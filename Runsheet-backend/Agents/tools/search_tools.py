@@ -1,12 +1,45 @@
 """
-Search tools for the logistics agent
+Search tools for the logistics agent.
+
+Validates:
+- Requirement 5.5: WHEN an AI tool is invoked, THE Telemetry_Service SHALL log
+  the tool name, input parameters, execution duration, and success/failure status
 """
 
 import logging
+import time
 from strands import tool
 from services.elasticsearch_service import elasticsearch_service
+from .logging_wrapper import get_telemetry_service
 
 logger = logging.getLogger(__name__)
+
+
+def _log_tool_invocation(tool_name: str, input_params: dict, start_time: float, 
+                         success: bool, error: str = None):
+    """Helper to log tool invocations with telemetry service."""
+    duration_ms = (time.time() - start_time) * 1000
+    telemetry = get_telemetry_service()
+    if telemetry:
+        telemetry.log_tool_invocation(
+            tool_name=tool_name,
+            input_params=input_params,
+            duration_ms=duration_ms,
+            success=success,
+            error=error
+        )
+        # Record metrics
+        telemetry.record_metric(
+            name="tool_invocation_duration_ms",
+            value=duration_ms,
+            tags={"tool_name": tool_name, "success": str(success).lower()}
+        )
+        telemetry.record_metric(
+            name="tool_invocation_count",
+            value=1,
+            tags={"tool_name": tool_name, "success": str(success).lower()}
+        )
+
 
 @tool
 async def search_fleet_data(query: str) -> str:
@@ -19,11 +52,16 @@ async def search_fleet_data(query: str) -> str:
     Returns:
         Search results from fleet database
     """
+    start_time = time.time()
+    success = False
+    error_msg = None
+    
     try:
         logger.info(f"🔍 Searching fleet data for: {query}")
         results = await elasticsearch_service.semantic_search("trucks", query, ["cargo.description", "driver_name", "status"], 5)
         
         if not results:
+            success = True
             return f"No fleet data found for query: '{query}'"
         
         response = f"🚛 Found {len(results)} trucks matching '{query}':\n\n"
@@ -34,10 +72,14 @@ async def search_fleet_data(query: str) -> str:
                 response += f"  Cargo: {truck.get('cargo', {}).get('description', 'N/A')}\n"
             response += f"  Location: {truck.get('current_location', {}).get('name', 'Unknown')}\n\n"
         
+        success = True
         return response
     except Exception as e:
+        error_msg = str(e)
         logger.error(f"Error searching fleet data: {e}")
         return f"Error searching fleet data: {str(e)}"
+    finally:
+        _log_tool_invocation("search_fleet_data", {"query": query}, start_time, success, error_msg)
 
 @tool
 async def search_orders(query: str) -> str:
@@ -50,11 +92,16 @@ async def search_orders(query: str) -> str:
     Returns:
         Search results from orders database
     """
+    start_time = time.time()
+    success = False
+    error_msg = None
+    
     try:
         logger.info(f"🔍 Searching orders for: {query}")
         results = await elasticsearch_service.semantic_search("orders", query, ["items", "customer"], 5)
         
         if not results:
+            success = True
             return f"No orders found for query: '{query}'"
         
         response = f"📦 Found {len(results)} orders matching '{query}':\n\n"
@@ -65,10 +112,14 @@ async def search_orders(query: str) -> str:
             response += f"  Items: {order.get('items', 'N/A')}\n"
             response += f"  Priority: {order.get('priority', 'N/A')}\n\n"
         
+        success = True
         return response
     except Exception as e:
+        error_msg = str(e)
         logger.error(f"Error searching orders: {e}")
         return f"Error searching orders: {str(e)}"
+    finally:
+        _log_tool_invocation("search_orders", {"query": query}, start_time, success, error_msg)
 
 @tool
 async def search_support_tickets(query: str) -> str:
@@ -81,6 +132,10 @@ async def search_support_tickets(query: str) -> str:
     Returns:
         Search results from support tickets database
     """
+    start_time = time.time()
+    success = False
+    error_msg = None
+    
     try:
         logger.info(f"🔍 Searching support tickets for: {query}")
         
@@ -100,6 +155,7 @@ async def search_support_tickets(query: str) -> str:
                           query.lower() in ticket.get('ticket_id', '').lower()]
         
         if not results:
+            success = True
             return f"No support tickets found for query: '{query}'"
         
         response = f"🎫 Found {len(results)} support tickets matching '{query}':\n\n"
@@ -110,10 +166,14 @@ async def search_support_tickets(query: str) -> str:
             response += f"  Status: {ticket.get('status')}\n"
             response += f"  Description: {ticket.get('description', 'N/A')[:100]}...\n\n"
         
+        success = True
         return response
     except Exception as e:
+        error_msg = str(e)
         logger.error(f"Error searching support tickets: {e}")
         return f"Error searching support tickets: {str(e)}"
+    finally:
+        _log_tool_invocation("search_support_tickets", {"query": query}, start_time, success, error_msg)
 
 @tool
 async def search_inventory(query: str) -> str:
@@ -126,6 +186,10 @@ async def search_inventory(query: str) -> str:
     Returns:
         Matching inventory items with stock levels and locations
     """
+    start_time = time.time()
+    success = False
+    error_msg = None
+    
     try:
         logger.info(f"📦 Searching inventory for: {query}")
         
@@ -139,6 +203,7 @@ async def search_inventory(query: str) -> str:
             results = [item for item in all_items if query.lower() in item.get('name', '').lower()]
         
         if not results:
+            success = True
             return f"No inventory items found for: '{query}'"
         
         response = f"📦 Found {len(results)} inventory items:\n\n"
@@ -149,7 +214,11 @@ async def search_inventory(query: str) -> str:
             response += f"  • Location: {item.get('location')}\n"
             response += f"  • Status: {item.get('status')}\n\n"
         
+        success = True
         return response
     except Exception as e:
+        error_msg = str(e)
         logger.error(f"Error searching inventory: {e}")
         return f"Error searching inventory: {str(e)}"
+    finally:
+        _log_tool_invocation("search_inventory", {"query": query}, start_time, success, error_msg)

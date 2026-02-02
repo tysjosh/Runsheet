@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { apiService, AnalyticsMetrics } from '../services/api';
 import { BarChart3, TrendingUp, Download, Activity } from 'lucide-react';
+import LoadingSpinner from './LoadingSpinner';
 
 // Google Charts component
 declare global {
@@ -239,12 +240,7 @@ export default function Analytics() {
       <div className="p-8">
         {/* Loading State */}
         {loading && (
-          <div className="flex items-center justify-center py-12">
-            <div className="text-center">
-              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#232323] mx-auto"></div>
-              <p className="mt-2 text-gray-600">Loading analytics...</p>
-            </div>
-          </div>
+          <LoadingSpinner message="Loading analytics..." fullHeight={false} />
         )}
 
         {/* Key Metrics */}

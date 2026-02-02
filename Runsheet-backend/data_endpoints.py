@@ -1,17 +1,26 @@
 """
 Data API endpoints for Runsheet Logistics Platform
 Provides Elasticsearch-powered data endpoints
+
+Validates:
+- Requirement 14.1: THE Backend_Service SHALL implement rate limiting of 100 requests
+  per minute per IP address for API endpoints
 """
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Request
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
 import random
 import logging
 from services.elasticsearch_service import elasticsearch_service
+from middleware.rate_limiter import limiter
+from config.settings import get_settings
 
 logger = logging.getLogger(__name__)
+
+# Load settings for rate limit configuration
+settings = get_settings()
 
 # Create router for data endpoints
 router = APIRouter(prefix="/api")
@@ -400,7 +409,8 @@ def get_mock_support_tickets():
 
 # Fleet Management
 @router.get("/fleet/summary")
-async def get_fleet_summary():
+@limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
+async def get_fleet_summary(request: Request):
     try:
         trucks = await elasticsearch_service.get_all_documents("trucks")
         
@@ -422,7 +432,8 @@ async def get_fleet_summary():
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/fleet/trucks")
-async def get_trucks():
+@limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
+async def get_trucks(request: Request):
     try:
         trucks = await elasticsearch_service.get_all_documents("trucks")
         
@@ -469,7 +480,8 @@ async def get_trucks():
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/fleet/trucks/{truck_id}")
-async def get_truck_by_id(truck_id: str):
+@limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
+async def get_truck_by_id(truck_id: str, request: Request):
     try:
         truck = await elasticsearch_service.get_document("trucks", truck_id)
         
@@ -513,7 +525,8 @@ async def get_truck_by_id(truck_id: str):
 
 # Inventory Management
 @router.get("/inventory")
-async def get_inventory():
+@limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
+async def get_inventory(request: Request):
     try:
         inventory = await elasticsearch_service.get_all_documents("inventory")
         
@@ -543,7 +556,8 @@ async def get_inventory():
 
 # Orders Management
 @router.get("/orders")
-async def get_orders():
+@limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
+async def get_orders(request: Request):
     try:
         orders = await elasticsearch_service.get_all_documents("orders")
         
@@ -575,7 +589,8 @@ async def get_orders():
 
 # Support Management
 @router.get("/support/tickets")
-async def get_support_tickets():
+@limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
+async def get_support_tickets(request: Request):
     try:
         tickets = await elasticsearch_service.get_all_documents("support_tickets")
         
@@ -606,7 +621,8 @@ async def get_support_tickets():
 
 # Analytics
 @router.get("/analytics/metrics")
-async def get_analytics_metrics(timeRange: str = "7d"):
+@limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
+async def get_analytics_metrics(request: Request, timeRange: str = "7d"):
     metrics = await elasticsearch_service.get_current_metrics()
     return {
         "data": metrics,
@@ -615,7 +631,8 @@ async def get_analytics_metrics(timeRange: str = "7d"):
     }
 
 @router.get("/analytics/routes")
-async def get_route_performance():
+@limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
+async def get_route_performance(request: Request):
     routes = await elasticsearch_service.get_route_performance_data()
     return {
         "data": routes,
@@ -624,7 +641,8 @@ async def get_route_performance():
     }
 
 @router.get("/analytics/delay-causes")
-async def get_delay_causes():
+@limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
+async def get_delay_causes(request: Request):
     causes = await elasticsearch_service.get_delay_causes_data()
     return {
         "data": causes,
@@ -633,7 +651,8 @@ async def get_delay_causes():
     }
 
 @router.get("/analytics/regional")
-async def get_regional_performance():
+@limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
+async def get_regional_performance(request: Request):
     regions = await elasticsearch_service.get_regional_performance_data()
     return {
         "data": regions,
@@ -642,7 +661,8 @@ async def get_regional_performance():
     }
 
 @router.get("/analytics/time-series")
-async def get_time_series_data(metric: str = "delivery_performance_pct", timeRange: str = "7d"):
+@limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
+async def get_time_series_data(request: Request, metric: str = "delivery_performance_pct", timeRange: str = "7d"):
     """Get time-series data for trending charts"""
     event_type = "hourly_metrics" if timeRange == "24h" else "daily_performance"
     data = await elasticsearch_service.get_time_series_data(event_type, metric, timeRange)
@@ -657,7 +677,8 @@ async def get_time_series_data(metric: str = "delivery_performance_pct", timeRan
 
 # Semantic Search
 @router.get("/search")
-async def semantic_search(q: str, index: str = "orders", limit: int = 10):
+@limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
+async def semantic_search(request: Request, q: str, index: str = "orders", limit: int = 10):
     """
     Perform semantic search across different indices
     """
@@ -726,7 +747,8 @@ async def semantic_search(q: str, index: str = "orders", limit: int = 10):
 
 # Data Management
 @router.post("/data/cleanup")
-async def cleanup_duplicate_data():
+@limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
+async def cleanup_duplicate_data(request: Request):
     """Clean up duplicate data in Elasticsearch"""
     try:
         from services.data_seeder import data_seeder
@@ -748,7 +770,8 @@ async def cleanup_duplicate_data():
 
 # Data Upload
 @router.post("/data/upload/sheets")
-async def upload_from_sheets(request: dict):
+@limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
+async def upload_from_sheets(request: Request, body: dict):
     # Simulate processing
     record_count = random.randint(50, 150)
     
@@ -759,7 +782,8 @@ async def upload_from_sheets(request: dict):
     }
 
 @router.post("/data/upload/csv")
-async def upload_csv(file: UploadFile = File(...), dataType: str = Form(...)):
+@limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
+async def upload_csv(request: Request, file: UploadFile = File(...), dataType: str = Form(...)):
     # Simulate processing
     record_count = random.randint(100, 300)
     

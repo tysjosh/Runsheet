@@ -8,3 +8,6 @@ export { default as Inventory } from './Inventory';
 export { default as Orders } from './Orders';
 export { default as Analytics } from './Analytics';
 export { default as Support } from './Support';
+export { default as ErrorBoundary, withErrorBoundary } from './ErrorBoundary';
+export { default as LoadingSpinner, InlineSpinner } from './LoadingSpinner';
+export { default as WebSocketStatus, WebSocketStatusBadge } from './WebSocketStatus';

@@ -1,6 +1,7 @@
 fastapi
 uvicorn==0.24.0
-pydantic
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
 python-multipart
 elasticsearch==8.11.0
 python-dotenv==1.0.0
@@ -9,3 +10,22 @@ strands-agents==1.8.0
 strands-agents-tools==0.2.7
 google-generativeai
 google-cloud-aiplatform
+
+# Redis for session storage (Requirement 8.4)
+redis>=5.0.0
+
+# Rate limiting (Requirements 14.1, 14.2)
+slowapi>=0.1.9
+
+# OpenTelemetry for distributed tracing (Requirement 5.3)
+opentelemetry-api>=1.20.0
+opentelemetry-sdk>=1.20.0
+opentelemetry-exporter-otlp>=1.20.0
+
+# Testing infrastructure (Requirement 11.6)
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+pytest-cov>=4.1.0
+
+# Property-based testing (Requirement 11.1)
+hypothesis>=6.100.0

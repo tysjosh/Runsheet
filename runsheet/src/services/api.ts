@@ -3,6 +3,57 @@ import { ApiResponse, Truck, FleetSummary, FleetFilters } from '../types/api';
 // API base URL - replace with actual API endpoint
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api';
 
+// Timeout configuration (in milliseconds)
+// Requirement 9.4: Configurable timeouts - 30s for standard calls, 120s for AI streaming
+export const API_TIMEOUTS = {
+  STANDARD: 30000,      // 30 seconds for standard API calls
+  AI_STREAMING: 120000, // 120 seconds for AI streaming responses
+} as const;
+
+// Custom error class for timeout errors
+export class ApiTimeoutError extends Error {
+  constructor(message: string = 'Request timed out') {
+    super(message);
+    this.name = 'ApiTimeoutError';
+  }
+}
+
+// Custom error class for API errors
+export class ApiError extends Error {
+  status: number;
+  
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
+
+// Helper function to create a fetch with timeout
+async function fetchWithTimeout(
+  url: string,
+  options: RequestInit = {},
+  timeout: number = API_TIMEOUTS.STANDARD
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+    return response;
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new ApiTimeoutError(`Request timed out after ${timeout / 1000} seconds`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 // Types for other components
 export interface InventoryItem {
   id: string;
@@ -48,22 +99,38 @@ export interface AnalyticsMetrics {
 }
 
 class ApiService {
-  private async request<T>(endpoint: string, options?: RequestInit): Promise<ApiResponse<T>> {
+  private async request<T>(
+    endpoint: string, 
+    options?: RequestInit,
+    timeout: number = API_TIMEOUTS.STANDARD
+  ): Promise<ApiResponse<T>> {
     try {
-      const response = await fetch(`${API_BASE_URL}${endpoint}`, {
-        headers: {
-          'Content-Type': 'application/json',
-          ...options?.headers,
+      const response = await fetchWithTimeout(
+        `${API_BASE_URL}${endpoint}`,
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            ...options?.headers,
+          },
+          ...options,
         },
-        ...options,
-      });
+        timeout
+      );
 
       if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+        throw new ApiError(`HTTP error! status: ${response.status}`, response.status);
       }
 
       return await response.json();
     } catch (error) {
+      if (error instanceof ApiTimeoutError) {
+        console.error('API request timed out:', error.message);
+        throw error;
+      }
+      if (error instanceof ApiError) {
+        console.error('API request failed:', error.message);
+        throw error;
+      }
       console.error('API request failed:', error);
       throw error;
     }
@@ -262,32 +329,128 @@ class ApiService {
   }
 
   async getDemoStatus(): Promise<{ current_state: string; total_trucks: number; success: boolean; timestamp: string }> {
-    const response = await fetch(`${API_BASE_URL}/demo/status`, {
-      headers: {
-        'Content-Type': 'application/json',
+    const response = await fetchWithTimeout(
+      `${API_BASE_URL}/demo/status`,
+      {
+        headers: {
+          'Content-Type': 'application/json',
+        },
       },
-    });
+      API_TIMEOUTS.STANDARD
+    );
 
     if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
+      throw new ApiError(`HTTP error! status: ${response.status}`, response.status);
     }
 
     return await response.json();
   }
 
   // Real-time updates
+  // Note: For React components, use the useFleetWebSocket hook instead
+  // This method is kept for backward compatibility
   async subscribeToFleetUpdates(callback: (data: Truck[]) => void): Promise<() => void> {
-    // WebSocket connection for real-time updates
-    const ws = new WebSocket(`${API_BASE_URL.replace('http', 'ws')}/fleet/live`);
-
-    ws.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      callback(data);
+    // WebSocket connection for real-time updates with reconnection
+    // For better reconnection handling, use the useFleetWebSocket hook in React components
+    const wsUrl = `${API_BASE_URL.replace('http', 'ws')}/fleet/live`;
+    
+    let ws: WebSocket | null = null;
+    let reconnectAttempt = 0;
+    let reconnectTimeout: NodeJS.Timeout | null = null;
+    let shouldReconnect = true;
+    
+    const INITIAL_RECONNECT_DELAY = 1000;  // 1 second
+    const MAX_RECONNECT_DELAY = 30000;     // 30 seconds
+    const BACKOFF_MULTIPLIER = 2;
+    
+    /**
+     * Calculate exponential backoff delay with jitter
+     * Validates: Requirement 9.5 - exponential backoff
+     */
+    const calculateBackoffDelay = (attempt: number): number => {
+      const exponentialDelay = INITIAL_RECONNECT_DELAY * Math.pow(BACKOFF_MULTIPLIER, attempt - 1);
+      const cappedDelay = Math.min(exponentialDelay, MAX_RECONNECT_DELAY);
+      // Add jitter (±25%) to prevent thundering herd
+      const jitter = cappedDelay * 0.25 * (Math.random() * 2 - 1);
+      return Math.floor(cappedDelay + jitter);
     };
+    
+    /**
+     * Connect to WebSocket with reconnection support
+     */
+    const connect = () => {
+      if (!shouldReconnect) return;
+      
+      try {
+        ws = new WebSocket(wsUrl);
+        
+        ws.onopen = () => {
+          console.log('Fleet WebSocket connected');
+          reconnectAttempt = 0;
+        };
+        
+        ws.onmessage = (event) => {
+          try {
+            const message = JSON.parse(event.data);
+            
+            // Handle different message types
+            if (message.type === 'location_update' && message.data) {
+              // Convert single update to array format for callback
+              callback([message.data as Truck]);
+            } else if (message.type === 'batch_location_update' && message.data?.updates) {
+              callback(message.data.updates as Truck[]);
+            }
+          } catch (error) {
+            console.error('Failed to parse WebSocket message:', error);
+          }
+        };
+        
+        ws.onclose = (event) => {
+          console.log('Fleet WebSocket disconnected', event.code, event.reason);
+          
+          // Reconnect if not a clean close and we should reconnect
+          if (shouldReconnect && !event.wasClean) {
+            reconnectAttempt++;
+            const delay = calculateBackoffDelay(reconnectAttempt);
+            console.log(`Reconnecting in ${delay}ms (attempt ${reconnectAttempt})`);
+            
+            reconnectTimeout = setTimeout(connect, delay);
+          }
+        };
+        
+        ws.onerror = (error) => {
+          console.error('Fleet WebSocket error:', error);
+          // Error is usually followed by close event, which handles reconnection
+        };
+      } catch (error) {
+        console.error('Failed to create WebSocket:', error);
+        
+        // Schedule reconnection
+        if (shouldReconnect) {
+          reconnectAttempt++;
+          const delay = calculateBackoffDelay(reconnectAttempt);
+          reconnectTimeout = setTimeout(connect, delay);
+        }
+      }
+    };
+    
+    // Initial connection
+    connect();
 
     // Return cleanup function
     return () => {
-      ws.close();
+      shouldReconnect = false;
+      
+      if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
+        reconnectTimeout = null;
+      }
+      
+      if (ws) {
+        ws.onclose = null; // Prevent reconnection on intentional close
+        ws.close(1000, 'Client unsubscribed');
+        ws = null;
+      }
     };
   }
 }

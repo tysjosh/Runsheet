@@ -1,18 +1,52 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, lazy, Suspense } from 'react';
 import { useRouter } from 'next/navigation';
+import dynamic from 'next/dynamic';
 import Header from '../components/Header';
 import Sidebar from '../components/Sidebar';
-import FleetTracking from '../components/FleetTracking';
-import MapView from '../components/MapView';
-import AIChat from '../components/AIChat';
-import DataUpload from '../components/DataUpload';
-import Inventory from '../components/Inventory';
-import Orders from '../components/Orders';
-import Analytics from '../components/Analytics';
-import Support from '../components/Support';
+import ErrorBoundary from '../components/ErrorBoundary';
+import LoadingSpinner from '../components/LoadingSpinner';
 import { Truck } from '../types/api';
+
+// Lazy-load heavy components for code splitting
+// These components are loaded on-demand when their routes are accessed
+
+// MapView is lazy-loaded because it includes the heavy Google Maps library
+const MapView = dynamic(() => import('../components/MapView'), {
+  loading: () => <MapLoadingPlaceholder />,
+  ssr: false, // Google Maps doesn't work with SSR
+});
+
+// Route-based lazy loading for main content components
+const FleetTracking = lazy(() => import('../components/FleetTracking'));
+const AIChat = lazy(() => import('../components/AIChat'));
+const DataUpload = lazy(() => import('../components/DataUpload'));
+const Inventory = lazy(() => import('../components/Inventory'));
+const Orders = lazy(() => import('../components/Orders'));
+const Analytics = lazy(() => import('../components/Analytics'));
+const Support = lazy(() => import('../components/Support'));
+
+// Loading placeholder for the map component
+function MapLoadingPlaceholder() {
+  return (
+    <div className="h-full flex items-center justify-center bg-gray-50">
+      <div className="text-center">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900 mx-auto"></div>
+        <p className="mt-2 text-gray-600">Loading map...</p>
+      </div>
+    </div>
+  );
+}
+
+// Generic loading placeholder for lazy-loaded components
+function ComponentLoadingPlaceholder() {
+  return (
+    <div className="h-full flex items-center justify-center bg-gray-50">
+      <LoadingSpinner message="Loading..." />
+    </div>
+  );
+}
 
 export default function Home() {
   const router = useRouter();
@@ -70,7 +104,9 @@ export default function Home() {
         return (
           <div className="flex-1 p-6 bg-gray-50">
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 h-full overflow-hidden">
-              <DataUpload />
+              <Suspense fallback={<ComponentLoadingPlaceholder />}>
+                <DataUpload />
+              </Suspense>
             </div>
           </div>
         );
@@ -79,7 +115,11 @@ export default function Home() {
         return (
           <div className="flex-1 p-6 bg-gray-50">
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 h-full overflow-hidden">
-              <Inventory />
+              <ErrorBoundary componentName="Inventory">
+                <Suspense fallback={<ComponentLoadingPlaceholder />}>
+                  <Inventory />
+                </Suspense>
+              </ErrorBoundary>
             </div>
           </div>
         );
@@ -88,7 +128,11 @@ export default function Home() {
         return (
           <div className="flex-1 p-6 bg-gray-50">
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 h-full overflow-hidden">
-              <Orders />
+              <ErrorBoundary componentName="Orders">
+                <Suspense fallback={<ComponentLoadingPlaceholder />}>
+                  <Orders />
+                </Suspense>
+              </ErrorBoundary>
             </div>
           </div>
         );
@@ -99,10 +143,14 @@ export default function Home() {
             <div className="flex gap-6 h-full">
               {/* Fleet Tracking Panel */}
               <div className="w-1/2 bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-                <FleetTracking onTruckSelect={handleTruckSelect} />
+                <ErrorBoundary componentName="Fleet Tracking">
+                  <Suspense fallback={<ComponentLoadingPlaceholder />}>
+                    <FleetTracking onTruckSelect={handleTruckSelect} />
+                  </Suspense>
+                </ErrorBoundary>
               </div>
 
-              {/* Map View */}
+              {/* Map View - Lazy-loaded with dynamic import (includes Google Maps) */}
               <div className="w-1/2 bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
                 <MapView selectedTruck={selectedTruck} />
               </div>
@@ -115,7 +163,11 @@ export default function Home() {
         return (
           <div className="flex-1 p-6 bg-gray-50">
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 h-full overflow-hidden">
-              <Analytics />
+              <ErrorBoundary componentName="Analytics">
+                <Suspense fallback={<ComponentLoadingPlaceholder />}>
+                  <Analytics />
+                </Suspense>
+              </ErrorBoundary>
             </div>
           </div>
         );
@@ -124,7 +176,11 @@ export default function Home() {
         return (
           <div className="flex-1 p-6 bg-gray-50">
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 h-full overflow-hidden">
-              <Support />
+              <ErrorBoundary componentName="Support">
+                <Suspense fallback={<ComponentLoadingPlaceholder />}>
+                  <Support />
+                </Suspense>
+              </ErrorBoundary>
             </div>
           </div>
         );
@@ -181,11 +237,15 @@ export default function Home() {
         </div>
       </div>
 
-      {/* AI Chat Overlay */}
-      <AIChat
-        isOpen={aiChatOpen}
-        onClose={() => setAiChatOpen(false)}
-      />
+      {/* AI Chat Overlay - Lazy-loaded */}
+      <ErrorBoundary componentName="AI Chat">
+        <Suspense fallback={null}>
+          <AIChat
+            isOpen={aiChatOpen}
+            onClose={() => setAiChatOpen(false)}
+          />
+        </Suspense>
+      </ErrorBoundary>
     </div>
   );
 }

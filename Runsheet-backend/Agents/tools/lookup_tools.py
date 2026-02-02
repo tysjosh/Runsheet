@@ -1,12 +1,53 @@
 """
-Lookup and specific data retrieval tools
+Lookup and specific data retrieval tools.
+
+Validates:
+- Requirement 5.5: WHEN an AI tool is invoked, THE Telemetry_Service SHALL log
+  the tool name, input parameters, execution duration, and success/failure status
 """
 
 import logging
+import time
 from strands import tool
 from services.elasticsearch_service import elasticsearch_service
 
 logger = logging.getLogger(__name__)
+
+
+def _get_telemetry_service():
+    """Get the telemetry service instance."""
+    try:
+        from telemetry.service import get_telemetry_service
+        return get_telemetry_service()
+    except ImportError:
+        return None
+
+
+def _log_tool_invocation(tool_name: str, input_params: dict, start_time: float, 
+                         success: bool, error: str = None):
+    """Helper to log tool invocations with telemetry service."""
+    duration_ms = (time.time() - start_time) * 1000
+    telemetry = _get_telemetry_service()
+    if telemetry:
+        telemetry.log_tool_invocation(
+            tool_name=tool_name,
+            input_params=input_params,
+            duration_ms=duration_ms,
+            success=success,
+            error=error
+        )
+        # Record metrics
+        telemetry.record_metric(
+            name="tool_invocation_duration_ms",
+            value=duration_ms,
+            tags={"tool_name": tool_name, "success": str(success).lower()}
+        )
+        telemetry.record_metric(
+            name="tool_invocation_count",
+            value=1,
+            tags={"tool_name": tool_name, "success": str(success).lower()}
+        )
+
 
 @tool
 async def find_truck_by_id(truck_identifier: str) -> str:
@@ -19,6 +60,10 @@ async def find_truck_by_id(truck_identifier: str) -> str:
     Returns:
         Detailed truck information including location, status, cargo
     """
+    start_time = time.time()
+    success = False
+    error_msg = None
+    
     try:
         logger.info(f"🚛 Finding truck: {truck_identifier}")
         trucks = await elasticsearch_service.get_all_documents("trucks")
@@ -32,6 +77,7 @@ async def find_truck_by_id(truck_identifier: str) -> str:
                 break
         
         if not truck:
+            success = True
             return f"Truck not found: {truck_identifier}"
         
         status_emoji = "🟢" if truck.get('status') == 'on_time' else "🔴" if truck.get('status') == 'delayed' else "🟡"
@@ -51,10 +97,14 @@ async def find_truck_by_id(truck_identifier: str) -> str:
             response += f"• Priority: {cargo.get('priority')}\n"
             response += f"• Description: {cargo.get('description')}\n"
         
+        success = True
         return response
     except Exception as e:
+        error_msg = str(e)
         logger.error(f"Error finding truck: {e}")
         return f"Error finding truck: {str(e)}"
+    finally:
+        _log_tool_invocation("find_truck_by_id", {"truck_identifier": truck_identifier}, start_time, success, error_msg)
 
 @tool
 async def get_all_locations() -> str:
@@ -64,6 +114,10 @@ async def get_all_locations() -> str:
     Returns:
         List of all locations organized by type
     """
+    start_time = time.time()
+    success = False
+    error_msg = None
+    
     try:
         logger.info("📍 Getting all locations")
         locations = await elasticsearch_service.get_all_documents("locations")
@@ -85,7 +139,11 @@ async def get_all_locations() -> str:
                 response += f"• {loc.get('name')} ({loc.get('region')})\n"
             response += "\n"
         
+        success = True
         return response
     except Exception as e:
+        error_msg = str(e)
         logger.error(f"Error getting locations: {e}")
         return f"Error getting locations: {str(e)}"
+    finally:
+        _log_tool_invocation("get_all_locations", {}, start_time, success, error_msg)

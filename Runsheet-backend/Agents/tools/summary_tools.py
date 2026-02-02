@@ -1,12 +1,53 @@
 """
-Summary and overview tools for the logistics agent
+Summary and overview tools for the logistics agent.
+
+Validates:
+- Requirement 5.5: WHEN an AI tool is invoked, THE Telemetry_Service SHALL log
+  the tool name, input parameters, execution duration, and success/failure status
 """
 
 import logging
+import time
 from strands import tool
 from services.elasticsearch_service import elasticsearch_service
 
 logger = logging.getLogger(__name__)
+
+
+def _get_telemetry_service():
+    """Get the telemetry service instance."""
+    try:
+        from telemetry.service import get_telemetry_service
+        return get_telemetry_service()
+    except ImportError:
+        return None
+
+
+def _log_tool_invocation(tool_name: str, input_params: dict, start_time: float, 
+                         success: bool, error: str = None):
+    """Helper to log tool invocations with telemetry service."""
+    duration_ms = (time.time() - start_time) * 1000
+    telemetry = _get_telemetry_service()
+    if telemetry:
+        telemetry.log_tool_invocation(
+            tool_name=tool_name,
+            input_params=input_params,
+            duration_ms=duration_ms,
+            success=success,
+            error=error
+        )
+        # Record metrics
+        telemetry.record_metric(
+            name="tool_invocation_duration_ms",
+            value=duration_ms,
+            tags={"tool_name": tool_name, "success": str(success).lower()}
+        )
+        telemetry.record_metric(
+            name="tool_invocation_count",
+            value=1,
+            tags={"tool_name": tool_name, "success": str(success).lower()}
+        )
+
 
 @tool
 async def get_fleet_summary() -> str:
@@ -16,6 +57,10 @@ async def get_fleet_summary() -> str:
     Returns:
         Summary of fleet status including total trucks, delays, etc.
     """
+    start_time = time.time()
+    success = False
+    error_msg = None
+    
     try:
         logger.info("📊 Getting fleet summary")
         trucks = await elasticsearch_service.get_all_documents("trucks")
@@ -37,10 +82,14 @@ async def get_fleet_summary() -> str:
                 if truck.get("status") == "delayed":
                     response += f"• {truck.get('plate_number')} - {truck.get('driver_name')}\n"
         
+        success = True
         return response
     except Exception as e:
+        error_msg = str(e)
         logger.error(f"Error getting fleet summary: {e}")
         return f"Error getting fleet summary: {str(e)}"
+    finally:
+        _log_tool_invocation("get_fleet_summary", {}, start_time, success, error_msg)
 
 @tool
 async def get_inventory_summary() -> str:
@@ -50,11 +99,16 @@ async def get_inventory_summary() -> str:
     Returns:
         All inventory items organized by status
     """
+    start_time = time.time()
+    success = False
+    error_msg = None
+    
     try:
         logger.info("📦 Getting inventory summary")
         inventory = await elasticsearch_service.get_all_documents("inventory")
         
         if not inventory:
+            success = True
             return "No inventory data found. The inventory might not be seeded yet."
         
         # Group by status
@@ -81,10 +135,14 @@ async def get_inventory_summary() -> str:
             for item in out_of_stock:
                 response += f"• {item.get('name')} at {item.get('location')}\n"
         
+        success = True
         return response
     except Exception as e:
+        error_msg = str(e)
         logger.error(f"Error getting inventory summary: {e}")
         return f"Error getting inventory summary: {str(e)}"
+    finally:
+        _log_tool_invocation("get_inventory_summary", {}, start_time, success, error_msg)
 
 @tool
 async def get_analytics_overview() -> str:
@@ -94,6 +152,10 @@ async def get_analytics_overview() -> str:
     Returns:
         Current KPIs, route performance, and delay analysis
     """
+    start_time = time.time()
+    success = False
+    error_msg = None
+    
     try:
         logger.info("📊 Getting analytics overview")
         
@@ -120,10 +182,14 @@ async def get_analytics_overview() -> str:
         for cause in sorted(delays, key=lambda x: x.get('percentage', 0), reverse=True)[:3]:
             response += f"• {cause.get('name')}: {cause.get('percentage')}%\n"
         
+        success = True
         return response
     except Exception as e:
+        error_msg = str(e)
         logger.error(f"Error getting analytics overview: {e}")
         return f"Error getting analytics overview: {str(e)}"
+    finally:
+        _log_tool_invocation("get_analytics_overview", {}, start_time, success, error_msg)
 
 @tool
 async def get_performance_insights() -> str:
@@ -133,6 +199,10 @@ async def get_performance_insights() -> str:
     Returns:
         Analysis of performance issues and improvement suggestions
     """
+    start_time = time.time()
+    success = False
+    error_msg = None
+    
     try:
         logger.info("🎯 Getting performance insights")
         
@@ -160,7 +230,11 @@ async def get_performance_insights() -> str:
         response += f"🌟 **Best Region**: {best_region.get('name')} ({best_region.get('onTimePercentage')}% on-time)\n"
         response += f"📍 **Focus Area**: {worst_region.get('name')} ({worst_region.get('onTimePercentage')}% on-time)\n"
         
+        success = True
         return response
     except Exception as e:
+        error_msg = str(e)
         logger.error(f"Error getting performance insights: {e}")
         return f"Error getting performance insights: {str(e)}"
+    finally:
+        _log_tool_invocation("get_performance_insights", {}, start_time, success, error_msg)

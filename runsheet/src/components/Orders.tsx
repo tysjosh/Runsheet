@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { apiService, Order } from '../services/api';
 import { Search, Filter, ShoppingCart, X } from 'lucide-react';
+import LoadingSpinner from './LoadingSpinner';
 
 export default function Orders() {
   const [orders, setOrders] = useState<Order[]>([]);
@@ -64,14 +65,7 @@ export default function Orders() {
   });
 
   if (loading) {
-    return (
-      <div className="h-full flex items-center justify-center">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#232323] mx-auto"></div>
-          <p className="mt-2 text-gray-600">Loading orders...</p>
-        </div>
-      </div>
-    );
+    return <LoadingSpinner message="Loading orders..." />;
   }
 
   return (

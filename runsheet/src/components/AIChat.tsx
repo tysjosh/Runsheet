@@ -111,6 +111,11 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
   }, [isOpen]);
 
   const streamChatResponse = async (userMessage: string) => {
+    // Requirement 9.4: 120-second timeout for AI streaming responses
+    const AI_STREAMING_TIMEOUT = 120000; // 120 seconds
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), AI_STREAMING_TIMEOUT);
+
     try {
       const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api';
       const response = await fetch(`${API_BASE_URL}/chat`, {
@@ -122,6 +127,7 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
           message: userMessage,
           mode: mode
         }),
+        signal: controller.signal,
       });
 
       if (!response.ok) {
@@ -240,10 +246,17 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
         const updated = [...prev];
         const lastMsg = updated[updated.length - 1];
         if (lastMsg.role === 'assistant') {
-          lastMsg.content = `❌ Sorry, I encountered an error connecting to the AI service. Please make sure the backend is running on port 8000.\n\nError: ${error instanceof Error ? error.message : 'Unknown error'}`;
+          // Handle timeout error specifically
+          if (error instanceof Error && error.name === 'AbortError') {
+            lastMsg.content = '⏱️ The request timed out after 120 seconds. The AI service may be experiencing high load. Please try again with a simpler query.';
+          } else {
+            lastMsg.content = `❌ Sorry, I encountered an error connecting to the AI service. Please make sure the backend is running on port 8000.\n\nError: ${error instanceof Error ? error.message : 'Unknown error'}`;
+          }
         }
         return updated;
       });
+    } finally {
+      clearTimeout(timeoutId);
     }
   };
 

@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { apiService, InventoryItem } from '../services/api';
 import { Search, Filter, Package } from 'lucide-react';
+import LoadingSpinner from './LoadingSpinner';
 
 export default function Inventory() {
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
@@ -52,14 +53,7 @@ export default function Inventory() {
   const categories = ['all', ...Array.from(new Set(inventory.map(item => item.category.toLowerCase())))];
 
   if (loading) {
-    return (
-      <div className="h-full flex items-center justify-center">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#232323] mx-auto"></div>
-          <p className="mt-2 text-gray-600">Loading inventory...</p>
-        </div>
-      </div>
-    );
+    return <LoadingSpinner message="Loading inventory..." />;
   }
 
   return (

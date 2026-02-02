@@ -1,13 +1,54 @@
 """
-Report generation tools for comprehensive analysis
+Report generation tools for comprehensive analysis.
+
+Validates:
+- Requirement 5.5: WHEN an AI tool is invoked, THE Telemetry_Service SHALL log
+  the tool name, input parameters, execution duration, and success/failure status
 """
 
 import logging
+import time
 from datetime import datetime
 from strands import tool
 from services.elasticsearch_service import elasticsearch_service
 
 logger = logging.getLogger(__name__)
+
+
+def _get_telemetry_service():
+    """Get the telemetry service instance."""
+    try:
+        from telemetry.service import get_telemetry_service
+        return get_telemetry_service()
+    except ImportError:
+        return None
+
+
+def _log_tool_invocation(tool_name: str, input_params: dict, start_time: float, 
+                         success: bool, error: str = None):
+    """Helper to log tool invocations with telemetry service."""
+    duration_ms = (time.time() - start_time) * 1000
+    telemetry = _get_telemetry_service()
+    if telemetry:
+        telemetry.log_tool_invocation(
+            tool_name=tool_name,
+            input_params=input_params,
+            duration_ms=duration_ms,
+            success=success,
+            error=error
+        )
+        # Record metrics
+        telemetry.record_metric(
+            name="tool_invocation_duration_ms",
+            value=duration_ms,
+            tags={"tool_name": tool_name, "success": str(success).lower()}
+        )
+        telemetry.record_metric(
+            name="tool_invocation_count",
+            value=1,
+            tags={"tool_name": tool_name, "success": str(success).lower()}
+        )
+
 
 @tool
 async def generate_operations_report() -> str:
@@ -17,6 +58,10 @@ async def generate_operations_report() -> str:
     Returns:
         Structured operations report with current status and recommendations
     """
+    start_time = time.time()
+    success = False
+    error_msg = None
+    
     try:
         logger.info("📋 Generating operations report")
         
@@ -69,11 +114,15 @@ async def generate_operations_report() -> str:
         if low_stock_items > 2:
             report += f"- 📦 **Inventory**: {low_stock_items} items running low - schedule restocking\n"
         
+        success = True
         return report
         
     except Exception as e:
+        error_msg = str(e)
         logger.error(f"Error generating operations report: {e}")
         return f"Error generating operations report: {str(e)}"
+    finally:
+        _log_tool_invocation("generate_operations_report", {}, start_time, success, error_msg)
 
 @tool
 async def generate_performance_report() -> str:
@@ -83,6 +132,10 @@ async def generate_performance_report() -> str:
     Returns:
         Detailed performance report with analytics and insights
     """
+    start_time = time.time()
+    success = False
+    error_msg = None
+    
     try:
         logger.info("📊 Generating performance report")
         
@@ -136,11 +189,15 @@ async def generate_performance_report() -> str:
 - ⚠️ **Main delay cause**: {main_delay.get('name')} ({main_delay.get('percentage')}%)
 """
         
+        success = True
         return report
         
     except Exception as e:
+        error_msg = str(e)
         logger.error(f"Error generating performance report: {e}")
         return f"Error generating performance report: {str(e)}"
+    finally:
+        _log_tool_invocation("generate_performance_report", {}, start_time, success, error_msg)
 
 @tool
 async def generate_incident_analysis(issue_description: str = "") -> str:
@@ -153,6 +210,10 @@ async def generate_incident_analysis(issue_description: str = "") -> str:
     Returns:
         Comprehensive incident analysis with related data and recommendations
     """
+    start_time = time.time()
+    success = False
+    error_msg = None
+    
     try:
         logger.info(f"🔍 Generating incident analysis for: {issue_description}")
         
@@ -202,8 +263,12 @@ async def generate_incident_analysis(issue_description: str = "") -> str:
 - Monitor affected routes for improvements
 """
         
+        success = True
         return report
         
     except Exception as e:
+        error_msg = str(e)
         logger.error(f"Error generating incident analysis: {e}")
         return f"Error generating incident analysis: {str(e)}"
+    finally:
+        _log_tool_invocation("generate_incident_analysis", {"issue_description": issue_description}, start_time, success, error_msg)

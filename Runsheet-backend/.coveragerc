@@ -1,0 +1,55 @@
+[run]
+# Source directories to measure
+source = .
+branch = True
+
+# Files and directories to exclude from coverage
+omit =
+    */tests/*
+    */__pycache__/*
+    */venv/*
+    */env/*
+    */.venv/*
+    */site-packages/*
+    setup.py
+    conftest.py
+
+[report]
+# Minimum coverage percentage required (Requirement 11.4)
+# Note: Set to 0 initially; will be enforced once more tests are written
+fail_under = 0
+
+# Exclude lines from coverage
+exclude_lines =
+    # Have to re-enable the standard pragma
+    pragma: no cover
+    
+    # Don't complain about missing debug-only code
+    def __repr__
+    
+    # Don't complain if tests don't hit defensive assertion code
+    raise AssertionError
+    raise NotImplementedError
+    
+    # Don't complain if non-runnable code isn't run
+    if __name__ == .__main__.:
+    if TYPE_CHECKING:
+    
+    # Don't complain about abstract methods
+    @abstractmethod
+    
+    # Don't complain about pass statements
+    pass
+
+# Show missing lines in report
+show_missing = True
+
+# Precision for coverage percentage
+precision = 2
+
+[html]
+# Directory for HTML report
+directory = coverage_html
+
+# Title for HTML report
+title = Runsheet Backend Coverage Report

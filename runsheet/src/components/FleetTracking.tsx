@@ -1,6 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Truck, FleetSummary } from '../types/api';
 import { apiService } from '../services/api';
+import LoadingSpinner from './LoadingSpinner';
+import { WebSocketStatusBadge } from './WebSocketStatus';
+import { useFleetWebSocket, LocationUpdateData } from '../hooks';
 
 interface FleetTrackingProps {
   onTruckSelect?: (truck: Truck) => void;
@@ -12,6 +15,75 @@ export default function FleetTracking({ onTruckSelect }: FleetTrackingProps) {
   const [loading, setLoading] = useState(true);
   const [showInTransit, setShowInTransit] = useState(true);
   const [selectedTruck, setSelectedTruck] = useState<string | null>(null);
+
+  /**
+   * Handle real-time location updates from WebSocket
+   * Updates the truck's current location in the local state
+   */
+  const handleLocationUpdate = useCallback((update: LocationUpdateData) => {
+    setTrucks(prevTrucks => 
+      prevTrucks.map(truck => {
+        if (truck.id === update.truck_id) {
+          return {
+            ...truck,
+            currentLocation: {
+              ...truck.currentLocation,
+              coordinates: {
+                lat: update.coordinates.lat,
+                lon: update.coordinates.lon,
+              },
+            },
+            lastUpdate: update.timestamp,
+          };
+        }
+        return truck;
+      })
+    );
+  }, []);
+
+  /**
+   * Handle batch location updates from WebSocket
+   */
+  const handleBatchLocationUpdate = useCallback((updates: LocationUpdateData[]) => {
+    setTrucks(prevTrucks => {
+      const updateMap = new Map(updates.map(u => [u.truck_id, u]));
+      
+      return prevTrucks.map(truck => {
+        const update = updateMap.get(truck.id);
+        if (update) {
+          return {
+            ...truck,
+            currentLocation: {
+              ...truck.currentLocation,
+              coordinates: {
+                lat: update.coordinates.lat,
+                lon: update.coordinates.lon,
+              },
+            },
+            lastUpdate: update.timestamp,
+          };
+        }
+        return truck;
+      });
+    });
+  }, []);
+
+  /**
+   * WebSocket connection for real-time fleet updates
+   * Validates: Requirement 9.5 - automatic reconnection with exponential backoff
+   */
+  const { 
+    state: wsState, 
+    reconnectAttempt,
+    reconnectDelay,
+  } = useFleetWebSocket({
+    autoConnect: true,
+    onLocationUpdate: handleLocationUpdate,
+    onBatchLocationUpdate: handleBatchLocationUpdate,
+    onReconnecting: (attempt, delay) => {
+      console.log(`Fleet WebSocket reconnecting in ${delay}ms (attempt ${attempt})`);
+    },
+  });
 
   useEffect(() => {
     loadFleetData();
@@ -88,14 +160,7 @@ export default function FleetTracking({ onTruckSelect }: FleetTrackingProps) {
     : trucks;
 
   if (loading) {
-    return (
-      <div className="h-full flex items-center justify-center">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900 mx-auto"></div>
-          <p className="mt-2 text-gray-600">Loading fleet data...</p>
-        </div>
-      </div>
-    );
+    return <LoadingSpinner message="Loading fleet data..." />;
   }
 
   return (
@@ -103,7 +168,13 @@ export default function FleetTracking({ onTruckSelect }: FleetTrackingProps) {
       {/* Compact Header */}
       <div className="border-b border-gray-200 px-4 py-2 flex-shrink-0">
         <div className="flex items-center justify-between mb-2">
-          <h1 className="text-lg font-bold text-gray-900">Fleet Tracking</h1>
+          <div className="flex items-center gap-3">
+            <h1 className="text-lg font-bold text-gray-900">Fleet Tracking</h1>
+            <WebSocketStatusBadge 
+              state={wsState} 
+              reconnectAttempt={reconnectAttempt}
+            />
+          </div>
           <div className="flex items-center gap-3">
             <label className="flex items-center gap-2 text-sm">
               <span className="text-gray-600">In transit only</span>
