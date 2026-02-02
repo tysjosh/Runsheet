@@ -85,16 +85,49 @@ class ElasticsearchService:
             logger.error(f"❌ Failed to connect to Elasticsearch: {e}")
             raise
     
+    def _check_ilm_available(self) -> bool:
+        """
+        Check if ILM (Index Lifecycle Management) is available on this Elasticsearch cluster.
+        
+        ILM requires specific license tiers (Basic+ for some features, Platinum for others).
+        This method detects availability to avoid errors on clusters without ILM support.
+        
+        Returns:
+            True if ILM is available, False otherwise
+        """
+        try:
+            # Try to list ILM policies - this will fail if ILM is not available
+            self.client.ilm.get_lifecycle()
+            return True
+        except Exception as e:
+            error_str = str(e).lower()
+            # Check for common indicators that ILM is not available
+            if "no handler found" in error_str or "unknown setting" in error_str or "ilm" in error_str:
+                logger.info("ℹ️ ILM (Index Lifecycle Management) is not available on this Elasticsearch cluster. "
+                          "This is normal for serverless or basic tier deployments. Skipping ILM configuration.")
+                return False
+            # For other errors, assume ILM might be available but there's a different issue
+            logger.debug(f"ILM availability check encountered error: {e}")
+            return False
+    
     def setup_ilm_policies(self):
         """
         Set up Index Lifecycle Management (ILM) policies for data tiering.
         
         Creates ILM policies that move old data to warm/cold tiers after 30 days.
+        Gracefully skips if ILM is not available on the cluster.
         
         Validates:
         - Requirement 7.1: Implement index lifecycle management policies that move 
           old data to warm/cold tiers after 30 days
         """
+        # Check if ILM is available before attempting to create policies
+        if not self._check_ilm_available():
+            self._ilm_available = False
+            return
+        
+        self._ilm_available = True
+        
         # Define ILM policies for different data types
         ilm_policies = {
             "runsheet-standard-policy": self._get_standard_ilm_policy(),
@@ -312,9 +345,16 @@ class ElasticsearchService:
         - trucks, orders, inventory, support_tickets, locations -> standard policy
         - analytics_events -> analytics policy
         
+        Skips if ILM is not available on the cluster.
+        
         Validates:
         - Requirement 7.1: Implement index lifecycle management policies
         """
+        # Skip if ILM is not available
+        if not getattr(self, '_ilm_available', False):
+            logger.debug("Skipping ILM policy application - ILM not available on this cluster")
+            return
+        
         # Define index to policy mapping
         index_policy_mapping = {
             "trucks": "runsheet-standard-policy",

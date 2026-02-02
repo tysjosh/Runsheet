@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, ValidationError
 from typing import Optional
+from contextlib import asynccontextmanager
 import json
 import logging
 import asyncio
@@ -36,8 +37,28 @@ settings = get_settings()
 # Validates: Requirement 5.1, 5.4, 5.7
 telemetry_service = initialize_telemetry(settings)
 
-# Initialize FastAPI app
-app = FastAPI(title="Runsheet Logistics API", version="1.0.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager for startup and shutdown events."""
+    # Startup
+    try:
+        logger.info("🚀 Starting Runsheet Logistics API...")
+        logger.info("🌅 Seeding Elasticsearch with baseline morning data...")
+        await data_seeder.seed_baseline_data(operational_time="09:00")
+        logger.info("✅ Baseline data seeding completed! Ready for temporal demo.")
+    except Exception as e:
+        logger.error(f"❌ Failed to seed Elasticsearch data: {e}")
+        # Don't fail startup, just log the error
+    
+    yield  # Application runs here
+    
+    # Shutdown (if needed)
+    logger.info("👋 Shutting down Runsheet Logistics API...")
+
+
+# Initialize FastAPI app with lifespan handler
+app = FastAPI(title="Runsheet Logistics API", version="1.0.0", lifespan=lifespan)
 
 # Register exception handlers for structured error responses
 register_exception_handlers(app)
@@ -112,18 +133,6 @@ data_ingestion_service.set_connection_manager(fleet_connection_manager)
 
 # Include data endpoints
 app.include_router(data_router)
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize Elasticsearch data on startup"""
-    try:
-        logger.info("🚀 Starting Runsheet Logistics API...")
-        logger.info("🌅 Seeding Elasticsearch with baseline morning data...")
-        await data_seeder.seed_baseline_data(operational_time="09:00")
-        logger.info("✅ Baseline data seeding completed! Ready for temporal demo.")
-    except Exception as e:
-        logger.error(f"❌ Failed to seed Elasticsearch data: {e}")
-        # Don't fail startup, just log the error
 
 class ChatRequest(BaseModel):
     message: str
