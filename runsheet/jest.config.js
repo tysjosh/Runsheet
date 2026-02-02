@@ -29,6 +29,7 @@ const customJestConfig = {
   testPathIgnorePatterns: [
     '<rootDir>/node_modules/',
     '<rootDir>/.next/',
+    '<rootDir>/e2e/',
   ],
   
   // Transform ignore patterns - don't transform node_modules except for specific packages

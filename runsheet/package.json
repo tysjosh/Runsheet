@@ -12,7 +12,11 @@
     "format": "biome format --write",
     "test": "jest",
     "test:watch": "jest --watch",
-    "test:coverage": "jest --coverage"
+    "test:coverage": "jest --coverage",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
+    "test:e2e:headed": "playwright test --headed",
+    "test:e2e:debug": "playwright test --debug"
   },
   "dependencies": {
     "@vis.gl/react-google-maps": "^1.5.5",
@@ -25,6 +29,7 @@
   "devDependencies": {
     "@biomejs/biome": "2.2.0",
     "@next/bundle-analyzer": "16.1.6",
+    "@playwright/test": "^1.49.0",
     "@tailwindcss/postcss": "^4",
     "@testing-library/dom": "^10.4.0",
     "@testing-library/jest-dom": "^6.6.3",
