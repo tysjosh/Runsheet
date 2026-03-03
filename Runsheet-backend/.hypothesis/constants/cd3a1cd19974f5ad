@@ -1,0 +1,4 @@
+# file: /Users/olukotunjosh/Downloads/Runsheet/Runsheet-backend/resilience/retry.py
+# hypothesis_version: 6.151.4
+
+[1.0, 2.0, 'T', 'Unknown error', 'attempt', 'attempts', 'delay_seconds', 'error_message', 'error_type', 'last_error', 'max_attempts', 'operation']

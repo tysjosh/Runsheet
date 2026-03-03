@@ -211,3 +211,87 @@ def circuit_open(
         message=message,
         details=details
     )
+
+def webhook_signature_invalid(
+    message: str = "Webhook signature verification failed",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a webhook signature invalid exception."""
+    return AppException(
+        error_code=ErrorCode.WEBHOOK_SIGNATURE_INVALID,
+        message=message,
+        details=details
+    )
+
+
+def webhook_schema_unknown(
+    message: str = "Unknown webhook schema version",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a webhook schema unknown exception."""
+    return AppException(
+        error_code=ErrorCode.WEBHOOK_SCHEMA_UNKNOWN,
+        message=message,
+        details=details
+    )
+
+
+def tenant_not_found(
+    message: str = "Tenant not found",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a tenant not found exception."""
+    return AppException(
+        error_code=ErrorCode.TENANT_NOT_FOUND,
+        message=message,
+        details=details
+    )
+
+
+def tenant_disabled(
+    message: str = "Ops intelligence is not enabled for this tenant",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a tenant disabled exception."""
+    return AppException(
+        error_code=ErrorCode.TENANT_DISABLED,
+        message=message,
+        details=details
+    )
+
+
+def poison_queue_max_retries(
+    message: str = "Event exceeded maximum retry count",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a poison queue max retries exceeded exception."""
+    return AppException(
+        error_code=ErrorCode.POISON_QUEUE_MAX_RETRIES,
+        message=message,
+        details=details
+    )
+
+
+def drift_threshold_exceeded(
+    message: str = "Source-replica drift exceeds threshold",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a drift threshold exceeded exception."""
+    return AppException(
+        error_code=ErrorCode.DRIFT_THRESHOLD_EXCEEDED,
+        message=message,
+        details=details
+    )
+
+
+def backfill_in_progress(
+    message: str = "A backfill job is already running for this tenant",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a backfill in progress exception."""
+    return AppException(
+        error_code=ErrorCode.BACKFILL_IN_PROGRESS,
+        message=message,
+        details=details
+    )
+

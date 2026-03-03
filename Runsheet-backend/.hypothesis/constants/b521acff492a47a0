@@ -1,0 +1,4 @@
+# file: /Users/olukotunjosh/Downloads/Runsheet/Runsheet-backend/Agents/tools/report_tools.py
+# hypothesis_version: 6.151.4
+
+[0.3, 1000, 'delayed', 'description', 'high', 'in_progress', 'inventory', 'issue', 'issue_description', 'low_stock', 'onTimePercentage', 'on_time', 'open', 'out_of_stock', 'percentage', 'performance', 'priority', 'status', 'success', 'support_tickets', 'tool_name', 'trend', 'trucks', 'up', 'urgent', '📈', '📉', '🔴', '🚨', '🟡', '🟢']

@@ -108,15 +108,15 @@ export default function Analytics() {
     setChartData({
       timeSeriesData: [
         ['Time', getMetricLabel(metric)],
-        ...result.data.map((point: any) => [new Date(point.timestamp).toLocaleDateString(), point.value])
+        ...result.data.map((point: any) => [new Date(point.timestamp).toLocaleDateString(), Number(point.value) || 0])
       ],
       pieChartData: [
         ['Cause', 'Percentage'],
-        ...delayCauses.map(cause => [cause.name, cause.percentage])
+        ...delayCauses.map(cause => [cause.name, Number(cause.percentage) || 0])
       ],
       barChartData: [
         ['Route', 'Performance'],
-        ...routePerformance.map(route => [route.name, route.performance])
+        ...routePerformance.map(route => [route.name, Number(route.performance) || 0])
       ]
     });
   };
@@ -399,7 +399,7 @@ export default function Analytics() {
                 chartType="PieChart"
                 data={[
                   ['Region', 'On-Time %'],
-                  ...regionalPerformance.map(region => [region.name, region.onTimePercentage])
+                  ...regionalPerformance.map(region => [region.name, Number(region.onTimePercentage) || 0])
                 ]}
                 options={{
                   ...getChartOptions('pie'),

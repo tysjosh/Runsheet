@@ -6,9 +6,11 @@ All secrets are loaded from environment variables or .env files.
 
 Requirements:
 - 1.1: Load all secrets from environment variables or secrets manager
+- 1.2: HMAC-SHA256 shared secret for Dinee webhook verification
 - 1.3: Fail startup with descriptive error message listing missing values
 - 1.4: Support environment-specific configuration files for development, staging, and production
 - 1.5: Validate all required fields and their formats before accepting requests
+- 21.1-21.3: Ops-specific rate limiting for webhooks, API, and metrics
 """
 
 import os
@@ -168,6 +170,75 @@ class Settings(BaseSettings):
         description="Allowed CORS origins"
     )
     
+    # JWT Configuration
+    jwt_secret: str = Field(
+        default="",
+        description="Secret key for signing and verifying JWT tokens"
+    )
+    jwt_algorithm: str = Field(
+        default="HS256",
+        description="Algorithm used for JWT signing (default: HS256)"
+    )
+
+    # Dinee / Ops Intelligence Configuration
+    dinee_webhook_secret: str = Field(
+        default="",
+        description="HMAC-SHA256 shared secret for verifying inbound Dinee webhooks (sole webhook auth credential)"
+    )
+    dinee_webhook_tenant_id: str = Field(
+        default="",
+        description="Tenant ID associated with the webhook signing secret. "
+        "When set, the receiver rejects payloads whose tenant_id does not match (Req 9.7)."
+    )
+    dinee_idempotency_ttl_hours: int = Field(
+        default=72,
+        ge=1,
+        le=720,
+        description="Idempotency store TTL in hours"
+    )
+    dinee_api_base_url: Optional[str] = Field(
+        default=None,
+        description="Dinee REST API base URL for Replay Service backfill"
+    )
+    dinee_api_key: Optional[str] = Field(
+        default=None,
+        description="Dinee API key for outbound Replay Service REST calls only (NOT used for webhook auth)"
+    )
+    
+    # Ops Rate Limiting Configuration
+    ops_webhook_rate_limit: int = Field(
+        default=500,
+        ge=1,
+        le=10000,
+        description="Webhook rate limit per minute per IP"
+    )
+    ops_api_rate_limit: int = Field(
+        default=100,
+        ge=1,
+        le=10000,
+        description="Ops API rate limit per minute per user"
+    )
+    ops_metrics_rate_limit: int = Field(
+        default=20,
+        ge=1,
+        le=1000,
+        description="Metrics API rate limit per minute per user"
+    )
+
+    # Drift Detection Configuration
+    drift_schedule_interval_hours: int = Field(
+        default=6,
+        ge=1,
+        le=168,
+        description="Drift detection schedule interval in hours (default 6)"
+    )
+    drift_threshold_pct: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=100.0,
+        description="Drift detection alert threshold percentage (default 1%)"
+    )
+    
     # Note: model_config is set dynamically via create_settings_for_environment()
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -252,6 +323,23 @@ class Settings(BaseSettings):
             validated_origins.append(origin)
         return validated_origins
     
+    @field_validator("dinee_webhook_secret")
+    @classmethod
+    def validate_dinee_webhook_secret(cls, v: str) -> str:
+        """Validate that dinee_webhook_secret is provided in non-development environments."""
+        # Allow empty in development; production validation is handled by model_validator
+        return v.strip() if v else v
+    
+    @field_validator("dinee_api_base_url")
+    @classmethod
+    def validate_dinee_api_base_url(cls, v: Optional[str]) -> Optional[str]:
+        """Validate that dinee_api_base_url is a valid URL if provided."""
+        if v is not None:
+            v = v.strip()
+            if v and not (v.startswith("http://") or v.startswith("https://")):
+                raise ValueError("dinee_api_base_url must be a valid HTTP/HTTPS URL")
+        return v
+    
     @model_validator(mode="after")
     def validate_session_store_config(self) -> "Settings":
         """Validate that the appropriate session store URL/table is provided."""
@@ -268,6 +356,14 @@ class Settings(BaseSettings):
                     "dynamodb_table is required when session_store_type is 'dynamodb' "
                     "in non-development environments"
                 )
+        
+        # Validate dinee_webhook_secret is set in non-development environments
+        if self.environment != Environment.DEVELOPMENT:
+            if not self.dinee_webhook_secret:
+                raise ValueError(
+                    "dinee_webhook_secret is required in non-development environments"
+                )
+        
         return self
 
 

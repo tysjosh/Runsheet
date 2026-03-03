@@ -9,7 +9,10 @@ import {
   HelpCircle,
   ChevronLeft,
   LogOut,
-  User
+  User,
+  Users,
+  AlertTriangle,
+  Activity
 } from 'lucide-react';
 
 interface SidebarProps {
@@ -17,9 +20,10 @@ interface SidebarProps {
   isCollapsed: boolean;
   onToggle: () => void;
   onNavigate: (item: string) => void;
+  opsEnabled?: boolean;
 }
 
-export default function Sidebar({ activeItem = 'Fleet', isCollapsed, onToggle, onNavigate }: SidebarProps) {
+export default function Sidebar({ activeItem = 'Fleet', isCollapsed, onToggle, onNavigate, opsEnabled = false }: SidebarProps) {
   const router = useRouter();
 
   const handleLogout = () => {
@@ -40,8 +44,19 @@ export default function Sidebar({ activeItem = 'Fleet', isCollapsed, onToggle, o
     { id: 'support', label: 'Support', icon: HelpCircle },
   ];
 
+  const opsMenuItems = [
+    { id: 'ops-shipments', label: 'Shipments', icon: Activity, route: '/ops' },
+    { id: 'ops-riders', label: 'Riders', icon: Users, route: '/ops/riders' },
+    { id: 'ops-failures', label: 'Failures', icon: AlertTriangle, route: '/ops/failures' },
+  ];
+
   const handleItemClick = (itemId: string) => {
     onNavigate(itemId);
+  };
+
+  const handleOpsItemClick = (route: string, itemId: string) => {
+    onNavigate(itemId);
+    router.push(route);
   };
 
   return (
@@ -128,6 +143,70 @@ export default function Sidebar({ activeItem = 'Fleet', isCollapsed, onToggle, o
             </li>
           ))}
         </ul>
+
+        {/* Ops Intelligence Section - conditionally shown based on feature flag */}
+        {opsEnabled && (
+          <>
+            <div
+              className="my-3 mx-3"
+              style={{ borderTop: '1px solid rgba(35,35,35,0.08)' }}
+            />
+            {!isCollapsed && (
+              <p
+                className="px-3 mb-1.5 text-xs font-semibold uppercase tracking-wider"
+                style={{ color: '#999' }}
+              >
+                Ops
+              </p>
+            )}
+            <ul className="space-y-1.5">
+              {opsMenuItems.map((item) => (
+                <li key={item.id}>
+                  <div
+                    className={`flex items-center ${isCollapsed ? 'justify-center' : 'justify-start'} px-3 py-2.5 ${isCollapsed ? 'rounded-2xl' : 'rounded-lg'} cursor-pointer transition-all duration-200`}
+                    style={{
+                      color: activeItem.toLowerCase() === item.id ? 'white' : '#232323',
+                      backgroundColor: activeItem.toLowerCase() === item.id ? '#232323' : 'transparent'
+                    }}
+                    onMouseEnter={(e) => {
+                      if (activeItem.toLowerCase() !== item.id) {
+                        e.currentTarget.style.backgroundColor = 'rgba(35,35,35,0.06)';
+                      } else {
+                        e.currentTarget.style.backgroundColor = '#1a1a1a';
+                      }
+                    }}
+                    onMouseLeave={(e) => {
+                      if (activeItem.toLowerCase() !== item.id) {
+                        e.currentTarget.style.backgroundColor = 'transparent';
+                      } else {
+                        e.currentTarget.style.backgroundColor = '#232323';
+                      }
+                    }}
+                    onClick={() => handleOpsItemClick(item.route, item.id)}
+                    title={isCollapsed ? item.label : ''}
+                  >
+                    <div className={`flex items-center ${isCollapsed ? '' : 'space-x-3'}`}>
+                      <item.icon
+                        className={`w-5 h-5 transition-colors`}
+                        style={{
+                          color: activeItem.toLowerCase() === item.id ? 'white' : '#232323'
+                        }}
+                      />
+                      {!isCollapsed && (
+                        <span
+                          className="font-medium text-sm transition-opacity duration-200"
+                          style={{ opacity: isCollapsed ? 0 : 1 }}
+                        >
+                          {item.label}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
       </nav>
 
       {/* User Profile - Expanded */}

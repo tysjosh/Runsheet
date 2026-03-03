@@ -1,0 +1,4 @@
+# file: /Users/olukotunjosh/Downloads/Runsheet/Runsheet-backend/ops/middleware/tenant_guard.py
+# hypothesis_version: 6.151.4
+
+['Authorization', 'Bearer ', 'bool', 'filter', 'has_pii_access', 'match_all', 'must', 'query', 'reason', 'sub', 'tenant_id', 'term', 'unknown', 'user_id']

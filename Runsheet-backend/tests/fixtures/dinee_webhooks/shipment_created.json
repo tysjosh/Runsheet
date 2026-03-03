@@ -1,0 +1,20 @@
+{
+  "event_id": "evt-sc-001-abc123",
+  "event_type": "shipment_created",
+  "schema_version": "1.0",
+  "tenant_id": "tenant-test-1",
+  "timestamp": "2025-01-15T09:00:00Z",
+  "data": {
+    "shipment_id": "SHP-20250115-0001",
+    "status": "pending",
+    "rider_id": "RDR-101",
+    "origin": "Warehouse A, Industrial Zone 3",
+    "destination": "Block 7, Sector 12, New District",
+    "estimated_delivery": "2025-01-15T17:00:00Z",
+    "created_at": "2025-01-15T09:00:00Z",
+    "current_location": {
+      "lat": 28.6139,
+      "lon": 77.209
+    }
+  }
+}

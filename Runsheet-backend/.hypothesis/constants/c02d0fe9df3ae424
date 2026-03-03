@@ -1,0 +1,4 @@
+# file: /Users/olukotunjosh/Downloads/Runsheet/Runsheet-backend/middleware/security_headers.py
+# hypothesis_version: 6.151.4
+
+[100, "'none'", "'self'", "'self' data: https:", '...', '; ', 'DENY', 'X-Frame-Options', 'base-uri', 'connect-src', 'default-src', 'extra_data', 'font-src', 'form-action', 'frame-ancestors', 'img-src', 'nosniff', 'script-src', 'style-src', 'x_frame_options']

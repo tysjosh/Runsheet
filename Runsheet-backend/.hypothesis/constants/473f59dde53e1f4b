@@ -1,0 +1,4 @@
+# file: /Users/olukotunjosh/Downloads/Runsheet/Runsheet-backend/Agents/tools/search_tools.py
+# hypothesis_version: 6.151.4
+
+[1000, 'all', 'all support tickets', 'cargo', 'cargo.description', 'customer', 'description', 'driver_name', 'in_stock', 'inventory', 'issue', 'items', 'low_stock', 'name', 'orders', 'query', 'search_fleet_data', 'search_inventory', 'search_orders', 'status', 'success', 'support tickets', 'support_tickets', 'ticket_id', 'tool_name', 'trucks', '🔴', '🟡', '🟢']

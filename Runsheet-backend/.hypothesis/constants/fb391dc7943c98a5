@@ -1,0 +1,4 @@
+# file: /Users/olukotunjosh/Downloads/Runsheet/Runsheet-backend/ops/ingestion/handlers/v1_0.py
+# hypothesis_version: 6.151.4
+
+['availability', 'completed_today', 'created_at', 'current_location', 'data', 'delivered', 'destination', 'estimated_delivery', 'event_id', 'event_payload', 'event_timestamp', 'event_type', 'failed', 'failure_reason', 'last_event_timestamp', 'last_seen', 'location', 'origin', 'pending', 'rider_assigned', 'rider_id', 'rider_name', 'rider_status_changed', 'shipment_created', 'shipment_delivered', 'shipment_failed', 'shipment_id', 'shipment_updated', 'status', 'tenant_id', 'timestamp', 'updated_at']

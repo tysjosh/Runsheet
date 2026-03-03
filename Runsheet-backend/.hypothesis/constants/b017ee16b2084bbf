@@ -1,0 +1,4 @@
+# file: /Users/olukotunjosh/Downloads/Runsheet/Runsheet-backend/Agents/tools/lookup_tools.py
+# hypothesis_version: 6.151.4
+
+[1000, 'cargo', 'delayed', 'depot', 'find_truck_by_id', 'get_all_locations', 'locations', 'on_time', 'plate_number', 'port', 'station', 'status', 'success', 'tool_name', 'truck_id', 'truck_identifier', 'trucks', 'type', 'unknown', 'warehouse', '⚓', '🏢', '🏭', '📍', '🔴', '🚉', '🟡', '🟢']

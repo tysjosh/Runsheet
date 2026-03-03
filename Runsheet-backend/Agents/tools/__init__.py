@@ -27,6 +27,19 @@ from .report_tools import (
     generate_incident_analysis
 )
 
+from .ops_search_tools import (
+    search_shipments,
+    search_riders,
+    get_shipment_events,
+    get_ops_metrics
+)
+
+from .ops_report_tools import (
+    generate_sla_report,
+    generate_failure_report,
+    generate_rider_productivity_report
+)
+
 # All available tools
 ALL_TOOLS = [
     # Search tools
@@ -48,5 +61,16 @@ ALL_TOOLS = [
     # Report tools
     generate_operations_report,
     generate_performance_report,
-    generate_incident_analysis
+    generate_incident_analysis,
+
+    # Ops search tools
+    search_shipments,
+    search_riders,
+    get_shipment_events,
+    get_ops_metrics,
+
+    # Ops report tools
+    generate_sla_report,
+    generate_failure_report,
+    generate_rider_productivity_report,
 ]

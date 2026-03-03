@@ -54,6 +54,29 @@ class ErrorCode(str, Enum):
     SESSION_STORE_UNAVAILABLE = "SESSION_STORE_UNAVAILABLE"
     """Redis/DynamoDB unavailable (HTTP 503)"""
     
+    # Ops Intelligence errors (4xx)
+    WEBHOOK_SIGNATURE_INVALID = "WEBHOOK_SIGNATURE_INVALID"
+    """Webhook HMAC-SHA256 signature verification failed (HTTP 401)"""
+    
+    WEBHOOK_SCHEMA_UNKNOWN = "WEBHOOK_SCHEMA_UNKNOWN"
+    """Webhook payload contains unrecognized schema version (HTTP 200, routed to poison queue)"""
+    
+    TENANT_NOT_FOUND = "TENANT_NOT_FOUND"
+    """Tenant does not exist (HTTP 404)"""
+    
+    TENANT_DISABLED = "TENANT_DISABLED"
+    """Tenant ops intelligence is disabled via feature flag (HTTP 404)"""
+    
+    # Ops Intelligence errors (5xx / operational)
+    POISON_QUEUE_MAX_RETRIES = "POISON_QUEUE_MAX_RETRIES"
+    """Poison queue event exceeded maximum retry count (HTTP 422)"""
+    
+    DRIFT_THRESHOLD_EXCEEDED = "DRIFT_THRESHOLD_EXCEEDED"
+    """Source-replica drift exceeds configured threshold (HTTP 409)"""
+    
+    BACKFILL_IN_PROGRESS = "BACKFILL_IN_PROGRESS"
+    """A backfill job is already running for this tenant (HTTP 409)"""
+    
     # Internal errors (5xx)
     INTERNAL_ERROR = "INTERNAL_ERROR"
     """Unexpected server error (HTTP 500)"""
@@ -75,6 +98,14 @@ ERROR_CODE_STATUS_MAP: dict[ErrorCode, int] = {
     ErrorCode.SESSION_STORE_UNAVAILABLE: 503,
     ErrorCode.INTERNAL_ERROR: 500,
     ErrorCode.CIRCUIT_OPEN: 503,
+    # Ops Intelligence error codes
+    ErrorCode.WEBHOOK_SIGNATURE_INVALID: 401,
+    ErrorCode.WEBHOOK_SCHEMA_UNKNOWN: 200,
+    ErrorCode.TENANT_NOT_FOUND: 404,
+    ErrorCode.TENANT_DISABLED: 404,
+    ErrorCode.POISON_QUEUE_MAX_RETRIES: 422,
+    ErrorCode.DRIFT_THRESHOLD_EXCEEDED: 409,
+    ErrorCode.BACKFILL_IN_PROGRESS: 409,
 }
 
 

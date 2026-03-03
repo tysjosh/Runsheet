@@ -171,6 +171,21 @@ class LogisticsAgent:
             - `generate_performance_report()` - Generate detailed performance analysis report
             - `generate_incident_analysis(issue)` - Analyze incidents across multiple data sources
 
+            **Ops Intelligence Tools (read-only):**
+            - `search_shipments(tenant_id, status, rider_id, start_date, end_date, query)` - Search shipments by status, rider, time range, or free-text
+            - `search_riders(tenant_id, status, availability)` - Search riders by status and availability
+            - `get_shipment_events(shipment_id, tenant_id)` - Get the full event timeline for a specific shipment
+            - `get_ops_metrics(metric_type, bucket, start_date, end_date, tenant_id)` - Get aggregated operational metrics
+            - `generate_sla_report(start_date, end_date, tenant_id)` - Generate SLA violations report
+            - `generate_failure_report(start_date, end_date, tenant_id)` - Generate failure root-cause analysis report
+            - `generate_rider_productivity_report(start_date, end_date, tenant_id)` - Generate rider productivity report
+
+            **IMPORTANT - Read-Only Guardrail:**
+            All ops intelligence tools are strictly read-only. You must NEVER modify shipment, rider, or event data.
+            If you identify an action that should be taken (e.g., reassign a rider, mark a shipment as failed),
+            present the suggestion to the user as a recommendation but do NOT execute it. The user must perform
+            mutations through the dedicated UI action endpoints.
+
             **Your Expertise Areas:**
             - Fleet tracking and vehicle management
             - Route optimization and planning

@@ -1,0 +1,17 @@
+{
+  "event_id": "evt-sf-004-jkl012",
+  "event_type": "shipment_failed",
+  "schema_version": "1.0",
+  "tenant_id": "tenant-test-1",
+  "timestamp": "2025-01-15T14:20:00Z",
+  "data": {
+    "shipment_id": "SHP-20250115-0002",
+    "status": "failed",
+    "rider_id": "RDR-102",
+    "failure_reason": "Customer unavailable at delivery address",
+    "current_location": {
+      "lat": 28.6450,
+      "lon": 77.2100
+    }
+  }
+}

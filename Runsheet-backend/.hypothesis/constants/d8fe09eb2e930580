@@ -1,0 +1,4 @@
+# file: /Users/olukotunjosh/Downloads/Runsheet/Runsheet-backend/Agents/tools/logging_wrapper.py
+# hypothesis_version: 6.151.4
+
+[200, 500, 1000, '...[truncated]', '[REDACTED]', '_positional_args', 'api_key', 'credential', 'password', 'secret', 'success', 'token', 'tool_name']

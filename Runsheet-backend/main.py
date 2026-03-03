@@ -15,6 +15,14 @@ from Agents.mainagent import LogisticsAgent
 from data_endpoints import router as data_router
 from services.data_seeder import data_seeder
 from services.elasticsearch_service import elasticsearch_service
+from ops.services.ops_es_service import OpsElasticsearchService
+from ops.webhooks.receiver import router as webhook_router, configure_webhook_receiver
+from ops.api.endpoints import router as ops_router, configure_ops_api
+from ops.ingestion.adapter import AdapterTransformer
+from ops.ingestion.handlers.v1_0 import V1SchemaHandler
+from ops.ingestion.idempotency import IdempotencyService
+from ops.ingestion.poison_queue import PoisonQueueService
+from ops.ingestion.replay import configure_replay_service
 from config.settings import get_settings
 from errors.handlers import register_exception_handlers
 from errors.exceptions import AppException, validation_error
@@ -25,6 +33,12 @@ from health.service import HealthCheckService
 from telemetry.service import get_telemetry_service, initialize_telemetry
 from ingestion.service import DataIngestionService, LocationUpdate, BatchLocationUpdate
 from websocket.connection_manager import ConnectionManager, get_connection_manager
+from ops.websocket.ops_ws import OpsWebSocketManager, get_ops_ws_manager
+from ops.services.feature_flags import FeatureFlagService
+from Agents.tools.ops_feature_guard import configure_ops_feature_guard
+from Agents.tools.ops_search_tools import configure_ops_search_tools
+from Agents.tools.ops_report_tools import configure_ops_report_tools
+from ops.services.drift_detector import configure_drift_detector
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -36,6 +50,29 @@ settings = get_settings()
 # Initialize telemetry service for structured logging and metrics
 # Validates: Requirement 5.1, 5.4, 5.7
 telemetry_service = initialize_telemetry(settings)
+
+# Initialize the Ops Elasticsearch Service (delegates to existing elasticsearch_service)
+ops_es_service = OpsElasticsearchService(elasticsearch_service)
+
+# Initialize ops ingestion services for webhook processing
+# AdapterTransformer with v1.0 schema handler
+ops_adapter = AdapterTransformer()
+ops_adapter.register_handler("1.0", V1SchemaHandler())
+
+# PoisonQueueService for failed event storage
+ops_poison_queue = PoisonQueueService(ops_es_service)
+
+# IdempotencyService (Redis-backed, connected during lifespan startup)
+ops_idempotency = IdempotencyService(
+    redis_url=settings.redis_url or "redis://localhost:6379",
+    ttl_hours=settings.dinee_idempotency_ttl_hours,
+)
+
+# FeatureFlagService (Redis-backed, connected during lifespan startup)
+ops_feature_flags = FeatureFlagService(
+    redis_url=settings.redis_url or "redis://localhost:6379",
+    ops_es_service=ops_es_service,
+)
 
 
 @asynccontextmanager
@@ -50,11 +87,100 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"❌ Failed to seed Elasticsearch data: {e}")
         # Don't fail startup, just log the error
+
+    # Set up ops intelligence indices and ILM policies
+    try:
+        logger.info("🔧 Setting up ops intelligence indices...")
+        ops_es_service.setup_ops_indices()
+        ops_es_service.setup_ops_ilm_policies()
+        ops_es_service.verify_ops_ilm_policies()
+        ops_es_service.validate_ops_index_schemas()
+        logger.info("✅ Ops intelligence indices ready")
+    except Exception as e:
+        logger.error(f"❌ Failed to set up ops intelligence indices: {e}")
+        # Don't fail startup, just log the error
+
+    # Connect idempotency service and wire webhook receiver dependencies
+    try:
+        await ops_idempotency.connect()
+        await ops_feature_flags.connect()
+        configure_webhook_receiver(
+            adapter=ops_adapter,
+            idempotency_service=ops_idempotency,
+            poison_queue_service=ops_poison_queue,
+            ops_es_service=ops_es_service,
+            ws_manager=ops_ws_manager,
+            feature_flag_service=ops_feature_flags,
+            webhook_secret=settings.dinee_webhook_secret,
+            webhook_tenant_id=settings.dinee_webhook_tenant_id,
+            idempotency_ttl_hours=settings.dinee_idempotency_ttl_hours,
+        )
+        logger.info("✅ Webhook receiver configured")
+
+        # Wire ops API endpoints with the shared OpsElasticsearchService
+        configure_ops_api(
+            ops_es_service=ops_es_service,
+            feature_flag_service=ops_feature_flags,
+        )
+        logger.info("✅ Ops API configured")
+
+        # Wire replay service for backfill jobs
+        configure_replay_service(
+            adapter=ops_adapter,
+            idempotency=ops_idempotency,
+            ops_es=ops_es_service,
+            settings=settings,
+        )
+        logger.info("✅ Replay service configured")
+
+        # Wire drift detector for drift detection endpoint and scheduled runs
+        # Validates: Req 25.4, 25.5
+        configure_drift_detector(
+            ops_es=ops_es_service,
+            settings=settings,
+            threshold_pct=settings.drift_threshold_pct,
+            schedule_interval_hours=settings.drift_schedule_interval_hours,
+        )
+        logger.info("✅ Drift detector configured")
+
+        # Wire feature flag service into WebSocket manager for tenant gating
+        # Validates: Req 27.3 — reject/disconnect disabled tenants on /ws/ops
+        ops_ws_manager.set_feature_flag_service(ops_feature_flags)
+        logger.info("✅ Ops WebSocket feature flag integration configured")
+
+        # Wire feature flag service into AI tools guard
+        # Validates: Req 27.3 — disabled tenants get structured disabled response from AI tools
+        configure_ops_feature_guard(ops_feature_flags)
+        logger.info("✅ Ops AI tools feature guard configured")
+
+        # Wire OpsElasticsearchService into AI search tools
+        # Validates: Req 17.1-17.6 — AI tools query ops ES indices
+        configure_ops_search_tools(ops_es_service)
+        logger.info("✅ Ops AI search tools configured")
+
+        # Wire OpsElasticsearchService into AI report tools
+        # Validates: Req 18.1-18.5 — AI report templates
+        configure_ops_report_tools(ops_es_service)
+        logger.info("✅ Ops AI report tools configured")
+    except Exception as e:
+        logger.error(f"❌ Failed to configure webhook receiver: {e}")
     
     yield  # Application runs here
     
-    # Shutdown (if needed)
+    # Shutdown
     logger.info("👋 Shutting down Runsheet Logistics API...")
+    try:
+        await ops_ws_manager.shutdown()
+    except Exception:
+        pass
+    try:
+        await ops_idempotency.disconnect()
+    except Exception:
+        pass
+    try:
+        await ops_feature_flags.disconnect()
+    except Exception:
+        pass
 
 
 # Initialize FastAPI app with lifespan handler
@@ -127,12 +253,27 @@ data_ingestion_service = DataIngestionService(
 # Validates: Requirement 6.7 - WebSocket connections for pushing real-time updates
 fleet_connection_manager = get_connection_manager()
 
+# Initialize the Ops WebSocket manager for real-time ops updates
+# Validates: Requirement 16.1 - /ws/ops WebSocket endpoint
+ops_ws_manager = get_ops_ws_manager()
+
 # Configure the data ingestion service with the WebSocket connection manager
 # This enables automatic broadcasting of location updates to connected clients
 data_ingestion_service.set_connection_manager(fleet_connection_manager)
 
 # Include data endpoints
 app.include_router(data_router)
+
+# Include Dinee webhook receiver with rate limiting (500 req/min per IP)
+# RequestIDMiddleware already generates trace_id (request.state.request_id) for all requests
+# Validates: Req 1.1, 21.1, 21.4, 20.1
+app.include_router(webhook_router)
+
+# Include Ops API router for tenant-scoped operational endpoints
+# Authentication enforced via TenantGuard (JWT) on all ops endpoints
+# Rate limiting applied per-endpoint: 100 req/min for ops, 20 req/min for metrics
+# Validates: Req 21.2, 21.3, 21.5
+app.include_router(ops_router)
 
 class ChatRequest(BaseModel):
     message: str
@@ -1055,6 +1196,78 @@ async def batch_location_updates(batch: BatchLocationUpdate):
 # - Requirement 6.7: THE Backend_Service SHALL implement WebSocket connections
 #   for pushing real-time updates to connected Frontend_Application clients
 # =============================================================================
+
+
+# =============================================================================
+# Ops WebSocket Endpoint
+# =============================================================================
+# Real-time ops updates for shipment and rider state changes.
+# Clients send a JSON message on connect specifying subscriptions:
+#   {"subscriptions": ["shipment_update", "rider_update", "sla_breach"]}
+#
+# Validates:
+# - Requirement 16.1: /ws/ops WebSocket endpoint
+# - Requirement 16.2: Broadcast shipment updates on upsert
+# - Requirement 16.3: Broadcast rider updates on upsert
+# - Requirement 16.4: Subscription filters by event type
+# - Requirement 16.6: Heartbeat every 30s
+# =============================================================================
+
+
+@app.websocket("/ws/ops")
+async def ops_live_websocket(websocket: WebSocket):
+    """
+    WebSocket endpoint for real-time ops intelligence updates.
+
+    Authenticates via JWT passed as ``token`` query parameter.
+    Rejects connections for disabled tenants with close code 4403.
+
+    On connect the client may send a JSON message with subscription filters:
+        {"subscriptions": ["shipment_update", "rider_update", "sla_breach"]}
+
+    If no subscriptions message is received the client gets all event types.
+
+    Validates: Req 16.1, 27.3
+    """
+    from jose import JWTError, jwt as jose_jwt
+
+    # Extract tenant_id from JWT query param
+    token = websocket.query_params.get("token", "")
+    tenant_id = ""
+    if token:
+        try:
+            payload = jose_jwt.decode(
+                token,
+                settings.jwt_secret,
+                algorithms=[settings.jwt_algorithm],
+            )
+            tenant_id = payload.get("tenant_id", "")
+        except JWTError as exc:
+            logger.warning("Ops WS JWT decode failed: %s", exc)
+
+    # Accept and register — connect() handles feature flag rejection internally
+    await ops_ws_manager.connect(websocket, tenant_id=tenant_id)
+
+    # If the connection was rejected (e.g. disabled tenant), connect() closed
+    # the socket and did not register it — exit early.
+    if websocket not in ops_ws_manager._clients:
+        return
+
+    try:
+        while True:
+            try:
+                raw = await websocket.receive_text()
+                await ops_ws_manager.handle_client_message(websocket, raw)
+            except WebSocketDisconnect:
+                break
+            except Exception as exc:
+                logger.warning("Error in ops WS message loop: %s", exc)
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        logger.error("Ops WebSocket error: %s", exc)
+    finally:
+        await ops_ws_manager.disconnect(websocket)
 
 
 @app.websocket("/api/fleet/live")

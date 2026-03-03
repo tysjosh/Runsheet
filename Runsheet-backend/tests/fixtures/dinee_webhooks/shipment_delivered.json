@@ -1,0 +1,16 @@
+{
+  "event_id": "evt-sd-003-ghi789",
+  "event_type": "shipment_delivered",
+  "schema_version": "1.0",
+  "tenant_id": "tenant-test-1",
+  "timestamp": "2025-01-15T15:45:00Z",
+  "data": {
+    "shipment_id": "SHP-20250115-0001",
+    "status": "delivered",
+    "rider_id": "RDR-101",
+    "current_location": {
+      "lat": 28.6350,
+      "lon": 77.2250
+    }
+  }
+}

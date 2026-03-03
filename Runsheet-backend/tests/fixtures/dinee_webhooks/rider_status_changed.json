@@ -1,0 +1,19 @@
+{
+  "event_id": "evt-rs-006-pqr678",
+  "event_type": "rider_status_changed",
+  "schema_version": "1.0",
+  "tenant_id": "tenant-test-1",
+  "timestamp": "2025-01-15T16:00:00Z",
+  "data": {
+    "rider_id": "RDR-101",
+    "rider_name": "Test Rider Alpha",
+    "status": "idle",
+    "availability": "available",
+    "current_location": {
+      "lat": 28.6350,
+      "lon": 77.2250
+    },
+    "active_shipment_count": 0,
+    "completed_today": 5
+  }
+}

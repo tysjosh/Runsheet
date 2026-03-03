@@ -19,3 +19,12 @@ export type {
   FleetWebSocketOptions,
   UseFleetWebSocketReturn,
 } from './useFleetWebSocket';
+
+export { useOpsWebSocket } from './useOpsWebSocket';
+export type {
+  OpsEventType,
+  OpsWebSocketMessage,
+  SlaBreach,
+  OpsWebSocketOptions,
+  UseOpsWebSocketReturn,
+} from './useOpsWebSocket';
