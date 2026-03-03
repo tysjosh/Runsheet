@@ -1,26 +1,27 @@
-'use client';
+"use client";
 
-import React, { useState, useEffect, useCallback } from 'react';
-import { useParams } from 'next/navigation';
-import { ArrowLeft, Package, User, MapPin, Clock, Truck } from 'lucide-react';
-import Link from 'next/link';
-import LoadingSpinner from '../../../../components/LoadingSpinner';
-import ShipmentTimeline from '../../../../components/ops/ShipmentTimeline';
-import ShipmentMap from '../../../../components/ops/ShipmentMap';
-import { getShipmentById } from '../../../../services/opsApi';
-import { useOpsWebSocket } from '../../../../hooks/useOpsWebSocket';
-import type { ShipmentDetail, OpsEvent } from '../../../../services/opsApi';
+import { ArrowLeft, Clock, MapPin, Package, Truck, User } from "lucide-react";
+import Link from "next/link";
+import { useParams } from "next/navigation";
+import type React from "react";
+import { useCallback, useEffect, useState } from "react";
+import LoadingSpinner from "../../../../components/LoadingSpinner";
+import ShipmentMap from "../../../../components/ops/ShipmentMap";
+import ShipmentTimeline from "../../../../components/ops/ShipmentTimeline";
+import { useOpsWebSocket } from "../../../../hooks/useOpsWebSocket";
+import type { OpsEvent, ShipmentDetail } from "../../../../services/opsApi";
+import { getShipmentById } from "../../../../services/opsApi";
 
 const STATUS_COLORS: Record<string, string> = {
-  pending: 'bg-gray-100 text-gray-700',
-  in_transit: 'bg-yellow-100 text-yellow-700',
-  delivered: 'bg-green-100 text-green-700',
-  failed: 'bg-red-100 text-red-700',
-  returned: 'bg-orange-100 text-orange-700',
+  pending: "bg-gray-100 text-gray-700",
+  in_transit: "bg-yellow-100 text-yellow-700",
+  delivered: "bg-green-100 text-green-700",
+  failed: "bg-red-100 text-red-700",
+  returned: "bg-orange-100 text-orange-700",
 };
 
 function formatDate(dateStr?: string): string {
-  if (!dateStr) return '—';
+  if (!dateStr) return "—";
   try {
     return new Date(dateStr).toLocaleString();
   } catch {
@@ -53,8 +54,8 @@ export default function ShipmentTrackingPage() {
       setShipment(res.data);
       setEvents(res.data.events ?? []);
     } catch (err) {
-      console.error('Failed to load shipment:', err);
-      setError('Failed to load shipment details. Please try again.');
+      console.error("Failed to load shipment:", err);
+      setError("Failed to load shipment details. Please try again.");
     } finally {
       setLoading(false);
     }
@@ -81,16 +82,20 @@ export default function ShipmentTrackingPage() {
       if (updated.events && updated.events.length > 0) {
         setEvents((prev) => {
           const existingIds = new Set(prev.map((e) => e.event_id));
-          const newEvents = updated.events!.filter((e) => !existingIds.has(e.event_id));
-          return newEvents.length > 0 ? [...prev, ...newEvents] : prev;
+          const newEvents = updated.events?.filter(
+            (e) => !existingIds.has(e.event_id),
+          );
+          return newEvents && newEvents.length > 0
+            ? [...prev, ...newEvents]
+            : prev;
         });
       }
     },
-    [shipmentId]
+    [shipmentId],
   );
 
   useOpsWebSocket({
-    subscriptions: ['shipment_update'],
+    subscriptions: ["shipment_update"],
     onShipmentUpdate: handleShipmentUpdate,
   });
 
@@ -102,7 +107,7 @@ export default function ShipmentTrackingPage() {
     return (
       <div className="h-full flex items-center justify-center">
         <div className="text-center">
-          <p className="text-red-600 mb-4">{error ?? 'Shipment not found.'}</p>
+          <p className="text-red-600 mb-4">{error ?? "Shipment not found."}</p>
           <Link
             href="/ops"
             className="text-sm text-[#232323] underline hover:no-underline"
@@ -114,7 +119,8 @@ export default function ShipmentTrackingPage() {
     );
   }
 
-  const statusStyle = STATUS_COLORS[shipment.status] ?? 'bg-gray-100 text-gray-700';
+  const statusStyle =
+    STATUS_COLORS[shipment.status] ?? "bg-gray-100 text-gray-700";
 
   return (
     <div className="h-full flex flex-col bg-white">
@@ -139,7 +145,7 @@ export default function ShipmentTrackingPage() {
             <span
               className={`inline-block mt-1 px-2 py-0.5 rounded text-xs font-medium ${statusStyle}`}
             >
-              {shipment.status.replace(/_/g, ' ').toUpperCase()}
+              {shipment.status.replace(/_/g, " ").toUpperCase()}
             </span>
           </div>
         </div>
@@ -149,17 +155,17 @@ export default function ShipmentTrackingPage() {
           <InfoItem
             icon={<User className="w-4 h-4" />}
             label="Rider"
-            value={shipment.rider_id ?? '—'}
+            value={shipment.rider_id ?? "—"}
           />
           <InfoItem
             icon={<MapPin className="w-4 h-4" />}
             label="Origin"
-            value={shipment.origin ?? '—'}
+            value={shipment.origin ?? "—"}
           />
           <InfoItem
             icon={<Truck className="w-4 h-4" />}
             label="Destination"
-            value={shipment.destination ?? '—'}
+            value={shipment.destination ?? "—"}
           />
           <InfoItem
             icon={<Clock className="w-4 h-4" />}
@@ -174,13 +180,17 @@ export default function ShipmentTrackingPage() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Timeline — takes 2 columns on large screens */}
           <div className="lg:col-span-2">
-            <h2 className="text-lg font-semibold text-[#232323] mb-4">Event Timeline</h2>
+            <h2 className="text-lg font-semibold text-[#232323] mb-4">
+              Event Timeline
+            </h2>
             <ShipmentTimeline events={events} />
           </div>
 
           {/* Map sidebar */}
           <div>
-            <h2 className="text-lg font-semibold text-[#232323] mb-4">Route Map</h2>
+            <h2 className="text-lg font-semibold text-[#232323] mb-4">
+              Route Map
+            </h2>
             <ShipmentMap events={events} />
           </div>
         </div>

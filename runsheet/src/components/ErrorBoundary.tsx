@@ -1,7 +1,8 @@
-'use client';
+"use client";
 
-import React, { Component, ErrorInfo, ReactNode } from 'react';
-import { AlertTriangle, RefreshCw } from 'lucide-react';
+import { AlertTriangle, RefreshCw } from "lucide-react";
+import type React from "react";
+import { Component, type ErrorInfo, type ReactNode } from "react";
 
 interface ErrorBoundaryProps {
   children: ReactNode;
@@ -24,12 +25,15 @@ interface ErrorBoundaryState {
 /**
  * ErrorBoundary component that catches JavaScript errors in child component tree,
  * logs those errors, and displays a fallback UI with retry option.
- * 
+ *
  * Validates: Requirements 9.1, 9.2
  * - Requirement 9.1: Implements React error boundaries around major components
  * - Requirement 9.2: Displays user-friendly error message with retry option
  */
-export default class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
+export default class ErrorBoundary extends Component<
+  ErrorBoundaryProps,
+  ErrorBoundaryState
+> {
   constructor(props: ErrorBoundaryProps) {
     super(props);
     this.state = {
@@ -46,8 +50,11 @@ export default class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBo
 
   componentDidCatch(error: Error, errorInfo: ErrorInfo): void {
     // Log the error to console for debugging
-    console.error(`ErrorBoundary caught an error in ${this.props.componentName || 'component'}:`, error);
-    console.error('Component stack:', errorInfo.componentStack);
+    console.error(
+      `ErrorBoundary caught an error in ${this.props.componentName || "component"}:`,
+      error,
+    );
+    console.error("Component stack:", errorInfo.componentStack);
 
     // Update state with error info
     this.setState({ errorInfo });
@@ -105,12 +112,12 @@ export default class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBo
 
             {/* User-friendly Error Message */}
             <p className="text-gray-600 mb-6">
-              We encountered an unexpected error while loading this section. 
+              We encountered an unexpected error while loading this section.
               Please try again or contact support if the problem persists.
             </p>
 
             {/* Error Details (collapsed by default in production) */}
-            {process.env.NODE_ENV === 'development' && error && (
+            {process.env.NODE_ENV === "development" && error && (
               <details className="mb-6 text-left">
                 <summary className="text-sm text-gray-500 cursor-pointer hover:text-gray-700">
                   Technical details
@@ -133,7 +140,8 @@ export default class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBo
 
             {/* Additional Help */}
             <p className="mt-4 text-sm text-gray-400">
-              If this problem continues, please refresh the page or contact support.
+              If this problem continues, please refresh the page or contact
+              support.
             </p>
           </div>
         </div>
@@ -151,7 +159,7 @@ export default class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBo
 export function withErrorBoundary<P extends object>(
   WrappedComponent: React.ComponentType<P>,
   componentName: string,
-  errorBoundaryProps?: Omit<ErrorBoundaryProps, 'children' | 'componentName'>
+  errorBoundaryProps?: Omit<ErrorBoundaryProps, "children" | "componentName">,
 ): React.FC<P> {
   const WithErrorBoundary: React.FC<P> = (props) => (
     <ErrorBoundary componentName={componentName} {...errorBoundaryProps}>

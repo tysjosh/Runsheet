@@ -50,9 +50,14 @@ def _make_es_response(hits: list[dict], total: int = None) -> dict:
 @pytest.fixture(autouse=True)
 def _reset_module_state():
     """Reset module-level service reference between tests."""
+    import Agents.tools.ops_feature_guard as ff_mod
     original = mod._ops_es_service
+    original_ff = ff_mod._feature_flag_service
+    # Reset feature flag guard so tests don't inherit state from other test modules
+    ff_mod._feature_flag_service = None
     yield
     mod._ops_es_service = original
+    ff_mod._feature_flag_service = original_ff
 
 
 @pytest.fixture()

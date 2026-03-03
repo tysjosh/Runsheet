@@ -3,10 +3,10 @@
 
 // Import jest-dom matchers for enhanced DOM assertions
 // Provides matchers like toBeInTheDocument(), toHaveTextContent(), etc.
-import '@testing-library/jest-dom';
+import "@testing-library/jest-dom";
 
 // Mock Next.js router
-jest.mock('next/navigation', () => ({
+jest.mock("next/navigation", () => ({
   useRouter: () => ({
     push: jest.fn(),
     replace: jest.fn(),
@@ -15,13 +15,13 @@ jest.mock('next/navigation', () => ({
     forward: jest.fn(),
     refresh: jest.fn(),
   }),
-  usePathname: () => '/',
+  usePathname: () => "/",
   useSearchParams: () => new URLSearchParams(),
   useParams: () => ({}),
 }));
 
 // Mock Next.js Image component
-jest.mock('next/image', () => ({
+jest.mock("next/image", () => ({
   __esModule: true,
   default: (props) => {
     // eslint-disable-next-line @next/next/no-img-element, jsx-a11y/alt-text
@@ -30,7 +30,7 @@ jest.mock('next/image', () => ({
 }));
 
 // Mock window.matchMedia for responsive components
-Object.defineProperty(window, 'matchMedia', {
+Object.defineProperty(window, "matchMedia", {
   writable: true,
   value: jest.fn().mockImplementation((query) => ({
     matches: false,

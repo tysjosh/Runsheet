@@ -1,7 +1,6 @@
-'use client';
+"use client";
 
-import React from 'react';
-import type { MetricsBucketEntry } from '../../services/opsApi';
+import type { MetricsBucketEntry } from "../../services/opsApi";
 
 interface FailureTrendChartProps {
   /** Time-bucketed failure counts */
@@ -27,14 +26,17 @@ export default function FailureTrendChart({ data }: FailureTrendChartProps) {
 
   const formatLabel = (timestamp: string): string => {
     const date = new Date(timestamp);
-    if (isNaN(date.getTime())) return timestamp;
+    if (Number.isNaN(date.getTime())) return timestamp;
     // Show short date/time depending on bucket granularity
     const now = new Date();
     const diffDays = (now.getTime() - date.getTime()) / (1000 * 60 * 60 * 24);
     if (diffDays <= 2) {
-      return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      return date.toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+      });
     }
-    return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+    return date.toLocaleDateString([], { month: "short", day: "numeric" });
   };
 
   return (
@@ -58,15 +60,18 @@ export default function FailureTrendChart({ data }: FailureTrendChartProps) {
           const heightPct = maxCount > 0 ? (bucket.count / maxCount) * 100 : 0;
           return (
             <div
-              key={bucket.timestamp + i}
+              key={`${bucket.timestamp}-${bucket.count}`}
               className="flex flex-col items-center flex-1 min-w-[24px] max-w-[48px]"
             >
               <span className="text-[10px] text-gray-500 mb-1">
-                {bucket.count > 0 ? bucket.count : ''}
+                {bucket.count > 0 ? bucket.count : ""}
               </span>
               <div
                 className="w-full bg-red-400 rounded-t transition-all hover:bg-red-500"
-                style={{ height: `${Math.max(heightPct, bucket.count > 0 ? 4 : 0)}px`, maxHeight: 100 }}
+                style={{
+                  height: `${Math.max(heightPct, bucket.count > 0 ? 4 : 0)}px`,
+                  maxHeight: 100,
+                }}
                 title={`${formatLabel(bucket.timestamp)}: ${bucket.count} failures`}
               />
             </div>
@@ -78,7 +83,7 @@ export default function FailureTrendChart({ data }: FailureTrendChartProps) {
       <div className="flex gap-1 overflow-x-auto">
         {data.map((bucket, i) => (
           <div
-            key={bucket.timestamp + i + '-label'}
+            key={`${bucket.timestamp + i}-label`}
             className="flex-1 min-w-[24px] max-w-[48px] text-center"
           >
             <span className="text-[10px] text-gray-400 truncate block">

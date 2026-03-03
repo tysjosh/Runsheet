@@ -173,9 +173,10 @@ class TestSettings:
         """Test that all environment enum values are accepted."""
         for env in ["development", "staging", "production"]:
             env_vars = {**valid_env_vars, "ENVIRONMENT": env}
-            # For non-development environments, redis_url is required
+            # For non-development environments, redis_url and dinee_webhook_secret are required
             if env != "development":
                 env_vars["REDIS_URL"] = "redis://localhost:6379"
+                env_vars["DINEE_WEBHOOK_SECRET"] = "test-webhook-secret"
             with patch.dict(os.environ, env_vars, clear=True):
                 settings = Settings()
                 assert settings.environment.value == env
@@ -439,7 +440,7 @@ class TestEnvironmentSpecificConfiguration:
         """Test creating settings for staging environment."""
         from config.settings import create_settings_for_environment
         
-        env_vars = {**valid_env_vars, "REDIS_URL": "redis://localhost:6379"}
+        env_vars = {**valid_env_vars, "REDIS_URL": "redis://localhost:6379", "DINEE_WEBHOOK_SECRET": "test-webhook-secret"}
         with patch.dict(os.environ, env_vars, clear=True):
             settings = create_settings_for_environment(Environment.STAGING)
             assert isinstance(settings, Settings)
@@ -448,7 +449,7 @@ class TestEnvironmentSpecificConfiguration:
         """Test creating settings for production environment."""
         from config.settings import create_settings_for_environment
         
-        env_vars = {**valid_env_vars, "REDIS_URL": "redis://localhost:6379"}
+        env_vars = {**valid_env_vars, "REDIS_URL": "redis://localhost:6379", "DINEE_WEBHOOK_SECRET": "test-webhook-secret"}
         with patch.dict(os.environ, env_vars, clear=True):
             settings = create_settings_for_environment(Environment.PRODUCTION)
             assert isinstance(settings, Settings)
@@ -457,7 +458,7 @@ class TestEnvironmentSpecificConfiguration:
         """Test that create_settings_for_environment auto-detects environment."""
         from config.settings import create_settings_for_environment
         
-        env_vars = {**valid_env_vars, "ENVIRONMENT": "staging", "REDIS_URL": "redis://localhost:6379"}
+        env_vars = {**valid_env_vars, "ENVIRONMENT": "staging", "REDIS_URL": "redis://localhost:6379", "DINEE_WEBHOOK_SECRET": "test-webhook-secret"}
         with patch.dict(os.environ, env_vars, clear=True):
             settings = create_settings_for_environment()
             assert settings.environment == Environment.STAGING

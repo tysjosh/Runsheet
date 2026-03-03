@@ -1,25 +1,25 @@
-'use client';
+"use client";
 
-import React, { useState, useEffect, useCallback } from 'react';
-import { AlertTriangle } from 'lucide-react';
-import LoadingSpinner from '../../../components/LoadingSpinner';
-import FailureBarChart from '../../../components/ops/FailureBarChart';
-import FailureTrendChart from '../../../components/ops/FailureTrendChart';
-import {
-  getShipmentFailures,
-  getFailureMetrics,
-} from '../../../services/opsApi';
+import { AlertTriangle } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import LoadingSpinner from "../../../components/LoadingSpinner";
+import FailureBarChart from "../../../components/ops/FailureBarChart";
+import FailureTrendChart from "../../../components/ops/FailureTrendChart";
 import type {
-  OpsShipment,
-  MetricsBucketEntry,
   FailureFilters,
-  MetricsFilters,
   MetricsBucket,
-} from '../../../services/opsApi';
+  MetricsBucketEntry,
+  MetricsFilters,
+  OpsShipment,
+} from "../../../services/opsApi";
+import {
+  getFailureMetrics,
+  getShipmentFailures,
+} from "../../../services/opsApi";
 
 // ─── Time Range Helpers ──────────────────────────────────────────────────────
 
-type TimeRangePreset = 'today' | '7d' | '30d' | 'custom';
+type TimeRangePreset = "today" | "7d" | "30d" | "custom";
 
 interface TimeRange {
   preset: TimeRangePreset;
@@ -28,33 +28,36 @@ interface TimeRange {
 }
 
 function toISODate(date: Date): string {
-  return date.toISOString().split('T')[0];
+  return date.toISOString().split("T")[0];
 }
 
-function getPresetDates(preset: TimeRangePreset): { start_date: string; end_date: string } {
+function getPresetDates(preset: TimeRangePreset): {
+  start_date: string;
+  end_date: string;
+} {
   const now = new Date();
   const end = toISODate(now);
 
   switch (preset) {
-    case 'today':
+    case "today":
       return { start_date: end, end_date: end };
-    case '7d': {
+    case "7d": {
       const start = new Date(now);
       start.setDate(start.getDate() - 7);
       return { start_date: toISODate(start), end_date: end };
     }
-    case '30d': {
+    case "30d": {
       const start = new Date(now);
       start.setDate(start.getDate() - 30);
       return { start_date: toISODate(start), end_date: end };
     }
     default:
-      return { start_date: '', end_date: '' };
+      return { start_date: "", end_date: "" };
   }
 }
 
 function getBucketForPreset(preset: TimeRangePreset): MetricsBucket {
-  return preset === 'today' ? 'hourly' : 'daily';
+  return preset === "today" ? "hourly" : "daily";
 }
 
 // ─── Page Component ──────────────────────────────────────────────────────────
@@ -72,10 +75,10 @@ export default function OpsFailureAnalyticsPage() {
   const [metrics, setMetrics] = useState<MetricsBucketEntry[]>([]);
   const [failures, setFailures] = useState<OpsShipment[]>([]);
   const [loading, setLoading] = useState(true);
-  const [selectedReason, setSelectedReason] = useState('');
+  const [selectedReason, setSelectedReason] = useState("");
   const [timeRange, setTimeRange] = useState<TimeRange>(() => {
-    const dates = getPresetDates('7d');
-    return { preset: '7d', ...dates };
+    const dates = getPresetDates("7d");
+    return { preset: "7d", ...dates };
   });
 
   const loadData = useCallback(async () => {
@@ -85,11 +88,13 @@ export default function OpsFailureAnalyticsPage() {
       const metricsFilters: MetricsFilters = {
         bucket: getBucketForPreset(timeRange.preset),
       };
-      if (timeRange.start_date) metricsFilters.start_date = timeRange.start_date;
+      if (timeRange.start_date)
+        metricsFilters.start_date = timeRange.start_date;
       if (timeRange.end_date) metricsFilters.end_date = timeRange.end_date;
 
       const failureFilters: FailureFilters = {};
-      if (timeRange.start_date) failureFilters.start_date = timeRange.start_date;
+      if (timeRange.start_date)
+        failureFilters.start_date = timeRange.start_date;
       if (timeRange.end_date) failureFilters.end_date = timeRange.end_date;
 
       const [metricsRes, failuresRes] = await Promise.all([
@@ -100,7 +105,7 @@ export default function OpsFailureAnalyticsPage() {
       setMetrics(metricsRes.data);
       setFailures(failuresRes.data);
     } catch (error) {
-      console.error('Failed to load failure analytics:', error);
+      console.error("Failed to load failure analytics:", error);
     } finally {
       setLoading(false);
     }
@@ -112,18 +117,21 @@ export default function OpsFailureAnalyticsPage() {
 
   /** Handle preset time range selection. Validates: Requirement 14.4 */
   const handlePresetChange = (preset: TimeRangePreset) => {
-    if (preset === 'custom') {
-      setTimeRange((prev) => ({ ...prev, preset: 'custom' }));
+    if (preset === "custom") {
+      setTimeRange((prev) => ({ ...prev, preset: "custom" }));
     } else {
       const dates = getPresetDates(preset);
       setTimeRange({ preset, ...dates });
-      setSelectedReason('');
+      setSelectedReason("");
     }
   };
 
   /** Handle custom date changes */
-  const handleCustomDate = (field: 'start_date' | 'end_date', value: string) => {
-    setTimeRange((prev) => ({ ...prev, preset: 'custom', [field]: value }));
+  const handleCustomDate = (
+    field: "start_date" | "end_date",
+    value: string,
+  ) => {
+    setTimeRange((prev) => ({ ...prev, preset: "custom", [field]: value }));
   };
 
   /**
@@ -154,7 +162,9 @@ export default function OpsFailureAnalyticsPage() {
             <AlertTriangle className="w-5 h-5 text-white" />
           </div>
           <div>
-            <h1 className="text-2xl font-semibold text-[#232323]">Failure Analytics</h1>
+            <h1 className="text-2xl font-semibold text-[#232323]">
+              Failure Analytics
+            </h1>
             <p className="text-gray-500">Analyze failure reasons and trends</p>
           </div>
         </div>
@@ -182,7 +192,7 @@ export default function OpsFailureAnalyticsPage() {
         <FailedShipmentsTable
           shipments={filteredFailures}
           selectedReason={selectedReason}
-          onClearFilter={() => setSelectedReason('')}
+          onClearFilter={() => setSelectedReason("")}
         />
       </div>
     </div>
@@ -192,10 +202,10 @@ export default function OpsFailureAnalyticsPage() {
 // ─── Sub-components ──────────────────────────────────────────────────────────
 
 const PRESET_OPTIONS: { value: TimeRangePreset; label: string }[] = [
-  { value: 'today', label: 'Today' },
-  { value: '7d', label: 'Last 7 days' },
-  { value: '30d', label: 'Last 30 days' },
-  { value: 'custom', label: 'Custom' },
+  { value: "today", label: "Today" },
+  { value: "7d", label: "Last 7 days" },
+  { value: "30d", label: "Last 30 days" },
+  { value: "custom", label: "Custom" },
 ];
 
 function TimeRangeSelector({
@@ -205,7 +215,7 @@ function TimeRangeSelector({
 }: {
   timeRange: TimeRange;
   onPresetChange: (preset: TimeRangePreset) => void;
-  onCustomDate: (field: 'start_date' | 'end_date', value: string) => void;
+  onCustomDate: (field: "start_date" | "end_date", value: string) => void;
 }) {
   return (
     <div className="flex flex-wrap items-center gap-3">
@@ -216,8 +226,8 @@ function TimeRangeSelector({
           onClick={() => onPresetChange(opt.value)}
           className={`px-3 py-1.5 text-sm rounded-lg border transition-colors ${
             timeRange.preset === opt.value
-              ? 'bg-[#232323] text-white border-[#232323]'
-              : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300'
+              ? "bg-[#232323] text-white border-[#232323]"
+              : "bg-white text-gray-600 border-gray-200 hover:border-gray-300"
           }`}
           aria-pressed={timeRange.preset === opt.value}
         >
@@ -225,12 +235,12 @@ function TimeRangeSelector({
         </button>
       ))}
 
-      {timeRange.preset === 'custom' && (
+      {timeRange.preset === "custom" && (
         <>
           <input
             type="date"
             value={timeRange.start_date}
-            onChange={(e) => onCustomDate('start_date', e.target.value)}
+            onChange={(e) => onCustomDate("start_date", e.target.value)}
             className="px-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300"
             aria-label="Custom start date"
           />
@@ -238,7 +248,7 @@ function TimeRangeSelector({
           <input
             type="date"
             value={timeRange.end_date}
-            onChange={(e) => onCustomDate('end_date', e.target.value)}
+            onChange={(e) => onCustomDate("end_date", e.target.value)}
             className="px-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300"
             aria-label="Custom end date"
           />
@@ -283,7 +293,7 @@ function FailedShipmentsTable({
         <p className="text-sm text-gray-400 py-4">No failed shipments found</p>
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full text-sm" role="table">
+          <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-gray-100 text-left text-gray-500">
                 <th className="py-2 pr-4 font-medium">Shipment ID</th>
@@ -303,16 +313,16 @@ function FailedShipmentsTable({
                   </td>
                   <td className="py-2.5 pr-4">
                     <span className="inline-block px-2 py-0.5 text-xs rounded bg-red-50 text-red-700">
-                      {s.failure_reason ?? 'Unknown'}
+                      {s.failure_reason ?? "Unknown"}
                     </span>
                   </td>
                   <td className="py-2.5 pr-4 text-gray-600">
-                    {s.rider_id ?? '—'}
+                    {s.rider_id ?? "—"}
                   </td>
                   <td className="py-2.5 text-gray-500 text-xs">
                     {s.updated_at
                       ? new Date(s.updated_at).toLocaleString()
-                      : '—'}
+                      : "—"}
                   </td>
                 </tr>
               ))}

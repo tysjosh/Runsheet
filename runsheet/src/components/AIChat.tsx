@@ -1,18 +1,19 @@
-'use client';
+"use client";
 
-import React, { useState, useRef, useEffect } from 'react';
-import { Send, Trash2, X, Truck, SendHorizontal } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
-import ReportViewer from './ReportViewer';
+import { SendHorizontal, Trash2, X } from "lucide-react";
+import type React from "react";
+import { useEffect, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import ReportViewer from "./ReportViewer";
 
 interface ChatMessage {
   id: string;
-  role: 'user' | 'assistant' | 'tool-indicator';
+  role: "user" | "assistant" | "tool-indicator";
   content: string;
   timestamp: Date;
   isStreaming?: boolean;
   toolName?: string;
-  toolStatus?: 'in-progress' | 'done';
+  toolStatus?: "in-progress" | "done";
   isContinuation?: boolean;
 }
 
@@ -40,64 +41,87 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
   `;
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
-      id: '1',
-      role: 'assistant',
-      content: 'Hello! I\'m your logistics AI assistant. I can help you search orders, track fleet status, analyze delays, and answer questions about your operations. What would you like to know?',
-      timestamp: new Date()
-    }
+      id: "1",
+      role: "assistant",
+      content:
+        "Hello! I'm your logistics AI assistant. I can help you search orders, track fleet status, analyze delays, and answer questions about your operations. What would you like to know?",
+      timestamp: new Date(),
+    },
   ]);
-  const [input, setInput] = useState('');
+  const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
-  const [toolStatus, setToolStatus] = useState<string>('');
-  const [mode, setMode] = useState<'chat' | 'agent'>('chat');
+  const [_toolStatus, setToolStatus] = useState<string>("");
+  const [mode, setMode] = useState<"chat" | "agent">("chat");
   const [reportContent, setReportContent] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const processingRef = useRef(false);
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  };
-
   const isReport = (content: string) => {
-    return content.includes('# 📋 Operations Report') || 
-           content.includes('# 📊 Performance Analysis Report') || 
-           content.includes('# 🔍 Incident Analysis Report') ||
-           (content.includes('Generated:') && content.includes('##'));
+    return (
+      content.includes("# 📋 Operations Report") ||
+      content.includes("# 📊 Performance Analysis Report") ||
+      content.includes("# 🔍 Incident Analysis Report") ||
+      (content.includes("Generated:") && content.includes("##"))
+    );
   };
 
   const getToolIcon = (toolName?: string) => {
-    if (!toolName) return '🔧';
-    
+    if (!toolName) return "🔧";
+
     // Search tools
-    if (toolName.startsWith('search_')) return '🔍';
-    
+    if (toolName.startsWith("search_")) return "🔍";
+
     // Report tools
-    if (toolName.startsWith('generate_')) return '📊';
-    
+    if (toolName.startsWith("generate_")) return "📊";
+
     // Summary tools
-    if (toolName.includes('summary') || toolName.includes('overview') || toolName.includes('insights')) return '📈';
-    
+    if (
+      toolName.includes("summary") ||
+      toolName.includes("overview") ||
+      toolName.includes("insights")
+    )
+      return "📈";
+
     // Lookup tools
-    if (toolName.startsWith('find_') || toolName.startsWith('get_all_')) return '🔎';
-    
+    if (toolName.startsWith("find_") || toolName.startsWith("get_all_"))
+      return "🔎";
+
     // Specific tools
     switch (toolName) {
-      case 'search_fleet_data': return '🚛';
-      case 'search_orders': return '📦';
-      case 'search_support_tickets': return '🎫';
-      case 'search_inventory': return '📦';
-      case 'get_fleet_summary': return '🚛';
-      case 'get_inventory_summary': return '📦';
-      case 'get_analytics_overview': return '📊';
-      case 'get_performance_insights': return '🎯';
-      case 'find_truck_by_id': return '🚛';
-      case 'get_all_locations': return '📍';
-      case 'generate_operations_report': return '📋';
-      case 'generate_performance_report': return '📊';
-      case 'generate_incident_analysis': return '🔍';
-      default: return '🔧';
+      case "search_fleet_data":
+        return "🚛";
+      case "search_orders":
+        return "📦";
+      case "search_support_tickets":
+        return "🎫";
+      case "search_inventory":
+        return "📦";
+      case "get_fleet_summary":
+        return "🚛";
+      case "get_inventory_summary":
+        return "📦";
+      case "get_analytics_overview":
+        return "📊";
+      case "get_performance_insights":
+        return "🎯";
+      case "find_truck_by_id":
+        return "🚛";
+      case "get_all_locations":
+        return "📍";
+      case "generate_operations_report":
+        return "📋";
+      case "generate_performance_report":
+        return "📊";
+      case "generate_incident_analysis":
+        return "🔍";
+      default:
+        return "🔧";
     }
+  };
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
 
   useEffect(() => {
@@ -114,18 +138,22 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
     // Requirement 9.4: 120-second timeout for AI streaming responses
     const AI_STREAMING_TIMEOUT = 120000; // 120 seconds
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), AI_STREAMING_TIMEOUT);
+    const timeoutId = setTimeout(
+      () => controller.abort(),
+      AI_STREAMING_TIMEOUT,
+    );
 
     try {
-      const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api';
+      const API_BASE_URL =
+        process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
       const response = await fetch(`${API_BASE_URL}/chat`, {
-        method: 'POST',
+        method: "POST",
         headers: {
-          'Content-Type': 'application/json',
+          "Content-Type": "application/json",
         },
         body: JSON.stringify({
           message: userMessage,
-          mode: mode
+          mode: mode,
         }),
         signal: controller.signal,
       });
@@ -136,11 +164,11 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
 
       const reader = response.body?.getReader();
       if (!reader) {
-        throw new Error('No response body reader available');
+        throw new Error("No response body reader available");
       }
 
       const decoder = new TextDecoder();
-      let buffer = '';
+      let buffer = "";
 
       while (true) {
         const { done, value } = await reader.read();
@@ -149,11 +177,11 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
 
         const chunk = decoder.decode(value, { stream: true });
         buffer += chunk;
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
 
         for (const line of lines) {
-          if (line.startsWith('data: ')) {
+          if (line.startsWith("data: ")) {
             try {
               const jsonStr = line.slice(6).trim();
               if (!jsonStr) continue;
@@ -164,93 +192,106 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
                 throw new Error(data.error);
               }
 
-              if (data.type === 'text' && data.content) {
-                setMessages(prev => {
+              if (data.type === "text" && data.content) {
+                setMessages((prev) => {
                   const updated = [...prev];
                   // Find the last streaming assistant message
-                  const lastStreamingAssistantIndex = updated.findLastIndex(msg =>
-                    msg.role === 'assistant' && msg.isStreaming
+                  const lastStreamingAssistantIndex = updated.findLastIndex(
+                    (msg) => msg.role === "assistant" && msg.isStreaming,
                   );
                   if (lastStreamingAssistantIndex !== -1) {
-                    updated[lastStreamingAssistantIndex].content += data.content;
+                    updated[lastStreamingAssistantIndex].content +=
+                      data.content;
                   }
                   return updated;
                 });
               }
 
-              if (data.type === 'tool' && data.tool_name) {
+              if (data.type === "tool" && data.tool_name) {
                 // Tool is being used - split the assistant message and add tool indicator
-                setMessages(prev => {
+                setMessages((prev) => {
                   const updated = [...prev];
-                  const lastAssistantIndex = updated.findLastIndex(msg => msg.role === 'assistant');
+                  const lastAssistantIndex = updated.findLastIndex(
+                    (msg) => msg.role === "assistant",
+                  );
 
-                  if (lastAssistantIndex !== -1 && updated[lastAssistantIndex].isStreaming) {
+                  if (
+                    lastAssistantIndex !== -1 &&
+                    updated[lastAssistantIndex].isStreaming
+                  ) {
                     // Stop streaming on the current assistant message
                     updated[lastAssistantIndex].isStreaming = false;
 
                     // Add tool indicator
                     updated.push({
                       id: `tool-${Date.now()}`,
-                      role: 'tool-indicator',
-                      content: '',
+                      role: "tool-indicator",
+                      content: "",
                       timestamp: new Date(),
                       toolName: data.tool_name,
-                      toolStatus: 'in-progress'
+                      toolStatus: "in-progress",
                     });
 
                     // Add a new assistant message for post-tool content
                     updated.push({
                       id: `assistant-${Date.now()}`,
-                      role: 'assistant',
-                      content: '',
+                      role: "assistant",
+                      content: "",
                       timestamp: new Date(),
                       isStreaming: true,
-                      isContinuation: true
+                      isContinuation: true,
                     });
                   }
                   return updated;
                 });
               }
 
-              if (data.type === 'tool_result') {
+              if (data.type === "tool_result") {
                 // Tool finished - update the indicator
-                setMessages(prev => {
+                setMessages((prev) => {
                   const updated = [...prev];
-                  const toolIndicatorIndex = updated.findIndex(msg =>
-                    msg.role === 'tool-indicator' && msg.toolStatus === 'in-progress'
+                  const toolIndicatorIndex = updated.findIndex(
+                    (msg) =>
+                      msg.role === "tool-indicator" &&
+                      msg.toolStatus === "in-progress",
                   );
 
                   if (toolIndicatorIndex !== -1) {
-                    updated[toolIndicatorIndex].toolStatus = 'done';
+                    updated[toolIndicatorIndex].toolStatus = "done";
                     // Remove the tool indicator after a short delay
                     setTimeout(() => {
-                      setMessages(prevMsgs => prevMsgs.filter(msg => msg.id !== updated[toolIndicatorIndex].id));
+                      setMessages((prevMsgs) =>
+                        prevMsgs.filter(
+                          (msg) => msg.id !== updated[toolIndicatorIndex].id,
+                        ),
+                      );
                     }, 500);
                   }
                   return updated;
                 });
               }
 
-              if (data.type === 'done') {
+              if (data.type === "done") {
                 return;
               }
             } catch (parseError) {
-              console.warn('Failed to parse streaming data:', parseError);
+              console.warn("Failed to parse streaming data:", parseError);
             }
           }
         }
       }
     } catch (error) {
-      console.error('Chat streaming error:', error);
-      setMessages(prev => {
+      console.error("Chat streaming error:", error);
+      setMessages((prev) => {
         const updated = [...prev];
         const lastMsg = updated[updated.length - 1];
-        if (lastMsg.role === 'assistant') {
+        if (lastMsg.role === "assistant") {
           // Handle timeout error specifically
-          if (error instanceof Error && error.name === 'AbortError') {
-            lastMsg.content = '⏱️ The request timed out after 120 seconds. The AI service may be experiencing high load. Please try again with a simpler query.';
+          if (error instanceof Error && error.name === "AbortError") {
+            lastMsg.content =
+              "⏱️ The request timed out after 120 seconds. The AI service may be experiencing high load. Please try again with a simpler query.";
           } else {
-            lastMsg.content = `❌ Sorry, I encountered an error connecting to the AI service. Please make sure the backend is running on port 8000.\n\nError: ${error instanceof Error ? error.message : 'Unknown error'}`;
+            lastMsg.content = `❌ Sorry, I encountered an error connecting to the AI service. Please make sure the backend is running on port 8000.\n\nError: ${error instanceof Error ? error.message : "Unknown error"}`;
           }
         }
         return updated;
@@ -268,43 +309,44 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
 
     const userMessage: ChatMessage = {
       id: Date.now().toString(),
-      role: 'user',
+      role: "user",
       content: input,
-      timestamp: new Date()
+      timestamp: new Date(),
     };
 
-    setMessages(prev => [...prev, userMessage]);
-    setInput('');
+    setMessages((prev) => [...prev, userMessage]);
+    setInput("");
 
     const assistantMessage: ChatMessage = {
       id: (Date.now() + 1).toString(),
-      role: 'assistant',
-      content: '',
+      role: "assistant",
+      content: "",
       timestamp: new Date(),
-      isStreaming: true
+      isStreaming: true,
     };
 
-    setMessages(prev => [...prev, assistantMessage]);
+    setMessages((prev) => [...prev, assistantMessage]);
 
     try {
       await streamChatResponse(userMessage.content);
     } catch (error) {
-      console.error('Chat error:', error);
-      setMessages(prev => {
+      console.error("Chat error:", error);
+      setMessages((prev) => {
         const updated = [...prev];
         const lastMsg = updated[updated.length - 1];
-        if (lastMsg.role === 'assistant') {
-          lastMsg.content = '❌ Sorry, I encountered an error. Please try again.';
+        if (lastMsg.role === "assistant") {
+          lastMsg.content =
+            "❌ Sorry, I encountered an error. Please try again.";
         }
         return updated;
       });
     } finally {
       setIsStreaming(false);
-      setToolStatus('');
-      setMessages(prev => {
+      setToolStatus("");
+      setMessages((prev) => {
         const updated = [...prev];
         const lastMsg = updated[updated.length - 1];
-        if (lastMsg.role === 'assistant') {
+        if (lastMsg.role === "assistant") {
           lastMsg.isStreaming = false;
         }
         return updated;
@@ -314,7 +356,7 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
   };
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSend();
     }
@@ -322,53 +364,65 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
 
   const clearChat = async () => {
     try {
-      const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api';
+      const API_BASE_URL =
+        process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
       const response = await fetch(`${API_BASE_URL}/chat/clear`, {
-        method: 'POST',
+        method: "POST",
         headers: {
-          'Content-Type': 'application/json',
+          "Content-Type": "application/json",
         },
         body: JSON.stringify({}),
       });
 
       if (response.ok) {
-        setMessages([{
-          id: '1',
-          role: 'assistant',
-          content: 'Chat cleared! How can I help you with your logistics operations?',
-          timestamp: new Date()
-        }]);
+        setMessages([
+          {
+            id: "1",
+            role: "assistant",
+            content:
+              "Chat cleared! How can I help you with your logistics operations?",
+            timestamp: new Date(),
+          },
+        ]);
       } else {
-        console.error('Failed to clear chat on backend');
+        console.error("Failed to clear chat on backend");
       }
     } catch (error) {
-      console.error('Error clearing chat:', error);
-      setMessages([{
-        id: '1',
-        role: 'assistant',
-        content: 'Chat cleared! How can I help you with your logistics operations?',
-        timestamp: new Date()
-      }]);
+      console.error("Error clearing chat:", error);
+      setMessages([
+        {
+          id: "1",
+          role: "assistant",
+          content:
+            "Chat cleared! How can I help you with your logistics operations?",
+          timestamp: new Date(),
+        },
+      ]);
     }
   };
 
   return (
     <>
       <style dangerouslySetInnerHTML={{ __html: scrollbarStyles }} />
-      <div className={`fixed top-0 right-0 h-full w-96 bg-gradient-to-br from-gray-50 to-gray-100 shadow-2xl z-50 flex flex-col transition-transform duration-300 ease-in-out ${isOpen ? 'translate-x-0' : 'translate-x-full'
-        }`}>
+      <div
+        className={`fixed top-0 right-0 h-full w-96 bg-gradient-to-br from-gray-50 to-gray-100 shadow-2xl z-50 flex flex-col transition-transform duration-300 ease-in-out ${
+          isOpen ? "translate-x-0" : "translate-x-full"
+        }`}
+      >
         {/* Header */}
         <div className="bg-white/80 backdrop-blur-sm border-b border-gray-200/50 p-4 flex-shrink-0">
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center space-x-2">
-              <img 
-                src="/assistant.svg" 
-                alt="Support Assistant" 
+              <img
+                src="/assistant.svg"
+                alt="Support Assistant"
                 className="w-6 h-6"
               />
               <div>
                 <h2 className="text-lg font-bold text-gray-900">Support</h2>
-                <p className="text-xs text-gray-500 mt-0.5">Powered by Gemini</p>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  Powered by Gemini
+                </p>
               </div>
             </div>
             <div className="flex items-center space-x-2">
@@ -392,20 +446,22 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
           {/* Mode Toggle */}
           <div className="flex bg-gray-50 rounded-lg p-0.5 border border-gray-200">
             <button
-              onClick={() => setMode('chat')}
-              className={`flex-1 px-2.5 py-1.5 text-xs font-medium rounded-md transition-all duration-200 ${mode === 'chat'
-                ? 'bg-white text-gray-900 shadow-sm border border-gray-200'
-                : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100'
-                }`}
+              onClick={() => setMode("chat")}
+              className={`flex-1 px-2.5 py-1.5 text-xs font-medium rounded-md transition-all duration-200 ${
+                mode === "chat"
+                  ? "bg-white text-gray-900 shadow-sm border border-gray-200"
+                  : "text-gray-500 hover:text-gray-700 hover:bg-gray-100"
+              }`}
             >
               Chat
             </button>
             <button
-              onClick={() => setMode('agent')}
-              className={`flex-1 px-2.5 py-1.5 text-xs font-medium rounded-md transition-all duration-200 ${mode === 'agent'
-                ? 'bg-white text-gray-900 shadow-sm border border-gray-200'
-                : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100'
-                }`}
+              onClick={() => setMode("agent")}
+              className={`flex-1 px-2.5 py-1.5 text-xs font-medium rounded-md transition-all duration-200 ${
+                mode === "agent"
+                  ? "bg-white text-gray-900 shadow-sm border border-gray-200"
+                  : "text-gray-500 hover:text-gray-700 hover:bg-gray-100"
+              }`}
             >
               Agent
             </button>
@@ -416,27 +472,36 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
         <div
           className="flex-1 overflow-y-auto p-4 space-y-4 min-h-0 custom-scrollbar"
           style={{
-            scrollbarWidth: 'thin',
-            scrollbarColor: '#d1d5db transparent'
+            scrollbarWidth: "thin",
+            scrollbarColor: "#d1d5db transparent",
           }}
         >
-          {messages.map(msg => (
+          {messages.map((msg) => (
             <div
               key={msg.id}
-              className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+              className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
             >
-              {msg.role === 'tool-indicator' ? (
+              {msg.role === "tool-indicator" ? (
                 <div className="max-w-[85%] my-1">
-                  <span className="inline-block px-2 py-1 text-xs text-white rounded border" style={{ backgroundColor: '#232323', borderColor: '#232323' }}>
-                    {getToolIcon(msg.toolName)} {msg.toolName || 'tool'}
+                  <span
+                    className="inline-block px-2 py-1 text-xs text-white rounded border"
+                    style={{
+                      backgroundColor: "#232323",
+                      borderColor: "#232323",
+                    }}
+                  >
+                    {getToolIcon(msg.toolName)} {msg.toolName || "tool"}
                   </span>
                 </div>
-              ) : msg.role === 'assistant' ? (
+              ) : msg.role === "assistant" ? (
                 <div className="max-w-[85%]">
                   <div className="text-sm text-gray-800 leading-relaxed prose prose-sm max-w-none prose-headings:text-gray-900 prose-p:text-gray-800 prose-strong:text-gray-900 prose-ul:text-gray-800 prose-li:text-gray-800">
                     <ReactMarkdown>{msg.content}</ReactMarkdown>
                     {msg.isStreaming && (
-                      <span className="inline-block w-1.5 h-4 ml-1 animate-pulse rounded" style={{ backgroundColor: '#232323' }} />
+                      <span
+                        className="inline-block w-1.5 h-4 ml-1 animate-pulse rounded"
+                        style={{ backgroundColor: "#232323" }}
+                      />
                     )}
                   </div>
                   {isReport(msg.content) && !msg.isStreaming && (
@@ -452,18 +517,18 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
                 </div>
               ) : (
                 <div className="max-w-[75%]">
-                  <div className="text-white rounded-2xl px-4 py-2.5 shadow-lg" style={{ backgroundColor: '#232323' }}>
+                  <div
+                    className="text-white rounded-2xl px-4 py-2.5 shadow-lg"
+                    style={{ backgroundColor: "#232323" }}
+                  >
                     <div className="whitespace-pre-wrap text-sm leading-relaxed">
                       {msg.content}
                     </div>
                   </div>
-
                 </div>
               )}
             </div>
           ))}
-
-
 
           <div ref={messagesEndRef} />
         </div>
@@ -479,9 +544,9 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
                 onChange={(e) => setInput(e.target.value)}
                 onKeyPress={handleKeyPress}
                 placeholder={
-                  mode === 'chat'
-                    ? 'Ask me anything...'
-                    : 'Describe your analysis...'
+                  mode === "chat"
+                    ? "Ask me anything..."
+                    : "Describe your analysis..."
                 }
                 disabled={isStreaming}
                 className="w-full px-4 py-3 pr-12 bg-white border-2 border-gray-200 rounded-2xl focus:outline-none focus:border-gray-400 focus:ring-2 focus:ring-gray-100 text-sm transition-all duration-200 disabled:bg-gray-100 disabled:cursor-not-allowed shadow-sm"
@@ -499,8 +564,6 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
               </button>
             </div>
           </div>
-
-
         </div>
       </div>
 

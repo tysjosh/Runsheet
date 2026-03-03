@@ -1,31 +1,31 @@
-'use client';
+"use client";
 
-import { useState, useEffect, lazy, Suspense } from 'react';
-import { useRouter } from 'next/navigation';
-import dynamic from 'next/dynamic';
-import Header from '../components/Header';
-import Sidebar from '../components/Sidebar';
-import ErrorBoundary from '../components/ErrorBoundary';
-import LoadingSpinner from '../components/LoadingSpinner';
-import { Truck } from '../types/api';
+import dynamic from "next/dynamic";
+import { useRouter } from "next/navigation";
+import { lazy, Suspense, useEffect, useState } from "react";
+import ErrorBoundary from "../components/ErrorBoundary";
+import Header from "../components/Header";
+import LoadingSpinner from "../components/LoadingSpinner";
+import Sidebar from "../components/Sidebar";
+import type { Truck } from "../types/api";
 
 // Lazy-load heavy components for code splitting
 // These components are loaded on-demand when their routes are accessed
 
 // MapView is lazy-loaded because it includes the heavy Google Maps library
-const MapView = dynamic(() => import('../components/MapView'), {
+const MapView = dynamic(() => import("../components/MapView"), {
   loading: () => <MapLoadingPlaceholder />,
   ssr: false, // Google Maps doesn't work with SSR
 });
 
 // Route-based lazy loading for main content components
-const FleetTracking = lazy(() => import('../components/FleetTracking'));
-const AIChat = lazy(() => import('../components/AIChat'));
-const DataUpload = lazy(() => import('../components/DataUpload'));
-const Inventory = lazy(() => import('../components/Inventory'));
-const Orders = lazy(() => import('../components/Orders'));
-const Analytics = lazy(() => import('../components/Analytics'));
-const Support = lazy(() => import('../components/Support'));
+const FleetTracking = lazy(() => import("../components/FleetTracking"));
+const AIChat = lazy(() => import("../components/AIChat"));
+const DataUpload = lazy(() => import("../components/DataUpload"));
+const Inventory = lazy(() => import("../components/Inventory"));
+const Orders = lazy(() => import("../components/Orders"));
+const Analytics = lazy(() => import("../components/Analytics"));
+const Support = lazy(() => import("../components/Support"));
 
 // Loading placeholder for the map component
 function MapLoadingPlaceholder() {
@@ -53,31 +53,31 @@ export default function Home() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
-  const [activeMenuItem, setActiveMenuItem] = useState('fleet');
+  const [activeMenuItem, setActiveMenuItem] = useState("fleet");
   const [selectedTruck, setSelectedTruck] = useState<Truck | null>(null);
   const [aiChatOpen, setAiChatOpen] = useState(false);
 
   // Check authentication on component mount
   useEffect(() => {
     const checkAuth = () => {
-      const authStatus = localStorage.getItem('isAuthenticated');
+      const authStatus = localStorage.getItem("isAuthenticated");
 
-      if (authStatus === 'true') {
+      if (authStatus === "true") {
         setIsAuthenticated(true);
         setIsLoading(false);
       } else {
         // Clear any existing auth data
-        localStorage.removeItem('isAuthenticated');
-        localStorage.removeItem('userEmail');
+        localStorage.removeItem("isAuthenticated");
+        localStorage.removeItem("userEmail");
 
         // Redirect to signin
-        router.replace('/signin');
+        router.replace("/signin");
         setIsLoading(false);
       }
     };
 
     // Check if we're in the browser environment
-    if (typeof window !== 'undefined') {
+    if (typeof window !== "undefined") {
       checkAuth();
     }
   }, [router]);
@@ -100,7 +100,7 @@ export default function Home() {
 
   const renderMainContent = () => {
     switch (activeMenuItem) {
-      case 'upload-data':
+      case "upload-data":
         return (
           <div className="flex-1 p-6 bg-gray-50">
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 h-full overflow-hidden">
@@ -111,7 +111,7 @@ export default function Home() {
           </div>
         );
 
-      case 'inventory':
+      case "inventory":
         return (
           <div className="flex-1 p-6 bg-gray-50">
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 h-full overflow-hidden">
@@ -124,7 +124,7 @@ export default function Home() {
           </div>
         );
 
-      case 'orders':
+      case "orders":
         return (
           <div className="flex-1 p-6 bg-gray-50">
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 h-full overflow-hidden">
@@ -137,7 +137,7 @@ export default function Home() {
           </div>
         );
 
-      case 'fleet':
+      case "fleet":
         return (
           <div className="flex-1 p-6 bg-gray-50">
             <div className="flex gap-6 h-full">
@@ -158,8 +158,7 @@ export default function Home() {
           </div>
         );
 
-
-      case 'analytics':
+      case "analytics":
         return (
           <div className="flex-1 p-6 bg-gray-50">
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 h-full overflow-hidden">
@@ -172,7 +171,7 @@ export default function Home() {
           </div>
         );
 
-      case 'support':
+      case "support":
         return (
           <div className="flex-1 p-6 bg-gray-50">
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 h-full overflow-hidden">
@@ -189,8 +188,12 @@ export default function Home() {
         return (
           <div className="flex-1 flex items-center justify-center bg-white">
             <div className="text-center">
-              <h2 className="text-xl font-semibold text-gray-700 mb-2">Welcome to RUNSHEET</h2>
-              <p className="text-gray-500">Select a module from the sidebar to get started</p>
+              <h2 className="text-xl font-semibold text-gray-700 mb-2">
+                Welcome to RUNSHEET
+              </h2>
+              <p className="text-gray-500">
+                Select a module from the sidebar to get started
+              </p>
             </div>
           </div>
         );
@@ -226,7 +229,10 @@ export default function Home() {
         />
 
         {/* Main Content Area */}
-        <div className="flex-1 flex flex-col min-h-0 overflow-hidden" style={{ minWidth: 0 }}>
+        <div
+          className="flex-1 flex flex-col min-h-0 overflow-hidden"
+          style={{ minWidth: 0 }}
+        >
           <Header onAIClick={handleAIClick} />
 
           <main className="flex-1 flex bg-white relative z-0 overflow-hidden">
@@ -240,10 +246,7 @@ export default function Home() {
       {/* AI Chat Overlay - Lazy-loaded */}
       <ErrorBoundary componentName="AI Chat">
         <Suspense fallback={null}>
-          <AIChat
-            isOpen={aiChatOpen}
-            onClose={() => setAiChatOpen(false)}
-          />
+          <AIChat isOpen={aiChatOpen} onClose={() => setAiChatOpen(false)} />
         </Suspense>
       </ErrorBoundary>
     </div>

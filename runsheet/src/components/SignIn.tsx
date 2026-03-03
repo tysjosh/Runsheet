@@ -1,50 +1,51 @@
-'use client';
+"use client";
 
-import React, { useState } from 'react';
-import { Truck, Eye, EyeOff } from 'lucide-react';
+import { Eye, EyeOff, Truck } from "lucide-react";
+import type React from "react";
+import { useState } from "react";
 
 interface SignInProps {
   onSignIn?: (email: string, password: string) => void;
 }
 
 export default function SignIn({ onSignIn }: SignInProps) {
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState('');
+  const [error, setError] = useState("");
 
   const handleSubmit = async () => {
-    setError('');
+    setError("");
     setIsLoading(true);
 
     if (!email || !password) {
-      setError('Please fill in all fields');
+      setError("Please fill in all fields");
       setIsLoading(false);
       return;
     }
 
-    if (!email.includes('@')) {
-      setError('Please enter a valid email address');
+    if (!email.includes("@")) {
+      setError("Please enter a valid email address");
       setIsLoading(false);
       return;
     }
 
     try {
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      await new Promise((resolve) => setTimeout(resolve, 1000));
 
       if (onSignIn) {
         onSignIn(email, password);
       }
-    } catch (err) {
-      setError('Invalid credentials. Please try again.');
+    } catch (_err) {
+      setError("Invalid credentials. Please try again.");
     } finally {
       setIsLoading(false);
     }
   };
 
   const handleKeyPress = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') {
+    if (e.key === "Enter") {
       handleSubmit();
     }
   };
@@ -59,16 +60,16 @@ export default function SignIn({ onSignIn }: SignInProps) {
           <div
             className="absolute inset-0"
             style={{
-              background: ' #f3f4f6',
-              clipPath: 'polygon(0 0, 60% 0, 35% 100%, 0 100%)'
+              background: " #f3f4f6",
+              clipPath: "polygon(0 0, 60% 0, 35% 100%, 0 100%)",
             }}
           />
           {/* Light gray section (right side) */}
           <div
             className="absolute inset-0"
             style={{
-              backgroundColor: '#BDC4D4',
-              clipPath: 'polygon(60% 0, 100% 0, 100% 100%, 35% 100%)'
+              backgroundColor: "#BDC4D4",
+              clipPath: "polygon(60% 0, 100% 0, 100% 100%, 35% 100%)",
             }}
           />
         </div>
@@ -90,7 +91,8 @@ export default function SignIn({ onSignIn }: SignInProps) {
             {/* Floating text below image */}
             <div className="mt-8 text-center">
               <p className="text-gray-900 text-lg font-light leading-relaxed max-w-xl mx-auto">
-                Streamlined fleet management that transforms operations.<br />
+                Streamlined fleet management that transforms operations.
+                <br />
                 The attention to detail and ease of use are unmatched.
               </p>
               <p className="text-gray-700 text-sm mt-4 font-light">
@@ -130,7 +132,10 @@ export default function SignIn({ onSignIn }: SignInProps) {
           <div className="space-y-6">
             {/* Email Field */}
             <div>
-              <label htmlFor="email" className="block text-sm font-medium text-gray-700 mb-2">
+              <label
+                htmlFor="email"
+                className="block text-sm font-medium text-gray-700 mb-2"
+              >
                 Email address *
               </label>
               <input
@@ -150,10 +155,16 @@ export default function SignIn({ onSignIn }: SignInProps) {
             {/* Password Field */}
             <div>
               <div className="flex items-center justify-between mb-2">
-                <label htmlFor="password" className="block text-sm font-medium text-gray-700">
+                <label
+                  htmlFor="password"
+                  className="block text-sm font-medium text-gray-700"
+                >
                   Password *
                 </label>
-                <a href="#" className="text-sm text-gray-900 hover:underline transition-all">
+                <a
+                  href="#"
+                  className="text-sm text-gray-900 hover:underline transition-all"
+                >
                   Forgot?
                 </a>
               </div>
@@ -161,7 +172,7 @@ export default function SignIn({ onSignIn }: SignInProps) {
                 <input
                   id="password"
                   name="password"
-                  type={showPassword ? 'text' : 'password'}
+                  type={showPassword ? "text" : "password"}
                   autoComplete="current-password"
                   required
                   value={password}
@@ -203,13 +214,15 @@ export default function SignIn({ onSignIn }: SignInProps) {
                   Signing in...
                 </div>
               ) : (
-                'Sign In'
+                "Sign In"
               )}
             </button>
 
             {/* Demo Credentials */}
             <div className="mt-6 p-4 bg-gray-50 border border-gray-200 rounded-lg">
-              <p className="text-sm font-medium text-gray-900 mb-2">Demo Credentials:</p>
+              <p className="text-sm font-medium text-gray-900 mb-2">
+                Demo Credentials:
+              </p>
               <p className="text-xs text-gray-600">Email: admin@runsheet.com</p>
               <p className="text-xs text-gray-600">Password: demo123</p>
             </div>

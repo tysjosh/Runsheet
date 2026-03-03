@@ -1,5 +1,4 @@
-import React from 'react';
-import ReactMarkdown from 'react-markdown';
+import ReactMarkdown from "react-markdown";
 
 interface ReportViewerProps {
   content: string;
@@ -8,7 +7,7 @@ interface ReportViewerProps {
 
 export default function ReportViewer({ content, onClose }: ReportViewerProps) {
   const handleDownloadPDF = () => {
-    const printWindow = window.open('', '_blank');
+    const printWindow = window.open("", "_blank");
     if (printWindow) {
       printWindow.document.write(`
         <!DOCTYPE html>
@@ -38,7 +37,10 @@ export default function ReportViewer({ content, onClose }: ReportViewerProps) {
           </style>
         </head>
         <body>
-          ${content.replace(/\n/g, '<br>').replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>').replace(/\*(.*?)\*/g, '<em>$1</em>')}
+          ${content
+            .replace(/\n/g, "<br>")
+            .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
+            .replace(/\*(.*?)\*/g, "<em>$1</em>")}
         </body>
         </html>
       `);
@@ -103,14 +105,10 @@ export default function ReportViewer({ content, onClose }: ReportViewerProps) {
                   </ul>
                 ),
                 li: ({ children }) => (
-                  <li className="text-gray-700">
-                    {children}
-                  </li>
+                  <li className="text-gray-700">{children}</li>
                 ),
                 p: ({ children }) => (
-                  <p className="text-gray-700 mb-3">
-                    {children}
-                  </p>
+                  <p className="text-gray-700 mb-3">{children}</p>
                 ),
                 strong: ({ children }) => (
                   <strong className="font-semibold text-[#232323]">
@@ -118,9 +116,7 @@ export default function ReportViewer({ content, onClose }: ReportViewerProps) {
                   </strong>
                 ),
                 em: ({ children }) => (
-                  <em className="italic text-gray-600">
-                    {children}
-                  </em>
+                  <em className="italic text-gray-600">{children}</em>
                 ),
               }}
             >

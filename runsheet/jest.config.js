@@ -1,51 +1,48 @@
-const nextJest = require('next/jest');
+const nextJest = require("next/jest");
 
 const createJestConfig = nextJest({
   // Provide the path to your Next.js app to load next.config.js and .env files in your test environment
-  dir: './',
+  dir: "./",
 });
 
 // Add any custom config to be passed to Jest
 /** @type {import('jest').Config} */
 const customJestConfig = {
   // Add more setup options before each test is run
-  setupFilesAfterEnv: ['<rootDir>/jest.setup.js'],
-  
+  setupFilesAfterEnv: ["<rootDir>/jest.setup.js"],
+
   // Test environment for React components
-  testEnvironment: 'jsdom',
-  
+  testEnvironment: "jsdom",
+
   // Module name mapper for path aliases (matching tsconfig paths)
   moduleNameMapper: {
-    '^@/(.*)$': '<rootDir>/src/$1',
+    "^@/(.*)$": "<rootDir>/src/$1",
   },
-  
+
   // Test file patterns
-  testMatch: [
-    '**/__tests__/**/*.[jt]s?(x)',
-    '**/?(*.)+(spec|test).[jt]s?(x)',
-  ],
-  
+  testMatch: ["**/__tests__/**/*.[jt]s?(x)", "**/?(*.)+(spec|test).[jt]s?(x)"],
+
   // Files to ignore during testing
   testPathIgnorePatterns: [
-    '<rootDir>/node_modules/',
-    '<rootDir>/.next/',
-    '<rootDir>/e2e/',
+    "<rootDir>/node_modules/",
+    "<rootDir>/.next/",
+    "<rootDir>/e2e/",
   ],
-  
+
   // Transform ignore patterns - don't transform node_modules except for specific packages
   transformIgnorePatterns: [
-    '/node_modules/',
-    '^.+\\.module\\.(css|sass|scss)$',
+    "/node_modules/",
+    "^.+\\.module\\.(css|sass|scss)$",
   ],
-  
+
   // Coverage configuration
   collectCoverageFrom: [
-    'src/**/*.{js,jsx,ts,tsx}',
-    '!src/**/*.d.ts',
-    '!src/**/*.stories.{js,jsx,ts,tsx}',
-    '!**/node_modules/**',
+    "src/**/*.{js,jsx,ts,tsx}",
+    "!src/**/*.d.ts",
+    "!src/**/*.stories.{js,jsx,ts,tsx}",
+    "!**/node_modules/**",
   ],
-  
+
   // Coverage thresholds (can be adjusted as test coverage improves)
   // Note: Thresholds are set low initially and should be increased as more tests are added
   coverageThreshold: {
@@ -56,13 +53,13 @@ const customJestConfig = {
       statements: 0,
     },
   },
-  
+
   // Coverage reporters
-  coverageReporters: ['text', 'lcov', 'html'],
-  
+  coverageReporters: ["text", "lcov", "html"],
+
   // Clear mocks between tests
   clearMocks: true,
-  
+
   // Verbose output
   verbose: true,
 };

@@ -1,12 +1,16 @@
-'use client';
+"use client";
 
-import React, { useState, useEffect, useCallback } from 'react';
-import { Users } from 'lucide-react';
-import LoadingSpinner from '../../../components/LoadingSpinner';
-import RiderUtilizationList from '../../../components/ops/RiderUtilizationList';
-import { getRiderUtilization } from '../../../services/opsApi';
-import { useOpsWebSocket } from '../../../hooks/useOpsWebSocket';
-import type { RiderUtilization, RiderStatus, RiderUtilizationFilters } from '../../../services/opsApi';
+import { Users } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import LoadingSpinner from "../../../components/LoadingSpinner";
+import RiderUtilizationList from "../../../components/ops/RiderUtilizationList";
+import { useOpsWebSocket } from "../../../hooks/useOpsWebSocket";
+import type {
+  RiderStatus,
+  RiderUtilization,
+  RiderUtilizationFilters,
+} from "../../../services/opsApi";
+import { getRiderUtilization } from "../../../services/opsApi";
 
 /**
  * Rider Utilization and Availability View page.
@@ -19,7 +23,7 @@ import type { RiderUtilization, RiderStatus, RiderUtilizationFilters } from '../
 export default function OpsRiderUtilizationPage() {
   const [riders, setRiders] = useState<RiderUtilization[]>([]);
   const [loading, setLoading] = useState(true);
-  const [statusFilter, setStatusFilter] = useState<RiderStatus | ''>('');
+  const [statusFilter, setStatusFilter] = useState<RiderStatus | "">("");
 
   const loadData = useCallback(async () => {
     try {
@@ -31,7 +35,7 @@ export default function OpsRiderUtilizationPage() {
       const res = await getRiderUtilization(apiFilters);
       setRiders(res.data);
     } catch (error) {
-      console.error('Failed to load rider utilization data:', error);
+      console.error("Failed to load rider utilization data:", error);
     } finally {
       setLoading(false);
     }
@@ -60,7 +64,7 @@ export default function OpsRiderUtilizationPage() {
   }, []);
 
   useOpsWebSocket({
-    subscriptions: ['rider_update'],
+    subscriptions: ["rider_update"],
     onRiderUpdate: handleRiderUpdate,
   });
 
@@ -77,8 +81,12 @@ export default function OpsRiderUtilizationPage() {
             <Users className="w-5 h-5 text-white" />
           </div>
           <div>
-            <h1 className="text-2xl font-semibold text-[#232323]">Rider Utilization</h1>
-            <p className="text-gray-500">Monitor rider availability and workload</p>
+            <h1 className="text-2xl font-semibold text-[#232323]">
+              Rider Utilization
+            </h1>
+            <p className="text-gray-500">
+              Monitor rider availability and workload
+            </p>
           </div>
         </div>
       </div>

@@ -1,8 +1,7 @@
-'use client';
+"use client";
 
-import React from 'react';
-import { MapPin } from 'lucide-react';
-import type { OpsEvent, GeoPoint } from '../../services/opsApi';
+import { MapPin } from "lucide-react";
+import type { GeoPoint, OpsEvent } from "../../services/opsApi";
 
 interface MapMarker {
   label: string;
@@ -28,7 +27,8 @@ export default function ShipmentMap({ events }: ShipmentMapProps) {
     .filter((e): e is OpsEvent & { location: GeoPoint } => !!e.location)
     .sort(
       (a, b) =>
-        new Date(a.event_timestamp).getTime() - new Date(b.event_timestamp).getTime()
+        new Date(a.event_timestamp).getTime() -
+        new Date(b.event_timestamp).getTime(),
     )
     .map((e, idx) => ({
       label: `${idx + 1}`,
@@ -66,10 +66,11 @@ export default function ShipmentMap({ events }: ShipmentMapProps) {
             {/* Coordinates */}
             <div className="flex-1 min-w-0">
               <span className="text-sm font-mono text-gray-800">
-                {marker.location.lat.toFixed(4)}, {marker.location.lon.toFixed(4)}
+                {marker.location.lat.toFixed(4)},{" "}
+                {marker.location.lon.toFixed(4)}
               </span>
               <span className="ml-2 text-xs text-gray-400">
-                {marker.eventType.replace(/_/g, ' ')}
+                {marker.eventType.replace(/_/g, " ")}
               </span>
             </div>
 

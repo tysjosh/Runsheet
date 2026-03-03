@@ -1,30 +1,34 @@
 /**
  * Specialized WebSocket hook for fleet real-time updates.
- * 
+ *
  * This hook wraps the base useWebSocket hook with fleet-specific
  * message handling and types.
- * 
+ *
  * Validates:
  * - Requirement 9.5: WHEN the WebSocket connection drops, THE Frontend_Application
  *   SHALL automatically attempt reconnection with exponential backoff
  */
 
-import { useState, useCallback, useMemo } from 'react';
-import { useWebSocket, WebSocketState, WebSocketOptions } from './useWebSocket';
-import { Truck } from '../types/api';
+import { useCallback, useMemo, useState } from "react";
+import {
+  useWebSocket,
+  type WebSocketOptions,
+  type WebSocketState,
+} from "./useWebSocket";
 
 // API base URL for WebSocket
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api';
-const WS_URL = `${API_BASE_URL.replace('http', 'ws')}/fleet/live`;
+const API_BASE_URL =
+  process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
+const WS_URL = `${API_BASE_URL.replace("http", "ws")}/fleet/live`;
 
 /**
  * Message types from the backend WebSocket
  */
-export type FleetMessageType = 
-  | 'connection'
-  | 'location_update'
-  | 'batch_location_update'
-  | 'heartbeat';
+export type FleetMessageType =
+  | "connection"
+  | "location_update"
+  | "batch_location_update"
+  | "heartbeat";
 
 /**
  * Base message structure from backend
@@ -63,7 +67,7 @@ export interface BatchLocationUpdateData {
  * Connection status message
  */
 export interface ConnectionMessage extends FleetMessage {
-  type: 'connection';
+  type: "connection";
   status: string;
   message: string;
 }
@@ -112,13 +116,13 @@ export interface UseFleetWebSocketReturn {
 
 /**
  * Custom hook for fleet real-time updates via WebSocket.
- * 
+ *
  * Provides automatic reconnection with exponential backoff and
  * fleet-specific message handling.
- * 
+ *
  * @param options - Configuration options
  * @returns Fleet WebSocket state and control functions
- * 
+ *
  * @example
  * ```tsx
  * const { state, isConnected, lastLocationUpdate, reconnectAttempt } = useFleetWebSocket({
@@ -132,72 +136,84 @@ export interface UseFleetWebSocketReturn {
  * ```
  */
 export function useFleetWebSocket(
-  options: FleetWebSocketOptions = {}
+  options: FleetWebSocketOptions = {},
 ): UseFleetWebSocketReturn {
-  const [lastLocationUpdate, setLastLocationUpdate] = useState<LocationUpdateData | null>(null);
+  const [lastLocationUpdate, setLastLocationUpdate] =
+    useState<LocationUpdateData | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<string | null>(null);
 
   /**
    * Handle incoming WebSocket messages
    */
-  const handleMessage = useCallback((data: unknown) => {
-    const message = data as FleetMessage;
+  const handleMessage = useCallback(
+    (data: unknown) => {
+      const message = data as FleetMessage;
 
-    switch (message.type) {
-      case 'connection':
-        const connMsg = message as ConnectionMessage;
-        setConnectionStatus(connMsg.message || connMsg.status);
-        break;
-
-      case 'location_update':
-        const locationData = message.data as LocationUpdateData;
-        setLastLocationUpdate(locationData);
-        options.onLocationUpdate?.(locationData);
-        break;
-
-      case 'batch_location_update':
-        const batchData = message.data as BatchLocationUpdateData;
-        if (batchData.updates && batchData.updates.length > 0) {
-          // Set the last update from the batch
-          setLastLocationUpdate(batchData.updates[batchData.updates.length - 1]);
-          options.onBatchLocationUpdate?.(batchData.updates);
+      switch (message.type) {
+        case "connection": {
+          const connMsg = message as ConnectionMessage;
+          setConnectionStatus(connMsg.message || connMsg.status);
+          break;
         }
-        break;
 
-      case 'heartbeat':
-        // Heartbeat received - connection is alive
-        break;
+        case "location_update": {
+          const locationData = message.data as LocationUpdateData;
+          setLastLocationUpdate(locationData);
+          options.onLocationUpdate?.(locationData);
+          break;
+        }
 
-      default:
-        console.warn('Unknown fleet message type:', message.type);
-    }
-  }, [options]);
+        case "batch_location_update": {
+          const batchData = message.data as BatchLocationUpdateData;
+          if (batchData.updates && batchData.updates.length > 0) {
+            // Set the last update from the batch
+            setLastLocationUpdate(
+              batchData.updates[batchData.updates.length - 1],
+            );
+            options.onBatchLocationUpdate?.(batchData.updates);
+          }
+          break;
+        }
+
+        case "heartbeat":
+          // Heartbeat received - connection is alive
+          break;
+
+        default:
+          console.warn("Unknown fleet message type:", message.type);
+      }
+    },
+    [options],
+  );
 
   /**
    * Handle connection state changes
    */
   const handleConnect = useCallback(() => {
-    options.onConnectionStatusChange?.('connected');
+    options.onConnectionStatusChange?.("connected");
   }, [options]);
 
   const handleDisconnect = useCallback(() => {
-    options.onConnectionStatusChange?.('disconnected');
+    options.onConnectionStatusChange?.("disconnected");
     setConnectionStatus(null);
   }, [options]);
 
   // WebSocket options
-  const wsOptions: WebSocketOptions = useMemo(() => ({
-    autoConnect: options.autoConnect ?? true,
-    initialReconnectDelay: 1000,    // Start with 1 second
-    maxReconnectDelay: 30000,       // Max 30 seconds
-    maxReconnectAttempts: 0,        // Infinite attempts
-    backoffMultiplier: 2,           // Double each time
-    onConnect: handleConnect,
-    onDisconnect: handleDisconnect,
-    onMessage: handleMessage,
-    onReconnecting: options.onReconnecting,
-    onMaxReconnectAttemptsReached: options.onMaxReconnectAttemptsReached,
-  }), [handleConnect, handleDisconnect, handleMessage, options]);
+  const wsOptions: WebSocketOptions = useMemo(
+    () => ({
+      autoConnect: options.autoConnect ?? true,
+      initialReconnectDelay: 1000, // Start with 1 second
+      maxReconnectDelay: 30000, // Max 30 seconds
+      maxReconnectAttempts: 0, // Infinite attempts
+      backoffMultiplier: 2, // Double each time
+      onConnect: handleConnect,
+      onDisconnect: handleDisconnect,
+      onMessage: handleMessage,
+      onReconnecting: options.onReconnecting,
+      onMaxReconnectAttemptsReached: options.onMaxReconnectAttemptsReached,
+    }),
+    [handleConnect, handleDisconnect, handleMessage, options],
+  );
 
   // Use the base WebSocket hook
   const {

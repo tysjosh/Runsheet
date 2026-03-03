@@ -1,7 +1,6 @@
-'use client';
+"use client";
 
-import React from 'react';
-import type { MetricsBucketEntry } from '../../services/opsApi';
+import type { MetricsBucketEntry } from "../../services/opsApi";
 
 interface FailureBarChartProps {
   /** Metrics data with breakdown by failure reason */
@@ -34,10 +33,12 @@ export default function FailureBarChart({
     }
   }
 
-  const entries = Array.from(reasonTotals.entries())
-    .sort((a, b) => b[1] - a[1]);
+  const entries = Array.from(reasonTotals.entries()).sort(
+    (a, b) => b[1] - a[1],
+  );
 
-  const maxCount = entries.length > 0 ? Math.max(...entries.map(([, c]) => c)) : 0;
+  const maxCount =
+    entries.length > 0 ? Math.max(...entries.map(([, c]) => c)) : 0;
 
   if (entries.length === 0) {
     return (
@@ -59,25 +60,29 @@ export default function FailureBarChart({
             <button
               key={reason}
               type="button"
-              onClick={() => onReasonClick(isSelected ? '' : reason)}
+              onClick={() => onReasonClick(isSelected ? "" : reason)}
               className={`w-full text-left group rounded-lg p-2 transition-colors ${
                 isSelected
-                  ? 'bg-red-50 ring-1 ring-red-200'
-                  : 'hover:bg-gray-50'
+                  ? "bg-red-50 ring-1 ring-red-200"
+                  : "hover:bg-gray-50"
               }`}
-              aria-label={`${reason}: ${count} failures${isSelected ? ' (selected)' : ''}`}
+              aria-label={`${reason}: ${count} failures${isSelected ? " (selected)" : ""}`}
               aria-pressed={isSelected}
             >
               <div className="flex items-center justify-between mb-1">
                 <span className="text-sm text-gray-700 truncate max-w-[70%]">
                   {reason}
                 </span>
-                <span className="text-sm font-medium text-gray-900">{count}</span>
+                <span className="text-sm font-medium text-gray-900">
+                  {count}
+                </span>
               </div>
               <div className="w-full bg-gray-100 rounded-full h-2">
                 <div
                   className={`h-2 rounded-full transition-all ${
-                    isSelected ? 'bg-red-500' : 'bg-red-400 group-hover:bg-red-500'
+                    isSelected
+                      ? "bg-red-500"
+                      : "bg-red-400 group-hover:bg-red-500"
                   }`}
                   style={{ width: `${pct}%` }}
                 />

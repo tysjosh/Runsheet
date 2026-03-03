@@ -14,7 +14,8 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "Runsheet - Fleet Management Platform",
-  description: "Advanced fleet tracking and logistics management platform for efficient operations",
+  description:
+    "Advanced fleet tracking and logistics management platform for efficient operations",
   icons: {
     icon: [
       {

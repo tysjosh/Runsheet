@@ -10,25 +10,30 @@
  *   with a maximum interval of 30 seconds
  */
 
-import { useState, useCallback, useMemo } from 'react';
-import { useWebSocket, WebSocketState, WebSocketOptions } from './useWebSocket';
-import type { OpsShipment, OpsRider } from '../services/opsApi';
+import { useCallback, useMemo, useState } from "react";
+import type { OpsRider, OpsShipment } from "../services/opsApi";
+import {
+  useWebSocket,
+  type WebSocketOptions,
+  type WebSocketState,
+} from "./useWebSocket";
 
 // Derive WebSocket URL from API base URL
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api';
-const WS_BASE = API_BASE_URL.replace(/\/api$/, '').replace('http', 'ws');
+const API_BASE_URL =
+  process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
+const WS_BASE = API_BASE_URL.replace(/\/api$/, "").replace("http", "ws");
 const OPS_WS_URL = `${WS_BASE}/ws/ops`;
 
 /**
  * Event types the ops WebSocket can deliver
  */
-export type OpsEventType = 'shipment_update' | 'rider_update' | 'sla_breach';
+export type OpsEventType = "shipment_update" | "rider_update" | "sla_breach";
 
 /**
  * Base message structure from the ops WebSocket endpoint
  */
 export interface OpsWebSocketMessage {
-  type: OpsEventType | 'connection' | 'heartbeat';
+  type: OpsEventType | "connection" | "heartbeat";
   timestamp: string;
   data?: unknown;
   status?: string;
@@ -123,62 +128,70 @@ export interface UseOpsWebSocketReturn {
  * ```
  */
 export function useOpsWebSocket(
-  options: OpsWebSocketOptions = {}
+  options: OpsWebSocketOptions = {},
 ): UseOpsWebSocketReturn {
-  const [lastShipmentUpdate, setLastShipmentUpdate] = useState<OpsShipment | null>(null);
+  const [lastShipmentUpdate, setLastShipmentUpdate] =
+    useState<OpsShipment | null>(null);
   const [lastRiderUpdate, setLastRiderUpdate] = useState<OpsRider | null>(null);
   const [lastSlaBreach, setLastSlaBreach] = useState<SlaBreach | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<string | null>(null);
 
-  const subscriptions = options.subscriptions ?? ['shipment_update', 'rider_update', 'sla_breach'];
+  const subscriptions = options.subscriptions ?? [
+    "shipment_update",
+    "rider_update",
+    "sla_breach",
+  ];
 
   /**
    * Handle incoming WebSocket messages and dispatch by event type
    */
-  const handleMessage = useCallback((data: unknown) => {
-    const message = data as OpsWebSocketMessage;
+  const handleMessage = useCallback(
+    (data: unknown) => {
+      const message = data as OpsWebSocketMessage;
 
-    switch (message.type) {
-      case 'connection':
-        setConnectionStatus(message.message || message.status || 'connected');
-        break;
+      switch (message.type) {
+        case "connection":
+          setConnectionStatus(message.message || message.status || "connected");
+          break;
 
-      case 'heartbeat':
-        // Heartbeat received — connection is alive, nothing to do
-        break;
+        case "heartbeat":
+          // Heartbeat received — connection is alive, nothing to do
+          break;
 
-      case 'shipment_update': {
-        const shipment = message.data as OpsShipment;
-        setLastShipmentUpdate(shipment);
-        options.onShipmentUpdate?.(shipment);
-        break;
+        case "shipment_update": {
+          const shipment = message.data as OpsShipment;
+          setLastShipmentUpdate(shipment);
+          options.onShipmentUpdate?.(shipment);
+          break;
+        }
+
+        case "rider_update": {
+          const rider = message.data as OpsRider;
+          setLastRiderUpdate(rider);
+          options.onRiderUpdate?.(rider);
+          break;
+        }
+
+        case "sla_breach": {
+          const breach = message.data as SlaBreach;
+          setLastSlaBreach(breach);
+          options.onSlaBreach?.(breach);
+          break;
+        }
+
+        default:
+          console.warn("Unknown ops WebSocket message type:", message.type);
       }
-
-      case 'rider_update': {
-        const rider = message.data as OpsRider;
-        setLastRiderUpdate(rider);
-        options.onRiderUpdate?.(rider);
-        break;
-      }
-
-      case 'sla_breach': {
-        const breach = message.data as SlaBreach;
-        setLastSlaBreach(breach);
-        options.onSlaBreach?.(breach);
-        break;
-      }
-
-      default:
-        console.warn('Unknown ops WebSocket message type:', message.type);
-    }
-  }, [options]);
+    },
+    [options],
+  );
 
   const handleConnect = useCallback(() => {
-    options.onConnectionStatusChange?.('connected');
+    options.onConnectionStatusChange?.("connected");
   }, [options]);
 
   const handleDisconnect = useCallback(() => {
-    options.onConnectionStatusChange?.('disconnected');
+    options.onConnectionStatusChange?.("disconnected");
     setConnectionStatus(null);
   }, [options]);
 
@@ -188,23 +201,28 @@ export function useOpsWebSocket(
       return OPS_WS_URL;
     }
     const params = new URLSearchParams();
-    subscriptions.forEach((sub) => params.append('subscribe', sub));
+    subscriptions.forEach((sub) => {
+      params.append("subscribe", sub);
+    });
     return `${OPS_WS_URL}?${params.toString()}`;
   }, [subscriptions]);
 
   // Configure the base WebSocket hook
-  const wsOptions: WebSocketOptions = useMemo(() => ({
-    autoConnect: options.autoConnect ?? true,
-    initialReconnectDelay: 1000,  // 1 second
-    maxReconnectDelay: 30000,     // 30 seconds
-    maxReconnectAttempts: 0,      // Infinite attempts
-    backoffMultiplier: 2,
-    onConnect: handleConnect,
-    onDisconnect: handleDisconnect,
-    onMessage: handleMessage,
-    onReconnecting: options.onReconnecting,
-    onMaxReconnectAttemptsReached: options.onMaxReconnectAttemptsReached,
-  }), [handleConnect, handleDisconnect, handleMessage, options]);
+  const wsOptions: WebSocketOptions = useMemo(
+    () => ({
+      autoConnect: options.autoConnect ?? true,
+      initialReconnectDelay: 1000, // 1 second
+      maxReconnectDelay: 30000, // 30 seconds
+      maxReconnectAttempts: 0, // Infinite attempts
+      backoffMultiplier: 2,
+      onConnect: handleConnect,
+      onDisconnect: handleDisconnect,
+      onMessage: handleMessage,
+      onReconnecting: options.onReconnecting,
+      onMaxReconnectAttemptsReached: options.onMaxReconnectAttemptsReached,
+    }),
+    [handleConnect, handleDisconnect, handleMessage, options],
+  );
 
   const {
     state,

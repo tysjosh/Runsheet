@@ -1,22 +1,48 @@
-'use client';
+"use client";
 
-import React from 'react';
-import { Clock, MapPin, FileText, Tag } from 'lucide-react';
-import type { OpsEvent } from '../../services/opsApi';
+import { Clock, FileText, MapPin, Tag } from "lucide-react";
+import type { OpsEvent } from "../../services/opsApi";
 
 /**
  * Color and label mapping for event types.
  */
-const EVENT_TYPE_STYLES: Record<string, { color: string; bg: string; label: string }> = {
-  shipment_created: { color: 'text-blue-700', bg: 'bg-blue-100', label: 'Created' },
-  shipment_updated: { color: 'text-indigo-700', bg: 'bg-indigo-100', label: 'Updated' },
-  shipment_delivered: { color: 'text-green-700', bg: 'bg-green-100', label: 'Delivered' },
-  shipment_failed: { color: 'text-red-700', bg: 'bg-red-100', label: 'Failed' },
-  rider_assigned: { color: 'text-purple-700', bg: 'bg-purple-100', label: 'Rider Assigned' },
-  rider_status_changed: { color: 'text-amber-700', bg: 'bg-amber-100', label: 'Rider Status' },
+const EVENT_TYPE_STYLES: Record<
+  string,
+  { color: string; bg: string; label: string }
+> = {
+  shipment_created: {
+    color: "text-blue-700",
+    bg: "bg-blue-100",
+    label: "Created",
+  },
+  shipment_updated: {
+    color: "text-indigo-700",
+    bg: "bg-indigo-100",
+    label: "Updated",
+  },
+  shipment_delivered: {
+    color: "text-green-700",
+    bg: "bg-green-100",
+    label: "Delivered",
+  },
+  shipment_failed: { color: "text-red-700", bg: "bg-red-100", label: "Failed" },
+  rider_assigned: {
+    color: "text-purple-700",
+    bg: "bg-purple-100",
+    label: "Rider Assigned",
+  },
+  rider_status_changed: {
+    color: "text-amber-700",
+    bg: "bg-amber-100",
+    label: "Rider Status",
+  },
 };
 
-const DEFAULT_STYLE = { color: 'text-gray-700', bg: 'bg-gray-100', label: 'Event' };
+const DEFAULT_STYLE = {
+  color: "text-gray-700",
+  bg: "bg-gray-100",
+  label: "Event",
+};
 
 function formatTimestamp(ts: string): string {
   try {
@@ -26,7 +52,10 @@ function formatTimestamp(ts: string): string {
   }
 }
 
-function formatLocation(location?: { lat: number; lon: number }): string | null {
+function formatLocation(location?: {
+  lat: number;
+  lon: number;
+}): string | null {
   if (!location) return null;
   return `${location.lat.toFixed(4)}, ${location.lon.toFixed(4)}`;
 }
@@ -54,13 +83,18 @@ export default function ShipmentTimeline({ events }: ShipmentTimelineProps) {
 
   // Sort events by timestamp descending (newest first)
   const sorted = [...events].sort(
-    (a, b) => new Date(b.event_timestamp).getTime() - new Date(a.event_timestamp).getTime()
+    (a, b) =>
+      new Date(b.event_timestamp).getTime() -
+      new Date(a.event_timestamp).getTime(),
   );
 
   return (
     <div className="relative">
       {/* Vertical line */}
-      <div className="absolute left-5 top-0 bottom-0 w-0.5 bg-gray-200" aria-hidden="true" />
+      <div
+        className="absolute left-5 top-0 bottom-0 w-0.5 bg-gray-200"
+        aria-hidden="true"
+      />
 
       <ol className="space-y-6" aria-label="Shipment event timeline">
         {sorted.map((event, idx) => {
@@ -75,7 +109,7 @@ export default function ShipmentTimeline({ events }: ShipmentTimelineProps) {
               {/* Dot on the timeline */}
               <div
                 className={`absolute left-3.5 w-3 h-3 rounded-full border-2 border-white ${
-                  idx === 0 ? 'bg-[#232323]' : 'bg-gray-400'
+                  idx === 0 ? "bg-[#232323]" : "bg-gray-400"
                 }`}
                 aria-hidden="true"
               />
@@ -107,7 +141,7 @@ export default function ShipmentTimeline({ events }: ShipmentTimelineProps) {
                   <div className="flex items-start gap-1 text-sm text-gray-700 mb-2">
                     <FileText className="w-3.5 h-3.5 mt-0.5 text-gray-400 flex-shrink-0" />
                     <span className="break-all">
-                      {details.map(([k, v]) => `${k}: ${String(v)}`).join(', ')}
+                      {details.map(([k, v]) => `${k}: ${String(v)}`).join(", ")}
                     </span>
                   </div>
                 )}

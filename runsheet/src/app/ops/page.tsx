@@ -1,20 +1,22 @@
-'use client';
+"use client";
 
-import React, { useState, useEffect, useCallback } from 'react';
-import { Package } from 'lucide-react';
-import LoadingSpinner from '../../components/LoadingSpinner';
-import ShipmentBoard from '../../components/ops/ShipmentBoard';
-import ShipmentSummaryBar from '../../components/ops/ShipmentSummaryBar';
-import OpsFilters, { type OpsFilterValues } from '../../components/ops/OpsFilters';
-import { getShipments, getSlaBreaches } from '../../services/opsApi';
-import { useOpsWebSocket } from '../../hooks/useOpsWebSocket';
-import type { OpsShipment, ShipmentFilters } from '../../services/opsApi';
+import { Package } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import LoadingSpinner from "../../components/LoadingSpinner";
+import OpsFilters, {
+  type OpsFilterValues,
+} from "../../components/ops/OpsFilters";
+import ShipmentBoard from "../../components/ops/ShipmentBoard";
+import ShipmentSummaryBar from "../../components/ops/ShipmentSummaryBar";
+import { useOpsWebSocket } from "../../hooks/useOpsWebSocket";
+import type { OpsShipment, ShipmentFilters } from "../../services/opsApi";
+import { getShipments, getSlaBreaches } from "../../services/opsApi";
 
 const INITIAL_FILTERS: OpsFilterValues = {
-  status: '',
-  rider_id: '',
-  start_date: '',
-  end_date: '',
+  status: "",
+  rider_id: "",
+  start_date: "",
+  end_date: "",
 };
 
 /**
@@ -49,7 +51,7 @@ export default function OpsShipmentBoardPage() {
       setShipments(shipmentsRes.data);
       setSlaBreachIds(new Set(slaRes.data.map((s) => s.shipment_id)));
     } catch (error) {
-      console.error('Failed to load shipment data:', error);
+      console.error("Failed to load shipment data:", error);
     } finally {
       setLoading(false);
     }
@@ -77,15 +79,12 @@ export default function OpsShipmentBoardPage() {
     });
   }, []);
 
-  const handleSlaBreach = useCallback(
-    (breach: { shipment_id: string }) => {
-      setSlaBreachIds((prev) => new Set(prev).add(breach.shipment_id));
-    },
-    []
-  );
+  const handleSlaBreach = useCallback((breach: { shipment_id: string }) => {
+    setSlaBreachIds((prev) => new Set(prev).add(breach.shipment_id));
+  }, []);
 
   useOpsWebSocket({
-    subscriptions: ['shipment_update', 'sla_breach'],
+    subscriptions: ["shipment_update", "sla_breach"],
     onShipmentUpdate: handleShipmentUpdate,
     onSlaBreach: handleSlaBreach,
   });
@@ -103,8 +102,12 @@ export default function OpsShipmentBoardPage() {
             <Package className="w-5 h-5 text-white" />
           </div>
           <div>
-            <h1 className="text-2xl font-semibold text-[#232323]">Shipment Status Board</h1>
-            <p className="text-gray-500">Monitor all active shipments in real time</p>
+            <h1 className="text-2xl font-semibold text-[#232323]">
+              Shipment Status Board
+            </h1>
+            <p className="text-gray-500">
+              Monitor all active shipments in real time
+            </p>
           </div>
         </div>
 

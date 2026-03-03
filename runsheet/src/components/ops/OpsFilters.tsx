@@ -1,11 +1,10 @@
-'use client';
+"use client";
 
-import React from 'react';
-import { Filter } from 'lucide-react';
-import type { ShipmentStatus } from '../../services/opsApi';
+import { Filter } from "lucide-react";
+import type { ShipmentStatus } from "../../services/opsApi";
 
 export interface OpsFilterValues {
-  status: ShipmentStatus | '';
+  status: ShipmentStatus | "";
   rider_id: string;
   start_date: string;
   end_date: string;
@@ -16,13 +15,13 @@ interface OpsFiltersProps {
   onChange: (filters: OpsFilterValues) => void;
 }
 
-const STATUS_OPTIONS: { value: ShipmentStatus | ''; label: string }[] = [
-  { value: '', label: 'All Statuses' },
-  { value: 'pending', label: 'Pending' },
-  { value: 'in_transit', label: 'In Transit' },
-  { value: 'delivered', label: 'Delivered' },
-  { value: 'failed', label: 'Failed' },
-  { value: 'returned', label: 'Returned' },
+const STATUS_OPTIONS: { value: ShipmentStatus | ""; label: string }[] = [
+  { value: "", label: "All Statuses" },
+  { value: "pending", label: "Pending" },
+  { value: "in_transit", label: "In Transit" },
+  { value: "delivered", label: "Delivered" },
+  { value: "failed", label: "Failed" },
+  { value: "returned", label: "Returned" },
 ];
 
 /**
@@ -42,7 +41,9 @@ export default function OpsFilters({ filters, onChange }: OpsFiltersProps) {
 
       <select
         value={filters.status}
-        onChange={(e) => update({ status: e.target.value as ShipmentStatus | '' })}
+        onChange={(e) =>
+          update({ status: e.target.value as ShipmentStatus | "" })
+        }
         className="px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white"
         aria-label="Filter by status"
       >

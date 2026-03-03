@@ -1,13 +1,16 @@
-export { default as Header } from './Header';
-export { default as Sidebar } from './Sidebar';
-export { default as FleetTracking } from './FleetTracking';
-export { default as MapView } from './MapView';
-export { default as AIChat } from './AIChat';
-export { default as DataUpload } from './DataUpload';
-export { default as Inventory } from './Inventory';
-export { default as Orders } from './Orders';
-export { default as Analytics } from './Analytics';
-export { default as Support } from './Support';
-export { default as ErrorBoundary, withErrorBoundary } from './ErrorBoundary';
-export { default as LoadingSpinner, InlineSpinner } from './LoadingSpinner';
-export { default as WebSocketStatus, WebSocketStatusBadge } from './WebSocketStatus';
+export { default as AIChat } from "./AIChat";
+export { default as Analytics } from "./Analytics";
+export { default as DataUpload } from "./DataUpload";
+export { default as ErrorBoundary, withErrorBoundary } from "./ErrorBoundary";
+export { default as FleetTracking } from "./FleetTracking";
+export { default as Header } from "./Header";
+export { default as Inventory } from "./Inventory";
+export { default as LoadingSpinner, InlineSpinner } from "./LoadingSpinner";
+export { default as MapView } from "./MapView";
+export { default as Orders } from "./Orders";
+export { default as Sidebar } from "./Sidebar";
+export { default as Support } from "./Support";
+export {
+  default as WebSocketStatus,
+  WebSocketStatusBadge,
+} from "./WebSocketStatus";

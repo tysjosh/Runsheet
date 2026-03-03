@@ -1,8 +1,8 @@
-'use client';
+"use client";
 
-import React, { useState, useCallback } from 'react';
-import { ChevronUp, ChevronDown } from 'lucide-react';
-import type { RiderUtilization, RiderStatus } from '../../services/opsApi';
+import { ChevronDown, ChevronUp } from "lucide-react";
+import { useCallback, useState } from "react";
+import type { RiderStatus, RiderUtilization } from "../../services/opsApi";
 
 /** Default capacity threshold for utilization calculation */
 const DEFAULT_CAPACITY = 10;
@@ -10,24 +10,31 @@ const DEFAULT_CAPACITY = 10;
 /** Idle threshold in minutes — riders idle longer than this are highlighted */
 const IDLE_THRESHOLD_MINUTES = 30;
 
-type SortField = 'rider_id' | 'rider_name' | 'status' | 'active_shipment_count' | 'completed_today' | 'last_seen' | 'utilization';
-type SortOrder = 'asc' | 'desc';
+type SortField =
+  | "rider_id"
+  | "rider_name"
+  | "status"
+  | "active_shipment_count"
+  | "completed_today"
+  | "last_seen"
+  | "utilization";
+type SortOrder = "asc" | "desc";
 
 interface RiderUtilizationListProps {
   riders: RiderUtilization[];
   /** Capacity threshold for utilization bar. Defaults to 10. */
   capacity?: number;
   /** Filter riders by status */
-  statusFilter?: RiderStatus | '';
+  statusFilter?: RiderStatus | "";
   /** Callback when status filter changes */
-  onStatusFilterChange?: (status: RiderStatus | '') => void;
+  onStatusFilterChange?: (status: RiderStatus | "") => void;
 }
 
-const STATUS_OPTIONS: { value: RiderStatus | ''; label: string }[] = [
-  { value: '', label: 'All Statuses' },
-  { value: 'active', label: 'Active' },
-  { value: 'idle', label: 'Idle' },
-  { value: 'offline', label: 'Offline' },
+const STATUS_OPTIONS: { value: RiderStatus | ""; label: string }[] = [
+  { value: "", label: "All Statuses" },
+  { value: "active", label: "Active" },
+  { value: "idle", label: "Idle" },
+  { value: "offline", label: "Offline" },
 ];
 
 /**
@@ -64,7 +71,7 @@ function isOverloaded(rider: RiderUtilization, capacity: number): boolean {
  * Validates: Requirement 13.3 — highlight idle >30min riders in yellow
  */
 function isIdleTooLong(rider: RiderUtilization): boolean {
-  if (rider.status !== 'idle') return false;
+  if (rider.status !== "idle") return false;
   return getIdleMinutes(rider) > IDLE_THRESHOLD_MINUTES;
 }
 
@@ -73,21 +80,21 @@ function isIdleTooLong(rider: RiderUtilization): boolean {
  * Validates: Requirement 13.3
  */
 function getRowHighlight(rider: RiderUtilization, capacity: number): string {
-  if (isOverloaded(rider, capacity)) return 'bg-red-50';
-  if (isIdleTooLong(rider)) return 'bg-yellow-50';
-  return '';
+  if (isOverloaded(rider, capacity)) return "bg-red-50";
+  if (isIdleTooLong(rider)) return "bg-yellow-50";
+  return "";
 }
 
 function getStatusBadge(status: RiderStatus): string {
   switch (status) {
-    case 'active':
-      return 'text-green-700 bg-green-100';
-    case 'idle':
-      return 'text-yellow-700 bg-yellow-100';
-    case 'offline':
-      return 'text-gray-700 bg-gray-100';
+    case "active":
+      return "text-green-700 bg-green-100";
+    case "idle":
+      return "text-yellow-700 bg-yellow-100";
+    case "offline":
+      return "text-gray-700 bg-gray-100";
     default:
-      return 'text-gray-700 bg-gray-100';
+      return "text-gray-700 bg-gray-100";
   }
 }
 
@@ -96,18 +103,18 @@ function getStatusBadge(status: RiderStatus): string {
  * Red when overloaded (>100%), yellow when moderate (60-100%), green otherwise.
  */
 function getBarColor(percentage: number): string {
-  if (percentage > 100) return 'bg-red-500';
-  if (percentage >= 60) return 'bg-yellow-500';
-  return 'bg-green-500';
+  if (percentage > 100) return "bg-red-500";
+  if (percentage >= 60) return "bg-yellow-500";
+  return "bg-green-500";
 }
 
 function formatDate(dateStr?: string): string {
-  if (!dateStr) return '—';
-  return new Date(dateStr).toLocaleString('en-US', {
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
+  if (!dateStr) return "—";
+  return new Date(dateStr).toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
   });
 }
 
@@ -120,22 +127,22 @@ function formatDate(dateStr?: string): string {
 export default function RiderUtilizationList({
   riders,
   capacity = DEFAULT_CAPACITY,
-  statusFilter = '',
+  statusFilter = "",
   onStatusFilterChange,
 }: RiderUtilizationListProps) {
-  const [sortField, setSortField] = useState<SortField>('utilization');
-  const [sortOrder, setSortOrder] = useState<SortOrder>('desc');
+  const [sortField, setSortField] = useState<SortField>("utilization");
+  const [sortOrder, setSortOrder] = useState<SortOrder>("desc");
 
   const handleSort = useCallback(
     (field: SortField) => {
       if (sortField === field) {
-        setSortOrder((prev) => (prev === 'asc' ? 'desc' : 'asc'));
+        setSortOrder((prev) => (prev === "asc" ? "desc" : "asc"));
       } else {
         setSortField(field);
-        setSortOrder('desc');
+        setSortOrder("desc");
       }
     },
-    [sortField]
+    [sortField],
   );
 
   // Filter by status
@@ -147,37 +154,39 @@ export default function RiderUtilizationList({
   const sorted = [...filtered].sort((a, b) => {
     let cmp = 0;
     switch (sortField) {
-      case 'utilization':
+      case "utilization":
         cmp = getUtilization(a, capacity) - getUtilization(b, capacity);
         break;
-      case 'active_shipment_count':
+      case "active_shipment_count":
         cmp = a.active_shipment_count - b.active_shipment_count;
         break;
-      case 'completed_today':
+      case "completed_today":
         cmp = a.completed_today - b.completed_today;
         break;
-      case 'last_seen':
-        cmp = (a.last_seen ?? '').localeCompare(b.last_seen ?? '');
+      case "last_seen":
+        cmp = (a.last_seen ?? "").localeCompare(b.last_seen ?? "");
         break;
       default:
-        cmp = ((a[sortField] as string) ?? '').localeCompare((b[sortField] as string) ?? '');
+        cmp = ((a[sortField] as string) ?? "").localeCompare(
+          (b[sortField] as string) ?? "",
+        );
     }
-    return sortOrder === 'asc' ? cmp : -cmp;
+    return sortOrder === "asc" ? cmp : -cmp;
   });
 
   const COLUMNS: { key: SortField; label: string }[] = [
-    { key: 'rider_id', label: 'Rider ID' },
-    { key: 'rider_name', label: 'Name' },
-    { key: 'status', label: 'Status' },
-    { key: 'active_shipment_count', label: 'Shipments' },
-    { key: 'completed_today', label: 'Completed Today' },
-    { key: 'last_seen', label: 'Last Seen' },
-    { key: 'utilization', label: 'Utilization' },
+    { key: "rider_id", label: "Rider ID" },
+    { key: "rider_name", label: "Name" },
+    { key: "status", label: "Status" },
+    { key: "active_shipment_count", label: "Shipments" },
+    { key: "completed_today", label: "Completed Today" },
+    { key: "last_seen", label: "Last Seen" },
+    { key: "utilization", label: "Utilization" },
   ];
 
   const SortIcon = ({ field }: { field: SortField }) => {
     if (sortField !== field) return null;
-    return sortOrder === 'asc' ? (
+    return sortOrder === "asc" ? (
       <ChevronUp className="w-3 h-3 inline ml-1" />
     ) : (
       <ChevronDown className="w-3 h-3 inline ml-1" />
@@ -195,7 +204,9 @@ export default function RiderUtilizationList({
           <select
             id="rider-status-filter"
             value={statusFilter}
-            onChange={(e) => onStatusFilterChange(e.target.value as RiderStatus | '')}
+            onChange={(e) =>
+              onStatusFilterChange(e.target.value as RiderStatus | "")
+            }
             className="rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-[#232323] focus:border-transparent"
             aria-label="Filter riders by status"
           >
@@ -211,11 +222,13 @@ export default function RiderUtilizationList({
       {filtered.length === 0 ? (
         <div className="text-center py-16 text-gray-500">
           <p className="text-lg font-medium text-gray-400">No riders found</p>
-          <p className="text-sm text-gray-400 mt-1">Try adjusting your filters</p>
+          <p className="text-sm text-gray-400 mt-1">
+            Try adjusting your filters
+          </p>
         </div>
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full" role="grid" aria-label="Rider utilization list">
+          <table className="w-full" aria-label="Rider utilization list">
             <thead className="bg-gray-50 sticky top-0 border-b border-gray-100">
               <tr>
                 {COLUMNS.map((col) => (
@@ -225,10 +238,10 @@ export default function RiderUtilizationList({
                     onClick={() => handleSort(col.key)}
                     aria-sort={
                       sortField === col.key
-                        ? sortOrder === 'asc'
-                          ? 'ascending'
-                          : 'descending'
-                        : 'none'
+                        ? sortOrder === "asc"
+                          ? "ascending"
+                          : "descending"
+                        : "none"
                     }
                   >
                     {col.label}
@@ -251,7 +264,7 @@ export default function RiderUtilizationList({
                       {rider.rider_id}
                     </td>
                     <td className="px-6 py-3 text-sm text-gray-700">
-                      {rider.rider_name ?? '—'}
+                      {rider.rider_name ?? "—"}
                     </td>
                     <td className="px-6 py-3">
                       <span

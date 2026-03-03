@@ -1,17 +1,13 @@
-import React, { useState, useEffect } from 'react';
-import { apiService, InventoryItem } from '../services/api';
-import { Search, Filter, Package } from 'lucide-react';
-import LoadingSpinner from './LoadingSpinner';
+import { Filter, Package, Search } from "lucide-react";
+import { useEffect, useState } from "react";
+import { apiService, type InventoryItem } from "../services/api";
+import LoadingSpinner from "./LoadingSpinner";
 
 export default function Inventory() {
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
   const [loading, setLoading] = useState(true);
-  const [searchTerm, setSearchTerm] = useState('');
-  const [filterCategory, setFilterCategory] = useState('all');
-
-  useEffect(() => {
-    loadInventoryData();
-  }, []);
+  const [searchTerm, setSearchTerm] = useState("");
+  const [filterCategory, setFilterCategory] = useState("all");
 
   const loadInventoryData = async () => {
     try {
@@ -19,38 +15,58 @@ export default function Inventory() {
       const response = await apiService.getInventory();
       setInventory(response.data);
     } catch (error) {
-      console.error('Failed to load inventory data:', error);
+      console.error("Failed to load inventory data:", error);
     } finally {
       setLoading(false);
     }
   };
 
+  useEffect(() => {
+    loadInventoryData();
+  }, [loadInventoryData]);
+
   const getStatusColor = (status: string) => {
     switch (status) {
-      case 'in_stock': return 'text-green-700 bg-green-50';
-      case 'low_stock': return 'text-yellow-700 bg-yellow-50';
-      case 'out_of_stock': return 'text-red-700 bg-red-50';
-      default: return 'text-gray-700 bg-gray-50';
+      case "in_stock":
+        return "text-green-700 bg-green-50";
+      case "low_stock":
+        return "text-yellow-700 bg-yellow-50";
+      case "out_of_stock":
+        return "text-red-700 bg-red-50";
+      default:
+        return "text-gray-700 bg-gray-50";
     }
   };
 
   const getStatusText = (status: string) => {
     switch (status) {
-      case 'in_stock': return 'In Stock';
-      case 'low_stock': return 'Low Stock';
-      case 'out_of_stock': return 'Out of Stock';
-      default: return status;
+      case "in_stock":
+        return "In Stock";
+      case "low_stock":
+        return "Low Stock";
+      case "out_of_stock":
+        return "Out of Stock";
+      default:
+        return status;
     }
   };
 
-  const filteredInventory = inventory.filter(item => {
-    const matchesSearch = item.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+  const filteredInventory = inventory.filter((item) => {
+    const matchesSearch =
+      item.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
       item.category.toLowerCase().includes(searchTerm.toLowerCase());
-    const matchesCategory = filterCategory === 'all' || item.category.toLowerCase() === filterCategory;
+    const matchesCategory =
+      filterCategory === "all" ||
+      item.category.toLowerCase() === filterCategory;
     return matchesSearch && matchesCategory;
   });
 
-  const categories = ['all', ...Array.from(new Set(inventory.map(item => item.category.toLowerCase())))];
+  const categories = [
+    "all",
+    ...Array.from(
+      new Set(inventory.map((item) => item.category.toLowerCase())),
+    ),
+  ];
 
   if (loading) {
     return <LoadingSpinner message="Loading inventory..." />;
@@ -65,7 +81,9 @@ export default function Inventory() {
             <Package className="w-5 h-5 text-white" />
           </div>
           <div>
-            <h1 className="text-2xl font-semibold text-[#232323]">Inventory Management</h1>
+            <h1 className="text-2xl font-semibold text-[#232323]">
+              Inventory Management
+            </h1>
             <p className="text-gray-500">Track and manage inventory levels</p>
           </div>
         </div>
@@ -89,9 +107,11 @@ export default function Inventory() {
               onChange={(e) => setFilterCategory(e.target.value)}
               className="pl-10 pr-8 py-3 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white min-w-[160px]"
             >
-              {categories.map(category => (
+              {categories.map((category) => (
                 <option key={category} value={category}>
-                  {category === 'all' ? 'All Categories' : category.charAt(0).toUpperCase() + category.slice(1)}
+                  {category === "all"
+                    ? "All Categories"
+                    : category.charAt(0).toUpperCase() + category.slice(1)}
                 </option>
               ))}
             </select>
@@ -103,24 +123,26 @@ export default function Inventory() {
       <div className="border-b border-gray-100 px-8 py-4">
         <div className="grid grid-cols-4 gap-6">
           <div className="text-center">
-            <div className="text-2xl font-semibold text-[#232323]">{inventory.length}</div>
+            <div className="text-2xl font-semibold text-[#232323]">
+              {inventory.length}
+            </div>
             <div className="text-sm text-gray-500">Total Items</div>
           </div>
           <div className="text-center">
             <div className="text-2xl font-semibold text-green-600">
-              {inventory.filter(i => i.status === 'in_stock').length}
+              {inventory.filter((i) => i.status === "in_stock").length}
             </div>
             <div className="text-sm text-gray-500">In Stock</div>
           </div>
           <div className="text-center">
             <div className="text-2xl font-semibold text-yellow-600">
-              {inventory.filter(i => i.status === 'low_stock').length}
+              {inventory.filter((i) => i.status === "low_stock").length}
             </div>
             <div className="text-sm text-gray-500">Low Stock</div>
           </div>
           <div className="text-center">
             <div className="text-2xl font-semibold text-red-600">
-              {inventory.filter(i => i.status === 'out_of_stock').length}
+              {inventory.filter((i) => i.status === "out_of_stock").length}
             </div>
             <div className="text-sm text-gray-500">Out of Stock</div>
           </div>
@@ -132,12 +154,24 @@ export default function Inventory() {
         <table className="w-full">
           <thead className="bg-gray-50 sticky top-0 border-b border-gray-100">
             <tr>
-              <th className="px-8 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">Item</th>
-              <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">Category</th>
-              <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">Location</th>
-              <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">Quantity</th>
-              <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">Status</th>
-              <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">Last Updated</th>
+              <th className="px-8 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
+                Item
+              </th>
+              <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
+                Category
+              </th>
+              <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
+                Location
+              </th>
+              <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
+                Quantity
+              </th>
+              <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
+                Status
+              </th>
+              <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
+                Last Updated
+              </th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
@@ -159,16 +193,18 @@ export default function Inventory() {
                   </div>
                 </td>
                 <td className="px-6 py-4">
-                  <span className={`inline-flex items-center px-3 py-1 rounded-lg text-xs font-medium ${getStatusColor(item.status)}`}>
+                  <span
+                    className={`inline-flex items-center px-3 py-1 rounded-lg text-xs font-medium ${getStatusColor(item.status)}`}
+                  >
                     {getStatusText(item.status)}
                   </span>
                 </td>
                 <td className="px-6 py-4">
                   <span className="text-sm text-gray-600">
-                    {new Date(item.lastUpdated).toLocaleDateString('en-US', {
-                      month: 'short',
-                      day: 'numeric',
-                      year: 'numeric'
+                    {new Date(item.lastUpdated).toLocaleDateString("en-US", {
+                      month: "short",
+                      day: "numeric",
+                      year: "numeric",
                     })}
                   </span>
                 </td>
@@ -180,8 +216,12 @@ export default function Inventory() {
         {filteredInventory.length === 0 && (
           <div className="text-center py-16 text-gray-500">
             <Package className="w-16 h-16 mx-auto mb-4 text-gray-300" />
-            <p className="text-lg font-medium text-gray-400">No inventory items found</p>
-            <p className="text-sm text-gray-400 mt-1">Try adjusting your search or filter criteria</p>
+            <p className="text-lg font-medium text-gray-400">
+              No inventory items found
+            </p>
+            <p className="text-sm text-gray-400 mt-1">
+              Try adjusting your search or filter criteria
+            </p>
           </div>
         )}
       </div>

@@ -24,7 +24,7 @@ export interface Truck {
 export interface Location {
   id: string;
   name: string;
-  type: 'station' | 'warehouse' | 'depot';
+  type: "station" | "warehouse" | "depot";
   coordinates: {
     lat: number;
     lon: number;
@@ -47,10 +47,16 @@ export interface CargoInfo {
   weight: number;
   volume: number;
   description: string;
-  priority: 'low' | 'medium' | 'high' | 'urgent';
+  priority: "low" | "medium" | "high" | "urgent";
 }
 
-export type TruckStatus = 'on_time' | 'delayed' | 'stopped' | 'loading' | 'unloading' | 'maintenance';
+export type TruckStatus =
+  | "on_time"
+  | "delayed"
+  | "stopped"
+  | "loading"
+  | "unloading"
+  | "maintenance";
 
 // Fleet Tracking
 export interface FleetSummary {
@@ -64,7 +70,7 @@ export interface FleetSummary {
 // Map Types
 export interface MapMarker {
   id: string;
-  type: 'truck' | 'location' | 'incident';
+  type: "truck" | "location" | "incident";
   position: {
     lat: number;
     lng: number;

@@ -1,17 +1,21 @@
 /**
  * WebSocket hook with automatic reconnection and exponential backoff.
- * 
+ *
  * Validates:
  * - Requirement 9.5: WHEN the WebSocket connection drops, THE Frontend_Application
  *   SHALL automatically attempt reconnection with exponential backoff
  */
 
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useCallback, useEffect, useRef, useState } from "react";
 
 /**
  * WebSocket connection states
  */
-export type WebSocketState = 'connecting' | 'connected' | 'disconnected' | 'reconnecting';
+export type WebSocketState =
+  | "connecting"
+  | "connected"
+  | "disconnected"
+  | "reconnecting";
 
 /**
  * Configuration options for the WebSocket hook
@@ -66,17 +70,27 @@ export interface UseWebSocketReturn {
 }
 
 // Default configuration values
-const DEFAULT_OPTIONS: Required<Omit<WebSocketOptions, 'onConnect' | 'onDisconnect' | 'onError' | 'onMessage' | 'onReconnecting' | 'onMaxReconnectAttemptsReached'>> = {
-  initialReconnectDelay: 1000,    // 1 second
-  maxReconnectDelay: 30000,       // 30 seconds
-  maxReconnectAttempts: 0,        // Infinite attempts
-  backoffMultiplier: 2,           // Double the delay each time
+const DEFAULT_OPTIONS: Required<
+  Omit<
+    WebSocketOptions,
+    | "onConnect"
+    | "onDisconnect"
+    | "onError"
+    | "onMessage"
+    | "onReconnecting"
+    | "onMaxReconnectAttemptsReached"
+  >
+> = {
+  initialReconnectDelay: 1000, // 1 second
+  maxReconnectDelay: 30000, // 30 seconds
+  maxReconnectAttempts: 0, // Infinite attempts
+  backoffMultiplier: 2, // Double the delay each time
   autoConnect: true,
 };
 
 /**
  * Calculate the next reconnection delay using exponential backoff with jitter.
- * 
+ *
  * @param attempt - Current reconnection attempt number
  * @param initialDelay - Initial delay in milliseconds
  * @param maxDelay - Maximum delay in milliseconds
@@ -87,28 +101,28 @@ function calculateBackoffDelay(
   attempt: number,
   initialDelay: number,
   maxDelay: number,
-  multiplier: number
+  multiplier: number,
 ): number {
   // Calculate exponential delay: initialDelay * multiplier^(attempt-1)
-  const exponentialDelay = initialDelay * Math.pow(multiplier, attempt - 1);
-  
+  const exponentialDelay = initialDelay * multiplier ** (attempt - 1);
+
   // Cap at maximum delay
   const cappedDelay = Math.min(exponentialDelay, maxDelay);
-  
+
   // Add jitter (±25%) to prevent thundering herd
   const jitter = cappedDelay * 0.25 * (Math.random() * 2 - 1);
-  
+
   return Math.floor(cappedDelay + jitter);
 }
 
 /**
  * Custom hook for WebSocket connections with automatic reconnection
  * and exponential backoff.
- * 
+ *
  * @param url - WebSocket URL to connect to
  * @param options - Configuration options
  * @returns WebSocket state and control functions
- * 
+ *
  * @example
  * ```tsx
  * const { state, isConnected, lastMessage, connect, disconnect } = useWebSocket(
@@ -122,7 +136,7 @@ function calculateBackoffDelay(
  */
 export function useWebSocket(
   url: string,
-  options: WebSocketOptions = {}
+  options: WebSocketOptions = {},
 ): UseWebSocketReturn {
   // Merge options with defaults
   const config = {
@@ -131,7 +145,7 @@ export function useWebSocket(
   };
 
   // State
-  const [state, setState] = useState<WebSocketState>('disconnected');
+  const [state, setState] = useState<WebSocketState>("disconnected");
   const [reconnectAttempt, setReconnectAttempt] = useState(0);
   const [reconnectDelay, setReconnectDelay] = useState(0);
   const [lastMessage, setLastMessage] = useState<unknown | null>(null);
@@ -153,130 +167,155 @@ export function useWebSocket(
     }
   }, []);
 
+  // Use refs to break the circular dependency between scheduleReconnect and connectInternal
+  const scheduleReconnectRef = useRef<(attempt: number) => void>(() => {});
+  const connectInternalRef = useRef<(currentAttempt?: number) => void>(
+    () => {},
+  );
+
   /**
    * Schedule a reconnection attempt with exponential backoff
    */
-  const scheduleReconnect = useCallback((attempt: number) => {
-    if (!mountedRef.current || !shouldReconnectRef.current) {
-      return;
-    }
+  const scheduleReconnect = useCallback(
+    (attempt: number) => {
+      if (!mountedRef.current || !shouldReconnectRef.current) {
+        return;
+      }
 
-    // Check if max attempts reached
-    if (config.maxReconnectAttempts > 0 && attempt > config.maxReconnectAttempts) {
-      setState('disconnected');
-      setReconnectAttempt(0);
-      setReconnectDelay(0);
-      options.onMaxReconnectAttemptsReached?.();
-      return;
-    }
+      // Check if max attempts reached
+      if (
+        config.maxReconnectAttempts > 0 &&
+        attempt > config.maxReconnectAttempts
+      ) {
+        setState("disconnected");
+        setReconnectAttempt(0);
+        setReconnectDelay(0);
+        options.onMaxReconnectAttemptsReached?.();
+        return;
+      }
 
-    const delay = calculateBackoffDelay(
-      attempt,
+      const delay = calculateBackoffDelay(
+        attempt,
+        config.initialReconnectDelay,
+        config.maxReconnectDelay,
+        config.backoffMultiplier,
+      );
+
+      setState("reconnecting");
+      setReconnectAttempt(attempt);
+      setReconnectDelay(delay);
+
+      options.onReconnecting?.(attempt, delay);
+
+      reconnectTimeoutRef.current = setTimeout(() => {
+        if (mountedRef.current && shouldReconnectRef.current) {
+          connectInternalRef.current(attempt);
+        }
+      }, delay);
+    },
+    [
       config.initialReconnectDelay,
       config.maxReconnectDelay,
-      config.backoffMultiplier
-    );
-
-    setState('reconnecting');
-    setReconnectAttempt(attempt);
-    setReconnectDelay(delay);
-
-    options.onReconnecting?.(attempt, delay);
-
-    reconnectTimeoutRef.current = setTimeout(() => {
-      if (mountedRef.current && shouldReconnectRef.current) {
-        connectInternal(attempt);
-      }
-    }, delay);
-  }, [config.initialReconnectDelay, config.maxReconnectDelay, config.backoffMultiplier, config.maxReconnectAttempts, options]);
+      config.backoffMultiplier,
+      config.maxReconnectAttempts,
+      options,
+    ],
+  );
 
   /**
    * Internal connect function that handles the WebSocket connection
    */
-  const connectInternal = useCallback((currentAttempt: number = 0) => {
-    if (!mountedRef.current) {
-      return;
-    }
-
-    // Close existing connection if any
-    if (wsRef.current) {
-      wsRef.current.onclose = null; // Prevent triggering reconnect
-      wsRef.current.close();
-      wsRef.current = null;
-    }
-
-    clearReconnectTimeout();
-    setState('connecting');
-    setError(null);
-
-    try {
-      const ws = new WebSocket(url);
-      wsRef.current = ws;
-
-      ws.onopen = () => {
-        if (!mountedRef.current) return;
-        
-        setState('connected');
-        setReconnectAttempt(0);
-        setReconnectDelay(0);
-        setError(null);
-        options.onConnect?.();
-      };
-
-      ws.onclose = (event) => {
-        if (!mountedRef.current) return;
-
-        setState('disconnected');
-        options.onDisconnect?.(event);
-
-        // Only reconnect if it wasn't a clean close and we should reconnect
-        if (shouldReconnectRef.current && !event.wasClean) {
-          scheduleReconnect(currentAttempt + 1);
-        }
-      };
-
-      ws.onerror = (event) => {
-        if (!mountedRef.current) return;
-
-        setError(event);
-        options.onError?.(event);
-        
-        // The error event is usually followed by a close event,
-        // so we don't need to trigger reconnect here
-      };
-
-      ws.onmessage = (event) => {
-        if (!mountedRef.current) return;
-
-        try {
-          const data = JSON.parse(event.data);
-          setLastMessage(data);
-          options.onMessage?.(data);
-        } catch {
-          // If not JSON, pass raw data
-          setLastMessage(event.data);
-          options.onMessage?.(event.data);
-        }
-      };
-    } catch (err) {
-      if (!mountedRef.current) return;
-
-      setState('disconnected');
-      
-      // Schedule reconnect on connection error
-      if (shouldReconnectRef.current) {
-        scheduleReconnect(currentAttempt + 1);
+  const connectInternal = useCallback(
+    (currentAttempt: number = 0) => {
+      if (!mountedRef.current) {
+        return;
       }
-    }
-  }, [url, clearReconnectTimeout, scheduleReconnect, options]);
+
+      // Close existing connection if any
+      if (wsRef.current) {
+        wsRef.current.onclose = null; // Prevent triggering reconnect
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+
+      clearReconnectTimeout();
+      setState("connecting");
+      setError(null);
+
+      try {
+        const ws = new WebSocket(url);
+        wsRef.current = ws;
+
+        ws.onopen = () => {
+          if (!mountedRef.current) return;
+
+          setState("connected");
+          setReconnectAttempt(0);
+          setReconnectDelay(0);
+          setError(null);
+          options.onConnect?.();
+        };
+
+        ws.onclose = (event) => {
+          if (!mountedRef.current) return;
+
+          setState("disconnected");
+          options.onDisconnect?.(event);
+
+          // Only reconnect if it wasn't a clean close and we should reconnect
+          if (shouldReconnectRef.current && !event.wasClean) {
+            scheduleReconnectRef.current(currentAttempt + 1);
+          }
+        };
+
+        ws.onerror = (event) => {
+          if (!mountedRef.current) return;
+
+          setError(event);
+          options.onError?.(event);
+
+          // The error event is usually followed by a close event,
+          // so we don't need to trigger reconnect here
+        };
+
+        ws.onmessage = (event) => {
+          if (!mountedRef.current) return;
+
+          try {
+            const data = JSON.parse(event.data);
+            setLastMessage(data);
+            options.onMessage?.(data);
+          } catch {
+            // If not JSON, pass raw data
+            setLastMessage(event.data);
+            options.onMessage?.(event.data);
+          }
+        };
+      } catch (_err) {
+        if (!mountedRef.current) return;
+
+        setState("disconnected");
+
+        // Schedule reconnect on connection error
+        if (shouldReconnectRef.current) {
+          scheduleReconnectRef.current(currentAttempt + 1);
+        }
+      }
+    },
+    [url, clearReconnectTimeout, options],
+  );
+
+  // Keep refs in sync with latest callbacks
+  scheduleReconnectRef.current = scheduleReconnect;
+  connectInternalRef.current = connectInternal;
 
   /**
    * Public connect function
    */
   const connect = useCallback(() => {
     shouldReconnectRef.current = true;
-    connectInternal(0);
-  }, [connectInternal]);
+    connectInternalRef.current(0);
+  }, []);
 
   /**
    * Public disconnect function
@@ -289,11 +328,11 @@ export function useWebSocket(
 
     if (wsRef.current) {
       wsRef.current.onclose = null; // Prevent triggering reconnect
-      wsRef.current.close(1000, 'Client disconnected');
+      wsRef.current.close(1000, "Client disconnected");
       wsRef.current = null;
     }
 
-    setState('disconnected');
+    setState("disconnected");
   }, [clearReconnectTimeout]);
 
   /**
@@ -301,16 +340,16 @@ export function useWebSocket(
    */
   const send = useCallback((data: unknown): boolean => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-      console.warn('WebSocket is not connected. Cannot send message.');
+      console.warn("WebSocket is not connected. Cannot send message.");
       return false;
     }
 
     try {
-      const message = typeof data === 'string' ? data : JSON.stringify(data);
+      const message = typeof data === "string" ? data : JSON.stringify(data);
       wsRef.current.send(message);
       return true;
     } catch (err) {
-      console.error('Failed to send WebSocket message:', err);
+      console.error("Failed to send WebSocket message:", err);
       return false;
     }
   }, []);
@@ -331,15 +370,15 @@ export function useWebSocket(
 
       if (wsRef.current) {
         wsRef.current.onclose = null;
-        wsRef.current.close(1000, 'Component unmounted');
+        wsRef.current.close(1000, "Component unmounted");
         wsRef.current = null;
       }
     };
-  }, [url]); // Only re-run if URL changes
+  }, [clearReconnectTimeout, config.autoConnect]); // Only re-run if URL changes
 
   return {
     state,
-    isConnected: state === 'connected',
+    isConnected: state === "connected",
     reconnectAttempt,
     reconnectDelay,
     lastMessage,

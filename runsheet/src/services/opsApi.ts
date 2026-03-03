@@ -1,8 +1,9 @@
-import { ApiTimeoutError, ApiError, API_TIMEOUTS } from './api';
+import { API_TIMEOUTS, ApiError, ApiTimeoutError } from "./api";
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api';
+const API_BASE_URL =
+  process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
 
 // ─── Shared Types ────────────────────────────────────────────────────────────
 
@@ -26,7 +27,7 @@ export interface PaginationParams {
 
 export interface SortParams {
   sort_by?: string;
-  sort_order?: 'asc' | 'desc';
+  sort_order?: "asc" | "desc";
 }
 
 export interface DateRangeParams {
@@ -54,7 +55,12 @@ export interface OpsShipment {
   ingested_at?: string;
 }
 
-export type ShipmentStatus = 'pending' | 'in_transit' | 'delivered' | 'failed' | 'returned';
+export type ShipmentStatus =
+  | "pending"
+  | "in_transit"
+  | "delivered"
+  | "failed"
+  | "returned";
 
 export interface ShipmentDetail extends OpsShipment {
   events?: OpsEvent[];
@@ -78,7 +84,7 @@ export interface OpsRider {
   ingested_at?: string;
 }
 
-export type RiderStatus = 'active' | 'idle' | 'offline';
+export type RiderStatus = "active" | "idle" | "offline";
 
 export interface RiderDetail extends OpsRider {
   assigned_shipments?: OpsShipment[];
@@ -106,7 +112,7 @@ export interface OpsEvent {
 
 // ─── Metrics Types ───────────────────────────────────────────────────────────
 
-export type MetricsBucket = 'hourly' | 'daily';
+export type MetricsBucket = "hourly" | "daily";
 
 export interface MetricsBucketEntry {
   timestamp: string;
@@ -157,7 +163,10 @@ export interface GeoPoint {
 
 // ─── Filter Types ────────────────────────────────────────────────────────────
 
-export interface ShipmentFilters extends PaginationParams, SortParams, DateRangeParams {
+export interface ShipmentFilters
+  extends PaginationParams,
+    SortParams,
+    DateRangeParams {
   status?: ShipmentStatus;
   rider_id?: string;
 }
@@ -188,13 +197,12 @@ export interface MetricsFilters extends DateRangeParams {
   bucket?: MetricsBucket;
 }
 
-
 // ─── HTTP Helper ─────────────────────────────────────────────────────────────
 
 async function fetchWithTimeout(
   url: string,
   options: RequestInit = {},
-  timeout: number = API_TIMEOUTS.STANDARD
+  timeout: number = API_TIMEOUTS.STANDARD,
 ): Promise<Response> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeout);
@@ -206,8 +214,10 @@ async function fetchWithTimeout(
     });
     return response;
   } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError') {
-      throw new ApiTimeoutError(`Request timed out after ${timeout / 1000} seconds`);
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new ApiTimeoutError(
+        `Request timed out after ${timeout / 1000} seconds`,
+      );
     }
     throw error;
   } finally {
@@ -215,11 +225,13 @@ async function fetchWithTimeout(
   }
 }
 
-function buildQueryString(params: Record<string, unknown>): string {
+function buildQueryString(
+  params: Record<string, string | number | boolean | undefined | null> | object,
+): string {
   const entries = Object.entries(params).filter(
-    ([, v]) => v !== undefined && v !== null && v !== ''
+    ([, v]) => v !== undefined && v !== null && v !== "",
   );
-  if (entries.length === 0) return '';
+  if (entries.length === 0) return "";
   const searchParams = new URLSearchParams();
   for (const [key, value] of entries) {
     searchParams.set(key, String(value));
@@ -227,12 +239,15 @@ function buildQueryString(params: Record<string, unknown>): string {
   return `?${searchParams.toString()}`;
 }
 
-async function opsRequest<T>(endpoint: string, options?: RequestInit): Promise<T> {
+async function opsRequest<T>(
+  endpoint: string,
+  options?: RequestInit,
+): Promise<T> {
   const url = `${API_BASE_URL}${endpoint}`;
   try {
     const response = await fetchWithTimeout(url, {
       headers: {
-        'Content-Type': 'application/json',
+        "Content-Type": "application/json",
         ...options?.headers,
       },
       ...options,
@@ -242,7 +257,7 @@ async function opsRequest<T>(endpoint: string, options?: RequestInit): Promise<T
       const body = await response.json().catch(() => ({}));
       throw new ApiError(
         body.detail || body.message || `HTTP error! status: ${response.status}`,
-        response.status
+        response.status,
       );
     }
 
@@ -252,8 +267,8 @@ async function opsRequest<T>(endpoint: string, options?: RequestInit): Promise<T
       throw error;
     }
     throw new ApiError(
-      error instanceof Error ? error.message : 'Unknown error',
-      0
+      error instanceof Error ? error.message : "Unknown error",
+      0,
     );
   }
 }
@@ -262,7 +277,7 @@ async function opsRequest<T>(endpoint: string, options?: RequestInit): Promise<T
 
 /** GET /ops/shipments — paginated list with filters and sorting */
 export async function getShipments(
-  filters: ShipmentFilters = {}
+  filters: ShipmentFilters = {},
 ): Promise<PaginatedResponse<OpsShipment>> {
   const qs = buildQueryString(filters);
   return opsRequest<PaginatedResponse<OpsShipment>>(`/ops/shipments${qs}`);
@@ -270,34 +285,38 @@ export async function getShipments(
 
 /** GET /ops/shipments/:id — single shipment with full event history */
 export async function getShipmentById(
-  shipmentId: string
+  shipmentId: string,
 ): Promise<{ data: ShipmentDetail; request_id: string }> {
   return opsRequest<{ data: ShipmentDetail; request_id: string }>(
-    `/ops/shipments/${encodeURIComponent(shipmentId)}`
+    `/ops/shipments/${encodeURIComponent(shipmentId)}`,
   );
 }
 
 /** GET /ops/shipments/sla-breaches — shipments past estimated delivery */
 export async function getSlaBreaches(
-  filters: SlaBreachFilters = {}
+  filters: SlaBreachFilters = {},
 ): Promise<PaginatedResponse<OpsShipment>> {
   const qs = buildQueryString(filters);
-  return opsRequest<PaginatedResponse<OpsShipment>>(`/ops/shipments/sla-breaches${qs}`);
+  return opsRequest<PaginatedResponse<OpsShipment>>(
+    `/ops/shipments/sla-breaches${qs}`,
+  );
 }
 
 /** GET /ops/shipments/failures — failed shipments with failure reason */
 export async function getShipmentFailures(
-  filters: FailureFilters = {}
+  filters: FailureFilters = {},
 ): Promise<PaginatedResponse<OpsShipment>> {
   const qs = buildQueryString(filters);
-  return opsRequest<PaginatedResponse<OpsShipment>>(`/ops/shipments/failures${qs}`);
+  return opsRequest<PaginatedResponse<OpsShipment>>(
+    `/ops/shipments/failures${qs}`,
+  );
 }
 
 // ─── Rider Endpoints ─────────────────────────────────────────────────────────
 
 /** GET /ops/riders — paginated rider list */
 export async function getRiders(
-  filters: RiderFilters = {}
+  filters: RiderFilters = {},
 ): Promise<PaginatedResponse<OpsRider>> {
   const qs = buildQueryString(filters);
   return opsRequest<PaginatedResponse<OpsRider>>(`/ops/riders${qs}`);
@@ -305,26 +324,28 @@ export async function getRiders(
 
 /** GET /ops/riders/:id — single rider with assigned shipments */
 export async function getRiderById(
-  riderId: string
+  riderId: string,
 ): Promise<{ data: RiderDetail; request_id: string }> {
   return opsRequest<{ data: RiderDetail; request_id: string }>(
-    `/ops/riders/${encodeURIComponent(riderId)}`
+    `/ops/riders/${encodeURIComponent(riderId)}`,
   );
 }
 
 /** GET /ops/riders/utilization — riders with utilization metrics */
 export async function getRiderUtilization(
-  filters: RiderUtilizationFilters = {}
+  filters: RiderUtilizationFilters = {},
 ): Promise<PaginatedResponse<RiderUtilization>> {
   const qs = buildQueryString(filters);
-  return opsRequest<PaginatedResponse<RiderUtilization>>(`/ops/riders/utilization${qs}`);
+  return opsRequest<PaginatedResponse<RiderUtilization>>(
+    `/ops/riders/utilization${qs}`,
+  );
 }
 
 // ─── Event Endpoints ─────────────────────────────────────────────────────────
 
 /** GET /ops/events — paginated event list with filters */
 export async function getEvents(
-  filters: EventFilters = {}
+  filters: EventFilters = {},
 ): Promise<PaginatedResponse<OpsEvent>> {
   const qs = buildQueryString(filters);
   return opsRequest<PaginatedResponse<OpsEvent>>(`/ops/events${qs}`);
@@ -334,7 +355,7 @@ export async function getEvents(
 
 /** GET /ops/metrics/shipments — shipment counts by status in time buckets */
 export async function getShipmentMetrics(
-  filters: MetricsFilters = {}
+  filters: MetricsFilters = {},
 ): Promise<MetricsResponse> {
   const qs = buildQueryString(filters);
   return opsRequest<MetricsResponse>(`/ops/metrics/shipments${qs}`);
@@ -342,7 +363,7 @@ export async function getShipmentMetrics(
 
 /** GET /ops/metrics/sla — SLA compliance and breach counts */
 export async function getSlaMetrics(
-  filters: MetricsFilters = {}
+  filters: MetricsFilters = {},
 ): Promise<MetricsResponse> {
   const qs = buildQueryString(filters);
   return opsRequest<MetricsResponse>(`/ops/metrics/sla${qs}`);
@@ -350,7 +371,7 @@ export async function getSlaMetrics(
 
 /** GET /ops/metrics/riders — rider utilization and availability metrics */
 export async function getRiderMetrics(
-  filters: MetricsFilters = {}
+  filters: MetricsFilters = {},
 ): Promise<MetricsResponse> {
   const qs = buildQueryString(filters);
   return opsRequest<MetricsResponse>(`/ops/metrics/riders${qs}`);
@@ -358,7 +379,7 @@ export async function getRiderMetrics(
 
 /** GET /ops/metrics/failures — failure counts by reason */
 export async function getFailureMetrics(
-  filters: MetricsFilters = {}
+  filters: MetricsFilters = {},
 ): Promise<MetricsResponse> {
   const qs = buildQueryString(filters);
   return opsRequest<MetricsResponse>(`/ops/metrics/failures${qs}`);
@@ -368,15 +389,15 @@ export async function getFailureMetrics(
 
 /** GET /ops/monitoring/ingestion — ingestion pipeline health */
 export async function getIngestionMonitoring(): Promise<IngestionMetrics> {
-  return opsRequest<IngestionMetrics>('/ops/monitoring/ingestion');
+  return opsRequest<IngestionMetrics>("/ops/monitoring/ingestion");
 }
 
 /** GET /ops/monitoring/indexing — ES indexing health */
 export async function getIndexingMonitoring(): Promise<IndexingMetrics> {
-  return opsRequest<IndexingMetrics>('/ops/monitoring/indexing');
+  return opsRequest<IndexingMetrics>("/ops/monitoring/indexing");
 }
 
 /** GET /ops/monitoring/poison-queue — poison queue stats */
 export async function getPoisonQueueMonitoring(): Promise<PoisonQueueMetrics> {
-  return opsRequest<PoisonQueueMetrics>('/ops/monitoring/poison-queue');
+  return opsRequest<PoisonQueueMetrics>("/ops/monitoring/poison-queue");
 }

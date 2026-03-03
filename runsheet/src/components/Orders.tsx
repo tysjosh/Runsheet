@@ -1,18 +1,14 @@
-import React, { useState, useEffect } from 'react';
-import { apiService, Order } from '../services/api';
-import { Search, Filter, ShoppingCart, X } from 'lucide-react';
-import LoadingSpinner from './LoadingSpinner';
+import { Filter, Search, ShoppingCart, X } from "lucide-react";
+import { useEffect, useState } from "react";
+import { apiService, type Order } from "../services/api";
+import LoadingSpinner from "./LoadingSpinner";
 
 export default function Orders() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
-  const [searchTerm, setSearchTerm] = useState('');
-  const [filterStatus, setFilterStatus] = useState('all');
+  const [searchTerm, setSearchTerm] = useState("");
+  const [filterStatus, setFilterStatus] = useState("all");
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
-
-  useEffect(() => {
-    loadOrdersData();
-  }, []);
 
   const loadOrdersData = async () => {
     try {
@@ -20,47 +16,68 @@ export default function Orders() {
       const response = await apiService.getOrders();
       setOrders(response.data);
     } catch (error) {
-      console.error('Failed to load orders data:', error);
+      console.error("Failed to load orders data:", error);
     } finally {
       setLoading(false);
     }
   };
 
+  useEffect(() => {
+    loadOrdersData();
+  }, [loadOrdersData]);
+
   const getStatusColor = (status: string) => {
     switch (status) {
-      case 'pending': return 'text-yellow-700 bg-yellow-50';
-      case 'in_transit': return 'text-blue-700 bg-blue-50';
-      case 'delivered': return 'text-green-700 bg-green-50';
-      case 'cancelled': return 'text-red-700 bg-red-50';
-      default: return 'text-gray-700 bg-gray-50';
+      case "pending":
+        return "text-yellow-700 bg-yellow-50";
+      case "in_transit":
+        return "text-blue-700 bg-blue-50";
+      case "delivered":
+        return "text-green-700 bg-green-50";
+      case "cancelled":
+        return "text-red-700 bg-red-50";
+      default:
+        return "text-gray-700 bg-gray-50";
     }
   };
 
   const getStatusText = (status: string) => {
     switch (status) {
-      case 'pending': return 'Pending';
-      case 'in_transit': return 'In Transit';
-      case 'delivered': return 'Delivered';
-      case 'cancelled': return 'Cancelled';
-      default: return status;
+      case "pending":
+        return "Pending";
+      case "in_transit":
+        return "In Transit";
+      case "delivered":
+        return "Delivered";
+      case "cancelled":
+        return "Cancelled";
+      default:
+        return status;
     }
   };
 
   const getPriorityColor = (priority: string) => {
     switch (priority) {
-      case 'urgent': return 'text-red-700 bg-red-50';
-      case 'high': return 'text-orange-700 bg-orange-50';
-      case 'medium': return 'text-yellow-700 bg-yellow-50';
-      case 'low': return 'text-gray-700 bg-gray-50';
-      default: return 'text-gray-700 bg-gray-50';
+      case "urgent":
+        return "text-red-700 bg-red-50";
+      case "high":
+        return "text-orange-700 bg-orange-50";
+      case "medium":
+        return "text-yellow-700 bg-yellow-50";
+      case "low":
+        return "text-gray-700 bg-gray-50";
+      default:
+        return "text-gray-700 bg-gray-50";
     }
   };
 
-  const filteredOrders = orders.filter(order => {
-    const matchesSearch = order.customer.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                         order.id.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                         order.items.toLowerCase().includes(searchTerm.toLowerCase());
-    const matchesStatus = filterStatus === 'all' || order.status === filterStatus;
+  const filteredOrders = orders.filter((order) => {
+    const matchesSearch =
+      order.customer.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      order.id.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      order.items.toLowerCase().includes(searchTerm.toLowerCase());
+    const matchesStatus =
+      filterStatus === "all" || order.status === filterStatus;
     return matchesSearch && matchesStatus;
   });
 
@@ -77,7 +94,9 @@ export default function Orders() {
             <ShoppingCart className="w-5 h-5 text-white" />
           </div>
           <div>
-            <h1 className="text-2xl font-semibold text-[#232323]">Order Management</h1>
+            <h1 className="text-2xl font-semibold text-[#232323]">
+              Order Management
+            </h1>
             <p className="text-gray-500">Track and manage customer orders</p>
           </div>
         </div>
@@ -115,24 +134,26 @@ export default function Orders() {
       <div className="border-b border-gray-100 px-8 py-4">
         <div className="grid grid-cols-4 gap-6">
           <div className="text-center">
-            <div className="text-2xl font-semibold text-[#232323]">{orders.length}</div>
+            <div className="text-2xl font-semibold text-[#232323]">
+              {orders.length}
+            </div>
             <div className="text-sm text-gray-500">Total Orders</div>
           </div>
           <div className="text-center">
             <div className="text-2xl font-semibold text-blue-600">
-              {orders.filter(o => o.status === 'in_transit').length}
+              {orders.filter((o) => o.status === "in_transit").length}
             </div>
             <div className="text-sm text-gray-500">In Transit</div>
           </div>
           <div className="text-center">
             <div className="text-2xl font-semibold text-yellow-600">
-              {orders.filter(o => o.status === 'pending').length}
+              {orders.filter((o) => o.status === "pending").length}
             </div>
             <div className="text-sm text-gray-500">Pending</div>
           </div>
           <div className="text-center">
             <div className="text-2xl font-semibold text-green-600">
-              {orders.filter(o => o.status === 'delivered').length}
+              {orders.filter((o) => o.status === "delivered").length}
             </div>
             <div className="text-sm text-gray-500">Delivered</div>
           </div>
@@ -144,35 +165,55 @@ export default function Orders() {
         <table className="w-full">
           <thead className="bg-gray-50 sticky top-0 border-b border-gray-100">
             <tr>
-              <th className="px-8 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">Order</th>
-              <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">Customer</th>
-              <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">Items</th>
-              <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">Region</th>
-              <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">Status</th>
-              <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">Priority</th>
-              <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">Value</th>
-              <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">ETA</th>
+              <th className="px-8 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
+                Order
+              </th>
+              <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
+                Customer
+              </th>
+              <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
+                Items
+              </th>
+              <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
+                Region
+              </th>
+              <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
+                Status
+              </th>
+              <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
+                Priority
+              </th>
+              <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
+                Value
+              </th>
+              <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
+                ETA
+              </th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
             {filteredOrders.map((order) => (
-              <tr 
+              <tr
                 key={order.id}
                 className={`cursor-pointer transition-colors ${
-                  selectedOrder?.id === order.id 
-                    ? 'bg-gray-50' 
-                    : 'hover:bg-gray-50'
+                  selectedOrder?.id === order.id
+                    ? "bg-gray-50"
+                    : "hover:bg-gray-50"
                 }`}
                 onClick={() => setSelectedOrder(order)}
               >
                 <td className="px-8 py-4">
                   <div className="font-medium text-[#232323]">{order.id}</div>
                   {order.truckId && (
-                    <div className="text-sm text-gray-500">Truck: {order.truckId}</div>
+                    <div className="text-sm text-gray-500">
+                      Truck: {order.truckId}
+                    </div>
                   )}
                 </td>
                 <td className="px-6 py-4">
-                  <span className="text-sm text-[#232323]">{order.customer}</span>
+                  <span className="text-sm text-[#232323]">
+                    {order.customer}
+                  </span>
                 </td>
                 <td className="px-6 py-4">
                   <span className="text-sm text-gray-700">{order.items}</span>
@@ -181,13 +222,18 @@ export default function Orders() {
                   <span className="text-sm text-gray-700">{order.region}</span>
                 </td>
                 <td className="px-6 py-4">
-                  <span className={`inline-flex items-center px-3 py-1 rounded-lg text-xs font-medium ${getStatusColor(order.status)}`}>
+                  <span
+                    className={`inline-flex items-center px-3 py-1 rounded-lg text-xs font-medium ${getStatusColor(order.status)}`}
+                  >
                     {getStatusText(order.status)}
                   </span>
                 </td>
                 <td className="px-6 py-4">
-                  <span className={`inline-flex items-center px-3 py-1 rounded-lg text-xs font-medium ${getPriorityColor(order.priority)}`}>
-                    {order.priority.charAt(0).toUpperCase() + order.priority.slice(1)}
+                  <span
+                    className={`inline-flex items-center px-3 py-1 rounded-lg text-xs font-medium ${getPriorityColor(order.priority)}`}
+                  >
+                    {order.priority.charAt(0).toUpperCase() +
+                      order.priority.slice(1)}
                   </span>
                 </td>
                 <td className="px-6 py-4">
@@ -197,9 +243,9 @@ export default function Orders() {
                 </td>
                 <td className="px-6 py-4">
                   <span className="text-sm text-gray-600">
-                    {new Date(order.deliveryEta).toLocaleDateString('en-US', { 
-                      month: 'short', 
-                      day: 'numeric'
+                    {new Date(order.deliveryEta).toLocaleDateString("en-US", {
+                      month: "short",
+                      day: "numeric",
                     })}
                   </span>
                 </td>
@@ -212,7 +258,9 @@ export default function Orders() {
           <div className="text-center py-16 text-gray-500">
             <ShoppingCart className="w-16 h-16 mx-auto mb-4 text-gray-300" />
             <p className="text-lg font-medium text-gray-400">No orders found</p>
-            <p className="text-sm text-gray-400 mt-1">Try adjusting your search or filter criteria</p>
+            <p className="text-sm text-gray-400 mt-1">
+              Try adjusting your search or filter criteria
+            </p>
           </div>
         )}
       </div>
@@ -222,27 +270,37 @@ export default function Orders() {
         <div className="border-t border-gray-100 px-8 py-6 bg-gray-50">
           <div className="flex items-start justify-between">
             <div>
-              <h3 className="font-semibold text-[#232323] mb-4">Selected Order Details</h3>
+              <h3 className="font-semibold text-[#232323] mb-4">
+                Selected Order Details
+              </h3>
               <div className="grid grid-cols-2 gap-x-8 gap-y-3 text-sm">
                 <div>
                   <span className="text-gray-500">Customer:</span>
-                  <span className="ml-3 text-[#232323] font-medium">{selectedOrder.customer}</span>
+                  <span className="ml-3 text-[#232323] font-medium">
+                    {selectedOrder.customer}
+                  </span>
                 </div>
                 <div>
                   <span className="text-gray-500">Value:</span>
-                  <span className="ml-3 text-[#232323] font-medium">KSh {selectedOrder.value.toLocaleString()}</span>
+                  <span className="ml-3 text-[#232323] font-medium">
+                    KSh {selectedOrder.value.toLocaleString()}
+                  </span>
                 </div>
                 <div>
                   <span className="text-gray-500">Items:</span>
-                  <span className="ml-3 text-[#232323]">{selectedOrder.items}</span>
+                  <span className="ml-3 text-[#232323]">
+                    {selectedOrder.items}
+                  </span>
                 </div>
                 <div>
                   <span className="text-gray-500">Region:</span>
-                  <span className="ml-3 text-[#232323]">{selectedOrder.region}</span>
+                  <span className="ml-3 text-[#232323]">
+                    {selectedOrder.region}
+                  </span>
                 </div>
               </div>
             </div>
-            <button 
+            <button
               onClick={() => setSelectedOrder(null)}
               className="text-gray-400 hover:text-[#232323] p-2 rounded-lg hover:bg-white transition-colors"
             >

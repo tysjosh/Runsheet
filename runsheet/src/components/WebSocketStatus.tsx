@@ -1,15 +1,14 @@
 /**
  * WebSocket connection status indicator component.
- * 
+ *
  * Displays the current WebSocket connection state with visual feedback
  * for connected, disconnected, and reconnecting states.
- * 
+ *
  * Validates:
  * - Requirement 9.5: Handle connection drop gracefully with user feedback
  */
 
-import React from 'react';
-import { WebSocketState } from '../hooks/useWebSocket';
+import type { WebSocketState } from "../hooks/useWebSocket";
 
 interface WebSocketStatusProps {
   /** Current WebSocket connection state */
@@ -29,16 +28,16 @@ interface WebSocketStatusProps {
  */
 function getStatusColor(state: WebSocketState): string {
   switch (state) {
-    case 'connected':
-      return 'bg-green-500';
-    case 'connecting':
-      return 'bg-yellow-500 animate-pulse';
-    case 'reconnecting':
-      return 'bg-orange-500 animate-pulse';
-    case 'disconnected':
-      return 'bg-red-500';
+    case "connected":
+      return "bg-green-500";
+    case "connecting":
+      return "bg-yellow-500 animate-pulse";
+    case "reconnecting":
+      return "bg-orange-500 animate-pulse";
+    case "disconnected":
+      return "bg-red-500";
     default:
-      return 'bg-gray-500';
+      return "bg-gray-500";
   }
 }
 
@@ -48,32 +47,32 @@ function getStatusColor(state: WebSocketState): string {
 function getStatusText(
   state: WebSocketState,
   reconnectAttempt?: number,
-  reconnectDelay?: number
+  reconnectDelay?: number,
 ): string {
   switch (state) {
-    case 'connected':
-      return 'Live';
-    case 'connecting':
-      return 'Connecting...';
-    case 'reconnecting':
+    case "connected":
+      return "Live";
+    case "connecting":
+      return "Connecting...";
+    case "reconnecting":
       if (reconnectAttempt && reconnectDelay) {
         const seconds = Math.ceil(reconnectDelay / 1000);
         return `Reconnecting in ${seconds}s (attempt ${reconnectAttempt})`;
       }
-      return 'Reconnecting...';
-    case 'disconnected':
-      return 'Disconnected';
+      return "Reconnecting...";
+    case "disconnected":
+      return "Disconnected";
     default:
-      return 'Unknown';
+      return "Unknown";
   }
 }
 
 /**
  * WebSocket status indicator component.
- * 
+ *
  * Shows a colored dot and optional text indicating the current
  * WebSocket connection state.
- * 
+ *
  * @example
  * ```tsx
  * <WebSocketStatus
@@ -89,7 +88,7 @@ export default function WebSocketStatus({
   reconnectAttempt = 0,
   reconnectDelay = 0,
   showDetails = false,
-  className = '',
+  className = "",
 }: WebSocketStatusProps) {
   const statusColor = getStatusColor(state);
   const statusText = getStatusText(state, reconnectAttempt, reconnectDelay);
@@ -102,12 +101,10 @@ export default function WebSocketStatus({
         title={statusText}
         aria-label={`WebSocket status: ${statusText}`}
       />
-      
+
       {/* Status text (optional) */}
       {showDetails && (
-        <span className="text-xs text-gray-600">
-          {statusText}
-        </span>
+        <span className="text-xs text-gray-600">{statusText}</span>
       )}
     </div>
   );
@@ -119,9 +116,9 @@ export default function WebSocketStatus({
 export function WebSocketStatusBadge({
   state,
   reconnectAttempt = 0,
-}: Pick<WebSocketStatusProps, 'state' | 'reconnectAttempt'>) {
-  const isConnected = state === 'connected';
-  const isReconnecting = state === 'reconnecting';
+}: Pick<WebSocketStatusProps, "state" | "reconnectAttempt">) {
+  const isConnected = state === "connected";
+  const isReconnecting = state === "reconnecting";
 
   if (isConnected) {
     return (
