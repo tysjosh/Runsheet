@@ -81,7 +81,9 @@ class LocationUpdate(BaseModel):
         accuracy_meters: Optional GPS accuracy in meters
     """
     
-    truck_id: str
+    truck_id: Optional[str] = None       # Legacy field, kept for backward compat
+    asset_id: Optional[str] = None       # New preferred field
+    asset_type: Optional[str] = None     # Optional classification
     latitude: float
     longitude: float
     timestamp: datetime
@@ -91,7 +93,7 @@ class LocationUpdate(BaseModel):
     
     @field_validator("truck_id")
     @classmethod
-    def validate_truck_id(cls, v: str) -> str:
+    def validate_truck_id(cls, v: Optional[str]) -> Optional[str]:
         """
         Validate truck_id is not empty and has reasonable length.
         
@@ -104,11 +106,49 @@ class LocationUpdate(BaseModel):
         Raises:
             ValueError: If truck_id is empty or too long
         """
-        if not v or not v.strip():
+        if v is None:
+            return v
+        if not v.strip():
             raise ValueError("truck_id cannot be empty")
         if len(v) > 100:
             raise ValueError("truck_id cannot exceed 100 characters")
         return v.strip()
+    
+    @field_validator("asset_id")
+    @classmethod
+    def validate_asset_id(cls, v: Optional[str]) -> Optional[str]:
+        """
+        Validate asset_id is not empty and has reasonable length.
+        
+        Args:
+            v: The asset_id value to validate
+            
+        Returns:
+            The validated asset_id
+            
+        Raises:
+            ValueError: If asset_id is empty or too long
+        """
+        if v is None:
+            return v
+        if not v.strip():
+            raise ValueError("asset_id cannot be empty")
+        if len(v) > 100:
+            raise ValueError("asset_id cannot exceed 100 characters")
+        return v.strip()
+    
+    @model_validator(mode="after")
+    def require_id(self):
+        """
+        Ensure either asset_id or truck_id is provided.
+        If only truck_id is provided, copy it to asset_id for
+        backward compatibility.
+        """
+        if not self.asset_id and not self.truck_id:
+            raise ValueError("Either asset_id or truck_id is required")
+        if not self.asset_id:
+            self.asset_id = self.truck_id
+        return self
     
     @field_validator("latitude")
     @classmethod
@@ -352,6 +392,10 @@ def sanitize_location_update(update: LocationUpdate) -> dict:
     # Sanitize string fields
     if data.get("truck_id"):
         data["truck_id"] = sanitize_string(data["truck_id"])
+    if data.get("asset_id"):
+        data["asset_id"] = sanitize_string(data["asset_id"])
+    if data.get("asset_type"):
+        data["asset_type"] = sanitize_string(data["asset_type"])
     
     # Convert timestamp to ISO format string for Elasticsearch
     if isinstance(data.get("timestamp"), datetime):
@@ -414,37 +458,67 @@ class DataIngestionService:
     async def _broadcast_location_update(self, sanitized_data: dict) -> None:
         """
         Broadcast a location update to all connected WebSocket clients.
-        
+
         This method sends the location update to all connected clients
         via the WebSocket connection manager. If no connection manager
         is configured, the broadcast is silently skipped.
-        
+
+        Uses asset_id for the broadcast, falling back to truck_id for
+        backward compatibility with the WebSocket connection manager.
+
+        Includes asset_type and asset_subtype in the broadcast payload so
+        the frontend can render type-appropriate markers.
+
         Validates:
         - Requirement 6.7: Push real-time updates to connected clients
-        
+        - Requirement 3.5: Include asset_type and asset_subtype in broadcast
+
         Args:
             sanitized_data: The sanitized location update data to broadcast
         """
         if self._connection_manager is None:
             # No connection manager configured, skip broadcast
             return
-        
+
+        asset_id = sanitized_data.get("asset_id") or sanitized_data.get("truck_id")
+
+        # Resolve asset_type and asset_subtype for the broadcast payload
+        asset_type = sanitized_data.get("asset_type")
+        asset_subtype = sanitized_data.get("asset_subtype")
+
+        # If asset_type or asset_subtype not provided in the update, look up from ES
+        if not asset_type or not asset_subtype:
+            try:
+                doc = await self.es_service.get_document("assets", asset_id)
+                if doc:
+                    asset_type = asset_type or doc.get("asset_type")
+                    asset_subtype = asset_subtype or doc.get("asset_subtype")
+            except Exception as e:
+                self._logger.debug(
+                    f"Could not look up asset type for {asset_id}: {e}",
+                    extra={"extra_data": {"asset_id": asset_id, "error": str(e)}}
+                )
+
         try:
             clients_notified = await self._connection_manager.broadcast_location_update(
-                truck_id=sanitized_data["truck_id"],
+                truck_id=asset_id,
                 latitude=sanitized_data["latitude"],
                 longitude=sanitized_data["longitude"],
                 timestamp=sanitized_data.get("timestamp"),
                 speed_kmh=sanitized_data.get("speed_kmh"),
                 heading=sanitized_data.get("heading"),
-                accuracy_meters=sanitized_data.get("accuracy_meters")
+                accuracy_meters=sanitized_data.get("accuracy_meters"),
+                asset_type=asset_type,
+                asset_subtype=asset_subtype
             )
-            
+
             if clients_notified > 0:
                 self._logger.debug(
                     f"Location update broadcast to {clients_notified} WebSocket clients",
                     extra={"extra_data": {
-                        "truck_id": sanitized_data["truck_id"],
+                        "asset_id": asset_id,
+                        "asset_type": asset_type,
+                        "asset_subtype": asset_subtype,
                         "clients_notified": clients_notified
                     }}
                 )
@@ -453,47 +527,47 @@ class DataIngestionService:
             self._logger.warning(
                 f"Failed to broadcast location update via WebSocket: {e}",
                 extra={"extra_data": {
-                    "truck_id": sanitized_data["truck_id"],
+                    "asset_id": asset_id,
                     "error": str(e)
                 }}
             )
     
-    async def validate_truck_exists(self, truck_id: str) -> bool:
+    async def validate_asset_exists(self, asset_id: str) -> bool:
         """
-        Verify that a truck with the given ID exists in the system.
-        
+        Verify that an asset with the given ID exists in the system.
+
         Validates:
-        - Requirement 6.6: IF a location update references a non-existent truck_id,
+        - Requirement 6.6: IF a location update references a non-existent asset_id,
           THEN THE Data_Ingestion_Service SHALL log a warning and reject the update
-        
+
         Args:
-            truck_id: The truck ID to verify
-            
+            asset_id: The asset ID to verify
+
         Returns:
-            True if the truck exists, False otherwise
+            True if the asset exists, False otherwise
         """
         try:
-            # Search for the truck in Elasticsearch
+            # Search for the asset in Elasticsearch using the assets alias
             query = {
                 "query": {
                     "term": {
-                        "truck_id": truck_id
+                        "truck_id": asset_id
                     }
                 },
                 "size": 1
             }
-            
-            result = await self.es_service.search_documents("trucks", query, size=1)
-            
+
+            result = await self.es_service.search_documents("assets", query, size=1)
+
             if result and result.get("hits", {}).get("total", {}).get("value", 0) > 0:
                 return True
-            
+
             return False
-            
+
         except Exception as e:
             self._logger.warning(
-                f"Error checking truck existence for {truck_id}: {e}",
-                extra={"extra_data": {"truck_id": truck_id, "error": str(e)}}
+                f"Error checking asset existence for {asset_id}: {e}",
+                extra={"extra_data": {"asset_id": asset_id, "error": str(e)}}
             )
             # In case of error, we'll be conservative and allow the update
             # The actual storage operation will fail if there's a real issue
@@ -502,45 +576,47 @@ class DataIngestionService:
     async def process_location_update(self, update: LocationUpdate) -> LocationUpdateResult:
         """
         Process and store a single location update.
-        
+
         This method validates the update, sanitizes the data, verifies the
-        truck exists, and stores the update in Elasticsearch.
-        
+        asset exists, and stores the update in Elasticsearch.
+
         Validates:
+        - Requirement 3.3: Use asset_id to update the corresponding document
+        - Requirement 3.4: Treat truck_id as asset_id for backward compatibility
         - Requirement 6.2: Validate payload schema and reject malformed requests
         - Requirement 6.3: Sanitize all input data to prevent injection attacks
-        - Requirement 6.4: Update the corresponding truck document within 2 seconds
-        - Requirement 6.6: Reject updates for non-existent truck_ids
-        
+        - Requirement 6.4: Update the corresponding document within 2 seconds
+        - Requirement 6.6: Reject updates for non-existent asset_ids
+
         Args:
             update: The LocationUpdate to process
-            
+
         Returns:
             LocationUpdateResult indicating success or failure
-            
+
         Raises:
-            AppException: If validation fails or truck doesn't exist
+            AppException: If validation fails or asset doesn't exist
         """
         start_time = datetime.utcnow()
-        
+
         try:
             # Sanitize the input data
             sanitized_data = sanitize_location_update(update)
-            truck_id = sanitized_data["truck_id"]
-            
-            # Verify truck exists
-            truck_exists = await self.validate_truck_exists(truck_id)
-            if not truck_exists:
+            asset_id = sanitized_data["asset_id"]
+
+            # Verify asset exists
+            asset_exists = await self.validate_asset_exists(asset_id)
+            if not asset_exists:
                 self._logger.warning(
-                    f"Location update rejected: truck_id '{truck_id}' not found",
-                    extra={"extra_data": {"truck_id": truck_id}}
+                    f"Location update rejected: asset_id '{asset_id}' not found",
+                    extra={"extra_data": {"asset_id": asset_id}}
                 )
                 raise resource_not_found(
-                    message=f"Truck with ID '{truck_id}' not found",
-                    details={"truck_id": truck_id}
+                    message=f"Asset with ID '{asset_id}' not found",
+                    details={"asset_id": asset_id}
                 )
-            
-            # Update the truck's current location in Elasticsearch
+
+            # Update the asset's current location in Elasticsearch
             location_data = {
                 "current_location": {
                     "coordinates": {
@@ -550,23 +626,23 @@ class DataIngestionService:
                 },
                 "last_update": sanitized_data["timestamp"],
             }
-            
+
             # Add optional fields if present
             if sanitized_data.get("speed_kmh") is not None:
                 location_data["current_speed_kmh"] = sanitized_data["speed_kmh"]
             if sanitized_data.get("heading") is not None:
                 location_data["current_heading"] = sanitized_data["heading"]
-            
-            # Update the truck document
+
+            # Write to "trucks" index (assets is an alias pointing to trucks)
             await self.es_service.index_document(
                 index="trucks",
-                doc_id=truck_id,
+                doc_id=asset_id,
                 document=location_data
             )
-            
+
             # Also store in locations history index for tracking
             location_history = {
-                "truck_id": truck_id,
+                "truck_id": asset_id,
                 "coordinates": {
                     "lat": sanitized_data["latitude"],
                     "lon": sanitized_data["longitude"]
@@ -576,64 +652,65 @@ class DataIngestionService:
                 "heading": sanitized_data.get("heading"),
                 "accuracy_meters": sanitized_data.get("accuracy_meters"),
             }
-            
+
             # Generate a unique ID for the location history entry
-            history_id = f"{truck_id}_{sanitized_data['timestamp']}"
+            history_id = f"{asset_id}_{sanitized_data['timestamp']}"
             await self.es_service.index_document(
                 index="locations",
                 doc_id=history_id,
                 document=location_history
             )
-            
+
             # Log success with telemetry
             duration_ms = (datetime.utcnow() - start_time).total_seconds() * 1000
             if self.telemetry:
                 self.telemetry.record_metric(
                     "location_update_duration_ms",
                     duration_ms,
-                    tags={"truck_id": truck_id}
+                    tags={"asset_id": asset_id}
                 )
-            
+
             self._logger.info(
-                f"Location update processed for truck {truck_id}",
+                f"Location update processed for asset {asset_id}",
                 extra={"extra_data": {
-                    "truck_id": truck_id,
+                    "asset_id": asset_id,
                     "latitude": sanitized_data["latitude"],
                     "longitude": sanitized_data["longitude"],
                     "duration_ms": duration_ms
                 }}
             )
-            
+
             # Broadcast location update via WebSocket to connected clients
             # Validates: Requirement 6.7 - Push real-time updates to connected clients
             await self._broadcast_location_update(sanitized_data)
-            
+
             return LocationUpdateResult(
                 success=True,
-                truck_id=truck_id,
+                truck_id=asset_id,
                 message="Location update processed successfully"
             )
-            
+
         except Exception as e:
             duration_ms = (datetime.utcnow() - start_time).total_seconds() * 1000
-            
+
             # Re-raise AppExceptions
             from errors.exceptions import AppException
             if isinstance(e, AppException):
                 raise
-            
+
+            asset_id = update.asset_id or update.truck_id
             self._logger.error(
                 f"Failed to process location update: {e}",
                 extra={"extra_data": {
-                    "truck_id": update.truck_id,
+                    "asset_id": asset_id,
                     "error": str(e),
                     "duration_ms": duration_ms
                 }}
             )
-            
+
             return LocationUpdateResult(
                 success=False,
-                truck_id=update.truck_id,
+                truck_id=asset_id,
                 message=f"Failed to process update: {str(e)}"
             )
     
@@ -643,28 +720,28 @@ class DataIngestionService:
     ) -> BatchUpdateResult:
         """
         Process multiple location updates efficiently.
-        
+
         This method processes a batch of location updates, collecting
         results for each update and returning aggregate statistics.
-        
+
         Validates:
         - Requirement 6.5: Support batch location updates for efficiency
-        
+
         Args:
             updates: List of LocationUpdate objects to process
-            
+
         Returns:
             BatchUpdateResult with success/failure counts and individual results
         """
         results: List[LocationUpdateResult] = []
         successful = 0
         failed = 0
-        
+
         self._logger.info(
             f"Processing batch of {len(updates)} location updates",
             extra={"extra_data": {"batch_size": len(updates)}}
         )
-        
+
         for update in updates:
             try:
                 result = await self.process_location_update(update)
@@ -680,14 +757,15 @@ class DataIngestionService:
                     message = e.message
                 else:
                     message = str(e)
-                
+
+                asset_id = update.asset_id or update.truck_id
                 results.append(LocationUpdateResult(
                     success=False,
-                    truck_id=update.truck_id,
+                    truck_id=asset_id,
                     message=message
                 ))
                 failed += 1
-        
+
         self._logger.info(
             f"Batch processing complete: {successful} successful, {failed} failed",
             extra={"extra_data": {
@@ -696,7 +774,7 @@ class DataIngestionService:
                 "failed": failed
             }}
         )
-        
+
         return BatchUpdateResult(
             total=len(updates),
             successful=successful,

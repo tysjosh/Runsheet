@@ -1,9 +1,37 @@
 import type {
   ApiResponse,
+  Asset,
+  AssetSubtype,
+  AssetSummary,
+  AssetType,
   FleetFilters,
-  FleetSummary,
   Truck,
 } from "../types/api";
+
+// Filters for the multi-asset /fleet/assets endpoint
+export interface AssetFilters {
+  asset_type?: AssetType;
+  asset_subtype?: AssetSubtype;
+  status?: string;
+}
+
+// Payload for creating a new asset via POST /fleet/assets
+export interface CreateAssetPayload {
+  asset_id: string;
+  asset_type: AssetType;
+  asset_subtype: AssetSubtype;
+  name: string;
+  status?: string;
+  current_location: {
+    lat: number;
+    lon: number;
+  };
+  plate_number?: string;
+  driver_id?: string;
+  driver_name?: string;
+  vessel_name?: string;
+  container_number?: string;
+}
 
 // API base URL - replace with actual API endpoint
 const API_BASE_URL =
@@ -168,8 +196,8 @@ class ApiService {
   }
 
   // Fleet Management
-  async getFleetSummary(): Promise<ApiResponse<FleetSummary>> {
-    return this.request<FleetSummary>("/fleet/summary");
+  async getFleetSummary(): Promise<ApiResponse<AssetSummary>> {
+    return this.request<AssetSummary>("/fleet/summary");
   }
 
   async getTrucks(filters?: FleetFilters): Promise<ApiResponse<Truck[]>> {
@@ -190,6 +218,34 @@ class ApiService {
     return this.request<Truck>(`/fleet/trucks/${id}/status`, {
       method: "PATCH",
       body: JSON.stringify({ status }),
+    });
+  }
+
+  // Multi-Asset Management
+  async getAssets(filters?: AssetFilters): Promise<ApiResponse<Asset[]>> {
+    const params = new URLSearchParams();
+    if (filters?.asset_type) params.set("asset_type", filters.asset_type);
+    if (filters?.asset_subtype) params.set("asset_subtype", filters.asset_subtype);
+    if (filters?.status) params.set("status", filters.status);
+    const query = params.toString();
+    return this.request<Asset[]>(`/fleet/assets${query ? `?${query}` : ""}`);
+  }
+
+  async getAsset(id: string): Promise<ApiResponse<Asset>> {
+    return this.request<Asset>(`/fleet/assets/${id}`);
+  }
+
+  async createAsset(data: CreateAssetPayload): Promise<ApiResponse<Asset>> {
+    return this.request<Asset>("/fleet/assets", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  }
+
+  async updateAsset(id: string, data: Partial<Asset>): Promise<ApiResponse<Asset>> {
+    return this.request<Asset>(`/fleet/assets/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
     });
   }
 

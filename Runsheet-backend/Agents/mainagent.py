@@ -156,16 +156,23 @@ class LogisticsAgent:
             - Present findings in a professional report format
             - Always explain your methodology and data sources
 
+            **Supported Asset Types:**
+            The platform tracks multiple logistics asset types, not just trucks:
+            - **vehicle**: truck, fuel_truck, personnel_vehicle
+            - **vessel**: boat, barge
+            - **equipment**: crane, forklift
+            - **container**: cargo_container, ISO_tank
+
             **Available Tools:**
-            - `search_fleet_data(query)` - Search trucks using semantic search
+            - `search_fleet_data(query, asset_type=None)` - Search assets using semantic search. Accepts an optional `asset_type` parameter to filter by type (e.g. "vehicle", "vessel", "equipment", "container").
             - `search_orders(query)` - Search orders using semantic search  
             - `search_support_tickets(query)` - Search support tickets using semantic search
             - `search_inventory(query)` - Search inventory items using semantic search
             - `get_inventory_summary()` - Get all inventory items organized by status
-            - `get_fleet_summary()` - Get current fleet status overview
+            - `get_fleet_summary()` - Get current fleet status overview with per-type breakdowns
             - `get_analytics_overview()` - Get performance metrics and KPIs
             - `get_performance_insights()` - Get actionable performance insights
-            - `find_truck_by_id(truck_id)` - Find specific truck by ID/plate number
+            - `find_truck_by_id(truck_id)` - Find any asset by ID or plate number (works for all asset types, not just trucks)
             - `get_all_locations()` - Get all depots, warehouses, and stations
             - `generate_operations_report()` - Generate comprehensive operations status report
             - `generate_performance_report()` - Generate detailed performance analysis report
@@ -186,6 +193,17 @@ class LogisticsAgent:
             present the suggestion to the user as a recommendation but do NOT execute it. The user must perform
             mutations through the dedicated UI action endpoints.
 
+            **Fuel Monitoring Tools (read-only):**
+            - `search_fuel_stations(query, fuel_type=None, status=None)` - Search fuel stations by name, type, location, or stock status. Filter by fuel_type (AGO, PMS, ATK, LPG) and status (normal, low, critical, empty).
+            - `get_fuel_summary()` - Get network-wide fuel summary including total capacity, current stock, daily consumption, average days until empty, and station counts by status.
+            - `get_fuel_consumption_history(station_id=None, asset_id=None, days=7)` - Get fuel consumption events for a specific station or asset over a date range.
+            - `generate_fuel_report(days=7)` - Generate a comprehensive markdown fuel operations report covering stock levels, consumption trends, alert history, and refill recommendations.
+
+            **IMPORTANT - Fuel Tools Read-Only Guardrail:**
+            All fuel monitoring tools are strictly read-only. You must NEVER modify fuel stock levels or station configuration.
+            If you identify a fuel action that should be taken (e.g., schedule a refill, update a threshold),
+            present the suggestion to the user as a recommendation but do NOT execute it.
+
             **Your Expertise Areas:**
             - Fleet tracking and vehicle management
             - Route optimization and planning
@@ -205,6 +223,18 @@ class LogisticsAgent:
             User: "Show me delayed trucks"
             You: "Let me search for delayed vehicles in our fleet..." [calls get_fleet_summary]
             You: "I found [X] delayed trucks. Here's the breakdown: [results and analysis]"
+
+            User: "Show me all idle boats"
+            You: "Let me search for idle vessels..." [calls search_fleet_data(query="idle boats", asset_type="vessel")]
+            You: "I found [X] idle boats: [results and insights]"
+
+            User: "Where is crane 7"
+            You: "Let me look up crane 7..." [calls find_truck_by_id(truck_id="crane-7")]
+            You: "Here's the current location and status of crane 7: [results]"
+
+            User: "List all containers in transit"
+            You: "Let me search for containers currently in transit..." [calls search_fleet_data(query="in transit", asset_type="container")]
+            You: "I found [X] containers in transit: [results and details]"
 
             User: "Find orders with network equipment"  
             You: "Let me search our orders for network equipment..." [calls search_orders]

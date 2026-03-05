@@ -49,39 +49,75 @@ def _log_tool_invocation(tool_name: str, input_params: dict, start_time: float,
         )
 
 
+
 @tool
 async def get_fleet_summary() -> str:
     """
-    Get current fleet status summary.
-    
+    Get current fleet status summary including breakdowns by asset type and subtype.
+
     Returns:
-        Summary of fleet status including total trucks, delays, etc.
+        Summary of fleet status including total trucks, delays, and counts
+        broken down by asset type (vehicle, vessel, equipment, container) and
+        asset subtype (truck, boat, crane, cargo_container, etc.).
     """
     start_time = time.time()
     success = False
     error_msg = None
-    
+
     try:
         logger.info("📊 Getting fleet summary")
         trucks = await elasticsearch_service.get_all_documents("trucks")
-        
+
         total = len(trucks)
         on_time = len([t for t in trucks if t.get("status") == "on_time"])
         delayed = len([t for t in trucks if t.get("status") == "delayed"])
-        
+
         response = f"🚛 **Fleet Summary**\n\n"
         response += f"• Total Trucks: {total}\n"
         response += f"• On Time: {on_time}\n"
         response += f"• Delayed: {delayed}\n"
         if total > 0:
             response += f"• Performance: {(on_time/total*100):.1f}% on time\n\n"
-        
+
         if delayed > 0:
             response += "**Delayed Trucks:**\n"
             for truck in trucks:
                 if truck.get("status") == "delayed":
                     response += f"• {truck.get('plate_number')} - {truck.get('driver_name')}\n"
-        
+            response += "\n"
+
+        # Fetch asset type and subtype breakdowns via ES aggregations
+        try:
+            agg_query = {
+                "size": 0,
+                "aggs": {
+                    "by_type": {
+                        "terms": {"field": "asset_type", "size": 20}
+                    },
+                    "by_subtype": {
+                        "terms": {"field": "asset_subtype", "size": 50}
+                    }
+                }
+            }
+            agg_response = await elasticsearch_service.search_documents("trucks", agg_query, size=0)
+
+            by_type_buckets = agg_response.get("aggregations", {}).get("by_type", {}).get("buckets", [])
+            by_subtype_buckets = agg_response.get("aggregations", {}).get("by_subtype", {}).get("buckets", [])
+
+            if by_type_buckets:
+                response += "**Assets by Type:**\n"
+                for bucket in by_type_buckets:
+                    response += f"• {bucket['key']}: {bucket['doc_count']}\n"
+                response += "\n"
+
+            if by_subtype_buckets:
+                response += "**Assets by Subtype:**\n"
+                for bucket in by_subtype_buckets:
+                    response += f"• {bucket['key']}: {bucket['doc_count']}\n"
+                response += "\n"
+        except Exception as agg_err:
+            logger.warning(f"Could not fetch asset type aggregations: {agg_err}")
+
         success = True
         return response
     except Exception as e:
@@ -90,6 +126,7 @@ async def get_fleet_summary() -> str:
         return f"Error getting fleet summary: {str(e)}"
     finally:
         _log_tool_invocation("get_fleet_summary", {}, start_time, success, error_msg)
+
 
 @tool
 async def get_inventory_summary() -> str:

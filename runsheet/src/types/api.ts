@@ -7,19 +7,6 @@ export interface ApiResponse<T> {
 }
 
 // Fleet Types
-export interface Truck {
-  id: string;
-  plateNumber: string;
-  driverId: string;
-  driverName: string;
-  currentLocation: Location;
-  destination: Location;
-  route: Route;
-  status: TruckStatus;
-  estimatedArrival: string;
-  lastUpdate: string;
-  cargo?: CargoInfo;
-}
 
 export interface Location {
   id: string;
@@ -58,6 +45,51 @@ export type TruckStatus =
   | "unloading"
   | "maintenance";
 
+// Asset Types (multi-asset tracking)
+export type AssetType = "vehicle" | "vessel" | "equipment" | "container";
+
+export type AssetSubtype =
+  | "truck"
+  | "fuel_truck"
+  | "personnel_vehicle"
+  | "boat"
+  | "barge"
+  | "crane"
+  | "forklift"
+  | "cargo_container"
+  | "ISO_tank";
+
+export interface Asset {
+  id: string;
+  assetType: AssetType;
+  assetSubtype: AssetSubtype;
+  name: string;
+  status: string;
+  currentLocation: Location;
+  destination?: Location;
+  route?: Route;
+  estimatedArrival?: string;
+  lastUpdate: string;
+  // Vehicle fields
+  plateNumber?: string;
+  driverId?: string;
+  driverName?: string;
+  cargo?: CargoInfo;
+  // Vessel fields
+  vesselName?: string;
+  imoNumber?: string;
+  // Equipment fields
+  equipmentModel?: string;
+  liftingCapacityTonnes?: number;
+  // Container fields
+  containerNumber?: string;
+  containerSize?: string;
+  weightTonnes?: number;
+}
+
+// Backward compat: Truck is just an Asset with asset_type=vehicle
+export type Truck = Asset;
+
 // Fleet Tracking
 export interface FleetSummary {
   totalTrucks: number;
@@ -65,6 +97,11 @@ export interface FleetSummary {
   onTimeTrucks: number;
   delayedTrucks: number;
   averageDelay: number; // in minutes
+}
+
+export interface AssetSummary extends FleetSummary {
+  byType: Record<AssetType, number>;
+  bySubtype: Record<AssetSubtype, number>;
 }
 
 // Map Types
@@ -75,7 +112,7 @@ export interface MapMarker {
     lat: number;
     lng: number;
   };
-  data: any;
+  data: unknown;
 }
 
 // Filter and Search

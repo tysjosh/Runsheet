@@ -530,8 +530,9 @@ class ElasticsearchService:
             }
         )
     
+
     def setup_indices(self):
-        """Create indices with proper mappings if they don't exist"""
+        """Create indices with proper mappings if they don't exist, and set up aliases"""
         indices = {
             "trucks": self._get_trucks_mapping(),
             "locations": self._get_locations_mapping(),
@@ -553,7 +554,18 @@ class ElasticsearchService:
                     logger.info(f"📋 Index already exists: {index_name}")
             except Exception as e:
                 logger.error(f"❌ Failed to create index {index_name}: {e}")
-    
+
+        # Create 'assets' alias pointing to 'trucks' index for multi-asset support
+        try:
+            alias_exists = self.client.indices.exists_alias(name="assets")
+            if not alias_exists:
+                self.client.indices.put_alias(index="trucks", name="assets")
+                logger.info("✅ Created alias: assets → trucks")
+            else:
+                logger.info("📋 Alias already exists: assets → trucks")
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to create 'assets' alias pointing to 'trucks': {e}")
+
     def validate_index_schemas(self) -> Dict[str, Any]:
         """
         Validate that index mappings match expected schemas and log warnings for mismatches.
@@ -863,6 +875,7 @@ class ElasticsearchService:
         """Get mapping for trucks index"""
         return {
             "mappings": {
+                "dynamic": False,
                 "properties": {
                     "truck_id": {"type": "keyword"},
                     "plate_number": {"type": "keyword"},
@@ -907,7 +920,27 @@ class ElasticsearchService:
                         }
                     },
                     "created_at": {"type": "date"},
-                    "updated_at": {"type": "date"}
+                    "updated_at": {"type": "date"},
+                    # Core asset classification
+                    "asset_type": {"type": "keyword"},
+                    "asset_subtype": {"type": "keyword"},
+                    "asset_name": {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
+                    # Vessel-specific fields
+                    "vessel_name": {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
+                    "imo_number": {"type": "keyword"},
+                    "port_of_registry": {"type": "keyword"},
+                    "draft_meters": {"type": "float"},
+                    "vessel_capacity_tonnes": {"type": "float"},
+                    # Equipment-specific fields
+                    "equipment_model": {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
+                    "lifting_capacity_tonnes": {"type": "float"},
+                    "operational_radius_meters": {"type": "float"},
+                    # Container-specific fields
+                    "container_number": {"type": "keyword"},
+                    "container_size": {"type": "keyword"},
+                    "seal_number": {"type": "keyword"},
+                    "contents_description": {"type": "text"},
+                    "weight_tonnes": {"type": "float"},
                 }
             }
         }
@@ -1074,6 +1107,30 @@ class ElasticsearchService:
             self._handle_circuit_breaker_exception(e)
         except Exception as e:
             self._handle_elasticsearch_error(f"index_document({index})", e)
+
+    async def update_document(self, index: str, doc_id: str, partial_doc: Dict[Any, Any]):
+        """
+        Partially update a document using the ES _update API with circuit breaker protection.
+
+        Only the fields present in *partial_doc* are merged into the existing document.
+        """
+        try:
+            async def _do_update():
+                partial_doc["updated_at"] = datetime.now().isoformat()
+                response = self.client.update(
+                    index=index,
+                    id=doc_id,
+                    body={"doc": partial_doc},
+                    refresh=True,
+                )
+                return response
+
+            return await self._circuit_breaker.execute(_do_update)
+        except CircuitOpenException as e:
+            self._handle_circuit_breaker_exception(e)
+        except Exception as e:
+            self._handle_elasticsearch_error(f"update_document({index}, {doc_id})", e)
+
     
     async def bulk_index_documents(self, index: str, documents: List[Dict[Any, Any]]) -> Dict[str, Any]:
         """

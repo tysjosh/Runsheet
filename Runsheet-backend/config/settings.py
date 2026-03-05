@@ -225,6 +225,26 @@ class Settings(BaseSettings):
         description="Metrics API rate limit per minute per user"
     )
 
+    # Fuel Monitoring Configuration
+    fuel_alert_default_threshold_pct: float = Field(
+        default=20.0,
+        ge=0.0,
+        le=100.0,
+        description="Default low-stock alert threshold percentage for fuel stations"
+    )
+    fuel_consumption_rolling_window_days: int = Field(
+        default=7,
+        ge=1,
+        le=365,
+        description="Rolling window in days for daily consumption rate calculation"
+    )
+    fuel_critical_days_threshold: int = Field(
+        default=3,
+        ge=1,
+        le=30,
+        description="Days until empty below which alert escalates to critical"
+    )
+
     # Drift Detection Configuration
     drift_schedule_interval_hours: int = Field(
         default=6,

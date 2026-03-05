@@ -39,6 +39,9 @@ from Agents.tools.ops_feature_guard import configure_ops_feature_guard
 from Agents.tools.ops_search_tools import configure_ops_search_tools
 from Agents.tools.ops_report_tools import configure_ops_report_tools
 from ops.services.drift_detector import configure_drift_detector
+from fuel.services.fuel_es_mappings import setup_fuel_indices
+from fuel.api.endpoints import router as fuel_router, configure_fuel_api
+from fuel.services.fuel_service import FuelService
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -99,6 +102,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"❌ Failed to set up ops intelligence indices: {e}")
         # Don't fail startup, just log the error
+
+    # Set up fuel monitoring indices and ILM policies
+    # Validates: Requirement 8.3
+    try:
+        logger.info("🔧 Setting up fuel monitoring indices...")
+        setup_fuel_indices(elasticsearch_service.client)
+        logger.info("✅ Fuel monitoring indices ready")
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to set up fuel monitoring indices: {e}")
+        # Don't fail startup, just log the warning
 
     # Connect idempotency service and wire webhook receiver dependencies
     try:
@@ -162,6 +175,12 @@ async def lifespan(app: FastAPI):
         # Validates: Req 18.1-18.5 — AI report templates
         configure_ops_report_tools(ops_es_service)
         logger.info("✅ Ops AI report tools configured")
+
+        # Wire fuel API endpoints with the shared ElasticsearchService
+        # Validates: Requirement 1.1
+        fuel_service = FuelService(elasticsearch_service)
+        configure_fuel_api(fuel_service=fuel_service)
+        logger.info("✅ Fuel API configured")
     except Exception as e:
         logger.error(f"❌ Failed to configure webhook receiver: {e}")
     
@@ -274,6 +293,10 @@ app.include_router(webhook_router)
 # Rate limiting applied per-endpoint: 100 req/min for ops, 20 req/min for metrics
 # Validates: Req 21.2, 21.3, 21.5
 app.include_router(ops_router)
+
+# Include Fuel API router for fuel station management, events, alerts, and metrics
+# Validates: Requirement 1.1
+app.include_router(fuel_router)
 
 class ChatRequest(BaseModel):
     message: str

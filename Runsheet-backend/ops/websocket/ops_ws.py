@@ -222,6 +222,14 @@ class OpsWebSocketManager:
         """Broadcast an SLA breach event to subscribed clients."""
         return await self._broadcast_event("sla_breach", breach_data)
 
+    async def broadcast_fuel_alert(self, alert_data: dict) -> int:
+        """
+        Broadcast a fuel stock alert to clients subscribed to ``fuel_alert``.
+
+        Validates: Requirement 4.3 — WebSocket alert within 5 seconds.
+        """
+        return await self._broadcast_event("fuel_alert", alert_data)
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------

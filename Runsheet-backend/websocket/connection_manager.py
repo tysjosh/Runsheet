@@ -181,26 +181,31 @@ class ConnectionManager:
         timestamp: Optional[str] = None,
         speed_kmh: Optional[float] = None,
         heading: Optional[float] = None,
+        asset_type: Optional[str] = None,
+        asset_subtype: Optional[str] = None,
         **extra_data: Any
     ) -> int:
         """
         Broadcast a location update to all connected clients.
-        
+
         This is a convenience method for broadcasting location updates
         with a standardized message format.
-        
+
         Validates:
         - Requirement 6.7: Push real-time updates to connected clients
-        
+        - Requirement 3.5: Include asset_type and asset_subtype in broadcast
+
         Args:
-            truck_id: The ID of the truck being updated
+            truck_id: The ID of the asset being updated
             latitude: GPS latitude coordinate
             longitude: GPS longitude coordinate
             timestamp: Optional timestamp of the update (ISO format)
             speed_kmh: Optional speed in km/h
             heading: Optional heading in degrees
+            asset_type: Optional asset type classification (vehicle, vessel, equipment, container)
+            asset_subtype: Optional asset subtype (truck, boat, crane, etc.)
             **extra_data: Additional data to include in the message
-            
+
         Returns:
             Number of clients that successfully received the update
         """
@@ -215,17 +220,23 @@ class ConnectionManager:
                 "timestamp": timestamp or datetime.utcnow().isoformat() + "Z"
             }
         }
-        
+
         # Add optional fields
         if speed_kmh is not None:
             message["data"]["speed_kmh"] = speed_kmh
         if heading is not None:
             message["data"]["heading"] = heading
-        
+
+        # Add asset type fields for multi-asset support
+        if asset_type is not None:
+            message["data"]["asset_type"] = asset_type
+        if asset_subtype is not None:
+            message["data"]["asset_subtype"] = asset_subtype
+
         # Add any extra data
         if extra_data:
             message["data"].update(extra_data)
-        
+
         return await self.broadcast(message)
     
     async def broadcast_batch_update(

@@ -27,7 +27,7 @@ const OPS_WS_URL = `${WS_BASE}/ws/ops`;
 /**
  * Event types the ops WebSocket can deliver
  */
-export type OpsEventType = "shipment_update" | "rider_update" | "sla_breach";
+export type OpsEventType = "shipment_update" | "rider_update" | "sla_breach" | "fuel_alert";
 
 /**
  * Base message structure from the ops WebSocket endpoint
@@ -53,6 +53,20 @@ export interface SlaBreach {
 }
 
 /**
+ * Data payload for a fuel alert event
+ */
+export interface FuelAlertEvent {
+  station_id: string;
+  name: string;
+  fuel_type: string;
+  status: string;
+  current_stock_liters: number;
+  capacity_liters: number;
+  stock_percentage: number;
+  days_until_empty: number;
+}
+
+/**
  * Options for the ops WebSocket hook
  */
 export interface OpsWebSocketOptions {
@@ -66,6 +80,8 @@ export interface OpsWebSocketOptions {
   onRiderUpdate?: (rider: OpsRider) => void;
   /** Callback when an SLA breach event is received */
   onSlaBreach?: (breach: SlaBreach) => void;
+  /** Callback when a fuel alert event is received */
+  onFuelAlert?: (alert: FuelAlertEvent) => void;
   /** Callback when connection state changes */
   onConnectionStatusChange?: (state: WebSocketState) => void;
   /** Callback when reconnection starts */
@@ -92,6 +108,8 @@ export interface UseOpsWebSocketReturn {
   lastRiderUpdate: OpsRider | null;
   /** Last received SLA breach event */
   lastSlaBreach: SlaBreach | null;
+  /** Last received fuel alert event */
+  lastFuelAlert: FuelAlertEvent | null;
   /** Error if any occurred */
   error: Event | null;
   /** Manually connect to the WebSocket */
@@ -134,6 +152,7 @@ export function useOpsWebSocket(
     useState<OpsShipment | null>(null);
   const [lastRiderUpdate, setLastRiderUpdate] = useState<OpsRider | null>(null);
   const [lastSlaBreach, setLastSlaBreach] = useState<SlaBreach | null>(null);
+  const [lastFuelAlert, setLastFuelAlert] = useState<FuelAlertEvent | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<string | null>(null);
 
   const subscriptions = options.subscriptions ?? [
@@ -176,6 +195,13 @@ export function useOpsWebSocket(
           const breach = message.data as SlaBreach;
           setLastSlaBreach(breach);
           options.onSlaBreach?.(breach);
+          break;
+        }
+
+        case "fuel_alert": {
+          const alert = message.data as FuelAlertEvent;
+          setLastFuelAlert(alert);
+          options.onFuelAlert?.(alert);
           break;
         }
 
@@ -243,6 +269,7 @@ export function useOpsWebSocket(
     lastShipmentUpdate,
     lastRiderUpdate,
     lastSlaBreach,
+    lastFuelAlert,
     error,
     connect,
     disconnect,

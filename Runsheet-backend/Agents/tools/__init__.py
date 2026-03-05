@@ -40,6 +40,13 @@ from .ops_report_tools import (
     generate_rider_productivity_report
 )
 
+from .fuel_tools import (
+    search_fuel_stations,
+    get_fuel_summary,
+    get_fuel_consumption_history,
+    generate_fuel_report
+)
+
 # All available tools
 ALL_TOOLS = [
     # Search tools
@@ -73,4 +80,10 @@ ALL_TOOLS = [
     generate_sla_report,
     generate_failure_report,
     generate_rider_productivity_report,
+
+    # Fuel tools
+    search_fuel_stations,
+    get_fuel_summary,
+    get_fuel_consumption_history,
+    generate_fuel_report,
 ]

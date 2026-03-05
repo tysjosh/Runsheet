@@ -41,45 +41,88 @@ def _log_tool_invocation(tool_name: str, input_params: dict, start_time: float,
         )
 
 
+
 @tool
-async def search_fleet_data(query: str) -> str:
+async def search_fleet_data(query: str, asset_type: str = None) -> str:
     """
-    Search fleet and truck data using natural language.
-    
+    Search fleet and asset data using natural language. Supports all asset types
+    including vehicles, vessels, equipment, and containers.
+
     Args:
-        query: Natural language search query (e.g., "trucks carrying perishables", "delayed vehicles")
-    
+        query: Natural language search query (e.g., "trucks carrying perishables",
+               "delayed vehicles", "search for all vessels", "find idle equipment",
+               "containers in transit", "show me all boats")
+        asset_type: Optional asset type filter. One of: "vehicle", "vessel",
+                    "equipment", "container". When provided, results are limited
+                    to the specified asset type.
+
     Returns:
         Search results from fleet database
     """
     start_time = time.time()
     success = False
     error_msg = None
-    
+
     try:
-        logger.info(f"🔍 Searching fleet data for: {query}")
-        results = await elasticsearch_service.semantic_search("trucks", query, ["cargo.description", "driver_name", "status"], 5)
-        
+        logger.info(f"🔍 Searching fleet data for: {query}" + (f" (asset_type={asset_type})" if asset_type else ""))
+
+        # Build the base multi_match query
+        must_clause = {
+            "multi_match": {
+                "query": query,
+                "fields": ["cargo.description", "driver_name", "status", "asset_name", "vessel_name", "equipment_model", "container_number"],
+                "type": "best_fields"
+            }
+        }
+
+        # When asset_type is provided, wrap in a bool query with a term filter
+        if asset_type:
+            es_query = {
+                "query": {
+                    "bool": {
+                        "must": [must_clause],
+                        "filter": [
+                            {"term": {"asset_type": asset_type}}
+                        ]
+                    }
+                }
+            }
+        else:
+            es_query = {
+                "query": must_clause
+            }
+
+        response = await elasticsearch_service.search_documents("trucks", es_query, 5)
+        results = [hit["_source"] for hit in response["hits"]["hits"]]
+
         if not results:
             success = True
-            return f"No fleet data found for query: '{query}'"
-        
-        response = f"🚛 Found {len(results)} trucks matching '{query}':\n\n"
-        for truck in results:
-            response += f"• **{truck.get('plate_number')}** - {truck.get('driver_name')}\n"
-            response += f"  Status: {truck.get('status')}\n"
-            if truck.get('cargo'):
-                response += f"  Cargo: {truck.get('cargo', {}).get('description', 'N/A')}\n"
-            response += f"  Location: {truck.get('current_location', {}).get('name', 'Unknown')}\n\n"
-        
+            filter_msg = f" with asset_type='{asset_type}'" if asset_type else ""
+            return f"No fleet data found for query: '{query}'{filter_msg}"
+
+        type_label = asset_type if asset_type else "assets"
+        response_text = f"🚛 Found {len(results)} {type_label} matching '{query}':\n\n"
+        for asset in results:
+            # Use asset_name or plate_number as the display name
+            display_name = asset.get('asset_name') or asset.get('plate_number') or asset.get('vessel_name') or asset.get('equipment_model') or asset.get('container_number') or 'Unknown'
+            asset_type_label = asset.get('asset_type', 'vehicle')
+            asset_subtype_label = asset.get('asset_subtype', 'truck')
+
+            response_text += f"• **{display_name}** [{asset_type_label}/{asset_subtype_label}] - {asset.get('driver_name', 'N/A')}\n"
+            response_text += f"  Status: {asset.get('status')}\n"
+            if asset.get('cargo'):
+                response_text += f"  Cargo: {asset.get('cargo', {}).get('description', 'N/A')}\n"
+            response_text += f"  Location: {asset.get('current_location', {}).get('name', 'Unknown')}\n\n"
+
         success = True
-        return response
+        return response_text
     except Exception as e:
         error_msg = str(e)
         logger.error(f"Error searching fleet data: {e}")
         return f"Error searching fleet data: {str(e)}"
     finally:
-        _log_tool_invocation("search_fleet_data", {"query": query}, start_time, success, error_msg)
+        _log_tool_invocation("search_fleet_data", {"query": query, "asset_type": asset_type}, start_time, success, error_msg)
+
 
 @tool
 async def search_orders(query: str) -> str:

@@ -4,6 +4,7 @@ import {
   BarChart3,
   ChevronLeft,
   FileText,
+  Fuel,
   HelpCircle,
   LogOut,
   Package,
@@ -57,6 +58,12 @@ export default function Sidebar({
       label: "Failures",
       icon: AlertTriangle,
       route: "/ops/failures",
+    },
+    {
+      id: "ops-fuel",
+      label: "Fuel",
+      icon: Fuel,
+      route: "/ops/fuel",
     },
   ];
 
