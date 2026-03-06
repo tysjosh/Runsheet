@@ -51,7 +51,6 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
   const [_toolStatus, setToolStatus] = useState<string>("");
-  const [mode, setMode] = useState<"chat" | "agent">("chat");
   const [reportContent, setReportContent] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -153,7 +152,7 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
         },
         body: JSON.stringify({
           message: userMessage,
-          mode: mode,
+          mode: "chat",
         }),
         signal: controller.signal,
       });
@@ -443,29 +442,7 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
             </div>
           </div>
 
-          {/* Mode Toggle */}
-          <div className="flex bg-gray-50 rounded-lg p-0.5 border border-gray-200">
-            <button
-              onClick={() => setMode("chat")}
-              className={`flex-1 px-2.5 py-1.5 text-xs font-medium rounded-md transition-all duration-200 ${
-                mode === "chat"
-                  ? "bg-white text-gray-900 shadow-sm border border-gray-200"
-                  : "text-gray-500 hover:text-gray-700 hover:bg-gray-100"
-              }`}
-            >
-              Chat
-            </button>
-            <button
-              onClick={() => setMode("agent")}
-              className={`flex-1 px-2.5 py-1.5 text-xs font-medium rounded-md transition-all duration-200 ${
-                mode === "agent"
-                  ? "bg-white text-gray-900 shadow-sm border border-gray-200"
-                  : "text-gray-500 hover:text-gray-700 hover:bg-gray-100"
-              }`}
-            >
-              Agent
-            </button>
-          </div>
+          {/* Mode Toggle removed — single unified mode */}
         </div>
 
         {/* Messages */}
@@ -543,11 +520,7 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyPress={handleKeyPress}
-                placeholder={
-                  mode === "chat"
-                    ? "Ask me anything..."
-                    : "Describe your analysis..."
-                }
+                placeholder="Ask me anything about your operations..."
                 disabled={isStreaming}
                 className="w-full px-4 py-3 pr-12 bg-white border-2 border-gray-200 rounded-2xl focus:outline-none focus:border-gray-400 focus:ring-2 focus:ring-gray-100 text-sm transition-all duration-200 disabled:bg-gray-100 disabled:cursor-not-allowed shadow-sm"
               />

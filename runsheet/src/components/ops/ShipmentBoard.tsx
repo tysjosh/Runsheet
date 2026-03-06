@@ -1,6 +1,7 @@
 "use client";
 
-import { ChevronDown, ChevronUp } from "lucide-react";
+import { ChevronDown, ChevronUp, ExternalLink } from "lucide-react";
+import Link from "next/link";
 import { useCallback, useState } from "react";
 import type { OpsShipment } from "../../services/opsApi";
 
@@ -170,7 +171,13 @@ export default function ShipmentBoard({
                 className={`${getRowColor(shipment, isBreach)} transition-colors`}
               >
                 <td className="px-6 py-3 text-sm font-medium text-[#232323]">
-                  {shipment.shipment_id}
+                  <Link
+                    href={`/ops/tracking/${encodeURIComponent(shipment.shipment_id)}`}
+                    className="hover:underline flex items-center gap-1"
+                  >
+                    {shipment.shipment_id}
+                    <ExternalLink className="w-3 h-3 text-gray-400" />
+                  </Link>
                 </td>
                 <td className="px-6 py-3">
                   <span

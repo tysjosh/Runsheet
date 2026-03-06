@@ -1,8 +1,9 @@
 "use client";
 
-import { CalendarClock } from "lucide-react";
+import { CalendarClock, Plus } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import LoadingSpinner from "../../../components/LoadingSpinner";
+import CreateJobModal from "../../../components/ops/CreateJobModal";
 import JobBoard from "../../../components/ops/JobBoard";
 import JobFilters, {
   type JobFilterValues,
@@ -36,6 +37,7 @@ export default function SchedulingJobBoardPage() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [loading, setLoading] = useState(true);
   const [filters, setFilters] = useState<JobFilterValues>(INITIAL_FILTERS);
+  const [showCreateModal, setShowCreateModal] = useState(false);
 
   const loadData = useCallback(async () => {
     try {
@@ -150,18 +152,28 @@ export default function SchedulingJobBoardPage() {
     <div className="h-full flex flex-col bg-white">
       {/* Header */}
       <div className="border-b border-gray-100 px-8 py-6">
-        <div className="flex items-center gap-3 mb-6">
-          <div className="w-10 h-10 bg-[#232323] rounded-xl flex items-center justify-center">
-            <CalendarClock className="w-5 h-5 text-white" />
+        <div className="flex items-center justify-between mb-6">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-[#232323] rounded-xl flex items-center justify-center">
+              <CalendarClock className="w-5 h-5 text-white" />
+            </div>
+            <div>
+              <h1 className="text-2xl font-semibold text-[#232323]">
+                Job Board
+              </h1>
+              <p className="text-gray-500">
+                Manage and track all logistics jobs in real time
+              </p>
+            </div>
           </div>
-          <div>
-            <h1 className="text-2xl font-semibold text-[#232323]">
-              Job Board
-            </h1>
-            <p className="text-gray-500">
-              Manage and track all logistics jobs in real time
-            </p>
-          </div>
+          <button
+            onClick={() => setShowCreateModal(true)}
+            className="flex items-center gap-2 px-4 py-2 text-sm text-white rounded-lg transition-colors hover:opacity-90"
+            style={{ backgroundColor: "#232323" }}
+          >
+            <Plus className="w-4 h-4" />
+            Create Job
+          </button>
         </div>
 
         <JobFilters filters={filters} onChange={setFilters} />
@@ -176,6 +188,14 @@ export default function SchedulingJobBoardPage() {
       <div className="flex-1 overflow-y-auto">
         <JobBoard jobs={jobs} onTransition={handleTransition} />
       </div>
+
+      {/* Create Job Modal */}
+      {showCreateModal && (
+        <CreateJobModal
+          onClose={() => setShowCreateModal(false)}
+          onCreated={(job) => setJobs((prev) => [job, ...prev])}
+        />
+      )}
     </div>
   );
 }

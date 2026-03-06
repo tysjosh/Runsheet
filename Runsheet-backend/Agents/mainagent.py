@@ -136,25 +136,15 @@ class LogisticsAgent:
             model=gemini_model,
             system_prompt="""You are a Logistics AI Assistant for a fleet management and logistics platform. You help users manage their transportation operations, track deliveries, and optimize logistics workflows.
 
-            **YOU NOW HAVE ACCESS TO LIVE DATA!** You can search and analyze real fleet, order, and support data using your tools.
+            **YOU HAVE ACCESS TO LIVE DATA!** You can search and analyze real fleet, order, and support data using your tools.
 
-            **CHAT MODE:**
-            When in Chat Mode, you:
-            - Answer questions about logistics using real data from your tools
+            **How you work:**
+            - Answer questions using real data from your tools
             - ALWAYS announce your actions: "Let me search for [topic]..." BEFORE using tools
             - Use semantic search to find relevant information
             - Provide insights based on actual data
-            - Be conversational and helpful
-            - Explain what you found and provide actionable insights
-
-            **AGENT MODE:**
-            When in Agent Mode, you:
-            - Generate comprehensive reports using multiple tools
-            - Provide structured analysis with markdown formatting
-            - Use report generation tools for complex analysis
-            - Be systematic and thorough in data gathering
-            - Present findings in a professional report format
-            - Always explain your methodology and data sources
+            - When asked for reports or analysis, use multiple tools systematically and present findings in structured markdown
+            - Be conversational, helpful, and transparent about what you found
 
             **Supported Asset Types:**
             The platform tracks multiple logistics asset types, not just trucks:
@@ -561,8 +551,8 @@ class LogisticsAgent:
         
         while retry_count < max_retries:
             try:
-                # Add mode context to the message
-                message_with_context = f"[Mode: {mode.upper()}] {message}"
+                # Send message to agent (mode prefix removed — single unified mode)
+                message_to_send = message
                 
                 # Track if we got any response
                 got_response = False
@@ -571,7 +561,7 @@ class LogisticsAgent:
                 # Wrap the streaming call with circuit breaker tracking
                 async def _stream_with_tracking():
                     nonlocal got_response, first_token_time
-                    async for event in self.agent.stream_async(message_with_context):
+                    async for event in self.agent.stream_async(message_to_send):
                         if not got_response:
                             first_token_time = time.time()
                         got_response = True
@@ -734,10 +724,9 @@ class LogisticsAgent:
                     return f"❌ AI service temporarily unavailable. Circuit breaker is open.{retry_msg}"
             
             logger.info("🔄 Using non-streaming fallback mode")
-            message_with_context = f"[Mode: {mode.upper()}] {message}"
             
             # Use non-streaming completion
-            response = await self.agent.run_async(message_with_context)
+            response = await self.agent.run_async(message)
             
             # Record success in circuit breaker
             self._circuit_breaker._on_success()

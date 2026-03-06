@@ -1,6 +1,7 @@
 "use client";
 
-import { ChevronDown, ChevronUp } from "lucide-react";
+import { ChevronDown, ChevronUp, ExternalLink } from "lucide-react";
+import Link from "next/link";
 import { useCallback, useState } from "react";
 import type { Job, JobStatus } from "../../types/api";
 import JobActionButtons from "./JobActionButtons";
@@ -186,7 +187,17 @@ export default function JobBoard({ jobs, onTransition }: JobBoardProps) {
               className={`${getRowColor(job)} transition-colors`}
             >
               <td className="px-6 py-3 text-sm font-medium text-[#232323]">
-                {job.job_id}
+                {job.job_type === "cargo_transport" ? (
+                  <Link
+                    href={`/ops/scheduling/${encodeURIComponent(job.job_id)}/cargo`}
+                    className="hover:underline flex items-center gap-1"
+                  >
+                    {job.job_id}
+                    <ExternalLink className="w-3 h-3 text-gray-400" />
+                  </Link>
+                ) : (
+                  job.job_id
+                )}
               </td>
               <td className="px-6 py-3 text-sm text-gray-700">
                 {formatJobType(job.job_type)}

@@ -26,36 +26,56 @@ function GoogleChart({
   height = "300px",
 }: GoogleChartProps) {
   const chartRef = React.useRef<HTMLDivElement>(null);
+  const [ready, setReady] = useState(false);
 
-  const drawChart = () => {
-    if (!chartRef.current || !window.google?.visualization) return;
-
-    const dataTable = window.google.visualization.arrayToDataTable(data);
-    const chart = new window.google.visualization[chartType](chartRef.current);
-    chart.draw(dataTable, options);
-  };
-
-  const loadGoogleCharts = () => {
+  // Load Google Charts script once
+  useEffect(() => {
     if (typeof window === "undefined") return;
 
+    // Already fully loaded
+    if (window.google?.visualization?.arrayToDataTable) {
+      setReady(true);
+      return;
+    }
+
+    // Script already injected but not finished loading — wait for it
+    if (window.google?.charts) {
+      window.google.charts.setOnLoadCallback(() => setReady(true));
+      return;
+    }
+
+    // First load — inject script
     const script = document.createElement("script");
     script.src = "https://www.gstatic.com/charts/loader.js";
     script.onload = () => {
       window.google.charts.load("current", {
         packages: ["corechart", "gauge"],
       });
-      window.google.charts.setOnLoadCallback(drawChart);
+      window.google.charts.setOnLoadCallback(() => setReady(true));
     };
     document.head.appendChild(script);
-  };
+  }, []);
 
+  // Draw chart when ready or data changes
   useEffect(() => {
-    if (typeof window !== "undefined" && window.google?.visualization) {
-      drawChart();
-    } else {
-      loadGoogleCharts();
+    if (!ready || !chartRef.current || !window.google?.visualization) return;
+    if (!data || data.length < 2) return; // Need header + at least one data row
+    try {
+      const dataTable = window.google.visualization.arrayToDataTable(data);
+      const chart = new window.google.visualization[chartType](chartRef.current);
+      chart.draw(dataTable, options);
+    } catch (e) {
+      console.error("Failed to draw chart:", e);
     }
-  }, [drawChart, loadGoogleCharts]);
+  }, [ready, data, chartType, options]);
+
+  if (!ready) {
+    return (
+      <div style={{ width, height }} className="flex items-center justify-center text-gray-400 text-sm">
+        Loading chart...
+      </div>
+    );
+  }
 
   return <div ref={chartRef} style={{ width, height }} />;
 }
@@ -121,15 +141,24 @@ export default function Analytics() {
     const metricField = metricFieldMap[metric as keyof typeof metricFieldMap];
     const API_BASE_URL =
       process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
-    const response = await fetch(
-      `${API_BASE_URL}/analytics/time-series?metric=${metricField}&timeRange=${range}`,
-    );
-    const result = await response.json();
+
+    let timeSeriesPoints: any[] = [];
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/analytics/time-series?metric=${metricField}&timeRange=${range}`,
+      );
+      if (response.ok) {
+        const result = await response.json();
+        timeSeriesPoints = Array.isArray(result.data) ? result.data : [];
+      }
+    } catch (e) {
+      console.error("Failed to fetch time series:", e);
+    }
 
     setChartData({
       timeSeriesData: [
-        ["Time", getMetricLabel(metric)],
-        ...result.data.map((point: any) => [
+        [{ type: "string", label: "Time" }, { type: "number", label: getMetricLabel(metric) }],
+        ...timeSeriesPoints.map((point: any) => [
           new Date(point.timestamp).toLocaleDateString(),
           Number(point.value) || 0,
         ]),
@@ -142,9 +171,9 @@ export default function Analytics() {
         ]),
       ],
       barChartData: [
-        ["Route", "Performance"],
+        [{ type: "string", label: "Route" }, { type: "number", label: "Performance" }],
         ...routePerformance.map((route) => [
-          route.name,
+          String(route.name),
           Number(route.performance) || 0,
         ]),
       ],

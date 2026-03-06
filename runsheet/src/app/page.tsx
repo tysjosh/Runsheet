@@ -9,25 +9,26 @@ import LoadingSpinner from "../components/LoadingSpinner";
 import Sidebar from "../components/Sidebar";
 import type { Truck } from "../types/api";
 
-// Lazy-load heavy components for code splitting
-// These components are loaded on-demand when their routes are accessed
-
-// MapView is lazy-loaded because it includes the heavy Google Maps library
+// MapView — heavy Google Maps library, no SSR
 const MapView = dynamic(() => import("../components/MapView"), {
   loading: () => <MapLoadingPlaceholder />,
-  ssr: false, // Google Maps doesn't work with SSR
+  ssr: false,
 });
 
-// Route-based lazy loading for main content components
-const FleetTracking = lazy(() => import("../components/FleetTracking"));
+// Lazy-load all content components
+const FleetDashboard = lazy(() => import("../components/FleetDashboard"));
 const AIChat = lazy(() => import("../components/AIChat"));
 const DataUpload = lazy(() => import("../components/DataUpload"));
 const Inventory = lazy(() => import("../components/Inventory"));
-const Orders = lazy(() => import("../components/Orders"));
-const Analytics = lazy(() => import("../components/Analytics"));
+const AnalyticsDashboard = lazy(() => import("../components/AnalyticsDashboard"));
 const Support = lazy(() => import("../components/Support"));
 
-// Loading placeholder for the map component
+// Ops components (previously on /ops/* routes)
+const SchedulingJobBoard = lazy(() => import("../app/ops/scheduling/page"));
+const FuelDashboard = lazy(() => import("../app/ops/fuel/page"));
+const RiderUtilization = lazy(() => import("../app/ops/riders/page"));
+const OperationsControl = lazy(() => import("../app/ops/control/page"));
+
 function MapLoadingPlaceholder() {
   return (
     <div className="h-full flex items-center justify-center bg-gray-50">
@@ -39,7 +40,6 @@ function MapLoadingPlaceholder() {
   );
 }
 
-// Generic loading placeholder for lazy-loaded components
 function ComponentLoadingPlaceholder() {
   return (
     <div className="h-full flex items-center justify-center bg-gray-50">
@@ -57,49 +57,22 @@ export default function Home() {
   const [selectedTruck, setSelectedTruck] = useState<Truck | null>(null);
   const [aiChatOpen, setAiChatOpen] = useState(false);
 
-  // Check authentication on component mount
   useEffect(() => {
-    const checkAuth = () => {
+    if (typeof window !== "undefined") {
       const authStatus = localStorage.getItem("isAuthenticated");
-
       if (authStatus === "true") {
         setIsAuthenticated(true);
-        setIsLoading(false);
       } else {
-        // Clear any existing auth data
         localStorage.removeItem("isAuthenticated");
         localStorage.removeItem("userEmail");
-
-        // Redirect to signin
         router.replace("/signin");
-        setIsLoading(false);
       }
-    };
-
-    // Check if we're in the browser environment
-    if (typeof window !== "undefined") {
-      checkAuth();
+      setIsLoading(false);
     }
   }, [router]);
 
-  const handleSidebarToggle = () => {
-    setSidebarCollapsed(!sidebarCollapsed);
-  };
-
-  const handleMenuNavigation = (item: string) => {
-    // Ops items navigate to /ops/* routes via the Sidebar's router.push,
-    // so we don't need to update activeMenuItem for them here.
-    if (!item.startsWith("ops-")) {
-      setActiveMenuItem(item.toLowerCase());
-    }
-  };
-
   const handleTruckSelect = (truck: Truck) => {
     setSelectedTruck(truck);
-  };
-
-  const handleAIClick = () => {
-    setAiChatOpen(true);
   };
 
   const renderMainContent = () => {
@@ -112,6 +85,28 @@ export default function Home() {
                 <DataUpload />
               </Suspense>
             </div>
+          </div>
+        );
+
+      case "fleet":
+        return (
+          <Suspense fallback={<ComponentLoadingPlaceholder />}>
+            <FleetDashboard
+              selectedTruck={selectedTruck}
+              onTruckSelect={handleTruckSelect}
+              mapView={<MapView selectedTruck={selectedTruck} />}
+            />
+          </Suspense>
+        );
+
+      case "scheduling":
+        return (
+          <div className="flex-1 bg-gray-50">
+            <ErrorBoundary componentName="Scheduling">
+              <Suspense fallback={<ComponentLoadingPlaceholder />}>
+                <SchedulingJobBoard />
+              </Suspense>
+            </ErrorBoundary>
           </div>
         );
 
@@ -128,50 +123,43 @@ export default function Home() {
           </div>
         );
 
-      case "orders":
+      case "fuel":
         return (
-          <div className="flex-1 p-6 bg-gray-50">
-            <div className="bg-white rounded-xl shadow-sm border border-gray-200 h-full overflow-hidden">
-              <ErrorBoundary componentName="Orders">
-                <Suspense fallback={<ComponentLoadingPlaceholder />}>
-                  <Orders />
-                </Suspense>
-              </ErrorBoundary>
-            </div>
+          <div className="flex-1 bg-gray-50">
+            <ErrorBoundary componentName="Fuel">
+              <Suspense fallback={<ComponentLoadingPlaceholder />}>
+                <FuelDashboard />
+              </Suspense>
+            </ErrorBoundary>
           </div>
         );
 
-      case "fleet":
+      case "riders":
         return (
-          <div className="flex-1 p-6 bg-gray-50">
-            <div className="flex gap-6 h-full">
-              {/* Fleet Tracking Panel */}
-              <div className="w-1/2 bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-                <ErrorBoundary componentName="Fleet Tracking">
-                  <Suspense fallback={<ComponentLoadingPlaceholder />}>
-                    <FleetTracking onTruckSelect={handleTruckSelect} />
-                  </Suspense>
-                </ErrorBoundary>
-              </div>
-
-              {/* Map View - Lazy-loaded with dynamic import (includes Google Maps) */}
-              <div className="w-1/2 bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-                <MapView selectedTruck={selectedTruck} />
-              </div>
-            </div>
+          <div className="flex-1 bg-gray-50">
+            <ErrorBoundary componentName="Riders">
+              <Suspense fallback={<ComponentLoadingPlaceholder />}>
+                <RiderUtilization />
+              </Suspense>
+            </ErrorBoundary>
           </div>
         );
 
       case "analytics":
         return (
-          <div className="flex-1 p-6 bg-gray-50">
-            <div className="bg-white rounded-xl shadow-sm border border-gray-200 h-full overflow-hidden">
-              <ErrorBoundary componentName="Analytics">
-                <Suspense fallback={<ComponentLoadingPlaceholder />}>
-                  <Analytics />
-                </Suspense>
-              </ErrorBoundary>
-            </div>
+          <Suspense fallback={<ComponentLoadingPlaceholder />}>
+            <AnalyticsDashboard />
+          </Suspense>
+        );
+
+      case "control-center":
+        return (
+          <div className="flex-1 bg-gray-50">
+            <ErrorBoundary componentName="Control Center">
+              <Suspense fallback={<ComponentLoadingPlaceholder />}>
+                <OperationsControl />
+              </Suspense>
+            </ErrorBoundary>
           </div>
         );
 
@@ -204,7 +192,6 @@ export default function Home() {
     }
   };
 
-  // Show loading spinner while checking authentication
   if (isLoading) {
     return (
       <div className="h-screen flex items-center justify-center bg-gray-50">
@@ -216,30 +203,22 @@ export default function Home() {
     );
   }
 
-  // Don't render main app if not authenticated
-  if (!isAuthenticated) {
-    return null;
-  }
+  if (!isAuthenticated) return null;
 
   return (
     <div className="h-screen flex flex-col bg-white">
       <div className="flex flex-1 overflow-hidden">
-        {/* Sidebar - Full Height (minus top bar) */}
         <Sidebar
           activeItem={activeMenuItem}
           isCollapsed={sidebarCollapsed}
-          onToggle={handleSidebarToggle}
-          onNavigate={handleMenuNavigation}
-          opsEnabled={true}
+          onToggle={() => setSidebarCollapsed(!sidebarCollapsed)}
+          onNavigate={(item) => setActiveMenuItem(item)}
         />
-
-        {/* Main Content Area */}
         <div
           className="flex-1 flex flex-col min-h-0 overflow-hidden"
           style={{ minWidth: 0 }}
         >
-          <Header onAIClick={handleAIClick} />
-
+          <Header onAIClick={() => setAiChatOpen(true)} />
           <main className="flex-1 flex bg-white relative z-0 overflow-hidden">
             <div className="flex-1 flex bg-white overflow-auto">
               {renderMainContent()}
@@ -247,8 +226,6 @@ export default function Home() {
           </main>
         </div>
       </div>
-
-      {/* AI Chat Overlay - Lazy-loaded */}
       <ErrorBoundary componentName="AI Chat">
         <Suspense fallback={null}>
           <AIChat isOpen={aiChatOpen} onClose={() => setAiChatOpen(false)} />

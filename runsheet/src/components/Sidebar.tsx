@@ -1,10 +1,7 @@
 import {
-  Activity,
-  AlertTriangle,
   BarChart3,
   CalendarClock,
   ChevronLeft,
-  FileText,
   Fuel,
   HelpCircle,
   LogOut,
@@ -22,73 +19,33 @@ interface SidebarProps {
   isCollapsed: boolean;
   onToggle: () => void;
   onNavigate: (item: string) => void;
-  opsEnabled?: boolean;
 }
 
 export default function Sidebar({
-  activeItem = "Fleet",
+  activeItem = "fleet",
   isCollapsed,
   onToggle,
   onNavigate,
-  opsEnabled = false,
 }: SidebarProps) {
   const router = useRouter();
 
   const handleLogout = () => {
-    // Clear authentication state
     localStorage.removeItem("isAuthenticated");
     localStorage.removeItem("userEmail");
-
-    // Redirect to sign-in page
     router.push("/signin");
   };
 
   const menuItems = [
     { id: "upload-data", label: "Upload Data", icon: Upload },
-    { id: "inventory", label: "Inventory", icon: Package },
-    { id: "orders", label: "Orders", icon: FileText },
     { id: "fleet", label: "Fleet", icon: Truck },
+    { id: "scheduling", label: "Scheduling", icon: CalendarClock },
+    { id: "inventory", label: "Inventory", icon: Package },
+    { id: "fuel", label: "Fuel", icon: Fuel },
+    { id: "riders", label: "Riders", icon: Users },
     { id: "analytics", label: "Analytics", icon: BarChart3 },
+    { id: "control-center", label: "Control Center", icon: Radio },
     { id: "support", label: "Support", icon: HelpCircle },
   ];
-
-  const opsMenuItems = [
-    { id: "ops-shipments", label: "Shipments", icon: Activity, route: "/ops" },
-    { id: "ops-riders", label: "Riders", icon: Users, route: "/ops/riders" },
-    {
-      id: "ops-failures",
-      label: "Failure Analytics",
-      icon: AlertTriangle,
-      route: "/ops/failures",
-    },
-    {
-      id: "ops-fuel",
-      label: "Fuel",
-      icon: Fuel,
-      route: "/ops/fuel",
-    },
-    {
-      id: "ops-scheduling",
-      label: "Scheduling",
-      icon: CalendarClock,
-      route: "/ops/scheduling",
-    },
-    {
-      id: "ops-control",
-      label: "Control Center",
-      icon: Radio,
-      route: "/ops/control",
-    },
-  ];
-
-  const handleItemClick = (itemId: string) => {
-    onNavigate(itemId);
-  };
-
-  const handleOpsItemClick = (route: string, itemId: string) => {
-    onNavigate(itemId);
-    router.push(route);
-  };
 
   return (
     <aside
@@ -156,7 +113,7 @@ export default function Sidebar({
                     e.currentTarget.style.backgroundColor = "#232323";
                   }
                 }}
-                onClick={() => handleItemClick(item.id)}
+                onClick={() => onNavigate(item.id)}
                 title={isCollapsed ? item.label : ""}
               >
                 <div
@@ -184,86 +141,6 @@ export default function Sidebar({
             </li>
           ))}
         </ul>
-
-        {/* Ops Intelligence Section - conditionally shown based on feature flag */}
-        {opsEnabled && (
-          <>
-            <div
-              className={`my-3 ${isCollapsed ? "flex justify-center" : "mx-3"}`}
-              style={{ borderTop: isCollapsed ? "none" : "1px solid rgba(35,35,35,0.08)" }}
-            >
-              {isCollapsed && (
-                <div className="w-6 border-t" style={{ borderColor: "rgba(35,35,35,0.15)" }} />
-              )}
-            </div>
-            {!isCollapsed && (
-              <p
-                className="px-3 mb-1.5 text-xs font-semibold uppercase tracking-wider"
-                style={{ color: "#999" }}
-              >
-                Ops
-              </p>
-            )}
-            <ul className="space-y-1.5">
-              {opsMenuItems.map((item) => (
-                <li key={item.id}>
-                  <div
-                    className={`flex items-center ${isCollapsed ? "justify-center" : "justify-start"} px-3 py-2.5 ${isCollapsed ? "rounded-2xl" : "rounded-lg"} cursor-pointer transition-all duration-200`}
-                    style={{
-                      color:
-                        activeItem.toLowerCase() === item.id
-                          ? "white"
-                          : "#232323",
-                      backgroundColor:
-                        activeItem.toLowerCase() === item.id
-                          ? "#232323"
-                          : "transparent",
-                    }}
-                    onMouseEnter={(e) => {
-                      if (activeItem.toLowerCase() !== item.id) {
-                        e.currentTarget.style.backgroundColor =
-                          "rgba(35,35,35,0.06)";
-                      } else {
-                        e.currentTarget.style.backgroundColor = "#1a1a1a";
-                      }
-                    }}
-                    onMouseLeave={(e) => {
-                      if (activeItem.toLowerCase() !== item.id) {
-                        e.currentTarget.style.backgroundColor = "transparent";
-                      } else {
-                        e.currentTarget.style.backgroundColor = "#232323";
-                      }
-                    }}
-                    onClick={() => handleOpsItemClick(item.route, item.id)}
-                    title={isCollapsed ? item.label : ""}
-                  >
-                    <div
-                      className={`flex items-center ${isCollapsed ? "" : "space-x-3"}`}
-                    >
-                      <item.icon
-                        className={`w-5 h-5 transition-colors`}
-                        style={{
-                          color:
-                            activeItem.toLowerCase() === item.id
-                              ? "white"
-                              : "#232323",
-                        }}
-                      />
-                      {!isCollapsed && (
-                        <span
-                          className="font-medium text-sm transition-opacity duration-200"
-                          style={{ opacity: isCollapsed ? 0 : 1 }}
-                        >
-                          {item.label}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          </>
-        )}
       </nav>
 
       {/* User Profile - Expanded */}

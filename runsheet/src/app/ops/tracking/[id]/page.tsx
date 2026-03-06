@@ -112,7 +112,7 @@ export default function ShipmentTrackingPage() {
             href="/ops"
             className="text-sm text-[#232323] underline hover:no-underline"
           >
-            Back to Shipment Board
+            Back to Fleet
           </Link>
         </div>
       </div>
@@ -131,7 +131,7 @@ export default function ShipmentTrackingPage() {
           className="inline-flex items-center gap-1 text-sm text-gray-500 hover:text-[#232323] mb-4"
         >
           <ArrowLeft className="w-4 h-4" />
-          Back to Shipment Board
+          Back to Fleet
         </Link>
 
         <div className="flex items-center gap-3 mb-4">
