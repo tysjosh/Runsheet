@@ -102,7 +102,7 @@ FUEL_EVENTS_INDEX = "fuel_events"
 FUEL_EVENTS_ILM_POLICY_NAME = "fuel-events-policy"
 
 
-def setup_fuel_indices(es_client):
+def setup_fuel_indices(es_client, es_service=None):
     """
     Create fuel indices and apply ILM policy.
 
@@ -112,7 +112,12 @@ def setup_fuel_indices(es_client):
 
     Args:
         es_client: An Elasticsearch client instance.
+        es_service: Optional ElasticsearchService for serverless detection.
     """
+    from services.elasticsearch_service import ElasticsearchService
+
+    is_serverless = es_service.is_serverless if es_service else False
+
     indices = {
         FUEL_STATIONS_INDEX: FUEL_STATIONS_MAPPING,
         FUEL_EVENTS_INDEX: FUEL_EVENTS_MAPPING,
@@ -121,6 +126,8 @@ def setup_fuel_indices(es_client):
     for index_name, mapping in indices.items():
         try:
             if not es_client.indices.exists(index=index_name):
+                if is_serverless:
+                    mapping = ElasticsearchService.strip_serverless_incompatible_settings(mapping)
                 es_client.indices.create(index=index_name, body=mapping)
                 logger.info(f"✅ Created fuel index: {index_name}")
             else:

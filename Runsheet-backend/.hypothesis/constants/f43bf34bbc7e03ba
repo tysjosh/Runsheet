@@ -1,0 +1,4 @@
+# file: /Users/olukotunjosh/Downloads/Runsheet/Runsheet-backend/scheduling/services/delay_detection_service.py
+# hypothesis_version: 6.151.5
+
+[0.0, 1000, '+00:00', 'Z', '_source', 'aggregations', 'aggs', 'asset_assigned', 'avg', 'avg_delay', 'avg_delay_minutes', 'bool', 'buckets', 'count', 'delay_alert', 'delayed', 'delays_by_job_type', 'destination', 'doc_count', 'estimated_arrival', 'field', 'gte', 'hits', 'job_id', 'job_type', 'key', 'lt', 'lte', 'must', 'origin', 'query', 'range', 'scheduled_time', 'size', 'status', 'tenant_id', 'term', 'terms', 'total', 'total_delayed', 'updated_at', 'value']

@@ -258,6 +258,23 @@ class Settings(BaseSettings):
         le=100.0,
         description="Drift detection alert threshold percentage (default 1%)"
     )
+
+    # Scheduling Configuration
+    scheduling_default_eta_hours: int = Field(
+        default=4,
+        ge=1,
+        description="Default ETA hours when no route calculation available"
+    )
+    scheduling_delay_check_interval_seconds: int = Field(
+        default=60,
+        ge=1,
+        description="Interval in seconds for periodic delay detection check"
+    )
+    scheduling_max_active_jobs_per_asset: int = Field(
+        default=1,
+        ge=1,
+        description="Maximum concurrent active jobs per asset"
+    )
     
     # Note: model_config is set dynamically via create_settings_for_environment()
     model_config = SettingsConfigDict(

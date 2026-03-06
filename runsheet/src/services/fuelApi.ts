@@ -169,7 +169,7 @@ async function fetchWithTimeout(
 }
 
 function buildQueryString(
-  params: Record<string, string | number | boolean | undefined | null>,
+  params: Record<string, string | number | boolean | undefined | null> | object,
 ): string {
   const entries = Object.entries(params).filter(
     ([, v]) => v !== undefined && v !== null && v !== "",

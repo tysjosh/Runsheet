@@ -44,9 +44,6 @@ export interface FleetMessage {
 /**
  * Location update message data
  */
-export /**
- * Location update message data
- */
 export interface LocationUpdateData {
   truck_id: string;
   coordinates: {

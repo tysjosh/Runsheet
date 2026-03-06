@@ -20,6 +20,9 @@ from errors.exceptions import forbidden
 
 logger = logging.getLogger(__name__)
 
+# Default tenant context for development mode (no JWT required)
+_DEV_TENANT = None
+
 
 @dataclass
 class TenantContext:
@@ -35,6 +38,9 @@ async def get_tenant_context(request: Request) -> TenantContext:
     FastAPI dependency that extracts tenant_id exclusively from the
     signed JWT ``tenant_id`` claim.
 
+    In development mode, if no Authorization header is present, returns
+    a default dev tenant context to allow frontend access without JWT.
+
     Validates: Requirements 9.1, 9.6, 9.8
     - Derives tenant_id only from the signed JWT token
     - Rejects requests where the JWT claim is missing or invalid (403)
@@ -44,6 +50,20 @@ async def get_tenant_context(request: Request) -> TenantContext:
 
     # Extract the Authorization header
     auth_header: str | None = request.headers.get("Authorization")
+
+    # In development mode, allow unauthenticated access with a default tenant
+    if (not auth_header or not auth_header.startswith("Bearer ")) and settings.environment.value == "development":
+        logger.debug(
+            "Dev mode: returning default tenant context for %s %s",
+            request.method,
+            request.url.path,
+        )
+        return TenantContext(
+            tenant_id="dev-tenant",
+            user_id="dev-user",
+            has_pii_access=True,
+        )
+
     if not auth_header or not auth_header.startswith("Bearer "):
         logger.debug(
             "Tenant guard rejected request: missing or malformed Authorization header "

@@ -47,6 +47,14 @@ from .fuel_tools import (
     generate_fuel_report
 )
 
+from .scheduling_tools import (
+    search_jobs,
+    get_job_details,
+    find_available_assets,
+    get_scheduling_summary,
+    generate_dispatch_report
+)
+
 # All available tools
 ALL_TOOLS = [
     # Search tools
@@ -86,4 +94,11 @@ ALL_TOOLS = [
     get_fuel_summary,
     get_fuel_consumption_history,
     generate_fuel_report,
+
+    # Scheduling tools
+    search_jobs,
+    get_job_details,
+    find_available_assets,
+    get_scheduling_summary,
+    generate_dispatch_report,
 ]

@@ -2,12 +2,14 @@ import {
   Activity,
   AlertTriangle,
   BarChart3,
+  CalendarClock,
   ChevronLeft,
   FileText,
   Fuel,
   HelpCircle,
   LogOut,
   Package,
+  Radio,
   Truck,
   Upload,
   User,
@@ -55,7 +57,7 @@ export default function Sidebar({
     { id: "ops-riders", label: "Riders", icon: Users, route: "/ops/riders" },
     {
       id: "ops-failures",
-      label: "Failures",
+      label: "Failure Analytics",
       icon: AlertTriangle,
       route: "/ops/failures",
     },
@@ -64,6 +66,18 @@ export default function Sidebar({
       label: "Fuel",
       icon: Fuel,
       route: "/ops/fuel",
+    },
+    {
+      id: "ops-scheduling",
+      label: "Scheduling",
+      icon: CalendarClock,
+      route: "/ops/scheduling",
+    },
+    {
+      id: "ops-control",
+      label: "Control Center",
+      icon: Radio,
+      route: "/ops/control",
     },
   ];
 
@@ -175,9 +189,13 @@ export default function Sidebar({
         {opsEnabled && (
           <>
             <div
-              className="my-3 mx-3"
-              style={{ borderTop: "1px solid rgba(35,35,35,0.08)" }}
-            />
+              className={`my-3 ${isCollapsed ? "flex justify-center" : "mx-3"}`}
+              style={{ borderTop: isCollapsed ? "none" : "1px solid rgba(35,35,35,0.08)" }}
+            >
+              {isCollapsed && (
+                <div className="w-6 border-t" style={{ borderColor: "rgba(35,35,35,0.15)" }} />
+              )}
+            </div>
             {!isCollapsed && (
               <p
                 className="px-3 mb-1.5 text-xs font-semibold uppercase tracking-wider"

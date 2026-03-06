@@ -1,0 +1,4 @@
+# file: /Users/olukotunjosh/Downloads/Runsheet/Runsheet-backend/config/settings.py
+# hypothesis_version: 6.151.5
+
+[0.0, 1.0, 20.0, 100.0, 100, 168, 365, 500, 720, 1000, 10000, '*', '.', '.env', '.env.development', '.env.production', '.env.staging', '127.0.0.1', 'Allowed CORS origins', 'CRITICAL', 'DEBUG', 'ENVIRONMENT', 'ERROR', 'HS256', 'INFO', 'Settings', 'WARNING', 'after', 'cors_origins', 'development', 'dinee_api_base_url', 'dinee_webhook_secret', 'dynamodb', 'elastic_api_key', 'elastic_endpoint', 'env_files_checked', 'env_files_loaded', 'environment', 'errors', 'google_cloud_project', 'http://', 'https://', 'ignore', 'loc', 'localhost', 'log_level', 'missing', 'msg', 'production', 'redis', 'runsheet-backend', 'session_store_type', 'staging', 'type', 'us-central1', 'utf-8']

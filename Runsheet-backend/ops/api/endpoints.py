@@ -43,7 +43,7 @@ _metrics_rate = f"{_settings.ops_metrics_rate_limit}/minute"
 _ops_es_service: Optional[OpsElasticsearchService] = None
 _feature_flag_service: Optional[FeatureFlagService] = None
 
-router = APIRouter(prefix="/ops", tags=["ops"])
+router = APIRouter(prefix="/api/ops", tags=["ops"])
 
 
 def configure_ops_api(
@@ -219,7 +219,7 @@ async def get_sla_breaches(
     query["size"] = size
     query["sort"] = [{"estimated_delivery": {"order": "asc"}}]
 
-    result = await es.client.search(
+    result = es.client.search(
         index=OpsElasticsearchService.SHIPMENTS_CURRENT, body=query
     )
 
@@ -280,7 +280,7 @@ async def get_shipment_failures(
     query["size"] = size
     query["sort"] = [{"updated_at": {"order": "desc"}}]
 
-    result = await es.client.search(
+    result = es.client.search(
         index=OpsElasticsearchService.SHIPMENTS_CURRENT, body=query
     )
 
@@ -305,7 +305,7 @@ async def get_shipment_failures(
                 )
                 event_query["size"] = 1
                 event_query["sort"] = [{"event_timestamp": {"order": "desc"}}]
-                event_result = await es.client.search(
+                event_result = es.client.search(
                     index=OpsElasticsearchService.SHIPMENT_EVENTS, body=event_query
                 )
                 if event_result["hits"]["hits"]:
@@ -374,7 +374,7 @@ async def list_shipments(
     query["size"] = size
     query["sort"] = [{sort_by: {"order": sort_order}}]
 
-    result = await es.client.search(index=OpsElasticsearchService.SHIPMENTS_CURRENT, body=query)
+    result = es.client.search(index=OpsElasticsearchService.SHIPMENTS_CURRENT, body=query)
 
     hits = result["hits"]["hits"]
     total = result["hits"]["total"]["value"]
@@ -408,7 +408,7 @@ async def get_shipment(
     )
     shipment_query["size"] = 1
 
-    shipment_result = await es.client.search(
+    shipment_result = es.client.search(
         index=OpsElasticsearchService.SHIPMENTS_CURRENT, body=shipment_query
     )
 
@@ -426,7 +426,7 @@ async def get_shipment(
     events_query["size"] = 1000
     events_query["sort"] = [{"event_timestamp": {"order": "asc"}}]
 
-    events_result = await es.client.search(
+    events_result = es.client.search(
         index=OpsElasticsearchService.SHIPMENT_EVENTS, body=events_query
     )
 
@@ -476,7 +476,7 @@ async def get_rider_utilization(
     query["size"] = size
     query["sort"] = [{"last_seen": {"order": "desc"}}]
 
-    result = await es.client.search(
+    result = es.client.search(
         index=OpsElasticsearchService.RIDERS_CURRENT, body=query
     )
 
@@ -547,7 +547,7 @@ async def list_riders(
     query["size"] = size
     query["sort"] = [{"last_seen": {"order": "desc"}}]
 
-    result = await es.client.search(
+    result = es.client.search(
         index=OpsElasticsearchService.RIDERS_CURRENT, body=query
     )
 
@@ -583,7 +583,7 @@ async def get_rider(
     )
     rider_query["size"] = 1
 
-    rider_result = await es.client.search(
+    rider_result = es.client.search(
         index=OpsElasticsearchService.RIDERS_CURRENT, body=rider_query
     )
 
@@ -604,7 +604,7 @@ async def get_rider(
     shipments_query["size"] = 100
     shipments_query["sort"] = [{"updated_at": {"order": "desc"}}]
 
-    shipments_result = await es.client.search(
+    shipments_result = es.client.search(
         index=OpsElasticsearchService.SHIPMENTS_CURRENT, body=shipments_query
     )
 
@@ -663,7 +663,7 @@ async def list_events(
     query["size"] = size
     query["sort"] = [{"event_timestamp": {"order": "desc"}}]
 
-    result = await es.client.search(
+    result = es.client.search(
         index=OpsElasticsearchService.SHIPMENT_EVENTS, body=query
     )
 
@@ -775,7 +775,7 @@ async def get_shipment_metrics(
         }
     }
 
-    result = await es.client.search(
+    result = es.client.search(
         index=OpsElasticsearchService.SHIPMENTS_CURRENT, body=query
     )
 
@@ -853,7 +853,7 @@ async def get_sla_metrics(
         }
     }
 
-    result = await es.client.search(
+    result = es.client.search(
         index=OpsElasticsearchService.SHIPMENTS_CURRENT, body=query
     )
 
@@ -939,7 +939,7 @@ async def get_rider_metrics(
         }
     }
 
-    result = await es.client.search(
+    result = es.client.search(
         index=OpsElasticsearchService.RIDERS_CURRENT, body=query
     )
 
@@ -1006,7 +1006,7 @@ async def get_failure_metrics(
         }
     }
 
-    result = await es.client.search(
+    result = es.client.search(
         index=OpsElasticsearchService.SHIPMENTS_CURRENT, body=query
     )
 
@@ -1092,7 +1092,7 @@ async def get_ingestion_metrics(
         },
     }
 
-    events_result = await es.client.search(
+    events_result = es.client.search(
         index=OpsElasticsearchService.SHIPMENT_EVENTS, body=events_query
     )
 
@@ -1104,7 +1104,7 @@ async def get_ingestion_metrics(
         "query": {"range": {"created_at": {"gte": range_value}}},
         "size": 0,
     }
-    poison_result = await es.client.search(
+    poison_result = es.client.search(
         index=OpsElasticsearchService.POISON_QUEUE, body=poison_query
     )
     failed_events = poison_result["hits"]["total"]["value"]
@@ -1165,7 +1165,7 @@ async def get_indexing_metrics(
             },
         }
         try:
-            result = await es.client.search(index=index_name, body=count_query)
+            result = es.client.search(index=index_name, body=count_query)
             count = result["hits"]["total"]["value"]
             avg_lat = result.get("aggregations", {}).get("avg_latency", {}).get("value")
             total_indexed += count
@@ -1190,7 +1190,7 @@ async def get_indexing_metrics(
         "size": 0,
     }
     try:
-        poison_result = await es.client.search(
+        poison_result = es.client.search(
             index=OpsElasticsearchService.POISON_QUEUE, body=poison_query
         )
         indexing_errors = poison_result["hits"]["total"]["value"]
@@ -1248,7 +1248,7 @@ async def get_poison_queue_metrics(
         },
     }
 
-    result = await es.client.search(
+    result = es.client.search(
         index=OpsElasticsearchService.POISON_QUEUE, body=depth_query
     )
 

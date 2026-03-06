@@ -71,7 +71,8 @@ export default function DataUpload() {
 
   useEffect(() => {
     loadDemoStatus();
-  }, [loadDemoStatus]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const handleSheetsUpload = async () => {
     if (!sheetsUrl.trim()) return;

@@ -108,9 +108,12 @@ export default function FleetTracking({ onTruckSelect }: FleetTrackingProps) {
     },
   });
 
-  const loadFleetData = async () => {
+  const [error, setError] = useState<string | null>(null);
+
+  const loadFleetData = useCallback(async () => {
     try {
       setLoading(true);
+      setError(null);
 
       // Use getTrucks for backward compat when filter is "all" or "vehicle"
       // Use getAssets with asset_type filter for other types
@@ -126,16 +129,28 @@ export default function FleetTracking({ onTruckSelect }: FleetTrackingProps) {
 
       setTrucks(trucksResponse.data);
       setFleetSummary(summaryResponse.data);
-    } catch (error) {
-      console.error("Failed to load fleet data:", error);
+    } catch (err) {
+      console.error("Failed to load fleet data:", err);
+      setError("Unable to connect to the fleet API. Make sure the backend is running.");
     } finally {
       setLoading(false);
     }
-  };
+  }, [assetTypeFilter]);
 
   useEffect(() => {
-    loadFleetData();
-  }, [loadFleetData, assetTypeFilter]);
+    let cancelled = false;
+
+    const load = async () => {
+      if (cancelled) return;
+      await loadFleetData();
+    };
+
+    load();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [loadFleetData]);
 
   const handleTruckClick = (truck: Truck) => {
     setSelectedTruck(truck.id);
@@ -208,6 +223,23 @@ export default function FleetTracking({ onTruckSelect }: FleetTrackingProps) {
 
   if (loading) {
     return <LoadingSpinner message="Loading fleet data..." />;
+  }
+
+  if (error) {
+    return (
+      <div className="h-full flex items-center justify-center">
+        <div className="text-center max-w-md">
+          <p className="text-red-600 font-medium mb-2">Connection Error</p>
+          <p className="text-gray-500 text-sm mb-4">{error}</p>
+          <button
+            onClick={loadFleetData}
+            className="px-4 py-2 bg-gray-900 text-white text-sm rounded-lg hover:bg-gray-800 transition-colors"
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    );
   }
 
   return (

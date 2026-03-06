@@ -24,7 +24,8 @@ export default function Orders() {
 
   useEffect(() => {
     loadOrdersData();
-  }, [loadOrdersData]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const getStatusColor = (status: string) => {
     switch (status) {

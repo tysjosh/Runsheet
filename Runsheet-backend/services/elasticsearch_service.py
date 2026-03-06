@@ -40,6 +40,7 @@ class ElasticsearchService:
     def __init__(self):
         self.client = None
         self.settings = get_settings()
+        self._serverless: bool | None = None
         
         # Initialize circuit breaker for Elasticsearch operations
         # Default: 3 failures, 30 second recovery timeout
@@ -109,7 +110,36 @@ class ElasticsearchService:
             # For other errors, assume ILM might be available but there's a different issue
             logger.debug(f"ILM availability check encountered error: {e}")
             return False
-    
+
+    @property
+    def is_serverless(self) -> bool:
+        """Detect whether the connected Elasticsearch cluster is running in serverless mode.
+
+        The result is cached after the first call so subsequent checks are free.
+        Detection works by attempting to read ILM policies — serverless clusters
+        reject this with a 400 / "no handler found" error.
+        """
+        if self._serverless is None:
+            self._serverless = not self._check_ilm_available()
+        return self._serverless
+
+    @staticmethod
+    def strip_serverless_incompatible_settings(mapping: dict) -> dict:
+        """Return a copy of *mapping* with shard/replica settings removed.
+
+        Elastic Cloud Serverless does not allow ``number_of_shards`` or
+        ``number_of_replicas`` in index creation requests.  Call this before
+        ``indices.create`` when running against a serverless cluster.
+        """
+        import copy
+        mapping = copy.deepcopy(mapping)
+        settings = mapping.get("settings", {})
+        settings.pop("number_of_shards", None)
+        settings.pop("number_of_replicas", None)
+        if not settings:
+            mapping.pop("settings", None)
+        return mapping
+
     def setup_ilm_policies(self):
         """
         Set up Index Lifecycle Management (ILM) policies for data tiering.
@@ -532,7 +562,7 @@ class ElasticsearchService:
     
 
     def setup_indices(self):
-        """Create indices with proper mappings if they don't exist, and set up aliases"""
+        """Create indices with proper mappings if they don't exist, and update mappings for existing indices."""
         indices = {
             "trucks": self._get_trucks_mapping(),
             "locations": self._get_locations_mapping(),
@@ -541,7 +571,7 @@ class ElasticsearchService:
             "support_tickets": self._get_support_tickets_mapping(),
             "analytics_events": self._get_analytics_mapping()
         }
-        
+
         for index_name, mapping in indices.items():
             try:
                 if not self.client.indices.exists(index=index_name):
@@ -552,6 +582,8 @@ class ElasticsearchService:
                     logger.info(f"✅ Created index: {index_name}")
                 else:
                     logger.info(f"📋 Index already exists: {index_name}")
+                    # Update mapping with any new fields (existing fields are unchanged)
+                    self._update_index_mapping(index_name, mapping)
             except Exception as e:
                 logger.error(f"❌ Failed to create index {index_name}: {e}")
 
@@ -565,6 +597,38 @@ class ElasticsearchService:
                 logger.info("📋 Alias already exists: assets → trucks")
         except Exception as e:
             logger.warning(f"⚠️ Failed to create 'assets' alias pointing to 'trucks': {e}")
+    def _update_index_mapping(self, index_name: str, expected_mapping: Dict[str, Any]):
+        """
+        Update an existing index mapping with any new fields from the expected mapping.
+        Elasticsearch allows adding new fields to an existing mapping via PUT mapping.
+        Existing fields are not modified.
+        """
+        try:
+            current_mapping = self.client.indices.get_mapping(index=index_name)
+            current_props = (
+                current_mapping.get(index_name, {})
+                .get("mappings", {})
+                .get("properties", {})
+            )
+            expected_props = expected_mapping.get("mappings", {}).get("properties", {})
+
+            # Find fields that exist in expected but not in current
+            missing_fields = {
+                k: v for k, v in expected_props.items() if k not in current_props
+            }
+
+            if missing_fields:
+                logger.info(
+                    f"📝 Updating index '{index_name}' with {len(missing_fields)} new field(s): "
+                    f"{list(missing_fields.keys())}"
+                )
+                self.client.indices.put_mapping(
+                    index=index_name,
+                    body={"properties": missing_fields},
+                )
+                logger.info(f"✅ Updated mapping for index: {index_name}")
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to update mapping for index '{index_name}': {e}")
 
     def validate_index_schemas(self) -> Dict[str, Any]:
         """

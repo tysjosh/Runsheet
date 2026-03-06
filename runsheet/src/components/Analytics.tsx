@@ -97,7 +97,8 @@ export default function Analytics() {
 
   useEffect(() => {
     loadAnalyticsData();
-  }, [loadAnalyticsData]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const getMetricLabel = (metric: string) => {
     const labels = {

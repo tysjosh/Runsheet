@@ -75,6 +75,8 @@ class OpsElasticsearchService:
         Create all ops indices with strict mappings if they don't exist.
         Validates: Req 5.1-5.6
         """
+        from services.elasticsearch_service import ElasticsearchService
+
         indices = {
             self.SHIPMENTS_CURRENT: self._get_shipments_current_mapping(),
             self.SHIPMENT_EVENTS: self._get_shipment_events_mapping(),
@@ -85,6 +87,8 @@ class OpsElasticsearchService:
         for index_name, mapping in indices.items():
             try:
                 if not self.client.indices.exists(index=index_name):
+                    if self._es.is_serverless:
+                        mapping = ElasticsearchService.strip_serverless_incompatible_settings(mapping)
                     self.client.indices.create(index=index_name, body=mapping)
                     logger.info(f"✅ Created ops index: {index_name}")
                 else:

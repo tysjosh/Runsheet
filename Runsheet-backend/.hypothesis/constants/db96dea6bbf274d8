@@ -1,0 +1,4 @@
+# file: /Users/olukotunjosh/Downloads/Runsheet/Runsheet-backend/scheduling/services/cargo_service.py
+# hypothesis_version: 6.151.5
+
+[100, '_source', 'actor_id', 'asset_assigned', 'bool', 'cargo_complete', 'cargo_manifest', 'cargo_status_changed', 'cargo_update', 'cargo_updated', 'data', 'destination', 'event_id', 'event_payload', 'event_timestamp', 'event_type', 'from', 'hits', 'inner_hits', 'item_id', 'item_status', 'items', 'job_id', 'job_status', 'job_type', 'lang', 'match', 'must', 'nested', 'new_item_count', 'new_status', 'now', 'old_item_count', 'old_status', 'origin', 'page', 'pagination', 'painless', 'params', 'path', 'query', 'script', 'size', 'source', 'status', 'tenant_id', 'term', 'total', 'total_pages', 'updated_at', 'value']

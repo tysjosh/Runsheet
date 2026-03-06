@@ -45,7 +45,7 @@ _fuel_rate = f"{_settings.ops_api_rate_limit}/minute"
 # Module-level service reference, wired via configure_fuel_api()
 _fuel_service: Optional[FuelService] = None
 
-router = APIRouter(prefix="/fuel", tags=["fuel"])
+router = APIRouter(prefix="/api/fuel", tags=["fuel"])
 
 
 def configure_fuel_api(*, fuel_service: FuelService) -> None:

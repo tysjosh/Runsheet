@@ -87,7 +87,11 @@ export default function Home() {
   };
 
   const handleMenuNavigation = (item: string) => {
-    setActiveMenuItem(item.toLowerCase());
+    // Ops items navigate to /ops/* routes via the Sidebar's router.push,
+    // so we don't need to update activeMenuItem for them here.
+    if (!item.startsWith("ops-")) {
+      setActiveMenuItem(item.toLowerCase());
+    }
   };
 
   const handleTruckSelect = (truck: Truck) => {
@@ -226,6 +230,7 @@ export default function Home() {
           isCollapsed={sidebarCollapsed}
           onToggle={handleSidebarToggle}
           onNavigate={handleMenuNavigation}
+          opsEnabled={true}
         />
 
         {/* Main Content Area */}

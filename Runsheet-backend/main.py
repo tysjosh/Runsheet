@@ -42,6 +42,12 @@ from ops.services.drift_detector import configure_drift_detector
 from fuel.services.fuel_es_mappings import setup_fuel_indices
 from fuel.api.endpoints import router as fuel_router, configure_fuel_api
 from fuel.services.fuel_service import FuelService
+from scheduling.services.scheduling_es_mappings import setup_scheduling_indices
+from scheduling.api.endpoints import router as scheduling_router, configure_scheduling_api
+from scheduling.services.job_service import JobService
+from scheduling.services.cargo_service import CargoService
+from scheduling.services.delay_detection_service import DelayDetectionService
+from scheduling.websocket.scheduling_ws import SchedulingWebSocketManager, get_scheduling_ws_manager
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -107,13 +113,24 @@ async def lifespan(app: FastAPI):
     # Validates: Requirement 8.3
     try:
         logger.info("🔧 Setting up fuel monitoring indices...")
-        setup_fuel_indices(elasticsearch_service.client)
+        setup_fuel_indices(elasticsearch_service.client, es_service=elasticsearch_service)
         logger.info("✅ Fuel monitoring indices ready")
     except Exception as e:
         logger.warning(f"⚠️ Failed to set up fuel monitoring indices: {e}")
         # Don't fail startup, just log the warning
 
+    # Set up scheduling indices and ILM policies
+    # Validates: Requirements 1.5, 1.6
+    try:
+        logger.info("🔧 Setting up scheduling indices...")
+        setup_scheduling_indices(elasticsearch_service)
+        logger.info("✅ Scheduling indices ready")
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to set up scheduling indices: {e}")
+        # Don't fail startup, just log the warning
+
     # Connect idempotency service and wire webhook receiver dependencies
+    _delay_check_task = None
     try:
         await ops_idempotency.connect()
         await ops_feature_flags.connect()
@@ -181,6 +198,54 @@ async def lifespan(app: FastAPI):
         fuel_service = FuelService(elasticsearch_service)
         configure_fuel_api(fuel_service=fuel_service)
         logger.info("✅ Fuel API configured")
+
+        # Wire scheduling API endpoints with shared services
+        # Validates: Requirement 8.1
+        _redis_url = settings.redis_url or "redis://localhost:6379"
+        scheduling_job_service = JobService(elasticsearch_service, redis_url=_redis_url)
+        scheduling_cargo_service = CargoService(elasticsearch_service)
+        scheduling_delay_service = DelayDetectionService(elasticsearch_service, ws_manager=scheduling_ws_manager)
+
+        # Wire SchedulingWebSocketManager into services for real-time broadcasts
+        # Validates: Requirements 9.2, 9.4
+        scheduling_job_service._ws_manager = scheduling_ws_manager
+        scheduling_cargo_service._ws_manager = scheduling_ws_manager
+
+        configure_scheduling_api(
+            job_service=scheduling_job_service,
+            cargo_service=scheduling_cargo_service,
+            delay_service=scheduling_delay_service,
+        )
+        logger.info("✅ Scheduling API configured")
+
+        # Start periodic delay detection background task
+        # Validates: Requirements 7.3, 7.4
+        async def _periodic_delay_check(
+            delay_service: DelayDetectionService, interval: int
+        ) -> None:
+            """Background task that periodically checks for delayed jobs."""
+            try:
+                while True:
+                    await asyncio.sleep(interval)
+                    try:
+                        newly_delayed = await delay_service.check_delays(tenant_id=None)
+                        if newly_delayed:
+                            logger.info(
+                                "Periodic delay check: %d job(s) newly delayed",
+                                len(newly_delayed),
+                            )
+                    except Exception as exc:
+                        logger.error("Periodic delay check failed: %s", exc)
+            except asyncio.CancelledError:
+                logger.info("Periodic delay check task cancelled")
+
+        _delay_check_interval = settings.scheduling_delay_check_interval_seconds
+        _delay_check_task = asyncio.create_task(
+            _periodic_delay_check(scheduling_delay_service, _delay_check_interval)
+        )
+        logger.info(
+            "✅ Periodic delay check started (interval: %ds)", _delay_check_interval
+        )
     except Exception as e:
         logger.error(f"❌ Failed to configure webhook receiver: {e}")
     
@@ -188,8 +253,20 @@ async def lifespan(app: FastAPI):
     
     # Shutdown
     logger.info("👋 Shutting down Runsheet Logistics API...")
+    # Cancel periodic delay check background task
+    if _delay_check_task is not None and not _delay_check_task.done():
+        _delay_check_task.cancel()
+        try:
+            await _delay_check_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("✅ Periodic delay check task stopped")
     try:
         await ops_ws_manager.shutdown()
+    except Exception:
+        pass
+    try:
+        await scheduling_ws_manager.shutdown()
     except Exception:
         pass
     try:
@@ -276,6 +353,10 @@ fleet_connection_manager = get_connection_manager()
 # Validates: Requirement 16.1 - /ws/ops WebSocket endpoint
 ops_ws_manager = get_ops_ws_manager()
 
+# Initialize the Scheduling WebSocket manager for real-time scheduling updates
+# Validates: Requirement 9.1 - /ws/scheduling WebSocket endpoint
+scheduling_ws_manager = get_scheduling_ws_manager()
+
 # Configure the data ingestion service with the WebSocket connection manager
 # This enables automatic broadcasting of location updates to connected clients
 data_ingestion_service.set_connection_manager(fleet_connection_manager)
@@ -297,6 +378,11 @@ app.include_router(ops_router)
 # Include Fuel API router for fuel station management, events, alerts, and metrics
 # Validates: Requirement 1.1
 app.include_router(fuel_router)
+
+# Include Scheduling API router for job lifecycle, cargo tracking, and metrics
+# Rate limiting: 100 req/min per user for scheduling endpoints
+# Validates: Requirement 8.1
+app.include_router(scheduling_router)
 
 class ChatRequest(BaseModel):
     message: str
@@ -1291,6 +1377,60 @@ async def ops_live_websocket(websocket: WebSocket):
         logger.error("Ops WebSocket error: %s", exc)
     finally:
         await ops_ws_manager.disconnect(websocket)
+
+
+# =============================================================================
+# WebSocket: Scheduling Live Updates
+# =============================================================================
+# Real-time scheduling updates for job state changes, delay alerts, and cargo.
+# Clients may pass subscription filters as a query parameter:
+#   /ws/scheduling?subscriptions=job_created,status_changed,delay_alert,cargo_update
+#
+# Validates:
+# - Requirement 9.1: /ws/scheduling WebSocket endpoint
+# - Requirement 9.2: Broadcast job state changes
+# - Requirement 9.3: Subscription filters by event type
+# - Requirement 9.4: Broadcast delay alerts
+# - Requirement 9.6: Heartbeat every 30s
+# =============================================================================
+
+
+@app.websocket("/ws/scheduling")
+async def scheduling_live_websocket(websocket: WebSocket):
+    """
+    WebSocket endpoint for real-time scheduling updates.
+
+    Clients can subscribe to specific event types via query parameter:
+        /ws/scheduling?subscriptions=job_created,status_changed
+
+    Supported event types: job_created, status_changed, delay_alert,
+    cargo_update, cargo_complete.
+
+    If no subscriptions are specified, the client receives all event types.
+
+    Validates: Req 9.1, 9.3, 9.6
+    """
+    # Parse subscription filters from query params
+    subs_param = websocket.query_params.get("subscriptions", "")
+    subscriptions = [s.strip() for s in subs_param.split(",") if s.strip()] if subs_param else None
+
+    await scheduling_ws_manager.connect(websocket, subscriptions=subscriptions)
+
+    try:
+        while True:
+            try:
+                raw = await websocket.receive_text()
+                await scheduling_ws_manager.handle_client_message(websocket, raw)
+            except WebSocketDisconnect:
+                break
+            except Exception as exc:
+                logger.warning("Error in scheduling WS message loop: %s", exc)
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        logger.error("Scheduling WebSocket error: %s", exc)
+    finally:
+        await scheduling_ws_manager.disconnect(websocket)
 
 
 @app.websocket("/api/fleet/live")

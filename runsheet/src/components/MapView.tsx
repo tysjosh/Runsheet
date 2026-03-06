@@ -39,49 +39,60 @@ export default function MapView({
   const [showInfo, setShowInfo] = useState(true);
   const [trucks, setTrucks] = useState<Truck[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [activeTypeFilter, setActiveTypeFilter] = useState<AssetType | "all">(
     assetTypeFilter,
   );
 
   const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
 
-  const loadTrucks = async () => {
-    try {
-      // Fetch all assets (not just trucks) so every type appears on the map
-      const response = await apiService.getAssets();
-      // Filter assets with valid coordinates
-      const validTrucks = response.data.filter((truck) => {
-        const lat = truck.currentLocation?.coordinates?.lat;
-        const lng = truck.currentLocation?.coordinates?.lon;
-        const isValid =
-          typeof lat === "number" &&
-          typeof lng === "number" &&
-          !Number.isNaN(lat) &&
-          !Number.isNaN(lng) &&
-          lat >= -90 &&
-          lat <= 90 &&
-          lng >= -180 &&
-          lng <= 180;
-
-        if (!isValid) {
-          console.warn(`Invalid coordinates for truck ${truck.plateNumber}:`, {
-            lat,
-            lng,
-          });
-        }
-
-        return isValid;
-      });
-      setTrucks(validTrucks);
-    } catch (error) {
-      console.error("Failed to load trucks:", error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
   useEffect(() => {
+    let cancelled = false;
+
+    const loadTrucks = async () => {
+      try {
+        setError(null);
+        // Fetch all assets (not just trucks) so every type appears on the map
+        const response = await apiService.getAssets();
+        if (cancelled) return;
+        // Filter assets with valid coordinates
+        const validTrucks = response.data.filter((truck) => {
+          const lat = truck.currentLocation?.coordinates?.lat;
+          const lng = truck.currentLocation?.coordinates?.lon;
+          const isValid =
+            typeof lat === "number" &&
+            typeof lng === "number" &&
+            !Number.isNaN(lat) &&
+            !Number.isNaN(lng) &&
+            lat >= -90 &&
+            lat <= 90 &&
+            lng >= -180 &&
+            lng <= 180;
+
+          if (!isValid) {
+            console.warn(`Invalid coordinates for truck ${truck.plateNumber}:`, {
+              lat,
+              lng,
+            });
+          }
+
+          return isValid;
+        });
+        setTrucks(validTrucks);
+      } catch (err) {
+        if (cancelled) return;
+        console.error("Failed to load trucks:", err);
+        setError("Unable to connect to the fleet API. Make sure the backend is running.");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+
     loadTrucks();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   /** Filter assets by the active type filter */
@@ -117,6 +128,17 @@ export default function MapView({
         <div className="text-center">
           <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900 mx-auto"></div>
           <p className="mt-2 text-gray-600">Loading map...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="h-full flex items-center justify-center bg-gray-50">
+        <div className="text-center max-w-md">
+          <p className="text-red-600 font-medium mb-2">Connection Error</p>
+          <p className="text-gray-500 text-sm">{error}</p>
         </div>
       </div>
     );

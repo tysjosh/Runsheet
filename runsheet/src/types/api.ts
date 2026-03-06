@@ -125,3 +125,89 @@ export interface FleetFilters {
     end: string;
   };
 }
+
+
+// ─── Scheduling Types (Logistics Scheduling & Dispatch) ──────────────────────
+
+export type JobType =
+  | "cargo_transport"
+  | "passenger_transport"
+  | "vessel_movement"
+  | "airport_transfer"
+  | "crane_booking";
+
+export type JobStatus =
+  | "scheduled"
+  | "assigned"
+  | "in_progress"
+  | "completed"
+  | "cancelled"
+  | "failed";
+
+export type CargoItemStatus =
+  | "pending"
+  | "loaded"
+  | "in_transit"
+  | "delivered"
+  | "damaged";
+
+export type Priority = "low" | "normal" | "high" | "urgent";
+
+export interface SchedulingCargoItem {
+  item_id: string;
+  description: string;
+  weight_kg: number;
+  container_number?: string;
+  seal_number?: string;
+  item_status: CargoItemStatus;
+}
+
+export interface Job {
+  job_id: string;
+  job_type: JobType;
+  status: JobStatus;
+  tenant_id: string;
+  asset_assigned?: string;
+  origin: string;
+  destination: string;
+  scheduled_time: string;
+  estimated_arrival?: string;
+  started_at?: string;
+  completed_at?: string;
+  created_at: string;
+  updated_at: string;
+  created_by?: string;
+  priority: Priority;
+  delayed: boolean;
+  delay_duration_minutes?: number;
+  failure_reason?: string;
+  notes?: string;
+  cargo_manifest?: SchedulingCargoItem[];
+}
+
+export interface JobEvent {
+  event_id: string;
+  job_id: string;
+  event_type: string;
+  actor_id?: string;
+  event_timestamp: string;
+  event_payload: Record<string, unknown>;
+}
+
+export interface JobSummary {
+  total_jobs: number;
+  scheduled: number;
+  assigned: number;
+  in_progress: number;
+  completed: number;
+  cancelled: number;
+  failed: number;
+  delayed: number;
+}
+
+export interface OperationsControlSummary {
+  active_jobs: number;
+  delayed_jobs: number;
+  available_assets: number;
+  fuel_alerts: number;
+}

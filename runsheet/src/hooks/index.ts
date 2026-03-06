@@ -26,3 +26,15 @@ export type {
   WebSocketState,
 } from "./useWebSocket";
 export { useWebSocket } from "./useWebSocket";
+
+export type {
+  CargoUpdateEvent,
+  DelayAlertEvent,
+  JobCreatedEvent,
+  SchedulingEventType,
+  SchedulingWebSocketMessage,
+  SchedulingWebSocketOptions,
+  StatusChangedEvent,
+  UseSchedulingWebSocketReturn,
+} from "./useSchedulingWebSocket";
+export { useSchedulingWebSocket } from "./useSchedulingWebSocket";
