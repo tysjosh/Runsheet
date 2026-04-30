@@ -1,0 +1,277 @@
+/**
+ * Agent API service for the Agentic AI Transformation layer.
+ *
+ * Provides typed functions for interacting with the agent REST endpoints:
+ * - Approval queue (list, approve, reject)
+ * - Activity log (list, stats)
+ * - Agent health (status, pause, resume)
+ *
+ * Follows the same pattern as opsApi.ts and schedulingApi.ts.
+ *
+ * Requirements: 2.3, 2.4, 2.5, 8.4, 8.5, 9.5, 9.6
+ */
+
+import { API_TIMEOUTS, ApiError, ApiTimeoutError } from "./api";
+
+// ─── Configuration ───────────────────────────────────────────────────────────
+
+const API_BASE_URL =
+  process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
+
+// ─── Types ───────────────────────────────────────────────────────────────────
+
+export type ApprovalStatus =
+  | "pending"
+  | "approved"
+  | "rejected"
+  | "expired"
+  | "executed";
+
+export type RiskLevel = "low" | "medium" | "high";
+
+export type AgentStatus = "running" | "stopped" | "error";
+
+export interface ApprovalEntry {
+  action_id: string;
+  action_type: string;
+  tool_name: string;
+  parameters: Record<string, unknown>;
+  risk_level: RiskLevel;
+  proposed_by: string;
+  proposed_at: string;
+  status: ApprovalStatus;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  expiry_time: string;
+  impact_summary: string;
+  execution_result?: Record<string, unknown>;
+  tenant_id: string;
+}
+
+export interface ActivityLogEntry {
+  log_id: string;
+  agent_id: string;
+  action_type: string;
+  tool_name: string | null;
+  parameters: Record<string, unknown> | null;
+  risk_level: string | null;
+  outcome: string;
+  duration_ms: number;
+  tenant_id: string;
+  user_id: string | null;
+  session_id: string | null;
+  timestamp: string;
+  details: Record<string, unknown> | null;
+}
+
+export interface AgentHealthEntry {
+  agent_id: string;
+  status: AgentStatus;
+}
+
+export interface AgentHealthResponse {
+  agents: Record<string, AgentHealthEntry>;
+}
+
+export interface PaginatedApprovals {
+  entries: ApprovalEntry[];
+  total: number;
+  page: number;
+  size: number;
+}
+
+export interface PaginatedActivity {
+  entries: ActivityLogEntry[];
+  total: number;
+  page: number;
+  size: number;
+}
+
+export interface ActivityStats {
+  total_actions: number;
+  actions_per_agent: Record<string, number>;
+  success_rate: number;
+  failure_rate: number;
+  avg_duration_ms: number;
+}
+
+// ─── HTTP Helper ─────────────────────────────────────────────────────────────
+
+async function fetchWithTimeout(
+  url: string,
+  options: RequestInit = {},
+  timeout: number = API_TIMEOUTS.STANDARD,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+    return response;
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new ApiTimeoutError(
+        `Request timed out after ${timeout / 1000} seconds`,
+      );
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function buildQueryString(
+  params: Record<string, string | number | boolean | undefined | null>,
+): string {
+  const entries = Object.entries(params).filter(
+    ([, v]) => v !== undefined && v !== null && v !== "",
+  );
+  if (entries.length === 0) return "";
+  const searchParams = new URLSearchParams();
+  for (const [key, value] of entries) {
+    searchParams.set(key, String(value));
+  }
+  return `?${searchParams.toString()}`;
+}
+
+async function agentRequest<T>(
+  endpoint: string,
+  options?: RequestInit,
+): Promise<T> {
+  const url = `${API_BASE_URL}/agent${endpoint}`;
+  try {
+    const response = await fetchWithTimeout(url, {
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+      },
+      ...options,
+    });
+
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new ApiError(
+        body.detail || body.message || `HTTP error! status: ${response.status}`,
+        response.status,
+      );
+    }
+
+    return await response.json();
+  } catch (error) {
+    if (error instanceof ApiTimeoutError || error instanceof ApiError) {
+      throw error;
+    }
+    throw new ApiError(
+      error instanceof Error ? error.message : "Unknown error",
+      0,
+    );
+  }
+}
+
+// ─── Approval Queue Endpoints ────────────────────────────────────────────────
+
+/** GET /agent/approvals — list pending approvals for a tenant */
+export async function getApprovals(
+  tenantId: string = "default",
+  page: number = 1,
+  size: number = 20,
+): Promise<PaginatedApprovals> {
+  const qs = buildQueryString({ tenant_id: tenantId, page, size });
+  return agentRequest<PaginatedApprovals>(`/approvals${qs}`);
+}
+
+/** POST /agent/approvals/{action_id}/approve — approve a pending action */
+export async function approveAction(
+  actionId: string,
+  reviewerId: string = "admin",
+): Promise<Record<string, unknown>> {
+  const qs = buildQueryString({ reviewer_id: reviewerId });
+  return agentRequest<Record<string, unknown>>(
+    `/approvals/${encodeURIComponent(actionId)}/approve${qs}`,
+    { method: "POST" },
+  );
+}
+
+/** POST /agent/approvals/{action_id}/reject — reject a pending action */
+export async function rejectAction(
+  actionId: string,
+  reason: string = "",
+  reviewerId: string = "admin",
+): Promise<Record<string, unknown>> {
+  const qs = buildQueryString({ reviewer_id: reviewerId });
+  return agentRequest<Record<string, unknown>>(
+    `/approvals/${encodeURIComponent(actionId)}/reject${qs}`,
+    {
+      method: "POST",
+      body: JSON.stringify({ reason }),
+    },
+  );
+}
+
+// ─── Activity Log Endpoints ──────────────────────────────────────────────────
+
+export interface ActivityFilters {
+  tenant_id?: string;
+  agent_id?: string;
+  action_type?: string;
+  outcome?: string;
+  time_from?: string;
+  time_to?: string;
+  page?: number;
+  size?: number;
+}
+
+/** GET /agent/activity — paginated activity log with filters */
+export async function getActivityLog(
+  filters: ActivityFilters = {},
+): Promise<PaginatedActivity> {
+  const qs = buildQueryString({
+    tenant_id: filters.tenant_id ?? "default",
+    agent_id: filters.agent_id,
+    action_type: filters.action_type,
+    outcome: filters.outcome,
+    time_from: filters.time_from,
+    time_to: filters.time_to,
+    page: filters.page ?? 1,
+    size: filters.size ?? 50,
+  });
+  return agentRequest<PaginatedActivity>(`/activity${qs}`);
+}
+
+/** GET /agent/activity/stats — aggregated activity statistics */
+export async function getActivityStats(
+  tenantId: string = "default",
+): Promise<ActivityStats> {
+  const qs = buildQueryString({ tenant_id: tenantId });
+  return agentRequest<ActivityStats>(`/activity/stats${qs}`);
+}
+
+// ─── Agent Health Endpoints ──────────────────────────────────────────────────
+
+/** GET /agent/health — status of all autonomous agents */
+export async function getAgentHealth(): Promise<AgentHealthResponse> {
+  return agentRequest<AgentHealthResponse>("/health");
+}
+
+/** POST /agent/{agent_id}/pause — pause an autonomous agent */
+export async function pauseAgent(
+  agentId: string,
+): Promise<{ agent_id: string; status: string }> {
+  return agentRequest<{ agent_id: string; status: string }>(
+    `/${encodeURIComponent(agentId)}/pause`,
+    { method: "POST" },
+  );
+}
+
+/** POST /agent/{agent_id}/resume — resume a paused autonomous agent */
+export async function resumeAgent(
+  agentId: string,
+): Promise<{ agent_id: string; status: string }> {
+  return agentRequest<{ agent_id: string; status: string }>(
+    `/${encodeURIComponent(agentId)}/resume`,
+    { method: "POST" },
+  );
+}

@@ -342,7 +342,7 @@ class TestMissingTenantReturns403:
         _, client = _build_scheduling_app(es)
 
         with _SETTINGS_PATCH:
-            resp = client.get("/scheduling/jobs")
+            resp = client.get("/api/scheduling/jobs")
 
         assert resp.status_code == 403
 
@@ -353,7 +353,7 @@ class TestMissingTenantReturns403:
 
         with _SETTINGS_PATCH:
             resp = client.get(
-                "/scheduling/jobs",
+                "/api/scheduling/jobs",
                 headers={"Authorization": "Bearer invalid-token"},
             )
 
@@ -367,7 +367,7 @@ class TestMissingTenantReturns403:
 
         with _SETTINGS_PATCH:
             resp = client.get(
-                "/scheduling/jobs",
+                "/api/scheduling/jobs",
                 headers={"Authorization": f"Bearer {token}"},
             )
 
@@ -380,7 +380,7 @@ class TestMissingTenantReturns403:
 
         with _SETTINGS_PATCH:
             resp = client.post(
-                "/scheduling/jobs",
+                "/api/scheduling/jobs",
                 json={
                     "job_type": "passenger_transport",
                     "origin": "A",
@@ -409,7 +409,7 @@ class TestQueryParamTenantIgnored:
 
         with _SETTINGS_PATCH:
             resp = client.get(
-                "/scheduling/jobs?tenant_id=spoofed-tenant",
+                "/api/scheduling/jobs?tenant_id=spoofed-tenant",
                 headers={"Authorization": f"Bearer {token}"},
             )
 
@@ -425,7 +425,7 @@ class TestQueryParamTenantIgnored:
 
         with _SETTINGS_PATCH:
             resp = client.get(
-                "/scheduling/jobs/active?tenant_id=spoofed-tenant",
+                "/api/scheduling/jobs/active?tenant_id=spoofed-tenant",
                 headers={"Authorization": f"Bearer {token}"},
             )
 
@@ -440,7 +440,7 @@ class TestQueryParamTenantIgnored:
 
         with _SETTINGS_PATCH:
             resp = client.get(
-                "/scheduling/jobs/delayed?tenant_id=spoofed-tenant",
+                "/api/scheduling/jobs/delayed?tenant_id=spoofed-tenant",
                 headers={"Authorization": f"Bearer {token}"},
             )
 
@@ -499,7 +499,7 @@ class TestJobCreationTenantFromJWT:
 
         with _SETTINGS_PATCH:
             resp = client.post(
-                "/scheduling/jobs",
+                "/api/scheduling/jobs",
                 headers={"Authorization": f"Bearer {token}"},
                 json={
                     "job_type": "cargo_transport",

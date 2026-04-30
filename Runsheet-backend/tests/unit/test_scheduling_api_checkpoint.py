@@ -202,7 +202,7 @@ class TestAssignBusyAssetReturns409:
 
         with _SETTINGS_PATCH:
             resp = client.patch(
-                "/scheduling/jobs/JOB_1/assign",
+                "/api/scheduling/jobs/JOB_1/assign",
                 headers=_auth_headers(),
                 json={"asset_id": "TRUCK_001"},
             )
@@ -238,7 +238,7 @@ class TestAssignBusyAssetReturns409:
 
         with _SETTINGS_PATCH:
             resp = client.patch(
-                "/scheduling/jobs/JOB_1/assign",
+                "/api/scheduling/jobs/JOB_1/assign",
                 headers=_auth_headers(),
                 json={"asset_id": "TRUCK_002"},
             )
@@ -272,7 +272,7 @@ class TestTenantIsolationAtAPILevel:
         _, client = _build_app(es)
 
         with _SETTINGS_PATCH:
-            resp = client.get("/scheduling/jobs", headers=_auth_headers(TENANT_A))
+            resp = client.get("/api/scheduling/jobs", headers=_auth_headers(TENANT_A))
 
         assert resp.status_code == 200
         body = resp.json()
@@ -301,7 +301,7 @@ class TestTenantIsolationAtAPILevel:
         _, client = _build_app(es)
 
         with _SETTINGS_PATCH:
-            resp = client.get("/scheduling/jobs", headers=_auth_headers(TENANT_B))
+            resp = client.get("/api/scheduling/jobs", headers=_auth_headers(TENANT_B))
 
         assert resp.status_code == 200
         body = resp.json()
@@ -336,7 +336,7 @@ class TestInvalidFilterValuesReturn400:
 
         with _SETTINGS_PATCH:
             resp = client.get(
-                "/scheduling/jobs?job_type=nonexistent_type",
+                "/api/scheduling/jobs?job_type=nonexistent_type",
                 headers=_auth_headers(),
             )
 
@@ -352,7 +352,7 @@ class TestInvalidFilterValuesReturn400:
 
         with _SETTINGS_PATCH:
             resp = client.get(
-                "/scheduling/jobs?status=nonexistent_status",
+                "/api/scheduling/jobs?status=nonexistent_status",
                 headers=_auth_headers(),
             )
 
@@ -368,7 +368,7 @@ class TestInvalidFilterValuesReturn400:
 
         with _SETTINGS_PATCH:
             resp = client.get(
-                "/scheduling/jobs?sort_order=sideways",
+                "/api/scheduling/jobs?sort_order=sideways",
                 headers=_auth_headers(),
             )
 
@@ -384,7 +384,7 @@ class TestInvalidFilterValuesReturn400:
 
         with _SETTINGS_PATCH:
             resp = client.get(
-                "/scheduling/metrics/jobs?bucket=weekly",
+                "/api/scheduling/metrics/jobs?bucket=weekly",
                 headers=_auth_headers(),
             )
 

@@ -1,0 +1,4 @@
+# file: /Users/olukotunjosh/Downloads/Runsheet/Runsheet-backend/scripts/backfill_asset_type.py
+# hypothesis_version: 6.151.4
+
+[500, '  %s', '"', '2m', 'Backfill failed: %s', '__main__', '_id', '_index', '_op_type', '_scroll_id', '_source', 'asset_name', 'asset_subtype', 'asset_type', 'bool', 'doc', 'exists', 'field', 'hits', 'must_not', 'plate_number', 'query', 'truck', 'truck_id', 'trucks', 'update', 'vehicle']

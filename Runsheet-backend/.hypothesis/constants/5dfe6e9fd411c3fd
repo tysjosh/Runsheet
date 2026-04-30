@@ -1,0 +1,4 @@
+# file: /Users/olukotunjosh/Downloads/Runsheet/Runsheet-backend/Agents/business_validator.py
+# hypothesis_version: 6.151.4
+
+[100000, '_source', 'asset_id', 'assigned', 'bool', 'cancelled', 'completed', 'failed', 'filter', 'hits', 'in_progress', 'job_id', 'jobs_current', 'new_status', 'plate_number', 'quantity_liters', 'query', 'scheduled', 'should', 'station_id', 'status', 'tenant_id', 'term', 'trucks']

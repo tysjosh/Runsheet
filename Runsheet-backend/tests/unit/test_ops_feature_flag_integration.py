@@ -42,22 +42,22 @@ def _es_search_response(hits=None, total=0):
 
 # Endpoints that always return 200 with empty data when enabled
 LIST_ENDPOINTS = [
-    ("GET", "/ops/shipments"),
-    ("GET", "/ops/shipments/sla-breaches"),
-    ("GET", "/ops/shipments/failures"),
-    ("GET", "/ops/riders"),
-    ("GET", "/ops/riders/utilization"),
-    ("GET", "/ops/events"),
-    ("GET", "/ops/metrics/shipments"),
-    ("GET", "/ops/metrics/sla"),
-    ("GET", "/ops/metrics/riders"),
-    ("GET", "/ops/metrics/failures"),
+    ("GET", "/api/ops/shipments"),
+    ("GET", "/api/ops/shipments/sla-breaches"),
+    ("GET", "/api/ops/shipments/failures"),
+    ("GET", "/api/ops/riders"),
+    ("GET", "/api/ops/riders/utilization"),
+    ("GET", "/api/ops/events"),
+    ("GET", "/api/ops/metrics/shipments"),
+    ("GET", "/api/ops/metrics/sla"),
+    ("GET", "/api/ops/metrics/riders"),
+    ("GET", "/api/ops/metrics/failures"),
 ]
 
 # Single-resource endpoints that return 404 when resource not found (even when enabled)
 SINGLE_RESOURCE_ENDPOINTS = [
-    ("GET", "/ops/shipments/SHP-001"),
-    ("GET", "/ops/riders/RDR-001"),
+    ("GET", "/api/ops/shipments/SHP-001"),
+    ("GET", "/api/ops/riders/RDR-001"),
 ]
 
 # All tenant-scoped endpoints combined
@@ -75,7 +75,7 @@ def mock_ff_service():
 @pytest.fixture()
 def mock_es_client():
     client = MagicMock()
-    client.search = AsyncMock(return_value=_es_search_response())
+    client.search = MagicMock(return_value=_es_search_response())
     return client
 
 

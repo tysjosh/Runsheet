@@ -1,0 +1,4 @@
+# file: /Users/olukotunjosh/Downloads/Runsheet/Runsheet-backend/Agents/autonomous/fuel_calculations.py
+# hypothesis_version: 6.151.4
+
+[0.0, 0.8, 'critical', 'high', 'medium', 'normal']

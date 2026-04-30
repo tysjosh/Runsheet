@@ -87,9 +87,9 @@ SAMPLE_RIDER = {
 
 @pytest.fixture()
 def mock_es_client():
-    """Mock ES client whose .search is an AsyncMock."""
+    """Mock ES client whose .search is a MagicMock (ops API calls search synchronously)."""
     client = MagicMock()
-    client.search = AsyncMock(return_value=_es_search_response([]))
+    client.search = MagicMock(return_value=_es_search_response([]))
     return client
 
 
@@ -136,10 +136,10 @@ class TestListShipments:
     """Validates: Requirement 8.1"""
 
     def test_returns_paginated_envelope(self, client, mock_es_client):
-        mock_es_client.search = AsyncMock(
+        mock_es_client.search = MagicMock(
             return_value=_es_search_response([SAMPLE_SHIPMENT], total=1)
         )
-        resp = client.get("/ops/shipments")
+        resp = client.get("/api/ops/shipments")
         assert resp.status_code == 200
         body = resp.json()
         assert "data" in body
@@ -148,10 +148,10 @@ class TestListShipments:
         assert body["request_id"] == "req-test-123"
 
     def test_pagination_meta(self, client, mock_es_client):
-        mock_es_client.search = AsyncMock(
+        mock_es_client.search = MagicMock(
             return_value=_es_search_response([SAMPLE_SHIPMENT] * 5, total=42)
         )
-        resp = client.get("/ops/shipments?page=2&size=5")
+        resp = client.get("/api/ops/shipments?page=2&size=5")
         body = resp.json()
         pag = body["pagination"]
         assert pag["page"] == 2
@@ -160,8 +160,8 @@ class TestListShipments:
         assert pag["total_pages"] == math.ceil(42 / 5)
 
     def test_status_filter_passed_to_es(self, client, mock_es_client):
-        mock_es_client.search = AsyncMock(return_value=_es_search_response([]))
-        client.get("/ops/shipments?status=delivered")
+        mock_es_client.search = MagicMock(return_value=_es_search_response([]))
+        client.get("/api/ops/shipments?status=delivered")
         call_body = mock_es_client.search.call_args.kwargs["body"]
         # The tenant filter wraps the inner query
         must_clauses = call_body["query"]["bool"]["must"]
@@ -170,8 +170,8 @@ class TestListShipments:
         assert any(f.get("term", {}).get("status") == "delivered" for f in inner_must)
 
     def test_date_range_filter(self, client, mock_es_client):
-        mock_es_client.search = AsyncMock(return_value=_es_search_response([]))
-        client.get("/ops/shipments?start_date=2025-01-01&end_date=2025-01-31")
+        mock_es_client.search = MagicMock(return_value=_es_search_response([]))
+        client.get("/api/ops/shipments?start_date=2025-01-01&end_date=2025-01-31")
         call_body = mock_es_client.search.call_args.kwargs["body"]
         must_clauses = call_body["query"]["bool"]["must"]
         inner_must = must_clauses[0]["bool"]["must"]
@@ -180,14 +180,14 @@ class TestListShipments:
         assert "updated_at" in range_filter[0]["range"]
 
     def test_sort_params(self, client, mock_es_client):
-        mock_es_client.search = AsyncMock(return_value=_es_search_response([]))
-        client.get("/ops/shipments?sort_by=created_at&sort_order=asc")
+        mock_es_client.search = MagicMock(return_value=_es_search_response([]))
+        client.get("/api/ops/shipments?sort_by=created_at&sort_order=asc")
         call_body = mock_es_client.search.call_args.kwargs["body"]
         assert call_body["sort"] == [{"created_at": {"order": "asc"}}]
 
     def test_tenant_filter_injected(self, client, mock_es_client):
-        mock_es_client.search = AsyncMock(return_value=_es_search_response([]))
-        client.get("/ops/shipments")
+        mock_es_client.search = MagicMock(return_value=_es_search_response([]))
+        client.get("/api/ops/shipments")
         call_body = mock_es_client.search.call_args.kwargs["body"]
         tenant_filter = call_body["query"]["bool"]["filter"]
         assert {"term": {"tenant_id": "tenant-1"}} in tenant_filter
@@ -202,13 +202,13 @@ class TestGetShipment:
     """Validates: Requirement 8.2"""
 
     def test_returns_shipment_with_events(self, client, mock_es_client):
-        mock_es_client.search = AsyncMock(
+        mock_es_client.search = MagicMock(
             side_effect=[
                 _es_search_response([SAMPLE_SHIPMENT], total=1),
                 _es_search_response([SAMPLE_EVENT], total=1),
             ]
         )
-        resp = client.get("/ops/shipments/SHP-001")
+        resp = client.get("/api/ops/shipments/SHP-001")
         assert resp.status_code == 200
         body = resp.json()
         assert body["data"]["shipment_id"] == "SHP-001"
@@ -216,8 +216,8 @@ class TestGetShipment:
         assert body["request_id"] == "req-test-123"
 
     def test_not_found(self, client, mock_es_client):
-        mock_es_client.search = AsyncMock(return_value=_es_search_response([]))
-        resp = client.get("/ops/shipments/NONEXISTENT")
+        mock_es_client.search = MagicMock(return_value=_es_search_response([]))
+        resp = client.get("/api/ops/shipments/NONEXISTENT")
         assert resp.status_code == 404
 
 
@@ -229,18 +229,18 @@ class TestListRiders:
     """Validates: Requirement 8.3"""
 
     def test_returns_paginated_riders(self, client, mock_es_client):
-        mock_es_client.search = AsyncMock(
+        mock_es_client.search = MagicMock(
             return_value=_es_search_response([SAMPLE_RIDER], total=1)
         )
-        resp = client.get("/ops/riders")
+        resp = client.get("/api/ops/riders")
         assert resp.status_code == 200
         body = resp.json()
         assert len(body["data"]) == 1
         assert body["pagination"]["total"] == 1
 
     def test_status_filter(self, client, mock_es_client):
-        mock_es_client.search = AsyncMock(return_value=_es_search_response([]))
-        client.get("/ops/riders?status=idle")
+        mock_es_client.search = MagicMock(return_value=_es_search_response([]))
+        client.get("/api/ops/riders?status=idle")
         call_body = mock_es_client.search.call_args.kwargs["body"]
         must_clauses = call_body["query"]["bool"]["must"]
         assert must_clauses[0] == {"term": {"status": "idle"}}
@@ -254,21 +254,21 @@ class TestGetRider:
     """Validates: Requirement 8.4"""
 
     def test_returns_rider_with_shipments(self, client, mock_es_client):
-        mock_es_client.search = AsyncMock(
+        mock_es_client.search = MagicMock(
             side_effect=[
                 _es_search_response([SAMPLE_RIDER], total=1),
                 _es_search_response([SAMPLE_SHIPMENT], total=1),
             ]
         )
-        resp = client.get("/ops/riders/RDR-001")
+        resp = client.get("/api/ops/riders/RDR-001")
         assert resp.status_code == 200
         body = resp.json()
         assert body["data"]["rider_id"] == "RDR-001"
         assert len(body["data"]["assigned_shipments"]) == 1
 
     def test_not_found(self, client, mock_es_client):
-        mock_es_client.search = AsyncMock(return_value=_es_search_response([]))
-        resp = client.get("/ops/riders/NONEXISTENT")
+        mock_es_client.search = MagicMock(return_value=_es_search_response([]))
+        resp = client.get("/api/ops/riders/NONEXISTENT")
         assert resp.status_code == 404
 
 
@@ -280,34 +280,34 @@ class TestListEvents:
     """Validates: Requirement 8.5"""
 
     def test_returns_paginated_events(self, client, mock_es_client):
-        mock_es_client.search = AsyncMock(
+        mock_es_client.search = MagicMock(
             return_value=_es_search_response([SAMPLE_EVENT], total=1)
         )
-        resp = client.get("/ops/events")
+        resp = client.get("/api/ops/events")
         assert resp.status_code == 200
         body = resp.json()
         assert len(body["data"]) == 1
         assert body["pagination"]["total"] == 1
 
     def test_shipment_id_filter(self, client, mock_es_client):
-        mock_es_client.search = AsyncMock(return_value=_es_search_response([]))
-        client.get("/ops/events?shipment_id=SHP-001")
+        mock_es_client.search = MagicMock(return_value=_es_search_response([]))
+        client.get("/api/ops/events?shipment_id=SHP-001")
         call_body = mock_es_client.search.call_args.kwargs["body"]
         must_clauses = call_body["query"]["bool"]["must"]
         inner_must = must_clauses[0]["bool"]["must"]
         assert any(f.get("term", {}).get("shipment_id") == "SHP-001" for f in inner_must)
 
     def test_event_type_filter(self, client, mock_es_client):
-        mock_es_client.search = AsyncMock(return_value=_es_search_response([]))
-        client.get("/ops/events?event_type=shipment_created")
+        mock_es_client.search = MagicMock(return_value=_es_search_response([]))
+        client.get("/api/ops/events?event_type=shipment_created")
         call_body = mock_es_client.search.call_args.kwargs["body"]
         must_clauses = call_body["query"]["bool"]["must"]
         inner_must = must_clauses[0]["bool"]["must"]
         assert any(f.get("term", {}).get("event_type") == "shipment_created" for f in inner_must)
 
     def test_time_range_filter(self, client, mock_es_client):
-        mock_es_client.search = AsyncMock(return_value=_es_search_response([]))
-        client.get("/ops/events?start_date=2025-01-01&end_date=2025-01-31")
+        mock_es_client.search = MagicMock(return_value=_es_search_response([]))
+        client.get("/api/ops/events?start_date=2025-01-01&end_date=2025-01-31")
         call_body = mock_es_client.search.call_args.kwargs["body"]
         must_clauses = call_body["query"]["bool"]["must"]
         inner_must = must_clauses[0]["bool"]["must"]
@@ -323,16 +323,16 @@ class TestListEvents:
 class TestResponseEnvelope:
     """Validates: Requirement 8.6 — consistent {data, pagination, request_id}."""
 
-    @pytest.mark.parametrize("path", ["/ops/shipments", "/ops/riders", "/ops/events"])
+    @pytest.mark.parametrize("path", ["/api/ops/shipments", "/api/ops/riders", "/api/ops/events"])
     def test_envelope_keys(self, client, mock_es_client, path):
-        mock_es_client.search = AsyncMock(return_value=_es_search_response([]))
+        mock_es_client.search = MagicMock(return_value=_es_search_response([]))
         resp = client.get(path)
         body = resp.json()
         assert set(body.keys()) == {"data", "pagination", "request_id"}
 
-    @pytest.mark.parametrize("path", ["/ops/shipments", "/ops/riders", "/ops/events"])
+    @pytest.mark.parametrize("path", ["/api/ops/shipments", "/api/ops/riders", "/api/ops/events"])
     def test_pagination_keys(self, client, mock_es_client, path):
-        mock_es_client.search = AsyncMock(return_value=_es_search_response([]))
+        mock_es_client.search = MagicMock(return_value=_es_search_response([]))
         resp = client.get(path)
         pag = resp.json()["pagination"]
         assert set(pag.keys()) == {"page", "size", "total", "total_pages"}
@@ -356,10 +356,10 @@ class TestGetSlaBreaches:
     """Validates: Requirement 10.2"""
 
     def test_returns_paginated_envelope(self, client, mock_es_client):
-        mock_es_client.search = AsyncMock(
+        mock_es_client.search = MagicMock(
             return_value=_es_search_response([SAMPLE_SLA_BREACH_SHIPMENT], total=1)
         )
-        resp = client.get("/ops/shipments/sla-breaches")
+        resp = client.get("/api/ops/shipments/sla-breaches")
         assert resp.status_code == 200
         body = resp.json()
         assert "data" in body
@@ -367,8 +367,8 @@ class TestGetSlaBreaches:
         assert "request_id" in body
 
     def test_queries_estimated_delivery_lt_now(self, client, mock_es_client):
-        mock_es_client.search = AsyncMock(return_value=_es_search_response([]))
-        client.get("/ops/shipments/sla-breaches")
+        mock_es_client.search = MagicMock(return_value=_es_search_response([]))
+        client.get("/api/ops/shipments/sla-breaches")
         call_body = mock_es_client.search.call_args.kwargs["body"]
         must_clauses = call_body["query"]["bool"]["must"]
         inner_must = must_clauses[0]["bool"]["must"]
@@ -376,29 +376,29 @@ class TestGetSlaBreaches:
         assert any("estimated_delivery" in rf["range"] for rf in range_filters)
 
     def test_supports_status_filter(self, client, mock_es_client):
-        mock_es_client.search = AsyncMock(return_value=_es_search_response([]))
-        client.get("/ops/shipments/sla-breaches?status=in_transit")
+        mock_es_client.search = MagicMock(return_value=_es_search_response([]))
+        client.get("/api/ops/shipments/sla-breaches?status=in_transit")
         call_body = mock_es_client.search.call_args.kwargs["body"]
         must_clauses = call_body["query"]["bool"]["must"]
         inner_must = must_clauses[0]["bool"]["must"]
         assert any(f.get("term", {}).get("status") == "in_transit" for f in inner_must)
 
     def test_supports_rider_id_filter(self, client, mock_es_client):
-        mock_es_client.search = AsyncMock(return_value=_es_search_response([]))
-        client.get("/ops/shipments/sla-breaches?rider_id=RDR-001")
+        mock_es_client.search = MagicMock(return_value=_es_search_response([]))
+        client.get("/api/ops/shipments/sla-breaches?rider_id=RDR-001")
         call_body = mock_es_client.search.call_args.kwargs["body"]
         must_clauses = call_body["query"]["bool"]["must"]
         inner_must = must_clauses[0]["bool"]["must"]
         assert any(f.get("term", {}).get("rider_id") == "RDR-001" for f in inner_must)
 
     def test_invalid_status_returns_400(self, client, mock_es_client):
-        resp = client.get("/ops/shipments/sla-breaches?status=bogus")
+        resp = client.get("/api/ops/shipments/sla-breaches?status=bogus")
         assert resp.status_code == 400
         assert "Invalid status" in resp.json()["detail"]
 
     def test_tenant_filter_injected(self, client, mock_es_client):
-        mock_es_client.search = AsyncMock(return_value=_es_search_response([]))
-        client.get("/ops/shipments/sla-breaches")
+        mock_es_client.search = MagicMock(return_value=_es_search_response([]))
+        client.get("/api/ops/shipments/sla-breaches")
         call_body = mock_es_client.search.call_args.kwargs["body"]
         tenant_filter = call_body["query"]["bool"]["filter"]
         assert {"term": {"tenant_id": "tenant-1"}} in tenant_filter
@@ -422,10 +422,10 @@ class TestGetShipmentFailures:
     """Validates: Requirement 10.4"""
 
     def test_returns_paginated_envelope(self, client, mock_es_client):
-        mock_es_client.search = AsyncMock(
+        mock_es_client.search = MagicMock(
             return_value=_es_search_response([SAMPLE_FAILED_SHIPMENT], total=1)
         )
-        resp = client.get("/ops/shipments/failures")
+        resp = client.get("/api/ops/shipments/failures")
         assert resp.status_code == 200
         body = resp.json()
         assert "data" in body
@@ -433,8 +433,8 @@ class TestGetShipmentFailures:
         assert "request_id" in body
 
     def test_queries_failed_status(self, client, mock_es_client):
-        mock_es_client.search = AsyncMock(return_value=_es_search_response([]))
-        client.get("/ops/shipments/failures")
+        mock_es_client.search = MagicMock(return_value=_es_search_response([]))
+        client.get("/api/ops/shipments/failures")
         call_body = mock_es_client.search.call_args.kwargs["body"]
         must_clauses = call_body["query"]["bool"]["must"]
         inner_must = must_clauses[0]["bool"]["must"]
@@ -456,20 +456,20 @@ class TestGetShipmentFailures:
             "event_timestamp": "2025-01-01T12:00:00Z",
             "event_payload": {"failure_reason": "address_not_found"},
         }
-        mock_es_client.search = AsyncMock(
+        mock_es_client.search = MagicMock(
             side_effect=[
                 _es_search_response([shipment_no_reason], total=1),
                 _es_search_response([event_with_reason], total=1),
             ]
         )
-        resp = client.get("/ops/shipments/failures")
+        resp = client.get("/api/ops/shipments/failures")
         assert resp.status_code == 200
         body = resp.json()
         assert body["data"][0]["failure_reason"] == "address_not_found"
 
     def test_supports_date_range_filter(self, client, mock_es_client):
-        mock_es_client.search = AsyncMock(return_value=_es_search_response([]))
-        client.get("/ops/shipments/failures?start_date=2025-01-01&end_date=2025-01-31")
+        mock_es_client.search = MagicMock(return_value=_es_search_response([]))
+        client.get("/api/ops/shipments/failures?start_date=2025-01-01&end_date=2025-01-31")
         call_body = mock_es_client.search.call_args.kwargs["body"]
         must_clauses = call_body["query"]["bool"]["must"]
         inner_must = must_clauses[0]["bool"]["must"]
@@ -477,13 +477,13 @@ class TestGetShipmentFailures:
         assert len(range_filter) == 1
 
     def test_invalid_date_returns_400(self, client, mock_es_client):
-        resp = client.get("/ops/shipments/failures?start_date=not-a-date")
+        resp = client.get("/api/ops/shipments/failures?start_date=not-a-date")
         assert resp.status_code == 400
         assert "Invalid start_date" in resp.json()["detail"]
 
     def test_tenant_filter_injected(self, client, mock_es_client):
-        mock_es_client.search = AsyncMock(return_value=_es_search_response([]))
-        client.get("/ops/shipments/failures")
+        mock_es_client.search = MagicMock(return_value=_es_search_response([]))
+        client.get("/api/ops/shipments/failures")
         call_body = mock_es_client.search.call_args.kwargs["body"]
         tenant_filter = call_body["query"]["bool"]["filter"]
         assert {"term": {"tenant_id": "tenant-1"}} in tenant_filter
@@ -508,10 +508,10 @@ class TestGetRiderUtilization:
     """Validates: Requirement 10.3"""
 
     def test_returns_paginated_envelope(self, client, mock_es_client):
-        mock_es_client.search = AsyncMock(
+        mock_es_client.search = MagicMock(
             return_value=_es_search_response([SAMPLE_RIDER_WITH_METRICS], total=1)
         )
-        resp = client.get("/ops/riders/utilization")
+        resp = client.get("/api/ops/riders/utilization")
         assert resp.status_code == 200
         body = resp.json()
         assert "data" in body
@@ -519,10 +519,10 @@ class TestGetRiderUtilization:
         assert "request_id" in body
 
     def test_includes_utilization_metrics(self, client, mock_es_client):
-        mock_es_client.search = AsyncMock(
+        mock_es_client.search = MagicMock(
             return_value=_es_search_response([SAMPLE_RIDER_WITH_METRICS], total=1)
         )
-        resp = client.get("/ops/riders/utilization")
+        resp = client.get("/api/ops/riders/utilization")
         body = resp.json()
         rider = body["data"][0]
         assert "utilization" in rider
@@ -531,21 +531,21 @@ class TestGetRiderUtilization:
         assert rider["utilization"]["idle_minutes"] is not None
 
     def test_supports_status_filter(self, client, mock_es_client):
-        mock_es_client.search = AsyncMock(return_value=_es_search_response([]))
-        client.get("/ops/riders/utilization?status=active")
+        mock_es_client.search = MagicMock(return_value=_es_search_response([]))
+        client.get("/api/ops/riders/utilization?status=active")
         call_body = mock_es_client.search.call_args.kwargs["body"]
         must_clauses = call_body["query"]["bool"]["must"]
         inner_must = must_clauses[0]["bool"]["must"]
         assert any(f.get("term", {}).get("status") == "active" for f in inner_must)
 
     def test_invalid_status_returns_400(self, client, mock_es_client):
-        resp = client.get("/ops/riders/utilization?status=bogus")
+        resp = client.get("/api/ops/riders/utilization?status=bogus")
         assert resp.status_code == 400
         assert "Invalid status" in resp.json()["detail"]
 
     def test_tenant_filter_injected(self, client, mock_es_client):
-        mock_es_client.search = AsyncMock(return_value=_es_search_response([]))
-        client.get("/ops/riders/utilization")
+        mock_es_client.search = MagicMock(return_value=_es_search_response([]))
+        client.get("/api/ops/riders/utilization")
         call_body = mock_es_client.search.call_args.kwargs["body"]
         tenant_filter = call_body["query"]["bool"]["filter"]
         assert {"term": {"tenant_id": "tenant-1"}} in tenant_filter
@@ -559,16 +559,16 @@ class TestInvalidFilterValidation:
     """Validates: Requirement 10.6 — 400 for invalid filter values."""
 
     def test_invalid_status_on_list_shipments(self, client, mock_es_client):
-        resp = client.get("/ops/shipments?status=invalid_status")
+        resp = client.get("/api/ops/shipments?status=invalid_status")
         assert resp.status_code == 400
 
     def test_invalid_date_on_list_shipments(self, client, mock_es_client):
-        resp = client.get("/ops/shipments?start_date=not-a-date")
+        resp = client.get("/api/ops/shipments?start_date=not-a-date")
         assert resp.status_code == 400
 
     def test_valid_status_on_list_shipments(self, client, mock_es_client):
-        mock_es_client.search = AsyncMock(return_value=_es_search_response([]))
-        resp = client.get("/ops/shipments?status=pending")
+        mock_es_client.search = MagicMock(return_value=_es_search_response([]))
+        resp = client.get("/api/ops/shipments?status=pending")
         assert resp.status_code == 200
 
 
@@ -580,23 +580,23 @@ class TestFilteredEndpointEnvelopes:
     """Validates: Requirement 8.6 — consistent envelope on filtered endpoints."""
 
     @pytest.mark.parametrize("path", [
-        "/ops/shipments/sla-breaches",
-        "/ops/shipments/failures",
-        "/ops/riders/utilization",
+        "/api/ops/shipments/sla-breaches",
+        "/api/ops/shipments/failures",
+        "/api/ops/riders/utilization",
     ])
     def test_envelope_keys(self, client, mock_es_client, path):
-        mock_es_client.search = AsyncMock(return_value=_es_search_response([]))
+        mock_es_client.search = MagicMock(return_value=_es_search_response([]))
         resp = client.get(path)
         body = resp.json()
         assert set(body.keys()) == {"data", "pagination", "request_id"}
 
     @pytest.mark.parametrize("path", [
-        "/ops/shipments/sla-breaches",
-        "/ops/shipments/failures",
-        "/ops/riders/utilization",
+        "/api/ops/shipments/sla-breaches",
+        "/api/ops/shipments/failures",
+        "/api/ops/riders/utilization",
     ])
     def test_pagination_keys(self, client, mock_es_client, path):
-        mock_es_client.search = AsyncMock(return_value=_es_search_response([]))
+        mock_es_client.search = MagicMock(return_value=_es_search_response([]))
         resp = client.get(path)
         pag = resp.json()["pagination"]
         assert set(pag.keys()) == {"page", "size", "total", "total_pages"}

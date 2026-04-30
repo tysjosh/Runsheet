@@ -1,0 +1,4 @@
+# file: /Users/olukotunjosh/Downloads/Runsheet/Runsheet-backend/fuel/api/endpoints.py
+# hypothesis_version: 6.151.4
+
+[100, 201, '/alerts', '/api/fuel', '/consumption', '/consumption/batch', '/metrics/consumption', '/metrics/efficiency', '/metrics/summary', '/refill', '/stations', 'Filter by asset_id', 'Filter by fuel type', 'Filter by station_id', 'Page number', 'Page size', 'daily', 'data', 'fuel', 'request_id', 'unknown']

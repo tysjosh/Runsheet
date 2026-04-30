@@ -1,0 +1,4 @@
+# file: /Users/olukotunjosh/Downloads/Runsheet/Runsheet-backend/Agents/tools/search_tools.py
+# hypothesis_version: 6.151.4
+
+[1000, 'Unknown', '_source', 'all', 'all support tickets', 'asset_name', 'asset_subtype', 'asset_type', 'assets', 'best_fields', 'bool', 'cargo', 'cargo.description', 'container_number', 'customer', 'description', 'driver_name', 'equipment_model', 'fields', 'filter', 'hits', 'in_stock', 'inventory', 'issue', 'items', 'low_stock', 'multi_match', 'must', 'name', 'orders', 'plate_number', 'query', 'search_fleet_data', 'search_inventory', 'search_orders', 'status', 'success', 'support tickets', 'support_tickets', 'term', 'ticket_id', 'tool_name', 'truck', 'trucks', 'type', 'vehicle', 'vessel_name', '🔴', '🟡', '🟢']

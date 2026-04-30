@@ -11,9 +11,22 @@ Validates: Requirements 1.1, 1.2, 1.5, 1.6
 """
 
 import logging
-from unittest.mock import MagicMock, call
+import sys
+from unittest.mock import MagicMock, call, patch
 
 import pytest
+
+# ---------------------------------------------------------------------------
+# Patch the ElasticsearchService singleton BEFORE any scheduling imports so
+# that importing services.elasticsearch_service doesn't trigger a real ES
+# connection.
+# ---------------------------------------------------------------------------
+_mock_es_module = MagicMock()
+_mock_es_class = MagicMock()
+_mock_es_class.strip_serverless_incompatible_settings = staticmethod(lambda m: m)
+_mock_es_module.ElasticsearchService = _mock_es_class
+_mock_es_module.elasticsearch_service = MagicMock()
+sys.modules.setdefault("services.elasticsearch_service", _mock_es_module)
 
 from scheduling.services.scheduling_es_mappings import (
     JOB_EVENTS_ILM_POLICY,
@@ -34,6 +47,7 @@ def _make_es_service(existing_indices=None):
     """Return a mock ElasticsearchService whose .client behaves like an ES client."""
     existing = existing_indices or set()
     es_service = MagicMock()
+    es_service.is_serverless = False
     client = MagicMock()
     client.indices.exists.side_effect = lambda index: index in existing
     es_service.client = client

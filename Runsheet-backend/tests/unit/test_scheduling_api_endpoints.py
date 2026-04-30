@@ -168,7 +168,7 @@ class TestResponseFormat:
 
         with _SETTINGS_PATCH:
             resp = client.post(
-                "/scheduling/jobs",
+                "/api/scheduling/jobs",
                 headers=_auth_headers(),
                 json={
                     "job_type": "cargo_transport",
@@ -196,7 +196,7 @@ class TestResponseFormat:
         _, client = _build_app(es)
 
         with _SETTINGS_PATCH:
-            resp = client.get("/scheduling/jobs", headers=_auth_headers())
+            resp = client.get("/api/scheduling/jobs", headers=_auth_headers())
 
         assert resp.status_code == 200
         body = resp.json()
@@ -212,7 +212,7 @@ class TestResponseFormat:
         _, client = _build_app(es)
 
         with _SETTINGS_PATCH:
-            resp = client.get("/scheduling/jobs/active", headers=_auth_headers())
+            resp = client.get("/api/scheduling/jobs/active", headers=_auth_headers())
 
         assert resp.status_code == 200
         body = resp.json()
@@ -226,7 +226,7 @@ class TestResponseFormat:
         _, client = _build_app(es)
 
         with _SETTINGS_PATCH:
-            resp = client.get("/scheduling/jobs/delayed", headers=_auth_headers())
+            resp = client.get("/api/scheduling/jobs/delayed", headers=_auth_headers())
 
         assert resp.status_code == 200
         body = resp.json()
@@ -247,7 +247,7 @@ class TestResponseFormat:
         _, client = _build_app(es)
 
         with _SETTINGS_PATCH:
-            resp = client.get("/scheduling/jobs/JOB_1", headers=_auth_headers())
+            resp = client.get("/api/scheduling/jobs/JOB_1", headers=_auth_headers())
 
         assert resp.status_code == 200
         body = resp.json()
@@ -260,7 +260,7 @@ class TestResponseFormat:
         _, client = _build_app(es)
 
         with _SETTINGS_PATCH:
-            resp = client.get("/scheduling/jobs/JOB_1/events", headers=_auth_headers())
+            resp = client.get("/api/scheduling/jobs/JOB_1/events", headers=_auth_headers())
 
         assert resp.status_code == 200
         body = resp.json()
@@ -285,7 +285,7 @@ class TestInputValidation:
 
         with _SETTINGS_PATCH:
             resp = client.post(
-                "/scheduling/jobs",
+                "/api/scheduling/jobs",
                 headers=_auth_headers(),
                 json={},
             )
@@ -299,7 +299,7 @@ class TestInputValidation:
 
         with _SETTINGS_PATCH:
             resp = client.post(
-                "/scheduling/jobs",
+                "/api/scheduling/jobs",
                 headers=_auth_headers(),
                 json={
                     "job_type": "passenger_transport",
@@ -317,7 +317,7 @@ class TestInputValidation:
 
         with _SETTINGS_PATCH:
             resp = client.post(
-                "/scheduling/jobs",
+                "/api/scheduling/jobs",
                 headers=_auth_headers(),
                 json={
                     "job_type": "passenger_transport",
@@ -335,7 +335,7 @@ class TestInputValidation:
 
         with _SETTINGS_PATCH:
             resp = client.post(
-                "/scheduling/jobs",
+                "/api/scheduling/jobs",
                 headers=_auth_headers(),
                 json={
                     "job_type": "passenger_transport",
@@ -353,7 +353,7 @@ class TestInputValidation:
 
         with _SETTINGS_PATCH:
             resp = client.post(
-                "/scheduling/jobs",
+                "/api/scheduling/jobs",
                 headers=_auth_headers(),
                 json={
                     "job_type": "invalid_type",
@@ -372,7 +372,7 @@ class TestInputValidation:
 
         with _SETTINGS_PATCH:
             resp = client.post(
-                "/scheduling/jobs",
+                "/api/scheduling/jobs",
                 headers=_auth_headers(),
                 json={
                     "job_type": "passenger_transport",
@@ -392,7 +392,7 @@ class TestInputValidation:
 
         with _SETTINGS_PATCH:
             resp = client.patch(
-                "/scheduling/jobs/JOB_1/status",
+                "/api/scheduling/jobs/JOB_1/status",
                 headers=_auth_headers(),
                 json={"status": "nonexistent_status"},
             )
@@ -406,7 +406,7 @@ class TestInputValidation:
 
         with _SETTINGS_PATCH:
             resp = client.patch(
-                "/scheduling/jobs/JOB_1/assign",
+                "/api/scheduling/jobs/JOB_1/assign",
                 headers=_auth_headers(),
                 json={},
             )
@@ -433,7 +433,7 @@ class TestPagination:
         _, client = _build_app(es)
 
         with _SETTINGS_PATCH:
-            resp = client.get("/scheduling/jobs?page=1&size=10", headers=_auth_headers())
+            resp = client.get("/api/scheduling/jobs?page=1&size=10", headers=_auth_headers())
 
         assert resp.status_code == 200
         pagination = resp.json()["pagination"]
@@ -451,7 +451,7 @@ class TestPagination:
         _, client = _build_app(es)
 
         with _SETTINGS_PATCH:
-            resp = client.get("/scheduling/jobs?page=1&size=10", headers=_auth_headers())
+            resp = client.get("/api/scheduling/jobs?page=1&size=10", headers=_auth_headers())
 
         assert resp.status_code == 200
         pagination = resp.json()["pagination"]
@@ -468,7 +468,7 @@ class TestPagination:
         _, client = _build_app(es)
 
         with _SETTINGS_PATCH:
-            resp = client.get("/scheduling/jobs?page=1&size=20", headers=_auth_headers())
+            resp = client.get("/api/scheduling/jobs?page=1&size=20", headers=_auth_headers())
 
         assert resp.status_code == 200
         pagination = resp.json()["pagination"]
@@ -481,7 +481,7 @@ class TestPagination:
         _, client = _build_app(es)
 
         with _SETTINGS_PATCH:
-            resp = client.get("/scheduling/jobs?page=1&size=20", headers=_auth_headers())
+            resp = client.get("/api/scheduling/jobs?page=1&size=20", headers=_auth_headers())
 
         assert resp.status_code == 200
         pagination = resp.json()["pagination"]
@@ -498,7 +498,7 @@ class TestPagination:
         _, client = _build_app(es)
 
         with _SETTINGS_PATCH:
-            resp = client.get("/scheduling/jobs?page=3&size=5", headers=_auth_headers())
+            resp = client.get("/api/scheduling/jobs?page=3&size=5", headers=_auth_headers())
 
         assert resp.status_code == 200
         pagination = resp.json()["pagination"]
@@ -524,7 +524,7 @@ class TestFilterCombinations:
 
         with _SETTINGS_PATCH:
             resp = client.get(
-                "/scheduling/jobs?job_type=cargo_transport&status=scheduled",
+                "/api/scheduling/jobs?job_type=cargo_transport&status=scheduled",
                 headers=_auth_headers(),
             )
 
@@ -549,7 +549,7 @@ class TestFilterCombinations:
 
         with _SETTINGS_PATCH:
             resp = client.get(
-                "/scheduling/jobs?job_type=vessel_movement&status=in_progress"
+                "/api/scheduling/jobs?job_type=vessel_movement&status=in_progress"
                 "&start_date=2026-03-01T00:00:00Z&end_date=2026-03-31T23:59:59Z",
                 headers=_auth_headers(),
             )
@@ -583,7 +583,7 @@ class TestFilterCombinations:
 
         with _SETTINGS_PATCH:
             resp = client.get(
-                "/scheduling/jobs?asset_assigned=TRUCK_001",
+                "/api/scheduling/jobs?asset_assigned=TRUCK_001",
                 headers=_auth_headers(),
             )
 
@@ -605,7 +605,7 @@ class TestFilterCombinations:
         _, client = _build_app(es)
 
         with _SETTINGS_PATCH:
-            resp = client.get("/scheduling/jobs", headers=_auth_headers())
+            resp = client.get("/api/scheduling/jobs", headers=_auth_headers())
 
         assert resp.status_code == 200
         call_args = es.search_documents.call_args
@@ -638,7 +638,7 @@ class TestMetricsEndpoints:
         _, client = _build_app(es)
 
         with _SETTINGS_PATCH:
-            resp = client.get("/scheduling/metrics/jobs", headers=_auth_headers())
+            resp = client.get("/api/scheduling/metrics/jobs", headers=_auth_headers())
 
         assert resp.status_code == 200
         body = resp.json()
@@ -654,7 +654,7 @@ class TestMetricsEndpoints:
 
         with _SETTINGS_PATCH:
             resp = client.get(
-                "/scheduling/metrics/jobs?bucket=weekly",
+                "/api/scheduling/metrics/jobs?bucket=weekly",
                 headers=_auth_headers(),
             )
 
@@ -673,7 +673,7 @@ class TestMetricsEndpoints:
 
         with _SETTINGS_PATCH:
             resp = client.get(
-                "/scheduling/metrics/jobs?bucket=hourly"
+                "/api/scheduling/metrics/jobs?bucket=hourly"
                 "&start_date=2026-01-01T00:00:00Z&end_date=2026-06-01T00:00:00Z",
                 headers=_auth_headers(),
             )
@@ -694,7 +694,7 @@ class TestMetricsEndpoints:
         _, client = _build_app(es)
 
         with _SETTINGS_PATCH:
-            resp = client.get("/scheduling/metrics/completion", headers=_auth_headers())
+            resp = client.get("/api/scheduling/metrics/completion", headers=_auth_headers())
 
         assert resp.status_code == 200
         body = resp.json()
@@ -713,7 +713,7 @@ class TestMetricsEndpoints:
         _, client = _build_app(es)
 
         with _SETTINGS_PATCH:
-            resp = client.get("/scheduling/metrics/assets", headers=_auth_headers())
+            resp = client.get("/api/scheduling/metrics/assets", headers=_auth_headers())
 
         assert resp.status_code == 200
         body = resp.json()
@@ -735,7 +735,7 @@ class TestMetricsEndpoints:
         _, client = _build_app(es)
 
         with _SETTINGS_PATCH:
-            resp = client.get("/scheduling/metrics/delays", headers=_auth_headers())
+            resp = client.get("/api/scheduling/metrics/delays", headers=_auth_headers())
 
         assert resp.status_code == 200
         body = resp.json()
@@ -749,7 +749,7 @@ class TestMetricsEndpoints:
 
         with _SETTINGS_PATCH:
             resp = client.get(
-                "/scheduling/metrics/jobs?start_date=not-a-date",
+                "/api/scheduling/metrics/jobs?start_date=not-a-date",
                 headers=_auth_headers(),
             )
 
@@ -815,9 +815,9 @@ class TestRateLimiting:
         with _SETTINGS_PATCH:
             # GET endpoints should return 200 (with mocked ES)
             for path in [
-                "/scheduling/jobs",
-                "/scheduling/jobs/active",
-                "/scheduling/jobs/delayed",
+                "/api/scheduling/jobs",
+                "/api/scheduling/jobs/active",
+                "/api/scheduling/jobs/delayed",
             ]:
                 resp = client.get(path, headers=_auth_headers())
                 assert resp.status_code == 200, f"{path} returned {resp.status_code}"

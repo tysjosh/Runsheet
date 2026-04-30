@@ -6,6 +6,8 @@ Validates:
 - Requirement 3.5: Implement circuit breakers for Gemini API
 - Requirement 2.5: Return specific error code indicating AI service unavailability
 - Requirement 5.4: Record custom metrics for AI response times
+- Requirement 7.6: Orchestrator receives user requests and delegates to specialists
+- Requirement 7.7: Orchestrator coordinates multiple specialist agents
 - Requirement 8.2: Load conversation history from Session_Store using session identifier
 - Requirement 8.3: Persist updated conversation history to Session_Store
 - Requirement 8.6: Gracefully degrade when Session_Store is unavailable
@@ -39,6 +41,31 @@ logger = logging.getLogger(__name__)
 # Suppress OpenTelemetry warnings and errors
 logging.getLogger('opentelemetry').setLevel(logging.CRITICAL)
 logging.getLogger('opentelemetry.context').setLevel(logging.CRITICAL)
+
+# Module-level orchestrator reference for multi-agent routing.
+# When configured, chat requests are routed through the AgentOrchestrator
+# which delegates to specialist agents. When None, the legacy direct
+# Strands agent invocation is used as a fallback.
+# Validates: Requirements 7.6, 7.7
+_orchestrator = None
+
+
+def configure_orchestrator(orchestrator) -> None:
+    """Wire the AgentOrchestrator for multi-agent request routing.
+
+    Called during application lifespan startup after the orchestrator
+    and all specialist agents have been initialised. Once configured,
+    ``LogisticsAgent.chat_streaming`` will route requests through the
+    orchestrator instead of invoking the Strands agent directly.
+
+    Args:
+        orchestrator: An ``AgentOrchestrator`` instance.
+
+    Validates: Requirements 7.6, 7.7
+    """
+    global _orchestrator
+    _orchestrator = orchestrator
+    logger.info("✅ Orchestrator configured for multi-agent routing")
 
 
 def _get_telemetry_service():
@@ -503,13 +530,25 @@ class LogisticsAgent:
     async def chat_streaming(self, message: str, mode: str = "chat", session_id: Optional[str] = None) -> AsyncGenerator[dict, None]:
         """
         Asynchronous streaming chat method with circuit breaker protection, 
-        retry logic, and session persistence.
+        retry logic, session persistence, and orchestrator routing.
+        
+        When an ``AgentOrchestrator`` has been configured via
+        ``configure_orchestrator``, requests are routed through the
+        multi-agent orchestrator which delegates to specialist agents.
+        The orchestrator returns a complete string response that is
+        yielded as a single streaming event for backward compatibility.
+
+        When no orchestrator is available the method falls back to the
+        legacy direct Strands agent invocation with full circuit breaker
+        and retry support.
         
         Validates:
         - Requirement 3.5: Implement circuit breakers for Gemini API
         - Requirement 2.5: Return specific error code indicating AI service unavailability
         - Requirement 3.4: Retry with exponential backoff
         - Requirement 5.4: Record custom metrics for AI response times
+        - Requirement 7.6: Route requests through the orchestrator
+        - Requirement 7.7: Coordinate multiple specialist agents
         - Requirement 8.2: Load conversation history from Session_Store
         - Requirement 8.3: Persist updated conversation history to Session_Store
         - Requirement 8.6: Gracefully degrade when Session_Store is unavailable
@@ -536,6 +575,59 @@ class LogisticsAgent:
                 # Graceful degradation: continue with fresh conversation
                 logger.warning(f"⚠️ Could not restore session {session_id}: {e}")
         
+        # ------------------------------------------------------------------
+        # Orchestrator routing (Requirements 7.6, 7.7)
+        # When the orchestrator is configured, route through it for
+        # multi-agent specialist delegation. The orchestrator returns a
+        # complete string which we yield as a streaming text event to
+        # maintain backward compatibility with the SSE interface.
+        # ------------------------------------------------------------------
+        if _orchestrator is not None:
+            try:
+                logger.info("🔀 Routing request through AgentOrchestrator")
+                tenant_id = "default"
+                orchestrator_response = await _orchestrator.route(
+                    user_message=message,
+                    tenant_id=tenant_id,
+                    session_id=session_id,
+                )
+
+                # Record AI response time metrics (Requirement 5.4)
+                telemetry = _get_telemetry_service()
+                if telemetry:
+                    total_duration_ms = (time.time() - start_time) * 1000
+                    telemetry.record_metric(
+                        name="ai_response_time_ms",
+                        value=total_duration_ms,
+                        tags={"mode": mode, "success": "true", "method": "orchestrator"},
+                    )
+
+                # Yield the orchestrator response as a streaming text event
+                yield {"data": orchestrator_response}
+                yield {"result": orchestrator_response}
+                return
+
+            except Exception as e:
+                logger.warning(
+                    f"⚠️ Orchestrator routing failed, falling back to direct agent: {e}"
+                )
+                # Record failure metrics before falling through
+                telemetry = _get_telemetry_service()
+                if telemetry:
+                    total_duration_ms = (time.time() - start_time) * 1000
+                    telemetry.record_metric(
+                        name="ai_response_time_ms",
+                        value=total_duration_ms,
+                        tags={"mode": mode, "success": "false", "method": "orchestrator"},
+                    )
+                # Fall through to direct agent invocation below
+        
+        # ------------------------------------------------------------------
+        # Direct agent invocation (legacy fallback)
+        # Used when no orchestrator is configured or when orchestrator
+        # routing fails.
+        # ------------------------------------------------------------------
+
         # Check circuit breaker state before attempting
         if self._circuit_breaker.state.value == "open":
             if not self._circuit_breaker._should_attempt_reset():

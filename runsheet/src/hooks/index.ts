@@ -28,6 +28,14 @@ export type {
 export { useWebSocket } from "./useWebSocket";
 
 export type {
+  AgentEventType,
+  AgentWebSocketMessage,
+  AgentWebSocketOptions,
+  UseAgentWebSocketReturn,
+} from "./useAgentWebSocket";
+export { useAgentWebSocket } from "./useAgentWebSocket";
+
+export type {
   CargoUpdateEvent,
   DelayAlertEvent,
   JobCreatedEvent,

@@ -1,0 +1,4 @@
+# file: /Users/olukotunjosh/Downloads/Runsheet/Runsheet-backend/Agents/confirmation_protocol.py
+# hypothesis_version: 6.151.4
+
+['approval_queue', 'auto-low', 'auto-medium', 'full-auto', 'high', 'immediate', 'low', 'medium', 'rejected', 'suggest-only', 'unknown']

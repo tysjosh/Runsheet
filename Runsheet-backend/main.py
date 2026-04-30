@@ -11,7 +11,7 @@ import csv
 import io
 import time
 from datetime import datetime, timedelta
-from Agents.mainagent import LogisticsAgent
+from Agents.mainagent import LogisticsAgent, configure_orchestrator
 from data_endpoints import router as data_router
 from services.data_seeder import data_seeder
 from services.elasticsearch_service import elasticsearch_service
@@ -48,6 +48,35 @@ from scheduling.services.job_service import JobService
 from scheduling.services.cargo_service import CargoService
 from scheduling.services.delay_detection_service import DelayDetectionService
 from scheduling.websocket.scheduling_ws import SchedulingWebSocketManager, get_scheduling_ws_manager
+from Agents.agent_ws_manager import AgentActivityWSManager, get_agent_ws_manager
+
+# Agentic AI Transformation imports
+# Validates: Requirements 3.1, 4.1, 5.1, 7.1-7.9, 9.6
+from Agents.risk_registry import RiskRegistry
+from Agents.business_validator import BusinessValidator
+from Agents.activity_log_service import ActivityLogService
+from Agents.autonomy_config_service import AutonomyConfigService
+from Agents.approval_queue_service import ApprovalQueueService
+from Agents.confirmation_protocol import ConfirmationProtocol
+from Agents.memory_service import MemoryService
+from Agents.feedback_service import FeedbackService
+from Agents.tools.mutation_tools import configure_mutation_tools
+from Agents.agent_es_mappings import setup_agent_indices
+from Agents.specialists import (
+    FleetAgent,
+    SchedulingAgent,
+    FuelAgent,
+    OpsIntelligenceAgent,
+    ReportingAgent,
+)
+from Agents.execution_planner import ExecutionPlanner
+from Agents.orchestrator import AgentOrchestrator
+from Agents.autonomous import (
+    DelayResponseAgent,
+    FuelManagementAgent,
+    SLAGuardianAgent,
+)
+from agent_endpoints import router as agent_router, configure_agent_endpoints
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -248,11 +277,171 @@ async def lifespan(app: FastAPI):
         )
     except Exception as e:
         logger.error(f"❌ Failed to configure webhook receiver: {e}")
-    
+
+    # ---------------------------------------------------------------
+    # Agentic AI Transformation: service initialization
+    # Validates: Requirements 3.1, 4.1, 5.1, 7.1-7.9, 9.6
+    # ---------------------------------------------------------------
+    _autonomous_agents = []
+    _agent_redis_client = None
+    try:
+        import redis.asyncio as aioredis
+
+        _redis_url = settings.redis_url or "redis://localhost:6379"
+
+        # 1. Redis client for agentic services (risk overrides, autonomy config)
+        _agent_redis_client = aioredis.from_url(_redis_url, decode_responses=False)
+        logger.info("✅ Agent Redis client connected")
+
+        # 2. Core services (order matters — later services depend on earlier ones)
+        risk_registry = RiskRegistry(redis_client=_agent_redis_client)
+        business_validator = BusinessValidator(es_service=elasticsearch_service)
+        activity_log_service = ActivityLogService(
+            es_service=elasticsearch_service, ws_manager=agent_ws_manager
+        )
+        autonomy_config_service = AutonomyConfigService(
+            redis_client=_agent_redis_client
+        )
+
+        # 3. Approval queue (needs es, ws, activity log)
+        approval_queue_service = ApprovalQueueService(
+            es_service=elasticsearch_service,
+            ws_manager=agent_ws_manager,
+            activity_log_service=activity_log_service,
+        )
+
+        # 4. Confirmation protocol (needs risk, approval, autonomy, activity, validator)
+        confirmation_protocol = ConfirmationProtocol(
+            risk_registry=risk_registry,
+            approval_queue_service=approval_queue_service,
+            autonomy_config_service=autonomy_config_service,
+            activity_log_service=activity_log_service,
+            business_validator=business_validator,
+        )
+
+        # Wire back-reference so approval queue can execute approved mutations
+        approval_queue_service._confirmation_protocol = confirmation_protocol
+
+        # 5. Memory and Feedback services
+        memory_service = MemoryService(es_service=elasticsearch_service)
+        feedback_service = FeedbackService(es_service=elasticsearch_service)
+
+        # 6. Wire mutation tools with confirmation protocol
+        configure_mutation_tools(confirmation_protocol, elasticsearch_service)
+        logger.info("✅ Mutation tools configured")
+
+        # 7. Wire agent REST endpoints
+        configure_agent_endpoints(
+            approval_queue_service=approval_queue_service,
+            activity_log_service=activity_log_service,
+            autonomy_config_service=autonomy_config_service,
+            memory_service=memory_service,
+            feedback_service=feedback_service,
+        )
+        logger.info("✅ Agent endpoints configured")
+
+        # 8. Specialist agents (share a new LiteLLM model instance)
+        from strands.models.litellm import LiteLLMModel
+
+        specialist_model = LiteLLMModel(
+            model_id="vertex_ai/gemini-2.5-flash",
+            client_args={
+                "vertex_project": settings.google_cloud_project,
+                "vertex_location": settings.google_cloud_location,
+            },
+            params={
+                "max_tokens": 8000,
+                "temperature": 0.7,
+            },
+        )
+
+        specialists = {
+            "fleet": FleetAgent(model=specialist_model),
+            "scheduling": SchedulingAgent(model=specialist_model),
+            "fuel": FuelAgent(model=specialist_model),
+            "ops": OpsIntelligenceAgent(model=specialist_model),
+            "reporting": ReportingAgent(model=specialist_model),
+        }
+        logger.info("✅ Specialist agents initialized")
+
+        # 9. Execution planner and orchestrator
+        execution_planner = ExecutionPlanner(
+            activity_log_service=activity_log_service,
+            confirmation_protocol=confirmation_protocol,
+        )
+        agent_orchestrator = AgentOrchestrator(
+            specialists=specialists,
+            execution_planner=execution_planner,
+            activity_log_service=activity_log_service,
+        )
+        logger.info("✅ Agent orchestrator initialized")
+
+        # 10. Autonomous agents (background tasks)
+        delay_response_agent = DelayResponseAgent(
+            es_service=elasticsearch_service,
+            activity_log_service=activity_log_service,
+            ws_manager=agent_ws_manager,
+            confirmation_protocol=confirmation_protocol,
+            feature_flag_service=ops_feature_flags,
+        )
+        fuel_management_agent = FuelManagementAgent(
+            es_service=elasticsearch_service,
+            activity_log_service=activity_log_service,
+            ws_manager=agent_ws_manager,
+            confirmation_protocol=confirmation_protocol,
+            feature_flag_service=ops_feature_flags,
+        )
+        sla_guardian_agent = SLAGuardianAgent(
+            es_service=elasticsearch_service,
+            activity_log_service=activity_log_service,
+            ws_manager=agent_ws_manager,
+            confirmation_protocol=confirmation_protocol,
+            feature_flag_service=ops_feature_flags,
+        )
+
+        await delay_response_agent.start()
+        await fuel_management_agent.start()
+        await sla_guardian_agent.start()
+        _autonomous_agents = [
+            delay_response_agent,
+            fuel_management_agent,
+            sla_guardian_agent,
+        ]
+        logger.info("✅ Autonomous agents started")
+
+        # 11. Store references in app.state for health/pause/resume endpoints
+        app.state.autonomous_agents = {
+            "delay_response_agent": delay_response_agent,
+            "fuel_management_agent": fuel_management_agent,
+            "sla_guardian_agent": sla_guardian_agent,
+        }
+        app.state.agent_orchestrator = agent_orchestrator
+
+        # Wire orchestrator into mainagent for multi-agent routing
+        # Validates: Requirements 7.6, 7.7
+        configure_orchestrator(agent_orchestrator)
+
+        # 12. Set up agent Elasticsearch indices and ILM policies
+        setup_agent_indices(elasticsearch_service)
+        logger.info("✅ Agent ES indices ready")
+
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize agentic services: {e}")
+        # Don't fail startup — the rest of the app can still serve requests
+
     yield  # Application runs here
     
     # Shutdown
     logger.info("👋 Shutting down Runsheet Logistics API...")
+
+    # Stop autonomous agents gracefully
+    for agent in _autonomous_agents:
+        try:
+            await agent.stop()
+            logger.info("✅ Stopped autonomous agent: %s", agent.agent_id)
+        except Exception:
+            pass
+
     # Cancel periodic delay check background task
     if _delay_check_task is not None and not _delay_check_task.done():
         _delay_check_task.cancel()
@@ -270,6 +459,10 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
     try:
+        await agent_ws_manager.shutdown()
+    except Exception:
+        pass
+    try:
         await ops_idempotency.disconnect()
     except Exception:
         pass
@@ -277,6 +470,13 @@ async def lifespan(app: FastAPI):
         await ops_feature_flags.disconnect()
     except Exception:
         pass
+    # Close agent Redis client
+    if _agent_redis_client is not None:
+        try:
+            await _agent_redis_client.close()
+            logger.info("✅ Agent Redis client closed")
+        except Exception:
+            pass
 
 
 # Initialize FastAPI app with lifespan handler
@@ -357,6 +557,10 @@ ops_ws_manager = get_ops_ws_manager()
 # Validates: Requirement 9.1 - /ws/scheduling WebSocket endpoint
 scheduling_ws_manager = get_scheduling_ws_manager()
 
+# Initialize the Agent Activity WebSocket manager for real-time agent updates
+# Validates: Requirement 8.7 - /ws/agent-activity WebSocket channel
+agent_ws_manager = get_agent_ws_manager()
+
 # Configure the data ingestion service with the WebSocket connection manager
 # This enables automatic broadcasting of location updates to connected clients
 data_ingestion_service.set_connection_manager(fleet_connection_manager)
@@ -383,6 +587,11 @@ app.include_router(fuel_router)
 # Rate limiting: 100 req/min per user for scheduling endpoints
 # Validates: Requirement 8.1
 app.include_router(scheduling_router)
+
+# Include Agent endpoints router for approval queue, activity log, autonomy config,
+# memory, feedback, and agent health/pause/resume
+# Validates: Requirements 2.3-2.5, 8.4-8.5, 9.6, 10.4-10.5, 11.5-11.6, 12.5-12.6
+app.include_router(agent_router)
 
 class ChatRequest(BaseModel):
     message: str
@@ -1431,6 +1640,58 @@ async def scheduling_live_websocket(websocket: WebSocket):
         logger.error("Scheduling WebSocket error: %s", exc)
     finally:
         await scheduling_ws_manager.disconnect(websocket)
+
+
+# =============================================================================
+# WebSocket: Agent Activity Live Updates
+# =============================================================================
+# Real-time agent activity feed for autonomous agent actions, approval queue
+# changes, and agent alerts (delay_alert, fuel_alert, sla_breach).
+#
+# Validates:
+# - Requirement 8.7: /ws/agent-activity WebSocket channel for real-time
+#   agent activity feed
+# =============================================================================
+
+
+@app.websocket("/ws/agent-activity")
+async def agent_activity_websocket(websocket: WebSocket):
+    """
+    WebSocket endpoint for real-time agent activity updates.
+
+    Broadcasts agent activity events, approval queue changes, and
+    autonomous agent alerts to connected clients.
+
+    Validates: Requirement 8.7
+    """
+    await agent_ws_manager.connect(websocket)
+
+    try:
+        while True:
+            try:
+                # Keep connection alive; handle client messages (e.g. ping)
+                data = await websocket.receive_text()
+                # Could handle client commands here in the future
+                try:
+                    message = json.loads(data)
+                    msg_type = message.get("type", "")
+                    if msg_type == "ping":
+                        await websocket.send_json({
+                            "type": "pong",
+                            "timestamp": datetime.utcnow().isoformat() + "Z",
+                        })
+                except json.JSONDecodeError:
+                    pass
+            except WebSocketDisconnect:
+                break
+            except Exception as exc:
+                logger.warning("Error in agent activity WS message loop: %s", exc)
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        logger.error("Agent activity WebSocket error: %s", exc)
+    finally:
+        await agent_ws_manager.disconnect(websocket)
 
 
 @app.websocket("/api/fleet/live")

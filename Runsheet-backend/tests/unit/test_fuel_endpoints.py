@@ -207,7 +207,7 @@ class TestListStations:
             pagination=PaginationMeta.compute(page=1, size=50, total=1),
             request_id="",
         )
-        resp = client.get("/fuel/stations")
+        resp = client.get("/api/fuel/stations")
         assert resp.status_code == 200
         body = resp.json()
         assert "data" in body
@@ -223,7 +223,7 @@ class TestListStations:
             pagination=PaginationMeta.compute(page=1, size=50, total=0),
             request_id="",
         )
-        client.get("/fuel/stations?fuel_type=AGO&status=low&location=Dubai&page=2&size=10")
+        client.get("/api/fuel/stations?fuel_type=AGO&status=low&location=Dubai&page=2&size=10")
         mock_fuel_service.list_stations.assert_called_once_with(
             tenant_id=TENANT_ID,
             fuel_type="AGO",
@@ -239,7 +239,7 @@ class TestListStations:
             pagination=PaginationMeta.compute(page=1, size=50, total=0),
             request_id="",
         )
-        client.get("/fuel/stations")
+        client.get("/api/fuel/stations")
         call_kwargs = mock_fuel_service.list_stations.call_args.kwargs
         assert call_kwargs["page"] == 1
         assert call_kwargs["size"] == 50
@@ -254,7 +254,7 @@ class TestGetStation:
     def test_returns_station_detail(self, client, mock_fuel_service):
         detail = _make_station_detail()
         mock_fuel_service.get_station.return_value = detail
-        resp = client.get("/fuel/stations/STN-001")
+        resp = client.get("/api/fuel/stations/STN-001")
         assert resp.status_code == 200
         body = resp.json()
         assert "data" in body
@@ -264,7 +264,7 @@ class TestGetStation:
     def test_not_found_returns_404(self, client, mock_fuel_service):
         from errors.exceptions import resource_not_found
         mock_fuel_service.get_station.side_effect = resource_not_found("Station not found")
-        resp = client.get("/fuel/stations/MISSING")
+        resp = client.get("/api/fuel/stations/MISSING")
         assert resp.status_code == 404
 
 
@@ -284,7 +284,7 @@ class TestCreateStation:
             "capacity_liters": 50000.0,
             "initial_stock_liters": 30000.0,
         }
-        resp = client.post("/fuel/stations", json=payload)
+        resp = client.post("/api/fuel/stations", json=payload)
         assert resp.status_code == 201
         body = resp.json()
         assert body["data"]["station_id"] == "STN-001"
@@ -299,7 +299,7 @@ class TestCreateStation:
             "capacity_liters": -100.0,
             "initial_stock_liters": 0.0,
         }
-        resp = client.post("/fuel/stations", json=payload)
+        resp = client.post("/api/fuel/stations", json=payload)
         assert resp.status_code == 422
 
     def test_zero_capacity_rejected(self, client, mock_fuel_service):
@@ -311,12 +311,12 @@ class TestCreateStation:
             "capacity_liters": 0.0,
             "initial_stock_liters": 0.0,
         }
-        resp = client.post("/fuel/stations", json=payload)
+        resp = client.post("/api/fuel/stations", json=payload)
         assert resp.status_code == 422
 
     def test_missing_required_fields_rejected(self, client, mock_fuel_service):
         """Missing station_id, name, fuel_type should fail validation."""
-        resp = client.post("/fuel/stations", json={})
+        resp = client.post("/api/fuel/stations", json={})
         assert resp.status_code == 422
 
 
@@ -329,13 +329,13 @@ class TestUpdateStation:
     def test_partial_update_returns_200(self, client, mock_fuel_service):
         station = _make_station(name="Updated Station")
         mock_fuel_service.update_station.return_value = station
-        resp = client.patch("/fuel/stations/STN-001", json={"name": "Updated Station"})
+        resp = client.patch("/api/fuel/stations/STN-001", json={"name": "Updated Station"})
         assert resp.status_code == 200
         body = resp.json()
         assert body["data"]["name"] == "Updated Station"
 
     def test_negative_capacity_in_update_rejected(self, client, mock_fuel_service):
-        resp = client.patch("/fuel/stations/STN-001", json={"capacity_liters": -5.0})
+        resp = client.patch("/api/fuel/stations/STN-001", json={"capacity_liters": -5.0})
         assert resp.status_code == 422
 
 
@@ -348,21 +348,21 @@ class TestUpdateThreshold:
     def test_update_threshold_returns_200(self, client, mock_fuel_service):
         station = _make_station(alert_threshold_pct=25.0)
         mock_fuel_service.update_threshold.return_value = station
-        resp = client.patch("/fuel/stations/STN-001/threshold", json={"alert_threshold_pct": 25.0})
+        resp = client.patch("/api/fuel/stations/STN-001/threshold", json={"alert_threshold_pct": 25.0})
         assert resp.status_code == 200
         body = resp.json()
         assert body["data"]["alert_threshold_pct"] == 25.0
 
     def test_threshold_above_100_rejected(self, client, mock_fuel_service):
-        resp = client.patch("/fuel/stations/STN-001/threshold", json={"alert_threshold_pct": 150.0})
+        resp = client.patch("/api/fuel/stations/STN-001/threshold", json={"alert_threshold_pct": 150.0})
         assert resp.status_code == 422
 
     def test_threshold_below_0_rejected(self, client, mock_fuel_service):
-        resp = client.patch("/fuel/stations/STN-001/threshold", json={"alert_threshold_pct": -5.0})
+        resp = client.patch("/api/fuel/stations/STN-001/threshold", json={"alert_threshold_pct": -5.0})
         assert resp.status_code == 422
 
     def test_missing_threshold_rejected(self, client, mock_fuel_service):
-        resp = client.patch("/fuel/stations/STN-001/threshold", json={})
+        resp = client.patch("/api/fuel/stations/STN-001/threshold", json={})
         assert resp.status_code == 422
 
 
@@ -386,7 +386,7 @@ class TestRecordConsumption:
             "asset_id": "TRUCK-001",
             "operator_id": "OP-001",
         }
-        resp = client.post("/fuel/consumption", json=payload)
+        resp = client.post("/api/fuel/consumption", json=payload)
         assert resp.status_code == 200
         body = resp.json()
         assert body["data"]["event_id"] == "EVT-001"
@@ -402,7 +402,7 @@ class TestRecordConsumption:
             "asset_id": "TRUCK-001",
             "operator_id": "OP-001",
         }
-        resp = client.post("/fuel/consumption", json=payload)
+        resp = client.post("/api/fuel/consumption", json=payload)
         assert resp.status_code == 422
 
     def test_zero_quantity_rejected(self, client, mock_fuel_service):
@@ -413,11 +413,11 @@ class TestRecordConsumption:
             "asset_id": "TRUCK-001",
             "operator_id": "OP-001",
         }
-        resp = client.post("/fuel/consumption", json=payload)
+        resp = client.post("/api/fuel/consumption", json=payload)
         assert resp.status_code == 422
 
     def test_missing_required_fields_rejected(self, client, mock_fuel_service):
-        resp = client.post("/fuel/consumption", json={"station_id": "STN-001"})
+        resp = client.post("/api/fuel/consumption", json={"station_id": "STN-001"})
         assert resp.status_code == 422
 
     def test_insufficient_stock_returns_400(self, client, mock_fuel_service):
@@ -432,7 +432,7 @@ class TestRecordConsumption:
             "asset_id": "TRUCK-001",
             "operator_id": "OP-001",
         }
-        resp = client.post("/fuel/consumption", json=payload)
+        resp = client.post("/api/fuel/consumption", json=payload)
         assert resp.status_code == 400
 
     def test_optional_odometer_accepted(self, client, mock_fuel_service):
@@ -450,7 +450,7 @@ class TestRecordConsumption:
             "operator_id": "OP-001",
             "odometer_reading": 125000.5,
         }
-        resp = client.post("/fuel/consumption", json=payload)
+        resp = client.post("/api/fuel/consumption", json=payload)
         assert resp.status_code == 200
 
 
@@ -474,7 +474,7 @@ class TestRecordConsumptionBatch:
             {"station_id": "STN-001", "fuel_type": "AGO", "quantity_liters": 1500.0, "asset_id": "TRUCK-001", "operator_id": "OP-001"},
             {"station_id": "STN-001", "fuel_type": "AGO", "quantity_liters": 1500.0, "asset_id": "TRUCK-002", "operator_id": "OP-001"},
         ]
-        resp = client.post("/fuel/consumption/batch", json=payload)
+        resp = client.post("/api/fuel/consumption/batch", json=payload)
         assert resp.status_code == 200
         body = resp.json()
         assert body["data"]["processed"] == 2
@@ -485,7 +485,7 @@ class TestRecordConsumptionBatch:
         payload = [
             {"station_id": "STN-001", "fuel_type": "AGO", "quantity_liters": -10.0, "asset_id": "TRUCK-001", "operator_id": "OP-001"},
         ]
-        resp = client.post("/fuel/consumption/batch", json=payload)
+        resp = client.post("/api/fuel/consumption/batch", json=payload)
         assert resp.status_code == 422
 
 
@@ -509,7 +509,7 @@ class TestRecordRefill:
             "supplier": "FuelCo",
             "operator_id": "OP-001",
         }
-        resp = client.post("/fuel/refill", json=payload)
+        resp = client.post("/api/fuel/refill", json=payload)
         assert resp.status_code == 200
         body = resp.json()
         assert body["data"]["event_id"] == "EVT-R01"
@@ -523,7 +523,7 @@ class TestRecordRefill:
             "supplier": "FuelCo",
             "operator_id": "OP-001",
         }
-        resp = client.post("/fuel/refill", json=payload)
+        resp = client.post("/api/fuel/refill", json=payload)
         assert resp.status_code == 422
 
     def test_overflow_returns_400(self, client, mock_fuel_service):
@@ -539,7 +539,7 @@ class TestRecordRefill:
             "supplier": "FuelCo",
             "operator_id": "OP-001",
         }
-        resp = client.post("/fuel/refill", json=payload)
+        resp = client.post("/api/fuel/refill", json=payload)
         assert resp.status_code == 400
 
     def test_missing_supplier_rejected(self, client, mock_fuel_service):
@@ -549,7 +549,7 @@ class TestRecordRefill:
             "quantity_liters": 1000.0,
             "operator_id": "OP-001",
         }
-        resp = client.post("/fuel/refill", json=payload)
+        resp = client.post("/api/fuel/refill", json=payload)
         assert resp.status_code == 422
 
 
@@ -561,7 +561,7 @@ class TestListAlerts:
 
     def test_returns_alerts(self, client, mock_fuel_service):
         mock_fuel_service.get_alerts.return_value = [_make_alert()]
-        resp = client.get("/fuel/alerts")
+        resp = client.get("/api/fuel/alerts")
         assert resp.status_code == 200
         body = resp.json()
         assert "data" in body
@@ -571,7 +571,7 @@ class TestListAlerts:
 
     def test_empty_alerts(self, client, mock_fuel_service):
         mock_fuel_service.get_alerts.return_value = []
-        resp = client.get("/fuel/alerts")
+        resp = client.get("/api/fuel/alerts")
         assert resp.status_code == 200
         assert resp.json()["data"] == []
 
@@ -586,7 +586,7 @@ class TestConsumptionMetrics:
         mock_fuel_service.get_consumption_metrics.return_value = [
             MetricsBucket(timestamp="2025-01-01T00:00:00Z", total_liters=1500.0, event_count=3),
         ]
-        resp = client.get("/fuel/metrics/consumption")
+        resp = client.get("/api/fuel/metrics/consumption")
         assert resp.status_code == 200
         body = resp.json()
         assert len(body["data"]) == 1
@@ -595,7 +595,7 @@ class TestConsumptionMetrics:
     def test_passes_filters_to_service(self, client, mock_fuel_service):
         mock_fuel_service.get_consumption_metrics.return_value = []
         client.get(
-            "/fuel/metrics/consumption"
+            "/api/fuel/metrics/consumption"
             "?bucket=hourly&station_id=STN-001&fuel_type=AGO"
             "&asset_id=TRUCK-001&start_date=2025-01-01&end_date=2025-01-31"
         )
@@ -626,7 +626,7 @@ class TestEfficiencyMetrics:
                 event_count=10,
             ),
         ]
-        resp = client.get("/fuel/metrics/efficiency")
+        resp = client.get("/api/fuel/metrics/efficiency")
         assert resp.status_code == 200
         body = resp.json()
         assert len(body["data"]) == 1
@@ -634,7 +634,7 @@ class TestEfficiencyMetrics:
 
     def test_passes_filters_to_service(self, client, mock_fuel_service):
         mock_fuel_service.get_efficiency_metrics.return_value = []
-        client.get("/fuel/metrics/efficiency?asset_id=TRUCK-001&start_date=2025-01-01&end_date=2025-01-31")
+        client.get("/api/fuel/metrics/efficiency?asset_id=TRUCK-001&start_date=2025-01-01&end_date=2025-01-31")
         mock_fuel_service.get_efficiency_metrics.assert_called_once_with(
             tenant_id=TENANT_ID,
             asset_id="TRUCK-001",
@@ -651,7 +651,7 @@ class TestNetworkSummary:
 
     def test_returns_summary(self, client, mock_fuel_service):
         mock_fuel_service.get_network_summary.return_value = _make_network_summary()
-        resp = client.get("/fuel/metrics/summary")
+        resp = client.get("/api/fuel/metrics/summary")
         assert resp.status_code == 200
         body = resp.json()
         assert body["data"]["total_stations"] == 5
@@ -666,9 +666,22 @@ class TestNetworkSummary:
 
 class TestTenantScoping:
 
+    @pytest.fixture(autouse=True)
+    def _force_non_dev(self):
+        """Force non-development environment so tenant guard rejects unauthenticated requests."""
+        with patch(
+            "ops.middleware.tenant_guard.get_settings",
+            return_value=MagicMock(
+                environment=MagicMock(value="production"),
+                jwt_secret="test-secret",
+                jwt_algorithm="HS256",
+            ),
+        ):
+            yield
+
     def test_no_auth_header_returns_403(self, no_tenant_client):
         """Requests without Authorization header should be rejected."""
-        resp = no_tenant_client.get("/fuel/stations")
+        resp = no_tenant_client.get("/api/fuel/stations")
         assert resp.status_code == 403
 
     def test_no_auth_on_post_returns_403(self, no_tenant_client):
@@ -679,7 +692,7 @@ class TestTenantScoping:
             "capacity_liters": 50000.0,
             "initial_stock_liters": 30000.0,
         }
-        resp = no_tenant_client.post("/fuel/stations", json=payload)
+        resp = no_tenant_client.post("/api/fuel/stations", json=payload)
         assert resp.status_code == 403
 
     def test_no_auth_on_consumption_returns_403(self, no_tenant_client):
@@ -690,7 +703,7 @@ class TestTenantScoping:
             "asset_id": "TRUCK-001",
             "operator_id": "OP-001",
         }
-        resp = no_tenant_client.post("/fuel/consumption", json=payload)
+        resp = no_tenant_client.post("/api/fuel/consumption", json=payload)
         assert resp.status_code == 403
 
     def test_no_auth_on_refill_returns_403(self, no_tenant_client):
@@ -701,15 +714,15 @@ class TestTenantScoping:
             "supplier": "FuelCo",
             "operator_id": "OP-001",
         }
-        resp = no_tenant_client.post("/fuel/refill", json=payload)
+        resp = no_tenant_client.post("/api/fuel/refill", json=payload)
         assert resp.status_code == 403
 
     def test_no_auth_on_alerts_returns_403(self, no_tenant_client):
-        resp = no_tenant_client.get("/fuel/alerts")
+        resp = no_tenant_client.get("/api/fuel/alerts")
         assert resp.status_code == 403
 
     def test_no_auth_on_metrics_returns_403(self, no_tenant_client):
-        resp = no_tenant_client.get("/fuel/metrics/summary")
+        resp = no_tenant_client.get("/api/fuel/metrics/summary")
         assert resp.status_code == 403
 
 
@@ -723,8 +736,8 @@ class TestRateLimiting:
         """Verify that the rate limiter decorator is applied to endpoints."""
         # The router has prefix="/fuel", so all route paths include it.
         route_paths = [r.path for r in router.routes]
-        assert "/fuel/stations" in route_paths
-        assert "/fuel/consumption" in route_paths
-        assert "/fuel/refill" in route_paths
-        assert "/fuel/alerts" in route_paths
-        assert "/fuel/metrics/summary" in route_paths
+        assert "/api/fuel/stations" in route_paths
+        assert "/api/fuel/consumption" in route_paths
+        assert "/api/fuel/refill" in route_paths
+        assert "/api/fuel/alerts" in route_paths
+        assert "/api/fuel/metrics/summary" in route_paths

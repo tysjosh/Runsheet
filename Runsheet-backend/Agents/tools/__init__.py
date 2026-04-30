@@ -55,6 +55,18 @@ from .scheduling_tools import (
     generate_dispatch_report
 )
 
+from .mutation_tools import (
+    assign_asset_to_job,
+    update_job_status,
+    cancel_job,
+    create_job,
+    reassign_rider,
+    escalate_shipment,
+    request_fuel_refill,
+    update_fuel_threshold,
+    configure_mutation_tools,
+)
+
 # All available tools
 ALL_TOOLS = [
     # Search tools
@@ -101,4 +113,18 @@ ALL_TOOLS = [
     find_available_assets,
     get_scheduling_summary,
     generate_dispatch_report,
+
+    # Mutation tools - scheduling
+    assign_asset_to_job,
+    update_job_status,
+    cancel_job,
+    create_job,
+
+    # Mutation tools - ops
+    reassign_rider,
+    escalate_shipment,
+
+    # Mutation tools - fuel
+    request_fuel_refill,
+    update_fuel_threshold,
 ]

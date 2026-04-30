@@ -1,0 +1,4 @@
+# file: /Users/olukotunjosh/Downloads/Runsheet/Runsheet-backend/Agents/autonomous/fuel_management_agent.py
+# hypothesis_version: 6.151.4
+
+[120, 300, 'N/A', 'Unknown', '_source', 'action', 'bool', 'capacity_liters', 'critical', 'current_stock_liters', 'days_until_empty', 'default', 'fuel_alert', 'fuel_stations', 'fuel_type', 'hits', 'lt', 'minimum_should_match', 'name', 'priority', 'quantity_liters', 'query', 'range', 'refill_quantity', 'refill_request', 'request_fuel_refill', 'result', 'should', 'size', 'station_id', 'station_name', 'status', 'tenant_id', 'term', 'unknown']

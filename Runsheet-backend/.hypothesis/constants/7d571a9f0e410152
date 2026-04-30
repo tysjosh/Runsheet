@@ -1,0 +1,4 @@
+# file: /Users/olukotunjosh/Downloads/Runsheet/Runsheet-backend/scheduling/websocket/scheduling_ws.py
+# hypothesis_version: 6.151.4
+
+[1000, '_alive', 'all', 'asset_assigned', 'cargo_complete', 'cargo_update', 'connected', 'connection', 'data', 'delay_alert', 'destination', 'estimated_arrival', 'heartbeat', 'item_id', 'item_status', 'job_created', 'job_id', 'job_type', 'message', 'new_status', 'old_status', 'origin', 'pong', 'shutdown', 'stale', 'status', 'status_changed', 'subscribe', 'subscribed', 'subscriptions', 'tenant_id', 'timestamp', 'type', 'websocket']

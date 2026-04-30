@@ -82,7 +82,7 @@ def client(app):
 
 class TestEnableFeatureFlag:
     def test_enable_returns_success(self, client, mock_ff_service):
-        resp = client.post("/ops/admin/feature-flags/tenant-abc/enable")
+        resp = client.post("/api/ops/admin/feature-flags/tenant-abc/enable")
         assert resp.status_code == 200
         body = resp.json()
         assert body["data"]["tenant_id"] == "tenant-abc"
@@ -90,7 +90,7 @@ class TestEnableFeatureFlag:
         assert "request_id" in body
 
     def test_enable_calls_service(self, client, mock_ff_service):
-        client.post("/ops/admin/feature-flags/tenant-abc/enable")
+        client.post("/api/ops/admin/feature-flags/tenant-abc/enable")
         mock_ff_service.enable.assert_awaited_once_with("tenant-abc", "user-1")
 
 
@@ -98,7 +98,7 @@ class TestDisableFeatureFlag:
     @patch("ops.websocket.ops_ws.get_ops_ws_manager")
     def test_disable_returns_success(self, mock_get_ws, client, mock_ff_service, mock_ws_manager):
         mock_get_ws.return_value = mock_ws_manager
-        resp = client.post("/ops/admin/feature-flags/tenant-abc/disable")
+        resp = client.post("/api/ops/admin/feature-flags/tenant-abc/disable")
         assert resp.status_code == 200
         body = resp.json()
         assert body["data"]["tenant_id"] == "tenant-abc"
@@ -108,7 +108,7 @@ class TestDisableFeatureFlag:
     @patch("ops.websocket.ops_ws.get_ops_ws_manager")
     def test_disable_calls_service_and_ws(self, mock_get_ws, client, mock_ff_service, mock_ws_manager):
         mock_get_ws.return_value = mock_ws_manager
-        client.post("/ops/admin/feature-flags/tenant-abc/disable")
+        client.post("/api/ops/admin/feature-flags/tenant-abc/disable")
         mock_ff_service.disable.assert_awaited_once_with("tenant-abc", "user-1")
         mock_ws_manager.disconnect_tenant.assert_awaited_once_with("tenant-abc")
 
@@ -117,7 +117,7 @@ class TestRollbackFeatureFlag:
     @patch("ops.websocket.ops_ws.get_ops_ws_manager")
     def test_rollback_default_no_purge(self, mock_get_ws, client, mock_ff_service, mock_ws_manager):
         mock_get_ws.return_value = mock_ws_manager
-        resp = client.post("/ops/admin/feature-flags/tenant-abc/rollback")
+        resp = client.post("/api/ops/admin/feature-flags/tenant-abc/rollback")
         assert resp.status_code == 200
         body = resp.json()
         assert body["data"]["tenant_id"] == "tenant-abc"
@@ -128,7 +128,7 @@ class TestRollbackFeatureFlag:
     @patch("ops.websocket.ops_ws.get_ops_ws_manager")
     def test_rollback_with_purge(self, mock_get_ws, client, mock_ff_service, mock_ws_manager):
         mock_get_ws.return_value = mock_ws_manager
-        resp = client.post("/ops/admin/feature-flags/tenant-abc/rollback?purge_data=true")
+        resp = client.post("/api/ops/admin/feature-flags/tenant-abc/rollback?purge_data=true")
         assert resp.status_code == 200
         body = resp.json()
         assert body["data"]["purge_data"] is True
@@ -137,7 +137,7 @@ class TestRollbackFeatureFlag:
     @patch("ops.websocket.ops_ws.get_ops_ws_manager")
     def test_rollback_disconnects_ws(self, mock_get_ws, client, mock_ff_service, mock_ws_manager):
         mock_get_ws.return_value = mock_ws_manager
-        resp = client.post("/ops/admin/feature-flags/tenant-abc/rollback")
+        resp = client.post("/api/ops/admin/feature-flags/tenant-abc/rollback")
         body = resp.json()
         assert body["data"]["ws_clients_disconnected"] == 2
         mock_ws_manager.disconnect_tenant.assert_awaited_once_with("tenant-abc")
@@ -167,5 +167,5 @@ class TestServiceNotConfigured:
         test_app.include_router(router)
         c = TestClient(test_app)
 
-        resp = c.post("/ops/admin/feature-flags/tenant-abc/enable")
+        resp = c.post("/api/ops/admin/feature-flags/tenant-abc/enable")
         assert resp.status_code == 503

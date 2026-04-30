@@ -1,0 +1,4 @@
+# file: /Users/olukotunjosh/Downloads/Runsheet/Runsheet-backend/Agents/risk_registry.py
+# hypothesis_version: 6.151.4
+
+['assign_asset_to_job', 'cancel_job', 'create_job', 'escalate_shipment', 'high', 'low', 'medium', 'reassign_rider', 'request_fuel_refill', 'update_job_status']
