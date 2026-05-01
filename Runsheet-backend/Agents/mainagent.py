@@ -146,12 +146,16 @@ class LogisticsAgent:
         # Setup Google credentials
         self.setup_gemini_credentials()
         
-        # Initialize Gemini model through LiteLLM
+        # Initialize Gemini model through LiteLLM (using API key)
+        import os
+        # Set the env var litellm reads for Gemini API key auth
+        gemini_key = os.environ.get("GEMINI_API_KEY", "")
+        if gemini_key:
+            os.environ["GEMINI_API_KEY"] = gemini_key
         gemini_model = LiteLLMModel(
-            model_id="vertex_ai/gemini-2.5-flash",
+            model_id="gemini/gemini-2.5-flash",
             client_args={
-                "vertex_project": self.settings.google_cloud_project,
-                "vertex_location": self.settings.google_cloud_location,
+                "api_key": gemini_key,
             },
             params={
                 "max_tokens": 8000,
@@ -223,11 +227,11 @@ class LogisticsAgent:
             present the suggestion to the user as a recommendation but do NOT execute it.
 
             **Scheduling & Dispatch Tools (read-only):**
-            - `search_jobs(job_type=None, status=None, asset=None, origin=None, destination=None, start_date=None, end_date=None, tenant_id="default")` - Search logistics jobs by type, status, asset, location, or time range. Job types: cargo_transport, passenger_transport, vessel_movement, airport_transfer, crane_booking. Statuses: scheduled, assigned, in_progress, completed, cancelled, failed.
-            - `get_job_details(job_id, tenant_id="default")` - Get full details of a job including event history and cargo manifest.
-            - `find_available_assets(asset_type=None, start_time_range=None, end_time_range=None, tenant_id="default")` - Find assets not assigned to active jobs within a time window. Filter by asset_type: vehicle, vessel, equipment, container.
-            - `get_scheduling_summary(tenant_id="default")` - Get summary of active jobs, delayed jobs, available assets, and upcoming scheduled jobs.
-            - `generate_dispatch_report(days=7, tenant_id="default")` - Generate a markdown dispatch report with completion rates, delay analysis, asset utilization, and recommendations.
+            - `search_jobs(job_type=None, status=None, asset=None, origin=None, destination=None, start_date=None, end_date=None, tenant_id="dev-tenant")` - Search logistics jobs by type, status, asset, location, or time range. Job types: cargo_transport, passenger_transport, vessel_movement, airport_transfer, crane_booking. Statuses: scheduled, assigned, in_progress, completed, cancelled, failed.
+            - `get_job_details(job_id, tenant_id="dev-tenant")` - Get full details of a job including event history and cargo manifest.
+            - `find_available_assets(asset_type=None, start_time_range=None, end_time_range=None, tenant_id="dev-tenant")` - Find assets not assigned to active jobs within a time window. Filter by asset_type: vehicle, vessel, equipment, container.
+            - `get_scheduling_summary(tenant_id="dev-tenant")` - Get summary of active jobs, delayed jobs, available assets, and upcoming scheduled jobs.
+            - `generate_dispatch_report(days=7, tenant_id="dev-tenant")` - Generate a markdown dispatch report with completion rates, delay analysis, asset utilization, and recommendations.
 
             **IMPORTANT - Scheduling Tools Read-Only Guardrail:**
             All scheduling tools are strictly read-only. You must NEVER modify job data, assignments, or status.
@@ -475,15 +479,18 @@ class LogisticsAgent:
         }
 
     def setup_gemini_credentials(self):
-        """Setup Gemini credentials using the service account file from configuration"""
+        """Setup Gemini credentials. Skips Vertex AI setup when GEMINI_API_KEY is set."""
+        # If using Gemini API key directly, skip Vertex AI credential setup
+        if os.environ.get('GEMINI_API_KEY'):
+            logger.info("✅ Using Gemini API key (skipping Vertex AI credentials)")
+            return
+
         try:
-            # Check if running in Cloud Run (has GOOGLE_APPLICATION_CREDENTIALS set)
             if os.environ.get('GOOGLE_APPLICATION_CREDENTIALS'):
                 logger.info("✅ Using Cloud Run service account credentials")
                 os.environ['GOOGLE_CLOUD_PROJECT'] = self.settings.google_cloud_project
                 return
             
-            # Local development - use credentials path from configuration if provided
             credentials_path = self.settings.google_application_credentials
             
             if credentials_path and os.path.exists(credentials_path):
@@ -496,7 +503,6 @@ class LogisticsAgent:
                 
         except Exception as e:
             logger.error(f"Failed to setup Gemini credentials: {e}")
-            # Don't raise - let it try with default credentials
             os.environ['GOOGLE_CLOUD_PROJECT'] = self.settings.google_cloud_project
 
     def clear_memory(self, session_id: Optional[str] = None):
@@ -586,7 +592,7 @@ class LogisticsAgent:
         if _orchestrator is not None:
             try:
                 logger.info("🔀 Routing request through AgentOrchestrator")
-                tenant_id = "default"
+                tenant_id = "dev-tenant"
                 orchestrator_response = await _orchestrator.route(
                     user_message=message,
                     tenant_id=tenant_id,

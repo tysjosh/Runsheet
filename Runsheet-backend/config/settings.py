@@ -104,12 +104,16 @@ class Settings(BaseSettings):
     
     # Google Cloud / Gemini Configuration
     google_cloud_project: str = Field(
-        ...,
-        description="Google Cloud Platform project ID"
+        default="",
+        description="Google Cloud Platform project ID (optional when using GEMINI_API_KEY)"
     )
     google_cloud_location: str = Field(
         default="us-central1",
         description="Google Cloud region for Vertex AI"
+    )
+    gemini_api_key: str = Field(
+        default="",
+        description="Gemini API key for direct API access (alternative to Vertex AI)"
     )
     google_application_credentials: Optional[str] = Field(
         default=None,
@@ -320,13 +324,10 @@ class Settings(BaseSettings):
     @field_validator("google_cloud_project")
     @classmethod
     def validate_google_cloud_project(cls, v: str) -> str:
-        """Validate that google_cloud_project is not empty and follows GCP naming conventions."""
+        """Validate google_cloud_project if provided."""
         if not v or not v.strip():
-            raise ValueError("google_cloud_project cannot be empty")
+            return ""
         v = v.strip()
-        # GCP project IDs must be 6-30 characters, lowercase letters, digits, and hyphens
-        if len(v) < 6 or len(v) > 30:
-            raise ValueError("google_cloud_project must be between 6 and 30 characters")
         return v
     
     @field_validator("log_level")

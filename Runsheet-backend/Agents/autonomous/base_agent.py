@@ -99,12 +99,15 @@ class AutonomousAgentBase(ABC):
                 duration_ms = (
                     datetime.now(timezone.utc) - cycle_start
                 ).total_seconds() * 1000
-                await self._activity_log.log_monitoring_cycle(
-                    self.agent_id,
-                    len(detections),
-                    len(actions),
-                    duration_ms,
-                )
+                # Only log to ES when something was detected or acted on
+                # Reduces write volume by ~90% for idle cycles
+                if len(detections) > 0 or len(actions) > 0:
+                    await self._activity_log.log_monitoring_cycle(
+                        self.agent_id,
+                        len(detections),
+                        len(actions),
+                        duration_ms,
+                    )
             except Exception as e:
                 self.logger.error(f"Monitor cycle error: {e}", exc_info=True)
             await asyncio.sleep(self.poll_interval)

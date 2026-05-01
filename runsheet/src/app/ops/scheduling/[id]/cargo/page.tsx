@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import LoadingSpinner from "../../../../../components/LoadingSpinner";
-import CargoManifestView from "../../../../../components/ops/CargoManifestView";
+import CargoManifestEditor from "../../../../../components/ops/CargoManifestEditor";
 import { useSchedulingWebSocket } from "../../../../../hooks/useSchedulingWebSocket";
 import type {
   CargoItemStatus,
@@ -16,7 +16,6 @@ import type {
 import {
   getCargo,
   getJob,
-  updateCargoItemStatus,
 } from "../../../../../services/schedulingApi";
 
 /**
@@ -136,24 +135,13 @@ export default function CargoTrackingPage() {
   });
 
   /**
-   * Handle cargo item status update from action buttons.
-   *
-   * Validates: Requirement 12.4
+   * Handle cargo items change from CargoManifestEditor (edit saves or status updates).
    */
-  const handleUpdateItemStatus = useCallback(
-    async (itemId: string, newStatus: CargoItemStatus) => {
-      try {
-        const res = await updateCargoItemStatus(jobId, itemId, newStatus);
-        setCargoItems((prev) =>
-          prev.map((item) =>
-            item.item_id === itemId ? res.data : item,
-          ),
-        );
-      } catch (error) {
-        console.error("Failed to update cargo item status:", error);
-      }
+  const handleItemsChange = useCallback(
+    (updatedItems: SchedulingCargoItem[]) => {
+      setCargoItems(updatedItems);
     },
-    [jobId],
+    [],
   );
 
   if (loading) {
@@ -220,9 +208,10 @@ export default function CargoTrackingPage() {
 
       {/* Cargo Manifest */}
       <div className="flex-1 overflow-y-auto">
-        <CargoManifestView
+        <CargoManifestEditor
+          jobId={jobId}
           items={cargoItems}
-          onUpdateItemStatus={handleUpdateItemStatus}
+          onItemsChange={handleItemsChange}
         />
       </div>
     </div>

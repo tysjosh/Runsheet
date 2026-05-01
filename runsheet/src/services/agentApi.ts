@@ -87,14 +87,6 @@ export interface PaginatedActivity {
   size: number;
 }
 
-export interface ActivityStats {
-  total_actions: number;
-  actions_per_agent: Record<string, number>;
-  success_rate: number;
-  failure_rate: number;
-  avg_duration_ms: number;
-}
-
 // ─── HTTP Helper ─────────────────────────────────────────────────────────────
 
 async function fetchWithTimeout(
@@ -241,14 +233,6 @@ export async function getActivityLog(
   return agentRequest<PaginatedActivity>(`/activity${qs}`);
 }
 
-/** GET /agent/activity/stats — aggregated activity statistics */
-export async function getActivityStats(
-  tenantId: string = "default",
-): Promise<ActivityStats> {
-  const qs = buildQueryString({ tenant_id: tenantId });
-  return agentRequest<ActivityStats>(`/activity/stats${qs}`);
-}
-
 // ─── Agent Health Endpoints ──────────────────────────────────────────────────
 
 /** GET /agent/health — status of all autonomous agents */
@@ -273,5 +257,93 @@ export async function resumeAgent(
   return agentRequest<{ agent_id: string; status: string }>(
     `/${encodeURIComponent(agentId)}/resume`,
     { method: "POST" },
+  );
+}
+
+// ─── Autonomy & Memory Types ─────────────────────────────────────────────────
+
+export type AutonomyLevel =
+  | "suggest-only"
+  | "auto-low"
+  | "auto-medium"
+  | "full-auto";
+
+export interface AutonomyUpdateResponse {
+  tenant_id: string;
+  previous_level: string;
+  new_level: string;
+}
+
+export interface MemoryEntry {
+  memory_id: string;
+  memory_type: "pattern" | "preference";
+  content: string;
+  tags: string[];
+  created_at: string;
+  tenant_id: string;
+}
+
+export interface MemoryFilters {
+  tenant_id?: string;
+  memory_type?: "pattern" | "preference";
+  tags?: string;
+  page?: number;
+  size?: number;
+}
+
+export interface PaginatedMemories {
+  entries: MemoryEntry[];
+  total: number;
+  page: number;
+  size: number;
+}
+
+// ─── Autonomy Configuration Endpoints ────────────────────────────────────────
+
+/** GET /agent/config/autonomy — get current autonomy level for a tenant */
+export async function getAutonomyLevel(
+  tenantId: string = "default",
+): Promise<{ level: AutonomyLevel }> {
+  const qs = buildQueryString({ tenant_id: tenantId });
+  return agentRequest<{ level: AutonomyLevel }>(`/config/autonomy${qs}`);
+}
+
+/** PATCH /agent/config/autonomy — update the autonomy level for a tenant */
+export async function updateAutonomyLevel(
+  level: string,
+  tenantId: string = "default",
+): Promise<AutonomyUpdateResponse> {
+  const qs = buildQueryString({ tenant_id: tenantId });
+  return agentRequest<AutonomyUpdateResponse>(`/config/autonomy${qs}`, {
+    method: "PATCH",
+    body: JSON.stringify({ level }),
+  });
+}
+
+// ─── Memory Management Endpoints ─────────────────────────────────────────────
+
+/** GET /agent/memory — paginated list of agent memories with optional filters */
+export async function getMemories(
+  filters: MemoryFilters = {},
+): Promise<PaginatedMemories> {
+  const qs = buildQueryString({
+    tenant_id: filters.tenant_id ?? "default",
+    memory_type: filters.memory_type,
+    tags: filters.tags,
+    page: filters.page ?? 1,
+    size: filters.size ?? 20,
+  });
+  return agentRequest<PaginatedMemories>(`/memory${qs}`);
+}
+
+/** DELETE /agent/memory/{id} — delete a specific memory entry */
+export async function deleteMemory(
+  memoryId: string,
+  tenantId: string = "default",
+): Promise<{ deleted: boolean }> {
+  const qs = buildQueryString({ tenant_id: tenantId });
+  return agentRequest<{ deleted: boolean }>(
+    `/memory/${encodeURIComponent(memoryId)}${qs}`,
+    { method: "DELETE" },
   );
 }

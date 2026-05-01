@@ -94,14 +94,6 @@ export interface ConsumptionMetric {
   fuel_type?: string | null;
 }
 
-export interface EfficiencyMetric {
-  asset_id: string;
-  total_liters: number;
-  total_distance_km?: number | null;
-  liters_per_km?: number | null;
-  event_count: number;
-}
-
 export interface FuelNetworkSummary {
   total_stations: number;
   total_capacity_liters: number;
@@ -129,12 +121,6 @@ export interface ConsumptionMetricsFilters {
   bucket?: "hourly" | "daily" | "weekly";
   station_id?: string;
   fuel_type?: FuelType;
-  asset_id?: string;
-  start_date?: string;
-  end_date?: string;
-}
-
-export interface EfficiencyMetricsFilters {
   asset_id?: string;
   start_date?: string;
   end_date?: string;
@@ -257,16 +243,6 @@ export async function getConsumptionMetrics(
   );
 }
 
-/** GET /fuel/metrics/efficiency — fuel efficiency per asset */
-export async function getEfficiencyMetrics(
-  filters: EfficiencyMetricsFilters = {},
-): Promise<{ data: EfficiencyMetric[]; request_id: string }> {
-  const qs = buildQueryString(filters);
-  return fuelRequest<{ data: EfficiencyMetric[]; request_id: string }>(
-    `/fuel/metrics/efficiency${qs}`,
-  );
-}
-
 /** GET /fuel/metrics/summary — network-wide fuel summary */
 export async function getNetworkSummary(): Promise<{
   data: FuelNetworkSummary;
@@ -274,5 +250,236 @@ export async function getNetworkSummary(): Promise<{
 }> {
   return fuelRequest<{ data: FuelNetworkSummary; request_id: string }>(
     "/fuel/metrics/summary",
+  );
+}
+
+// ─── Station CRUD Types ──────────────────────────────────────────────────────
+
+export interface CreateStationPayload {
+  name: string;
+  fuel_type: FuelType;
+  capacity_liters: number;
+  location?: GeoPoint;
+  location_name?: string;
+  alert_threshold_pct: number;
+}
+
+export interface UpdateStationPayload {
+  name?: string;
+  fuel_type?: FuelType;
+  capacity_liters?: number;
+  location?: GeoPoint;
+  location_name?: string;
+  alert_threshold_pct?: number;
+}
+
+// ─── Fuel Distribution MVP Types ─────────────────────────────────────────────
+
+export interface GeneratePlanResponse {
+  run_id: string;
+  status: string;
+}
+
+export interface ReplanRequest {
+  disruption_type: string;
+  description: string;
+  entity_id: string;
+}
+
+export interface ReplanResponse {
+  plan_id: string;
+  status: string;
+  disruption_type: string;
+}
+
+export interface ForecastFilters {
+  tenant_id: string;
+  station_id?: string;
+  fuel_grade?: string;
+  page?: number;
+  size?: number;
+}
+
+export interface PaginationFilters {
+  tenant_id: string;
+  page?: number;
+  size?: number;
+}
+
+export interface CompartmentAssignment {
+  compartment_id: string;
+  station_id: string;
+  fuel_grade: string;
+  quantity_liters: number;
+  compartment_capacity_liters: number;
+}
+
+export interface LoadingPlan {
+  plan_id: string;
+  truck_id: string;
+  assignments: CompartmentAssignment[];
+  total_utilization_pct: number;
+  unserved_demand_liters: number;
+  total_weight_kg: number;
+  tenant_id: string;
+  run_id: string;
+  created_at: string;
+  status: string;
+}
+
+export interface RouteStop {
+  station_id: string;
+  eta: string;
+  drop: Record<string, number>;
+  sequence: number;
+}
+
+export interface RouteAssignment {
+  route_id: string;
+  truck_id: string;
+  plan_id: string;
+  stops: RouteStop[];
+  distance_km: number;
+  eta_confidence: number;
+  objective_value: number;
+  tenant_id: string;
+  run_id: string;
+  timestamp: string;
+  status: string;
+}
+
+export interface RoutePlan {
+  plan_id: string;
+  tenant_id: string;
+  routes: RouteAssignment[];
+  timestamp: string;
+}
+
+export interface PlanDetail {
+  plan_id: string;
+  loading_plan: LoadingPlan | null;
+  route_plan: RoutePlan | null;
+}
+
+export interface Forecast {
+  station_id: string;
+  fuel_grade: string;
+  current_stock_liters: number;
+  predicted_stock_liters: number;
+  days_until_empty: number;
+  timestamp: string;
+}
+
+export interface DeliveryPriority {
+  station_id: string;
+  station_name: string;
+  fuel_grade: string;
+  priority_score: number;
+  urgency: "low" | "medium" | "high" | "critical";
+  timestamp: string;
+}
+
+// ─── Fuel Distribution MVP Endpoints ─────────────────────────────────────────
+
+/** POST /api/fuel/mvp/plan/generate — trigger a full pipeline run */
+export async function generatePlan(
+  tenantId: string,
+): Promise<GeneratePlanResponse> {
+  const qs = buildQueryString({ tenant_id: tenantId });
+  return fuelRequest<GeneratePlanResponse>(`/fuel/mvp/plan/generate${qs}`, {
+    method: "POST",
+  });
+}
+
+/** GET /api/fuel/mvp/plan/:id — retrieve a complete plan (loading + route) */
+export async function getPlan(
+  planId: string,
+  tenantId: string,
+): Promise<PlanDetail> {
+  const qs = buildQueryString({ tenant_id: tenantId });
+  return fuelRequest<PlanDetail>(
+    `/fuel/mvp/plan/${encodeURIComponent(planId)}${qs}`,
+  );
+}
+
+/** POST /api/fuel/mvp/plan/:id/replan — trigger exception replanning */
+export async function replan(
+  planId: string,
+  body: ReplanRequest,
+  tenantId: string,
+): Promise<ReplanResponse> {
+  const qs = buildQueryString({ tenant_id: tenantId });
+  return fuelRequest<ReplanResponse>(
+    `/fuel/mvp/plan/${encodeURIComponent(planId)}/replan${qs}`,
+    {
+      method: "POST",
+      body: JSON.stringify(body),
+    },
+  );
+}
+
+/** GET /api/fuel/mvp/forecasts — paginated tank forecasts with optional filters */
+export async function getForecasts(
+  filters: ForecastFilters,
+): Promise<PaginatedResponse<Forecast>> {
+  const qs = buildQueryString(filters);
+  return fuelRequest<PaginatedResponse<Forecast>>(
+    `/fuel/mvp/forecasts${qs}`,
+  );
+}
+
+/** GET /api/fuel/mvp/priorities — paginated delivery priority rankings */
+export async function getPriorities(
+  filters: PaginationFilters,
+): Promise<PaginatedResponse<DeliveryPriority>> {
+  const qs = buildQueryString(filters);
+  return fuelRequest<PaginatedResponse<DeliveryPriority>>(
+    `/fuel/mvp/priorities${qs}`,
+  );
+}
+
+// ─── Station CRUD Endpoints ──────────────────────────────────────────────────
+
+/** POST /fuel/stations — create a new fuel station */
+export async function createStation(
+  data: CreateStationPayload,
+  tenantId: string,
+): Promise<FuelStation> {
+  const qs = buildQueryString({ tenant_id: tenantId });
+  return fuelRequest<FuelStation>(`/fuel/stations${qs}`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+/** PATCH /fuel/stations/:id — update an existing fuel station */
+export async function updateStation(
+  stationId: string,
+  data: UpdateStationPayload,
+  tenantId: string,
+): Promise<FuelStation> {
+  const qs = buildQueryString({ tenant_id: tenantId });
+  return fuelRequest<FuelStation>(
+    `/fuel/stations/${encodeURIComponent(stationId)}${qs}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    },
+  );
+}
+
+/** PATCH /fuel/stations/:id/threshold — update a station's alert threshold */
+export async function updateStationThreshold(
+  stationId: string,
+  threshold: number,
+  tenantId: string,
+): Promise<FuelStation> {
+  const qs = buildQueryString({ tenant_id: tenantId });
+  return fuelRequest<FuelStation>(
+    `/fuel/stations/${encodeURIComponent(stationId)}/threshold${qs}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ alert_threshold_pct: threshold }),
+    },
   );
 }

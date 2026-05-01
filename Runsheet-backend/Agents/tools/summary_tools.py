@@ -250,22 +250,29 @@ async def get_performance_insights() -> str:
         response = f"🎯 **Performance Insights**\n\n"
         
         # Best and worst routes
-        best_route = max(routes, key=lambda x: x.get('performance', 0))
-        worst_route = min(routes, key=lambda x: x.get('performance', 0))
-        
-        response += f"🟢 **Best Route**: {best_route.get('name')} ({best_route.get('performance')}%)\n"
-        response += f"🔴 **Needs Attention**: {worst_route.get('name')} ({worst_route.get('performance')}%)\n\n"
+        if routes:
+            best_route = max(routes, key=lambda x: x.get('performance', 0))
+            worst_route = min(routes, key=lambda x: x.get('performance', 0))
+            response += f"🟢 **Best Route**: {best_route.get('name')} ({best_route.get('performance')}%)\n"
+            response += f"🔴 **Needs Attention**: {worst_route.get('name')} ({worst_route.get('performance')}%)\n\n"
+        else:
+            response += "ℹ️ No route performance data available yet\n\n"
         
         # Main delay cause
-        main_delay = max(delays, key=lambda x: x.get('percentage', 0))
-        response += f"⚠️ **Main Issue**: {main_delay.get('name')} causes {main_delay.get('percentage')}% of delays\n\n"
+        if delays:
+            main_delay = max(delays, key=lambda x: x.get('percentage', 0))
+            response += f"⚠️ **Main Issue**: {main_delay.get('name')} causes {main_delay.get('percentage')}% of delays\n\n"
+        else:
+            response += "ℹ️ No delay data recorded\n\n"
         
         # Regional performance
-        best_region = max(regions, key=lambda x: x.get('onTimePercentage', 0))
-        worst_region = min(regions, key=lambda x: x.get('onTimePercentage', 0))
-        
-        response += f"🌟 **Best Region**: {best_region.get('name')} ({best_region.get('onTimePercentage')}% on-time)\n"
-        response += f"📍 **Focus Area**: {worst_region.get('name')} ({worst_region.get('onTimePercentage')}% on-time)\n"
+        if regions:
+            best_region = max(regions, key=lambda x: x.get('onTimePercentage', 0))
+            worst_region = min(regions, key=lambda x: x.get('onTimePercentage', 0))
+            response += f"🌟 **Best Region**: {best_region.get('name')} ({best_region.get('onTimePercentage')}% on-time)\n"
+            response += f"📍 **Focus Area**: {worst_region.get('name')} ({worst_region.get('onTimePercentage')}% on-time)\n"
+        else:
+            response += "ℹ️ No regional performance data available yet\n"
         
         success = True
         return response

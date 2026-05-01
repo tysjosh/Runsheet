@@ -42,12 +42,18 @@ class ElasticsearchService:
         self.settings = get_settings()
         self._serverless: bool | None = None
         
-        # Initialize circuit breaker for Elasticsearch operations
-        # Default: 3 failures, 30 second recovery timeout
+        # Initialize separate circuit breakers for read and write operations
+        # so that agent write failures don't block user read queries
         self._circuit_breaker = CircuitBreaker(
-            name="elasticsearch",
+            name="elasticsearch_write",
             config=CircuitBreakerConfig(
-                failure_threshold=3,
+                failure_threshold=10,
+            )
+        )
+        self._read_circuit_breaker = CircuitBreaker(
+            name="elasticsearch_read",
+            config=CircuitBreakerConfig(
+                failure_threshold=15,
             )
         )
         
@@ -1162,7 +1168,7 @@ class ElasticsearchService:
                     index=index,
                     id=doc_id,
                     body=document,
-                    refresh=True
+                    refresh=False
                 )
                 return response
             
@@ -1428,7 +1434,7 @@ class ElasticsearchService:
                 )
                 return response
             
-            return await self._circuit_breaker.execute(_do_search)
+            return await self._read_circuit_breaker.execute(_do_search)
         except CircuitOpenException as e:
             self._handle_circuit_breaker_exception(e)
         except Exception as e:
@@ -1447,7 +1453,7 @@ class ElasticsearchService:
                 response = self.client.get(index=index, id=doc_id)
                 return response["_source"]
             
-            return await self._circuit_breaker.execute(_do_get)
+            return await self._read_circuit_breaker.execute(_do_get)
         except CircuitOpenException as e:
             self._handle_circuit_breaker_exception(e)
         except Exception as e:

@@ -81,13 +81,16 @@ async def generate_operations_report() -> str:
         urgent_tickets = len([t for t in tickets_data if t.get('priority') == 'urgent'])
         open_tickets = len([t for t in tickets_data if t.get('status') == 'open'])
         
+        on_time_pct = (on_time_trucks / total_trucks * 100) if total_trucks > 0 else 0
+        delayed_pct = (delayed_trucks / total_trucks * 100) if total_trucks > 0 else 0
+        
         report = f"""# 📋 Operations Report
 *Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}*
 
 ## 🚛 Fleet Status
 - **Total Trucks**: {total_trucks}
-- **On Time**: {on_time_trucks} ({(on_time_trucks/total_trucks*100):.1f}%)
-- **Delayed**: {delayed_trucks} ({(delayed_trucks/total_trucks*100):.1f}%)
+- **On Time**: {on_time_trucks} ({on_time_pct:.1f}%)
+- **Delayed**: {delayed_trucks} ({delayed_pct:.1f}%)
 
 ## 📦 Inventory Status
 - **Total Items**: {len(inventory_data)}
@@ -178,16 +181,24 @@ async def generate_performance_report() -> str:
             report += f"- {status_emoji} **{region.get('name')}**: {performance}% on-time\n"
         
         # Add insights
-        best_route = max(routes, key=lambda x: x.get('performance', 0))
-        worst_route = min(routes, key=lambda x: x.get('performance', 0))
-        main_delay = max(delays, key=lambda x: x.get('percentage', 0))
+        report += "\n## 💡 Key Insights\n"
         
-        report += f"""
-## 💡 Key Insights
-- 🏆 **Best performing route**: {best_route.get('name')} ({best_route.get('performance')}%)
-- 🎯 **Needs improvement**: {worst_route.get('name')} ({worst_route.get('performance')}%)
-- ⚠️ **Main delay cause**: {main_delay.get('name')} ({main_delay.get('percentage')}%)
-"""
+        if routes:
+            best_route = max(routes, key=lambda x: x.get('performance', 0))
+            worst_route = min(routes, key=lambda x: x.get('performance', 0))
+            report += f"- 🏆 **Best performing route**: {best_route.get('name')} ({best_route.get('performance')}%)\n"
+            report += f"- 🎯 **Needs improvement**: {worst_route.get('name')} ({worst_route.get('performance')}%)\n"
+        else:
+            report += "- ℹ️ No route performance data available yet\n"
+        
+        if delays:
+            main_delay = max(delays, key=lambda x: x.get('percentage', 0))
+            report += f"- ⚠️ **Main delay cause**: {main_delay.get('name')} ({main_delay.get('percentage')}%)\n"
+        else:
+            report += "- ℹ️ No delay data recorded\n"
+        
+        if not regions:
+            report += "- ℹ️ No regional performance data available yet\n"
         
         success = True
         return report

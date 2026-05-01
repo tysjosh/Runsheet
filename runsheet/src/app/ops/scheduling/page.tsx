@@ -1,7 +1,7 @@
 "use client";
 
-import { CalendarClock, Plus } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { CalendarClock, ChevronDown, ChevronUp, Plus, Search } from "lucide-react";
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import LoadingSpinner from "../../../components/LoadingSpinner";
 import CreateJobModal from "../../../components/ops/CreateJobModal";
 import JobBoard from "../../../components/ops/JobBoard";
@@ -16,6 +16,10 @@ import {
   transitionStatus,
   type JobFilters as ApiJobFilters,
 } from "../../../services/schedulingApi";
+
+const CargoSearchSection = lazy(
+  () => import("../../../components/ops/CargoSearchSection"),
+);
 
 const INITIAL_FILTERS: JobFilterValues = {
   job_type: "",
@@ -38,6 +42,7 @@ export default function SchedulingJobBoardPage() {
   const [loading, setLoading] = useState(true);
   const [filters, setFilters] = useState<JobFilterValues>(INITIAL_FILTERS);
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const [showCargoSearch, setShowCargoSearch] = useState(false);
 
   const loadData = useCallback(async () => {
     try {
@@ -166,14 +171,30 @@ export default function SchedulingJobBoardPage() {
               </p>
             </div>
           </div>
-          <button
-            onClick={() => setShowCreateModal(true)}
-            className="flex items-center gap-2 px-4 py-2 text-sm text-white rounded-lg transition-colors hover:opacity-90"
-            style={{ backgroundColor: "#232323" }}
-          >
-            <Plus className="w-4 h-4" />
-            Create Job
-          </button>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => setShowCargoSearch((prev) => !prev)}
+              className="flex items-center gap-2 px-4 py-2 text-sm border border-gray-200 rounded-lg text-gray-600 hover:bg-gray-50 transition-colors"
+              aria-expanded={showCargoSearch}
+              aria-controls="cargo-search-section"
+            >
+              <Search className="w-4 h-4" />
+              Cargo Search
+              {showCargoSearch ? (
+                <ChevronUp className="w-4 h-4" />
+              ) : (
+                <ChevronDown className="w-4 h-4" />
+              )}
+            </button>
+            <button
+              onClick={() => setShowCreateModal(true)}
+              className="flex items-center gap-2 px-4 py-2 text-sm text-white rounded-lg transition-colors hover:opacity-90"
+              style={{ backgroundColor: "#232323" }}
+            >
+              <Plus className="w-4 h-4" />
+              Create Job
+            </button>
+          </div>
         </div>
 
         <JobFilters filters={filters} onChange={setFilters} />
@@ -188,6 +209,21 @@ export default function SchedulingJobBoardPage() {
       <div className="flex-1 overflow-y-auto">
         <JobBoard jobs={jobs} onTransition={handleTransition} />
       </div>
+
+      {/* Cargo Search — collapsible section */}
+      {showCargoSearch && (
+        <div id="cargo-search-section" className="border-t border-gray-200 px-8 py-6">
+          <Suspense
+            fallback={
+              <div className="flex items-center justify-center py-8 text-gray-400 text-sm">
+                Loading cargo search...
+              </div>
+            }
+          >
+            <CargoSearchSection />
+          </Suspense>
+        </div>
+      )}
 
       {/* Create Job Modal */}
       {showCreateModal && (

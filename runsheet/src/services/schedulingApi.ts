@@ -230,36 +230,6 @@ export async function createJob(
   });
 }
 
-// ─── Assignment Endpoints ────────────────────────────────────────────────────
-
-/** PATCH /scheduling/jobs/:id/assign — assign an asset to a job */
-export async function assignAsset(
-  jobId: string,
-  assetId: string,
-): Promise<SingleResponse<Job>> {
-  return schedulingRequest<SingleResponse<Job>>(
-    `/scheduling/jobs/${encodeURIComponent(jobId)}/assign`,
-    {
-      method: "PATCH",
-      body: JSON.stringify({ asset_id: assetId }),
-    },
-  );
-}
-
-/** PATCH /scheduling/jobs/:id/reassign — reassign asset on a job */
-export async function reassignAsset(
-  jobId: string,
-  assetId: string,
-): Promise<SingleResponse<Job>> {
-  return schedulingRequest<SingleResponse<Job>>(
-    `/scheduling/jobs/${encodeURIComponent(jobId)}/reassign`,
-    {
-      method: "PATCH",
-      body: JSON.stringify({ asset_id: assetId }),
-    },
-  );
-}
-
 // ─── Status Transition Endpoint ──────────────────────────────────────────────
 
 /** PATCH /scheduling/jobs/:id/status — transition job status */
@@ -326,17 +296,6 @@ export async function searchCargo(
   );
 }
 
-// ─── ETA Endpoint ────────────────────────────────────────────────────────────
-
-/** GET /scheduling/jobs/:id/eta — get current ETA for a job */
-export async function getEta(
-  jobId: string,
-): Promise<SingleResponse<{ estimated_arrival: string }>> {
-  return schedulingRequest<SingleResponse<{ estimated_arrival: string }>>(
-    `/scheduling/jobs/${encodeURIComponent(jobId)}/eta`,
-  );
-}
-
 // ─── Metrics Endpoints ───────────────────────────────────────────────────────
 
 /** GET /scheduling/metrics/jobs — job counts by status/type in time buckets */
@@ -379,13 +338,3 @@ export async function getDelayMetrics(
   );
 }
 
-// ─── Event Endpoints ─────────────────────────────────────────────────────────
-
-/** GET /scheduling/jobs/:id/events — full event timeline for a job */
-export async function getJobEvents(
-  jobId: string,
-): Promise<SingleResponse<JobEvent[]>> {
-  return schedulingRequest<SingleResponse<JobEvent[]>>(
-    `/scheduling/jobs/${encodeURIComponent(jobId)}/events`,
-  );
-}

@@ -24,7 +24,7 @@ from .logging_wrapper import get_telemetry_service
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TENANT_ID = "default"
+DEFAULT_TENANT_ID = "dev-tenant"
 
 JOBS_CURRENT_INDEX = "jobs_current"
 JOB_EVENTS_INDEX = "job_events"

@@ -17,6 +17,7 @@ import OperationsSummaryBar from "./OperationsSummaryBar";
 import OperationsMap from "./OperationsMap";
 import JobQueuePanel from "./JobQueuePanel";
 import DelayedOperationsPanel from "./DelayedOperationsPanel";
+import ApprovalQueuePanel from "./ApprovalQueuePanel";
 import FuelStatusSidebar from "./FuelStatusSidebar";
 import LoadingSpinner from "../LoadingSpinner";
 
@@ -215,6 +216,7 @@ export default function OperationsControlView() {
         <div className="w-2/5 flex flex-col gap-4 overflow-y-auto min-h-0">
           <JobQueuePanel jobs={activeJobs} />
           <DelayedOperationsPanel jobs={activeJobs} />
+          <ApprovalQueuePanel />
           <FuelStatusSidebar alerts={fuelAlerts} />
         </div>
       </div>

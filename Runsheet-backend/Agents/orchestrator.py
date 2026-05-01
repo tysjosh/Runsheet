@@ -115,7 +115,7 @@ class AgentOrchestrator:
         """
         start_time = time.monotonic()
 
-        targets = self._classify_intent(user_message)
+        targets = await self._classify_intent(user_message)
 
         # Fallback to reporting when no domain matches
         if len(targets) == 0:
@@ -177,12 +177,12 @@ class AgentOrchestrator:
     # Intent classification
     # ------------------------------------------------------------------
 
-    def _classify_intent(self, message: str) -> List[str]:
-        """Keyword-based intent classification against routing table.
+    async def _classify_intent(self, message: str) -> List[str]:
+        """Hybrid intent classification: keywords first, LLM fallback.
 
-        Scans the lowercased message for keywords defined in each
-        domain's entry in ``ROUTING_TABLE``. Returns a list of all
-        domains that had at least one keyword match.
+        1. Scans the message for keywords from the routing table.
+        2. If no keywords match, asks Gemini to classify the intent.
+        3. Falls back to empty list if both fail.
 
         Args:
             message: The user's natural language message.
@@ -190,11 +190,47 @@ class AgentOrchestrator:
         Returns:
             List of matched domain names (may be empty).
         """
+        # Step 1: Fast keyword matching
         message_lower = message.lower()
         matched: List[str] = []
         for domain, keywords in self.ROUTING_TABLE.items():
             if any(kw in message_lower for kw in keywords):
                 matched.append(domain)
+
+        if matched:
+            return matched
+
+        # Step 2: LLM-based classification when keywords fail
+        try:
+            import os
+            from litellm import acompletion
+
+            domains = list(self.ROUTING_TABLE.keys())
+            classification_prompt = (
+                f"Classify this user message into one or more of these domains: {domains}\n\n"
+                f"User message: \"{message}\"\n\n"
+                f"Reply with ONLY a comma-separated list of matching domain names. "
+                f"If the message is a greeting or general question, reply with: reporting"
+            )
+
+            response = await acompletion(
+                model="gemini/gemini-2.5-flash",
+                messages=[{"role": "user", "content": classification_prompt}],
+                api_key=os.environ.get("GEMINI_API_KEY", ""),
+                max_tokens=50,
+                temperature=0.0,
+            )
+
+            result_text = response.choices[0].message.content.strip().lower()
+            llm_domains = [d.strip() for d in result_text.split(",") if d.strip() in domains]
+
+            if llm_domains:
+                logger.info(f"LLM classified '{message}' → {llm_domains}")
+                return llm_domains
+
+        except Exception as e:
+            logger.warning(f"LLM classification failed, using fallback: {e}")
+
         return matched
 
     def _is_complex_request(self, message: str) -> bool:

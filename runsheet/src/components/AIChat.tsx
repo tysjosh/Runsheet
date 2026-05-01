@@ -1,9 +1,10 @@
 "use client";
 
-import { SendHorizontal, Trash2, X } from "lucide-react";
+import { CalendarDays, SendHorizontal, Trash2, X } from "lucide-react";
 import type React from "react";
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import ReportViewer from "./ReportViewer";
 
 interface ChatMessage {
@@ -52,6 +53,9 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
   const [isStreaming, setIsStreaming] = useState(false);
   const [_toolStatus, setToolStatus] = useState<string>("");
   const [reportContent, setReportContent] = useState<string | null>(null);
+  const [showDatePicker, setShowDatePicker] = useState(false);
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const processingRef = useRef(false);
@@ -302,14 +306,29 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
 
   const handleSend = async () => {
     if (!input.trim() || isStreaming || processingRef.current) return;
+    await sendMessage(input);
+  };
+
+  const sendMessage = async (text: string) => {
+    if (!text.trim() || isStreaming || processingRef.current) return;
 
     processingRef.current = true;
     setIsStreaming(true);
 
+    // Append date range context if dates are selected
+    let messageText = text;
+    if (startDate && endDate) {
+      messageText = `${text} (from ${startDate} to ${endDate})`;
+    } else if (startDate) {
+      messageText = `${text} (from ${startDate})`;
+    } else if (endDate) {
+      messageText = `${text} (until ${endDate})`;
+    }
+
     const userMessage: ChatMessage = {
       id: Date.now().toString(),
       role: "user",
-      content: input,
+      content: messageText,
       timestamp: new Date(),
     };
 
@@ -472,8 +491,77 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
                 </div>
               ) : msg.role === "assistant" ? (
                 <div className="max-w-[85%]">
-                  <div className="text-sm text-gray-800 leading-relaxed prose prose-sm max-w-none prose-headings:text-gray-900 prose-p:text-gray-800 prose-strong:text-gray-900 prose-ul:text-gray-800 prose-li:text-gray-800">
-                    <ReactMarkdown>{msg.content}</ReactMarkdown>
+                  <div className="text-sm text-gray-800 leading-relaxed prose prose-sm max-w-none prose-headings:text-gray-900 prose-p:text-gray-800 prose-strong:text-gray-900 prose-ul:text-gray-800 prose-li:text-gray-800 prose-table:text-xs prose-th:bg-gray-100 prose-th:px-2 prose-th:py-1 prose-td:px-2 prose-td:py-1 prose-table:border-collapse">
+                    <ReactMarkdown
+                      remarkPlugins={[remarkGfm]}
+                      components={{
+                        strong: ({ children, ...props }) => {
+                          const text = typeof children === "string"
+                            ? children
+                            : Array.isArray(children)
+                              ? children.map((c: any) => (typeof c === "string" ? c : "")).join("")
+                              : String(children || "");
+                          const trimmed = text.trim();
+                          const isClickable = !msg.isStreaming && trimmed.length > 5 && trimmed.length < 80 && (
+                            /report|analysis|summary|status|overview|productivity|violations|dispatch/i.test(trimmed)
+                          );
+                          if (isClickable) {
+                            return (
+                              <button
+                                type="button"
+                                onClick={() => sendMessage(`Generate ${trimmed}`)}
+                                className="w-full text-left px-3 py-2 my-1 rounded-lg text-xs font-semibold border border-gray-200 bg-white hover:bg-blue-50 hover:border-blue-300 transition-all cursor-pointer flex items-center gap-2 shadow-sm"
+                                style={{ color: "#232323" }}
+                              >
+                                <span className="text-blue-500 text-sm">▸</span>
+                                {trimmed}
+                              </button>
+                            );
+                          }
+                          return <strong {...props}>{children}</strong>;
+                        },
+                        li: ({ children, ...props }) => {
+                          const text = typeof children === "string"
+                            ? children
+                            : Array.isArray(children)
+                              ? children.map((c: any) => (typeof c === "string" ? c : c?.props?.children || "")).join("")
+                              : "";
+                          const trimmed = text.replace(/\*\*/g, "").trim();
+                          const isClickable = !msg.isStreaming && trimmed.length > 5 && trimmed.length < 80 && (
+                            /report|analysis|summary|status|overview|productivity|violations|dispatch/i.test(trimmed)
+                          );
+                          if (isClickable) {
+                            return (
+                              <li {...props} className="list-none -ml-4 my-1">
+                                <button
+                                  type="button"
+                                  onClick={() => sendMessage(`Generate ${trimmed}`)}
+                                  className="text-left w-full px-3 py-2 rounded-lg text-xs font-semibold border border-gray-200 bg-white hover:bg-blue-50 hover:border-blue-300 transition-all cursor-pointer flex items-center gap-2 shadow-sm"
+                                  style={{ color: "#232323" }}
+                                >
+                                  <span className="text-blue-500 text-sm">▸</span>
+                                  {trimmed}
+                                </button>
+                              </li>
+                            );
+                          }
+                          return <li {...props}>{children}</li>;
+                        },
+                        table: ({ children, ...props }) => (
+                          <div className="overflow-x-auto my-2">
+                            <table {...props} className="w-full text-xs border border-gray-200 rounded">{children}</table>
+                          </div>
+                        ),
+                        th: ({ children, ...props }) => (
+                          <th {...props} className="bg-gray-100 text-left px-2 py-1.5 border-b border-gray-200 font-semibold text-gray-700">{children}</th>
+                        ),
+                        td: ({ children, ...props }) => (
+                          <td {...props} className="px-2 py-1 border-b border-gray-100 text-gray-600">{children}</td>
+                        ),
+                      }}
+                    >
+                      {msg.content}
+                    </ReactMarkdown>
                     {msg.isStreaming && (
                       <span
                         className="inline-block w-1.5 h-4 ml-1 animate-pulse rounded"
@@ -512,29 +600,120 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
 
         {/* Input */}
         <div className="bg-white/80 backdrop-blur-sm border-t border-gray-200/50 p-4 flex-shrink-0">
+          {/* Date Range Picker */}
+          {showDatePicker && (
+            <div className="mb-3 p-3 bg-white rounded-xl border border-gray-200 shadow-sm">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-semibold text-gray-600">Date Range</span>
+                {(startDate || endDate) && (
+                  <button
+                    onClick={() => { setStartDate(""); setEndDate(""); }}
+                    className="text-xs text-red-500 hover:text-red-600 transition-colors"
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+              {/* Quick presets */}
+              <div className="flex gap-1.5 mb-2">
+                {[
+                  { label: "7d", days: 7 },
+                  { label: "14d", days: 14 },
+                  { label: "30d", days: 30 },
+                  { label: "90d", days: 90 },
+                ].map(({ label, days }) => {
+                  const end = new Date();
+                  const start = new Date();
+                  start.setDate(end.getDate() - days);
+                  const startISO = start.toISOString().split("T")[0];
+                  const endISO = end.toISOString().split("T")[0];
+                  const isActive = startDate === startISO && endDate === endISO;
+                  return (
+                    <button
+                      key={label}
+                      onClick={() => { setStartDate(startISO); setEndDate(endISO); }}
+                      className={`px-2.5 py-1 text-[10px] font-medium rounded-md border transition-all ${
+                        isActive
+                          ? "bg-gray-800 text-white border-gray-800"
+                          : "bg-gray-50 text-gray-600 border-gray-200 hover:bg-gray-100"
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="flex items-center gap-2">
+                <div className="flex-1">
+                  <label className="block text-[10px] text-gray-400 mb-0.5">From</label>
+                  <input
+                    type="date"
+                    value={startDate}
+                    onChange={(e) => setStartDate(e.target.value)}
+                    className="w-full px-2 py-1.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:border-gray-400 bg-gray-50"
+                  />
+                </div>
+                <span className="text-gray-300 mt-3">→</span>
+                <div className="flex-1">
+                  <label className="block text-[10px] text-gray-400 mb-0.5">To</label>
+                  <input
+                    type="date"
+                    value={endDate}
+                    onChange={(e) => setEndDate(e.target.value)}
+                    className="w-full px-2 py-1.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:border-gray-400 bg-gray-50"
+                  />
+                </div>
+              </div>
+              {startDate && endDate && (
+                <div className="mt-2 text-[10px] text-gray-500 bg-gray-50 rounded-md px-2 py-1">
+                  📅 Reports will use: {startDate} → {endDate}
+                </div>
+              )}
+            </div>
+          )}
           <div className="mb-3">
-            <div className="relative">
-              <input
-                ref={inputRef}
-                type="text"
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyPress={handleKeyPress}
-                placeholder="Ask me anything about your operations..."
-                disabled={isStreaming}
-                className="w-full px-4 py-3 pr-12 bg-white border-2 border-gray-200 rounded-2xl focus:outline-none focus:border-gray-400 focus:ring-2 focus:ring-gray-100 text-sm transition-all duration-200 disabled:bg-gray-100 disabled:cursor-not-allowed shadow-sm"
-              />
+            <div className="relative flex items-center gap-2">
               <button
-                onClick={handleSend}
-                disabled={isStreaming || !input.trim()}
-                className="absolute right-2 top-1/2 transform -translate-y-1/2 p-2 text-gray-600 hover:text-gray-800 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200"
+                onClick={() => setShowDatePicker(!showDatePicker)}
+                className={`p-2.5 rounded-xl border-2 transition-all duration-200 flex-shrink-0 ${
+                  showDatePicker || (startDate && endDate)
+                    ? "border-blue-400 bg-blue-50 text-blue-600"
+                    : "border-gray-200 bg-white text-gray-400 hover:text-gray-600 hover:border-gray-300"
+                }`}
+                title={startDate && endDate ? `${startDate} → ${endDate}` : "Set date range"}
               >
-                {isStreaming ? (
-                  <div className="w-4 h-4 border-2 border-gray-600 border-t-transparent rounded-full animate-spin"></div>
-                ) : (
-                  <SendHorizontal className="w-4 h-4" />
+                <CalendarDays className="w-4 h-4" />
+                {startDate && endDate && (
+                  <span className="absolute -top-1 -right-1 w-2 h-2 bg-blue-500 rounded-full" />
                 )}
               </button>
+              <div className="relative flex-1">
+                <input
+                  ref={inputRef}
+                  type="text"
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyPress={handleKeyPress}
+                  placeholder={
+                    startDate && endDate
+                      ? `Ask about ${startDate} to ${endDate}...`
+                      : "Ask me anything about your operations..."
+                  }
+                  disabled={isStreaming}
+                  className="w-full px-4 py-3 pr-12 bg-white border-2 border-gray-200 rounded-2xl focus:outline-none focus:border-gray-400 focus:ring-2 focus:ring-gray-100 text-sm transition-all duration-200 disabled:bg-gray-100 disabled:cursor-not-allowed shadow-sm"
+                />
+                <button
+                  onClick={handleSend}
+                  disabled={isStreaming || !input.trim()}
+                  className="absolute right-2 top-1/2 transform -translate-y-1/2 p-2 text-gray-600 hover:text-gray-800 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200"
+                >
+                  {isStreaming ? (
+                    <div className="w-4 h-4 border-2 border-gray-600 border-t-transparent rounded-full animate-spin"></div>
+                  ) : (
+                    <SendHorizontal className="w-4 h-4" />
+                  )}
+                </button>
+              </div>
             </div>
           </div>
         </div>

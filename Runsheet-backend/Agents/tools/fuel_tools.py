@@ -23,7 +23,7 @@ from .logging_wrapper import get_telemetry_service
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TENANT_ID = "default"
+DEFAULT_TENANT_ID = "dev-tenant"
 
 
 def _log_tool_invocation(tool_name: str, input_params: dict, start_time: float,

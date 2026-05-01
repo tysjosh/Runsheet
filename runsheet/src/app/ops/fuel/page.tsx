@@ -1,10 +1,11 @@
 "use client";
 
-import { Fuel, Search } from "lucide-react";
+import { Fuel, Plus, Search } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import LoadingSpinner from "../../../components/LoadingSpinner";
 import FuelConsumptionChart from "../../../components/ops/FuelConsumptionChart";
 import FuelStationDetail from "../../../components/ops/FuelStationDetail";
+import FuelStationForm from "../../../components/ops/FuelStationForm";
 import FuelStationList from "../../../components/ops/FuelStationList";
 import FuelSummaryBar from "../../../components/ops/FuelSummaryBar";
 import { useOpsWebSocket } from "../../../hooks/useOpsWebSocket";
@@ -76,6 +77,11 @@ export default function FuelDashboardPage() {
   const [statusFilter, setStatusFilter] = useState<"" | StationStatus>("");
   const [locationFilter, setLocationFilter] = useState("");
 
+  // Station form modal state
+  const [showStationForm, setShowStationForm] = useState(false);
+  const [stationFormMode, setStationFormMode] = useState<"create" | "edit">("create");
+  const [editingStation, setEditingStation] = useState<FuelStation | null>(null);
+
   const loadData = useCallback(async () => {
     try {
       setLoading(true);
@@ -137,6 +143,50 @@ export default function FuelDashboardPage() {
     setStationDetail(null);
   }, []);
 
+  /** Open FuelStationForm in create mode. Validates: Requirement 8.1 */
+  const handleAddStation = useCallback(() => {
+    setStationFormMode("create");
+    setEditingStation(null);
+    setShowStationForm(true);
+  }, []);
+
+  /** Open FuelStationForm in edit mode with station data. Validates: Requirement 8.3 */
+  const handleEditStation = useCallback((station: FuelStation) => {
+    setStationFormMode("edit");
+    setEditingStation(station);
+    setShowStationForm(true);
+  }, []);
+
+  /** Close the station form modal */
+  const handleCloseStationForm = useCallback(() => {
+    setShowStationForm(false);
+    setEditingStation(null);
+  }, []);
+
+  /** Handle successful create or edit from FuelStationForm */
+  const handleStationFormSuccess = useCallback(
+    (savedStation: FuelStation) => {
+      if (stationFormMode === "create") {
+        // Add the new station to the displayed list
+        setStations((prev) => [savedStation, ...prev]);
+      } else {
+        // Update the station in the displayed list
+        setStations((prev) =>
+          prev.map((s) =>
+            s.station_id === savedStation.station_id ? savedStation : s,
+          ),
+        );
+        // Also update the detail panel if this station is currently selected
+        if (selectedStationId === savedStation.station_id && stationDetail) {
+          setStationDetail((prev) =>
+            prev ? { ...prev, station: savedStation } : prev,
+          );
+        }
+      }
+    },
+    [stationFormMode, selectedStationId, stationDetail],
+  );
+
   /**
    * Handle real-time fuel alert updates via WebSocket.
    * Updates the affected station row within 5 seconds.
@@ -177,7 +227,7 @@ export default function FuelDashboardPage() {
           <div className="w-10 h-10 bg-[#232323] rounded-xl flex items-center justify-center">
             <Fuel className="w-5 h-5 text-white" />
           </div>
-          <div>
+          <div className="flex-1">
             <h1 className="text-2xl font-semibold text-[#232323]">
               Fuel Monitoring
             </h1>
@@ -185,6 +235,15 @@ export default function FuelDashboardPage() {
               Track fuel stock levels, alerts, and consumption trends
             </p>
           </div>
+          <button
+            type="button"
+            onClick={handleAddStation}
+            className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-white rounded-lg hover:opacity-90 transition-opacity"
+            style={{ backgroundColor: "#232323" }}
+          >
+            <Plus className="w-4 h-4" aria-hidden="true" />
+            Add Station
+          </button>
         </div>
 
         {/* Filters — Validates: Requirement 6.4 */}
@@ -252,6 +311,7 @@ export default function FuelDashboardPage() {
               stations={stations}
               onSelectStation={handleSelectStation}
               selectedStationId={selectedStationId}
+              onEditStation={handleEditStation}
             />
           </div>
         </div>
@@ -271,6 +331,16 @@ export default function FuelDashboardPage() {
           </div>
         )}
       </div>
+
+      {/* Station Form Modal — Validates: Requirements 8.1, 8.3 */}
+      {showStationForm && (
+        <FuelStationForm
+          mode={stationFormMode}
+          station={editingStation}
+          onClose={handleCloseStationForm}
+          onSuccess={handleStationFormSuccess}
+        />
+      )}
     </div>
   );
 }

@@ -113,7 +113,7 @@ def _format_mutation_result(result) -> str:
 
 @tool
 async def assign_asset_to_job(job_id: str, asset_id: str,
-                              tenant_id: str = "default") -> str:
+                              tenant_id: str = "dev-tenant") -> str:
     """
     Assign an asset to a job. Risk: medium.
 
@@ -157,7 +157,7 @@ async def assign_asset_to_job(job_id: str, asset_id: str,
 
 @tool
 async def update_job_status(job_id: str, new_status: str, reason: str,
-                            tenant_id: str = "default") -> str:
+                            tenant_id: str = "dev-tenant") -> str:
     """
     Update job status with valid transition check. Risk: medium.
 
@@ -208,7 +208,7 @@ async def update_job_status(job_id: str, new_status: str, reason: str,
 
 @tool
 async def cancel_job(job_id: str, reason: str,
-                     tenant_id: str = "default") -> str:
+                     tenant_id: str = "dev-tenant") -> str:
     """
     Cancel a job. Risk: high.
 
@@ -254,7 +254,7 @@ async def cancel_job(job_id: str, reason: str,
 async def create_job(job_type: str, origin: str, destination: str,
                      scheduled_time: str, asset_id: str = None,
                      cargo_manifest: list = None,
-                     tenant_id: str = "default") -> str:
+                     tenant_id: str = "dev-tenant") -> str:
     """
     Create a new logistics job. Risk: medium.
 
@@ -425,7 +425,7 @@ async def escalate_shipment(shipment_id: str, priority: str, reason: str,
 @tool
 async def request_fuel_refill(station_id: str, quantity_liters: float,
                               priority: str,
-                              tenant_id: str = "default") -> str:
+                              tenant_id: str = "dev-tenant") -> str:
     """
     Request a fuel refill for a station. Risk: medium.
 
@@ -476,7 +476,7 @@ async def request_fuel_refill(station_id: str, quantity_liters: float,
 
 @tool
 async def update_fuel_threshold(station_id: str, threshold_pct: float,
-                                tenant_id: str = "default") -> str:
+                                tenant_id: str = "dev-tenant") -> str:
     """
     Update fuel alert threshold. Risk: low.
 

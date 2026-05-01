@@ -7,6 +7,13 @@ and WebSocket/health endpoint definitions.
 
 Requirements: 1.3, 1.6, 2.5
 """
+# Load .env.development BEFORE any imports to ensure GEMINI_API_KEY is available
+import os
+from dotenv import load_dotenv
+_env = os.environ.get("ENVIRONMENT", "development").lower()
+_env_file = f".env.{_env}" if os.path.exists(f".env.{_env}") else ".env"
+load_dotenv(_env_file, override=True)
+
 from contextlib import asynccontextmanager
 import json
 import logging
@@ -41,6 +48,25 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Runsheet Logistics API", version="1.0.0", lifespan=lifespan)
+
+# CORS must be added before the app starts (cannot be added in lifespan/bootstrap)
+from fastapi.middleware.cors import CORSMiddleware
+import os, json as _json
+_cors_raw = os.environ.get("CORS_ORIGINS", '["http://localhost:3000", "http://127.0.0.1:3000"]')
+try:
+    _cors_origins = _json.loads(_cors_raw)
+except Exception:
+    _cors_origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    allow_headers=["Accept", "Accept-Language", "Content-Language", "Content-Type",
+                    "Authorization", "X-Request-ID", "X-Requested-With"],
+    expose_headers=["X-Request-ID", "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset"],
+    max_age=600,
+)
 
 # Routers (middleware is registered by bootstrap/middleware.py)
 app.include_router(data_router)

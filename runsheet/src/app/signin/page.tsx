@@ -14,7 +14,7 @@ export default function SignInPage() {
       sessionStorage.setItem("isAuthenticated", "true");
 
       // Use replace instead of push to prevent back navigation to signin
-      router.replace("/");
+      router.replace("/dashboard");
     } else {
       // This error will be handled by the SignIn component
       throw new Error("Invalid credentials");

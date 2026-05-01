@@ -325,6 +325,27 @@ async def get_activity_stats(
 # ===================================================================
 
 
+@router.get("/config/autonomy")
+async def get_autonomy_level(
+    request: Request,
+    tenant_id: str = Query("default", description="Tenant identifier"),
+):
+    """
+    Get the current autonomy level for a tenant.
+
+    Returns the current autonomy level configuration.
+    """
+    svc = _get_autonomy_config()
+    try:
+        level = await svc.get_level(tenant_id=tenant_id)
+    except Exception as e:
+        logger.error(f"Failed to get autonomy level: {e}")
+        # Return a sensible default if the service fails
+        level = "suggest-only"
+
+    return {"level": level}
+
+
 @router.patch("/config/autonomy")
 async def update_autonomy_level(
     body: AutonomyUpdateRequest,
@@ -574,19 +595,27 @@ async def get_feedback_stats(
 @router.get("/health")
 async def get_agent_health(request: Request):
     """
-    Status of all autonomous agents.
+    Status of all autonomous and overlay agents.
 
     Returns the status (running, paused/stopped, error) and agent_id
-    for each registered autonomous agent.
+    for each registered agent.
 
     Validates: Requirement 9.6
     """
     agents = getattr(request.app.state, "autonomous_agents", {})
+    overlay_agents = getattr(request.app.state, "overlay_agents", {})
     health = {}
     for agent_id, agent in agents.items():
         health[agent_id] = {
             "agent_id": agent_id,
             "status": agent.status,
+            "type": "autonomous",
+        }
+    for agent_id, agent in overlay_agents.items():
+        health[agent_id] = {
+            "agent_id": agent_id,
+            "status": agent.status,
+            "type": "overlay",
         }
     return {"agents": health}
 

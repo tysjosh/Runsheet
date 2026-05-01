@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronDown, ChevronUp, MapPin } from "lucide-react";
+import { ChevronDown, ChevronUp, MapPin, Pencil } from "lucide-react";
 import { useCallback, useState } from "react";
 import type { FuelStation, FuelType, StationStatus } from "../../services/fuelApi";
 
@@ -19,6 +19,8 @@ interface FuelStationListProps {
   onSelectStation?: (stationId: string) => void;
   /** Currently selected station ID */
   selectedStationId?: string | null;
+  /** Called when the Edit button is clicked for a station */
+  onEditStation?: (station: FuelStation) => void;
 }
 
 const STATUS_CONFIG: Record<StationStatus, { label: string; color: string; bg: string; barColor: string }> = {
@@ -64,6 +66,7 @@ export default function FuelStationList({
   stations,
   onSelectStation,
   selectedStationId,
+  onEditStation,
 }: FuelStationListProps) {
   const [sortField, setSortField] = useState<SortField>("stock_pct");
   const [sortOrder, setSortOrder] = useState<SortOrder>("asc");
@@ -135,6 +138,11 @@ export default function FuelStationList({
                 <SortIcon field={col.key} />
               </th>
             ))}
+            {onEditStation && (
+              <th className="px-6 py-3 text-right text-xs font-medium text-gray-600 uppercase tracking-wider">
+                Actions
+              </th>
+            )}
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-100">
@@ -211,6 +219,22 @@ export default function FuelStationList({
                     "—"
                   )}
                 </td>
+                {onEditStation && (
+                  <td className="px-6 py-3 text-right">
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onEditStation(station);
+                      }}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-gray-600 bg-gray-100 rounded-md hover:bg-gray-200 hover:text-gray-800 transition-colors"
+                      aria-label={`Edit ${station.name}`}
+                    >
+                      <Pencil className="w-3 h-3" aria-hidden="true" />
+                      Edit
+                    </button>
+                  </td>
+                )}
               </tr>
             );
           })}

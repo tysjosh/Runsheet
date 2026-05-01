@@ -9,6 +9,7 @@ AgentOrchestrator, autonomous agents via AgentScheduler, and agent ES indices.
 Requirements: 1.1, 1.2, 7.6
 """
 import logging
+import os
 
 from bootstrap.container import ServiceContainer
 
@@ -132,11 +133,14 @@ async def initialize(app, container: ServiceContainer) -> None:
     # Specialist agents
     from strands.models.litellm import LiteLLMModel
 
+    # Set the env var litellm reads for Gemini API key auth
+    gemini_key = os.environ.get("GEMINI_API_KEY", "")
+    if gemini_key:
+        os.environ["GEMINI_API_KEY"] = gemini_key
     specialist_model = LiteLLMModel(
-        model_id="vertex_ai/gemini-2.5-flash",
+        model_id="gemini/gemini-2.5-flash",
         client_args={
-            "vertex_project": settings.google_cloud_project,
-            "vertex_location": settings.google_cloud_location,
+            "api_key": gemini_key,
         },
         params={
             "max_tokens": 8000,

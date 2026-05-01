@@ -22,7 +22,7 @@ export default function FailureTrendChart({ data }: FailureTrendChartProps) {
     );
   }
 
-  const maxCount = Math.max(...data.map((d) => d.count), 1);
+  const maxCount = Math.max(...data.map((d) => d.count ?? 0), 1);
 
   const formatLabel = (timestamp: string): string => {
     const date = new Date(timestamp);
@@ -57,22 +57,22 @@ export default function FailureTrendChart({ data }: FailureTrendChartProps) {
         aria-label="Failure trend chart"
       >
         {data.map((bucket, i) => {
-          const heightPct = maxCount > 0 ? (bucket.count / maxCount) * 100 : 0;
+          const heightPct = maxCount > 0 ? ((bucket.count ?? 0) / maxCount) * 100 : 0;
           return (
             <div
               key={`${bucket.timestamp}-${bucket.count}`}
               className="flex flex-col items-center flex-1 min-w-[24px] max-w-[48px]"
             >
               <span className="text-[10px] text-gray-500 mb-1">
-                {bucket.count > 0 ? bucket.count : ""}
+                {(bucket.count ?? 0) > 0 ? bucket.count : ""}
               </span>
               <div
                 className="w-full bg-red-400 rounded-t transition-all hover:bg-red-500"
                 style={{
-                  height: `${Math.max(heightPct, bucket.count > 0 ? 4 : 0)}px`,
+                  height: `${Math.max(heightPct, (bucket.count ?? 0) > 0 ? 4 : 0)}px`,
                   maxHeight: 100,
                 }}
-                title={`${formatLabel(bucket.timestamp)}: ${bucket.count} failures`}
+                title={`${formatLabel(bucket.timestamp)}: ${bucket.count ?? 0} failures`}
               />
             </div>
           );

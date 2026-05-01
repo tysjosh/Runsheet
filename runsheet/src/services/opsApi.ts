@@ -86,10 +86,6 @@ export interface OpsRider {
 
 export type RiderStatus = "active" | "idle" | "offline";
 
-export interface RiderDetail extends OpsRider {
-  assigned_shipments?: OpsShipment[];
-}
-
 export interface RiderUtilization extends OpsRider {
   utilization_percentage?: number;
   idle_minutes?: number;
@@ -178,23 +174,16 @@ export interface SlaBreachFilters extends PaginationParams {
 
 export interface FailureFilters extends PaginationParams, DateRangeParams {
   rider_id?: string;
-}
-
-export interface RiderFilters extends PaginationParams {
-  status?: RiderStatus;
+  failure_reason?: string;
 }
 
 export interface RiderUtilizationFilters extends PaginationParams {
   status?: RiderStatus;
 }
 
-export interface EventFilters extends PaginationParams, DateRangeParams {
-  shipment_id?: string;
-  event_type?: string;
-}
-
 export interface MetricsFilters extends DateRangeParams {
   bucket?: MetricsBucket;
+  failure_reason?: string;
 }
 
 // ─── HTTP Helper ─────────────────────────────────────────────────────────────
@@ -314,23 +303,6 @@ export async function getShipmentFailures(
 
 // ─── Rider Endpoints ─────────────────────────────────────────────────────────
 
-/** GET /ops/riders — paginated rider list */
-export async function getRiders(
-  filters: RiderFilters = {},
-): Promise<PaginatedResponse<OpsRider>> {
-  const qs = buildQueryString(filters);
-  return opsRequest<PaginatedResponse<OpsRider>>(`/ops/riders${qs}`);
-}
-
-/** GET /ops/riders/:id — single rider with assigned shipments */
-export async function getRiderById(
-  riderId: string,
-): Promise<{ data: RiderDetail; request_id: string }> {
-  return opsRequest<{ data: RiderDetail; request_id: string }>(
-    `/ops/riders/${encodeURIComponent(riderId)}`,
-  );
-}
-
 /** GET /ops/riders/utilization — riders with utilization metrics */
 export async function getRiderUtilization(
   filters: RiderUtilizationFilters = {},
@@ -341,41 +313,7 @@ export async function getRiderUtilization(
   );
 }
 
-// ─── Event Endpoints ─────────────────────────────────────────────────────────
-
-/** GET /ops/events — paginated event list with filters */
-export async function getEvents(
-  filters: EventFilters = {},
-): Promise<PaginatedResponse<OpsEvent>> {
-  const qs = buildQueryString(filters);
-  return opsRequest<PaginatedResponse<OpsEvent>>(`/ops/events${qs}`);
-}
-
 // ─── Metrics Endpoints ───────────────────────────────────────────────────────
-
-/** GET /ops/metrics/shipments — shipment counts by status in time buckets */
-export async function getShipmentMetrics(
-  filters: MetricsFilters = {},
-): Promise<MetricsResponse> {
-  const qs = buildQueryString(filters);
-  return opsRequest<MetricsResponse>(`/ops/metrics/shipments${qs}`);
-}
-
-/** GET /ops/metrics/sla — SLA compliance and breach counts */
-export async function getSlaMetrics(
-  filters: MetricsFilters = {},
-): Promise<MetricsResponse> {
-  const qs = buildQueryString(filters);
-  return opsRequest<MetricsResponse>(`/ops/metrics/sla${qs}`);
-}
-
-/** GET /ops/metrics/riders — rider utilization and availability metrics */
-export async function getRiderMetrics(
-  filters: MetricsFilters = {},
-): Promise<MetricsResponse> {
-  const qs = buildQueryString(filters);
-  return opsRequest<MetricsResponse>(`/ops/metrics/riders${qs}`);
-}
 
 /** GET /ops/metrics/failures — failure counts by reason */
 export async function getFailureMetrics(

@@ -293,7 +293,7 @@ class SLAGuardianAgent(AutonomousAgentBase):
             "sort": [{"active_shipment_count": {"order": "asc"}}],
             "size": 1,
         }
-        resp = await self._es.search_documents("riders", query, 1)
+        resp = await self._es.search_documents("riders_current", query, 1)
         hits = [h["_source"] for h in resp["hits"]["hits"]]
         return hits[0] if hits else None
 

@@ -1,4 +1,5 @@
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 interface ReportViewerProps {
   content: string;
@@ -9,13 +10,78 @@ export default function ReportViewer({ content, onClose }: ReportViewerProps) {
   const handleDownloadPDF = () => {
     const printWindow = window.open("", "_blank");
     if (printWindow) {
+      // Convert markdown tables to proper HTML
+      const convertMarkdownTables = (md: string): string => {
+        const lines = md.split("\n");
+        const result: string[] = [];
+        let inTable = false;
+        let headerDone = false;
+
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i].trim();
+          const isTableRow = /^\|(.+)\|$/.test(line);
+          const isSeparator =
+            /^\|[\s\-:|]+\|$/.test(line) &&
+            line.replace(/[|\s\-:]/g, "").length === 0;
+
+          if (isTableRow) {
+            if (!inTable) {
+              result.push("<table>");
+              inTable = true;
+              headerDone = false;
+            }
+            if (isSeparator) {
+              headerDone = true;
+              continue;
+            }
+            const rawCells = line.split("|");
+            const cleanCells = rawCells
+              .slice(1, rawCells.length - 1)
+              .map((c) => c.trim());
+
+            if (!headerDone) {
+              result.push(
+                "<tr>" +
+                  cleanCells.map((c) => `<th>${c}</th>`).join("") +
+                  "</tr>"
+              );
+            } else {
+              result.push(
+                "<tr>" +
+                  cleanCells.map((c) => `<td>${c}</td>`).join("") +
+                  "</tr>"
+              );
+            }
+          } else {
+            if (inTable) {
+              result.push("</table>");
+              inTable = false;
+              headerDone = false;
+            }
+            result.push(line);
+          }
+        }
+        if (inTable) result.push("</table>");
+        return result.join("\n");
+      };
+
+      const htmlContent = convertMarkdownTables(content)
+        .replace(/^### (.*$)/gm, "<h3>$1</h3>")
+        .replace(/^## (.*$)/gm, "<h2>$1</h2>")
+        .replace(/^# (.*$)/gm, "<h1>$1</h1>")
+        .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
+        .replace(/\*(.*?)\*/g, "<em>$1</em>")
+        .replace(/^- (.*$)/gm, "<li>$1</li>")
+        .replace(/\n\n/g, "<br><br>")
+        .replace(/\n/g, "<br>");
+
       printWindow.document.write(`
         <!DOCTYPE html>
         <html>
         <head>
           <title>Logistics Report</title>
           <style>
-            body { 
+            body {
               font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
               line-height: 1.6;
               color: #333;
@@ -26,10 +92,14 @@ export default function ReportViewer({ content, onClose }: ReportViewerProps) {
             h1 { color: #232323; border-bottom: 2px solid #232323; padding-bottom: 10px; }
             h2 { color: #232323; margin-top: 30px; }
             h3 { color: #4b5563; }
-            ul { padding-left: 20px; }
+            ul { padding-left: 20px; list-style-type: disc; }
             li { margin: 5px 0; }
             strong { color: #232323; }
             em { color: #6b7280; }
+            table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 13px; }
+            th { background: #f3f4f6; text-align: left; padding: 8px 12px; border: 1px solid #d1d5db; font-weight: 600; color: #374151; }
+            td { padding: 6px 12px; border: 1px solid #e5e7eb; color: #4b5563; }
+            tr:nth-child(even) { background: #f9fafb; }
             @media print {
               body { margin: 0; padding: 15px; }
               .no-print { display: none; }
@@ -37,10 +107,7 @@ export default function ReportViewer({ content, onClose }: ReportViewerProps) {
           </style>
         </head>
         <body>
-          ${content
-            .replace(/\n/g, "<br>")
-            .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
-            .replace(/\*(.*?)\*/g, "<em>$1</em>")}
+          ${htmlContent}
         </body>
         </html>
       `);
@@ -83,6 +150,7 @@ export default function ReportViewer({ content, onClose }: ReportViewerProps) {
         <div className="flex-1 overflow-y-auto p-6">
           <div className="prose prose-sm max-w-none">
             <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
               components={{
                 h1: ({ children }) => (
                   <h1 className="text-2xl font-bold text-[#232323] border-b-2 border-[#232323] pb-2 mb-4">
@@ -117,6 +185,23 @@ export default function ReportViewer({ content, onClose }: ReportViewerProps) {
                 ),
                 em: ({ children }) => (
                   <em className="italic text-gray-600">{children}</em>
+                ),
+                table: ({ children }) => (
+                  <div className="overflow-x-auto my-3">
+                    <table className="w-full text-sm border-collapse border border-gray-200 rounded">
+                      {children}
+                    </table>
+                  </div>
+                ),
+                th: ({ children }) => (
+                  <th className="bg-gray-100 text-left px-3 py-2 border border-gray-200 font-semibold text-gray-700 text-xs">
+                    {children}
+                  </th>
+                ),
+                td: ({ children }) => (
+                  <td className="px-3 py-1.5 border border-gray-100 text-gray-600 text-xs">
+                    {children}
+                  </td>
                 ),
               }}
             >

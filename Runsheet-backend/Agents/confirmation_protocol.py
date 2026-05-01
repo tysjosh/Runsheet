@@ -135,7 +135,20 @@ class ConfirmationProtocol:
                 confirmation_method="immediate",
             )
         else:
-            # 4b. Queue for approval
+            # 4b. Check for existing pending action (deduplication)
+            try:
+                existing = await self._find_pending_duplicate(request)
+                if existing:
+                    return MutationResult(
+                        executed=False,
+                        approval_id=existing,
+                        risk_level=risk_level.value,
+                        confirmation_method="already_queued",
+                    )
+            except Exception:
+                pass  # If dedup check fails, proceed to queue normally
+
+            # 4c. Queue for approval
             approval_id = await self._approval_queue.create(request, risk_level)
             await self._activity_log.log_mutation(
                 request, risk_level, "approval_queue", None
@@ -165,6 +178,31 @@ class ConfirmationProtocol:
             "full-auto": {"low", "medium", "high"},
         }
         return risk_level.value in matrix.get(autonomy_level, set())
+
+    async def _find_pending_duplicate(self, request: MutationRequest):
+        """Check if an identical pending action already exists in the approval queue.
+
+        Returns the action_id if a duplicate is found, None otherwise.
+        """
+        es = self._approval_queue._es
+        query = {
+            "query": {
+                "bool": {
+                    "must": [
+                        {"term": {"status": "pending"}},
+                        {"term": {"tool_name": request.tool_name}},
+                        {"term": {"proposed_by": request.agent_id}},
+                        {"term": {"tenant_id": request.tenant_id}},
+                    ]
+                }
+            },
+            "size": 1,
+        }
+        resp = await es.search_documents("agent_approval_queue", query, size=1)
+        hits = resp.get("hits", {}).get("hits", [])
+        if hits:
+            return hits[0]["_source"].get("action_id")
+        return None
 
     async def _execute_mutation(self, request: MutationRequest) -> str:
         """Execute the actual mutation via Elasticsearch.

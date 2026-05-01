@@ -150,7 +150,7 @@ async def generate_sla_report(
         total_query = inject_tenant_filter(total_query, tenant_id)
         total_query["size"] = 0
 
-        total_resp = await es.client.search(index=es.SHIPMENTS_CURRENT, body=total_query)
+        total_resp = es.client.search(index=es.SHIPMENTS_CURRENT, body=total_query)
         total_count = _total_hits(total_resp)
 
         # Breached shipments: estimated_delivery < now AND status != delivered
@@ -169,7 +169,7 @@ async def generate_sla_report(
         breach_query["size"] = 100
         breach_query["sort"] = [{"estimated_delivery": {"order": "asc"}}]
 
-        breach_resp = await es.client.search(index=es.SHIPMENTS_CURRENT, body=breach_query)
+        breach_resp = es.client.search(index=es.SHIPMENTS_CURRENT, body=breach_query)
         breached_shipments = _format_hits(breach_resp)
         breach_count = _total_hits(breach_resp)
 
@@ -308,7 +308,7 @@ async def generate_failure_report(
             },
         }
 
-        response = await es.client.search(index=es.SHIPMENTS_CURRENT, body=es_query)
+        response = es.client.search(index=es.SHIPMENTS_CURRENT, body=es_query)
         aggs = response.get("aggregations", {})
         total_failures = _total_hits(response)
 
@@ -454,7 +454,7 @@ async def generate_rider_productivity_report(
             }
         }
 
-        delivered_resp = await es.client.search(index=es.SHIPMENTS_CURRENT, body=delivered_query)
+        delivered_resp = es.client.search(index=es.SHIPMENTS_CURRENT, body=delivered_query)
         delivered_aggs = delivered_resp.get("aggregations", {})
         delivered_by_rider = {
             b["key"]: b["doc_count"]
@@ -480,7 +480,7 @@ async def generate_rider_productivity_report(
             }
         }
 
-        failed_resp = await es.client.search(index=es.SHIPMENTS_CURRENT, body=failed_query)
+        failed_resp = es.client.search(index=es.SHIPMENTS_CURRENT, body=failed_query)
         failed_aggs = failed_resp.get("aggregations", {})
         failed_by_rider = {
             b["key"]: b["doc_count"]
@@ -492,7 +492,7 @@ async def generate_rider_productivity_report(
         riders_query = inject_tenant_filter(riders_query, tenant_id)
         riders_query["size"] = 500
 
-        riders_resp = await es.client.search(index=es.RIDERS_CURRENT, body=riders_query)
+        riders_resp = es.client.search(index=es.RIDERS_CURRENT, body=riders_query)
         riders = _format_hits(riders_resp)
         riders = [_pii_masker.mask_response(r, has_pii_access=False) for r in riders]
 
@@ -531,7 +531,7 @@ async def generate_rider_productivity_report(
             }
         }
 
-        avg_time_resp = await es.client.search(index=es.SHIPMENTS_CURRENT, body=avg_time_query)
+        avg_time_resp = es.client.search(index=es.SHIPMENTS_CURRENT, body=avg_time_query)
         avg_time_aggs = avg_time_resp.get("aggregations", {})
         avg_time_by_rider = {}
         for b in avg_time_aggs.get("by_rider", {}).get("buckets", []):

@@ -1,12 +1,16 @@
 import {
+  Activity,
   BarChart3,
   CalendarClock,
   ChevronLeft,
+  Droplets,
   Fuel,
   HelpCircle,
   LogOut,
   Package,
   Radio,
+  Settings,
+  TrendingUp,
   Truck,
   Upload,
   User,
@@ -35,14 +39,18 @@ export default function Sidebar({
   };
 
   const menuItems = [
-    { id: "upload-data", label: "Upload Data", icon: Upload },
     { id: "fleet", label: "Fleet", icon: Truck },
     { id: "scheduling", label: "Scheduling", icon: CalendarClock },
-    { id: "inventory", label: "Inventory", icon: Package },
     { id: "fuel", label: "Fuel", icon: Fuel },
+    { id: "fuel-distribution", label: "Fuel Distribution", icon: Droplets },
+    { id: "inventory", label: "Inventory", icon: Package },
     { id: "riders", label: "Riders", icon: Users },
     { id: "analytics", label: "Analytics", icon: BarChart3 },
+    { id: "scheduling-metrics", label: "Scheduling Metrics", icon: TrendingUp },
+    { id: "ops-monitoring", label: "Ops Monitoring", icon: Activity },
     { id: "control-center", label: "Control Center", icon: Radio },
+    { id: "agent-settings", label: "Agent Settings", icon: Settings },
+    { id: "upload-data", label: "Upload Data", icon: Upload },
     { id: "support", label: "Support", icon: HelpCircle },
   ];
 
