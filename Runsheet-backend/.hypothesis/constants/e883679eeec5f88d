@@ -1,4 +1,0 @@
-# file: /Users/olukotunjosh/Downloads/Runsheet/Runsheet-backend/errors/exceptions.py
-# hypothesis_version: 6.151.4
-
-['Tenant not found', 'Too many requests', 'details', 'error_code', 'message']

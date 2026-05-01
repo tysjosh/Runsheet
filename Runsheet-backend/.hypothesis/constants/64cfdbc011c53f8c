@@ -1,4 +1,0 @@
-# file: /Users/olukotunjosh/Downloads/Runsheet/Runsheet-backend/Agents/execution_planner.py
-# hypothesis_version: 6.151.4
-
-[1000, 'Mutation failed', '_dependency_outputs', 'aborted', 'action_type', 'agent_id', 'completed', 'default', 'details', 'duration_ms', 'event', 'executing', 'execution_planner', 'failed', 'goal', 'outcome', 'parameters', 'partial_failure', 'pending', 'plan', 'plan_created', 'plan_executed', 'plan_id', 'plan_rolled_back', 'recovery_attempts', 'request', 'result', 'risk_level', 'rolled_back', 'rolled_back_steps', 'running', 'session_id', 'skipped', 'status', 'step_count', 'step_id', 'step_results', 'success', 'target_domains', 'tenant_id', 'tool_name', 'user_id']

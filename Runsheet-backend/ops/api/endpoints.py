@@ -22,12 +22,12 @@ from config.settings import get_settings
 from middleware.rate_limiter import limiter
 from ops.middleware.pii_masker import PIIMasker, log_pii_access
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context, inject_tenant_filter
-from ops.models import PaginatedResponse, PaginationMeta
 from ops.services.ops_es_service import OpsElasticsearchService
 from ops.services.feature_flags import FeatureFlagService
 from ops.ingestion.replay import ReplayService, ReplayJobStatus, get_replay_service
 from ops.services.drift_detector import DriftResult, get_drift_detector
 from ops.services.ops_metrics import generate_metrics
+from schemas.common import paginated_response_dict
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +44,10 @@ _ops_es_service: Optional[OpsElasticsearchService] = None
 _feature_flag_service: Optional[FeatureFlagService] = None
 
 router = APIRouter(prefix="/api/ops", tags=["ops"])
+
+# Auth policy declaration for this router (Req 5.2)
+# Default: JWT_REQUIRED for all ops endpoints
+ROUTER_AUTH_POLICY = "jwt_required"
 
 
 def configure_ops_api(
@@ -194,7 +198,7 @@ async def get_sla_breaches(
     rider_id: Optional[str] = Query(None, description="Filter by rider_id"),
     page: int = Query(1, ge=1, description="Page number"),
     size: int = Query(20, ge=1, le=100, description="Page size"),
-) -> PaginatedResponse:
+) -> dict:
     """Return shipments where current time exceeds estimated_delivery."""
     _validate_status(status, VALID_SHIPMENT_STATUSES)
     es = _get_es()
@@ -230,9 +234,11 @@ async def get_sla_breaches(
         [hit["_source"] for hit in hits], tenant, request,
     )
 
-    return PaginatedResponse(
-        data=data,
-        pagination=PaginationMeta.compute(page=page, size=size, total=total),
+    return paginated_response_dict(
+        items=data,
+        total=total,
+        page=page,
+        page_size=size,
         request_id=_get_request_id(request),
     )
 
@@ -253,7 +259,7 @@ async def get_shipment_failures(
     end_date: Optional[str] = Query(None, description="Filter until this ISO date"),
     page: int = Query(1, ge=1, description="Page number"),
     size: int = Query(20, ge=1, le=100, description="Page size"),
-) -> PaginatedResponse:
+) -> dict:
     """Return failed shipments with failure reason from the latest event."""
     _validate_date(start_date, "start_date")
     _validate_date(end_date, "end_date")
@@ -315,9 +321,11 @@ async def get_shipment_failures(
                         shipment["failure_reason"] = payload.get("failure_reason", "unknown")
         data.append(shipment)
 
-    return PaginatedResponse(
-        data=_mask_response_data(data, tenant, request),
-        pagination=PaginationMeta.compute(page=page, size=size, total=total),
+    return paginated_response_dict(
+        items=_mask_response_data(data, tenant, request),
+        total=total,
+        page=page,
+        page_size=size,
         request_id=_get_request_id(request),
     )
 
@@ -339,7 +347,7 @@ async def list_shipments(
     sort_order: str = Query("desc", description="Sort order: asc or desc"),
     page: int = Query(1, ge=1, description="Page number"),
     size: int = Query(20, ge=1, le=100, description="Page size"),
-) -> PaginatedResponse:
+) -> dict:
     """Return paginated shipments from shipments_current index."""
     _validate_status(status, VALID_SHIPMENT_STATUSES)
     _validate_date(start_date, "start_date")
@@ -379,9 +387,11 @@ async def list_shipments(
     hits = result["hits"]["hits"]
     total = result["hits"]["total"]["value"]
 
-    return PaginatedResponse(
-        data=_mask_response_data([hit["_source"] for hit in hits], tenant, request),
-        pagination=PaginationMeta.compute(page=page, size=size, total=total),
+    return paginated_response_dict(
+        items=_mask_response_data([hit["_source"] for hit in hits], tenant, request),
+        total=total,
+        page=page,
+        page_size=size,
         request_id=_get_request_id(request),
     )
 
@@ -455,7 +465,7 @@ async def get_rider_utilization(
     status: Optional[str] = Query(None, description="Filter by rider status"),
     page: int = Query(1, ge=1, description="Page number"),
     size: int = Query(20, ge=1, le=100, description="Page size"),
-) -> PaginatedResponse:
+) -> dict:
     """Return rider records with calculated utilization metrics."""
     _validate_status(status, VALID_RIDER_STATUSES)
     es = _get_es()
@@ -512,9 +522,11 @@ async def get_rider_utilization(
         }
         data.append(rider)
 
-    return PaginatedResponse(
-        data=_mask_response_data(data, tenant, request),
-        pagination=PaginationMeta.compute(page=page, size=size, total=total),
+    return paginated_response_dict(
+        items=_mask_response_data(data, tenant, request),
+        total=total,
+        page=page,
+        page_size=size,
         request_id=_get_request_id(request),
     )
 
@@ -531,7 +543,7 @@ async def list_riders(
     status: Optional[str] = Query(None, description="Filter by rider status"),
     page: int = Query(1, ge=1, description="Page number"),
     size: int = Query(20, ge=1, le=100, description="Page size"),
-) -> PaginatedResponse:
+) -> dict:
     """Return paginated rider records from riders_current index."""
     es = _get_es()
 
@@ -554,9 +566,11 @@ async def list_riders(
     hits = result["hits"]["hits"]
     total = result["hits"]["total"]["value"]
 
-    return PaginatedResponse(
-        data=_mask_response_data([hit["_source"] for hit in hits], tenant, request),
-        pagination=PaginationMeta.compute(page=page, size=size, total=total),
+    return paginated_response_dict(
+        items=_mask_response_data([hit["_source"] for hit in hits], tenant, request),
+        total=total,
+        page=page,
+        page_size=size,
         request_id=_get_request_id(request),
     )
 
@@ -634,7 +648,7 @@ async def list_events(
     end_date: Optional[str] = Query(None, description="Filter events until this ISO date"),
     page: int = Query(1, ge=1, description="Page number"),
     size: int = Query(20, ge=1, le=100, description="Page size"),
-) -> PaginatedResponse:
+) -> dict:
     """Return paginated event records from shipment_events index."""
     es = _get_es()
 
@@ -670,9 +684,11 @@ async def list_events(
     hits = result["hits"]["hits"]
     total = result["hits"]["total"]["value"]
 
-    return PaginatedResponse(
-        data=_mask_response_data([hit["_source"] for hit in hits], tenant, request),
-        pagination=PaginationMeta.compute(page=page, size=size, total=total),
+    return paginated_response_dict(
+        items=_mask_response_data([hit["_source"] for hit in hits], tenant, request),
+        total=total,
+        page=page,
+        page_size=size,
         request_id=_get_request_id(request),
     )
 

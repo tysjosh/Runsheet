@@ -1,4 +1,0 @@
-# file: /Users/olukotunjosh/Downloads/Runsheet/Runsheet-backend/Agents/tools/lookup_tools.py
-# hypothesis_version: 6.151.4
-
-[1000, 'Unknown', 'asset_id', 'asset_name', 'asset_subtype', 'asset_type', 'cargo', 'container', 'container_number', 'container_size', 'contents_description', 'delayed', 'depot', 'draft_meters', 'driver_name', 'equipment', 'equipment_model', 'find_truck_by_id', 'get_all_locations', 'imo_number', 'locations', 'on_time', 'plate_number', 'port', 'port_of_registry', 'seal_number', 'station', 'status', 'success', 'tool_name', 'truck', 'truck_id', 'truck_identifier', 'trucks', 'type', 'unknown', 'vehicle', 'vessel', 'vessel_name', 'warehouse', 'weight_tonnes', '⚓', '🏗️', '🏢', '🏭', '📍', '📦', '🔴', '🚉', '🚛', '🚢', '🟡', '🟢']

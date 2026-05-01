@@ -342,13 +342,13 @@ class TestWebSocketClientMessageHandling:
         ws = FakeWebSocket()
         await self.manager.connect(ws, tenant_id="t1")
 
-        # Manually mark pending (simulating heartbeat cycle)
+        # Manually mark pending (simulating heartbeat cycle) using dict metadata
         client = self.manager._clients[ws]
-        client.mark_pending()
-        assert not client.is_alive
+        client["_alive"] = False
+        assert not client.get("_alive", True)
 
         await self.manager.handle_client_message(ws, json.dumps({"type": "pong"}))
-        assert client.is_alive
+        assert client["_alive"] is True
 
     @pytest.mark.asyncio
     async def test_invalid_json_message_ignored(self):

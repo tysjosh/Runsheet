@@ -1,4 +1,0 @@
-# file: /Users/olukotunjosh/Downloads/Runsheet/Runsheet-backend/ingestion/service.py
-# hypothesis_version: 6.151.4
-
-[-180, 100, 180, 300, 360, 1000, '\x00', '"', '&', '&#x27;', '&amp;', '&gt;', '&lt;', '&quot;', "'", '(--|;|/\\*|\\*/)', '<', '>', 'ConnectionManager', '\\$\\w+', '\\.\\./', '\\.\\.\\\\', '\\x00', '\\{\\s*"\\$', 'accuracy_meters', 'after', 'asset_id', 'asset_subtype', 'asset_type', 'assets', 'batch_size', 'clients_notified', 'coordinates', 'current_heading', 'current_location', 'current_speed_kmh', 'duration_ms', 'error', 'extra_data', 'failed', 'heading', 'hits', 'javascript:', 'last_update', 'lat', 'latitude', 'locations', 'lon', 'longitude', 'on\\w+\\s*=', 'query', 'size', 'speed_kmh', 'successful', 'term', 'timestamp', 'total', 'truck_id', 'trucks', 'updates', 'value']

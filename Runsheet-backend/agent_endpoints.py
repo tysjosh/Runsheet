@@ -32,6 +32,11 @@ _feedback_service = None
 
 router = APIRouter(prefix="/api/agent", tags=["agent"])
 
+# Auth policy declaration for this router (Req 5.2)
+# Default: JWT_REQUIRED for all agent endpoints
+# Exception: GET /api/agent/health → PUBLIC (declared in POLICY_EXCEPTIONS)
+ROUTER_AUTH_POLICY = "jwt_required"
+
 
 # ---------------------------------------------------------------------------
 # Request / response models
@@ -154,6 +159,18 @@ async def list_approvals(
     svc = _get_approval_queue()
     try:
         result = await svc.list_pending(tenant_id=tenant_id, page=page, size=size)
+        # Dual-field deprecation: add unified PaginatedResponse fields
+        from schemas.common import paginated_response_dict
+
+        if isinstance(result, dict) and "data" in result:
+            pagination = result.get("pagination", {})
+            return paginated_response_dict(
+                items=result["data"],
+                total=pagination.get("total", len(result["data"])),
+                page=pagination.get("page", page),
+                page_size=pagination.get("size", size),
+                request_id=pagination.get("request_id", "unknown"),
+            )
         return result
     except Exception as e:
         logger.error(f"Failed to list approvals: {e}")
@@ -262,6 +279,18 @@ async def list_activity(
 
     try:
         result = await svc.query(filters=filters, page=page, size=size)
+        # Dual-field deprecation: add unified PaginatedResponse fields
+        from schemas.common import paginated_response_dict
+
+        if isinstance(result, dict) and "data" in result:
+            pagination = result.get("pagination", {})
+            return paginated_response_dict(
+                items=result["data"],
+                total=pagination.get("total", len(result["data"])),
+                page=pagination.get("page", page),
+                page_size=pagination.get("size", size),
+                request_id=pagination.get("request_id", "unknown"),
+            )
         return result
     except Exception as e:
         logger.error(f"Failed to query activity log: {e}")
@@ -402,6 +431,18 @@ async def list_memories(
             page=page,
             size=size,
         )
+        # Dual-field deprecation: add unified PaginatedResponse fields
+        from schemas.common import paginated_response_dict
+
+        if isinstance(result, dict) and "data" in result:
+            pagination = result.get("pagination", {})
+            return paginated_response_dict(
+                items=result["data"],
+                total=pagination.get("total", len(result["data"])),
+                page=pagination.get("page", page),
+                page_size=pagination.get("size", size),
+                request_id=pagination.get("request_id", "unknown"),
+            )
         return result
     except Exception as e:
         logger.error(f"Failed to list memories: {e}")
@@ -484,6 +525,18 @@ async def list_feedback(
             page=page,
             size=size,
         )
+        # Dual-field deprecation: add unified PaginatedResponse fields
+        from schemas.common import paginated_response_dict
+
+        if isinstance(result, dict) and "data" in result:
+            pagination = result.get("pagination", {})
+            return paginated_response_dict(
+                items=result["data"],
+                total=pagination.get("total", len(result["data"])),
+                page=pagination.get("page", page),
+                page_size=pagination.get("size", size),
+                request_id=pagination.get("request_id", "unknown"),
+            )
         return result
     except Exception as e:
         logger.error(f"Failed to list feedback: {e}")

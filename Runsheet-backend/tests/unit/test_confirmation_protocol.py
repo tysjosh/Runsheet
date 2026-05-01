@@ -462,7 +462,7 @@ class TestProcessMutationWiring:
         await protocol.process_mutation(request)
 
         protocol._risk_registry.classify.assert_called_once_with(
-            "update_fuel_threshold"
+            "update_fuel_threshold", tenant_id="t1"
         )
 
     async def test_calls_business_validator(self):

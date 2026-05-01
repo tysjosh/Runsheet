@@ -1,4 +1,0 @@
-# file: /Users/olukotunjosh/Downloads/Runsheet/Runsheet-backend/middleware/rate_limiter.py
-# hypothesis_version: 6.151.4
-
-[100, 429, ',', '/api/chat', '/api/chat/fallback', 'RATE_LIMITED', 'Rate limit exceeded', 'Retry-After', 'X-Forwarded-For', 'X-Real-IP', 'X-Request-ID', 'application/json', 'detail', 'details', 'error_code', 'extra_data', 'limit', 'message', 'method', 'path', 'request_id', 'retry_after', 'retry_after_seconds', 'unknown']

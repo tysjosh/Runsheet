@@ -1,4 +1,0 @@
-# file: /Users/olukotunjosh/Downloads/Runsheet/Runsheet-backend/Agents/autonomous/sla_guardian_agent.py
-# hypothesis_version: 6.151.4
-
-[120, '+00:00', 'Z', '_source', 'action', 'active', 'asc', 'bool', 'critical', 'default', 'escalate_shipment', 'escalation', 'estimated_delivery', 'filter', 'hits', 'in_transit', 'lte', 'must_not', 'new_rider_id', 'order', 'priority', 'query', 'range', 'reason', 'reassign_rider', 'result', 'rider_id', 'riders', 'shipment_id', 'shipments_current', 'size', 'sla_breach', 'sla_guardian_agent', 'sort', 'status', 'tenant_id', 'term', 'total', 'value']

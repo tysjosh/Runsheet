@@ -1,4 +1,0 @@
-# file: /Users/olukotunjosh/Downloads/Runsheet/Runsheet-backend/Agents/autonomous/delay_response_agent.py
-# hypothesis_version: 6.151.4
-
-['_source', 'action', 'airport_transfer', 'asset_id', 'asset_type', 'assign_asset_to_job', 'bool', 'cargo_transport', 'crane_booking', 'default', 'delay_alert', 'delay_response_agent', 'equipment', 'escalation', 'estimated_arrival', 'filter', 'hits', 'in_progress', 'job_details', 'job_id', 'job_type', 'jobs_current', 'lt', 'on_time', 'passenger_transport', 'query', 'range', 'reason', 'reassignment', 'result', 'size', 'status', 'tenant_id', 'term', 'trucks', 'vehicle', 'vessel', 'vessel_movement']

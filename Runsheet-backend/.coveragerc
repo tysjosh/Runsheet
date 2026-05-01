@@ -16,8 +16,7 @@ omit =
 
 [report]
 # Minimum coverage percentage required (Requirement 11.4)
-# Note: Set to 0 initially; will be enforced once more tests are written
-fail_under = 0
+fail_under = 70
 
 # Exclude lines from coverage
 exclude_lines =

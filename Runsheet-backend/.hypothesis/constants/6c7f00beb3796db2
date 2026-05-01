@@ -1,4 +1,0 @@
-# file: /Users/olukotunjosh/Downloads/Runsheet/Runsheet-backend/Agents/tools/mutation_tools.py
-# hypothesis_version: 6.151.4
-
-[1000, 'ai_agent', 'asset_id', 'assign_asset_to_job', 'cancel_job', 'cargo_manifest', 'create_job', 'default', 'destination', 'escalate_shipment', 'job_id', 'job_type', 'new_rider_id', 'new_status', 'origin', 'priority', 'quantity_liters', 'reason', 'reassign_rider', 'rejected', 'request_fuel_refill', 'scheduled_time', 'shipment_id', 'station_id', 'success', 'tenant_id', 'threshold_pct', 'tool_name', 'update_job_status']

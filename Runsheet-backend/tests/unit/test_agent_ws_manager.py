@@ -194,8 +194,13 @@ class TestBroadcastActivity:
         ws_dead = _make_websocket(fail_send=True)
 
         await manager.connect(ws_alive)
-        # Manually add the dead client (since connect sends a message which would fail)
-        manager._clients[ws_dead] = datetime.now(timezone.utc)
+        # Manually add the dead client with metadata dict (since connect sends a message which would fail)
+        manager._clients[ws_dead] = {
+            "connected_at": datetime.now(timezone.utc),
+            "last_send": None,
+            "tenant_id": "",
+            "pending_count": 0,
+        }
 
         data = {"agent_id": "test_agent"}
         count = await manager.broadcast_activity(data)
@@ -249,7 +254,12 @@ class TestBroadcastApprovalEvent:
         ws_dead = _make_websocket(fail_send=True)
 
         await manager.connect(ws_alive)
-        manager._clients[ws_dead] = datetime.now(timezone.utc)
+        manager._clients[ws_dead] = {
+            "connected_at": datetime.now(timezone.utc),
+            "last_send": None,
+            "tenant_id": "",
+            "pending_count": 0,
+        }
 
         count = await manager.broadcast_approval_event("approval_rejected", {"action_id": "x"})
 
@@ -315,7 +325,12 @@ class TestBroadcastEvent:
         ws_dead = _make_websocket(fail_send=True)
 
         await manager.connect(ws_alive)
-        manager._clients[ws_dead] = datetime.now(timezone.utc)
+        manager._clients[ws_dead] = {
+            "connected_at": datetime.now(timezone.utc),
+            "last_send": None,
+            "tenant_id": "",
+            "pending_count": 0,
+        }
 
         count = await manager.broadcast_event("sla_breach", {"shipment_id": "SH-1"})
 

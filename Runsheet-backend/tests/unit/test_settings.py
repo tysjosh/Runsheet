@@ -177,6 +177,9 @@ class TestSettings:
             if env != "development":
                 env_vars["REDIS_URL"] = "redis://localhost:6379"
                 env_vars["DINEE_WEBHOOK_SECRET"] = "test-webhook-secret"
+                env_vars["JWT_SECRET"] = "test-jwt-secret-that-is-at-least-32-chars-long"
+            if env == "production":
+                env_vars["CORS_ORIGINS"] = '["https://app.runsheet.com"]'
             with patch.dict(os.environ, env_vars, clear=True):
                 settings = Settings()
                 assert settings.environment.value == env
@@ -440,7 +443,7 @@ class TestEnvironmentSpecificConfiguration:
         """Test creating settings for staging environment."""
         from config.settings import create_settings_for_environment
         
-        env_vars = {**valid_env_vars, "REDIS_URL": "redis://localhost:6379", "DINEE_WEBHOOK_SECRET": "test-webhook-secret"}
+        env_vars = {**valid_env_vars, "REDIS_URL": "redis://localhost:6379", "DINEE_WEBHOOK_SECRET": "test-webhook-secret", "JWT_SECRET": "test-jwt-secret-that-is-at-least-32-chars-long"}
         with patch.dict(os.environ, env_vars, clear=True):
             settings = create_settings_for_environment(Environment.STAGING)
             assert isinstance(settings, Settings)
@@ -449,7 +452,7 @@ class TestEnvironmentSpecificConfiguration:
         """Test creating settings for production environment."""
         from config.settings import create_settings_for_environment
         
-        env_vars = {**valid_env_vars, "REDIS_URL": "redis://localhost:6379", "DINEE_WEBHOOK_SECRET": "test-webhook-secret"}
+        env_vars = {**valid_env_vars, "REDIS_URL": "redis://localhost:6379", "DINEE_WEBHOOK_SECRET": "test-webhook-secret", "JWT_SECRET": "test-jwt-secret-that-is-at-least-32-chars-long", "CORS_ORIGINS": '["https://app.runsheet.com"]'}
         with patch.dict(os.environ, env_vars, clear=True):
             settings = create_settings_for_environment(Environment.PRODUCTION)
             assert isinstance(settings, Settings)
@@ -458,7 +461,7 @@ class TestEnvironmentSpecificConfiguration:
         """Test that create_settings_for_environment auto-detects environment."""
         from config.settings import create_settings_for_environment
         
-        env_vars = {**valid_env_vars, "ENVIRONMENT": "staging", "REDIS_URL": "redis://localhost:6379", "DINEE_WEBHOOK_SECRET": "test-webhook-secret"}
+        env_vars = {**valid_env_vars, "ENVIRONMENT": "staging", "REDIS_URL": "redis://localhost:6379", "DINEE_WEBHOOK_SECRET": "test-webhook-secret", "JWT_SECRET": "test-jwt-secret-that-is-at-least-32-chars-long"}
         with patch.dict(os.environ, env_vars, clear=True):
             settings = create_settings_for_environment()
             assert settings.environment == Environment.STAGING

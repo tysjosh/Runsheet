@@ -1,4 +1,0 @@
-# file: /Users/olukotunjosh/Downloads/Runsheet/Runsheet-backend/ops/ingestion/adapter.py
-# hypothesis_version: 6.151.4
-
-[' (deprecated)', 'Semver e.g. "1.0"', 'Tenant identifier', 'availability', 'completed_today', 'created_at', 'current_location', 'destination', 'estimated_delivery', 'event_id', 'event_payload', 'event_timestamp', 'event_type', 'failure_reason', 'ingested_at', 'last_event_timestamp', 'last_seen', 'location', 'origin', 'rider_id', 'rider_name', 'riders_current', 'shipment_events', 'shipment_id', 'shipments_current', 'status', 'tenant_id', 'trace_id', 'updated_at']

@@ -114,6 +114,8 @@ class SLAGuardianAgent(AutonomousAgentBase):
         threshold_time = now + timedelta(minutes=self._sla_threshold_minutes)
 
         # Query for in_transit shipments approaching SLA breach (Req 5.2)
+        # Note: query runs across all tenants; tenant_id is extracted per-shipment.
+        # Each tenant's shipments are processed with their own tenant_id scope.
         query = {
             "query": {
                 "bool": {
@@ -129,11 +131,12 @@ class SLAGuardianAgent(AutonomousAgentBase):
                     ]
                 }
             },
-            "size": 50,
+            "size": 200,
+            "sort": [{"estimated_delivery": {"order": "asc"}}],
         }
 
         resp = await self._es.search_documents(
-            SHIPMENTS_CURRENT_INDEX, query, 50
+            SHIPMENTS_CURRENT_INDEX, query, 200
         )
         at_risk_shipments = [h["_source"] for h in resp["hits"]["hits"]]
 

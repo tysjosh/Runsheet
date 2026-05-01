@@ -366,7 +366,7 @@ class TestWebSocketHeartbeat:
         # Manually mark the client as pending (simulating missed heartbeat)
         async with mgr._lock:
             client = mgr._clients[ws]
-            client.mark_pending()
+            client["_alive"] = False
 
         original_sleep = asyncio.sleep
 
@@ -597,14 +597,14 @@ class TestWebSocketClientMessageHandling:
         # Mark pending (simulating heartbeat cycle)
         async with mgr._lock:
             client = mgr._clients[ws]
-            client.mark_pending()
-            assert not client.is_alive
+            client["_alive"] = False
+            assert not client.get("_alive", True)
 
         await mgr.handle_client_message(ws, json.dumps({"type": "pong"}))
 
         async with mgr._lock:
             client = mgr._clients[ws]
-            assert client.is_alive
+            assert client["_alive"] is True
 
     @pytest.mark.asyncio
     async def test_subscribe_updates_subscriptions(self):
@@ -624,7 +624,7 @@ class TestWebSocketClientMessageHandling:
 
         async with mgr._lock:
             client = mgr._clients[ws]
-            assert client.subscriptions == {"delay_alert", "status_changed"}
+            assert client["subscriptions"] == {"delay_alert", "status_changed"}
 
         # Should have received a "subscribed" confirmation
         sub_msgs = [m for m in ws.messages if m.get("type") == "subscribed"]

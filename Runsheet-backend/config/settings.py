@@ -180,6 +180,20 @@ class Settings(BaseSettings):
         description="Algorithm used for JWT signing (default: HS256)"
     )
 
+    # Circuit Breaker Configuration
+    circuit_breaker_failure_threshold: int = Field(
+        default=3,
+        ge=1,
+        le=20,
+        description="Number of consecutive failures before circuit opens"
+    )
+    circuit_breaker_recovery_timeout_seconds: int = Field(
+        default=30,
+        ge=5,
+        le=300,
+        description="Seconds to wait before attempting recovery"
+    )
+
     # Dinee / Ops Intelligence Configuration
     dinee_webhook_secret: str = Field(
         default="",
@@ -367,6 +381,13 @@ class Settings(BaseSettings):
         # Allow empty in development; production validation is handled by model_validator
         return v.strip() if v else v
     
+    @field_validator("jwt_secret")
+    @classmethod
+    def validate_jwt_secret(cls, v: str) -> str:
+        """Validate JWT secret strength."""
+        # Allow empty in development (model_validator handles production check)
+        return v.strip() if v else v
+    
     @field_validator("dinee_api_base_url")
     @classmethod
     def validate_dinee_api_base_url(cls, v: Optional[str]) -> Optional[str]:
@@ -400,6 +421,23 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "dinee_webhook_secret is required in non-development environments"
                 )
+            # Validate JWT secret strength in non-development environments
+            if not self.jwt_secret or len(self.jwt_secret) < 32:
+                raise ValueError(
+                    "jwt_secret must be at least 32 characters in non-development environments"
+                )
+            if self.jwt_secret == "dev-jwt-secret-change-me-in-production":
+                raise ValueError(
+                    "jwt_secret must not be the default placeholder in non-development environments"
+                )
+            # Validate CORS: reject any localhost origins in production
+            if self.environment == Environment.PRODUCTION:
+                for origin in self.cors_origins:
+                    if "localhost" in origin or "127.0.0.1" in origin:
+                        raise ValueError(
+                            f"Production environment cannot have localhost CORS origins: {origin}. "
+                            "Configure your production frontend domain(s)."
+                        )
         
         return self
 
@@ -571,15 +609,12 @@ def validate_startup() -> None:
             )
     
     # In production, ensure CORS origins are explicitly configured (not just localhost)
+    # Note: per-origin localhost rejection is handled by the model_validator.
+    # This check catches the case where ALL origins are localhost (template not updated).
     if settings.environment == Environment.PRODUCTION:
-        localhost_only = all(
-            "localhost" in origin or "127.0.0.1" in origin 
-            for origin in settings.cors_origins
-        )
-        if localhost_only:
+        if not settings.cors_origins:
             validation_errors["cors_origins"] = (
-                "Production environment requires non-localhost CORS origins. "
-                "Configure your production frontend domain(s)."
+                "Production environment requires at least one CORS origin configured."
             )
     
     if validation_errors:

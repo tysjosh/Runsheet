@@ -49,39 +49,74 @@ class RiskRegistry:
         self._defaults = dict(DEFAULT_RISK_REGISTRY)
         self._redis = redis_client
 
-    async def classify(self, tool_name: str) -> RiskLevel:
-        """Return the risk level for a tool, checking Redis overrides first.
+    async def classify(self, tool_name: str, tenant_id: str = "") -> RiskLevel:
+        """Return the risk level for a tool, checking tenant-scoped Redis overrides first.
+
+        Checks in order:
+        1. Tenant-specific override: risk_override:{tenant_id}:{tool_name}
+        2. Global override: risk_override:{tool_name}
+        3. Default registry
 
         Args:
             tool_name: The name of the mutation tool to classify.
+            tenant_id: Optional tenant for tenant-scoped overrides.
 
         Returns:
             The RiskLevel for the tool. Defaults to HIGH for unknown tools.
         """
         if self._redis:
+            # Check tenant-specific override first
+            if tenant_id:
+                try:
+                    override = await self._redis.get(
+                        f"risk_override:{tenant_id}:{tool_name}"
+                    )
+                    if override:
+                        value = override.decode() if isinstance(override, bytes) else override
+                        return RiskLevel(value)
+                except Exception as e:
+                    logger.warning(
+                        "Redis lookup failed for risk_override:%s:%s: %s",
+                        tenant_id, tool_name, e,
+                    )
+
+            # Check global override
             try:
                 override = await self._redis.get(f"risk_override:{tool_name}")
                 if override:
                     value = override.decode() if isinstance(override, bytes) else override
                     return RiskLevel(value)
             except Exception as e:
-                logger.warning(f"Redis lookup failed for risk_override:{tool_name}: {e}")
+                logger.warning(
+                    "Redis lookup failed for risk_override:%s: %s",
+                    tool_name, e,
+                )
 
         return self._defaults.get(tool_name, RiskLevel.HIGH)
 
-    async def set_override(self, tool_name: str, level: RiskLevel) -> None:
+    async def set_override(
+        self, tool_name: str, level: RiskLevel, tenant_id: str = ""
+    ) -> None:
         """Set a Redis-backed risk level override.
 
         Args:
             tool_name: The name of the mutation tool to override.
             level: The new RiskLevel to assign.
+            tenant_id: Optional tenant for tenant-scoped override.
+                If empty, sets a global override.
 
         Raises:
             RuntimeError: If no Redis client is configured.
         """
         if self._redis:
-            await self._redis.set(f"risk_override:{tool_name}", level.value)
+            key = (
+                f"risk_override:{tenant_id}:{tool_name}"
+                if tenant_id
+                else f"risk_override:{tool_name}"
+            )
+            await self._redis.set(key, level.value)
         else:
             logger.warning(
-                f"Cannot set risk override for {tool_name}: no Redis client configured"
+                "Cannot set risk override for %s: no Redis client configured",
+                tool_name,
             )

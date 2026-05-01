@@ -1,4 +1,0 @@
-# file: /Users/olukotunjosh/Downloads/Runsheet/Runsheet-backend/ops/services/ops_metrics.py
-# hypothesis_version: 6.151.4
-
-[0.0, 0.05, 1.0, 60.0, 100, 300, 600, 3600, '+Inf', '5.0', 'ALERT [%s]: %s — %s', 'ERROR', 'ES indexing failures', 'Feature flag changes', 'WARN', '_bucket', '_count', '_total', 'action', 'condition', 'description', 'endpoint', 'error_type', 'es_errors_warn_since', 'event_type', 'index_name', 'last_es_error_check', 'last_es_error_count', 'le', 'method', 'ops_drift_percentage', 'schema_version', 'severity', 'status', 'tenant_id', 'unknown', 'ws_zero_since']

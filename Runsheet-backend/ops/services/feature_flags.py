@@ -17,6 +17,9 @@ from ops.services.ops_metrics import ops_feature_flag_changes_total
 
 logger = logging.getLogger(__name__)
 
+OVERLAY_PREFIX = "overlay_ff:"
+VALID_OVERLAY_STATES = frozenset({"disabled", "shadow", "active_gated", "active_auto"})
+
 
 class FeatureFlagService:
     """
@@ -200,3 +203,79 @@ class FeatureFlagService:
             return await self.client.ping() is True
         except Exception:
             return False
+
+    # ── Overlay agent feature-flag methods ──────────────────────────
+
+    async def get_overlay_state(self, flag_key: str, tenant_id: str) -> str:
+        """
+        Return the overlay state for *flag_key* and *tenant_id*.
+
+        Reads the Redis key ``overlay_ff:{flag_key}:{tenant_id}`` and returns
+        one of the valid overlay states: ``disabled``, ``shadow``,
+        ``active_gated``, or ``active_auto``.  Defaults to ``"disabled"`` when
+        the key does not exist.
+
+        Raises ``RuntimeError`` if the Redis client is not connected.
+        Logs a warning and returns ``"disabled"`` on any Redis error
+        (fail-closed behaviour).
+
+        Validates: Req 12.1, 12.4, 12.7
+        """
+        if not self.client:
+            raise RuntimeError("Redis client not connected. Call connect() first.")
+        try:
+            key = f"{OVERLAY_PREFIX}{flag_key}:{tenant_id}"
+            value = await self.client.get(key)
+            if value is None:
+                return "disabled"
+            return value
+        except Exception as exc:
+            logger.warning(
+                "Failed to read overlay state for flag_key=%s, tenant_id=%s: %s — defaulting to disabled",
+                flag_key,
+                tenant_id,
+                exc,
+            )
+            return "disabled"
+
+    async def set_overlay_state(
+        self, flag_key: str, tenant_id: str, state: str, user_id: str
+    ) -> str:
+        """
+        Set the overlay state for *flag_key* and *tenant_id*.
+
+        Validates that *state* is one of the ``VALID_OVERLAY_STATES``.  Reads
+        the previous state via :meth:`get_overlay_state`, writes the new value
+        to Redis, and logs the transition with full audit context.
+
+        Returns the **previous** state so callers can detect transitions.
+
+        Raises ``ValueError`` if *state* is not a valid overlay state.
+        Raises ``RuntimeError`` if the Redis client is not connected.
+
+        Validates: Req 12.1, 12.4, 12.5, 12.7
+        """
+        if state not in VALID_OVERLAY_STATES:
+            raise ValueError(
+                f"Invalid overlay state '{state}'. "
+                f"Must be one of: {', '.join(sorted(VALID_OVERLAY_STATES))}"
+            )
+        if not self.client:
+            raise RuntimeError("Redis client not connected. Call connect() first.")
+
+        previous = await self.get_overlay_state(flag_key, tenant_id)
+
+        key = f"{OVERLAY_PREFIX}{flag_key}:{tenant_id}"
+        await self.client.set(key, state)
+
+        logger.info(
+            "Overlay flag transition: flag_key=%s, tenant_id=%s, "
+            "previous_state=%s, new_state=%s, user_id=%s",
+            flag_key,
+            tenant_id,
+            previous,
+            state,
+            user_id,
+        )
+
+        return previous

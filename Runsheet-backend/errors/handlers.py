@@ -14,29 +14,16 @@ error response without exposing internal details.
 import logging
 import traceback
 import uuid
-from typing import Any, Optional
+from typing import Any
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
 
 from errors.codes import ErrorCode
 from errors.exceptions import AppException
+from schemas.common import ErrorResponse
 
 logger = logging.getLogger(__name__)
-
-
-class ErrorResponse(BaseModel):
-    """
-    Structured error response model.
-    
-    All error responses from the API follow this format for consistency
-    and to enable programmatic error handling by clients.
-    """
-    error_code: str
-    message: str
-    details: Optional[dict[str, Any]] = None
-    request_id: str
 
 
 def get_request_id(request: Request) -> str:

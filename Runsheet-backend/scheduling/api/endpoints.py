@@ -44,6 +44,10 @@ _delay_service: Optional[DelayDetectionService] = None
 
 router = APIRouter(prefix="/api/scheduling", tags=["scheduling"])
 
+# Auth policy declaration for this router (Req 5.2)
+# Default: JWT_REQUIRED for all scheduling endpoints
+ROUTER_AUTH_POLICY = "jwt_required"
+
 
 # ---------------------------------------------------------------------------
 # Service wiring
@@ -239,8 +243,16 @@ async def list_jobs(
         sort_by=sort_by,
         sort_order=sort_order,
     )
-    result["request_id"] = _get_request_id(request)
-    return result
+    # Dual-field deprecation: add unified PaginatedResponse fields
+    from schemas.common import paginated_response_dict
+
+    return paginated_response_dict(
+        items=result["data"],
+        total=result["pagination"]["total"],
+        page=result["pagination"]["page"],
+        page_size=result["pagination"]["size"],
+        request_id=_get_request_id(request),
+    )
 
 
 @router.get("/jobs/active")
@@ -256,16 +268,15 @@ async def get_active_jobs(
     """
     svc = _get_job_service()
     jobs = await svc.get_active_jobs(tenant.tenant_id)
-    return {
-        "data": jobs,
-        "pagination": {
-            "page": 1,
-            "size": len(jobs),
-            "total": len(jobs),
-            "total_pages": 1,
-        },
-        "request_id": _get_request_id(request),
-    }
+    from schemas.common import paginated_response_dict
+
+    return paginated_response_dict(
+        items=jobs,
+        total=len(jobs),
+        page=1,
+        page_size=len(jobs) if jobs else 1,
+        request_id=_get_request_id(request),
+    )
 
 
 @router.get("/jobs/delayed")
@@ -281,16 +292,15 @@ async def get_delayed_jobs(
     """
     svc = _get_job_service()
     jobs = await svc.get_delayed_jobs(tenant.tenant_id)
-    return {
-        "data": jobs,
-        "pagination": {
-            "page": 1,
-            "size": len(jobs),
-            "total": len(jobs),
-            "total_pages": 1,
-        },
-        "request_id": _get_request_id(request),
-    }
+    from schemas.common import paginated_response_dict
+
+    return paginated_response_dict(
+        items=jobs,
+        total=len(jobs),
+        page=1,
+        page_size=len(jobs) if jobs else 1,
+        request_id=_get_request_id(request),
+    )
 
 
 @router.get("/jobs/{job_id}")
@@ -327,16 +337,15 @@ async def get_job_events(
     """
     svc = _get_job_service()
     events = await svc.get_job_events(job_id, tenant.tenant_id)
-    return {
-        "data": events,
-        "pagination": {
-            "page": 1,
-            "size": len(events),
-            "total": len(events),
-            "total_pages": 1,
-        },
-        "request_id": _get_request_id(request),
-    }
+    from schemas.common import paginated_response_dict
+
+    return paginated_response_dict(
+        items=events,
+        total=len(events),
+        page=1,
+        page_size=len(events) if events else 1,
+        request_id=_get_request_id(request),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -518,8 +527,16 @@ async def search_cargo(
         page=page,
         size=size,
     )
-    result["request_id"] = _get_request_id(request)
-    return result
+    # Dual-field deprecation: add unified PaginatedResponse fields
+    from schemas.common import paginated_response_dict
+
+    return paginated_response_dict(
+        items=result.get("data", []),
+        total=result.get("pagination", {}).get("total", 0),
+        page=result.get("pagination", {}).get("page", page),
+        page_size=result.get("pagination", {}).get("size", size),
+        request_id=_get_request_id(request),
+    )
 
 
 # ---------------------------------------------------------------------------

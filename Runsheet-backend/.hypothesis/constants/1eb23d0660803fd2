@@ -1,4 +1,0 @@
-# file: /Users/olukotunjosh/Downloads/Runsheet/Runsheet-backend/ops/websocket/ops_ws.py
-# hypothesis_version: 6.151.4
-
-[1000, 4403, 'FeatureFlagService', '_alive', 'all', 'connected', 'connection', 'data', 'heartbeat', 'message', 'pong', 'rider_update', 'shipment_update', 'shutdown', 'sla_breach', 'stale', 'status', 'subscribe', 'subscribed', 'subscriptions', 'tenant_disabled', 'tenant_id', 'timestamp', 'type', 'unknown', 'websocket']

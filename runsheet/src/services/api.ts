@@ -90,6 +90,55 @@ async function fetchWithTimeout(
   }
 }
 
+// Retry configuration
+const RETRY_CONFIG = {
+  maxRetries: 2,
+  initialDelayMs: 500,
+  backoffMultiplier: 2,
+  retryableStatuses: new Set([408, 429, 502, 503, 504]),
+} as const;
+
+// Helper function to fetch with timeout and retry
+async function fetchWithRetry(
+  url: string,
+  options: RequestInit = {},
+  timeout: number = API_TIMEOUTS.STANDARD,
+): Promise<Response> {
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt <= RETRY_CONFIG.maxRetries; attempt++) {
+    try {
+      const response = await fetchWithTimeout(url, options, timeout);
+
+      // Don't retry successful responses or non-retryable errors
+      if (response.ok || !RETRY_CONFIG.retryableStatuses.has(response.status)) {
+        return response;
+      }
+
+      // Retryable HTTP status — treat as error for retry
+      lastError = new ApiError(
+        `HTTP error! status: ${response.status}`,
+        response.status,
+      );
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+
+      // Don't retry non-transient errors
+      if (error instanceof ApiError && !RETRY_CONFIG.retryableStatuses.has(error.status)) {
+        throw error;
+      }
+    }
+
+    // Wait before retrying (skip delay on last attempt)
+    if (attempt < RETRY_CONFIG.maxRetries) {
+      const delay = RETRY_CONFIG.initialDelayMs * (RETRY_CONFIG.backoffMultiplier ** attempt);
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+
+  throw lastError ?? new Error("Request failed after retries");
+}
+
 // Types for other components
 export interface InventoryItem {
   id: string;
@@ -161,7 +210,7 @@ class ApiService {
     timeout: number = API_TIMEOUTS.STANDARD,
   ): Promise<ApiResponse<T>> {
     try {
-      const response = await fetchWithTimeout(
+      const response = await fetchWithRetry(
         `${API_BASE_URL}${endpoint}`,
         {
           headers: {
@@ -360,6 +409,25 @@ class ApiService {
     file: File,
     dataType: string,
   ): Promise<ApiResponse<{ recordCount: number }>> {
+    // Validate file size (max 50MB)
+    const MAX_FILE_SIZE = 50 * 1024 * 1024;
+    if (file.size > MAX_FILE_SIZE) {
+      throw new ApiError(
+        `File too large: ${(file.size / 1024 / 1024).toFixed(1)}MB exceeds 50MB limit`,
+        413,
+      );
+    }
+
+    // Validate file type
+    const allowedTypes = [".csv", ".xlsx", ".xls"];
+    const fileName = file.name.toLowerCase();
+    if (!allowedTypes.some((ext) => fileName.endsWith(ext))) {
+      throw new ApiError(
+        `Invalid file type: ${file.name}. Allowed: ${allowedTypes.join(", ")}`,
+        415,
+      );
+    }
+
     const formData = new FormData();
     formData.append("file", file);
     formData.append("dataType", dataType);
@@ -493,7 +561,7 @@ class ApiService {
     success: boolean;
     timestamp: string;
   }> {
-    const response = await fetchWithTimeout(
+    const response = await fetchWithRetry(
       `${API_BASE_URL}/demo/status`,
       {
         headers: {

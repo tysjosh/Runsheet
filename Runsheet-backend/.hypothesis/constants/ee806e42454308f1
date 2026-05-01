@@ -1,4 +1,0 @@
-# file: /Users/olukotunjosh/Downloads/Runsheet/Runsheet-backend/Agents/tools/summary_tools.py
-# hypothesis_version: 6.151.4
-
-[1000, '**Assets by Type:**\n', '**Delayed Trucks:**\n', '**Key Metrics:**\n', 'aggregations', 'aggs', 'asset_subtype', 'asset_type', 'buckets', 'by_subtype', 'by_type', 'delayed', 'field', 'get_fleet_summary', 'in_stock', 'inventory', 'low_stock', 'onTimePercentage', 'on_time', 'out_of_stock', 'percentage', 'performance', 'size', 'status', 'success', 'terms', 'tool_name', 'trend', 'trucks', 'up', '📈', '📉', '🔴 **Out of Stock:**\n', '🟡 **Low Stock:**\n', '🟢 **In Stock:**\n']

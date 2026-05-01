@@ -41,6 +41,10 @@ SEMVER_PATTERN = re.compile(r"^\d+\.\d+(\.\d+)?$")
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
+# Auth policy declaration for this router (Req 5.2)
+# Default: WEBHOOK_HMAC — webhooks use HMAC signature verification
+ROUTER_AUTH_POLICY = "webhook_hmac"
+
 
 # ---------------------------------------------------------------------------
 # Response model

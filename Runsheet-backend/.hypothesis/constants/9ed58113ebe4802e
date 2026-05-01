@@ -1,4 +1,0 @@
-# file: /Users/olukotunjosh/Downloads/Runsheet/Runsheet-backend/scheduling/models.py
-# hypothesis_version: 6.151.5
-
-['after', 'airport_transfer', 'assigned', 'cancelled', 'cargo_transport', 'completed', 'crane_booking', 'damaged', 'delivered', 'equipment', 'failed', 'high', 'in_progress', 'in_transit', 'loaded', 'low', 'normal', 'passenger_transport', 'pending', 'scheduled', 'urgent', 'vehicle', 'vessel', 'vessel_movement']

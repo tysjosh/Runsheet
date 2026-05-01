@@ -1,4 +1,0 @@
-# file: /Users/olukotunjosh/Downloads/Runsheet/Runsheet-backend/ops/middleware/pii_masker.py
-# hypothesis_version: 6.151.4
-
-['***', '***@***.com', ',', '.', '\\+?\\d[\\d\\s\\-]{7,}\\d', '\\d', 'customer_name', 'none', 'recipient_name', 'sender_name']

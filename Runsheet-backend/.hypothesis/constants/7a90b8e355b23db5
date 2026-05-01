@@ -1,4 +1,0 @@
-# file: /Users/olukotunjosh/Downloads/Runsheet/Runsheet-backend/errors/handlers.py
-# hypothesis_version: 6.151.4
-
-[500, 'details', 'error_code', 'error_message', 'exception_message', 'exception_type', 'method', 'path', 'request_id', 'stack_trace', 'status_code']

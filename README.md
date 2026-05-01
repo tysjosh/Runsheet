@@ -154,16 +154,27 @@ source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-Create `.env` file:
-```
-ELASTIC_API_KEY=your_elasticsearch_api_key
-ELASTIC_ENDPOINT=your_elasticsearch_endpoint
-GOOGLE_CLOUD_PROJECT=your_gcp_project_id
+Set up your environment configuration:
+```bash
+# Copy the example environment file
+cp .env.example .env.development
+
+# Open .env.development and fill in your actual credentials:
+# - ELASTIC_ENDPOINT: Your Elasticsearch Cloud endpoint URL
+# - ELASTIC_API_KEY: Your Elasticsearch API key (from Elastic Cloud console)
+# - GOOGLE_CLOUD_PROJECT: Your GCP project ID
+# - JWT_SECRET: A strong random secret for JWT signing (min 32 chars)
+# - DINEE_WEBHOOK_SECRET: HMAC secret for webhook verification
+#
+# See .env.example for full documentation of all variables.
 ```
 
+> **Important**: Never commit `.env.development` or any file containing real credentials.
+> Only `.env.example` (with placeholder values) should be tracked in git.
+
 Setup Google Cloud credentials:
-- Place service account JSON in backend directory
-- Update path in `mainagent.py`
+- Run `gcloud auth application-default login`, or
+- Place service account JSON in the backend directory and set `GOOGLE_APPLICATION_CREDENTIALS` in `.env.development`
 
 Start server:
 ```bash
@@ -175,6 +186,20 @@ python main.py
 ```bash
 cd runsheet
 npm install
+
+# Copy the example environment file
+cp .env.example .env.local
+
+# Open .env.local and fill in your actual values:
+# - NEXT_PUBLIC_API_URL: Backend API URL (default: http://localhost:8000/api)
+# - NEXT_PUBLIC_GOOGLE_MAPS_API_KEY: Your Google Maps API key
+#
+# See .env.example for full documentation.
+```
+
+> **Important**: Never commit `.env.local` or any file containing real credentials.
+
+```bash
 npm run dev
 ```
 
@@ -286,14 +311,29 @@ POST /api/upload/csv           # Upload data
 
 ### Environment Variables
 
-```bash
-# Elasticsearch
-ELASTIC_API_KEY=your_api_key
-ELASTIC_ENDPOINT=https://your-cluster.es.region.aws.found.io
+Environment configuration is managed through `.env.example` template files. Copy these to create your local configuration:
 
-# Google Cloud
-GOOGLE_CLOUD_PROJECT=your_project_id
-GOOGLE_APPLICATION_CREDENTIALS=path/to/service-account.json
+```bash
+# Backend
+cp Runsheet-backend/.env.example Runsheet-backend/.env.development
+
+# Frontend
+cp runsheet/.env.example runsheet/.env.local
+```
+
+See each `.env.example` file for the full list of variables with descriptions, expected formats, and required/optional status.
+
+Key variables:
+```bash
+# Elasticsearch (required)
+ELASTIC_API_KEY=your-api-key-here
+ELASTIC_ENDPOINT=https://your-elasticsearch-endpoint.elastic-cloud.com
+
+# Google Cloud (required)
+GOOGLE_CLOUD_PROJECT=your-gcp-project-id
+
+# Authentication (required)
+JWT_SECRET=your-jwt-secret-here
 ```
 
 ### AI Agent Configuration

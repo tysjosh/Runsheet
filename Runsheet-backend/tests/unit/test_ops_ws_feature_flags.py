@@ -10,11 +10,12 @@ Validates: Requirement 27.3
 """
 
 import asyncio
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from ops.websocket.ops_ws import OpsWebSocketManager, _ClientConnection
+from ops.websocket.ops_ws import OpsWebSocketManager
 
 
 def _make_ws(accepted: bool = True) -> MagicMock:
@@ -31,6 +32,18 @@ def _make_ff_service(enabled: bool = True) -> AsyncMock:
     svc = AsyncMock()
     svc.is_enabled = AsyncMock(return_value=enabled)
     return svc
+
+
+def _make_client_meta(tenant_id: str = "", subscriptions=None):
+    """Create a client metadata dict matching BaseWSManager format."""
+    return {
+        "connected_at": datetime.now(timezone.utc),
+        "last_send": None,
+        "tenant_id": tenant_id,
+        "pending_count": 0,
+        "subscriptions": subscriptions or set(),
+        "_alive": True,
+    }
 
 
 class TestConnectRejectsDisabledTenant:
@@ -62,7 +75,7 @@ class TestConnectRejectsDisabledTenant:
         ws.accept.assert_awaited_once()
         ws.close.assert_not_awaited()
         assert ws in mgr._clients
-        assert mgr._clients[ws].tenant_id == "enabled-tenant"
+        assert mgr._clients[ws]["tenant_id"] == "enabled-tenant"
 
         # Cleanup
         await mgr.shutdown()
@@ -146,8 +159,8 @@ class TestBroadcastExcludesDisabledTenants:
         mgr.set_feature_flag_service(_make_ff_service(enabled=False))
 
         ws = _make_ws()
-        # Manually register a client (bypass connect's flag check)
-        mgr._clients[ws] = _ClientConnection(ws, set(), tenant_id="tenant-x")
+        # Manually register a client using metadata dict
+        mgr._clients[ws] = _make_client_meta(tenant_id="tenant-x")
 
         sent = await mgr.broadcast_shipment_update({"tenant_id": "disabled-tenant", "status": "delivered"})
 
@@ -162,7 +175,7 @@ class TestBroadcastExcludesDisabledTenants:
         mgr.set_feature_flag_service(_make_ff_service(enabled=True))
 
         ws = _make_ws()
-        mgr._clients[ws] = _ClientConnection(ws, set(), tenant_id="tenant-x")
+        mgr._clients[ws] = _make_client_meta(tenant_id="tenant-x")
 
         sent = await mgr.broadcast_shipment_update({"tenant_id": "enabled-tenant", "status": "delivered"})
 
@@ -178,7 +191,7 @@ class TestBroadcastExcludesDisabledTenants:
         mgr.set_feature_flag_service(_make_ff_service(enabled=False))
 
         ws = _make_ws()
-        mgr._clients[ws] = _ClientConnection(ws, set(), tenant_id="tenant-x")
+        mgr._clients[ws] = _make_client_meta(tenant_id="tenant-x")
 
         sent = await mgr.broadcast_rider_update({"status": "active"})
 
@@ -197,7 +210,7 @@ class TestBroadcastExcludesDisabledTenants:
         mgr.set_feature_flag_service(ff)
 
         ws = _make_ws()
-        mgr._clients[ws] = _ClientConnection(ws, set(), tenant_id="tenant-x")
+        mgr._clients[ws] = _make_client_meta(tenant_id="tenant-x")
 
         sent = await mgr.broadcast_shipment_update({"tenant_id": "some-tenant", "status": "delivered"})
 

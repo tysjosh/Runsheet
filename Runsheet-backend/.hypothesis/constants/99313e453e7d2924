@@ -1,4 +1,0 @@
-# file: /Users/olukotunjosh/Downloads/Runsheet/Runsheet-backend/telemetry/service.py
-# hypothesis_version: 6.151.4
-
-['<module>', 'INFO', 'Z', '__enter__', 'action', 'audit_event', 'client', 'details', 'duration_ms', 'error', 'event_type', 'exception', 'extra_data', 'function', 'input_params', 'level', 'line', 'log_level', 'logger', 'message', 'metric_name', 'metric_value', 'module', 'operation.name', 'otel_endpoint', 'otel_service_name', 'request_id', 'resource_id', 'resource_type', 'runsheet-backend', 'service.name', 'service_name', 'set_attribute', 'span.kind', 'stack_trace', 'success', 'tags', 'telemetry', 'timestamp', 'tool_name', 'user_id']

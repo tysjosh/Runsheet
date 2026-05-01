@@ -57,13 +57,17 @@ class AutonomyConfigService:
                     if decoded in VALID_AUTONOMY_LEVELS:
                         return decoded
                     logger.warning(
-                        f"Invalid autonomy level '{decoded}' for tenant {tenant_id}, "
-                        f"returning default"
+                        "Invalid autonomy level '%s' for tenant %s, "
+                        "returning default",
+                        decoded,
+                        tenant_id,
                     )
                     return DEFAULT_AUTONOMY_LEVEL
             except Exception as e:
                 logger.warning(
-                    f"Redis lookup failed for tenant:{tenant_id}:autonomy_level: {e}"
+                    "Redis lookup failed for tenant:%s:autonomy_level: %s",
+                    tenant_id,
+                    e,
                 )
 
         return DEFAULT_AUTONOMY_LEVEL
@@ -96,13 +100,16 @@ class AutonomyConfigService:
                 await self._redis.set(key, level)
             except Exception as e:
                 logger.error(
-                    f"Failed to set autonomy level for tenant {tenant_id}: {e}"
+                    "Failed to set autonomy level for tenant %s: %s",
+                    tenant_id,
+                    e,
                 )
                 raise
         else:
             logger.warning(
-                f"Cannot set autonomy level for tenant {tenant_id}: "
-                f"no Redis client configured"
+                "Cannot set autonomy level for tenant %s: "
+                "no Redis client configured",
+                tenant_id,
             )
 
         return previous

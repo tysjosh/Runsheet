@@ -9,6 +9,7 @@ Validates:
   for pushing real-time updates to connected Frontend_Application clients
 """
 
+from .base_ws_manager import BaseWSManager
 from .connection_manager import ConnectionManager, get_connection_manager
 
-__all__ = ["ConnectionManager", "get_connection_manager"]
+__all__ = ["BaseWSManager", "ConnectionManager", "get_connection_manager"]

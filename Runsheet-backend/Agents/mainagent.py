@@ -30,10 +30,11 @@ from errors.exceptions import ai_service_unavailable, circuit_open
 # Load environment variables
 load_dotenv()
 
-# Disable OpenTelemetry to avoid context errors
-os.environ['OTEL_SDK_DISABLED'] = 'true'
-os.environ['OTEL_PYTHON_DISABLED'] = 'true'
-os.environ['OTEL_EXPORTER_OTLP_ENDPOINT'] = ''
+# Disable OpenTelemetry to avoid context errors — controlled by env var
+if os.environ.get('DISABLE_OTEL_IN_AGENT', 'true').lower() == 'true':
+    os.environ.setdefault('OTEL_SDK_DISABLED', 'true')
+    os.environ.setdefault('OTEL_PYTHON_DISABLED', 'true')
+    os.environ.setdefault('OTEL_EXPORTER_OTLP_ENDPOINT', '')
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

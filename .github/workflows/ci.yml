@@ -1,0 +1,242 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+env:
+  PYTHON_VERSION: "3.11"
+  NODE_VERSION: "20"
+  COVERAGE_THRESHOLD: 70
+
+jobs:
+  # -----------------------------------------------------------------
+  # Job 1: Secret scan — run scripts/check-secrets.sh on changed files
+  # -----------------------------------------------------------------
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan for secrets
+        run: |
+          chmod +x scripts/check-secrets.sh
+          bash scripts/check-secrets.sh
+
+  # -----------------------------------------------------------------
+  # Job 2: Backend tests + coverage (70% minimum)
+  # -----------------------------------------------------------------
+  backend-tests:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    defaults:
+      run:
+        working-directory: Runsheet-backend
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: Runsheet-backend/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests with coverage
+        env:
+          ELASTICSEARCH_URL: "http://localhost:9200"
+          ELASTIC_ENDPOINT: "http://localhost:9200"
+          ELASTIC_API_KEY: "mock-key-for-ci"
+          ELASTICSEARCH_API_KEY: "mock-key-for-ci"
+          REDIS_URL: "redis://localhost:6379"
+          JWT_SECRET: "ci-test-jwt-secret"
+          JWT_ALGORITHM: "HS256"
+          ENVIRONMENT: "test"
+        run: |
+          pytest --cov=. --cov-report=xml:coverage.xml --cov-report=term-missing \
+                 --cov-fail-under=${{ env.COVERAGE_THRESHOLD }} \
+                 -x -q
+
+      - name: Check changed-file coverage
+        run: python scripts/check_coverage.py --threshold 0
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: Runsheet-backend/coverage.xml
+          retention-days: 14
+
+  # -----------------------------------------------------------------
+  # Job 3: Route smoke tests (30-second timeout)
+  # -----------------------------------------------------------------
+  smoke-tests:
+    runs-on: ubuntu-latest
+    needs: backend-tests
+    defaults:
+      run:
+        working-directory: Runsheet-backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: Runsheet-backend/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run smoke tests
+        env:
+          ELASTICSEARCH_URL: "http://localhost:9200"
+          ELASTIC_ENDPOINT: "http://localhost:9200"
+          ELASTIC_API_KEY: "mock-key-for-ci"
+          ELASTICSEARCH_API_KEY: "mock-key-for-ci"
+          REDIS_URL: "redis://localhost:6379"
+          JWT_SECRET: "ci-test-jwt-secret"
+          JWT_ALGORITHM: "HS256"
+          ENVIRONMENT: "test"
+        run: |
+          pytest tests/smoke/ -v --timeout=30
+
+  # -----------------------------------------------------------------
+  # Job 4: Integration tests (feature flags, tenant flows, 120s timeout)
+  # -----------------------------------------------------------------
+  integration-tests:
+    runs-on: ubuntu-latest
+    needs: backend-tests
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    defaults:
+      run:
+        working-directory: Runsheet-backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: Runsheet-backend/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run integration tests
+        env:
+          ELASTICSEARCH_URL: "http://localhost:9200"
+          ELASTIC_ENDPOINT: "http://localhost:9200"
+          ELASTIC_API_KEY: "mock-key-for-ci"
+          ELASTICSEARCH_API_KEY: "mock-key-for-ci"
+          REDIS_URL: "redis://localhost:6379"
+          JWT_SECRET: "ci-test-jwt-secret"
+          JWT_ALGORITHM: "HS256"
+          ENVIRONMENT: "test"
+        run: |
+          pytest tests/integration/ -v --timeout=120
+
+  # -----------------------------------------------------------------
+  # Job 5: Endpoint registry freshness — regenerate and diff
+  # -----------------------------------------------------------------
+  endpoint-registry:
+    runs-on: ubuntu-latest
+    needs: backend-tests
+    defaults:
+      run:
+        working-directory: Runsheet-backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: Runsheet-backend/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Generate endpoint registry
+        env:
+          ELASTICSEARCH_URL: "http://localhost:9200"
+          ELASTIC_ENDPOINT: "http://localhost:9200"
+          ELASTIC_API_KEY: "mock-key-for-ci"
+          ELASTICSEARCH_API_KEY: "mock-key-for-ci"
+          REDIS_URL: "redis://localhost:6379"
+          JWT_SECRET: "ci-test-jwt-secret"
+          JWT_ALGORITHM: "HS256"
+          ENVIRONMENT: "test"
+        run: python scripts/generate_endpoint_registry.py
+
+      - name: Check registry is up to date
+        run: |
+          if ! git diff --exit-code ../docs/endpoint-registry.md; then
+            echo "❌ Endpoint registry is stale. Run: cd Runsheet-backend && python scripts/generate_endpoint_registry.py"
+            exit 1
+          fi
+          echo "✅ Endpoint registry is up to date."
+
+  # -----------------------------------------------------------------
+  # Job 6: Git hygiene — no ignored files tracked, ADR index exists
+  # -----------------------------------------------------------------
+  git-hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify no ignored files are tracked
+        run: |
+          tracked=$(git ls-files -i --exclude-standard 2>/dev/null || true)
+          if [ -n "$tracked" ]; then
+            echo "❌ Tracked files matching .gitignore patterns:"
+            echo "$tracked"
+            exit 1
+          fi
+          echo "✅ No ignored files are tracked."
+
+      - name: Verify ADR index exists
+        run: |
+          if [ ! -f docs/adr/README.md ]; then
+            echo "❌ docs/adr/README.md not found. ADR index is required."
+            exit 1
+          fi
+          echo "✅ ADR index exists."
+
+      - name: Verify main.py line count
+        run: |
+          # Count non-blank, non-comment, non-import lines
+          count=$(grep -cvE '^\s*$|^\s*#|^\s*(import |from )' Runsheet-backend/main.py || true)
+          echo "main.py effective line count: $count"
+          if [ "$count" -gt 200 ]; then
+            echo "❌ main.py exceeds 200 lines ($count lines)"
+            exit 1
+          fi
+          echo "✅ main.py is within the 200-line limit."

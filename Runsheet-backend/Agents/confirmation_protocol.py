@@ -77,12 +77,14 @@ class ConfirmationProtocol:
         autonomy_config_service,
         activity_log_service,
         business_validator,
+        es_service=None,
     ):
         self._risk_registry = risk_registry
         self._approval_queue = approval_queue_service
         self._autonomy = autonomy_config_service
         self._activity_log = activity_log_service
         self._validator = business_validator
+        self._es = es_service
 
     async def process_mutation(self, request: MutationRequest) -> MutationResult:
         """Route a mutation through risk classification and autonomy level checks.
@@ -100,7 +102,9 @@ class ConfirmationProtocol:
             MutationResult indicating whether the action was executed or queued.
         """
         # 1. Classify risk
-        risk_level = await self._risk_registry.classify(request.tool_name)
+        risk_level = await self._risk_registry.classify(
+            request.tool_name, tenant_id=request.tenant_id
+        )
 
         # 2. Validate business rules
         validation = await self._validator.validate(
@@ -163,24 +167,112 @@ class ConfirmationProtocol:
         return risk_level.value in matrix.get(autonomy_level, set())
 
     async def _execute_mutation(self, request: MutationRequest) -> str:
-        """Execute the actual mutation (ES write).
+        """Execute the actual mutation via Elasticsearch.
 
-        This is a placeholder that returns a success string. The actual
-        mutation execution logic will be wired in when mutation tools
-        are integrated.
+        Dispatches the mutation to the appropriate ES index based on
+        tool_name. Falls back to a no-op log if no ES service is wired.
 
         Args:
             request: The mutation request to execute.
 
         Returns:
-            A success message string.
+            A result message string.
         """
-        logger.info(
-            f"Executing mutation: {request.tool_name} "
-            f"with params {request.parameters} "
-            f"for tenant {request.tenant_id}"
-        )
-        return (
-            f"Successfully executed {request.tool_name} "
-            f"for tenant {request.tenant_id}"
-        )
+        if self._es is None:
+            logger.warning(
+                "ConfirmationProtocol: no ES service wired, mutation %s "
+                "logged but not persisted for tenant %s",
+                request.tool_name,
+                request.tenant_id,
+            )
+            return (
+                f"Mutation {request.tool_name} approved but ES not wired "
+                f"for tenant {request.tenant_id}"
+            )
+
+        # Dispatch to tool-specific ES writes
+        tool_name = request.tool_name
+        params = request.parameters
+        tenant_id = request.tenant_id
+
+        try:
+            if tool_name == "update_job_status":
+                await self._es.update_document(
+                    "jobs",
+                    params["job_id"],
+                    {"status": params["new_status"], "tenant_id": tenant_id},
+                )
+            elif tool_name == "assign_asset_to_job":
+                await self._es.update_document(
+                    "jobs",
+                    params["job_id"],
+                    {"assigned_asset_id": params["asset_id"], "tenant_id": tenant_id},
+                )
+            elif tool_name == "cancel_job":
+                await self._es.update_document(
+                    "jobs",
+                    params["job_id"],
+                    {"status": "cancelled", "cancel_reason": params.get("reason", ""), "tenant_id": tenant_id},
+                )
+            elif tool_name == "create_job":
+                import uuid
+                job_id = f"JOB_{uuid.uuid4().hex[:8].upper()}"
+                await self._es.index_document(
+                    "jobs",
+                    job_id,
+                    {**params, "job_id": job_id, "status": "scheduled", "tenant_id": tenant_id},
+                )
+            elif tool_name == "reassign_rider":
+                await self._es.update_document(
+                    "shipments_current",
+                    params["shipment_id"],
+                    {"rider_id": params["new_rider_id"], "tenant_id": tenant_id},
+                )
+            elif tool_name == "escalate_shipment":
+                await self._es.update_document(
+                    "shipments_current",
+                    params["shipment_id"],
+                    {"priority": params.get("priority", "high"), "tenant_id": tenant_id},
+                )
+            elif tool_name == "request_fuel_refill":
+                import uuid
+                refill_id = f"REFILL_{uuid.uuid4().hex[:8].upper()}"
+                await self._es.index_document(
+                    "fuel_events",
+                    refill_id,
+                    {
+                        "event_type": "refill_request",
+                        "station_id": params["station_id"],
+                        "quantity_liters": params.get("quantity_liters", 0),
+                        "status": "requested",
+                        "tenant_id": tenant_id,
+                    },
+                )
+            elif tool_name == "update_fuel_threshold":
+                await self._es.update_document(
+                    "fuel_stations",
+                    params["station_id"],
+                    {"threshold_pct": params["threshold_pct"], "tenant_id": tenant_id},
+                )
+            else:
+                logger.warning(
+                    "ConfirmationProtocol: unknown tool %s, no ES write performed",
+                    tool_name,
+                )
+                return f"Unknown tool {tool_name} — no mutation executed"
+
+            logger.info(
+                "ConfirmationProtocol: executed %s for tenant %s",
+                tool_name,
+                tenant_id,
+            )
+            return f"Successfully executed {tool_name} for tenant {tenant_id}"
+
+        except Exception as e:
+            logger.error(
+                "ConfirmationProtocol: failed to execute %s for tenant %s: %s",
+                tool_name,
+                tenant_id,
+                e,
+            )
+            return f"Failed to execute {tool_name}: {e}"

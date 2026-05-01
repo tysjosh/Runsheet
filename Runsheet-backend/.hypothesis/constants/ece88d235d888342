@@ -1,4 +1,0 @@
-# file: /Users/olukotunjosh/Downloads/Runsheet/Runsheet-backend/fuel/services/fuel_es_mappings.py
-# hypothesis_version: 6.151.4
-
-[100, '0ms', '30d', '365d', '90d', 'actions', 'alert_threshold_pct', 'allocate', 'asset_id', 'capacity_liters', 'cold', 'created_at', 'current_stock_liters', 'date', 'days_until_empty', 'delete', 'delivery_reference', 'dynamic', 'event_id', 'event_timestamp', 'event_type', 'fields', 'float', 'forcemerge', 'fuel-events-policy', 'fuel_events', 'fuel_stations', 'fuel_type', 'geo_point', 'hot', 'index', 'ingested_at', 'keyword', 'last_updated', 'lifecycle', 'location', 'location_name', 'mappings', 'max_num_segments', 'min_age', 'name', 'number_of_replicas', 'number_of_shards', 'odometer_reading', 'operator_id', 'phases', 'policy', 'priority', 'properties', 'quantity_liters', 'readonly', 'set_priority', 'settings', 'station_id', 'status', 'strict', 'supplier', 'tenant_id', 'text', 'type', 'warm']

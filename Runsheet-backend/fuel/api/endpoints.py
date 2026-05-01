@@ -47,6 +47,10 @@ _fuel_service: Optional[FuelService] = None
 
 router = APIRouter(prefix="/api/fuel", tags=["fuel"])
 
+# Auth policy declaration for this router (Req 5.2)
+# Default: JWT_REQUIRED for all fuel endpoints
+ROUTER_AUTH_POLICY = "jwt_required"
+
 
 def configure_fuel_api(*, fuel_service: FuelService) -> None:
     """
@@ -100,7 +104,7 @@ async def list_stations(
     location: Optional[str] = Query(None, description="Filter by location name"),
     page: int = Query(1, ge=1, description="Page number"),
     size: int = Query(50, ge=1, le=100, description="Page size"),
-) -> PaginatedResponse[FuelStation]:
+) -> dict:
     """
     List fuel stations with optional filters and pagination.
 
@@ -115,8 +119,18 @@ async def list_stations(
         page=page,
         size=size,
     )
-    result.request_id = _get_request_id(request)
-    return result
+    # Convert to dual-field response for deprecation window
+    from schemas.common import paginated_response_dict
+
+    items = [s.model_dump() for s in result.data]
+    resp = paginated_response_dict(
+        items=items,
+        total=result.pagination.total,
+        page=result.pagination.page,
+        page_size=result.pagination.size,
+        request_id=_get_request_id(request),
+    )
+    return resp
 
 
 @router.get("/stations/{station_id}")

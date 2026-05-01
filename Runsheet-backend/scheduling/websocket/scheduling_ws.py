@@ -5,19 +5,24 @@ Manages client connections with subscription-based filtering for
 job_created, status_changed, delay_alert, and cargo_update event types.
 Sends heartbeat every 30 seconds and disconnects stale clients.
 
+Extends BaseWSManager for consistent lifecycle metrics and backpressure.
+
 Validates:
 - Requirement 9.1: /ws/scheduling WebSocket endpoint
 - Requirement 9.3: Subscription filters by event type
 - Requirement 9.6: Heartbeat every 30s, stale client detection
+- Requirement 6.6: Extends BaseWSManager
 """
 
 import asyncio
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 from fastapi import WebSocket
+
+from websocket.base_ws_manager import BaseWSManager
 
 logger = logging.getLogger(__name__)
 
@@ -31,38 +36,21 @@ VALID_SUBSCRIPTIONS = {
 HEARTBEAT_INTERVAL_SECONDS = 30
 
 
-class _ClientConnection:
-    """Tracks a single WebSocket client with its subscriptions and liveness."""
-
-    __slots__ = ("websocket", "subscriptions", "_alive")
-
-    def __init__(self, websocket: WebSocket, subscriptions: Set[str]):
-        self.websocket = websocket
-        self.subscriptions = subscriptions
-        self._alive = True
-
-    def mark_alive(self) -> None:
-        self._alive = True
-
-    def mark_pending(self) -> None:
-        self._alive = False
-
-    @property
-    def is_alive(self) -> bool:
-        return self._alive
-
-
-class SchedulingWebSocketManager:
+class SchedulingWebSocketManager(BaseWSManager):
     """
     Manages scheduling WebSocket connections with subscription filtering,
     heartbeat keep-alive, and stale client detection.
 
+    Extends BaseWSManager for metrics and backpressure (Req 6.6).
+
     Validates: Req 9.1, 9.3, 9.6
     """
 
-    def __init__(self) -> None:
-        self._clients: Dict[WebSocket, _ClientConnection] = {}
-        self._lock = asyncio.Lock()
+    def __init__(self, max_pending_messages: int = 100) -> None:
+        super().__init__(
+            manager_name="scheduling",
+            max_pending_messages=max_pending_messages,
+        )
         self._heartbeat_task: Optional[asyncio.Task] = None
 
     # ------------------------------------------------------------------
@@ -86,12 +74,19 @@ class SchedulingWebSocketManager:
         valid_subs: Set[str] = set()
         if subscriptions:
             valid_subs = {s for s in subscriptions if s in VALID_SUBSCRIPTIONS}
-        # Empty set means "subscribe to everything"
 
-        client = _ClientConnection(websocket, valid_subs)
+        client_meta: Dict[str, Any] = {
+            "connected_at": datetime.now(timezone.utc),
+            "last_send": None,
+            "tenant_id": "",
+            "pending_count": 0,
+            "subscriptions": valid_subs,
+            "_alive": True,
+        }
 
         async with self._lock:
-            self._clients[websocket] = client
+            self._clients[websocket] = client_meta
+            self._metrics["connections_total"] += 1
 
         logger.info(
             "Scheduling WebSocket client connected. subscriptions=%s total=%d",
@@ -102,6 +97,7 @@ class SchedulingWebSocketManager:
         await self._send_to_client(websocket, {
             "type": "connection",
             "status": "connected",
+            "manager": self.manager_name,
             "subscriptions": sorted(valid_subs) if valid_subs else sorted(VALID_SUBSCRIPTIONS),
             "message": "Connected to scheduling live updates",
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -114,7 +110,9 @@ class SchedulingWebSocketManager:
     async def disconnect(self, websocket: WebSocket) -> None:
         """Remove a client connection."""
         async with self._lock:
-            self._clients.pop(websocket, None)
+            removed = self._clients.pop(websocket, None)
+            if removed is not None:
+                self._metrics["disconnections_total"] += 1
 
         logger.info(
             "Scheduling WebSocket client disconnected. total=%d",
@@ -128,8 +126,7 @@ class SchedulingWebSocketManager:
     async def broadcast(self, event_type: str, data: dict) -> int:
         """Send data to every client whose subscriptions include event_type.
 
-        This is the generic broadcast method called by services via
-        ``_broadcast_job_update`` and ``_broadcast_cargo_complete`` stubs.
+        Applies backpressure from BaseWSManager.
 
         Validates: Req 9.2, 9.3
 
@@ -144,8 +141,8 @@ class SchedulingWebSocketManager:
 
         async with self._lock:
             targets = [
-                c for c in self._clients.values()
-                if not c.subscriptions or event_type in c.subscriptions
+                (ws, meta) for ws, meta in self._clients.items()
+                if not meta.get("subscriptions") or event_type in meta.get("subscriptions", set())
             ]
 
         if not targets:
@@ -154,19 +151,33 @@ class SchedulingWebSocketManager:
         successful = 0
         disconnected: List[WebSocket] = []
 
-        send_tasks = [self._send_to_client(c.websocket, message) for c in targets]
-        results = await asyncio.gather(*send_tasks, return_exceptions=True)
+        for ws, meta in targets:
+            # Backpressure check
+            if meta.get("pending_count", 0) >= self.max_pending_messages:
+                self._metrics["messages_dropped_total"] += 1
+                logger.warning(
+                    "%s backpressure: dropping message for client (pending=%d)",
+                    self.manager_name, meta["pending_count"],
+                )
+                continue
 
-        for client, result in zip(targets, results):
-            if result is True:
+            meta["pending_count"] = meta.get("pending_count", 0) + 1
+            ok = await self._send_to_client(ws, message)
+            meta["pending_count"] = max(0, meta.get("pending_count", 1) - 1)
+
+            if ok:
                 successful += 1
+                meta["last_send"] = datetime.now(timezone.utc)
+                self._metrics["messages_sent_total"] += 1
             else:
-                disconnected.append(client.websocket)
+                disconnected.append(ws)
+                self._metrics["send_failures_total"] += 1
 
         if disconnected:
             async with self._lock:
                 for ws in disconnected:
                     self._clients.pop(ws, None)
+                    self._metrics["disconnections_total"] += 1
             logger.info(
                 "Removed %d disconnected scheduling WS clients during broadcast",
                 len(disconnected),
@@ -230,30 +241,11 @@ class SchedulingWebSocketManager:
         })
 
     # ------------------------------------------------------------------
-    # Internals
-    # ------------------------------------------------------------------
-
-    async def _send_to_client(self, websocket: WebSocket, data: dict) -> bool:
-        """Send JSON to a single client. Returns True on success."""
-        try:
-            await websocket.send_json(data)
-            return True
-        except Exception as exc:
-            logger.warning("Failed to send to scheduling WS client: %s", exc)
-            return False
-
-    # ------------------------------------------------------------------
     # Heartbeat & stale detection  (Req 9.6)
     # ------------------------------------------------------------------
 
     async def _heartbeat_loop(self) -> None:
         """Periodically send heartbeat messages and prune stale clients.
-
-        Cycle:
-        1. Mark all clients as *pending* (not yet responded).
-        2. Send ``{"type": "heartbeat"}`` to every client.
-        3. Wait ``HEARTBEAT_INTERVAL_SECONDS``.
-        4. Any client still marked *pending* is considered stale and disconnected.
 
         Validates: Req 9.6
         """
@@ -262,23 +254,24 @@ class SchedulingWebSocketManager:
                 await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
 
                 async with self._lock:
-                    clients = list(self._clients.values())
+                    clients = list(self._clients.items())
 
                 if not clients:
                     break
 
                 # 1. Disconnect stale clients from previous cycle
                 stale: List[WebSocket] = []
-                for c in clients:
-                    if not c.is_alive:
-                        stale.append(c.websocket)
+                for ws, meta in clients:
+                    if not meta.get("_alive", True):
+                        stale.append(ws)
                     else:
-                        c.mark_pending()
+                        meta["_alive"] = False
 
                 if stale:
                     async with self._lock:
                         for ws in stale:
                             self._clients.pop(ws, None)
+                            self._metrics["disconnections_total"] += 1
                     for ws in stale:
                         try:
                             await ws.close(code=1000, reason="stale")
@@ -296,12 +289,12 @@ class SchedulingWebSocketManager:
                 }
 
                 async with self._lock:
-                    remaining = list(self._clients.values())
+                    remaining = list(self._clients.items())
 
-                for c in remaining:
-                    ok = await self._send_to_client(c.websocket, heartbeat_msg)
+                for ws, meta in remaining:
+                    ok = await self._send_to_client(ws, heartbeat_msg)
                     if ok:
-                        c.mark_alive()
+                        meta["_alive"] = True
         except asyncio.CancelledError:
             pass
         except Exception as exc:
@@ -327,17 +320,17 @@ class SchedulingWebSocketManager:
 
         if msg_type == "pong":
             async with self._lock:
-                client = self._clients.get(websocket)
-            if client:
-                client.mark_alive()
+                meta = self._clients.get(websocket)
+            if meta is not None:
+                meta["_alive"] = True
 
         elif msg_type == "subscribe":
             new_subs = message.get("subscriptions", [])
             valid = {s for s in new_subs if s in VALID_SUBSCRIPTIONS}
             async with self._lock:
-                client = self._clients.get(websocket)
-            if client:
-                client.subscriptions = valid
+                meta = self._clients.get(websocket)
+            if meta is not None:
+                meta["subscriptions"] = valid
                 await self._send_to_client(websocket, {
                     "type": "subscribed",
                     "subscriptions": sorted(valid) if valid else sorted(VALID_SUBSCRIPTIONS),
@@ -369,6 +362,8 @@ class SchedulingWebSocketManager:
                     pass
             self._clients.clear()
 
+        logger.info("%s WS manager shut down", self.manager_name)
+
 
 # ---------------------------------------------------------------------------
 # Module-level singleton
@@ -376,9 +371,33 @@ class SchedulingWebSocketManager:
 
 _scheduling_ws_manager: Optional[SchedulingWebSocketManager] = None
 
+# Compatibility adapter for ServiceContainer (Req 2.6, 2.7)
+_container: Optional[Any] = None
+
+
+def bind_container(container: Any) -> None:
+    """Called by bootstrap modules to wire the compatibility adapter.
+
+    When bound, ``get_scheduling_ws_manager()`` delegates to the container's
+    ``scheduling_ws_manager`` attribute instead of the module-level singleton.
+
+    Requirements: 2.6, 2.7
+    """
+    global _container
+    _container = container
+
 
 def get_scheduling_ws_manager() -> SchedulingWebSocketManager:
-    """Return the global SchedulingWebSocketManager singleton."""
+    """Return the global SchedulingWebSocketManager instance.
+
+    If a ServiceContainer has been bound via ``bind_container()``,
+    delegates to ``container.scheduling_ws_manager``.  Otherwise falls back
+    to the legacy module-level singleton.
+
+    Requirements: 2.6, 2.7
+    """
+    if _container is not None:
+        return _container.scheduling_ws_manager
     global _scheduling_ws_manager
     if _scheduling_ws_manager is None:
         _scheduling_ws_manager = SchedulingWebSocketManager()

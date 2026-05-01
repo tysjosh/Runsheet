@@ -328,7 +328,9 @@ class TestResponseEnvelope:
         mock_es_client.search = MagicMock(return_value=_es_search_response([]))
         resp = client.get(path)
         body = resp.json()
-        assert set(body.keys()) == {"data", "pagination", "request_id"}
+        # Dual-field deprecation: both old and new keys present
+        assert {"data", "pagination", "request_id"}.issubset(set(body.keys()))
+        assert {"items", "total", "page", "page_size", "has_next"}.issubset(set(body.keys()))
 
     @pytest.mark.parametrize("path", ["/api/ops/shipments", "/api/ops/riders", "/api/ops/events"])
     def test_pagination_keys(self, client, mock_es_client, path):
@@ -588,7 +590,9 @@ class TestFilteredEndpointEnvelopes:
         mock_es_client.search = MagicMock(return_value=_es_search_response([]))
         resp = client.get(path)
         body = resp.json()
-        assert set(body.keys()) == {"data", "pagination", "request_id"}
+        # Dual-field deprecation: both old and new keys present
+        assert {"data", "pagination", "request_id"}.issubset(set(body.keys()))
+        assert {"items", "total", "page", "page_size", "has_next"}.issubset(set(body.keys()))
 
     @pytest.mark.parametrize("path", [
         "/api/ops/shipments/sla-breaches",

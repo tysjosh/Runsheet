@@ -26,6 +26,10 @@ settings = get_settings()
 # Create router for data endpoints
 router = APIRouter(prefix="/api")
 
+# Auth policy declaration for this router (Req 5.2)
+# Default: JWT_REQUIRED for all data endpoints
+ROUTER_AUTH_POLICY = "jwt_required"
+
 # Data Models
 class Location(BaseModel):
     id: str

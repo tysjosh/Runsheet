@@ -1,4 +1,0 @@
-# file: /Users/olukotunjosh/Downloads/Runsheet/Runsheet-backend/config/__init__.py
-# hypothesis_version: 6.151.4
-
-['Environment', 'Settings', 'get_settings', 'validate_startup']

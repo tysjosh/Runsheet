@@ -1,4 +1,0 @@
-# file: /Users/olukotunjosh/Downloads/Runsheet/Runsheet-backend/Agents/activity_log_service.py
-# hypothesis_version: 6.151.4
-
-[0.0, 100, '_source', 'action_count', 'action_type', 'actions_per_agent', 'agent_activity_log', 'agent_id', 'aggregations', 'aggs', 'avg', 'avg_duration', 'avg_duration_ms', 'bool', 'buckets', 'confirmation_method', 'desc', 'details', 'detection_count', 'doc_count', 'duration_ms', 'failure', 'failure_rate', 'field', 'from', 'gte', 'hits', 'items', 'key', 'log_id', 'lte', 'match_all', 'monitoring_cycle', 'must', 'mutation', 'order', 'outcome', 'outcome_counts', 'outcomes', 'page', 'parameters', 'pending_approval', 'query', 'range', 'rejected', 'result', 'risk_level', 'session_id', 'size', 'sort', 'success', 'success_rate', 'tenant_id', 'term', 'terms', 'time_range', 'timestamp', 'tool_invocation', 'tool_name', 'total', 'total_actions', 'user_id', 'value']
