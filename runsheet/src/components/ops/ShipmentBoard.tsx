@@ -2,7 +2,7 @@
 
 import { ChevronDown, ChevronUp, ExternalLink } from "lucide-react";
 import Link from "next/link";
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import type { OpsShipment } from "../../services/opsApi";
 
 type SortField =
@@ -114,11 +114,15 @@ export default function ShipmentBoard({
     [sortField],
   );
 
-  const sorted = [...shipments].sort((a, b) => {
-    const aVal = a[sortField] as string | undefined;
-    const bVal = b[sortField] as string | undefined;
-    return compareValues(aVal, bVal, sortOrder);
-  });
+  const sorted = useMemo(
+    () =>
+      [...shipments].sort((a, b) => {
+        const aVal = a[sortField] as string | undefined;
+        const bVal = b[sortField] as string | undefined;
+        return compareValues(aVal, bVal, sortOrder);
+      }),
+    [shipments, sortField, sortOrder],
+  );
 
   const SortIcon = ({ field }: { field: SortField }) => {
     if (sortField !== field) return null;

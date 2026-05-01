@@ -147,6 +147,7 @@ export default function SignIn({ onSignIn }: SignInProps) {
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 onKeyPress={handleKeyPress}
+                aria-describedby={error ? "signin-error" : undefined}
                 className="w-full px-4 py-3 bg-white border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent transition-all placeholder:text-gray-400"
                 placeholder="Enter your email"
               />
@@ -184,7 +185,8 @@ export default function SignIn({ onSignIn }: SignInProps) {
                 <button
                   type="button"
                   onClick={() => setShowPassword(!showPassword)}
-                  className="absolute inset-y-0 right-0 pr-4 flex items-center text-gray-400 hover:text-gray-600 transition-colors"
+                  aria-label={showPassword ? "Hide password" : "Show password"}
+                  className="absolute inset-y-0 right-0 pr-4 flex items-center text-gray-400 hover:text-gray-600 transition-colors focus:outline-none focus:ring-2 focus:ring-gray-500 rounded"
                 >
                   {showPassword ? (
                     <EyeOff className="w-5 h-5" />
@@ -197,8 +199,8 @@ export default function SignIn({ onSignIn }: SignInProps) {
 
             {/* Error Message */}
             {error && (
-              <div className="bg-red-50 border border-red-200 rounded-lg p-3">
-                <p className="text-sm text-red-600">{error}</p>
+              <div className="bg-red-50 border border-red-200 rounded-lg p-3" role="alert">
+                <p id="signin-error" className="text-sm text-red-600">{error}</p>
               </div>
             )}
 

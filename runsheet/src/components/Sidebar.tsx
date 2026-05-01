@@ -30,8 +30,7 @@ export default function Sidebar({
   const router = useRouter();
 
   const handleLogout = () => {
-    localStorage.removeItem("isAuthenticated");
-    localStorage.removeItem("userEmail");
+    sessionStorage.removeItem("isAuthenticated");
     router.push("/signin");
   };
 
@@ -59,7 +58,9 @@ export default function Sidebar({
       {/* Toggle Button */}
       <button
         onClick={onToggle}
-        className="absolute -right-3 border rounded-full p-1.5 z-20 transition-all duration-200 shadow-sm"
+        aria-label={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+        aria-expanded={!isCollapsed}
+        className="absolute -right-3 border rounded-full p-1.5 z-20 transition-all duration-200 shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-500"
         style={{
           backgroundColor: "white",
           borderColor: "rgba(35,35,35,0.12)",

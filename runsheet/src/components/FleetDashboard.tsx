@@ -32,12 +32,15 @@ export default function FleetDashboard({
   return (
     <div className="flex-1 flex flex-col h-full bg-gray-50">
       {/* Tab bar */}
-      <div className="flex items-center gap-1 px-6 pt-4 pb-0">
+      <div className="flex items-center gap-1 px-6 pt-4 pb-0" role="tablist" aria-label="Fleet dashboard views">
         {TABS.map((tab) => (
           <button
             key={tab.id}
+            role="tab"
+            aria-selected={activeTab === tab.id}
+            aria-controls={`tabpanel-${tab.id}`}
             onClick={() => setActiveTab(tab.id)}
-            className={`flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-t-lg transition-colors ${
+            className={`flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-t-lg transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-500 ${
               activeTab === tab.id
                 ? "bg-white text-[#232323] border border-gray-200 border-b-white -mb-px z-10"
                 : "text-gray-500 hover:text-gray-700 hover:bg-gray-100"

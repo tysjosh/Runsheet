@@ -59,12 +59,11 @@ export default function Home() {
 
   useEffect(() => {
     if (typeof window !== "undefined") {
-      const authStatus = localStorage.getItem("isAuthenticated");
+      const authStatus = sessionStorage.getItem("isAuthenticated");
       if (authStatus === "true") {
         setIsAuthenticated(true);
       } else {
-        localStorage.removeItem("isAuthenticated");
-        localStorage.removeItem("userEmail");
+        sessionStorage.removeItem("isAuthenticated");
         router.replace("/signin");
       }
       setIsLoading(false);

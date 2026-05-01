@@ -215,7 +215,8 @@ export default function ApprovalQueue() {
                   <button
                     onClick={() => handleApprove(approval.action_id)}
                     disabled={isProcessing}
-                    className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    aria-label={`Approve ${approval.tool_name} action`}
+                    className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-offset-1 focus:ring-emerald-500"
                   >
                     {isProcessing ? (
                       <div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
@@ -227,7 +228,8 @@ export default function ApprovalQueue() {
                   <button
                     onClick={() => handleReject(approval.action_id)}
                     disabled={isProcessing}
-                    className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    aria-label={`Reject ${approval.tool_name} action`}
+                    className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-offset-1 focus:ring-gray-400"
                   >
                     {isProcessing ? (
                       <div className="w-3 h-3 border-2 border-gray-400 border-t-transparent rounded-full animate-spin" />

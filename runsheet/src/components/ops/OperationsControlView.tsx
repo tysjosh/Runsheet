@@ -55,31 +55,33 @@ export default function OperationsControlView() {
     fuel_alerts: fuelAlerts.length,
   };
 
-  /** Load all data sources */
+  /** Load all data sources independently — each request handles its own errors */
   const loadData = useCallback(async () => {
     try {
       setLoading(true);
-      const [activeRes, delayedRes, fuelRes, assetsRes] = await Promise.all([
-        getActiveJobs().catch(() => ({ data: [] as Job[] })),
-        getDelayedJobs().catch(() => ({ data: [] as Job[] })),
-        getFuelAlerts().catch(() => ({ data: [] as FuelAlert[] })),
-        apiService.getAssets().catch(() => ({ data: [] as never[] })),
+      const [activeRes, delayedRes, fuelRes, assetsRes] = await Promise.allSettled([
+        getActiveJobs(),
+        getDelayedJobs(),
+        getFuelAlerts(),
+        apiService.getAssets(),
       ]);
 
-      setActiveJobs(activeRes.data);
-      setDelayedJobs(delayedRes.data);
-      setFuelAlerts(fuelRes.data);
+      setActiveJobs(activeRes.status === "fulfilled" ? activeRes.value.data : []);
+      setDelayedJobs(delayedRes.status === "fulfilled" ? delayedRes.value.data : []);
+      setFuelAlerts(fuelRes.status === "fulfilled" ? fuelRes.value.data : []);
+
+      const assets = assetsRes.status === "fulfilled" ? assetsRes.value.data : [];
 
       // Build asset locations with job assignment info
       const jobsByAsset = new Map<string, Job>();
-      for (const job of activeRes.data) {
+      for (const job of (activeRes.status === "fulfilled" ? activeRes.value.data : [])) {
         if (job.asset_assigned) {
           jobsByAsset.set(job.asset_assigned, job);
         }
       }
 
-      const locations: AssetLocation[] = assetsRes.data
-        .filter((a) => {
+      const locations: AssetLocation[] = assets
+        .filter((a: any) => {
           const lat = a.currentLocation?.coordinates?.lat;
           const lng = a.currentLocation?.coordinates?.lon;
           return (
@@ -89,7 +91,7 @@ export default function OperationsControlView() {
             !Number.isNaN(lng)
           );
         })
-        .map((a) => {
+        .map((a: any) => {
           const assignedJob = jobsByAsset.get(a.id);
           return {
             asset_id: a.id,

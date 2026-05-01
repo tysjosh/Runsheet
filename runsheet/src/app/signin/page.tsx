@@ -9,9 +9,9 @@ export default function SignInPage() {
   const handleSignIn = (email: string, password: string) => {
     // Mock authentication - in real app, this would call an API
     if (email === "admin@runsheet.com" && password === "demo123") {
-      // Store auth state (in real app, use proper auth tokens)
-      localStorage.setItem("isAuthenticated", "true");
-      localStorage.setItem("userEmail", email);
+      // Store auth state in sessionStorage (cleared on tab close)
+      // In production, use httpOnly cookies set by the backend
+      sessionStorage.setItem("isAuthenticated", "true");
 
       // Use replace instead of push to prevent back navigation to signin
       router.replace("/");

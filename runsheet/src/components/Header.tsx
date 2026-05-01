@@ -45,7 +45,8 @@ export default function Header({ onAIClick }: HeaderProps) {
           <div className="flex items-center space-x-2">
             <button
               onClick={onAIClick}
-              className="flex items-center space-x-2 px-4 py-2 rounded-lg transition-all duration-200 font-medium text-sm"
+              aria-label="Open AI support assistant"
+              className="flex items-center space-x-2 px-4 py-2 rounded-lg transition-all duration-200 font-medium text-sm focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-500"
               style={{
                 color: "#232323",
                 backgroundColor: "rgba(255,255,255,0.8)",
