@@ -10,7 +10,7 @@ Validates: Requirements 9.1, 9.2, 9.4, 9.6, 9.8
 """
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from fastapi import Depends, Request
 from jose import JWTError, jwt
@@ -31,6 +31,7 @@ class TenantContext:
     tenant_id: str
     user_id: str
     has_pii_access: bool
+    roles: list[str] = field(default_factory=list)
 
 
 async def get_tenant_context(request: Request) -> TenantContext:
@@ -53,8 +54,9 @@ async def get_tenant_context(request: Request) -> TenantContext:
 
     # In development mode, allow unauthenticated access with a default tenant
     if (not auth_header or not auth_header.startswith("Bearer ")) and settings.environment.value == "development":
-        logger.debug(
-            "Dev mode: returning default tenant context for %s %s",
+        logger.warning(
+            "Dev mode: returning default tenant context for %s %s "
+            "(dev-tenant fallback should only be active in development)",
             request.method,
             request.url.path,
         )
@@ -62,6 +64,7 @@ async def get_tenant_context(request: Request) -> TenantContext:
             tenant_id="dev-tenant",
             user_id="dev-user",
             has_pii_access=True,
+            roles=["admin"],
         )
 
     if not auth_header or not auth_header.startswith("Bearer "):
@@ -112,6 +115,7 @@ async def get_tenant_context(request: Request) -> TenantContext:
 
     user_id: str = payload.get("sub", payload.get("user_id", "unknown"))
     has_pii_access: bool = payload.get("has_pii_access", False)
+    roles: list[str] = payload.get("roles", [])
 
     logger.debug(
         "Tenant scope enforced: tenant_id=%s user_id=%s endpoint=%s %s",
@@ -125,6 +129,7 @@ async def get_tenant_context(request: Request) -> TenantContext:
         tenant_id=tenant_id,
         user_id=user_id,
         has_pii_access=has_pii_access,
+        roles=roles,
     )
 
 

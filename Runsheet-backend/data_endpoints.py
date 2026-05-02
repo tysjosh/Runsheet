@@ -7,7 +7,7 @@ Validates:
   per minute per IP address for API endpoints
 """
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Request
+from fastapi import APIRouter, Depends, UploadFile, File, Form, Request
 from pydantic import BaseModel, model_validator
 from typing import List, Optional
 from enum import Enum
@@ -17,6 +17,8 @@ import logging
 from services.elasticsearch_service import elasticsearch_service
 from middleware.rate_limiter import limiter
 from config.settings import get_settings
+from ops.middleware.tenant_guard import TenantContext, get_tenant_context, inject_tenant_filter
+from errors.exceptions import AppException, internal_error, resource_not_found, validation_error
 
 logger = logging.getLogger(__name__)
 
@@ -574,9 +576,16 @@ def get_mock_support_tickets():
 
 @router.get("/fleet/summary")
 @limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
-async def get_fleet_summary(request: Request):
+async def get_fleet_summary(request: Request, tenant: TenantContext = Depends(get_tenant_context)):
     try:
-        trucks = await elasticsearch_service.get_all_documents("trucks")
+        # Build tenant-scoped query for trucks
+        trucks_query = inject_tenant_filter(
+            {"query": {"match_all": {}}},
+            tenant.tenant_id,
+        )
+        trucks_query["size"] = 1000
+        trucks_response = await elasticsearch_service.search_documents("trucks", trucks_query, size=1000)
+        trucks = [hit["_source"] for hit in trucks_response["hits"]["hits"]]
 
         summary = FleetSummary(
             totalTrucks=len(trucks),
@@ -586,25 +595,27 @@ async def get_fleet_summary(request: Request):
             averageDelay=45
         )
 
-        # Multi-asset counts via ES aggregations
-        agg_query = {
-            "size": 0,
-            "aggs": {
-                "by_type": {
-                    "terms": {"field": "asset_type", "size": 50}
-                },
-                "by_subtype": {
-                    "terms": {"field": "asset_subtype", "size": 50}
-                },
-                "active_count": {
-                    "filter": {
-                        "terms": {"status": ["active", "in_transit"]}
-                    }
-                },
-                "delayed_count": {
-                    "filter": {
-                        "term": {"status": "delayed"}
-                    }
+        # Multi-asset counts via ES aggregations (tenant-scoped)
+        agg_query = inject_tenant_filter(
+            {"query": {"match_all": {}}},
+            tenant.tenant_id,
+        )
+        agg_query["size"] = 0
+        agg_query["aggs"] = {
+            "by_type": {
+                "terms": {"field": "asset_type", "size": 50}
+            },
+            "by_subtype": {
+                "terms": {"field": "asset_subtype", "size": 50}
+            },
+            "active_count": {
+                "filter": {
+                    "terms": {"status": ["active", "in_transit"]}
+                }
+            },
+            "delayed_count": {
+                "filter": {
+                    "term": {"status": "delayed"}
                 }
             }
         }
@@ -647,16 +658,16 @@ async def get_fleet_summary(request: Request):
         }
     except Exception as e:
         logger.error(f"Error getting fleet summary: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(message="Failed to fetch fleet summary", details={"error": str(e)})
 
 
 
 @router.get("/fleet/trucks")
 @limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
-async def get_trucks(request: Request):
+async def get_trucks(request: Request, tenant: TenantContext = Depends(get_tenant_context)):
     try:
         # Filter for only truck assets: asset_subtype is "truck" OR asset_type is not set (legacy documents)
-        query = {
+        inner_query = {
             "query": {
                 "bool": {
                     "should": [
@@ -665,9 +676,10 @@ async def get_trucks(request: Request):
                     ],
                     "minimum_should_match": 1
                 }
-            },
-            "sort": [{"created_at": {"order": "desc"}}]
+            }
         }
+        query = inject_tenant_filter(inner_query, tenant.tenant_id)
+        query["sort"] = [{"created_at": {"order": "desc"}}]
         response = await elasticsearch_service.search_documents("trucks", query, size=1000)
         trucks = [hit["_source"] for hit in response["hits"]["hits"]]
 
@@ -711,14 +723,24 @@ async def get_trucks(request: Request):
         }
     except Exception as e:
         logger.error(f"Error getting trucks: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(message="Failed to fetch trucks", details={"error": str(e)})
 
 
 @router.get("/fleet/trucks/{truck_id}")
 @limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
-async def get_truck_by_id(truck_id: str, request: Request):
+async def get_truck_by_id(truck_id: str, request: Request, tenant: TenantContext = Depends(get_tenant_context)):
     try:
-        truck = await elasticsearch_service.get_document("trucks", truck_id)
+        # Tenant-scoped lookup by truck_id
+        query = inject_tenant_filter(
+            {"query": {"term": {"_id": truck_id}}},
+            tenant.tenant_id,
+        )
+        query["size"] = 1
+        result = await elasticsearch_service.search_documents("trucks", query, size=1)
+        hits = result["hits"]["hits"]
+        if not hits:
+            raise resource_not_found(message="Truck not found", details={"truck_id": truck_id})
+        truck = hits[0]["_source"]
         
         # Convert to Truck model format
         route_data = truck.get("route", {})
@@ -754,9 +776,11 @@ async def get_truck_by_id(truck_id: str, request: Request):
             "success": True,
             "timestamp": datetime.now().isoformat()
         }
+    except AppException:
+        raise
     except Exception as e:
         logger.error(f"Error getting truck {truck_id}: {e}")
-        raise HTTPException(status_code=404, detail="Truck not found")
+        raise internal_error(message="Failed to fetch truck", details={"truck_id": truck_id, "error": str(e)})
 
 def _format_asset(doc: dict) -> dict:
     """Format an ES document as an Asset response object."""
@@ -823,6 +847,7 @@ def _format_asset(doc: dict) -> dict:
 @limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
 async def get_fleet_assets(
     request: Request,
+    tenant: TenantContext = Depends(get_tenant_context),
     asset_type: Optional[str] = None,
     asset_subtype: Optional[str] = None,
     status: Optional[str] = None,
@@ -839,15 +864,17 @@ async def get_fleet_assets(
             filters.append({"term": {"status": status}})
 
         if filters:
-            query = {
+            inner_query = {
                 "query": {"bool": {"filter": filters}},
-                "sort": [{"created_at": {"order": "desc"}}],
             }
         else:
-            query = {
+            inner_query = {
                 "query": {"match_all": {}},
-                "sort": [{"created_at": {"order": "desc"}}],
             }
+
+        # Inject tenant scoping
+        query = inject_tenant_filter(inner_query, tenant.tenant_id)
+        query["sort"] = [{"created_at": {"order": "desc"}}]
 
         # Query the assets alias (points to trucks index)
         response = await elasticsearch_service.search_documents("assets", query, size=1000)
@@ -862,27 +889,39 @@ async def get_fleet_assets(
         }
     except Exception as e:
         logger.error(f"Error getting fleet assets: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(message="Failed to fetch fleet assets", details={"error": str(e)})
 
 
 @router.get("/fleet/assets/{asset_id}")
 @limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
-async def get_asset_by_id(asset_id: str, request: Request):
+async def get_asset_by_id(asset_id: str, request: Request, tenant: TenantContext = Depends(get_tenant_context)):
     """Return a single asset by ID regardless of type."""
     try:
-        doc = await elasticsearch_service.get_document("assets", asset_id)
+        # Tenant-scoped lookup by asset_id
+        query = inject_tenant_filter(
+            {"query": {"term": {"_id": asset_id}}},
+            tenant.tenant_id,
+        )
+        query["size"] = 1
+        result = await elasticsearch_service.search_documents("assets", query, size=1)
+        hits = result["hits"]["hits"]
+        if not hits:
+            raise resource_not_found(message="Asset not found", details={"asset_id": asset_id})
+        doc = hits[0]["_source"]
         return {
             "data": _format_asset(doc),
             "success": True,
             "timestamp": datetime.now().isoformat(),
         }
+    except AppException:
+        raise
     except Exception as e:
         logger.error(f"Error getting asset {asset_id}: {e}")
-        raise HTTPException(status_code=404, detail="Asset not found")
+        raise internal_error(message="Failed to fetch asset", details={"asset_id": asset_id, "error": str(e)})
 
 @router.post("/fleet/assets")
 @limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
-async def create_fleet_asset(body: CreateAsset, request: Request):
+async def create_fleet_asset(body: CreateAsset, request: Request, tenant: TenantContext = Depends(get_tenant_context)):
     """Register a new asset. Validates type/subtype enums and type-specific required fields via CreateAsset model."""
     try:
         # Build the ES document from the CreateAsset body (camelCase -> snake_case)
@@ -894,6 +933,7 @@ async def create_fleet_asset(body: CreateAsset, request: Request):
             "asset_name": body.name,
             "status": body.status,
             "current_location": body.current_location.model_dump(),
+            "tenant_id": tenant.tenant_id,
         }
 
         # Add type-specific fields when present
@@ -933,12 +973,12 @@ async def create_fleet_asset(body: CreateAsset, request: Request):
         }
     except Exception as e:
         logger.error(f"Error creating asset: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(message="Failed to create asset", details={"error": str(e)})
 
 
 @router.patch("/fleet/assets/{asset_id}")
 @limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
-async def update_fleet_asset(asset_id: str, body: UpdateAsset, request: Request):
+async def update_fleet_asset(asset_id: str, body: UpdateAsset, request: Request, tenant: TenantContext = Depends(get_tenant_context)):
     """Partially update an asset. Only the provided (non-None) fields are written."""
     try:
         # Build a partial doc containing only the fields the caller supplied.
@@ -977,33 +1017,56 @@ async def update_fleet_asset(asset_id: str, body: UpdateAsset, request: Request)
                 partial_doc[es_field] = body_data[model_field]
 
         if not partial_doc:
-            raise HTTPException(status_code=400, detail="No fields provided for update")
+            raise validation_error(message="No fields provided for update")
 
         partial_doc["last_update"] = datetime.now().isoformat()
+
+        # Verify the asset belongs to this tenant before updating
+        verify_query = inject_tenant_filter(
+            {"query": {"term": {"_id": asset_id}}},
+            tenant.tenant_id,
+        )
+        verify_query["size"] = 1
+        verify_result = await elasticsearch_service.search_documents("trucks", verify_query, size=1)
+        if not verify_result["hits"]["hits"]:
+            raise resource_not_found(message="Asset not found", details={"asset_id": asset_id})
 
         # Partial update via ES _update API
         await elasticsearch_service.update_document("trucks", asset_id, partial_doc)
 
-        # Return the full updated document
-        updated_doc = await elasticsearch_service.get_document("trucks", asset_id)
+        # Return the full updated document (tenant-scoped)
+        updated_query = inject_tenant_filter(
+            {"query": {"term": {"_id": asset_id}}},
+            tenant.tenant_id,
+        )
+        updated_query["size"] = 1
+        updated_result = await elasticsearch_service.search_documents("trucks", updated_query, size=1)
+        updated_doc = updated_result["hits"]["hits"][0]["_source"] if updated_result["hits"]["hits"] else {}
         return {
             "data": _format_asset(updated_doc),
             "success": True,
             "timestamp": datetime.now().isoformat(),
         }
-    except HTTPException:
+    except AppException:
         raise
     except Exception as e:
         logger.error(f"Error updating asset {asset_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(message="Failed to update asset", details={"asset_id": asset_id, "error": str(e)})
 
 
 # Inventory Management
 @router.get("/inventory")
 @limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
-async def get_inventory(request: Request):
+async def get_inventory(request: Request, tenant: TenantContext = Depends(get_tenant_context)):
     try:
-        inventory = await elasticsearch_service.get_all_documents("inventory")
+        # Tenant-scoped query for inventory
+        query = inject_tenant_filter(
+            {"query": {"match_all": {}}},
+            tenant.tenant_id,
+        )
+        query["sort"] = [{"created_at": {"order": "desc"}}]
+        response = await elasticsearch_service.search_documents("inventory", query, size=1000)
+        inventory = [hit["_source"] for hit in response["hits"]["hits"]]
         
         # Convert to InventoryItem model format
         formatted_inventory = []
@@ -1027,14 +1090,21 @@ async def get_inventory(request: Request):
         }
     except Exception as e:
         logger.error(f"Error getting inventory: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(message="Failed to fetch inventory", details={"error": str(e)})
 
 # Orders Management
 @router.get("/orders")
 @limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
-async def get_orders(request: Request):
+async def get_orders(request: Request, tenant: TenantContext = Depends(get_tenant_context)):
     try:
-        orders = await elasticsearch_service.get_all_documents("orders")
+        # Tenant-scoped query for orders
+        query = inject_tenant_filter(
+            {"query": {"match_all": {}}},
+            tenant.tenant_id,
+        )
+        query["sort"] = [{"created_at": {"order": "desc"}}]
+        response = await elasticsearch_service.search_documents("orders", query, size=1000)
+        orders = [hit["_source"] for hit in response["hits"]["hits"]]
         
         # Convert to Order model format
         formatted_orders = []
@@ -1060,14 +1130,21 @@ async def get_orders(request: Request):
         }
     except Exception as e:
         logger.error(f"Error getting orders: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(message="Failed to fetch orders", details={"error": str(e)})
 
 # Support Management
 @router.get("/support/tickets")
 @limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
-async def get_support_tickets(request: Request):
+async def get_support_tickets(request: Request, tenant: TenantContext = Depends(get_tenant_context)):
     try:
-        tickets = await elasticsearch_service.get_all_documents("support_tickets")
+        # Tenant-scoped query for support tickets
+        query = inject_tenant_filter(
+            {"query": {"match_all": {}}},
+            tenant.tenant_id,
+        )
+        query["sort"] = [{"created_at": {"order": "desc"}}]
+        response = await elasticsearch_service.search_documents("support_tickets", query, size=1000)
+        tickets = [hit["_source"] for hit in response["hits"]["hits"]]
         
         # Convert to SupportTicket model format
         formatted_tickets = []
@@ -1092,12 +1169,12 @@ async def get_support_tickets(request: Request):
         }
     except Exception as e:
         logger.error(f"Error getting support tickets: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(message="Failed to fetch support tickets", details={"error": str(e)})
 
 # Analytics
 @router.get("/analytics/metrics")
 @limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
-async def get_analytics_metrics(request: Request, timeRange: str = "7d"):
+async def get_analytics_metrics(request: Request, tenant: TenantContext = Depends(get_tenant_context), timeRange: str = "7d"):
     metrics = await elasticsearch_service.get_current_metrics()
     return {
         "data": metrics,
@@ -1107,7 +1184,7 @@ async def get_analytics_metrics(request: Request, timeRange: str = "7d"):
 
 @router.get("/analytics/routes")
 @limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
-async def get_route_performance(request: Request):
+async def get_route_performance(request: Request, tenant: TenantContext = Depends(get_tenant_context)):
     routes = await elasticsearch_service.get_route_performance_data()
     return {
         "data": routes,
@@ -1117,7 +1194,7 @@ async def get_route_performance(request: Request):
 
 @router.get("/analytics/delay-causes")
 @limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
-async def get_delay_causes(request: Request):
+async def get_delay_causes(request: Request, tenant: TenantContext = Depends(get_tenant_context)):
     causes = await elasticsearch_service.get_delay_causes_data()
     return {
         "data": causes,
@@ -1127,7 +1204,7 @@ async def get_delay_causes(request: Request):
 
 @router.get("/analytics/regional")
 @limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
-async def get_regional_performance(request: Request):
+async def get_regional_performance(request: Request, tenant: TenantContext = Depends(get_tenant_context)):
     regions = await elasticsearch_service.get_regional_performance_data()
     return {
         "data": regions,
@@ -1137,7 +1214,7 @@ async def get_regional_performance(request: Request):
 
 @router.get("/analytics/time-series")
 @limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
-async def get_time_series_data(request: Request, metric: str = "delivery_performance_pct", timeRange: str = "7d"):
+async def get_time_series_data(request: Request, tenant: TenantContext = Depends(get_tenant_context), metric: str = "delivery_performance_pct", timeRange: str = "7d"):
     """Get time-series data for trending charts"""
     event_type = "hourly_metrics" if timeRange == "24h" else "daily_performance"
     data = await elasticsearch_service.get_time_series_data(event_type, metric, timeRange)
@@ -1153,7 +1230,7 @@ async def get_time_series_data(request: Request, metric: str = "delivery_perform
 # Semantic Search
 @router.get("/search")
 @limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
-async def semantic_search(request: Request, q: str, index: str = "orders", limit: int = 10):
+async def semantic_search(request: Request, q: str, tenant: TenantContext = Depends(get_tenant_context), index: str = "orders", limit: int = 10):
     """
     Perform semantic search across different indices
     """
@@ -1207,7 +1284,7 @@ async def semantic_search(request: Request, q: str, index: str = "orders", limit
                 }
                 formatted_results.append(formatted_result)
         else:
-            raise HTTPException(status_code=400, detail="Invalid index. Use: orders, trucks, or support_tickets")
+            raise validation_error(message="Invalid index. Use: orders, trucks, or support_tickets")
         
         return {
             "data": formatted_results,
@@ -1216,14 +1293,16 @@ async def semantic_search(request: Request, q: str, index: str = "orders", limit
             "success": True,
             "timestamp": datetime.now().isoformat()
         }
+    except AppException:
+        raise
     except Exception as e:
         logger.error(f"Error in semantic search: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(message="Failed to perform semantic search", details={"error": str(e)})
 
 # Data Management
 @router.post("/data/cleanup")
 @limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
-async def cleanup_duplicate_data(request: Request):
+async def cleanup_duplicate_data(request: Request, tenant: TenantContext = Depends(get_tenant_context)):
     """Clean up duplicate data in Elasticsearch"""
     try:
         from services.data_seeder import data_seeder
@@ -1241,12 +1320,12 @@ async def cleanup_duplicate_data(request: Request):
         }
     except Exception as e:
         logger.error(f"Error during data cleanup: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(message="Failed to clean up data", details={"error": str(e)})
 
 # Data Upload
 @router.post("/data/upload/sheets")
 @limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
-async def upload_from_sheets(request: Request, body: dict):
+async def upload_from_sheets(request: Request, body: dict, tenant: TenantContext = Depends(get_tenant_context)):
     # Simulate processing
     record_count = random.randint(50, 150)
     
@@ -1258,7 +1337,7 @@ async def upload_from_sheets(request: Request, body: dict):
 
 @router.post("/data/upload/csv")
 @limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
-async def upload_csv(request: Request, file: UploadFile = File(...), dataType: str = Form(...)):
+async def upload_csv(request: Request, file: UploadFile = File(...), dataType: str = Form(...), tenant: TenantContext = Depends(get_tenant_context)):
     # Simulate processing
     record_count = random.randint(100, 300)
     

@@ -46,14 +46,14 @@ class AgentActivityWSManager(BaseWSManager):
     # Connection lifecycle
     # ------------------------------------------------------------------
 
-    async def connect(self, websocket: WebSocket) -> None:
+    async def connect(self, websocket: WebSocket, tenant_id: str = "") -> None:
         """
         Accept a WebSocket connection and register it.
 
         Sends a connection confirmation message after accepting.
         """
         # Use base class connect which handles accept, registry, and handshake
-        await super().connect(websocket)
+        await super().connect(websocket, tenant_id=tenant_id)
 
     async def disconnect(self, websocket: WebSocket) -> None:
         """Remove a WebSocket connection."""

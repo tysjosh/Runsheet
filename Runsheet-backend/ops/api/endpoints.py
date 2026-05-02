@@ -19,6 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from config.settings import get_settings
+from errors.exceptions import validation_error
 from middleware.rate_limiter import limiter
 from ops.middleware.pii_masker import PIIMasker, log_pii_access
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context, inject_tenant_filter
@@ -164,9 +165,9 @@ VALID_RIDER_STATUSES = {"active", "idle", "offline"}
 def _validate_status(value: Optional[str], valid_values: set[str], field_name: str = "status") -> None:
     """Raise 400 if the status value is not in the allowed set. Validates: Req 10.6"""
     if value is not None and value not in valid_values:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid {field_name} value '{value}'. Must be one of: {', '.join(sorted(valid_values))}",
+        raise validation_error(
+            message=f"Invalid {field_name} value '{value}'. Must be one of: {', '.join(sorted(valid_values))}",
+            details={field_name: value, "valid_values": sorted(valid_values)},
         )
 
 
@@ -177,9 +178,9 @@ def _validate_date(value: Optional[str], field_name: str) -> None:
     try:
         datetime.fromisoformat(value.replace("Z", "+00:00"))
     except (ValueError, AttributeError):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid {field_name} value '{value}'. Must be a valid ISO 8601 date string.",
+        raise validation_error(
+            message=f"Invalid {field_name} value '{value}'. Must be a valid ISO 8601 date string.",
+            details={field_name: value},
         )
 
 
@@ -1459,15 +1460,15 @@ async def trigger_replay(
         start_dt = datetime.fromisoformat(body.start_time.replace("Z", "+00:00"))
         end_dt = datetime.fromisoformat(body.end_time.replace("Z", "+00:00"))
     except (ValueError, AttributeError):
-        raise HTTPException(
-            status_code=400,
-            detail="start_time and end_time must be valid ISO 8601 date strings",
+        raise validation_error(
+            message="start_time and end_time must be valid ISO 8601 date strings",
+            details={"start_time": body.start_time, "end_time": body.end_time},
         )
 
     if end_dt <= start_dt:
-        raise HTTPException(
-            status_code=400,
-            detail="end_time must be after start_time",
+        raise validation_error(
+            message="end_time must be after start_time",
+            details={"start_time": body.start_time, "end_time": body.end_time},
         )
 
     # Use the tenant_id from the JWT-verified context for security,
@@ -1561,24 +1562,24 @@ async def run_drift_detection(
         try:
             start_dt = datetime.fromisoformat(body.start_time.replace("Z", "+00:00"))
         except (ValueError, AttributeError):
-            raise HTTPException(
-                status_code=400,
-                detail="start_time must be a valid ISO 8601 date string",
+            raise validation_error(
+                message="start_time must be a valid ISO 8601 date string",
+                details={"start_time": body.start_time},
             )
 
     if body.end_time is not None:
         try:
             end_dt = datetime.fromisoformat(body.end_time.replace("Z", "+00:00"))
         except (ValueError, AttributeError):
-            raise HTTPException(
-                status_code=400,
-                detail="end_time must be a valid ISO 8601 date string",
+            raise validation_error(
+                message="end_time must be a valid ISO 8601 date string",
+                details={"end_time": body.end_time},
             )
 
     if start_dt and end_dt and end_dt <= start_dt:
-        raise HTTPException(
-            status_code=400,
-            detail="end_time must be after start_time",
+        raise validation_error(
+            message="end_time must be after start_time",
+            details={"start_time": body.start_time, "end_time": body.end_time},
         )
 
     # Use the tenant_id from the JWT-verified context for security

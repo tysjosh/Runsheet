@@ -70,7 +70,8 @@ jobs:
           JWT_ALGORITHM: "HS256"
           ENVIRONMENT: "test"
         run: |
-          pytest --cov=. --cov-report=xml:coverage.xml --cov-report=term-missing \
+          pytest --cov=. --cov-report=html:coverage_html --cov-report=xml:coverage.xml \
+                 --cov-report=term-missing \
                  --cov-fail-under=${{ env.COVERAGE_THRESHOLD }} \
                  -x -q
 
@@ -82,7 +83,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
-          path: Runsheet-backend/coverage.xml
+          path: |
+            Runsheet-backend/coverage_html/
+            Runsheet-backend/coverage.xml
           retention-days: 14
 
   # -----------------------------------------------------------------
@@ -211,6 +214,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Check for generated artifacts in git index
+        run: |
+          artifacts=$(git ls-files | grep -E '\.coverage$|\.hypothesis/|__pycache__/|\.pyc$' || true)
+          if [ -n "$artifacts" ]; then
+            echo "❌ Generated artifacts found in git index:"
+            echo "$artifacts"
+            echo ""
+            echo "Remove them with:"
+            echo "  git rm --cached <file>"
+            echo "  git rm --cached -r <directory>"
+            exit 1
+          fi
+          echo "✅ No generated artifacts in git index."
 
       - name: Verify no ignored files are tracked
         run: |

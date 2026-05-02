@@ -17,6 +17,7 @@ load_dotenv(_env_file, override=True)
 from contextlib import asynccontextmanager
 import json
 import logging
+import traceback
 from datetime import datetime
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
@@ -60,7 +61,8 @@ import os, json as _json
 _cors_raw = os.environ.get("CORS_ORIGINS", '["http://localhost:3000", "http://127.0.0.1:3000"]')
 try:
     _cors_origins = _json.loads(_cors_raw)
-except Exception:
+except Exception as e:
+    logger.warning(f"Failed to parse CORS_ORIGINS: {e}, using defaults")
     _cors_origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
 app.add_middleware(
     CORSMiddleware,
@@ -129,14 +131,19 @@ async def ops_live_websocket(websocket: WebSocket):
     from jose import JWTError, jwt as jose_jwt
     c = _c(websocket.app)
     token = websocket.query_params.get("token", "")
-    tenant_id = ""
-    if token:
-        try:
-            payload = jose_jwt.decode(token, c.settings.jwt_secret,
-                                      algorithms=[c.settings.jwt_algorithm])
-            tenant_id = payload.get("tenant_id", "")
-        except JWTError:
-            pass
+    if not token:
+        await websocket.close(code=4001, reason="Authentication required")
+        return
+    try:
+        payload = jose_jwt.decode(token, c.settings.jwt_secret,
+                                  algorithms=[c.settings.jwt_algorithm])
+        tenant_id = payload.get("tenant_id", "")
+    except JWTError:
+        await websocket.close(code=4001, reason="Authentication failed")
+        return
+    if not tenant_id:
+        await websocket.close(code=4001, reason="Authentication required")
+        return
     mgr = c.ops_ws_manager
     await mgr.connect(websocket, tenant_id=tenant_id)
     if websocket not in mgr._clients:
@@ -145,31 +152,83 @@ async def ops_live_websocket(websocket: WebSocket):
         while True:
             raw = await websocket.receive_text()
             await mgr.handle_client_message(websocket, raw)
-    except (WebSocketDisconnect, Exception):
-        pass
+    except WebSocketDisconnect:
+        logger.debug("WebSocket client disconnected normally from /ws/ops (tenant_id=%s)", tenant_id)
+    except Exception as e:
+        logger.error(
+            "Unexpected WebSocket error on /ws/ops: endpoint=/ws/ops tenant_id=%s exception_type=%s error=%s traceback=%s",
+            tenant_id, type(e).__name__, str(e), traceback.format_exc()
+        )
+        try:
+            await websocket.close(code=1011, reason="Internal server error")
+        except Exception:
+            pass
     finally:
         await mgr.disconnect(websocket)
 
 @app.websocket("/ws/scheduling")
 async def scheduling_live_websocket(websocket: WebSocket):
+    from jose import JWTError, jwt as jose_jwt
+    from config.settings import get_settings
     c = _c(websocket.app)
+    settings = get_settings()
+    token = websocket.query_params.get("token", "")
+    if not token:
+        await websocket.close(code=4001, reason="Authentication required")
+        return
+    try:
+        payload = jose_jwt.decode(token, settings.jwt_secret,
+                                  algorithms=[settings.jwt_algorithm])
+        tenant_id = payload.get("tenant_id", "")
+    except JWTError:
+        await websocket.close(code=4001, reason="Authentication required")
+        return
+    if not tenant_id:
+        await websocket.close(code=4001, reason="Authentication required")
+        return
     subs = websocket.query_params.get("subscriptions", "")
     subs_list = [s.strip() for s in subs.split(",") if s.strip()] if subs else None
     mgr = c.scheduling_ws_manager
-    await mgr.connect(websocket, subscriptions=subs_list)
+    await mgr.connect(websocket, subscriptions=subs_list, tenant_id=tenant_id)
     try:
         while True:
             raw = await websocket.receive_text()
             await mgr.handle_client_message(websocket, raw)
-    except (WebSocketDisconnect, Exception):
-        pass
+    except WebSocketDisconnect:
+        logger.debug("WebSocket client disconnected normally from /ws/scheduling (tenant_id=%s)", tenant_id)
+    except Exception as e:
+        logger.error(
+            "Unexpected WebSocket error on /ws/scheduling: endpoint=/ws/scheduling tenant_id=%s exception_type=%s error=%s traceback=%s",
+            tenant_id, type(e).__name__, str(e), traceback.format_exc()
+        )
+        try:
+            await websocket.close(code=1011, reason="Internal server error")
+        except Exception:
+            pass
     finally:
         await mgr.disconnect(websocket)
 
 @app.websocket("/ws/agent-activity")
 async def agent_activity_websocket(websocket: WebSocket):
+    from jose import JWTError, jwt as jose_jwt
+    from config.settings import get_settings
+    settings = get_settings()
+    token = websocket.query_params.get("token", "")
+    if not token:
+        await websocket.close(code=4001, reason="Authentication required")
+        return
+    try:
+        payload = jose_jwt.decode(token, settings.jwt_secret,
+                                  algorithms=[settings.jwt_algorithm])
+        tenant_id = payload.get("tenant_id", "")
+    except JWTError:
+        await websocket.close(code=4001, reason="Authentication required")
+        return
+    if not tenant_id:
+        await websocket.close(code=4001, reason="Authentication required")
+        return
     mgr = _c(websocket.app).agent_ws_manager
-    await mgr.connect(websocket)
+    await mgr.connect(websocket, tenant_id=tenant_id)
     try:
         while True:
             data = await websocket.receive_text()
@@ -179,16 +238,43 @@ async def agent_activity_websocket(websocket: WebSocket):
                     await websocket.send_json({"type": "pong",
                         "timestamp": datetime.utcnow().isoformat() + "Z"})
             except json.JSONDecodeError:
-                pass
-    except (WebSocketDisconnect, Exception):
-        pass
+                logger.warning("Malformed JSON received on /ws/agent-activity (tenant_id=%s): %s", tenant_id, data)
+                await websocket.send_json({"type": "error", "message": "Invalid JSON"})
+    except WebSocketDisconnect:
+        logger.debug("WebSocket client disconnected normally from /ws/agent-activity (tenant_id=%s)", tenant_id)
+    except Exception as e:
+        logger.error(
+            "Unexpected WebSocket error on /ws/agent-activity: endpoint=/ws/agent-activity tenant_id=%s exception_type=%s error=%s traceback=%s",
+            tenant_id, type(e).__name__, str(e), traceback.format_exc()
+        )
+        try:
+            await websocket.close(code=1011, reason="Internal server error")
+        except Exception:
+            pass
     finally:
         await mgr.disconnect(websocket)
 
 @app.websocket("/api/fleet/live")
 async def fleet_live_websocket(websocket: WebSocket):
+    from jose import JWTError, jwt as jose_jwt
+    from config.settings import get_settings
+    settings = get_settings()
+    token = websocket.query_params.get("token", "")
+    if not token:
+        await websocket.close(code=4001, reason="Authentication required")
+        return
+    try:
+        payload = jose_jwt.decode(token, settings.jwt_secret,
+                                  algorithms=[settings.jwt_algorithm])
+        tenant_id = payload.get("tenant_id", "")
+    except JWTError:
+        await websocket.close(code=4001, reason="Authentication required")
+        return
+    if not tenant_id:
+        await websocket.close(code=4001, reason="Authentication required")
+        return
     mgr = _c(websocket.app).fleet_ws_manager
-    await mgr.connect(websocket)
+    await mgr.connect(websocket, tenant_id=tenant_id)
     try:
         while True:
             data = await websocket.receive_text()
@@ -202,9 +288,19 @@ async def fleet_live_websocket(websocket: WebSocket):
                         "message": "Subscribed to all fleet updates",
                         "timestamp": datetime.utcnow().isoformat() + "Z"})
             except json.JSONDecodeError:
-                pass
-    except (WebSocketDisconnect, Exception):
-        pass
+                logger.warning("Malformed JSON received on /api/fleet/live (tenant_id=%s): %s", tenant_id, data)
+                await websocket.send_json({"type": "error", "message": "Invalid JSON"})
+    except WebSocketDisconnect:
+        logger.debug("WebSocket client disconnected normally from /api/fleet/live (tenant_id=%s)", tenant_id)
+    except Exception as e:
+        logger.error(
+            "Unexpected WebSocket error on /api/fleet/live: endpoint=/api/fleet/live tenant_id=%s exception_type=%s error=%s traceback=%s",
+            tenant_id, type(e).__name__, str(e), traceback.format_exc()
+        )
+        try:
+            await websocket.close(code=1011, reason="Internal server error")
+        except Exception:
+            pass
     finally:
         await mgr.disconnect(websocket)
 

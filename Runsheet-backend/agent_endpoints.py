@@ -15,8 +15,18 @@ Requirements: 2.3, 2.4, 2.5, 8.4, 8.5, 10.4, 10.5, 11.5, 11.6,
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
+
+from errors.codes import ErrorCode
+from errors.exceptions import (
+    AppException,
+    forbidden,
+    internal_error,
+    resource_not_found,
+    validation_error,
+)
+from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 
 logger = logging.getLogger(__name__)
 
@@ -145,7 +155,7 @@ def _get_feedback_service():
 @router.get("/approvals")
 async def list_approvals(
     request: Request,
-    tenant_id: str = Query("default", description="Tenant identifier"),
+    tenant: TenantContext = Depends(get_tenant_context),
     page: int = Query(1, ge=1, description="Page number"),
     size: int = Query(20, ge=1, le=100, description="Page size"),
 ):
@@ -158,7 +168,7 @@ async def list_approvals(
     """
     svc = _get_approval_queue()
     try:
-        result = await svc.list_pending(tenant_id=tenant_id, page=page, size=size)
+        result = await svc.list_pending(tenant_id=tenant.tenant_id, page=page, size=size)
         # Dual-field deprecation: add unified PaginatedResponse fields
         from schemas.common import paginated_response_dict
 
@@ -174,7 +184,7 @@ async def list_approvals(
         return result
     except Exception as e:
         logger.error(f"Failed to list approvals: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(message="Failed to list approvals", details={"error": str(e)})
 
 
 @router.post("/approvals/{action_id}/approve")
@@ -193,13 +203,13 @@ async def approve_action(
         result = await svc.approve(action_id=action_id, reviewer_id=reviewer_id)
         return result
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise validation_error(message=str(e))
     except RuntimeError as e:
         # Concurrency conflict
-        raise HTTPException(status_code=409, detail=str(e))
+        raise AppException(error_code=ErrorCode.VALIDATION_ERROR, message=str(e), status_code=409)
     except Exception as e:
         logger.error(f"Failed to approve action {action_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(message="Failed to approve action", details={"action_id": action_id, "error": str(e)})
 
 
 @router.post("/approvals/{action_id}/reject")
@@ -222,12 +232,12 @@ async def reject_action(
         )
         return result
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise validation_error(message=str(e))
     except RuntimeError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+        raise AppException(error_code=ErrorCode.VALIDATION_ERROR, message=str(e), status_code=409)
     except Exception as e:
         logger.error(f"Failed to reject action {action_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(message="Failed to reject action", details={"action_id": action_id, "error": str(e)})
 
 
 # ===================================================================
@@ -239,7 +249,7 @@ async def reject_action(
 @router.get("/activity")
 async def list_activity(
     request: Request,
-    tenant_id: str = Query("default", description="Tenant identifier"),
+    tenant: TenantContext = Depends(get_tenant_context),
     agent_id: Optional[str] = Query(None, description="Filter by agent ID"),
     action_type: Optional[str] = Query(None, description="Filter by action type"),
     outcome: Optional[str] = Query(None, description="Filter by outcome"),
@@ -262,7 +272,7 @@ async def list_activity(
     """
     svc = _get_activity_log()
 
-    filters = {"tenant_id": tenant_id}
+    filters = {"tenant_id": tenant.tenant_id}
     if agent_id:
         filters["agent_id"] = agent_id
     if action_type:
@@ -294,13 +304,13 @@ async def list_activity(
         return result
     except Exception as e:
         logger.error(f"Failed to query activity log: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(message="Failed to query activity log", details={"error": str(e)})
 
 
 @router.get("/activity/stats")
 async def get_activity_stats(
     request: Request,
-    tenant_id: str = Query("default", description="Tenant identifier"),
+    tenant: TenantContext = Depends(get_tenant_context),
 ):
     """
     Aggregated activity statistics for a tenant.
@@ -312,11 +322,11 @@ async def get_activity_stats(
     """
     svc = _get_activity_log()
     try:
-        result = await svc.get_stats(tenant_id=tenant_id)
+        result = await svc.get_stats(tenant_id=tenant.tenant_id)
         return result
     except Exception as e:
         logger.error(f"Failed to get activity stats: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(message="Failed to get activity stats", details={"error": str(e)})
 
 
 # ===================================================================
@@ -328,7 +338,7 @@ async def get_activity_stats(
 @router.get("/config/autonomy")
 async def get_autonomy_level(
     request: Request,
-    tenant_id: str = Query("default", description="Tenant identifier"),
+    tenant: TenantContext = Depends(get_tenant_context),
 ):
     """
     Get the current autonomy level for a tenant.
@@ -337,7 +347,7 @@ async def get_autonomy_level(
     """
     svc = _get_autonomy_config()
     try:
-        level = await svc.get_level(tenant_id=tenant_id)
+        level = await svc.get_level(tenant_id=tenant.tenant_id)
     except Exception as e:
         logger.error(f"Failed to get autonomy level: {e}")
         # Return a sensible default if the service fails
@@ -350,7 +360,7 @@ async def get_autonomy_level(
 async def update_autonomy_level(
     body: AutonomyUpdateRequest,
     request: Request,
-    tenant_id: str = Query("default", description="Tenant identifier"),
+    tenant: TenantContext = Depends(get_tenant_context),
 ):
     """
     Update the tenant's autonomy level (admin-only).
@@ -359,28 +369,24 @@ async def update_autonomy_level(
 
     Validates: Requirements 10.4, 10.5
     """
-    # Admin-only JWT check: inspect the request for admin claims
-    # In production this would use a proper JWT dependency; here we
-    # check for an ``x-user-role`` header or JWT claim.
-    user_role = request.headers.get("x-user-role", "")
-    user_id = request.headers.get("x-user-id", "system")
-
-    if user_role != "admin":
-        raise HTTPException(
-            status_code=403,
-            detail="Only admin users can update the autonomy level",
+    # Admin-only JWT check: verify admin role from JWT claims (Req 2.5)
+    if "admin" not in tenant.roles:
+        raise forbidden(
+            message="Only admin users can update the autonomy level",
         )
+
+    user_id = tenant.user_id
 
     svc = _get_autonomy_config()
     activity_svc = _get_activity_log()
 
     try:
-        previous_level = await svc.set_level(tenant_id=tenant_id, level=body.level)
+        previous_level = await svc.set_level(tenant_id=tenant.tenant_id, level=body.level)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise validation_error(message=str(e))
     except Exception as e:
         logger.error(f"Failed to update autonomy level: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(message="Failed to update autonomy level", details={"error": str(e)})
 
     # Log the change to the activity log (Requirement 10.5)
     try:
@@ -389,14 +395,14 @@ async def update_autonomy_level(
             "action_type": "autonomy_level_change",
             "tool_name": None,
             "parameters": {
-                "tenant_id": tenant_id,
+                "tenant_id": tenant.tenant_id,
                 "old_level": previous_level,
                 "new_level": body.level,
             },
             "risk_level": None,
             "outcome": "success",
             "duration_ms": 0,
-            "tenant_id": tenant_id,
+            "tenant_id": tenant.tenant_id,
             "user_id": user_id,
             "session_id": None,
             "details": {
@@ -409,7 +415,7 @@ async def update_autonomy_level(
         logger.warning(f"Failed to log autonomy level change: {e}")
 
     return {
-        "tenant_id": tenant_id,
+        "tenant_id": tenant.tenant_id,
         "previous_level": previous_level,
         "new_level": body.level,
     }
@@ -424,7 +430,7 @@ async def update_autonomy_level(
 @router.get("/memory")
 async def list_memories(
     request: Request,
-    tenant_id: str = Query("default", description="Tenant identifier"),
+    tenant: TenantContext = Depends(get_tenant_context),
     memory_type: Optional[str] = Query(
         None, description="Filter by memory type (pattern or preference)"
     ),
@@ -446,7 +452,7 @@ async def list_memories(
 
     try:
         result = await svc.list_memories(
-            tenant_id=tenant_id,
+            tenant_id=tenant.tenant_id,
             memory_type=memory_type,
             tags=tag_list,
             page=page,
@@ -467,14 +473,14 @@ async def list_memories(
         return result
     except Exception as e:
         logger.error(f"Failed to list memories: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(message="Failed to list memories", details={"error": str(e)})
 
 
 @router.delete("/memory/{memory_id}")
 async def delete_memory(
     memory_id: str,
     request: Request,
-    tenant_id: str = Query("default", description="Tenant identifier"),
+    tenant: TenantContext = Depends(get_tenant_context),
 ):
     """
     Delete a specific memory.
@@ -485,18 +491,18 @@ async def delete_memory(
     """
     svc = _get_memory_service()
     try:
-        deleted = await svc.delete(memory_id=memory_id, tenant_id=tenant_id)
+        deleted = await svc.delete(memory_id=memory_id, tenant_id=tenant.tenant_id)
         if not deleted:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Memory {memory_id} not found or does not belong to tenant",
+            raise resource_not_found(
+                message=f"Memory {memory_id} not found or does not belong to tenant",
+                details={"memory_id": memory_id},
             )
         return {"deleted": True, "memory_id": memory_id}
-    except HTTPException:
+    except AppException:
         raise
     except Exception as e:
         logger.error(f"Failed to delete memory {memory_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(message="Failed to delete memory", details={"memory_id": memory_id, "error": str(e)})
 
 
 # ===================================================================
@@ -508,7 +514,7 @@ async def delete_memory(
 @router.get("/feedback")
 async def list_feedback(
     request: Request,
-    tenant_id: str = Query("default", description="Tenant identifier"),
+    tenant: TenantContext = Depends(get_tenant_context),
     agent_id: Optional[str] = Query(None, description="Filter by agent ID"),
     action_type: Optional[str] = Query(None, description="Filter by action type"),
     time_from: Optional[str] = Query(
@@ -539,7 +545,7 @@ async def list_feedback(
 
     try:
         result = await svc.list_feedback(
-            tenant_id=tenant_id,
+            tenant_id=tenant.tenant_id,
             agent_id=agent_id,
             action_type=action_type,
             time_range=time_range,
@@ -561,13 +567,13 @@ async def list_feedback(
         return result
     except Exception as e:
         logger.error(f"Failed to list feedback: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(message="Failed to list feedback", details={"error": str(e)})
 
 
 @router.get("/feedback/stats")
 async def get_feedback_stats(
     request: Request,
-    tenant_id: str = Query("default", description="Tenant identifier"),
+    tenant: TenantContext = Depends(get_tenant_context),
 ):
     """
     Aggregated feedback statistics for a tenant.
@@ -579,11 +585,11 @@ async def get_feedback_stats(
     """
     svc = _get_feedback_service()
     try:
-        result = await svc.get_stats(tenant_id=tenant_id)
+        result = await svc.get_stats(tenant_id=tenant.tenant_id)
         return result
     except Exception as e:
         logger.error(f"Failed to get feedback stats: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(message="Failed to get feedback stats", details={"error": str(e)})
 
 
 # ===================================================================
@@ -632,8 +638,9 @@ async def pause_agent(agent_id: str, request: Request):
     agents = getattr(request.app.state, "autonomous_agents", {})
     agent = agents.get(agent_id)
     if agent is None:
-        raise HTTPException(
-            status_code=404, detail=f"Agent '{agent_id}' not found"
+        raise resource_not_found(
+            message=f"Agent '{agent_id}' not found",
+            details={"agent_id": agent_id},
         )
 
     if agent.status == "stopped":
@@ -658,7 +665,7 @@ async def pause_agent(agent_id: str, request: Request):
         })
     except Exception as e:
         logger.error(f"Failed to pause agent {agent_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(message="Failed to pause agent", details={"agent_id": agent_id, "error": str(e)})
 
     return {"agent_id": agent_id, "status": "stopped"}
 
@@ -675,8 +682,9 @@ async def resume_agent(agent_id: str, request: Request):
     agents = getattr(request.app.state, "autonomous_agents", {})
     agent = agents.get(agent_id)
     if agent is None:
-        raise HTTPException(
-            status_code=404, detail=f"Agent '{agent_id}' not found"
+        raise resource_not_found(
+            message=f"Agent '{agent_id}' not found",
+            details={"agent_id": agent_id},
         )
 
     if agent.status == "running":
@@ -701,6 +709,6 @@ async def resume_agent(agent_id: str, request: Request):
         })
     except Exception as e:
         logger.error(f"Failed to resume agent {agent_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(message="Failed to resume agent", details={"agent_id": agent_id, "error": str(e)})
 
     return {"agent_id": agent_id, "status": "running"}

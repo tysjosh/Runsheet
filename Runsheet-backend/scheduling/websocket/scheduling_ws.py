@@ -61,6 +61,7 @@ class SchedulingWebSocketManager(BaseWSManager):
         self,
         websocket: WebSocket,
         subscriptions: Optional[List[str]] = None,
+        tenant_id: str = "",
     ) -> None:
         """Accept a WebSocket connection and register it with subscriptions.
 
@@ -78,7 +79,7 @@ class SchedulingWebSocketManager(BaseWSManager):
         client_meta: Dict[str, Any] = {
             "connected_at": datetime.now(timezone.utc),
             "last_send": None,
-            "tenant_id": "",
+            "tenant_id": tenant_id,
             "pending_count": 0,
             "subscriptions": valid_subs,
             "_alive": True,
