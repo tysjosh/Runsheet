@@ -483,3 +483,31 @@ export async function updateStationThreshold(
     },
   );
 }
+
+// ─── Fuel Event Recording Endpoints ──────────────────────────────────────────
+
+/** POST /fuel/consumption — record a fuel dispensing event */
+export async function recordConsumption(
+  data: ConsumptionEvent,
+): Promise<{ data: Record<string, unknown>; request_id: string }> {
+  return fuelRequest<{ data: Record<string, unknown>; request_id: string }>(
+    "/fuel/consumption",
+    {
+      method: "POST",
+      body: JSON.stringify(data),
+    },
+  );
+}
+
+/** POST /fuel/refill — record a fuel delivery/refill event */
+export async function recordRefill(
+  data: RefillEvent,
+): Promise<{ data: Record<string, unknown>; request_id: string }> {
+  return fuelRequest<{ data: Record<string, unknown>; request_id: string }>(
+    "/fuel/refill",
+    {
+      method: "POST",
+      body: JSON.stringify(data),
+    },
+  );
+}

@@ -322,7 +322,14 @@ export default function FuelDashboardPage() {
             {detailLoading ? (
               <LoadingSpinner message="Loading station detail..." />
             ) : stationDetail ? (
-              <FuelStationDetail detail={stationDetail} onClose={handleCloseDetail} />
+              <FuelStationDetail
+                detail={stationDetail}
+                onClose={handleCloseDetail}
+                onEventRecorded={() => {
+                  if (selectedStationId) loadStationDetail(selectedStationId);
+                  loadData();
+                }}
+              />
             ) : (
               <p className="text-sm text-gray-400 text-center py-8">
                 Failed to load station detail

@@ -1,6 +1,7 @@
 "use client";
 
 import { ArrowDown, ArrowUp, Clock, Droplets, Fuel, MapPin, TrendingDown, X } from "lucide-react";
+import { useCallback, useState } from "react";
 import type {
   ConsumptionEvent,
   FuelStation,
@@ -9,10 +10,12 @@ import type {
   RefillEvent,
   StationStatus,
 } from "../../services/fuelApi";
+import FuelEventForm from "./FuelEventForm";
 
 interface FuelStationDetailProps {
   detail: FuelStationDetailType;
   onClose?: () => void;
+  onEventRecorded?: () => void;
 }
 
 const STATUS_CONFIG: Record<StationStatus, { label: string; color: string; bg: string }> = {
@@ -61,8 +64,9 @@ function formatTimestamp(ts: string): string {
  *
  * Validates: Requirements 6.6
  */
-export default function FuelStationDetail({ detail, onClose }: FuelStationDetailProps) {
+export default function FuelStationDetail({ detail, onClose, onEventRecorded }: FuelStationDetailProps) {
   const { station, recent_consumption_events, recent_refill_events } = detail;
+  const [activeForm, setActiveForm] = useState<"consumption" | "refill" | null>(null);
   const stockPct =
     station.capacity_liters > 0
       ? (station.current_stock_liters / station.capacity_liters) * 100
@@ -166,6 +170,49 @@ export default function FuelStationDetail({ detail, onClose }: FuelStationDetail
           </div>
         </div>
       </div>
+
+      {/* Action buttons */}
+      <div className="px-4 pb-2 pt-3 border-b border-gray-100 flex gap-2">
+        <button
+          type="button"
+          onClick={() => setActiveForm(activeForm === "consumption" ? null : "consumption")}
+          className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg transition-colors ${
+            activeForm === "consumption"
+              ? "bg-red-600 text-white"
+              : "bg-red-50 text-red-700 hover:bg-red-100"
+          }`}
+        >
+          <ArrowDown className="w-3.5 h-3.5" aria-hidden="true" />
+          Record Consumption
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveForm(activeForm === "refill" ? null : "refill")}
+          className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg transition-colors ${
+            activeForm === "refill"
+              ? "bg-green-600 text-white"
+              : "bg-green-50 text-green-700 hover:bg-green-100"
+          }`}
+        >
+          <ArrowUp className="w-3.5 h-3.5" aria-hidden="true" />
+          Record Refill
+        </button>
+      </div>
+
+      {/* Inline event form */}
+      {activeForm && (
+        <div className="px-4 py-3 border-b border-gray-100">
+          <FuelEventForm
+            station={station}
+            mode={activeForm}
+            onClose={() => setActiveForm(null)}
+            onSuccess={() => {
+              setActiveForm(null);
+              onEventRecorded?.();
+            }}
+          />
+        </div>
+      )}
 
       {/* Recent events */}
       <div className="p-4">
