@@ -68,8 +68,8 @@ class TestAgentApprovalQueueMapping:
             "action_id", "action_type", "tool_name", "parameters",
             "risk_level", "proposed_by", "proposed_at", "status",
             "reviewed_by", "reviewed_at", "expiry_time",
-            "impact_summary", "execution_result", "tenant_id",
-            "created_at", "updated_at",
+            "impact_summary", "execution_result", "rejection_reason",
+            "tenant_id", "created_at", "updated_at",
         }
         assert set(props.keys()) == expected_fields
 

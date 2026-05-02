@@ -34,6 +34,7 @@ AGENT_APPROVAL_QUEUE_MAPPING = {
             "expiry_time":      {"type": "date"},
             "impact_summary":   {"type": "text"},
             "execution_result": {"type": "object", "dynamic": True, "enabled": True},
+            "rejection_reason": {"type": "text"},
             "tenant_id":        {"type": "keyword"},
             "created_at":       {"type": "date"},
             "updated_at":       {"type": "date"},
@@ -175,6 +176,27 @@ def setup_agent_indices(es_service):
                 logger.info(f"✅ Created agent index: {index_name}")
             else:
                 logger.info(f"📋 Agent index already exists: {index_name}")
+                # Update mapping with any new fields (existing fields are unchanged)
+                try:
+                    current = es_client.indices.get_mapping(index=index_name)
+                    current_props = (
+                        current.get(index_name, {})
+                        .get("mappings", {})
+                        .get("properties", {})
+                    )
+                    expected_props = mapping.get("mappings", {}).get("properties", {})
+                    missing = {k: v for k, v in expected_props.items() if k not in current_props}
+                    if missing:
+                        es_client.indices.put_mapping(
+                            index=index_name,
+                            body={"properties": missing},
+                        )
+                        logger.info(
+                            f"📝 Updated agent index '{index_name}' with new field(s): "
+                            f"{list(missing.keys())}"
+                        )
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to update mapping for agent index '{index_name}': {e}")
         except Exception as e:
             logger.error(f"❌ Failed to create agent index {index_name}: {e}")
 
