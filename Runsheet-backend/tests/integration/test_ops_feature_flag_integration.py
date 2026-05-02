@@ -27,6 +27,14 @@ _mock_es_module.ElasticsearchService = MagicMock
 _mock_es_module.elasticsearch_service = MagicMock()
 sys.modules.setdefault("services.elasticsearch_service", _mock_es_module)
 
+# ---------------------------------------------------------------------------
+# Patch strands BEFORE any Agents.tools imports (strands may not be installed)
+# ---------------------------------------------------------------------------
+if "strands" not in sys.modules:
+    _mock_strands = MagicMock()
+    _mock_strands.tool = lambda f=None, **kwargs: f if f else (lambda fn: fn)
+    sys.modules["strands"] = _mock_strands
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -204,7 +212,7 @@ class TestApiFeatureFlagGating:
         app = FastAPI()
 
         mock_es_client = MagicMock()
-        mock_es_client.search = AsyncMock(return_value={
+        mock_es_client.search = MagicMock(return_value={
             "hits": {"hits": [], "total": {"value": 0}},
         })
         mock_ops_es = MagicMock(spec=OpsElasticsearchService)
@@ -232,35 +240,35 @@ class TestApiFeatureFlagGating:
         self.client = TestClient(app)
 
     def test_disabled_tenant_shipments_returns_404(self):
-        resp = self.client.get("/ops/shipments")
+        resp = self.client.get("/api/ops/shipments")
         assert resp.status_code == 404
         body = resp.json()
         assert body["detail"]["error_code"] == "TENANT_DISABLED"
 
     def test_disabled_tenant_riders_returns_404(self):
-        resp = self.client.get("/ops/riders")
+        resp = self.client.get("/api/ops/riders")
         assert resp.status_code == 404
 
     def test_disabled_tenant_events_returns_404(self):
-        resp = self.client.get("/ops/events")
+        resp = self.client.get("/api/ops/events")
         assert resp.status_code == 404
 
     def test_disabled_tenant_single_shipment_returns_404(self):
-        resp = self.client.get("/ops/shipments/SHP-001")
+        resp = self.client.get("/api/ops/shipments/SHP-001")
         assert resp.status_code == 404
 
     def test_disabled_tenant_sla_breaches_returns_404(self):
-        resp = self.client.get("/ops/shipments/sla-breaches")
+        resp = self.client.get("/api/ops/shipments/sla-breaches")
         assert resp.status_code == 404
 
     def test_disabled_tenant_failures_returns_404(self):
-        resp = self.client.get("/ops/shipments/failures")
+        resp = self.client.get("/api/ops/shipments/failures")
         assert resp.status_code == 404
 
     def test_enabled_tenant_shipments_returns_200(self):
         """After enabling, endpoints return 200."""
         self.ff_service._flags[DISABLED_TENANT] = True
-        resp = self.client.get("/ops/shipments")
+        resp = self.client.get("/api/ops/shipments")
         assert resp.status_code == 200
 
 

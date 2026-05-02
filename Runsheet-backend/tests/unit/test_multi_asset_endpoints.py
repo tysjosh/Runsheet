@@ -75,13 +75,28 @@ def _es_agg_response(total, active, delayed, by_type_buckets, by_subtype_buckets
     }
 
 
+def _extract_inner_query(query):
+    """Extract the inner query from a tenant-filter-wrapped ES query.
+
+    ``inject_tenant_filter`` wraps the original query as::
+
+        {"query": {"bool": {"must": [<original_query>], "filter": [{"term": {"tenant_id": ...}}]}}}
+
+    This helper returns the original query dict that was placed inside ``must[0]``.
+    """
+    must = query.get("query", {}).get("bool", {}).get("must", [])
+    if must:
+        return must[0]
+    return query.get("query", {})
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
 def client():
-    """Create a test client with mocked ES service."""
+    """Create a test client with mocked ES service and overridden tenant guard."""
     with patch("data_endpoints.elasticsearch_service") as mock_es:
         mock_es.index_document = AsyncMock(return_value={"result": "created"})
         mock_es.search_documents = AsyncMock(return_value=_es_search_response([]))
@@ -89,8 +104,19 @@ def client():
         mock_es.get_all_documents = AsyncMock(return_value=[])
         mock_es.update_document = AsyncMock(return_value={"result": "updated"})
         from main import app
+        from ops.middleware.tenant_guard import TenantContext, get_tenant_context
+
+        # Override tenant guard to skip JWT auth in tests
+        async def _override_tenant():
+            return TenantContext(tenant_id="test-tenant", user_id="test-user", has_pii_access=False)
+
+        app.dependency_overrides[get_tenant_context] = _override_tenant
+
         with TestClient(app) as c:
             yield c, mock_es
+
+        # Clean up override
+        app.dependency_overrides.pop(get_tenant_context, None)
 
 
 # ---------------------------------------------------------------------------
@@ -128,11 +154,12 @@ class TestGetFleetAssets:
         assert len(data["data"]) == 1
         assert data["data"][0]["asset_type"] == "vessel"
 
-        # Verify the ES query included the asset_type filter
+        # Verify the ES query included the asset_type filter (inside tenant wrapper)
         call_args = mock_es.search_documents.call_args
         query = call_args[0][1]
-        filters = query["query"]["bool"]["filter"]
-        assert {"term": {"asset_type": "vessel"}} in filters
+        inner = _extract_inner_query(query)
+        inner_filters = inner.get("bool", {}).get("filter", [])
+        assert {"term": {"asset_type": "vessel"}} in inner_filters
 
     def test_filter_by_asset_subtype(self, client):
         """GET /fleet/assets?asset_subtype=crane returns only cranes."""
@@ -157,8 +184,9 @@ class TestGetFleetAssets:
 
         call_args = mock_es.search_documents.call_args
         query = call_args[0][1]
-        filters = query["query"]["bool"]["filter"]
-        assert {"term": {"status": "active"}} in filters
+        inner = _extract_inner_query(query)
+        inner_filters = inner.get("bool", {}).get("filter", [])
+        assert {"term": {"status": "active"}} in inner_filters
 
     def test_combined_filters(self, client):
         """GET /fleet/assets?asset_type=vehicle&status=active applies both filters."""
@@ -170,9 +198,10 @@ class TestGetFleetAssets:
 
         call_args = mock_es.search_documents.call_args
         query = call_args[0][1]
-        filters = query["query"]["bool"]["filter"]
-        assert {"term": {"asset_type": "vehicle"}} in filters
-        assert {"term": {"status": "active"}} in filters
+        inner = _extract_inner_query(query)
+        inner_filters = inner.get("bool", {}).get("filter", [])
+        assert {"term": {"asset_type": "vehicle"}} in inner_filters
+        assert {"term": {"status": "active"}} in inner_filters
 
     def test_no_filter_uses_match_all(self, client):
         """GET /fleet/assets with no filters uses match_all query."""
@@ -184,7 +213,9 @@ class TestGetFleetAssets:
 
         call_args = mock_es.search_documents.call_args
         query = call_args[0][1]
-        assert "match_all" in query["query"]
+        # The inner query (inside tenant wrapper must[0]) should be match_all
+        inner = _extract_inner_query(query)
+        assert "match_all" in inner
 
     def test_queries_assets_alias(self, client):
         """GET /fleet/assets queries the 'assets' alias, not 'trucks' directly."""
@@ -215,6 +246,10 @@ class TestGetFleetAssets:
 class TestGetAssetById:
     """Validates: Requirement 2.3"""
 
+    def _mock_search_for_doc(self, mock_es, doc):
+        """Helper: mock search_documents to return a single doc (tenant-scoped lookup)."""
+        mock_es.search_documents = AsyncMock(return_value=_es_search_response([doc]))
+
     def test_returns_single_asset(self, client):
         """GET /fleet/assets/{id} returns the asset with all type-specific fields."""
         c, mock_es = client
@@ -224,7 +259,7 @@ class TestGetAssetById:
             imo_number="IMO-123",
             port_of_registry="Dubai",
         )
-        mock_es.get_document = AsyncMock(return_value=doc)
+        self._mock_search_for_doc(mock_es, doc)
 
         resp = c.get("/api/fleet/assets/VS-001")
         assert resp.status_code == 200
@@ -244,7 +279,7 @@ class TestGetAssetById:
             driver_id="D-001",
             driver_name="John Doe",
         )
-        mock_es.get_document = AsyncMock(return_value=doc)
+        self._mock_search_for_doc(mock_es, doc)
 
         resp = c.get("/api/fleet/assets/V-001")
         asset = resp.json()["data"]
@@ -261,7 +296,7 @@ class TestGetAssetById:
             container_size="40ft",
             weight_tonnes=25.5,
         )
-        mock_es.get_document = AsyncMock(return_value=doc)
+        self._mock_search_for_doc(mock_es, doc)
 
         resp = c.get("/api/fleet/assets/C-001")
         asset = resp.json()["data"]
@@ -278,7 +313,7 @@ class TestGetAssetById:
             lifting_capacity_tonnes=300.0,
             operational_radius_meters=60.0,
         )
-        mock_es.get_document = AsyncMock(return_value=doc)
+        self._mock_search_for_doc(mock_es, doc)
 
         resp = c.get("/api/fleet/assets/E-001")
         asset = resp.json()["data"]
@@ -289,7 +324,8 @@ class TestGetAssetById:
     def test_not_found_returns_404(self, client):
         """GET /fleet/assets/{id} returns 404 when asset doesn't exist."""
         c, mock_es = client
-        mock_es.get_document = AsyncMock(side_effect=Exception("Not found"))
+        # Route now uses search_documents with tenant filter; empty result → 404
+        mock_es.search_documents = AsyncMock(return_value=_es_search_response([]))
 
         resp = c.get("/api/fleet/assets/NONEXISTENT")
         assert resp.status_code == 404
@@ -302,12 +338,16 @@ class TestGetAssetById:
 class TestUpdateFleetAsset:
     """Validates: Requirement 6.3"""
 
+    def _mock_search_then_update(self, mock_es, doc):
+        """Helper: mock search_documents to return doc for verify + re-fetch steps."""
+        mock_es.search_documents = AsyncMock(return_value=_es_search_response([doc]))
+        mock_es.update_document = AsyncMock(return_value={"result": "updated"})
+
     def test_partial_update_status(self, client):
         """PATCH /fleet/assets/{id} updates only the provided fields."""
         c, mock_es = client
         updated_doc = _make_es_doc("V-001", status="idle")
-        mock_es.update_document = AsyncMock(return_value={"result": "updated"})
-        mock_es.get_document = AsyncMock(return_value=updated_doc)
+        self._mock_search_then_update(mock_es, updated_doc)
 
         resp = c.patch("/api/fleet/assets/V-001", json={"status": "idle"})
         assert resp.status_code == 200
@@ -325,8 +365,7 @@ class TestUpdateFleetAsset:
         """PATCH /fleet/assets/{id} can update the asset name."""
         c, mock_es = client
         updated_doc = _make_es_doc("V-001", asset_name="New Name")
-        mock_es.update_document = AsyncMock(return_value={"result": "updated"})
-        mock_es.get_document = AsyncMock(return_value=updated_doc)
+        self._mock_search_then_update(mock_es, updated_doc)
 
         resp = c.patch("/api/fleet/assets/V-001", json={"name": "New Name"})
         assert resp.status_code == 200
@@ -338,8 +377,7 @@ class TestUpdateFleetAsset:
         """PATCH /fleet/assets/{id} can update vessel-specific fields."""
         c, mock_es = client
         updated_doc = _make_es_doc("VS-001", "vessel", "boat", vessel_name="Updated Vessel")
-        mock_es.update_document = AsyncMock(return_value={"result": "updated"})
-        mock_es.get_document = AsyncMock(return_value=updated_doc)
+        self._mock_search_then_update(mock_es, updated_doc)
 
         resp = c.patch("/api/fleet/assets/VS-001", json={
             "vessel_name": "Updated Vessel",
@@ -365,8 +403,7 @@ class TestUpdateFleetAsset:
             plate_number="ABC-1234",
             status="idle",
         )
-        mock_es.update_document = AsyncMock(return_value={"result": "updated"})
-        mock_es.get_document = AsyncMock(return_value=updated_doc)
+        self._mock_search_then_update(mock_es, updated_doc)
 
         resp = c.patch("/api/fleet/assets/V-001", json={"status": "idle"})
         data = resp.json()["data"]
@@ -404,13 +441,15 @@ class TestGetTrucksBackwardCompat:
 
         call_args = mock_es.search_documents.call_args
         query = call_args[0][1]
-        should = query["query"]["bool"]["should"]
+        # The inner query is wrapped by inject_tenant_filter inside must[0]
+        inner = _extract_inner_query(query)
+        should = inner.get("bool", {}).get("should", [])
         # Should contain term for asset_subtype=truck
         assert {"term": {"asset_subtype": "truck"}} in should
         # Should contain must_not exists for legacy docs
         legacy_clause = {"bool": {"must_not": {"exists": {"field": "asset_type"}}}}
         assert legacy_clause in should
-        assert query["query"]["bool"]["minimum_should_match"] == 1
+        assert inner["bool"]["minimum_should_match"] == 1
 
     def test_queries_trucks_index(self, client):
         """GET /fleet/trucks queries the 'trucks' index directly."""
@@ -460,12 +499,22 @@ class TestGetFleetSummary:
     def test_includes_by_type_counts(self, client):
         """GET /fleet/summary includes byType breakdown."""
         c, mock_es = client
-        # Mock get_all_documents for the legacy truck summary
-        mock_es.get_all_documents = AsyncMock(return_value=[
-            {"status": "on_time"},
-            {"status": "delayed"},
+        # The summary endpoint now calls search_documents twice:
+        # 1) tenant-scoped truck query  2) tenant-scoped aggregation on assets
+        trucks_resp = _es_search_response([
+            {"_source": {"status": "on_time"}},
+            {"_source": {"status": "delayed"}},
         ])
-        # Mock search_documents for the aggregation query
+        # Fix: the route iterates hits and reads _source, so provide proper hits
+        trucks_resp = {
+            "hits": {
+                "hits": [
+                    {"_source": {"status": "on_time"}},
+                    {"_source": {"status": "delayed"}},
+                ],
+                "total": {"value": 2},
+            }
+        }
         agg_resp = _es_agg_response(
             total=10,
             active=6,
@@ -482,7 +531,8 @@ class TestGetFleetSummary:
                 {"key": "crane", "doc_count": 2},
             ],
         )
-        mock_es.search_documents = AsyncMock(return_value=agg_resp)
+        # First call = trucks query, second call = assets aggregation
+        mock_es.search_documents = AsyncMock(side_effect=[trucks_resp, agg_resp])
 
         resp = c.get("/api/fleet/summary")
         assert resp.status_code == 200
@@ -504,7 +554,7 @@ class TestGetFleetSummary:
     def test_includes_by_subtype_counts(self, client):
         """GET /fleet/summary includes bySubtype breakdown."""
         c, mock_es = client
-        mock_es.get_all_documents = AsyncMock(return_value=[])
+        trucks_resp = _es_search_response([])
         agg_resp = _es_agg_response(
             total=7,
             active=4,
@@ -515,7 +565,7 @@ class TestGetFleetSummary:
                 {"key": "fuel_truck", "doc_count": 2},
             ],
         )
-        mock_es.search_documents = AsyncMock(return_value=agg_resp)
+        mock_es.search_documents = AsyncMock(side_effect=[trucks_resp, agg_resp])
 
         resp = c.get("/api/fleet/summary")
         data = resp.json()["data"]
@@ -525,8 +575,11 @@ class TestGetFleetSummary:
     def test_agg_failure_returns_zeros(self, client):
         """GET /fleet/summary returns zero counts if aggregation fails."""
         c, mock_es = client
-        mock_es.get_all_documents = AsyncMock(return_value=[])
-        mock_es.search_documents = AsyncMock(side_effect=Exception("ES down"))
+        # First call (trucks) succeeds with empty result, second call (agg) fails
+        trucks_resp = _es_search_response([])
+        mock_es.search_documents = AsyncMock(
+            side_effect=[trucks_resp, Exception("ES down")]
+        )
 
         resp = c.get("/api/fleet/summary")
         assert resp.status_code == 200
@@ -540,13 +593,15 @@ class TestGetFleetSummary:
     def test_summary_queries_assets_alias(self, client):
         """GET /fleet/summary aggregation queries the 'assets' alias."""
         c, mock_es = client
-        mock_es.get_all_documents = AsyncMock(return_value=[])
+        trucks_resp = _es_search_response([])
         agg_resp = _es_agg_response(0, 0, 0, [], [])
-        mock_es.search_documents = AsyncMock(return_value=agg_resp)
+        mock_es.search_documents = AsyncMock(side_effect=[trucks_resp, agg_resp])
 
         c.get("/api/fleet/summary")
-        call_args = mock_es.search_documents.call_args
-        assert call_args[0][0] == "assets"
+        # The second call should be to the 'assets' alias
+        calls = mock_es.search_documents.call_args_list
+        assert len(calls) == 2
+        assert calls[1][0][0] == "assets"
 
 
 # ---------------------------------------------------------------------------
@@ -555,6 +610,10 @@ class TestGetFleetSummary:
 
 class TestFormatAsset:
     """Validates: Requirement 2.6 — consistent asset_type/asset_subtype in responses."""
+
+    def _mock_search_for_doc(self, mock_es, doc):
+        """Helper: mock search_documents to return a single doc (tenant-scoped lookup)."""
+        mock_es.search_documents = AsyncMock(return_value=_es_search_response([doc]))
 
     def test_vehicle_format(self, client):
         """_format_asset maps vehicle ES fields to camelCase response fields."""
@@ -565,7 +624,7 @@ class TestFormatAsset:
             driver_id="D-001",
             driver_name="John Doe",
         )
-        mock_es.get_document = AsyncMock(return_value=doc)
+        self._mock_search_for_doc(mock_es, doc)
 
         resp = c.get("/api/fleet/assets/V-001")
         asset = resp.json()["data"]
@@ -585,7 +644,7 @@ class TestFormatAsset:
             draft_meters=4.5,
             vessel_capacity_tonnes=1000.0,
         )
-        mock_es.get_document = AsyncMock(return_value=doc)
+        self._mock_search_for_doc(mock_es, doc)
 
         resp = c.get("/api/fleet/assets/VS-001")
         asset = resp.json()["data"]
@@ -604,7 +663,7 @@ class TestFormatAsset:
             lifting_capacity_tonnes=300.0,
             operational_radius_meters=60.0,
         )
-        mock_es.get_document = AsyncMock(return_value=doc)
+        self._mock_search_for_doc(mock_es, doc)
 
         resp = c.get("/api/fleet/assets/E-001")
         asset = resp.json()["data"]
@@ -623,7 +682,7 @@ class TestFormatAsset:
             contents_description="Electronics",
             weight_tonnes=25.5,
         )
-        mock_es.get_document = AsyncMock(return_value=doc)
+        self._mock_search_for_doc(mock_es, doc)
 
         resp = c.get("/api/fleet/assets/C-001")
         asset = resp.json()["data"]
@@ -646,7 +705,7 @@ class TestFormatAsset:
             "route": {},
             "last_update": "2025-01-01T12:00:00",
         }
-        mock_es.get_document = AsyncMock(return_value=doc)
+        self._mock_search_for_doc(mock_es, doc)
 
         resp = c.get("/api/fleet/assets/T-LEGACY")
         asset = resp.json()["data"]

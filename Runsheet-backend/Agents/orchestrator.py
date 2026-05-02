@@ -177,6 +177,26 @@ class AgentOrchestrator:
     # Intent classification
     # ------------------------------------------------------------------
 
+    def _classify_intent_keywords(self, message: str) -> List[str]:
+        """Synchronous keyword-based intent classification.
+
+        Scans the message for keywords from the routing table and returns
+        the list of matched domain names.  This is the fast path used by
+        ``_is_complex_request`` and can be called without ``await``.
+
+        Args:
+            message: The user's natural language message.
+
+        Returns:
+            List of matched domain names (may be empty).
+        """
+        message_lower = message.lower()
+        matched: List[str] = []
+        for domain, keywords in self.ROUTING_TABLE.items():
+            if any(kw in message_lower for kw in keywords):
+                matched.append(domain)
+        return matched
+
     async def _classify_intent(self, message: str) -> List[str]:
         """Hybrid intent classification: keywords first, LLM fallback.
 
@@ -191,11 +211,7 @@ class AgentOrchestrator:
             List of matched domain names (may be empty).
         """
         # Step 1: Fast keyword matching
-        message_lower = message.lower()
-        matched: List[str] = []
-        for domain, keywords in self.ROUTING_TABLE.items():
-            if any(kw in message_lower for kw in keywords):
-                matched.append(domain)
+        matched = self._classify_intent_keywords(message)
 
         if matched:
             return matched
@@ -251,7 +267,7 @@ class AgentOrchestrator:
             indicator in message_lower
             for indicator in self._COMPLEX_INDICATORS
         )
-        targets = self._classify_intent(message)
+        targets = self._classify_intent_keywords(message)
         return has_conjunction and len(targets) > 1
 
     # ------------------------------------------------------------------

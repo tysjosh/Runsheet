@@ -180,61 +180,61 @@ class TestClassifyIntent:
 
     def test_single_fleet_keyword(self):
         orch = _make_orchestrator()
-        result = orch._classify_intent("Show me all trucks")
+        result = orch._classify_intent_keywords("Show me all trucks")
         assert "fleet" in result
 
     def test_single_scheduling_keyword(self):
         orch = _make_orchestrator()
-        result = orch._classify_intent("List all active jobs")
+        result = orch._classify_intent_keywords("List all active jobs")
         assert "scheduling" in result
 
     def test_single_fuel_keyword(self):
         orch = _make_orchestrator()
-        result = orch._classify_intent("Check fuel levels")
+        result = orch._classify_intent_keywords("Check fuel levels")
         assert "fuel" in result
 
     def test_single_ops_keyword(self):
         orch = _make_orchestrator()
-        result = orch._classify_intent("Track this shipment")
+        result = orch._classify_intent_keywords("Track this shipment")
         assert "ops" in result
 
     def test_single_reporting_keyword(self):
         orch = _make_orchestrator()
-        result = orch._classify_intent("Generate a report")
+        result = orch._classify_intent_keywords("Generate a report")
         assert "reporting" in result
 
     def test_multiple_domains_matched(self):
         orch = _make_orchestrator()
-        result = orch._classify_intent("Show truck fuel consumption")
+        result = orch._classify_intent_keywords("Show truck fuel consumption")
         assert "fleet" in result
         assert "fuel" in result
 
     def test_case_insensitive(self):
         orch = _make_orchestrator()
-        result = orch._classify_intent("SHOW ME ALL TRUCKS")
+        result = orch._classify_intent_keywords("SHOW ME ALL TRUCKS")
         assert "fleet" in result
 
     def test_no_match_returns_empty(self):
         orch = _make_orchestrator()
-        result = orch._classify_intent("hello how are you")
+        result = orch._classify_intent_keywords("hello how are you")
         assert result == []
 
     def test_partial_keyword_match(self):
         orch = _make_orchestrator()
         # "trucks" contains "truck"
-        result = orch._classify_intent("Where are the trucks?")
+        result = orch._classify_intent_keywords("Where are the trucks?")
         assert "fleet" in result
 
     def test_multiple_keywords_same_domain(self):
         orch = _make_orchestrator()
-        result = orch._classify_intent("Find vehicle at location")
+        result = orch._classify_intent_keywords("Find vehicle at location")
         assert "fleet" in result
         # Should only appear once
         assert result.count("fleet") == 1
 
     def test_all_domains_matched(self):
         orch = _make_orchestrator()
-        result = orch._classify_intent(
+        result = orch._classify_intent_keywords(
             "Show truck job fuel shipment report"
         )
         assert len(result) == 5

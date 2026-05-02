@@ -69,6 +69,7 @@ class TestAgentApprovalQueueMapping:
             "risk_level", "proposed_by", "proposed_at", "status",
             "reviewed_by", "reviewed_at", "expiry_time",
             "impact_summary", "execution_result", "tenant_id",
+            "created_at", "updated_at",
         }
         assert set(props.keys()) == expected_fields
 
@@ -112,6 +113,7 @@ class TestAgentActivityLogMapping:
             "log_id", "agent_id", "action_type", "tool_name",
             "parameters", "risk_level", "outcome", "duration_ms",
             "tenant_id", "user_id", "session_id", "timestamp", "details",
+            "created_at", "updated_at",
         }
         assert set(props.keys()) == expected_fields
 
@@ -157,6 +159,7 @@ class TestAgentMemoryMapping:
             "memory_id", "memory_type", "agent_id", "tenant_id",
             "content", "confidence_score", "created_at",
             "last_accessed", "access_count", "tags",
+            "updated_at",
         }
         assert set(props.keys()) == expected_fields
 
@@ -196,6 +199,7 @@ class TestAgentFeedbackMapping:
             "feedback_id", "agent_id", "action_type",
             "original_proposal", "user_action", "feedback_type",
             "tenant_id", "user_id", "timestamp", "context",
+            "created_at", "updated_at",
         }
         assert set(props.keys()) == expected_fields
 

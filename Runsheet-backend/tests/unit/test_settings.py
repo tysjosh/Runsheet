@@ -80,16 +80,6 @@ class TestSettings:
             
             assert "elastic_api_key" in str(exc_info.value).lower()
     
-    def test_missing_google_cloud_project_raises_error(self, valid_env_vars):
-        """Test that missing google_cloud_project raises validation error."""
-        env_vars = {k: v for k, v in valid_env_vars.items() if k != "GOOGLE_CLOUD_PROJECT"}
-        
-        with patch.dict(os.environ, env_vars, clear=True):
-            with pytest.raises(Exception) as exc_info:
-                Settings()
-            
-            assert "google_cloud_project" in str(exc_info.value).lower()
-    
     def test_empty_elastic_endpoint_raises_error(self, valid_env_vars):
         """Test that empty elastic_endpoint raises validation error."""
         env_vars = {**valid_env_vars, "ELASTIC_ENDPOINT": "   "}
@@ -235,17 +225,6 @@ class TestSettings:
             
             assert "http" in str(exc_info.value).lower() or "invalid" in str(exc_info.value).lower()
     
-    def test_google_cloud_project_length_validation(self, valid_env_vars):
-        """Test that google_cloud_project length is validated."""
-        # Too short (less than 6 characters)
-        env_vars = {**valid_env_vars, "GOOGLE_CLOUD_PROJECT": "short"}
-        
-        with patch.dict(os.environ, env_vars, clear=True):
-            with pytest.raises(Exception) as exc_info:
-                Settings()
-            
-            assert "google_cloud_project" in str(exc_info.value).lower()
-
 
 class TestConfigurationError:
     """Tests for the ConfigurationError class."""

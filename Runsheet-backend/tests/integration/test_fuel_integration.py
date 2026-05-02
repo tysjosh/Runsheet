@@ -157,7 +157,7 @@ class TestFuelConsumptionFlow:
         self.mock_es.index_document = AsyncMock(return_value=None)
 
         resp = self.client.post(
-            "/fuel/stations",
+            "/api/fuel/stations",
             json={
                 "station_id": "STN-001",
                 "name": "Industrial Depot",
@@ -197,7 +197,7 @@ class TestFuelConsumptionFlow:
         self.mock_es.update_document = AsyncMock(return_value=None)
 
         resp = self.client.post(
-            "/fuel/consumption",
+            "/api/fuel/consumption",
             json={
                 "station_id": "STN-001",
                 "fuel_type": "AGO",
@@ -243,7 +243,7 @@ class TestFuelConsumptionFlow:
 
         # Consume 1500 liters → stock becomes 9000 / 50000 = 18% (below 20% threshold)
         resp = self.client.post(
-            "/fuel/consumption",
+            "/api/fuel/consumption",
             json={
                 "station_id": "STN-001",
                 "fuel_type": "AGO",
@@ -266,7 +266,7 @@ class TestFuelConsumptionFlow:
         )
 
         resp = self.client.post(
-            "/fuel/consumption",
+            "/api/fuel/consumption",
             json={
                 "station_id": "STN-001",
                 "fuel_type": "AGO",
@@ -309,7 +309,7 @@ class TestFuelRefillFlow:
 
         # Refill 40000 liters → stock becomes 5000 + 40000 = 45000 / 50000 = 90%
         resp = self.client.post(
-            "/fuel/refill",
+            "/api/fuel/refill",
             json={
                 "station_id": "STN-001",
                 "fuel_type": "AGO",
@@ -338,7 +338,7 @@ class TestFuelRefillFlow:
 
         # Station has 30000 stock, capacity 50000 → refill 25000 would overflow
         resp = self.client.post(
-            "/fuel/refill",
+            "/api/fuel/refill",
             json={
                 "station_id": "STN-001",
                 "fuel_type": "AGO",
@@ -359,7 +359,7 @@ class TestFuelRefillFlow:
 
         # Refill only 1000 liters → stock becomes 6000 / 50000 = 12% (still below 20%)
         resp = self.client.post(
-            "/fuel/refill",
+            "/api/fuel/refill",
             json={
                 "station_id": "STN-001",
                 "fuel_type": "AGO",
@@ -414,7 +414,7 @@ class TestFuelMetricsIntegration:
             )
         )
 
-        resp = self.client.get("/fuel/metrics/consumption?bucket=daily")
+        resp = self.client.get("/api/fuel/metrics/consumption?bucket=daily")
         assert resp.status_code == 200
         data = resp.json()["data"]
         assert len(data) == 2
@@ -429,7 +429,7 @@ class TestFuelMetricsIntegration:
         )
 
         resp = self.client.get(
-            "/fuel/metrics/consumption?bucket=hourly&station_id=STN-001&fuel_type=AGO"
+            "/api/fuel/metrics/consumption?bucket=hourly&station_id=STN-001&fuel_type=AGO"
         )
         assert resp.status_code == 200
 
@@ -462,7 +462,7 @@ class TestFuelMetricsIntegration:
             )
         )
 
-        resp = self.client.get("/fuel/metrics/efficiency")
+        resp = self.client.get("/api/fuel/metrics/efficiency")
         assert resp.status_code == 200
         data = resp.json()["data"]
         assert len(data) == 1
@@ -492,7 +492,7 @@ class TestFuelMetricsIntegration:
             )
         )
 
-        resp = self.client.get("/fuel/metrics/summary")
+        resp = self.client.get("/api/fuel/metrics/summary")
         assert resp.status_code == 200
         data = resp.json()["data"]
         assert data["total_stations"] == 5
@@ -518,7 +518,7 @@ class TestFuelMetricsIntegration:
             return_value=_es_search_response([alert_station])
         )
 
-        resp = self.client.get("/fuel/alerts")
+        resp = self.client.get("/api/fuel/alerts")
         assert resp.status_code == 200
         data = resp.json()["data"]
         assert len(data) == 1

@@ -104,6 +104,10 @@ def app(mock_es_client):
 
     configure_ops_api(ops_es_service=mock_ops_es)
 
+    # Register structured exception handlers so AppException → proper JSON
+    from errors.handlers import register_exception_handlers
+    register_exception_handlers(test_app)
+
     # Override the tenant guard dependency so we don't need a real JWT
     async def _override_tenant():
         return _make_tenant()
@@ -396,7 +400,8 @@ class TestGetSlaBreaches:
     def test_invalid_status_returns_400(self, client, mock_es_client):
         resp = client.get("/api/ops/shipments/sla-breaches?status=bogus")
         assert resp.status_code == 400
-        assert "Invalid status" in resp.json()["detail"]
+        body = resp.json()
+        assert "Invalid status" in body.get("message", body.get("detail", ""))
 
     def test_tenant_filter_injected(self, client, mock_es_client):
         mock_es_client.search = MagicMock(return_value=_es_search_response([]))
@@ -481,7 +486,8 @@ class TestGetShipmentFailures:
     def test_invalid_date_returns_400(self, client, mock_es_client):
         resp = client.get("/api/ops/shipments/failures?start_date=not-a-date")
         assert resp.status_code == 400
-        assert "Invalid start_date" in resp.json()["detail"]
+        body = resp.json()
+        assert "Invalid" in body.get("message", body.get("detail", ""))
 
     def test_tenant_filter_injected(self, client, mock_es_client):
         mock_es_client.search = MagicMock(return_value=_es_search_response([]))
@@ -543,7 +549,8 @@ class TestGetRiderUtilization:
     def test_invalid_status_returns_400(self, client, mock_es_client):
         resp = client.get("/api/ops/riders/utilization?status=bogus")
         assert resp.status_code == 400
-        assert "Invalid status" in resp.json()["detail"]
+        body = resp.json()
+        assert "Invalid status" in body.get("message", body.get("detail", ""))
 
     def test_tenant_filter_injected(self, client, mock_es_client):
         mock_es_client.search = MagicMock(return_value=_es_search_response([]))

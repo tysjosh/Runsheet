@@ -86,13 +86,17 @@ def _build_app(tenant_id: str = TENANT_A, pii_access: bool = False):
     app = FastAPI()
 
     mock_es_client = MagicMock()
-    mock_es_client.search = AsyncMock(return_value=_es_search_response([]))
+    mock_es_client.search = MagicMock(return_value=_es_search_response([]))
 
     mock_ops_es = MagicMock(spec=OpsElasticsearchService)
     mock_ops_es.client = mock_es_client
 
     # No feature flag service → require_ops_enabled passes through
     configure_ops_api(ops_es_service=mock_ops_es, feature_flag_service=None)
+
+    # Register structured exception handlers so AppException → proper JSON
+    from errors.handlers import register_exception_handlers
+    register_exception_handlers(app)
 
     tenant_ctx = TenantContext(
         tenant_id=tenant_id, user_id="user-1", has_pii_access=pii_access
@@ -134,10 +138,10 @@ class TestOpsApiEndpointIntegration:
         self.client, self.mock_es = _build_app(TENANT_A)
 
     def test_list_shipments_returns_envelope(self):
-        self.mock_es.search = AsyncMock(
+        self.mock_es.search = MagicMock(
             return_value=_es_search_response(SHIPMENTS_A, total=3)
         )
-        resp = self.client.get("/ops/shipments")
+        resp = self.client.get("/api/ops/shipments")
         assert resp.status_code == 200
         body = resp.json()
         assert "data" in body
@@ -146,10 +150,10 @@ class TestOpsApiEndpointIntegration:
         assert body["request_id"] == "req-integ-001"
 
     def test_list_shipments_pagination_meta(self):
-        self.mock_es.search = AsyncMock(
+        self.mock_es.search = MagicMock(
             return_value=_es_search_response(SHIPMENTS_A[:2], total=3)
         )
-        resp = self.client.get("/ops/shipments?page=1&size=2")
+        resp = self.client.get("/api/ops/shipments?page=1&size=2")
         body = resp.json()
         pag = body["pagination"]
         assert pag["page"] == 1
@@ -160,23 +164,23 @@ class TestOpsApiEndpointIntegration:
     def test_get_single_shipment(self):
         """GET /ops/shipments/{id} returns shipment with event history."""
         # The endpoint calls search twice: once for shipment, once for events
-        self.mock_es.search = AsyncMock(
+        self.mock_es.search = MagicMock(
             side_effect=[
                 _es_search_response([SHIPMENTS_A[0]], total=1),
                 _es_search_response(EVENTS_A, total=2),
             ]
         )
-        resp = self.client.get("/ops/shipments/SHP-A-001")
+        resp = self.client.get("/api/ops/shipments/SHP-A-001")
         assert resp.status_code == 200
         body = resp.json()
         assert "data" in body
         assert "request_id" in body
 
     def test_list_riders_returns_envelope(self):
-        self.mock_es.search = AsyncMock(
+        self.mock_es.search = MagicMock(
             return_value=_es_search_response(RIDERS_A, total=2)
         )
-        resp = self.client.get("/ops/riders")
+        resp = self.client.get("/api/ops/riders")
         assert resp.status_code == 200
         body = resp.json()
         assert "data" in body
@@ -184,20 +188,20 @@ class TestOpsApiEndpointIntegration:
 
     def test_get_single_rider(self):
         """GET /ops/riders/{id} returns rider with assigned shipments."""
-        self.mock_es.search = AsyncMock(
+        self.mock_es.search = MagicMock(
             side_effect=[
                 _es_search_response([RIDERS_A[0]], total=1),
                 _es_search_response(SHIPMENTS_A[:1], total=1),
             ]
         )
-        resp = self.client.get("/ops/riders/RDR-A-1")
+        resp = self.client.get("/api/ops/riders/RDR-A-1")
         assert resp.status_code == 200
 
     def test_list_events_returns_envelope(self):
-        self.mock_es.search = AsyncMock(
+        self.mock_es.search = MagicMock(
             return_value=_es_search_response(EVENTS_A, total=2)
         )
-        resp = self.client.get("/ops/events")
+        resp = self.client.get("/api/ops/events")
         assert resp.status_code == 200
         body = resp.json()
         assert "data" in body
@@ -224,35 +228,35 @@ class TestTenantIsolation:
 
     def test_shipments_query_scoped_to_tenant_a(self):
         client, mock_es = _build_app(TENANT_A)
-        mock_es.search = AsyncMock(return_value=_es_search_response([]))
-        client.get("/ops/shipments")
+        mock_es.search = MagicMock(return_value=_es_search_response([]))
+        client.get("/api/ops/shipments")
         assert self._extract_tenant_filter(mock_es) == TENANT_A
 
     def test_shipments_query_scoped_to_tenant_b(self):
         client, mock_es = _build_app(TENANT_B)
-        mock_es.search = AsyncMock(return_value=_es_search_response([]))
-        client.get("/ops/shipments")
+        mock_es.search = MagicMock(return_value=_es_search_response([]))
+        client.get("/api/ops/shipments")
         assert self._extract_tenant_filter(mock_es) == TENANT_B
 
     def test_riders_query_scoped_to_tenant(self):
         client, mock_es = _build_app(TENANT_A)
-        mock_es.search = AsyncMock(return_value=_es_search_response([]))
-        client.get("/ops/riders")
+        mock_es.search = MagicMock(return_value=_es_search_response([]))
+        client.get("/api/ops/riders")
         assert self._extract_tenant_filter(mock_es) == TENANT_A
 
     def test_events_query_scoped_to_tenant(self):
         client, mock_es = _build_app(TENANT_A)
-        mock_es.search = AsyncMock(return_value=_es_search_response([]))
-        client.get("/ops/events")
+        mock_es.search = MagicMock(return_value=_es_search_response([]))
+        client.get("/api/ops/events")
         assert self._extract_tenant_filter(mock_es) == TENANT_A
 
     def test_tenant_a_cannot_see_tenant_b_data(self):
         """Tenant A's query never includes tenant B's ID in the filter."""
         client, mock_es = _build_app(TENANT_A)
-        mock_es.search = AsyncMock(
+        mock_es.search = MagicMock(
             return_value=_es_search_response(SHIPMENTS_A, total=3)
         )
-        resp = client.get("/ops/shipments")
+        resp = client.get("/api/ops/shipments")
         body = resp.json()
         for item in body["data"]:
             assert item.get("tenant_id") == TENANT_A
@@ -271,24 +275,24 @@ class TestFilterCombinations:
         self.client, self.mock_es = _build_app(TENANT_A)
 
     def test_status_filter(self):
-        self.mock_es.search = AsyncMock(return_value=_es_search_response([]))
-        self.client.get("/ops/shipments?status=delivered")
+        self.mock_es.search = MagicMock(return_value=_es_search_response([]))
+        self.client.get("/api/ops/shipments?status=delivered")
         call_body = self.mock_es.search.call_args.kwargs["body"]
         must_clauses = call_body["query"]["bool"]["must"]
         inner_must = must_clauses[0]["bool"]["must"]
         assert any(f.get("term", {}).get("status") == "delivered" for f in inner_must)
 
     def test_rider_id_filter(self):
-        self.mock_es.search = AsyncMock(return_value=_es_search_response([]))
-        self.client.get("/ops/shipments?rider_id=RDR-A-1")
+        self.mock_es.search = MagicMock(return_value=_es_search_response([]))
+        self.client.get("/api/ops/shipments?rider_id=RDR-A-1")
         call_body = self.mock_es.search.call_args.kwargs["body"]
         must_clauses = call_body["query"]["bool"]["must"]
         inner_must = must_clauses[0]["bool"]["must"]
         assert any(f.get("term", {}).get("rider_id") == "RDR-A-1" for f in inner_must)
 
     def test_date_range_filter(self):
-        self.mock_es.search = AsyncMock(return_value=_es_search_response([]))
-        self.client.get("/ops/shipments?start_date=2025-01-01&end_date=2025-01-31")
+        self.mock_es.search = MagicMock(return_value=_es_search_response([]))
+        self.client.get("/api/ops/shipments?start_date=2025-01-01&end_date=2025-01-31")
         call_body = self.mock_es.search.call_args.kwargs["body"]
         must_clauses = call_body["query"]["bool"]["must"]
         inner_must = must_clauses[0]["bool"]["must"]
@@ -297,8 +301,8 @@ class TestFilterCombinations:
 
     def test_combined_status_and_rider_filter(self):
         """Combining status + rider_id produces both filters in the query."""
-        self.mock_es.search = AsyncMock(return_value=_es_search_response([]))
-        self.client.get("/ops/shipments?status=in_transit&rider_id=RDR-A-1")
+        self.mock_es.search = MagicMock(return_value=_es_search_response([]))
+        self.client.get("/api/ops/shipments?status=in_transit&rider_id=RDR-A-1")
         call_body = self.mock_es.search.call_args.kwargs["body"]
         must_clauses = call_body["query"]["bool"]["must"]
         inner_must = must_clauses[0]["bool"]["must"]
@@ -307,21 +311,21 @@ class TestFilterCombinations:
         assert has_status and has_rider
 
     def test_invalid_status_returns_400(self):
-        resp = self.client.get("/ops/shipments?status=nonexistent")
+        resp = self.client.get("/api/ops/shipments?status=nonexistent")
         assert resp.status_code == 400
 
     def test_pagination_total_pages_calculation(self):
-        self.mock_es.search = AsyncMock(
+        self.mock_es.search = MagicMock(
             return_value=_es_search_response([SHIPMENTS_A[0]], total=50)
         )
-        resp = self.client.get("/ops/shipments?page=3&size=10")
+        resp = self.client.get("/api/ops/shipments?page=3&size=10")
         body = resp.json()
         assert body["pagination"]["total_pages"] == math.ceil(50 / 10)
         assert body["pagination"]["page"] == 3
 
     def test_sort_order(self):
-        self.mock_es.search = AsyncMock(return_value=_es_search_response([]))
-        self.client.get("/ops/shipments?sort_by=created_at&sort_order=asc")
+        self.mock_es.search = MagicMock(return_value=_es_search_response([]))
+        self.client.get("/api/ops/shipments?sort_by=created_at&sort_order=asc")
         call_body = self.mock_es.search.call_args.kwargs["body"]
         assert call_body["sort"] == [{"created_at": {"order": "asc"}}]
 
@@ -338,22 +342,22 @@ class TestFilteredEndpoints:
         self.client, self.mock_es = _build_app(TENANT_A)
 
     def test_sla_breaches_endpoint(self):
-        self.mock_es.search = AsyncMock(return_value=_es_search_response([], total=0))
-        resp = self.client.get("/ops/shipments/sla-breaches")
+        self.mock_es.search = MagicMock(return_value=_es_search_response([], total=0))
+        resp = self.client.get("/api/ops/shipments/sla-breaches")
         assert resp.status_code == 200
         body = resp.json()
         assert "data" in body
 
     def test_shipment_failures_endpoint(self):
-        self.mock_es.search = AsyncMock(return_value=_es_search_response([], total=0))
-        resp = self.client.get("/ops/shipments/failures")
+        self.mock_es.search = MagicMock(return_value=_es_search_response([], total=0))
+        resp = self.client.get("/api/ops/shipments/failures")
         assert resp.status_code == 200
         body = resp.json()
         assert "data" in body
 
     def test_rider_utilization_endpoint(self):
-        self.mock_es.search = AsyncMock(return_value=_es_search_response([], total=0))
-        resp = self.client.get("/ops/riders/utilization")
+        self.mock_es.search = MagicMock(return_value=_es_search_response([], total=0))
+        resp = self.client.get("/api/ops/riders/utilization")
         assert resp.status_code == 200
         body = resp.json()
         assert "data" in body
