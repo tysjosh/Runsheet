@@ -112,7 +112,11 @@ export type MetricsBucket = "hourly" | "daily";
 
 export interface MetricsBucketEntry {
   timestamp: string;
-  count: number;
+  /** Backend returns `values` dict with `total` key and per-status counts */
+  values?: Record<string, number>;
+  /** Derived total count (may be populated from values.total) */
+  count?: number;
+  /** Derived per-status breakdown (may be populated from values minus total) */
   breakdown?: Record<string, number>;
 }
 
@@ -122,6 +126,16 @@ export interface MetricsResponse {
   start_date: string;
   end_date: string;
   request_id: string;
+}
+
+// ─── SLA Types ────────────────────────────────────────────────────────────────
+
+export interface SlaMetric {
+  category: string;
+  total_shipments: number;
+  on_time: number;
+  breached: number;
+  compliance_rate: number;
 }
 
 // ─── Monitoring Types ────────────────────────────────────────────────────────
@@ -321,6 +335,22 @@ export async function getFailureMetrics(
 ): Promise<MetricsResponse> {
   const qs = buildQueryString(filters);
   return opsRequest<MetricsResponse>(`/ops/metrics/failures${qs}`);
+}
+
+/** GET /ops/metrics/shipments — shipment volume by status in time buckets */
+export async function getShipmentMetrics(
+  filters: MetricsFilters = {},
+): Promise<MetricsResponse> {
+  const qs = buildQueryString(filters);
+  return opsRequest<MetricsResponse>(`/ops/metrics/shipments${qs}`);
+}
+
+/** GET /ops/metrics/sla — SLA compliance metrics (time-bucketed like shipment metrics) */
+export async function getSlaMetrics(
+  filters: MetricsFilters = {},
+): Promise<MetricsResponse> {
+  const qs = buildQueryString(filters);
+  return opsRequest<MetricsResponse>(`/ops/metrics/sla${qs}`);
 }
 
 // ─── Monitoring Endpoints ────────────────────────────────────────────────────

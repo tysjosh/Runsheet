@@ -5,6 +5,7 @@ import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import LoadingSpinner from "../../../components/LoadingSpinner";
 import CreateJobModal from "../../../components/ops/CreateJobModal";
 import JobBoard from "../../../components/ops/JobBoard";
+import JobDetailPage from "../../../components/ops/JobDetailPage";
 import JobFilters, {
   type JobFilterValues,
 } from "../../../components/ops/JobFilters";
@@ -43,6 +44,7 @@ export default function SchedulingJobBoardPage() {
   const [filters, setFilters] = useState<JobFilterValues>(INITIAL_FILTERS);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showCargoSearch, setShowCargoSearch] = useState(false);
+  const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
 
   const loadData = useCallback(async () => {
     try {
@@ -153,6 +155,17 @@ export default function SchedulingJobBoardPage() {
     return <LoadingSpinner message="Loading jobs..." />;
   }
 
+  // Sub-navigation: show job detail when a job is selected
+  if (selectedJobId) {
+    return (
+      <JobDetailPage
+        jobId={selectedJobId}
+        onBack={() => setSelectedJobId(null)}
+        onTransition={handleTransition}
+      />
+    );
+  }
+
   return (
     <div className="h-full flex flex-col bg-white">
       {/* Header */}
@@ -207,7 +220,7 @@ export default function SchedulingJobBoardPage() {
 
       {/* Board */}
       <div className="flex-1 overflow-y-auto">
-        <JobBoard jobs={jobs} onTransition={handleTransition} />
+        <JobBoard jobs={jobs} onTransition={handleTransition} onSelectJob={setSelectedJobId} />
       </div>
 
       {/* Cargo Search — collapsible section */}

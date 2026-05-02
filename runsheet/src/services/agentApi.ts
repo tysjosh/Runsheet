@@ -347,3 +347,68 @@ export async function deleteMemory(
     { method: "DELETE" },
   );
 }
+
+// ─── Feedback Types ──────────────────────────────────────────────────────────
+
+export interface FeedbackEntry {
+  feedback_id: string;
+  action_id: string;
+  feedback_type: "positive" | "negative" | "correction";
+  comment?: string;
+  created_at: string;
+  tenant_id: string;
+}
+
+export interface FeedbackStats {
+  tenant_id?: string;
+  total_feedback: number;
+  rejection_count: number;
+  override_count: number;
+  rejection_rate: number;
+  rejections_per_agent?: Record<string, number>;
+  common_action_types?: Record<string, number>;
+  /** Derived fields for backward compat */
+  total_actions?: number;
+  approval_rate?: number;
+}
+
+export interface FeedbackFilters {
+  tenant_id?: string;
+  feedback_type?: string;
+  start_date?: string;
+  end_date?: string;
+  page?: number;
+  size?: number;
+}
+
+export interface PaginatedFeedback {
+  entries: FeedbackEntry[];
+  total: number;
+  page: number;
+  size: number;
+}
+
+// ─── Feedback Endpoints ──────────────────────────────────────────────────────
+
+/** GET /agent/feedback — paginated feedback list with filters */
+export async function getFeedback(
+  filters: FeedbackFilters = {},
+): Promise<PaginatedFeedback> {
+  const qs = buildQueryString({
+    tenant_id: filters.tenant_id ?? "default",
+    feedback_type: filters.feedback_type,
+    start_date: filters.start_date,
+    end_date: filters.end_date,
+    page: filters.page ?? 1,
+    size: filters.size ?? 20,
+  });
+  return agentRequest<PaginatedFeedback>(`/feedback${qs}`);
+}
+
+/** GET /agent/feedback/stats — feedback statistics */
+export async function getFeedbackStats(
+  tenantId: string = "default",
+): Promise<FeedbackStats> {
+  const qs = buildQueryString({ tenant_id: tenantId });
+  return agentRequest<FeedbackStats>(`/feedback/stats${qs}`);
+}

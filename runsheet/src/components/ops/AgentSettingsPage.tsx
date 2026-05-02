@@ -1,11 +1,12 @@
 "use client";
 
 /**
- * Agent Settings page — Autonomy Configuration & Memory Management.
+ * Agent Settings page — Autonomy Configuration, Memory Management & Feedback.
  *
- * Two-section layout:
+ * Three-section layout:
  * - Autonomy: Display/update autonomy level with radio options and confirm button
  * - Memory: Paginated list with type/tag filters and delete with confirmation
+ * - Feedback: Paginated feedback entries with stats cards and type/date filters
  *
  * Validates:
  * - Requirement 3.1: Display current autonomy level for the tenant
@@ -18,18 +19,30 @@
  * - Requirement 4.3: Delete with confirmation dialog
  * - Requirement 4.4: Remove entry from list on success without full reload
  * - Requirement 4.5: Handle 404 on delete with "memory not found" message
+ * - Requirement 7.1: Feedback section below Memory Management
+ * - Requirement 7.2: Paginated feedback entries from GET /agent/feedback
+ * - Requirement 7.3: Feedback stats (approval rate, rejection rate, total actions)
+ * - Requirement 7.4: Filter controls for feedback type and date range
+ * - Requirement 7.5: Load both feedback list and stats on mount
+ * - Requirement 7.6: Inline error message on feedback API failure
+ * - Requirement 7.7: Retain existing autonomy and memory functionality
  */
 
 import {
+  BarChart3,
   Brain,
+  Calendar,
   ChevronLeft,
   ChevronRight,
   Filter,
   Loader2,
+  MessageSquare,
   Settings,
   Shield,
   ShieldAlert,
   Tag,
+  ThumbsDown,
+  ThumbsUp,
   Trash2,
   X,
 } from "lucide-react";
@@ -38,13 +51,19 @@ import { ApiError } from "../../services/api";
 import type {
   AutonomyLevel,
   AutonomyUpdateResponse,
+  FeedbackEntry,
+  FeedbackFilters,
+  FeedbackStats,
   MemoryEntry,
   MemoryFilters,
+  PaginatedFeedback,
   PaginatedMemories,
 } from "../../services/agentApi";
 import {
   deleteMemory,
   getAutonomyLevel,
+  getFeedback,
+  getFeedbackStats,
   getMemories,
   updateAutonomyLevel,
 } from "../../services/agentApi";
@@ -374,8 +393,8 @@ function MemorySection() {
       if (tagsFilter.trim()) filters.tags = tagsFilter.trim();
 
       const result = await getMemories(filters) as any;
-      setMemories(result.entries ?? result.items ?? []);
-      setTotal(result.total ?? 0);
+      setMemories(result.entries ?? result.items ?? result.data ?? []);
+      setTotal(result.total ?? result.pagination?.total ?? 0);
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "Failed to load memories",
@@ -585,6 +604,285 @@ function MemorySection() {
   );
 }
 
+// ─── Feedback Section ────────────────────────────────────────────────────────
+
+const FEEDBACK_PAGE_SIZE = 10;
+
+function FeedbackSection() {
+  const [entries, setEntries] = useState<FeedbackEntry[]>([]);
+  const [stats, setStats] = useState<FeedbackStats | null>(null);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  // Filters
+  const [typeFilter, setTypeFilter] = useState("");
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
+
+  const totalPages = Math.max(1, Math.ceil(total / FEEDBACK_PAGE_SIZE));
+
+  const loadFeedback = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const filters: FeedbackFilters = {
+        tenant_id: TENANT_ID,
+        page,
+        size: FEEDBACK_PAGE_SIZE,
+      };
+      if (typeFilter) filters.feedback_type = typeFilter;
+      if (startDate) filters.start_date = startDate;
+      if (endDate) filters.end_date = endDate;
+
+      const [feedbackResult, statsResult] = await Promise.allSettled([
+        getFeedback(filters),
+        getFeedbackStats(TENANT_ID),
+      ]);
+
+      if (feedbackResult.status === "fulfilled") {
+        setEntries(feedbackResult.value.entries ?? []);
+        setTotal(feedbackResult.value.total ?? 0);
+      } else {
+        throw feedbackResult.reason;
+      }
+
+      if (statsResult.status === "fulfilled") {
+        setStats(statsResult.value);
+      }
+      // Stats failure is non-critical — we still show entries
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Failed to load feedback",
+      );
+    } finally {
+      setLoading(false);
+    }
+  }, [page, typeFilter, startDate, endDate]);
+
+  useEffect(() => {
+    loadFeedback();
+  }, [loadFeedback]);
+
+  const handlePageChange = useCallback((newPage: number) => {
+    setPage(newPage);
+  }, []);
+
+  const feedbackTypeBadge = (type: string) => {
+    switch (type) {
+      case "positive":
+        return (
+          <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded font-medium bg-green-50 text-green-600">
+            <ThumbsUp className="w-3 h-3" />
+            positive
+          </span>
+        );
+      case "negative":
+        return (
+          <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded font-medium bg-red-50 text-red-600">
+            <ThumbsDown className="w-3 h-3" />
+            negative
+          </span>
+        );
+      case "correction":
+        return (
+          <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded font-medium bg-yellow-50 text-yellow-600">
+            <MessageSquare className="w-3 h-3" />
+            correction
+          </span>
+        );
+      default:
+        return (
+          <span className="inline-flex items-center text-[10px] px-1.5 py-0.5 rounded font-medium bg-gray-50 text-gray-600">
+            {type}
+          </span>
+        );
+    }
+  };
+
+  const inputClass =
+    "px-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white";
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-2">
+        <BarChart3 className="w-4 h-4 text-gray-500" />
+        <h3 className="text-sm font-semibold text-[#232323]">
+          Feedback
+        </h3>
+      </div>
+
+      {/* Stats Cards */}
+      {stats && (
+        <div className="grid grid-cols-3 gap-4">
+          <div className="bg-gray-50 rounded-lg p-4">
+            <p className="text-xs text-gray-500 mb-1">Total Feedback</p>
+            <p className="text-xl font-semibold text-[#232323]">
+              {stats.total_feedback ?? stats.total_actions ?? 0}
+            </p>
+          </div>
+          <div className="bg-green-50 rounded-lg p-4">
+            <p className="text-xs text-gray-500 mb-1">Approval Rate</p>
+            <p className="text-xl font-semibold text-green-700">
+              {(() => {
+                const rate = stats.approval_rate ?? (stats.total_feedback > 0 ? (1 - stats.rejection_rate) : 0);
+                return Number.isFinite(rate) ? (rate * 100).toFixed(1) : "0.0";
+              })()}%
+            </p>
+          </div>
+          <div className="bg-red-50 rounded-lg p-4">
+            <p className="text-xs text-gray-500 mb-1">Rejection Rate</p>
+            <p className="text-xl font-semibold text-red-700">
+              {Number.isFinite(stats.rejection_rate) ? (stats.rejection_rate * 100).toFixed(1) : "0.0"}%
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Filters */}
+      <div className="flex items-center gap-3 flex-wrap">
+        <div className="flex items-center gap-1.5">
+          <Filter className="w-3.5 h-3.5 text-gray-400" />
+          <select
+            value={typeFilter}
+            onChange={(e) => {
+              setTypeFilter(e.target.value);
+              setPage(1);
+            }}
+            className={inputClass}
+          >
+            <option value="">All types</option>
+            <option value="positive">Positive</option>
+            <option value="negative">Negative</option>
+            <option value="correction">Correction</option>
+          </select>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <Calendar className="w-3.5 h-3.5 text-gray-400" />
+          <input
+            type="date"
+            value={startDate}
+            onChange={(e) => {
+              setStartDate(e.target.value);
+              setPage(1);
+            }}
+            placeholder="Start date"
+            className={inputClass}
+            aria-label="Start date"
+          />
+        </div>
+        <div className="flex items-center gap-1.5">
+          <Calendar className="w-3.5 h-3.5 text-gray-400" />
+          <input
+            type="date"
+            value={endDate}
+            onChange={(e) => {
+              setEndDate(e.target.value);
+              setPage(1);
+            }}
+            placeholder="End date"
+            className={inputClass}
+            aria-label="End date"
+          />
+        </div>
+      </div>
+
+      {error && (
+        <p className="text-sm text-red-600 bg-red-50 px-4 py-3 rounded-lg">
+          {error}
+        </p>
+      )}
+
+      {loading ? (
+        <div className="flex items-center justify-center py-16">
+          <Loader2 className="w-6 h-6 text-gray-400 animate-spin" />
+        </div>
+      ) : entries.length === 0 ? (
+        <div className="flex flex-col items-center justify-center py-16 text-gray-400">
+          <MessageSquare className="w-8 h-8 mb-2" />
+          <p className="text-sm">No feedback entries found</p>
+          <p className="text-xs mt-1">
+            Try adjusting your filters or check back later
+          </p>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {/* Feedback entries table */}
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-gray-100">
+                  <th className="text-left px-4 py-2 text-xs font-medium text-gray-500">
+                    Type
+                  </th>
+                  <th className="text-left px-4 py-2 text-xs font-medium text-gray-500">
+                    Action ID
+                  </th>
+                  <th className="text-left px-4 py-2 text-xs font-medium text-gray-500">
+                    Comment
+                  </th>
+                  <th className="text-left px-4 py-2 text-xs font-medium text-gray-500">
+                    Created
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {entries.map((entry) => (
+                  <tr
+                    key={entry.feedback_id}
+                    className="hover:bg-gray-50 transition-colors"
+                  >
+                    <td className="px-4 py-3">
+                      {feedbackTypeBadge(entry.feedback_type)}
+                    </td>
+                    <td className="px-4 py-3 text-xs text-gray-600 font-mono">
+                      {entry.action_id}
+                    </td>
+                    <td className="px-4 py-3 text-xs text-gray-600 max-w-xs truncate">
+                      {entry.comment || "—"}
+                    </td>
+                    <td className="px-4 py-3 text-xs text-gray-400">
+                      {new Date(entry.created_at).toLocaleString()}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Pagination */}
+          {totalPages > 1 && (
+            <div className="flex items-center justify-between px-4 py-3 border-t border-gray-100">
+              <span className="text-xs text-gray-500">
+                Page {page} of {totalPages} ({total} total)
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => handlePageChange(page - 1)}
+                  disabled={page <= 1}
+                  className="p-1.5 text-gray-400 hover:text-gray-600 disabled:opacity-30 disabled:cursor-not-allowed rounded"
+                  aria-label="Previous feedback page"
+                >
+                  <ChevronLeft className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={() => handlePageChange(page + 1)}
+                  disabled={page >= totalPages}
+                  className="p-1.5 text-gray-400 hover:text-gray-600 disabled:opacity-30 disabled:cursor-not-allowed rounded"
+                  aria-label="Next feedback page"
+                >
+                  <ChevronRight className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Main Page Component ─────────────────────────────────────────────────────
 
 export default function AgentSettingsPage() {
@@ -605,7 +903,7 @@ export default function AgentSettingsPage() {
               Agent Settings
             </h2>
             <p className="text-xs text-gray-500">
-              Configure autonomy levels and manage agent memory
+              Configure autonomy levels, manage agent memory, and review feedback
             </p>
           </div>
         </div>
@@ -622,6 +920,11 @@ export default function AgentSettingsPage() {
           {/* Memory Management */}
           <div className="bg-white border border-gray-200 rounded-lg p-6">
             <MemorySection />
+          </div>
+
+          {/* Feedback */}
+          <div className="bg-white border border-gray-200 rounded-lg p-6">
+            <FeedbackSection />
           </div>
         </div>
       </div>

@@ -21,6 +21,8 @@ type SortOrder = "asc" | "desc";
 interface JobBoardProps {
   jobs: Job[];
   onTransition: (jobId: string, targetStatus: JobStatus, failureReason?: string) => Promise<void>;
+  /** Optional callback when a job row is clicked — navigates to job detail */
+  onSelectJob?: (jobId: string) => void;
 }
 
 const COLUMNS: { key: SortField; label: string }[] = [
@@ -113,7 +115,7 @@ function compareValues(
  *
  * Validates: Requirements 11.1, 11.2, 11.4, 11.7
  */
-export default function JobBoard({ jobs, onTransition }: JobBoardProps) {
+export default function JobBoard({ jobs, onTransition, onSelectJob }: JobBoardProps) {
   const [sortField, setSortField] = useState<SortField>("scheduled_time");
   const [sortOrder, setSortOrder] = useState<SortOrder>("asc");
 
@@ -184,13 +186,15 @@ export default function JobBoard({ jobs, onTransition }: JobBoardProps) {
           {sorted.map((job) => (
             <tr
               key={job.job_id}
-              className={`${getRowColor(job)} transition-colors`}
+              className={`${getRowColor(job)} transition-colors ${onSelectJob ? "cursor-pointer hover:bg-gray-100" : ""}`}
+              onClick={() => onSelectJob?.(job.job_id)}
             >
               <td className="px-6 py-3 text-sm font-medium text-[#232323]">
                 {job.job_type === "cargo_transport" ? (
                   <Link
                     href={`/ops/scheduling/${encodeURIComponent(job.job_id)}/cargo`}
                     className="hover:underline flex items-center gap-1"
+                    onClick={(e) => e.stopPropagation()}
                   >
                     {job.job_id}
                     <ExternalLink className="w-3 h-3 text-gray-400" />
@@ -220,7 +224,7 @@ export default function JobBoard({ jobs, onTransition }: JobBoardProps) {
               <td className="px-6 py-3 text-sm text-gray-600">
                 {formatDate(job.estimated_arrival)}
               </td>
-              <td className="px-6 py-3">
+              <td className="px-6 py-3" onClick={(e) => e.stopPropagation()}>
                 <JobActionButtons
                   jobId={job.job_id}
                   currentStatus={job.status}

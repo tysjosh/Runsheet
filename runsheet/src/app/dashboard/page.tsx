@@ -34,6 +34,7 @@ const FuelDistributionPage = lazy(() => import("../../components/ops/FuelDistrib
 const AgentSettingsPage = lazy(() => import("../../components/ops/AgentSettingsPage"));
 const OpsMonitoringDashboard = lazy(() => import("../../components/ops/OpsMonitoringDashboard"));
 const SchedulingMetricsPage = lazy(() => import("../../components/ops/SchedulingMetricsPage"));
+const OrdersPage = lazy(() => import("../../components/ops/OrdersPage"));
 
 function MapLoadingPlaceholder() {
   return (
@@ -115,6 +116,17 @@ export default function Home() {
               mapView={<MapView selectedTruck={selectedTruck} />}
             />
           </Suspense>
+        );
+
+      case "orders":
+        return (
+          <div className="flex-1 bg-gray-50">
+            <ErrorBoundary componentName="Orders">
+              <Suspense fallback={<ComponentLoadingPlaceholder />}>
+                <OrdersPage />
+              </Suspense>
+            </ErrorBoundary>
+          </div>
         );
 
       case "scheduling":

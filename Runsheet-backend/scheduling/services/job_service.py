@@ -286,7 +286,7 @@ class JobService:
         job_doc.update(update_fields)
         await self._broadcast_job_update("status_changed", job_doc)
 
-        return Job(**job_doc)
+        return Job(**self._normalize_job_doc(job_doc))
 
     async def reassign_asset(
         self,
@@ -368,7 +368,7 @@ class JobService:
         job_doc.update(update_fields)
         await self._broadcast_job_update("status_changed", job_doc)
 
-        return Job(**job_doc)
+        return Job(**self._normalize_job_doc(job_doc))
 
     # ------------------------------------------------------------------
     # Status Transitions  (Requirements 4.1-4.8)
@@ -520,7 +520,7 @@ class JobService:
         job_doc.update(update_fields)
         await self._broadcast_job_update("status_changed", job_doc)
 
-        return Job(**job_doc)
+        return Job(**self._normalize_job_doc(job_doc))
 
     # ------------------------------------------------------------------
     # Query Methods  (Requirements 5.1-5.7, 15.2)
@@ -546,10 +546,47 @@ class JobService:
         job_doc = await self._get_job_doc(job_id, tenant_id)
         events = await self.get_job_events(job_id, tenant_id)
 
+        # Normalize legacy seed data that may not match current enums
+        job_doc = self._normalize_job_doc(job_doc)
+
         return {
             "job": Job(**job_doc),
             "events": events,
         }
+
+    @staticmethod
+    def _normalize_job_doc(doc: dict) -> dict:
+        """Normalize a raw job document to match current Pydantic model enums.
+
+        Handles legacy seed data with non-standard job_type, priority, and
+        location field names (lon vs lng).
+        """
+        doc = dict(doc)  # shallow copy
+
+        # Map legacy job_type values to valid enum values
+        job_type_map = {
+            "delivery": "cargo_transport",
+            "pickup": "cargo_transport",
+            "fuel_delivery": "cargo_transport",
+        }
+        if doc.get("job_type") in job_type_map:
+            doc["job_type"] = job_type_map[doc["job_type"]]
+
+        # Map legacy priority values to valid enum values
+        priority_map = {
+            "critical": "urgent",
+            "medium": "normal",
+        }
+        if doc.get("priority") in priority_map:
+            doc["priority"] = priority_map[doc["priority"]]
+
+        # Normalize location fields: lon -> lng
+        for loc_field in ("origin_location", "destination_location"):
+            loc = doc.get(loc_field)
+            if isinstance(loc, dict) and "lon" in loc and "lng" not in loc:
+                doc[loc_field] = {"lat": loc["lat"], "lng": loc["lon"]}
+
+        return doc
 
     async def list_jobs(
         self,

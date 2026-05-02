@@ -107,6 +107,23 @@ export interface FuelNetworkSummary {
   active_alerts: number;
 }
 
+// ─── Efficiency Types ─────────────────────────────────────────────────────────
+
+export interface EfficiencyMetric {
+  asset_id: string;
+  distance_km: number;
+  fuel_consumed_liters: number;
+  efficiency_km_per_liter: number;
+  period_start?: string;
+  period_end?: string;
+}
+
+export interface EfficiencyFilters {
+  asset_id?: string;
+  start_date?: string;
+  end_date?: string;
+}
+
 // ─── Filter Types ────────────────────────────────────────────────────────────
 
 export interface StationFilters {
@@ -250,6 +267,16 @@ export async function getNetworkSummary(): Promise<{
 }> {
   return fuelRequest<{ data: FuelNetworkSummary; request_id: string }>(
     "/fuel/metrics/summary",
+  );
+}
+
+/** GET /fuel/metrics/efficiency — per-asset fuel efficiency */
+export async function getEfficiencyMetrics(
+  filters: EfficiencyFilters = {},
+): Promise<{ data: EfficiencyMetric[]; request_id: string }> {
+  const qs = buildQueryString(filters);
+  return fuelRequest<{ data: EfficiencyMetric[]; request_id: string }>(
+    `/fuel/metrics/efficiency${qs}`,
   );
 }
 

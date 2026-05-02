@@ -58,24 +58,6 @@ const nextConfig: NextConfig = {
     // Configure remote patterns if needed
     remotePatterns: [],
   },
-
-  // Webpack configuration for additional optimizations
-  webpack: (config, { isServer, dev }) => {
-    // Only apply production optimizations in production builds
-    if (!dev) {
-      // Enable module concatenation for better tree shaking
-      config.optimization = {
-        ...config.optimization,
-        moduleIds: "deterministic",
-        // Ensure tree shaking is enabled
-        usedExports: true,
-        // Enable side effects optimization
-        sideEffects: true,
-      };
-    }
-
-    return config;
-  },
 };
 
 export default withBundleAnalyzer(nextConfig);

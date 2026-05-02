@@ -98,6 +98,8 @@ export default function JobActionButtons({
         failureReason = reason;
       }
       await onTransition(jobId, targetStatus, failureReason);
+    } catch {
+      // Error is handled by the parent component (displayed inline)
     } finally {
       setLoading(null);
     }

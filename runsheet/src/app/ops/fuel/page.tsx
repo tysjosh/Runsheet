@@ -1,9 +1,10 @@
 "use client";
 
-import { Fuel, Plus, Search } from "lucide-react";
+import { BarChart3, Fuel, Plus, Search } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import LoadingSpinner from "../../../components/LoadingSpinner";
 import FuelConsumptionChart from "../../../components/ops/FuelConsumptionChart";
+import FuelEfficiencyChart from "../../../components/ops/FuelEfficiencyChart";
 import FuelStationDetail from "../../../components/ops/FuelStationDetail";
 import FuelStationForm from "../../../components/ops/FuelStationForm";
 import FuelStationList from "../../../components/ops/FuelStationList";
@@ -296,13 +297,24 @@ export default function FuelDashboardPage() {
       {/* Main content area */}
       <div className="flex-1 overflow-hidden flex">
         {/* Left: Station list + chart */}
-        <div className={`flex-1 flex flex-col overflow-hidden ${stationDetail ? "lg:w-3/5" : "w-full"}`}>
+        <div className={`flex-1 flex flex-col overflow-y-auto ${stationDetail ? "lg:w-3/5" : "w-full"}`}>
           {/* Consumption Chart — Validates: Requirement 6.3 */}
           <div className="border-b border-gray-100 px-8 py-6">
             <h2 className="text-sm font-medium text-gray-700 mb-3">
               Daily Consumption Trend
             </h2>
             <FuelConsumptionChart data={consumptionData} />
+          </div>
+
+          {/* Efficiency Chart — Validates: Requirements 9.1, 9.2, 9.3, 9.4, 9.5, 9.6 */}
+          <div className="border-b border-gray-100 px-8 py-6">
+            <div className="flex items-center gap-2 mb-3">
+              <BarChart3 className="w-4 h-4 text-gray-500" aria-hidden="true" />
+              <h2 className="text-sm font-medium text-gray-700">
+                Fuel Efficiency by Asset
+              </h2>
+            </div>
+            <FuelEfficiencyChart />
           </div>
 
           {/* Station List — Validates: Requirements 6.1, 6.4 */}

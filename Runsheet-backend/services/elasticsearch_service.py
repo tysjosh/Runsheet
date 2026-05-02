@@ -1514,6 +1514,26 @@ class ElasticsearchService:
         except Exception as e:
             self._handle_elasticsearch_error(f"get_document({index}, {doc_id})", e)
     
+    async def delete_document(self, index: str, doc_id: str) -> bool:
+        """
+        Delete a single document by ID with circuit breaker protection.
+
+        Returns True if the document was deleted, False if not found.
+        """
+        try:
+            async def _do_delete():
+                self.client.delete(index=index, id=doc_id, refresh="wait_for")
+                return True
+
+            return await self._read_circuit_breaker.execute(_do_delete)
+        except CircuitOpenException as e:
+            self._handle_circuit_breaker_exception(e)
+        except Exception as e:
+            # NotFoundError means the doc doesn't exist — return False
+            if hasattr(e, 'status_code') and e.status_code == 404:
+                return False
+            self._handle_elasticsearch_error(f"delete_document({index}, {doc_id})", e)
+
     async def get_all_documents(self, index: str, size: int = 1000):
         """
         Get all documents from an index with circuit breaker protection.

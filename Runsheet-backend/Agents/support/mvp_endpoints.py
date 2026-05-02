@@ -142,58 +142,68 @@ async def get_plan(
     request: Request,
     tenant_id: str = Query(..., description="Tenant identifier"),
 ):
-    """Retrieve a complete plan (loading + route) by plan_id.
+    """Retrieve a complete plan (loading + route) by plan_id or run_id.
 
     Validates: Requirement 8.2
     """
     es = _get_es()
 
-    # Query loading plan
-    loading_query = {
-        "query": {
-            "bool": {
-                "must": [
-                    {"term": {"tenant_id": tenant_id}},
-                    {"term": {"plan_id": plan_id}},
-                ],
-            },
-        },
-        "size": 1,
-    }
-
+    # Try plan_id first, then fall back to run_id (the generate endpoint
+    # returns run_id, which is what the frontend passes here).
     loading_plan = None
-    try:
-        resp = await es.search_documents("mvp_load_plans", loading_query, 1)
-        hits = resp.get("hits", {}).get("hits", [])
-        if hits:
-            loading_plan = hits[0]["_source"]
-    except Exception as e:
-        logger.error("Failed to query loading plan %s: %s", plan_id, e)
+    for field in ("plan_id", "run_id"):
+        loading_query = {
+            "query": {
+                "bool": {
+                    "must": [
+                        {"term": {"tenant_id": tenant_id}},
+                        {"term": {field: plan_id}},
+                    ],
+                },
+            },
+            "size": 1,
+        }
+        try:
+            resp = await es.search_documents("mvp_load_plans", loading_query, 1)
+            hits = resp.get("hits", {}).get("hits", [])
+            if hits:
+                loading_plan = hits[0]["_source"]
+                break
+        except Exception as e:
+            logger.error("Failed to query loading plan %s (field=%s): %s", plan_id, field, e)
 
     if loading_plan is None:
-        raise HTTPException(status_code=404, detail=f"Plan {plan_id} not found")
+        # No loading plan found — could be a run_id for a pipeline that
+        # completed without producing plans (e.g. no truck compartments
+        # configured). Return an empty plan instead of 404.
+        return {
+            "plan_id": plan_id,
+            "loading_plan": None,
+            "route_plan": None,
+        }
 
-    # Query associated route plan
-    route_query = {
-        "query": {
-            "bool": {
-                "must": [
-                    {"term": {"tenant_id": tenant_id}},
-                    {"term": {"plan_id": plan_id}},
-                ],
-            },
-        },
-        "size": 1,
-    }
-
+    # Query associated route plan using the same fallback strategy
     route_plan = None
-    try:
-        resp = await es.search_documents("mvp_routes", route_query, 1)
-        hits = resp.get("hits", {}).get("hits", [])
-        if hits:
-            route_plan = hits[0]["_source"]
-    except Exception as e:
-        logger.error("Failed to query route plan for %s: %s", plan_id, e)
+    for field in ("plan_id", "run_id"):
+        route_query = {
+            "query": {
+                "bool": {
+                    "must": [
+                        {"term": {"tenant_id": tenant_id}},
+                        {"term": {field: plan_id}},
+                    ],
+                },
+            },
+            "size": 1,
+        }
+        try:
+            resp = await es.search_documents("mvp_routes", route_query, 1)
+            hits = resp.get("hits", {}).get("hits", [])
+            if hits:
+                route_plan = hits[0]["_source"]
+                break
+        except Exception as e:
+            logger.error("Failed to query route plan for %s (field=%s): %s", plan_id, field, e)
 
     return {
         "plan_id": plan_id,
