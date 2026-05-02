@@ -61,12 +61,14 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
   const processingRef = useRef(false);
 
   const isReport = (content: string) => {
-    return (
-      content.includes("# 📋 Operations Report") ||
-      content.includes("# 📊 Performance Analysis Report") ||
-      content.includes("# 🔍 Incident Analysis Report") ||
-      (content.includes("Generated:") && content.includes("##"))
-    );
+    // Match any structured report: has a markdown H1 header and at least one H2 section
+    if (!content.includes("##")) return false;
+    const hasReportHeader = /^# .*(Report|Analysis)/m.test(content);
+    const hasGeneratedMeta =
+      content.includes("Generated") && (content.includes("|") || content.includes("*"));
+    const hasReportKeyword =
+      /Report\b|Analysis\b|Productivity\b|Violations\b|Dispatch\b|Operations\b/i.test(content);
+    return (hasReportHeader || hasGeneratedMeta) && hasReportKeyword;
   };
 
   const getToolIcon = (toolName?: string) => {

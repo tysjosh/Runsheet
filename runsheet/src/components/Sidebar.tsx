@@ -4,6 +4,7 @@ import {
   CalendarClock,
   ChevronLeft,
   Droplets,
+  FileInput,
   Fuel,
   HelpCircle,
   LogOut,
@@ -50,7 +51,7 @@ export default function Sidebar({
     { id: "ops-monitoring", label: "Ops Monitoring", icon: Activity },
     { id: "control-center", label: "Control Center", icon: Radio },
     { id: "agent-settings", label: "Agent Settings", icon: Settings },
-    { id: "upload-data", label: "Upload Data", icon: Upload },
+    { id: "upload-data", label: "Data Import", icon: FileInput },
     { id: "support", label: "Support", icon: HelpCircle },
   ];
 

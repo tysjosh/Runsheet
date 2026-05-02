@@ -23,6 +23,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import JSONResponse
 
 from bootstrap import ServiceContainer, initialize_all, shutdown_all
+from errors.handlers import register_exception_handlers
 from data_endpoints import router as data_router
 from ops.webhooks.receiver import router as webhook_router
 from ops.api.endpoints import router as ops_router
@@ -30,6 +31,7 @@ from fuel.api.endpoints import router as fuel_router
 from scheduling.api.endpoints import router as scheduling_router
 from agent_endpoints import router as agent_router
 from inline_endpoints import router as inline_router
+from import_endpoints import router as import_router
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -48,6 +50,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Runsheet Logistics API", version="1.0.0", lifespan=lifespan)
+
+# Register structured error handlers (AppException → proper JSON, not 500)
+register_exception_handlers(app)
 
 # CORS must be added before the app starts (cannot be added in lifespan/bootstrap)
 from fastapi.middleware.cors import CORSMiddleware
@@ -76,6 +81,7 @@ app.include_router(fuel_router)
 app.include_router(scheduling_router)
 app.include_router(agent_router)
 app.include_router(inline_router)
+app.include_router(import_router)
 
 
 def _c(app: FastAPI) -> ServiceContainer:

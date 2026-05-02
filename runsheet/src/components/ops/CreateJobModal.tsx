@@ -20,6 +20,32 @@ const PRIORITIES: { value: Priority; label: string }[] = [
   { value: "urgent", label: "Urgent" },
 ];
 
+// Asset options per job type (must match JOB_ASSET_COMPATIBILITY on backend)
+const ASSETS_BY_JOB_TYPE: Record<string, { value: string; label: string }[]> = {
+  cargo_transport: [
+    { value: "TRK-001", label: "TRK-001 — Volvo FH16 (ABC-123-LG)" },
+    { value: "TRK-002", label: "TRK-002 — MAN TGX (DEF-456-AB)" },
+    { value: "TRK-003", label: "TRK-003 — Scania R500 (GHI-789-KN)" },
+    { value: "TRK-004", label: "TRK-004 — DAF XF (JKL-012-PH)" },
+    { value: "TRK-005", label: "TRK-005 — Mercedes Actros (MNO-345-IB)" },
+    { value: "TRK-006", label: "TRK-006 — Iveco Stralis (PQR-678-EN)" },
+    { value: "TRK-007", label: "TRK-007 — Toyota HiAce (STU-901-KD)" },
+    { value: "TRK-008", label: "TRK-008 — Ford Transit (VWX-234-BC)" },
+    { value: "TRF-001", label: "TRF-001 — Howo Tanker (YZA-567-LG)" },
+    { value: "TRF-002", label: "TRF-002 — Sinotruk Tanker (BCD-890-PH)" },
+  ],
+  passenger_transport: [
+    { value: "TRK-007", label: "TRK-007 — Toyota HiAce (STU-901-KD)" },
+    { value: "TRK-008", label: "TRK-008 — Ford Transit (VWX-234-BC)" },
+  ],
+  airport_transfer: [
+    { value: "TRK-007", label: "TRK-007 — Toyota HiAce (STU-901-KD)" },
+    { value: "TRK-008", label: "TRK-008 — Ford Transit (VWX-234-BC)" },
+  ],
+  vessel_movement: [],
+  crane_booking: [],
+};
+
 interface CreateJobModalProps {
   onClose: () => void;
   onCreated: (job: Job) => void;
@@ -147,13 +173,16 @@ export default function CreateJobModal({ onClose, onCreated }: CreateJobModalPro
             </div>
             <div>
               <label className="block text-xs font-medium text-gray-600 mb-1">Asset (optional)</label>
-              <input
-                type="text"
+              <select
                 value={form.asset_assigned}
                 onChange={(e) => setForm({ ...form, asset_assigned: e.target.value })}
-                placeholder="e.g. TRK-001"
                 className={inputClass}
-              />
+              >
+                <option value="">— None —</option>
+                {(ASSETS_BY_JOB_TYPE[form.job_type] || []).map((a) => (
+                  <option key={a.value} value={a.value}>{a.label}</option>
+                ))}
+              </select>
             </div>
           </div>
 

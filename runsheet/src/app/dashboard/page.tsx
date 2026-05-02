@@ -18,7 +18,7 @@ const MapView = dynamic(() => import("../../components/MapView"), {
 // Lazy-load all content components
 const FleetDashboard = lazy(() => import("../../components/FleetDashboard"));
 const AIChat = lazy(() => import("../../components/AIChat"));
-const DataUpload = lazy(() => import("../../components/DataUpload"));
+const DataImport = lazy(() => import("../../components/DataImport"));
 const Inventory = lazy(() => import("../../components/Inventory"));
 const AnalyticsDashboard = lazy(() => import("../../components/AnalyticsDashboard"));
 const Support = lazy(() => import("../../components/Support"));
@@ -100,7 +100,7 @@ export default function Home() {
           <div className="flex-1 p-6 bg-gray-50">
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 h-full overflow-hidden">
               <Suspense fallback={<ComponentLoadingPlaceholder />}>
-                <DataUpload />
+                <DataImport />
               </Suspense>
             </div>
           </div>

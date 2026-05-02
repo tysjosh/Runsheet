@@ -96,6 +96,80 @@ def _single(index: str, doc_id: str, body: dict):
 
 
 # ---------------------------------------------------------------------------
+# 0. trucks (assets)
+# ---------------------------------------------------------------------------
+def seed_trucks(force: bool = False):
+    index = "trucks"
+    if not force and _index_count(index) > 0:
+        logger.info(f"⏭️  {index} already has data — skipping")
+        return
+
+    trucks = [
+        ("TRK-001", "ABC-123-LG", "vehicle", "truck",    "Volvo FH16",   "DRV-001", "Chinedu Okafor",  "Lagos",         "on_time"),
+        ("TRK-002", "DEF-456-AB", "vehicle", "truck",    "MAN TGX",      "DRV-002", "Amina Bello",     "Abuja",         "on_time"),
+        ("TRK-003", "GHI-789-KN", "vehicle", "truck",    "Scania R500",  "DRV-003", "Emeka Nwosu",     "Kano",          "delayed"),
+        ("TRK-004", "JKL-012-PH", "vehicle", "truck",    "DAF XF",       "DRV-004", "Fatima Yusuf",    "Port Harcourt", "on_time"),
+        ("TRK-005", "MNO-345-IB", "vehicle", "truck",    "Mercedes Actros", "DRV-005", "Oluwaseun Ade", "Ibadan",        "on_time"),
+        ("TRK-006", "PQR-678-EN", "vehicle", "truck",    "Iveco Stralis", "DRV-006", "Ibrahim Musa",   "Enugu",         "delayed"),
+        ("TRK-007", "STU-901-KD", "vehicle", "van",      "Toyota HiAce",  "DRV-007", "Grace Obi",      "Kaduna",        "on_time"),
+        ("TRK-008", "VWX-234-BC", "vehicle", "van",      "Ford Transit",  "DRV-008", "Yusuf Abdullahi", "Benin City",   "on_time"),
+        ("TRF-001", "YZA-567-LG", "vehicle", "tanker",   "Howo Tanker",   "DRV-009", "Bola Tinubu Jr", "Lagos",         "on_time"),
+        ("TRF-002", "BCD-890-PH", "vehicle", "tanker",   "Sinotruk Tanker", "DRV-010", "Ngozi Okonkwo", "Port Harcourt", "on_time"),
+    ]
+
+    actions = []
+    for tid, plate, atype, subtype, model, drv_id, drv_name, city, status in trucks:
+        dest_city = random.choice([c for c in CITY_NAMES if c != city])
+        doc = {
+            "truck_id": tid,
+            "plate_number": plate,
+            "asset_type": atype,
+            "asset_subtype": subtype,
+            "asset_name": f"{model} ({plate})",
+            "equipment_model": model,
+            "driver_id": drv_id,
+            "driver_name": drv_name,
+            "status": status,
+            "current_location": {
+                "id": f"LOC-{city[:3].upper()}",
+                "name": city,
+                "type": "city",
+                "coordinates": _geo(city),
+                "address": f"{random.randint(1,200)} Main Road, {city}",
+            },
+            "destination": {
+                "id": f"LOC-{dest_city[:3].upper()}",
+                "name": dest_city,
+                "type": "city",
+                "coordinates": _geo(dest_city),
+                "address": f"{random.randint(1,200)} Delivery Ave, {dest_city}",
+            },
+            "route": {
+                "id": f"RT-{city[:3]}-{dest_city[:3]}".upper(),
+                "distance": round(random.uniform(100, 900), 1),
+                "estimated_duration": random.randint(120, 720),
+                "actual_duration": random.randint(130, 800),
+            },
+            "estimated_arrival": _future(hours=random.uniform(2, 48)),
+            "last_update": _ago(minutes=random.randint(5, 120)),
+            "cargo": {
+                "type": random.choice(["fuel", "general", "perishable", "equipment"]),
+                "weight": round(random.uniform(5000, 30000), 1),
+                "volume": round(random.uniform(20, 80), 1),
+                "priority": random.choice(["normal", "high", "urgent"]),
+            },
+            "created_at": _ago(days=random.randint(30, 365)),
+            "updated_at": _now(),
+            "tenant_id": TENANT,
+        }
+        actions.append({"index": {"_index": index, "_id": tid}})
+        actions.append(doc)
+
+    _bulk(actions)
+    logger.info(f"✅ Seeded {len(trucks)} docs → {index}")
+
+
+# ---------------------------------------------------------------------------
 # 1. riders_current
 # ---------------------------------------------------------------------------
 def seed_riders(force: bool = False):
@@ -672,6 +746,7 @@ def main():
         sys.exit(1)
 
     seeders = [
+        ("trucks",                seed_trucks),
         ("riders_current",        seed_riders),
         ("shipments_current",     seed_shipments),
         ("shipment_events",       seed_shipment_events),

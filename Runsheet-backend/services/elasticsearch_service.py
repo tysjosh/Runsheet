@@ -575,7 +575,8 @@ class ElasticsearchService:
             "orders": self._get_orders_mapping(),
             "inventory": self._get_inventory_mapping(),
             "support_tickets": self._get_support_tickets_mapping(),
-            "analytics_events": self._get_analytics_mapping()
+            "analytics_events": self._get_analytics_mapping(),
+            "import_sessions": self._get_import_sessions_mapping()
         }
 
         for index_name, mapping in indices.items():
@@ -1148,7 +1149,35 @@ class ElasticsearchService:
                 }
             }
         }
-    
+
+    def _get_import_sessions_mapping(self):
+        """Get mapping for import sessions index"""
+        return {
+            "mappings": {
+                "properties": {
+                    "session_id": {"type": "keyword"},
+                    "data_type": {"type": "keyword"},
+                    "source_type": {"type": "keyword"},
+                    "source_name": {
+                        "type": "text",
+                        "fields": {
+                            "keyword": {"type": "keyword"}
+                        }
+                    },
+                    "total_records": {"type": "integer"},
+                    "imported_records": {"type": "integer"},
+                    "skipped_records": {"type": "integer"},
+                    "error_count": {"type": "integer"},
+                    "status": {"type": "keyword"},
+                    "errors": {"type": "text"},
+                    "field_mapping": {"type": "object", "enabled": False},
+                    "created_at": {"type": "date"},
+                    "completed_at": {"type": "date"},
+                    "duration_seconds": {"type": "float"}
+                }
+            }
+        }
+
     # CRUD Operations
     async def index_document(self, index: str, doc_id: str, document: Dict[Any, Any]):
         """
@@ -1160,9 +1189,13 @@ class ElasticsearchService:
         """
         try:
             async def _do_index():
-                document["updated_at"] = datetime.now().isoformat()
-                if "created_at" not in document:
-                    document["created_at"] = datetime.now().isoformat()
+                # Only inject timestamps for indices that have these fields in their mapping.
+                # Strict-mapped indices like job_events will reject unknown fields.
+                _TIMESTAMP_SKIP_INDICES = {"job_events", "shipment_events"}
+                if index not in _TIMESTAMP_SKIP_INDICES:
+                    document["updated_at"] = datetime.now().isoformat()
+                    if "created_at" not in document:
+                        document["created_at"] = datetime.now().isoformat()
                 
                 response = self.client.index(
                     index=index,
