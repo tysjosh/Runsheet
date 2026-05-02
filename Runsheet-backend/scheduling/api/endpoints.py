@@ -692,29 +692,6 @@ async def get_completion_metrics(
                     "completed_count": {
                         "filter": {"term": {"status": "completed"}},
                     },
-                    "completed_jobs": {
-                        "filter": {"term": {"status": "completed"}},
-                        "aggs": {
-                            "avg_completion_time": {
-                                "scripted_metric": {
-                                    "init_script": "state.durations = []",
-                                    "map_script": (
-                                        "if (doc['started_at'].size() > 0 && doc['completed_at'].size() > 0) {"
-                                        "  long start = doc['started_at'].value.toInstant().toEpochMilli();"
-                                        "  long end = doc['completed_at'].value.toInstant().toEpochMilli();"
-                                        "  state.durations.add((end - start) / 60000.0);"
-                                        "}"
-                                    ),
-                                    "combine_script": "return state.durations",
-                                    "reduce_script": (
-                                        "double total = 0; int count = 0;"
-                                        "for (s in states) { for (d in s) { total += d; count++; } }"
-                                        "return count > 0 ? total / count : 0"
-                                    ),
-                                },
-                            },
-                        },
-                    },
                 },
             },
         },
@@ -722,20 +699,52 @@ async def get_completion_metrics(
 
     result = await es.search_documents(JOBS_CURRENT_INDEX, query, size=0)
 
-    metrics: list[dict] = []
+    # Collect job_types and their counts from the aggregation
+    type_stats: dict[str, dict] = {}
     for b in result.get("aggregations", {}).get("by_job_type", {}).get("buckets", []):
         total = b["doc_count"]
         completed = b.get("completed_count", {}).get("doc_count", 0)
+        type_stats[b["key"]] = {"total": total, "completed": completed}
+
+    # Fetch completed jobs with both started_at and completed_at to compute
+    # average completion time in Python (avoids scripted_metric which is
+    # blocked on serverless ES clusters).
+    completed_clauses = list(must_clauses) + [
+        {"term": {"status": "completed"}},
+        {"exists": {"field": "started_at"}},
+        {"exists": {"field": "completed_at"}},
+    ]
+    completed_query: dict = {
+        "query": {"bool": {"must": completed_clauses}},
+        "_source": ["job_type", "started_at", "completed_at"],
+        "size": 1000,
+    }
+    completed_result = await es.search_documents(JOBS_CURRENT_INDEX, completed_query, size=1000)
+
+    # Accumulate durations per job_type
+    durations_by_type: dict[str, list[float]] = {}
+    for hit in completed_result.get("hits", {}).get("hits", []):
+        src = hit["_source"]
+        jt = src.get("job_type", "unknown")
+        try:
+            start_dt = datetime.fromisoformat(src["started_at"].replace("Z", "+00:00"))
+            end_dt = datetime.fromisoformat(src["completed_at"].replace("Z", "+00:00"))
+            minutes = (end_dt - start_dt).total_seconds() / 60.0
+            durations_by_type.setdefault(jt, []).append(minutes)
+        except (ValueError, TypeError, KeyError):
+            pass
+
+    metrics: list[dict] = []
+    for job_type, stats in type_stats.items():
+        total = stats["total"]
+        completed = stats["completed"]
         completion_rate = round((completed / total) * 100, 2) if total > 0 else 0.0
 
-        avg_minutes = 0.0
-        completed_jobs_agg = b.get("completed_jobs", {})
-        avg_val = completed_jobs_agg.get("avg_completion_time", {}).get("value")
-        if avg_val is not None:
-            avg_minutes = round(float(avg_val), 2)
+        durs = durations_by_type.get(job_type, [])
+        avg_minutes = round(sum(durs) / len(durs), 2) if durs else 0.0
 
         metrics.append({
-            "job_type": b["key"],
+            "job_type": job_type,
             "total": total,
             "completed": completed,
             "completion_rate": completion_rate,
@@ -792,32 +801,50 @@ async def get_asset_utilization(
                     "completed_jobs": {
                         "filter": {"term": {"status": "completed"}},
                     },
-                    "active_hours": {
-                        "scripted_metric": {
-                            "init_script": "state.hours = []",
-                            "map_script": (
-                                "if (doc['started_at'].size() > 0) {"
-                                "  long start = doc['started_at'].value.toInstant().toEpochMilli();"
-                                "  long end = doc['completed_at'].size() > 0 "
-                                "    ? doc['completed_at'].value.toInstant().toEpochMilli() "
-                                "    : System.currentTimeMillis();"
-                                "  state.hours.add((end - start) / 3600000.0);"
-                                "}"
-                            ),
-                            "combine_script": "return state.hours",
-                            "reduce_script": (
-                                "double total = 0;"
-                                "for (s in states) { for (h in s) { total += h; } }"
-                                "return total"
-                            ),
-                        },
-                    },
                 },
             },
         },
     }
 
     result = await es.search_documents(JOBS_CURRENT_INDEX, query, size=0)
+
+    # Collect asset stats from aggregation
+    asset_stats: dict[str, dict] = {}
+    for b in result.get("aggregations", {}).get("by_asset", {}).get("buckets", []):
+        asset_stats[b["key"]] = {
+            "total_jobs": b["doc_count"],
+            "active": b.get("active_jobs", {}).get("doc_count", 0),
+            "completed": b.get("completed_jobs", {}).get("doc_count", 0),
+        }
+
+    # Fetch jobs with started_at to compute active hours in Python
+    # (avoids scripted_metric which is blocked on serverless ES clusters).
+    hours_clauses = list(must_clauses) + [
+        {"exists": {"field": "started_at"}},
+    ]
+    hours_query: dict = {
+        "query": {"bool": {"must": hours_clauses}},
+        "_source": ["asset_assigned", "started_at", "completed_at"],
+        "size": 2000,
+    }
+    hours_result = await es.search_documents(JOBS_CURRENT_INDEX, hours_query, size=2000)
+
+    hours_by_asset: dict[str, float] = {}
+    for hit in hours_result.get("hits", {}).get("hits", []):
+        src = hit["_source"]
+        asset_id = src.get("asset_assigned")
+        if not asset_id:
+            continue
+        try:
+            start_dt = datetime.fromisoformat(src["started_at"].replace("Z", "+00:00"))
+            if src.get("completed_at"):
+                end_dt = datetime.fromisoformat(src["completed_at"].replace("Z", "+00:00"))
+            else:
+                end_dt = datetime.now(start_dt.tzinfo)
+            hours = (end_dt - start_dt).total_seconds() / 3600.0
+            hours_by_asset[asset_id] = hours_by_asset.get(asset_id, 0.0) + hours
+        except (ValueError, TypeError, KeyError):
+            pass
 
     # Calculate total time range for idle time computation
     total_range_hours = 0.0
@@ -830,23 +857,15 @@ async def get_asset_utilization(
             pass
 
     metrics: list[dict] = []
-    for b in result.get("aggregations", {}).get("by_asset", {}).get("buckets", []):
-        total_jobs = b["doc_count"]
-        active = b.get("active_jobs", {}).get("doc_count", 0)
-        completed = b.get("completed_jobs", {}).get("doc_count", 0)
-
-        active_hrs = 0.0
-        active_hours_val = b.get("active_hours", {}).get("value")
-        if active_hours_val is not None:
-            active_hrs = round(float(active_hours_val), 2)
-
+    for asset_id, stats in asset_stats.items():
+        active_hrs = round(hours_by_asset.get(asset_id, 0.0), 2)
         idle_hrs = round(max(total_range_hours - active_hrs, 0.0), 2) if total_range_hours > 0 else 0.0
 
         metrics.append({
-            "asset_id": b["key"],
-            "total_jobs": total_jobs,
-            "active_jobs": active,
-            "completed_jobs": completed,
+            "asset_id": asset_id,
+            "total_jobs": stats["total_jobs"],
+            "active_jobs": stats["active"],
+            "completed_jobs": stats["completed"],
             "total_active_hours": active_hrs,
             "idle_hours": idle_hrs,
         })

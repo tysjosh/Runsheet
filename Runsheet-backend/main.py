@@ -90,6 +90,35 @@ def _c(app: FastAPI) -> ServiceContainer:
     return app.state.container
 
 
+def _ws_authenticate(websocket: WebSocket) -> str | None:
+    """Extract tenant_id from a WebSocket ``token`` query parameter.
+
+    In development mode, returns ``"dev-tenant"`` when no token is
+    provided — matching the REST endpoint behaviour in
+    ``get_tenant_context``.  In non-development environments, returns
+    ``None`` to signal that the connection should be rejected.
+    """
+    from jose import JWTError, jwt as jose_jwt
+    from config.settings import get_settings
+
+    settings = get_settings()
+    token = websocket.query_params.get("token", "")
+
+    if not token:
+        if settings.environment.value == "development":
+            return "dev-tenant"
+        return None
+
+    try:
+        payload = jose_jwt.decode(
+            token, settings.jwt_secret, algorithms=[settings.jwt_algorithm]
+        )
+        tenant_id = payload.get("tenant_id", "")
+        return tenant_id if tenant_id else None
+    except JWTError:
+        return None
+
+
 # Health endpoints
 @app.get("/")
 async def root():
@@ -128,19 +157,8 @@ async def health_live(request: Request):
 # WebSocket endpoints
 @app.websocket("/ws/ops")
 async def ops_live_websocket(websocket: WebSocket):
-    from jose import JWTError, jwt as jose_jwt
     c = _c(websocket.app)
-    token = websocket.query_params.get("token", "")
-    if not token:
-        await websocket.close(code=4001, reason="Authentication required")
-        return
-    try:
-        payload = jose_jwt.decode(token, c.settings.jwt_secret,
-                                  algorithms=[c.settings.jwt_algorithm])
-        tenant_id = payload.get("tenant_id", "")
-    except JWTError:
-        await websocket.close(code=4001, reason="Authentication failed")
-        return
+    tenant_id = _ws_authenticate(websocket)
     if not tenant_id:
         await websocket.close(code=4001, reason="Authentication required")
         return
@@ -168,21 +186,8 @@ async def ops_live_websocket(websocket: WebSocket):
 
 @app.websocket("/ws/scheduling")
 async def scheduling_live_websocket(websocket: WebSocket):
-    from jose import JWTError, jwt as jose_jwt
-    from config.settings import get_settings
     c = _c(websocket.app)
-    settings = get_settings()
-    token = websocket.query_params.get("token", "")
-    if not token:
-        await websocket.close(code=4001, reason="Authentication required")
-        return
-    try:
-        payload = jose_jwt.decode(token, settings.jwt_secret,
-                                  algorithms=[settings.jwt_algorithm])
-        tenant_id = payload.get("tenant_id", "")
-    except JWTError:
-        await websocket.close(code=4001, reason="Authentication required")
-        return
+    tenant_id = _ws_authenticate(websocket)
     if not tenant_id:
         await websocket.close(code=4001, reason="Authentication required")
         return
@@ -210,20 +215,7 @@ async def scheduling_live_websocket(websocket: WebSocket):
 
 @app.websocket("/ws/agent-activity")
 async def agent_activity_websocket(websocket: WebSocket):
-    from jose import JWTError, jwt as jose_jwt
-    from config.settings import get_settings
-    settings = get_settings()
-    token = websocket.query_params.get("token", "")
-    if not token:
-        await websocket.close(code=4001, reason="Authentication required")
-        return
-    try:
-        payload = jose_jwt.decode(token, settings.jwt_secret,
-                                  algorithms=[settings.jwt_algorithm])
-        tenant_id = payload.get("tenant_id", "")
-    except JWTError:
-        await websocket.close(code=4001, reason="Authentication required")
-        return
+    tenant_id = _ws_authenticate(websocket)
     if not tenant_id:
         await websocket.close(code=4001, reason="Authentication required")
         return
@@ -256,20 +248,7 @@ async def agent_activity_websocket(websocket: WebSocket):
 
 @app.websocket("/api/fleet/live")
 async def fleet_live_websocket(websocket: WebSocket):
-    from jose import JWTError, jwt as jose_jwt
-    from config.settings import get_settings
-    settings = get_settings()
-    token = websocket.query_params.get("token", "")
-    if not token:
-        await websocket.close(code=4001, reason="Authentication required")
-        return
-    try:
-        payload = jose_jwt.decode(token, settings.jwt_secret,
-                                  algorithms=[settings.jwt_algorithm])
-        tenant_id = payload.get("tenant_id", "")
-    except JWTError:
-        await websocket.close(code=4001, reason="Authentication required")
-        return
+    tenant_id = _ws_authenticate(websocket)
     if not tenant_id:
         await websocket.close(code=4001, reason="Authentication required")
         return

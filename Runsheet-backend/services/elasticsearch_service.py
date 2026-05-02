@@ -624,14 +624,33 @@ class ElasticsearchService:
                 k: v for k, v in expected_props.items() if k not in current_props
             }
 
-            if missing_fields:
+            # Find existing fields that need sub-field updates (e.g., adding .keyword)
+            subfield_updates = {}
+            for field_name, expected_def in expected_props.items():
+                if field_name not in current_props:
+                    continue
+                expected_fields = expected_def.get("fields", {})
+                current_fields = current_props[field_name].get("fields", {})
+                if expected_fields and expected_fields != current_fields:
+                    new_subfields = {
+                        k: v for k, v in expected_fields.items() if k not in current_fields
+                    }
+                    if new_subfields:
+                        subfield_updates[field_name] = {
+                            "type": current_props[field_name].get("type", "text"),
+                            "fields": new_subfields,
+                        }
+
+            updates = {**missing_fields, **subfield_updates}
+
+            if updates:
                 logger.info(
-                    f"📝 Updating index '{index_name}' with {len(missing_fields)} new field(s): "
-                    f"{list(missing_fields.keys())}"
+                    f"📝 Updating index '{index_name}' with {len(updates)} field update(s): "
+                    f"{list(updates.keys())}"
                 )
                 self.client.indices.put_mapping(
                     index=index_name,
-                    body={"properties": missing_fields},
+                    body={"properties": updates},
                 )
                 logger.info(f"✅ Updated mapping for index: {index_name}")
         except Exception as e:
@@ -1106,7 +1125,10 @@ class ElasticsearchService:
                     "truck_id": {"type": "keyword"},
                     "order_id": {"type": "keyword"},
                     "region": {"type": "keyword"},
-                    "route_name": {"type": "text"},
+                    "route_name": {
+                        "type": "text",
+                        "fields": {"keyword": {"type": "keyword"}}
+                    },
                     "route_id": {"type": "keyword"},
                     "delay_cause": {"type": "keyword"},
                     "metrics": {
@@ -1661,7 +1683,7 @@ class ElasticsearchService:
                 "query": {"term": {"event_type": "delay_cause_analysis"}},
                 "aggs": {
                     "causes": {
-                        "terms": {"field": "delay_cause.keyword", "size": 10},
+                        "terms": {"field": "delay_cause", "size": 10},
                         "aggs": {
                             "avg_percentage": {
                                 "avg": {"field": "metrics.percentage"}
@@ -1701,7 +1723,7 @@ class ElasticsearchService:
                 "query": {"term": {"event_type": "regional_performance"}},
                 "aggs": {
                     "regions": {
-                        "terms": {"field": "region.keyword", "size": 10},
+                        "terms": {"field": "region", "size": 10},
                         "aggs": {
                             "avg_on_time": {
                                 "avg": {"field": "metrics.on_time_percentage"}

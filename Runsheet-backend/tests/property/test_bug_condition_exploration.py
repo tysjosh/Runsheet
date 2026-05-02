@@ -342,27 +342,31 @@ class TestWebSocketNoAuthRejection:
     def test_websocket_rejects_unauthenticated_connection(self, ws_path, test_app):
         """
         For each WebSocket endpoint, connecting without a JWT must be
-        rejected with close code 4001.
+        rejected with close code 4001 in non-development environments.
         """
         client = test_app["client"]
 
-        # Attempt WebSocket connection without any token.
-        # On unfixed code, the connection is accepted (no auth check).
-        # On fixed code, the connection should be rejected with close code 4001.
-        connection_accepted = False
-        try:
-            with client.websocket_connect(ws_path) as ws:
-                # If we reach here, the connection was accepted — this is the bug
-                connection_accepted = True
-        except Exception:
-            # Connection was rejected — this is the expected (fixed) behavior
-            connection_accepted = False
+        # Simulate a non-development environment so the dev-tenant fallback
+        # is not active (matching production behaviour).
+        mock_settings = MagicMock()
+        mock_settings.environment.value = "production"
+        mock_settings.jwt_secret = JWT_SECRET
+        mock_settings.jwt_algorithm = JWT_ALGORITHM
 
-        assert not connection_accepted, (
-            f"WebSocket connection to {ws_path} was ACCEPTED without JWT auth. "
-            f"Expected rejection with close code 4001 (bug 1.1). "
-            f"The handler has no authentication check."
-        )
+        with patch("config.settings.get_settings", return_value=mock_settings):
+            # Attempt WebSocket connection without any token.
+            connection_accepted = False
+            try:
+                with client.websocket_connect(ws_path) as ws:
+                    connection_accepted = True
+            except Exception:
+                connection_accepted = False
+
+            assert not connection_accepted, (
+                f"WebSocket connection to {ws_path} was ACCEPTED without JWT auth. "
+                f"Expected rejection with close code 4001 (bug 1.1). "
+                f"The handler has no authentication check."
+            )
 
 
 # ===========================================================================
