@@ -36,15 +36,19 @@ class DeliveryStatus(str, Enum):
     """Lifecycle status of a notification delivery.
 
     Valid transitions: pending → sent → delivered,
-    pending → failed, sent → failed.
+    pending → failed, sent → failed,
+    failed → retry_pending → sent (retry success),
+    failed → dead_letter (max retries exceeded).
 
-    Validates: Requirement 3.1
+    Validates: Requirement 3.1, 3.5, 3.6
     """
 
     PENDING = "pending"
     SENT = "sent"
     DELIVERED = "delivered"
     FAILED = "failed"
+    RETRY_PENDING = "retry_pending"
+    DEAD_LETTER = "dead_letter"
 
 
 class Channel(str, Enum):
@@ -66,7 +70,7 @@ class Channel(str, Enum):
 class Notification(BaseModel):
     """Model for the ``notifications_current`` Elasticsearch index.
 
-    Validates: Requirements 3.1, 12.1
+    Validates: Requirements 3.1, 3.5, 3.6, 4.1, 12.1
     """
 
     notification_id: str
@@ -86,6 +90,9 @@ class Notification(BaseModel):
     failed_at: Optional[str] = None
     failure_reason: Optional[str] = None
     retry_count: int = 0
+    proposal_id: Optional[str] = None
+    provider_message_id: Optional[str] = None
+    scheduled_retry_at: Optional[str] = None
     tenant_id: str
 
 

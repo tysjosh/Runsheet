@@ -103,6 +103,9 @@ AGENT_OUTCOMES_MAPPING = {
             "timestamp":            {"type": "date"},
             "status":               {"type": "keyword"},
             "schema_version":       {"type": "keyword"},
+            "notification_ids":     {"type": "keyword"},
+            "confidence_score":     {"type": "float"},
+            "confidence_rationale": {"type": "keyword"},
         },
     },
     "settings": {

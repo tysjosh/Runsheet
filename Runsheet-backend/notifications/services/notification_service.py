@@ -27,6 +27,7 @@ from notifications.services.template_renderer import TemplateRenderer
 from services.elasticsearch_service import ElasticsearchService
 
 if TYPE_CHECKING:
+    from notifications.services.retry_pipeline import RetryPipeline
     from notifications.ws.notification_ws_manager import NotificationWSManager
 
 logger = logging.getLogger(__name__)
@@ -85,6 +86,7 @@ class NotificationService:
         self._template_renderer = TemplateRenderer(es_service)
         self._dispatchers: dict[str, ChannelDispatcher] = {}
         self._ws_manager: NotificationWSManager | None = None
+        self._retry_pipeline: RetryPipeline | None = None
 
     # ------------------------------------------------------------------
     # WS manager wiring (called by bootstrap after construction)
@@ -97,6 +99,16 @@ class NotificationService:
         real-time notification events to connected clients.
         """
         self._ws_manager = ws_manager
+
+    def set_retry_pipeline(self, retry_pipeline: RetryPipeline) -> None:
+        """Wire the retry pipeline after construction.
+
+        Called by the bootstrap module so that failed dispatches are
+        automatically scheduled for retry with exponential backoff.
+
+        Validates: Requirements 3.1, 3.3
+        """
+        self._retry_pipeline = retry_pipeline
 
     # ------------------------------------------------------------------
     # Dispatcher registration
@@ -268,6 +280,7 @@ class NotificationService:
             "delivery_status",
             "related_entity_id",
             "recipient_reference",
+            "proposal_id",
         ):
             value = filters.get(field)
             if value:
@@ -604,6 +617,11 @@ class NotificationService:
             "tenant_id": tenant_id,
         }
 
+        # Include proposal_id if present in event_data (Req 4.1)
+        proposal_id = event_data.get("proposal_id")
+        if proposal_id:
+            notification["proposal_id"] = proposal_id
+
         # --- Index in ES (status=pending) ---
         await self._es.index_document(
             NOTIFICATIONS_CURRENT_INDEX, notification_id, notification
@@ -663,7 +681,10 @@ class NotificationService:
         - ``delivered`` → ``delivered_at``
         - ``failed`` → ``failed_at``
 
-        Validates: Requirement 3.3
+        When the new status is ``failed`` and a retry pipeline is wired,
+        the pipeline is invoked to schedule a retry or move to DLQ.
+
+        Validates: Requirements 3.1, 3.2, 3.3, 3.5, 3.6
         """
         now = datetime.now(timezone.utc).isoformat()
 
@@ -703,3 +724,14 @@ class NotificationService:
                 new_status.value,
                 exc,
             )
+
+        # Trigger retry pipeline for failed dispatches
+        if new_status == DeliveryStatus.FAILED and self._retry_pipeline is not None:
+            try:
+                await self._retry_pipeline.schedule_retry(notification)
+            except Exception as exc:
+                logger.error(
+                    "Retry pipeline error for notification_id=%s: %s",
+                    notification_id,
+                    exc,
+                )

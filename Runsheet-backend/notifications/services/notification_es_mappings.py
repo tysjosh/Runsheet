@@ -15,6 +15,7 @@ NOTIFICATIONS_CURRENT_INDEX = "notifications_current"
 NOTIFICATION_PREFERENCES_INDEX = "notification_preferences"
 NOTIFICATION_TEMPLATES_INDEX = "notification_templates"
 NOTIFICATION_RULES_INDEX = "notification_rules"
+DEAD_LETTER_QUEUE_INDEX = "dead_letter_queue"
 
 NOTIFICATIONS_CURRENT_MAPPING = {
     "mappings": {
@@ -37,6 +38,9 @@ NOTIFICATIONS_CURRENT_MAPPING = {
             "failed_at":           {"type": "date"},
             "failure_reason":      {"type": "text"},
             "retry_count":         {"type": "integer"},
+            "proposal_id":         {"type": "keyword"},
+            "provider_message_id": {"type": "keyword"},
+            "scheduled_retry_at":  {"type": "date"},
             "tenant_id":           {"type": "keyword"},
         }
     },
@@ -113,6 +117,23 @@ NOTIFICATION_RULES_MAPPING = {
     }
 }
 
+DEAD_LETTER_QUEUE_MAPPING = {
+    "mappings": {
+        "dynamic": "strict",
+        "properties": {
+            "notification_id":       {"type": "keyword"},
+            "original_notification": {"type": "object", "enabled": False},
+            "failure_reasons":       {"type": "text"},
+            "moved_at":              {"type": "date"},
+            "tenant_id":             {"type": "keyword"},
+        }
+    },
+    "settings": {
+        "number_of_shards": 1,
+        "number_of_replicas": 1,
+    }
+}
+
 
 def setup_notification_indices(es_service):
     """
@@ -138,6 +159,7 @@ def setup_notification_indices(es_service):
         NOTIFICATION_PREFERENCES_INDEX: NOTIFICATION_PREFERENCES_MAPPING,
         NOTIFICATION_TEMPLATES_INDEX: NOTIFICATION_TEMPLATES_MAPPING,
         NOTIFICATION_RULES_INDEX: NOTIFICATION_RULES_MAPPING,
+        DEAD_LETTER_QUEUE_INDEX: DEAD_LETTER_QUEUE_MAPPING,
     }
 
     for index_name, mapping in indices.items():

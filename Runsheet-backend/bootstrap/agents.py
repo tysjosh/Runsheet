@@ -103,6 +103,7 @@ async def initialize(app, container: ServiceContainer) -> None:
         activity_log_service=activity_log_service,
         business_validator=business_validator,
         es_service=es_service,
+        notification_service=container.notification_service if container.has("notification_service") else None,
     )
     container.confirmation_protocol = confirmation_protocol
 
@@ -244,6 +245,7 @@ async def initialize(app, container: ServiceContainer) -> None:
     from Agents.overlay.revenue_guard import RevenueGuard
     from Agents.overlay.customer_promise import CustomerPromise
     from Agents.overlay.learning_policy_agent import LearningPolicyAgent
+    from Agents.overlay.driver_nudge_agent import DriverNudgeAgent
 
     # Create SignalBus wired to ES (Req 2.1)
     signal_bus = SignalBus(es_service=es_service)
@@ -289,11 +291,15 @@ async def initialize(app, container: ServiceContainer) -> None:
         feedback_service=feedback_service,
     )
 
+    # Driver Nudge Agent — monitors unacknowledged assignments (Req 15.1–15.4)
+    driver_nudge_agent = DriverNudgeAgent(**overlay_common_args)
+
     # Register with scheduler — Layer 1 first, then Layer 2 (Req 10.2)
     scheduler.register(dispatch_optimizer, RestartPolicy.ON_FAILURE)
     scheduler.register(exception_commander, RestartPolicy.ON_FAILURE)
     scheduler.register(revenue_guard, RestartPolicy.ON_FAILURE)
     scheduler.register(customer_promise, RestartPolicy.ON_FAILURE)
+    scheduler.register(driver_nudge_agent, RestartPolicy.ON_FAILURE)
     scheduler.register(learning_policy_agent, RestartPolicy.ON_FAILURE)
 
     # Start overlay agents (only newly registered ones)
@@ -306,6 +312,7 @@ async def initialize(app, container: ServiceContainer) -> None:
         "exception_commander": exception_commander,
         "revenue_guard": revenue_guard,
         "customer_promise": customer_promise,
+        "driver_nudge_agent": driver_nudge_agent,
         "learning_policy_agent": learning_policy_agent,
     }
 

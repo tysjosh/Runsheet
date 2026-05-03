@@ -83,7 +83,7 @@ class TestFullBootstrapSequence:
     @pytest.mark.asyncio
     async def test_boot_order_is_correct(self):
         """Verify the boot order matches the design spec."""
-        assert _BOOT_ORDER == ["core", "middleware", "ops", "fuel", "scheduling", "agents"]
+        assert _BOOT_ORDER == ["core", "middleware", "ops", "fuel", "scheduling", "notifications", "agents"]
 
     @pytest.mark.asyncio
     async def test_shutdown_reverse_order(self, mock_app, container):

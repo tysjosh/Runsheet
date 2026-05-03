@@ -26,9 +26,18 @@ async def initialize(app, container: ServiceContainer) -> None:
     from scheduling.services.cargo_service import CargoService
     from scheduling.services.delay_detection_service import DelayDetectionService
     from scheduling.api.endpoints import configure_scheduling_api
+    from scheduling.api.driver_endpoints import configure_driver_endpoints
+    from driver.api.message_endpoints import configure_message_endpoints
+    from driver.api.exception_endpoints import configure_exception_endpoints
+    from driver.api.pod_endpoints import configure_pod_endpoints
+    from driver.middleware.idempotency import configure_idempotency_middleware
     from scheduling.websocket.scheduling_ws import (
         SchedulingWebSocketManager,
         bind_container as bind_sched_ws,
+    )
+    from driver.ws.driver_ws_manager import (
+        DriverWSManager,
+        bind_container as bind_driver_ws,
     )
 
     settings = container.settings
@@ -47,6 +56,15 @@ async def initialize(app, container: ServiceContainer) -> None:
     container.scheduling_ws_manager = scheduling_ws_manager
     bind_sched_ws(container)
 
+    # Driver WebSocket manager
+    driver_ws_manager = DriverWSManager(es_service=es_service)
+    container.driver_ws_manager = driver_ws_manager
+    bind_driver_ws(container)
+
+    # Idempotency middleware (ES-backed, Req 14.1–14.4)
+    configure_idempotency_middleware(es_service=es_service)
+    logger.info("Idempotency middleware configured")
+
     # Services
     redis_url = settings.redis_url or "redis://localhost:6379"
     job_service = JobService(es_service, redis_url=redis_url)
@@ -59,6 +77,7 @@ async def initialize(app, container: ServiceContainer) -> None:
 
     # Wire WS manager into services for real-time broadcasts
     job_service._ws_manager = scheduling_ws_manager
+    job_service._driver_ws_manager = driver_ws_manager
     cargo_service._ws_manager = scheduling_ws_manager
 
     # Wire scheduling API
@@ -66,6 +85,39 @@ async def initialize(app, container: ServiceContainer) -> None:
         job_service=job_service,
         cargo_service=cargo_service,
         delay_service=delay_service,
+    )
+
+    # Wire driver acknowledgment endpoints
+    configure_driver_endpoints(
+        job_service=job_service,
+        scheduling_ws_manager=scheduling_ws_manager,
+        driver_ws_manager=driver_ws_manager,
+    )
+
+    # Wire driver messaging endpoints
+    configure_message_endpoints(
+        es_service=es_service,
+        job_service=job_service,
+        scheduling_ws_manager=scheduling_ws_manager,
+        driver_ws_manager=driver_ws_manager,
+    )
+
+    # Wire driver exception reporting endpoints
+    signal_bus = container.get("signal_bus") if container.has("signal_bus") else None
+    configure_exception_endpoints(
+        es_service=es_service,
+        job_service=job_service,
+        signal_bus=signal_bus,
+        scheduling_ws_manager=scheduling_ws_manager,
+        driver_ws_manager=driver_ws_manager,
+    )
+
+    # Wire driver POD endpoints
+    configure_pod_endpoints(
+        es_service=es_service,
+        job_service=job_service,
+        scheduling_ws_manager=scheduling_ws_manager,
+        driver_ws_manager=driver_ws_manager,
     )
     logger.info("Scheduling API configured")
 
@@ -108,6 +160,12 @@ async def shutdown(app, container: ServiceContainer) -> None:
     if container.has("scheduling_ws_manager"):
         try:
             await container.scheduling_ws_manager.shutdown()
+        except Exception:
+            pass
+
+    if container.has("driver_ws_manager"):
+        try:
+            await container.driver_ws_manager.shutdown()
         except Exception:
             pass
 

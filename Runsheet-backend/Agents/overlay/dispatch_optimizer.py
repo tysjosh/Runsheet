@@ -14,6 +14,7 @@ import logging
 from typing import Any, Dict, List
 
 from Agents.overlay.base_overlay_agent import OverlayAgentBase
+from Agents.overlay.confidence_utils import compute_confidence_score
 from Agents.overlay.data_contracts import (
     InterventionProposal,
     RiskClass,
@@ -145,6 +146,34 @@ class DispatchOptimizer(OverlayAgentBase):
             total_time_saved += candidate["time_saved"]
             total_fuel_delta += candidate["fuel_delta"]
 
+        # Compute confidence score (Req 17.1, 17.2)
+        signal_confidence = min(s.confidence for s in signals)
+        affected_entity_count = len(safe_candidates)
+
+        # Data freshness: use the oldest signal's age
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        data_freshness_seconds = max(
+            (now - s.timestamp).total_seconds() for s in signals
+        )
+        data_freshness_seconds = max(0.0, data_freshness_seconds)
+
+        confidence_score, confidence_rationale = compute_confidence_score(
+            signal_confidence=signal_confidence,
+            historical_success_rate=0.7,  # Default; future: query from OutcomeTracker
+            data_freshness_seconds=data_freshness_seconds,
+            affected_entity_count=affected_entity_count,
+        )
+
+        # Req 17.3: override risk_class to HIGH when confidence < 0.5
+        risk_class = RiskClass.MEDIUM
+        if confidence_score < 0.5:
+            risk_class = RiskClass.HIGH
+            confidence_rationale.append(
+                "risk_class overridden to HIGH due to low confidence (<0.5)"
+            )
+
         proposal = InterventionProposal(
             source_agent=self.agent_id,
             actions=actions,
@@ -155,10 +184,12 @@ class DispatchOptimizer(OverlayAgentBase):
                     c["sla_impact"] for c in safe_candidates
                 ),
             },
-            risk_class=RiskClass.MEDIUM,
-            confidence=min(s.confidence for s in signals),
+            risk_class=risk_class,
+            confidence=signal_confidence,
             priority=len(safe_candidates),
             tenant_id=tenant_id,
+            confidence_score=confidence_score,
+            confidence_rationale=confidence_rationale,
         )
 
         return [proposal]

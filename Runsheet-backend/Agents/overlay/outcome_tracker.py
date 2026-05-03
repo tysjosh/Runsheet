@@ -44,6 +44,9 @@ class PendingOutcome:
         self.measure_at = created_at + timedelta(
             seconds=observation_window_seconds
         )
+        self.notification_ids: Optional[List[str]] = None
+        self.confidence_score: Optional[float] = None
+        self.confidence_rationale: Optional[List[str]] = None
 
 
 class OutcomeTracker:
@@ -86,10 +89,16 @@ class OutcomeTracker:
         before_kpis: Dict[str, float],
         tenant_id: str,
         entity_ids: List[str],
+        notification_ids: Optional[List[str]] = None,
+        confidence_score: Optional[float] = None,
+        confidence_rationale: Optional[List[str]] = None,
     ) -> None:
-        """Record that a proposal has been executed (Req 11.1, 11.2).
+        """Record that a proposal has been executed (Req 11.1, 11.2, 4.2, 4.4, 17.4).
 
         Captures before-KPIs and schedules after-KPI measurement.
+        Optionally stores notification_ids generated during execution.
+        Optionally stores confidence_score and confidence_rationale for
+        retrospective accuracy analysis (Req 17.4).
         """
         pending = PendingOutcome(
             intervention_id=intervention_id,
@@ -100,6 +109,14 @@ class OutcomeTracker:
             observation_window_seconds=self._observation_window,
         )
         self._pending[intervention_id] = pending
+        # Store notification_ids for inclusion in the OutcomeRecord (Req 4.2, 4.4)
+        if notification_ids is not None:
+            pending.notification_ids = notification_ids
+        # Store confidence data for inclusion in the OutcomeRecord (Req 17.4)
+        if confidence_score is not None:
+            pending.confidence_score = confidence_score
+        if confidence_rationale is not None:
+            pending.confidence_rationale = confidence_rationale
 
     # ------------------------------------------------------------------
     # Check pending outcomes
@@ -135,6 +152,9 @@ class OutcomeTracker:
                     ).total_seconds() * 1000,
                     tenant_id=pending.tenant_id,
                     status="inconclusive",
+                    notification_ids=pending.notification_ids,
+                    confidence_score=pending.confidence_score,
+                    confidence_rationale=pending.confidence_rationale,
                 )
             else:
                 # Compute realized delta (Req 11.3)
@@ -163,6 +183,9 @@ class OutcomeTracker:
                     ).total_seconds() * 1000,
                     tenant_id=pending.tenant_id,
                     status=status,
+                    notification_ids=pending.notification_ids,
+                    confidence_score=pending.confidence_score,
+                    confidence_rationale=pending.confidence_rationale,
                 )
 
             # Persist to ES (Req 11.4)

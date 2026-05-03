@@ -54,7 +54,7 @@ class RiskSignal(BaseModel):
 class InterventionProposal(BaseModel):
     """Proposal produced by Layer 1 agents containing ranked actions.
 
-    Validates: Requirement 1.2, 1.5, 1.8
+    Validates: Requirement 1.2, 1.5, 1.8, 17.1, 17.2
     """
     proposal_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     source_agent: str
@@ -66,12 +66,14 @@ class InterventionProposal(BaseModel):
     tenant_id: str
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     schema_version: str = "1.0.0"
+    confidence_score: Optional[float] = Field(None, ge=0.0, le=1.0)
+    confidence_rationale: Optional[List[str]] = None
 
 
 class OutcomeRecord(BaseModel):
     """Record of an executed intervention's before/after KPIs.
 
-    Validates: Requirement 1.3
+    Validates: Requirement 1.3, 4.4, 17.4
     """
     outcome_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     intervention_id: str  # References InterventionProposal.proposal_id
@@ -83,6 +85,9 @@ class OutcomeRecord(BaseModel):
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     status: str = "measured"  # measured | adverse | inconclusive
     schema_version: str = "1.0.0"
+    notification_ids: Optional[List[str]] = None
+    confidence_score: Optional[float] = Field(None, ge=0.0, le=1.0)
+    confidence_rationale: Optional[List[str]] = None
 
 
 class PolicyChangeProposal(BaseModel):

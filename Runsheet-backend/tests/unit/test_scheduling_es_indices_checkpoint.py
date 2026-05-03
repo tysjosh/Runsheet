@@ -35,6 +35,8 @@ from scheduling.services.scheduling_es_mappings import (
     JOB_EVENTS_MAPPING,
     JOBS_CURRENT_INDEX,
     JOBS_CURRENT_MAPPING,
+    TENANT_JOB_POLICIES_INDEX,
+    TENANT_JOB_POLICIES_MAPPING,
     setup_scheduling_indices,
 )
 
@@ -71,7 +73,7 @@ class TestIndicesCreatedOnStartup:
 
     def test_skips_existing_indices(self):
         es_service, client = _make_es_service(
-            existing_indices={JOBS_CURRENT_INDEX, JOB_EVENTS_INDEX}
+            existing_indices={JOBS_CURRENT_INDEX, JOB_EVENTS_INDEX, TENANT_JOB_POLICIES_INDEX}
         )
         setup_scheduling_indices(es_service)
         client.indices.create.assert_not_called()

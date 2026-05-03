@@ -1,6 +1,6 @@
 """Elasticsearch index mappings for the Logistics Scheduling module.
 
-Validates: Requirements 1.1, 1.2, 1.5, 1.6
+Validates: Requirements 1.1, 1.2, 1.5, 1.6, 10.3
 """
 
 import logging
@@ -9,6 +9,7 @@ logger = logging.getLogger(__name__)
 
 JOBS_CURRENT_INDEX = "jobs_current"
 JOB_EVENTS_INDEX = "job_events"
+TENANT_JOB_POLICIES_INDEX = "tenant_job_policies"
 JOB_EVENTS_ILM_POLICY_NAME = "job-events-policy"
 
 JOBS_CURRENT_MAPPING = {
@@ -86,6 +87,23 @@ JOB_EVENTS_ILM_POLICY = {
     }
 }
 
+TENANT_JOB_POLICIES_MAPPING = {
+    "mappings": {
+        "dynamic": "strict",
+        "properties": {
+            "tenant_id":              {"type": "keyword"},
+            "pod_required":           {"type": "boolean"},
+            "pod_radius_meters":      {"type": "integer"},
+            "otp_required":           {"type": "boolean"},
+            "nudge_timeout_minutes":  {"type": "integer"},
+        }
+    },
+    "settings": {
+        "number_of_shards": 1,
+        "number_of_replicas": 1,
+    }
+}
+
 
 def setup_scheduling_indices(es_service):
     """
@@ -108,6 +126,7 @@ def setup_scheduling_indices(es_service):
     indices = {
         JOBS_CURRENT_INDEX: JOBS_CURRENT_MAPPING,
         JOB_EVENTS_INDEX: JOB_EVENTS_MAPPING,
+        TENANT_JOB_POLICIES_INDEX: TENANT_JOB_POLICIES_MAPPING,
     }
 
     for index_name, mapping in indices.items():

@@ -602,3 +602,127 @@ class TestPersistOutcome:
         )
         # Should not raise
         await tracker._persist_outcome(outcome)
+
+
+# ---------------------------------------------------------------------------
+# Tests: notification_ids linking (Task 4.4, Req 4.2, 4.4)
+# ---------------------------------------------------------------------------
+
+
+class TestNotificationIdsLinking:
+    """Tests for notification_ids storage in OutcomeTracker (Req 4.2, 4.4)."""
+
+    @pytest.mark.asyncio
+    async def test_record_proposal_execution_stores_notification_ids(self):
+        """Req 4.2: notification_ids are stored in the pending outcome."""
+        tracker = _make_tracker()
+        await tracker.record_proposal_execution(
+            intervention_id="int-1",
+            before_kpis={"delivery_time": 30.0},
+            tenant_id="tenant-1",
+            entity_ids=["job-1"],
+            notification_ids=["notif-a", "notif-b"],
+        )
+        assert tracker._pending["int-1"].notification_ids == ["notif-a", "notif-b"]
+
+    @pytest.mark.asyncio
+    async def test_record_proposal_execution_defaults_notification_ids_to_none(self):
+        """When notification_ids is not provided, it defaults to None."""
+        tracker = _make_tracker()
+        await tracker.record_proposal_execution(
+            intervention_id="int-1",
+            before_kpis={"delivery_time": 30.0},
+            tenant_id="tenant-1",
+            entity_ids=["job-1"],
+        )
+        assert tracker._pending["int-1"].notification_ids is None
+
+    @pytest.mark.asyncio
+    async def test_outcome_record_includes_notification_ids(self):
+        """Req 4.4: OutcomeRecord includes notification_ids from the pending outcome."""
+        es = _make_es_service(hits=[])
+        tracker = _make_tracker(es_service=es)
+        await tracker.record_proposal_execution(
+            intervention_id="int-1",
+            before_kpis={"delivery_time": 30.0},
+            tenant_id="tenant-1",
+            entity_ids=["job-1"],
+            notification_ids=["notif-a", "notif-b"],
+        )
+        tracker._pending["int-1"].measure_at = datetime.now(
+            timezone.utc
+        ) - timedelta(seconds=1)
+
+        results = await tracker.check_pending_outcomes()
+        assert len(results) == 1
+        assert results[0].notification_ids == ["notif-a", "notif-b"]
+
+    @pytest.mark.asyncio
+    async def test_outcome_record_notification_ids_none_when_not_provided(self):
+        """OutcomeRecord has notification_ids=None when not provided."""
+        es = _make_es_service(hits=[])
+        tracker = _make_tracker(es_service=es)
+        await tracker.record_proposal_execution(
+            intervention_id="int-1",
+            before_kpis={},
+            tenant_id="tenant-1",
+            entity_ids=["job-1"],
+        )
+        tracker._pending["int-1"].measure_at = datetime.now(
+            timezone.utc
+        ) - timedelta(seconds=1)
+
+        results = await tracker.check_pending_outcomes()
+        assert len(results) == 1
+        assert results[0].notification_ids is None
+
+    @pytest.mark.asyncio
+    async def test_outcome_record_includes_notification_ids_for_measured_status(self):
+        """notification_ids are included in OutcomeRecord even for measured (non-inconclusive) outcomes."""
+        es = _make_es_service(
+            hits=[
+                {"actual_delivery_minutes": 29.0, "fuel_cost": 98.0, "sla_met": True}
+            ]
+        )
+        tracker = _make_tracker(es_service=es)
+        await tracker.record_proposal_execution(
+            intervention_id="int-1",
+            before_kpis={
+                "avg_delivery_time_minutes": 30.0,
+                "total_fuel_cost": 100.0,
+                "sla_compliance_rate": 1.0,
+            },
+            tenant_id="tenant-1",
+            entity_ids=["job-1"],
+            notification_ids=["notif-x"],
+        )
+        tracker._pending["int-1"].measure_at = datetime.now(
+            timezone.utc
+        ) - timedelta(seconds=1)
+
+        results = await tracker.check_pending_outcomes()
+        assert len(results) == 1
+        assert results[0].status == "measured"
+        assert results[0].notification_ids == ["notif-x"]
+
+    @pytest.mark.asyncio
+    async def test_persisted_outcome_includes_notification_ids(self):
+        """notification_ids are persisted to ES in the outcome document."""
+        es = _make_es_service(hits=[])
+        tracker = _make_tracker(es_service=es)
+        await tracker.record_proposal_execution(
+            intervention_id="int-1",
+            before_kpis={},
+            tenant_id="tenant-1",
+            entity_ids=["job-1"],
+            notification_ids=["notif-1", "notif-2"],
+        )
+        tracker._pending["int-1"].measure_at = datetime.now(
+            timezone.utc
+        ) - timedelta(seconds=1)
+
+        await tracker.check_pending_outcomes()
+
+        es.index_document.assert_called_once()
+        doc = es.index_document.call_args[0][2]
+        assert doc["notification_ids"] == ["notif-1", "notif-2"]

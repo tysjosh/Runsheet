@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from Agents.overlay.base_overlay_agent import OverlayAgentBase
+from Agents.overlay.confidence_utils import compute_confidence_score
 from Agents.overlay.data_contracts import (
     InterventionProposal,
     RiskClass,
@@ -353,6 +354,7 @@ class ExceptionReplanningAgent(OverlayAgentBase):
             disruption_type=disruption_type,
             risk_class=risk_class,
             tenant_id=tenant_id,
+            signal=signal,
         )
 
         return proposal
@@ -534,11 +536,15 @@ class ExceptionReplanningAgent(OverlayAgentBase):
         disruption_type: str,
         risk_class: RiskClass,
         tenant_id: str,
+        signal: Optional[RiskSignal] = None,
     ) -> InterventionProposal:
         """Build an InterventionProposal for a replan event.
 
         Routes through ConfirmationProtocol with MEDIUM risk
         (truck swaps as HIGH) per Req 5.8.
+
+        Computes confidence_score and confidence_rationale per Req 17.1–17.3.
+        When confidence_score < 0.5, overrides risk_class to HIGH.
         """
         actions = [
             {
@@ -556,6 +562,40 @@ class ExceptionReplanningAgent(OverlayAgentBase):
             }
         ]
 
+        # Compute confidence score (Req 17.1, 17.2)
+        signal_confidence = signal.confidence if signal else 0.5
+        # Count affected entities from the diff
+        affected_count = len(replan_event.diff.stops_reordered or [])
+        affected_count += len(replan_event.diff.stations_deferred or [])
+        affected_count += len(replan_event.diff.volumes_reallocated or {})
+        if replan_event.diff.truck_swapped:
+            affected_count += 1
+        affected_count = max(1, affected_count)
+
+        # Data freshness: seconds since the signal was emitted
+        data_freshness_seconds = 0.0
+        if signal:
+            from datetime import datetime, timezone
+
+            now = datetime.now(timezone.utc)
+            delta = (now - signal.timestamp).total_seconds()
+            data_freshness_seconds = max(0.0, delta)
+
+        confidence_score, confidence_rationale = compute_confidence_score(
+            signal_confidence=signal_confidence,
+            historical_success_rate=0.7,  # Default; future: query from OutcomeTracker
+            data_freshness_seconds=data_freshness_seconds,
+            affected_entity_count=affected_count,
+        )
+
+        # Req 17.3: override risk_class to HIGH when confidence < 0.5
+        effective_risk_class = risk_class
+        if confidence_score < 0.5:
+            effective_risk_class = RiskClass.HIGH
+            confidence_rationale.append(
+                "risk_class overridden to HIGH due to low confidence (<0.5)"
+            )
+
         return InterventionProposal(
             source_agent=self.agent_id,
             actions=actions,
@@ -563,10 +603,12 @@ class ExceptionReplanningAgent(OverlayAgentBase):
                 "replan_count": 1,
                 "disruption_mitigated": 1,
             },
-            risk_class=risk_class,
-            confidence=0.7,
+            risk_class=effective_risk_class,
+            confidence=signal_confidence,
             priority=2,
             tenant_id=tenant_id,
+            confidence_score=confidence_score,
+            confidence_rationale=confidence_rationale,
         )
 
     # ------------------------------------------------------------------

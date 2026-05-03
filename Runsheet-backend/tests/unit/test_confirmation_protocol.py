@@ -50,6 +50,7 @@ def _make_protocol(
     validation_valid: bool = True,
     validation_reason: str = None,
     approval_id: str = "approval-123",
+    notification_service=None,
 ) -> ConfirmationProtocol:
     """Create a ConfirmationProtocol with mocked dependencies."""
     risk_registry = MagicMock()
@@ -75,6 +76,7 @@ def _make_protocol(
         autonomy_config_service=autonomy_config,
         activity_log_service=activity_log,
         business_validator=business_validator,
+        notification_service=notification_service,
     )
 
 
@@ -536,3 +538,200 @@ class TestExecuteMutation:
         result = await protocol._execute_mutation(request)
 
         assert "tenant-xyz" in result
+
+
+# ---------------------------------------------------------------------------
+# Tests: _execute_mutation — send_customer_notification branch
+# ---------------------------------------------------------------------------
+
+
+class TestExecuteMutationSendCustomerNotification:
+    """Tests for the send_customer_notification branch in _execute_mutation.
+
+    Requirements: 1.1, 1.2, 1.3, 1.4
+    """
+
+    def _make_notification_request(self, **overrides) -> MutationRequest:
+        """Create a MutationRequest for send_customer_notification."""
+        params = {
+            "delivery_id": "JOB_ABC123",
+            "notification_type": "delay_alert",
+            "channel": "sms",
+            "message_template": "Your delivery is delayed.",
+            "customer_id": "CUST_001",
+            "proposal_id": "PROP_001",
+            "context": {},
+        }
+        params.update(overrides)
+        return _make_request(
+            tool_name="send_customer_notification",
+            parameters=params,
+            tenant_id="t1",
+        )
+
+    async def test_success_returns_notification_ids(self):
+        """Req 1.4: Successful dispatch includes notification_id(s) in result."""
+        mock_ns = AsyncMock()
+        mock_ns.notify_event = AsyncMock(
+            return_value=[
+                {"notification_id": "notif-001"},
+                {"notification_id": "notif-002"},
+            ]
+        )
+        protocol = _make_protocol(notification_service=mock_ns)
+        request = self._make_notification_request()
+
+        result = await protocol._execute_mutation(request)
+
+        assert "notif-001" in result
+        assert "notif-002" in result
+        assert "Dispatched 2 notification(s)" in result
+
+    async def test_invokes_notify_event_with_correct_params(self):
+        """Req 1.1, 1.2: Parameters forwarded correctly to NotificationService."""
+        mock_ns = AsyncMock()
+        mock_ns.notify_event = AsyncMock(
+            return_value=[{"notification_id": "notif-001"}]
+        )
+        protocol = _make_protocol(notification_service=mock_ns)
+        request = self._make_notification_request(
+            delivery_id="JOB_XYZ",
+            notification_type="eta_change",
+            channel="email",
+            message_template="ETA updated.",
+            customer_id="CUST_002",
+            proposal_id="PROP_002",
+        )
+
+        await protocol._execute_mutation(request)
+
+        mock_ns.notify_event.assert_called_once()
+        call_kwargs = mock_ns.notify_event.call_args[1]
+        assert call_kwargs["event_type"] == "eta_change"
+        assert call_kwargs["tenant_id"] == "t1"
+        event_data = call_kwargs["event_data"]
+        assert event_data["customer_id"] == "CUST_002"
+        assert event_data["job_id"] == "JOB_XYZ"
+        assert event_data["channel_override"] == "email"
+        assert event_data["template_override"] == "ETA updated."
+        assert event_data["proposal_id"] == "PROP_002"
+
+    async def test_empty_notifications_returns_failure_message(self):
+        """Req 1.3: Empty notification list returns failure details."""
+        mock_ns = AsyncMock()
+        mock_ns.notify_event = AsyncMock(return_value=[])
+        protocol = _make_protocol(notification_service=mock_ns)
+        request = self._make_notification_request()
+
+        result = await protocol._execute_mutation(request)
+
+        assert "failed" in result.lower()
+        assert "no notifications created" in result.lower()
+
+    async def test_none_notifications_returns_failure_message(self):
+        """Req 1.3: None return from notify_event returns failure details."""
+        mock_ns = AsyncMock()
+        mock_ns.notify_event = AsyncMock(return_value=None)
+        protocol = _make_protocol(notification_service=mock_ns)
+        request = self._make_notification_request()
+
+        result = await protocol._execute_mutation(request)
+
+        assert "failed" in result.lower()
+
+    async def test_notify_event_exception_returns_failure(self):
+        """Req 1.3: Exception from NotificationService returns failure details."""
+        mock_ns = AsyncMock()
+        mock_ns.notify_event = AsyncMock(
+            side_effect=Exception("ES connection timeout")
+        )
+        protocol = _make_protocol(notification_service=mock_ns)
+        request = self._make_notification_request()
+
+        result = await protocol._execute_mutation(request)
+
+        assert "Failed to execute" in result
+        assert "ES connection timeout" in result
+
+    async def test_no_notification_service_returns_failure(self):
+        """When notification_service is not wired, returns failure message."""
+        protocol = _make_protocol(notification_service=None)
+        request = self._make_notification_request()
+
+        result = await protocol._execute_mutation(request)
+
+        assert "failed" in result.lower()
+        assert "not configured" in result.lower()
+
+    async def test_default_notification_type_is_order_status_update(self):
+        """Req 1.2: Defaults to order_status_update when notification_type missing."""
+        mock_ns = AsyncMock()
+        mock_ns.notify_event = AsyncMock(
+            return_value=[{"notification_id": "notif-001"}]
+        )
+        protocol = _make_protocol(notification_service=mock_ns)
+        # Omit notification_type from parameters
+        request = _make_request(
+            tool_name="send_customer_notification",
+            parameters={
+                "delivery_id": "JOB_1",
+                "customer_id": "CUST_1",
+                "context": {},
+            },
+            tenant_id="t1",
+        )
+
+        await protocol._execute_mutation(request)
+
+        call_kwargs = mock_ns.notify_event.call_args[1]
+        assert call_kwargs["event_type"] == "order_status_update"
+
+    async def test_context_params_merged_into_event_data(self):
+        """Req 1.2: Extra context parameters are merged into event_data."""
+        mock_ns = AsyncMock()
+        mock_ns.notify_event = AsyncMock(
+            return_value=[{"notification_id": "notif-001"}]
+        )
+        protocol = _make_protocol(notification_service=mock_ns)
+        request = self._make_notification_request(
+            context={"extra_key": "extra_value", "another": 42}
+        )
+
+        await protocol._execute_mutation(request)
+
+        event_data = mock_ns.notify_event.call_args[1]["event_data"]
+        assert event_data["extra_key"] == "extra_value"
+        assert event_data["another"] == 42
+
+    async def test_single_notification_returns_single_id(self):
+        """Req 1.4: Single notification returns single notification_id."""
+        mock_ns = AsyncMock()
+        mock_ns.notify_event = AsyncMock(
+            return_value=[{"notification_id": "notif-solo"}]
+        )
+        protocol = _make_protocol(notification_service=mock_ns)
+        request = self._make_notification_request()
+
+        result = await protocol._execute_mutation(request)
+
+        assert "Dispatched 1 notification(s)" in result
+        assert "notif-solo" in result
+
+    async def test_end_to_end_via_process_mutation(self):
+        """Req 1.1: Full flow through process_mutation returns executed=True with notification_ids."""
+        mock_ns = AsyncMock()
+        mock_ns.notify_event = AsyncMock(
+            return_value=[{"notification_id": "notif-e2e"}]
+        )
+        protocol = _make_protocol(
+            risk_level=RiskLevel.LOW,
+            autonomy_level="full-auto",
+            notification_service=mock_ns,
+        )
+        request = self._make_notification_request()
+
+        result = await protocol.process_mutation(request)
+
+        assert result.executed is True
+        assert result.confirmation_method == "immediate"
+        assert "notif-e2e" in result.result

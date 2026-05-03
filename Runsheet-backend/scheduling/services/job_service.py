@@ -42,7 +42,9 @@ from scheduling.services.job_id_generator import JobIdGenerator
 from scheduling.services.scheduling_es_mappings import (
     JOBS_CURRENT_INDEX,
     JOB_EVENTS_INDEX,
+    TENANT_JOB_POLICIES_INDEX,
 )
+from driver.services.driver_es_mappings import PROOF_OF_DELIVERY_INDEX
 from services.elasticsearch_service import ElasticsearchService
 
 logger = logging.getLogger(__name__)
@@ -63,7 +65,9 @@ class JobService:
         self._id_gen = JobIdGenerator(redis_url)
         self._settings = get_settings()
         self._ws_manager = None  # Wired in task 8.3
+        self._driver_ws_manager = None  # Wired by bootstrap/scheduling
         self._notification_service = None  # Wired by bootstrap/notifications
+        self._audit_timeline_service = None  # Wired by bootstrap/notifications
 
     # ------------------------------------------------------------------
     # Job Creation  (Requirements 2.1-2.8, 8.5)
@@ -283,6 +287,19 @@ class JobService:
             },
         )
 
+        # Append audit timeline event (Req 12.2)
+        await self._append_audit_event(
+            job_id=job_id,
+            event_type="assignment",
+            actor_type="dispatcher",
+            actor_id=actor_id or "system",
+            payload={
+                "asset_id": asset_id,
+                "job_id": job_id,
+            },
+            tenant_id=tenant_id,
+        )
+
         # Merge updates into doc for return / broadcast
         job_doc.update(update_fields)
         await self._broadcast_job_update("status_changed", job_doc)
@@ -298,11 +315,17 @@ class JobService:
     ) -> Job:
         """Change the assigned asset on an active job.
 
-        Validates: Requirement 3.6
+        Validates: Requirements 3.6, 11.1, 11.3, 11.4
         - Verifies the job status is ``assigned`` or ``in_progress``.
         - Verifies the new asset is compatible and available.
         - Updates ``asset_assigned`` and appends an ``asset_reassigned`` event
           recording both old and new asset ids.
+        - Publishes ``assignment_revoked`` event to previous driver via
+          DriverWSManager.
+        - Publishes ``assignment`` event to new driver via DriverWSManager
+          with full job details.
+        - Appends ``assignment_revoked`` event to job timeline with
+          previous/new driver_id and timestamp.
 
         Args:
             job_id: The job to reassign.
@@ -352,7 +375,7 @@ class JobService:
 
         await self._es.update_document(JOBS_CURRENT_INDEX, job_id, update_fields)
 
-        # Append event with old and new asset ids
+        # Append asset_reassigned event with old and new asset ids
         await self._append_event(
             job_id=job_id,
             event_type="asset_reassigned",
@@ -365,8 +388,58 @@ class JobService:
             },
         )
 
+        # Append assignment_revoked event to job timeline (Req 11.3)
+        await self._append_event(
+            job_id=job_id,
+            event_type="assignment_revoked",
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            payload={
+                "job_id": job_id,
+                "previous_driver_id": old_asset_id,
+                "new_driver_id": new_asset_id,
+                "timestamp": now,
+            },
+        )
+
+        # Publish assignment_revoked event to previous driver (Req 11.1)
+        if old_asset_id and self._driver_ws_manager is not None:
+            try:
+                await self._driver_ws_manager.send_assignment_revoked(
+                    old_asset_id,
+                    {
+                        "job_id": job_id,
+                        "previous_driver_id": old_asset_id,
+                        "new_driver_id": new_asset_id,
+                        "timestamp": now,
+                    },
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to send assignment_revoked to driver %s for job %s: %s",
+                    old_asset_id,
+                    job_id,
+                    exc,
+                )
+
         # Merge updates into doc for return / broadcast
         job_doc.update(update_fields)
+
+        # Publish assignment event to new driver with full job details (Req 11.4)
+        if self._driver_ws_manager is not None:
+            try:
+                await self._driver_ws_manager.send_assignment(
+                    new_asset_id,
+                    job_doc,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to send assignment to new driver %s for job %s: %s",
+                    new_asset_id,
+                    job_id,
+                    exc,
+                )
+
         await self._broadcast_job_update("status_changed", job_doc)
 
         return Job(**self._normalize_job_doc(job_doc))
@@ -428,6 +501,21 @@ class JobService:
                     "current_status": current_status.value,
                     "target_status": target_status.value,
                     "allowed_transitions": [s.value for s in allowed],
+                },
+            )
+
+        # Evaluate business rules before executing the transition
+        violation = await self._evaluate_business_rules(
+            job_doc, target_status, tenant_id
+        )
+        if violation is not None:
+            raise validation_error(
+                violation["message"],
+                details={
+                    "job_id": job_id,
+                    "target_status": target_status.value,
+                    "rule": violation["rule"],
+                    "remediation": violation["remediation"],
                 },
             )
 
@@ -515,6 +603,19 @@ class JobService:
                 "new_status": target_status.value,
                 "actor_id": actor_id,
             },
+        )
+
+        # Append audit timeline event (Req 12.2)
+        await self._append_audit_event(
+            job_id=job_id,
+            event_type="status_changed",
+            actor_type="dispatcher",
+            actor_id=actor_id or "system",
+            payload={
+                "old_status": current_status.value,
+                "new_status": target_status.value,
+            },
+            tenant_id=tenant_id,
         )
 
         # Merge updates and broadcast
@@ -813,6 +914,140 @@ class JobService:
         ]
 
     # ------------------------------------------------------------------
+    # Business rule evaluation  (Requirements 10.1, 10.2, 10.3)
+    # ------------------------------------------------------------------
+
+    async def _get_tenant_policies(self, tenant_id: str) -> dict:
+        """Fetch tenant job policies from ES, returning defaults if not found.
+
+        Queries the ``tenant_job_policies`` index for the given tenant.
+        Returns a dict with keys: pod_required, pod_radius_meters,
+        otp_required, nudge_timeout_minutes.
+
+        Validates: Requirement 10.3
+
+        Args:
+            tenant_id: Tenant scope from JWT.
+
+        Returns:
+            Dict of policy settings with sensible defaults.
+        """
+        defaults = {
+            "pod_required": False,
+            "pod_radius_meters": 500,
+            "otp_required": False,
+            "nudge_timeout_minutes": 10,
+        }
+        try:
+            query = {
+                "query": {"term": {"tenant_id": tenant_id}},
+                "size": 1,
+            }
+            response = await self._es.search_documents(
+                TENANT_JOB_POLICIES_INDEX, query, size=1
+            )
+            hits = response.get("hits", {}).get("hits", [])
+            if hits:
+                source = hits[0]["_source"]
+                return {
+                    key: source.get(key, default)
+                    for key, default in defaults.items()
+                }
+        except Exception as exc:
+            logger.warning(
+                "Failed to fetch tenant policies for %s, using defaults: %s",
+                tenant_id,
+                exc,
+            )
+        return defaults
+
+    async def _check_pod_exists(
+        self, job_id: str, tenant_id: str
+    ) -> Optional[dict]:
+        """Check if an accepted POD exists for the given job.
+
+        Queries the ``proof_of_delivery`` index for a POD with status
+        ``accepted`` for the given job and tenant.
+
+        Args:
+            job_id: The job identifier.
+            tenant_id: Tenant scope.
+
+        Returns:
+            The POD document dict if found, or None.
+        """
+        try:
+            query = {
+                "query": {
+                    "bool": {
+                        "must": [
+                            {"term": {"job_id": job_id}},
+                            {"term": {"tenant_id": tenant_id}},
+                            {"term": {"status": "accepted"}},
+                        ]
+                    }
+                },
+                "size": 1,
+            }
+            response = await self._es.search_documents(
+                PROOF_OF_DELIVERY_INDEX, query, size=1
+            )
+            hits = response.get("hits", {}).get("hits", [])
+            if hits:
+                return hits[0]["_source"]
+        except Exception as exc:
+            logger.warning(
+                "Failed to check POD for job %s: %s", job_id, exc
+            )
+        return None
+
+    async def _evaluate_business_rules(
+        self,
+        job_doc: dict,
+        target_status: JobStatus,
+        tenant_id: str,
+    ) -> Optional[dict]:
+        """Evaluate tenant-specific business rules before a status transition.
+
+        Called by ``transition_status`` before executing the transition.
+        Returns a violation dict if a rule is violated, or None if all
+        rules pass.
+
+        Validates: Requirements 10.1, 10.2, 10.3
+
+        Args:
+            job_doc: The raw job document from Elasticsearch.
+            target_status: The target status for the transition.
+            tenant_id: Tenant scope from JWT.
+
+        Returns:
+            A dict with ``rule``, ``message``, and ``remediation`` keys
+            if a business rule is violated, or None if all rules pass.
+        """
+        policies = await self._get_tenant_policies(tenant_id)
+
+        # POD-required check: reject completed transition unless accepted POD exists
+        if target_status == JobStatus.COMPLETED:
+            if policies.get("pod_required", False):
+                pod = await self._check_pod_exists(
+                    job_doc["job_id"], tenant_id
+                )
+                if not pod:
+                    return {
+                        "rule": "pod_required",
+                        "message": (
+                            "POD with status 'accepted' is required before "
+                            "completing this job"
+                        ),
+                        "remediation": (
+                            "Submit proof of delivery via "
+                            f"POST /api/driver/jobs/{job_doc['job_id']}/pod"
+                        ),
+                    }
+
+        return None
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
@@ -1026,3 +1261,49 @@ class JobService:
                 )
             except Exception as e:
                 logger.warning(f"Notification pipeline error (non-blocking): {e}")
+
+    # ------------------------------------------------------------------
+    # Audit timeline helper  (Requirements 12.1, 12.2)
+    # ------------------------------------------------------------------
+
+    async def _append_audit_event(
+        self,
+        job_id: str,
+        event_type: str,
+        actor_type: str,
+        actor_id: str,
+        payload: dict,
+        tenant_id: str,
+    ) -> None:
+        """Append an event to the immutable audit timeline (non-blocking).
+
+        Delegates to AuditTimelineService if wired. Failures are logged
+        but never propagate — audit writes must not block job operations.
+
+        Validates: Requirements 12.1, 12.2
+
+        Args:
+            job_id: The job this event belongs to.
+            event_type: The type of event.
+            actor_type: The type of actor (driver, dispatcher, agent, system).
+            actor_id: The identifier of the actor.
+            payload: Event-specific context dict.
+            tenant_id: Tenant scope.
+        """
+        if self._audit_timeline_service is None:
+            return
+        try:
+            await self._audit_timeline_service.append_event(
+                job_id=job_id,
+                event_type=event_type,
+                actor_type=actor_type,
+                actor_id=actor_id,
+                payload=payload,
+                tenant_id=tenant_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Audit timeline append failed for job %s (non-blocking): %s",
+                job_id,
+                exc,
+            )

@@ -13,8 +13,17 @@ Tests cover:
 - _compute_priority() scoring (Req 7.7)
 - _select_channel() channel selection by severity
 - _cleanup_flagged() removes old entries
+- SLA-tier personalization (Req 16.1, 16.2, 16.3)
+  - _get_sla_tier() lookup from signal context
+  - _select_channel_for_tier() override for premium/enterprise
+  - _select_template_for_tier() tier-based template selection
+  - _select_recovery_template_for_tier() tier-based recovery template
+  - _get_recovery_apology() tier-appropriate apology messages
+  - evaluate() includes sla_tier in proposal parameters
+  - evaluate() overrides channel for premium/enterprise tiers
+  - evaluate() generates recovery with updated ETA and apology
 
-Requirements: 7.1, 7.2, 7.3, 7.4, 7.5, 7.6, 7.7, 7.8
+Requirements: 7.1, 7.2, 7.3, 7.4, 7.5, 7.6, 7.7, 7.8, 16.1, 16.2, 16.3
 """
 import pytest
 from datetime import datetime, timedelta, timezone
@@ -178,7 +187,7 @@ class TestEvaluate:
 
     @pytest.mark.asyncio
     async def test_generates_breach_proposal(self):
-        """Req 7.3: Breach proposal includes delivery_id, channel, template."""
+        """Req 7.3: Breach proposal includes delivery_id, channel, template, sla_tier."""
         agent, _ = _make_agent()
         signal = _make_signal(
             entity_id="delivery-42",
@@ -200,6 +209,7 @@ class TestEvaluate:
         assert action["parameters"]["notification_type"] == "eta_breach_warning"
         assert action["parameters"]["channel"] == "sms"
         assert action["parameters"]["message_template"] == "eta_delay_notification"
+        assert action["parameters"]["sla_tier"] == "standard"
 
     @pytest.mark.asyncio
     async def test_respects_cooldown(self):
@@ -254,8 +264,14 @@ class TestEvaluate:
 
         assert len(result) == 1
         proposal = result[0]
-        assert proposal.actions[0]["parameters"]["notification_type"] == "eta_recovery"
-        assert proposal.actions[0]["parameters"]["channel"] == "push"
+        params = proposal.actions[0]["parameters"]
+        assert params["notification_type"] == "eta_recovery"
+        # Standard tier recovery uses severity-based channel (low → push)
+        assert params["channel"] == "push"
+        assert params["sla_tier"] == "standard"
+        assert params["message_template"] == "eta_recovery_notification"
+        assert "apology_message" in params
+        assert "updated_eta" in params
         assert proposal.risk_class == RiskClass.LOW
         # Delivery should be removed from flagged
         assert "delivery-50" not in agent._flagged_deliveries
@@ -444,3 +460,403 @@ class TestCleanupFlagged:
         agent, _ = _make_agent()
         agent._cleanup_flagged()  # Should not raise
         assert agent._flagged_deliveries == {}
+
+
+# ---------------------------------------------------------------------------
+# Tests: _get_sla_tier() (Req 16.1)
+# ---------------------------------------------------------------------------
+
+
+class TestGetSlaTier:
+    def test_returns_tier_from_context(self):
+        signal = _make_signal(context={"sla_tier": "premium"})
+        assert CustomerPromise._get_sla_tier(signal) == "premium"
+
+    def test_returns_enterprise_from_context(self):
+        signal = _make_signal(context={"sla_tier": "enterprise"})
+        assert CustomerPromise._get_sla_tier(signal) == "enterprise"
+
+    def test_defaults_to_standard_when_missing(self):
+        signal = _make_signal(context={})
+        assert CustomerPromise._get_sla_tier(signal) == "standard"
+
+    def test_defaults_to_standard_when_no_context(self):
+        signal = _make_signal()
+        assert CustomerPromise._get_sla_tier(signal) == "standard"
+
+
+# ---------------------------------------------------------------------------
+# Tests: _select_channel_for_tier() (Req 16.3)
+# ---------------------------------------------------------------------------
+
+
+class TestSelectChannelForTier:
+    """Req 16.3: Premium/enterprise override channel regardless of severity."""
+
+    def test_enterprise_always_whatsapp_critical(self):
+        assert CustomerPromise._select_channel_for_tier(Severity.CRITICAL, "enterprise") == "whatsapp"
+
+    def test_enterprise_always_whatsapp_high(self):
+        assert CustomerPromise._select_channel_for_tier(Severity.HIGH, "enterprise") == "whatsapp"
+
+    def test_enterprise_always_whatsapp_medium(self):
+        assert CustomerPromise._select_channel_for_tier(Severity.MEDIUM, "enterprise") == "whatsapp"
+
+    def test_enterprise_always_whatsapp_low(self):
+        assert CustomerPromise._select_channel_for_tier(Severity.LOW, "enterprise") == "whatsapp"
+
+    def test_premium_always_sms_critical(self):
+        assert CustomerPromise._select_channel_for_tier(Severity.CRITICAL, "premium") == "sms"
+
+    def test_premium_always_sms_high(self):
+        assert CustomerPromise._select_channel_for_tier(Severity.HIGH, "premium") == "sms"
+
+    def test_premium_always_sms_medium(self):
+        assert CustomerPromise._select_channel_for_tier(Severity.MEDIUM, "premium") == "sms"
+
+    def test_premium_always_sms_low(self):
+        assert CustomerPromise._select_channel_for_tier(Severity.LOW, "premium") == "sms"
+
+    def test_standard_critical_returns_sms(self):
+        assert CustomerPromise._select_channel_for_tier(Severity.CRITICAL, "standard") == "sms"
+
+    def test_standard_high_returns_sms(self):
+        assert CustomerPromise._select_channel_for_tier(Severity.HIGH, "standard") == "sms"
+
+    def test_standard_medium_returns_email(self):
+        assert CustomerPromise._select_channel_for_tier(Severity.MEDIUM, "standard") == "email"
+
+    def test_standard_low_returns_push(self):
+        assert CustomerPromise._select_channel_for_tier(Severity.LOW, "standard") == "push"
+
+
+# ---------------------------------------------------------------------------
+# Tests: _select_template_for_tier() (Req 16.1)
+# ---------------------------------------------------------------------------
+
+
+class TestSelectTemplateForTier:
+    def test_enterprise_template(self):
+        assert CustomerPromise._select_template_for_tier("enterprise") == "eta_delay_enterprise"
+
+    def test_premium_template(self):
+        assert CustomerPromise._select_template_for_tier("premium") == "eta_delay_premium"
+
+    def test_standard_template(self):
+        assert CustomerPromise._select_template_for_tier("standard") == "eta_delay_notification"
+
+    def test_unknown_tier_defaults_to_standard(self):
+        assert CustomerPromise._select_template_for_tier("unknown") == "eta_delay_notification"
+
+
+# ---------------------------------------------------------------------------
+# Tests: _select_recovery_template_for_tier() (Req 16.2)
+# ---------------------------------------------------------------------------
+
+
+class TestSelectRecoveryTemplateForTier:
+    def test_enterprise_recovery_template(self):
+        assert CustomerPromise._select_recovery_template_for_tier("enterprise") == "eta_recovery_enterprise"
+
+    def test_premium_recovery_template(self):
+        assert CustomerPromise._select_recovery_template_for_tier("premium") == "eta_recovery_premium"
+
+    def test_standard_recovery_template(self):
+        assert CustomerPromise._select_recovery_template_for_tier("standard") == "eta_recovery_notification"
+
+    def test_unknown_tier_defaults_to_standard(self):
+        assert CustomerPromise._select_recovery_template_for_tier("unknown") == "eta_recovery_notification"
+
+
+# ---------------------------------------------------------------------------
+# Tests: _get_recovery_apology() (Req 16.2)
+# ---------------------------------------------------------------------------
+
+
+class TestGetRecoveryApology:
+    def test_enterprise_apology(self):
+        apology = CustomerPromise._get_recovery_apology("enterprise")
+        assert "enterprise partner" in apology
+        assert "dedicated account team" in apology
+
+    def test_premium_apology(self):
+        apology = CustomerPromise._get_recovery_apology("premium")
+        assert "premium customer" in apology
+        assert "prioritized" in apology
+
+    def test_standard_apology(self):
+        apology = CustomerPromise._get_recovery_apology("standard")
+        assert "back on schedule" in apology
+
+    def test_unknown_tier_gets_standard_apology(self):
+        apology = CustomerPromise._get_recovery_apology("unknown")
+        assert "back on schedule" in apology
+
+
+# ---------------------------------------------------------------------------
+# Tests: evaluate() SLA-tier integration (Req 16.1, 16.2, 16.3)
+# ---------------------------------------------------------------------------
+
+
+class TestEvaluateSlaTier:
+    """Integration tests for SLA-tier personalization in evaluate()."""
+
+    @pytest.mark.asyncio
+    async def test_premium_breach_uses_sms_regardless_of_severity(self):
+        """Req 16.3: Premium tier always uses SMS even for low severity."""
+        agent, _ = _make_agent()
+        signal = _make_signal(
+            entity_id="delivery-p1",
+            severity=Severity.MEDIUM,
+            confidence=0.9,
+            context={"sla_tier": "premium"},
+        )
+        result = await agent.evaluate([signal])
+        assert len(result) == 1
+        params = result[0].actions[0]["parameters"]
+        assert params["channel"] == "sms"
+        assert params["sla_tier"] == "premium"
+        assert params["message_template"] == "eta_delay_premium"
+
+    @pytest.mark.asyncio
+    async def test_enterprise_breach_uses_whatsapp_regardless_of_severity(self):
+        """Req 16.3: Enterprise tier always uses WhatsApp even for low severity."""
+        agent, _ = _make_agent()
+        signal = _make_signal(
+            entity_id="delivery-e1",
+            severity=Severity.LOW,
+            confidence=0.8,
+            context={"sla_tier": "enterprise"},
+        )
+        # LOW severity for non-flagged delivery is a breach signal
+        result = await agent.evaluate([signal])
+        assert len(result) == 1
+        params = result[0].actions[0]["parameters"]
+        assert params["channel"] == "whatsapp"
+        assert params["sla_tier"] == "enterprise"
+        assert params["message_template"] == "eta_delay_enterprise"
+
+    @pytest.mark.asyncio
+    async def test_standard_breach_uses_severity_based_channel(self):
+        """Req 16.3: Standard tier uses severity-based channel selection."""
+        agent, _ = _make_agent()
+        signal = _make_signal(
+            entity_id="delivery-s1",
+            severity=Severity.MEDIUM,
+            confidence=0.9,
+            context={"sla_tier": "standard"},
+        )
+        result = await agent.evaluate([signal])
+        assert len(result) == 1
+        params = result[0].actions[0]["parameters"]
+        assert params["channel"] == "email"
+        assert params["sla_tier"] == "standard"
+        assert params["message_template"] == "eta_delay_notification"
+
+    @pytest.mark.asyncio
+    async def test_sla_tier_included_in_breach_proposal_params(self):
+        """Req 16.1: sla_tier is included in proposal parameters."""
+        agent, _ = _make_agent()
+        signal = _make_signal(
+            entity_id="delivery-t1",
+            severity=Severity.HIGH,
+            confidence=0.9,
+            context={"sla_tier": "premium"},
+        )
+        result = await agent.evaluate([signal])
+        assert len(result) == 1
+        assert result[0].actions[0]["parameters"]["sla_tier"] == "premium"
+
+    @pytest.mark.asyncio
+    async def test_sla_tier_stored_in_flagged_deliveries(self):
+        """Flagged deliveries track the SLA tier for recovery use."""
+        agent, _ = _make_agent()
+        signal = _make_signal(
+            entity_id="delivery-f1",
+            severity=Severity.HIGH,
+            confidence=0.9,
+            context={"sla_tier": "enterprise"},
+        )
+        await agent.evaluate([signal])
+        assert agent._flagged_deliveries["delivery-f1"]["sla_tier"] == "enterprise"
+
+    @pytest.mark.asyncio
+    async def test_premium_recovery_uses_sms_channel(self):
+        """Req 16.2, 16.3: Premium recovery uses SMS channel."""
+        agent, _ = _make_agent()
+
+        # Flag with premium tier
+        breach = _make_signal(
+            entity_id="delivery-pr1",
+            severity=Severity.HIGH,
+            confidence=0.9,
+            context={"sla_tier": "premium"},
+        )
+        await agent.evaluate([breach])
+        agent._cooldown_tracker.clear()
+
+        # Recovery signal
+        recovery = _make_signal(
+            entity_id="delivery-pr1",
+            severity=Severity.LOW,
+            confidence=0.8,
+            context={"sla_tier": "premium", "updated_eta": "2025-01-15T14:00:00Z"},
+        )
+        result = await agent.evaluate([recovery])
+        assert len(result) == 1
+        params = result[0].actions[0]["parameters"]
+        assert params["channel"] == "sms"
+        assert params["sla_tier"] == "premium"
+        assert params["message_template"] == "eta_recovery_premium"
+        assert "premium customer" in params["apology_message"]
+        assert params["updated_eta"] == "2025-01-15T14:00:00Z"
+
+    @pytest.mark.asyncio
+    async def test_enterprise_recovery_uses_whatsapp_channel(self):
+        """Req 16.2, 16.3: Enterprise recovery uses WhatsApp channel."""
+        agent, _ = _make_agent()
+
+        # Flag with enterprise tier
+        breach = _make_signal(
+            entity_id="delivery-er1",
+            severity=Severity.CRITICAL,
+            confidence=0.95,
+            context={"sla_tier": "enterprise"},
+        )
+        await agent.evaluate([breach])
+        agent._cooldown_tracker.clear()
+
+        # Recovery signal
+        recovery = _make_signal(
+            entity_id="delivery-er1",
+            severity=Severity.LOW,
+            confidence=0.85,
+            context={"sla_tier": "enterprise", "updated_eta": "2025-01-15T16:00:00Z"},
+        )
+        result = await agent.evaluate([recovery])
+        assert len(result) == 1
+        params = result[0].actions[0]["parameters"]
+        assert params["channel"] == "whatsapp"
+        assert params["sla_tier"] == "enterprise"
+        assert params["message_template"] == "eta_recovery_enterprise"
+        assert "enterprise partner" in params["apology_message"]
+        assert params["updated_eta"] == "2025-01-15T16:00:00Z"
+
+    @pytest.mark.asyncio
+    async def test_standard_recovery_uses_push_channel(self):
+        """Req 16.2: Standard recovery uses severity-based channel (push for low)."""
+        agent, _ = _make_agent()
+
+        # Flag with standard tier (default)
+        breach = _make_signal(
+            entity_id="delivery-sr1",
+            severity=Severity.HIGH,
+            confidence=0.9,
+        )
+        await agent.evaluate([breach])
+        agent._cooldown_tracker.clear()
+
+        # Recovery signal
+        recovery = _make_signal(
+            entity_id="delivery-sr1",
+            severity=Severity.LOW,
+            confidence=0.8,
+            context={"updated_eta": "2025-01-15T12:00:00Z"},
+        )
+        result = await agent.evaluate([recovery])
+        assert len(result) == 1
+        params = result[0].actions[0]["parameters"]
+        assert params["channel"] == "push"
+        assert params["sla_tier"] == "standard"
+        assert params["message_template"] == "eta_recovery_notification"
+        assert "back on schedule" in params["apology_message"]
+        assert params["updated_eta"] == "2025-01-15T12:00:00Z"
+
+    @pytest.mark.asyncio
+    async def test_recovery_includes_updated_eta_from_context(self):
+        """Req 16.2: Recovery notification includes updated ETA."""
+        agent, _ = _make_agent()
+
+        breach = _make_signal(
+            entity_id="delivery-eta1",
+            severity=Severity.HIGH,
+            confidence=0.9,
+        )
+        await agent.evaluate([breach])
+        agent._cooldown_tracker.clear()
+
+        recovery = _make_signal(
+            entity_id="delivery-eta1",
+            severity=Severity.LOW,
+            confidence=0.8,
+            context={"updated_eta": "2025-06-15T10:30:00Z"},
+        )
+        result = await agent.evaluate([recovery])
+        assert len(result) == 1
+        assert result[0].actions[0]["parameters"]["updated_eta"] == "2025-06-15T10:30:00Z"
+
+    @pytest.mark.asyncio
+    async def test_recovery_updated_eta_none_when_not_in_context(self):
+        """Recovery notification has updated_eta=None when not in signal context."""
+        agent, _ = _make_agent()
+
+        breach = _make_signal(
+            entity_id="delivery-noeta",
+            severity=Severity.HIGH,
+            confidence=0.9,
+        )
+        await agent.evaluate([breach])
+        agent._cooldown_tracker.clear()
+
+        recovery = _make_signal(
+            entity_id="delivery-noeta",
+            severity=Severity.LOW,
+            confidence=0.8,
+        )
+        result = await agent.evaluate([recovery])
+        assert len(result) == 1
+        assert result[0].actions[0]["parameters"]["updated_eta"] is None
+
+    @pytest.mark.asyncio
+    async def test_recovery_uses_flagged_tier_when_signal_has_no_tier(self):
+        """Recovery uses the SLA tier stored at breach time if signal context lacks it."""
+        agent, _ = _make_agent()
+
+        # Flag with enterprise tier
+        breach = _make_signal(
+            entity_id="delivery-ft1",
+            severity=Severity.HIGH,
+            confidence=0.9,
+            context={"sla_tier": "enterprise"},
+        )
+        await agent.evaluate([breach])
+        agent._cooldown_tracker.clear()
+
+        # Recovery signal without sla_tier in context
+        recovery = _make_signal(
+            entity_id="delivery-ft1",
+            severity=Severity.LOW,
+            confidence=0.8,
+            context={},
+        )
+        result = await agent.evaluate([recovery])
+        assert len(result) == 1
+        params = result[0].actions[0]["parameters"]
+        # Should use the enterprise tier from flagged data
+        assert params["sla_tier"] == "enterprise"
+        assert params["channel"] == "whatsapp"
+        assert params["message_template"] == "eta_recovery_enterprise"
+
+    @pytest.mark.asyncio
+    async def test_default_sla_tier_when_not_in_context(self):
+        """When no sla_tier in context, defaults to standard."""
+        agent, _ = _make_agent()
+        signal = _make_signal(
+            entity_id="delivery-def1",
+            severity=Severity.HIGH,
+            confidence=0.9,
+            context={},
+        )
+        result = await agent.evaluate([signal])
+        assert len(result) == 1
+        assert result[0].actions[0]["parameters"]["sla_tier"] == "standard"

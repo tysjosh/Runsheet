@@ -757,3 +757,103 @@ class TestGetSummary:
         assert result["by_channel"] == {}
         assert result["by_status"] == {}
         assert result["total"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Proposal-to-notification linking (Task 4.4)
+# ---------------------------------------------------------------------------
+
+
+class TestProposalToNotificationLinking:
+    """Tests for proposal_id storage and filtering (Req 4.1, 4.3)."""
+
+    async def test_notify_event_stores_proposal_id_in_notification(self):
+        """Req 4.1: proposal_id from event_data is stored in the notification record."""
+        es = _make_es_mock()
+        service = _make_service(es)
+
+        indexed_docs: list[dict] = []
+
+        async def _capture_index(index, doc_id, doc):
+            indexed_docs.append(dict(doc))
+            return {"result": "created"}
+
+        es.index_document = AsyncMock(side_effect=_capture_index)
+
+        rule = _rule_doc(event_type="delay_alert")
+        rule["default_channels"] = ["sms"]
+        service._rule_engine.evaluate_rule = AsyncMock(return_value=rule)
+        service._preference_resolver.resolve_channels = AsyncMock(return_value=[])
+
+        service._template_renderer.list_templates = AsyncMock(
+            return_value=[_template_doc()]
+        )
+        service._template_renderer.render = AsyncMock(
+            return_value={"subject": "Test", "body": "Test body"}
+        )
+
+        sms_d = _make_dispatcher_mock("sms")
+        service.register_dispatcher("sms", sms_d)
+
+        result = await service.notify_event(
+            "delay_alert",
+            {
+                "customer_id": "cust-1",
+                "order_id": "ord-1",
+                "proposal_id": "prop-abc-123",
+            },
+            "tenant-1",
+        )
+
+        assert len(result) == 1
+        assert result[0]["proposal_id"] == "prop-abc-123"
+        # Also verify the indexed document has proposal_id
+        assert len(indexed_docs) == 1
+        assert indexed_docs[0]["proposal_id"] == "prop-abc-123"
+
+    async def test_notify_event_omits_proposal_id_when_absent(self):
+        """When event_data has no proposal_id, the notification record should not contain it."""
+        es = _make_es_mock()
+        service = _make_service(es)
+
+        rule = _rule_doc(event_type="delay_alert")
+        rule["default_channels"] = ["sms"]
+        service._rule_engine.evaluate_rule = AsyncMock(return_value=rule)
+        service._preference_resolver.resolve_channels = AsyncMock(return_value=[])
+
+        service._template_renderer.list_templates = AsyncMock(
+            return_value=[_template_doc()]
+        )
+        service._template_renderer.render = AsyncMock(
+            return_value={"subject": "Test", "body": "Test body"}
+        )
+
+        sms_d = _make_dispatcher_mock("sms")
+        service.register_dispatcher("sms", sms_d)
+
+        result = await service.notify_event(
+            "delay_alert",
+            {"customer_id": "cust-1", "order_id": "ord-1"},
+            "tenant-1",
+        )
+
+        assert len(result) == 1
+        assert "proposal_id" not in result[0]
+
+    async def test_list_notifications_filters_by_proposal_id(self):
+        """Req 4.3: list_notifications supports proposal_id filter."""
+        es = _make_es_mock()
+        es.search_documents = AsyncMock(return_value=_es_response([]))
+        service = _make_service(es)
+
+        await service.list_notifications(
+            "tenant-1",
+            {"proposal_id": "prop-abc-123"},
+            page=1,
+            size=10,
+        )
+
+        call_args = es.search_documents.call_args
+        query = call_args[0][1]
+        must = query["query"]["bool"]["must"]
+        assert {"term": {"proposal_id": "prop-abc-123"}} in must

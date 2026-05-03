@@ -17,7 +17,6 @@ load_dotenv(_env_file, override=True)
 from contextlib import asynccontextmanager
 import json
 import logging
-import traceback
 from datetime import datetime
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
@@ -30,10 +29,15 @@ from ops.webhooks.receiver import router as webhook_router
 from ops.api.endpoints import router as ops_router
 from fuel.api.endpoints import router as fuel_router
 from scheduling.api.endpoints import router as scheduling_router
+from scheduling.api.driver_endpoints import router as driver_scheduling_router
+from driver.api.message_endpoints import router as message_router
+from driver.api.exception_endpoints import router as exception_router
+from driver.api.pod_endpoints import router as pod_router
 from agent_endpoints import router as agent_router
 from inline_endpoints import router as inline_router
 from import_endpoints import router as import_router
 from notifications.api.endpoints import router as notification_router
+from notifications.api.metrics_endpoints import router as metrics_router
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -71,8 +75,9 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allow_headers=["Accept", "Accept-Language", "Content-Language", "Content-Type",
-                    "Authorization", "X-Request-ID", "X-Requested-With"],
-    expose_headers=["X-Request-ID", "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset"],
+                    "Authorization", "X-Request-ID", "X-Requested-With", "X-Idempotency-Key"],
+    expose_headers=["X-Request-ID", "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset",
+                     "X-Idempotent-Replayed"],
     max_age=600,
 )
 
@@ -82,10 +87,15 @@ app.include_router(webhook_router)
 app.include_router(ops_router)
 app.include_router(fuel_router)
 app.include_router(scheduling_router)
+app.include_router(driver_scheduling_router)
+app.include_router(message_router)
+app.include_router(exception_router)
+app.include_router(pod_router)
 app.include_router(agent_router)
 app.include_router(inline_router)
 app.include_router(import_router)
 app.include_router(notification_router)
+app.include_router(metrics_router)
 
 
 def _c(app: FastAPI) -> ServiceContainer:
@@ -117,6 +127,45 @@ def _ws_authenticate(websocket: WebSocket) -> str | None:
         )
         tenant_id = payload.get("tenant_id", "")
         return tenant_id if tenant_id else None
+    except JWTError:
+        return None
+
+
+def _ws_authenticate_driver(websocket: WebSocket) -> tuple[str, str] | None:
+    """Extract tenant_id and driver_id from a WebSocket ``token`` query parameter.
+
+    Used by the ``/ws/driver`` endpoint which requires both tenant_id and
+    driver_id from the JWT claims.
+
+    In development mode, returns ``("dev-tenant", "dev-driver")`` when no
+    token is provided.  In non-development environments, returns ``None``
+    to signal that the connection should be rejected.
+
+    Returns:
+        A ``(tenant_id, driver_id)`` tuple on success, or ``None`` on failure.
+
+    Validates: Requirements 9.1, 9.2
+    """
+    from jose import JWTError, jwt as jose_jwt
+    from config.settings import get_settings
+
+    settings = get_settings()
+    token = websocket.query_params.get("token", "")
+
+    if not token:
+        if settings.environment.value == "development":
+            return ("dev-tenant", "dev-driver")
+        return None
+
+    try:
+        payload = jose_jwt.decode(
+            token, settings.jwt_secret, algorithms=[settings.jwt_algorithm]
+        )
+        tenant_id = payload.get("tenant_id", "")
+        driver_id = payload.get("driver_id", "")
+        if not tenant_id or not driver_id:
+            return None
+        return (tenant_id, driver_id)
     except JWTError:
         return None
 
@@ -156,7 +205,46 @@ async def health_live(request: Request):
             "version": "1.0.0", "timestamp": result["timestamp"]}
 
 
-# WebSocket endpoints
+# WebSocket helpers and endpoints
+
+async def _ws_loop(websocket: WebSocket, mgr, endpoint: str, tenant_id: str,
+                   handler=None, check_connected: bool = False):
+    """Shared WebSocket receive loop with error handling."""
+    if check_connected and websocket not in mgr._clients:
+        return
+    try:
+        while True:
+            raw = await websocket.receive_text()
+            if handler:
+                await handler(websocket, raw)
+            else:
+                await mgr.handle_client_message(websocket, raw)
+    except WebSocketDisconnect:
+        logger.debug("WebSocket client disconnected normally from %s (tenant_id=%s)", endpoint, tenant_id)
+    except Exception as e:
+        logger.error("Unexpected WebSocket error on %s: tenant_id=%s error=%s", endpoint, tenant_id, str(e))
+        try:
+            await websocket.close(code=1011, reason="Internal server error")
+        except Exception:
+            pass
+    finally:
+        await mgr.disconnect(websocket)
+
+
+async def _json_echo_handler(websocket: WebSocket, raw: str, endpoint: str, tenant_id: str,
+                              extra_types: dict | None = None):
+    """Handle ping/pong and optional extra message types for JSON-based WS endpoints."""
+    try:
+        msg = json.loads(raw)
+        if msg.get("type") == "ping":
+            await websocket.send_json({"type": "pong", "timestamp": datetime.utcnow().isoformat() + "Z"})
+        elif extra_types and msg.get("type") in extra_types:
+            await websocket.send_json(extra_types[msg["type"]])
+    except json.JSONDecodeError:
+        logger.warning(f"Malformed JSON received on {endpoint} (tenant_id=%s): %s", tenant_id, raw)
+        await websocket.send_json({"type": "error", "message": "Invalid JSON"})
+
+
 @app.websocket("/ws/ops")
 async def ops_live_websocket(websocket: WebSocket):
     c = _c(websocket.app)
@@ -166,25 +254,7 @@ async def ops_live_websocket(websocket: WebSocket):
         return
     mgr = c.ops_ws_manager
     await mgr.connect(websocket, tenant_id=tenant_id)
-    if websocket not in mgr._clients:
-        return
-    try:
-        while True:
-            raw = await websocket.receive_text()
-            await mgr.handle_client_message(websocket, raw)
-    except WebSocketDisconnect:
-        logger.debug("WebSocket client disconnected normally from /ws/ops (tenant_id=%s)", tenant_id)
-    except Exception as e:
-        logger.error(
-            "Unexpected WebSocket error on /ws/ops: endpoint=/ws/ops tenant_id=%s exception_type=%s error=%s traceback=%s",
-            tenant_id, type(e).__name__, str(e), traceback.format_exc()
-        )
-        try:
-            await websocket.close(code=1011, reason="Internal server error")
-        except Exception:
-            pass
-    finally:
-        await mgr.disconnect(websocket)
+    await _ws_loop(websocket, mgr, "/ws/ops", tenant_id, check_connected=True)
 
 @app.websocket("/ws/scheduling")
 async def scheduling_live_websocket(websocket: WebSocket):
@@ -197,23 +267,7 @@ async def scheduling_live_websocket(websocket: WebSocket):
     subs_list = [s.strip() for s in subs.split(",") if s.strip()] if subs else None
     mgr = c.scheduling_ws_manager
     await mgr.connect(websocket, subscriptions=subs_list, tenant_id=tenant_id)
-    try:
-        while True:
-            raw = await websocket.receive_text()
-            await mgr.handle_client_message(websocket, raw)
-    except WebSocketDisconnect:
-        logger.debug("WebSocket client disconnected normally from /ws/scheduling (tenant_id=%s)", tenant_id)
-    except Exception as e:
-        logger.error(
-            "Unexpected WebSocket error on /ws/scheduling: endpoint=/ws/scheduling tenant_id=%s exception_type=%s error=%s traceback=%s",
-            tenant_id, type(e).__name__, str(e), traceback.format_exc()
-        )
-        try:
-            await websocket.close(code=1011, reason="Internal server error")
-        except Exception:
-            pass
-    finally:
-        await mgr.disconnect(websocket)
+    await _ws_loop(websocket, mgr, "/ws/scheduling", tenant_id)
 
 @app.websocket("/ws/notifications")
 async def notifications_live_websocket(websocket: WebSocket):
@@ -224,30 +278,9 @@ async def notifications_live_websocket(websocket: WebSocket):
         return
     mgr = c.notification_ws_manager
     await mgr.connect(websocket, tenant_id=tenant_id)
-    try:
-        while True:
-            raw = await websocket.receive_text()
-            try:
-                msg = json.loads(raw)
-                if msg.get("type") == "ping":
-                    await websocket.send_json({"type": "pong",
-                        "timestamp": datetime.utcnow().isoformat() + "Z"})
-            except json.JSONDecodeError:
-                logger.warning("Malformed JSON received on /ws/notifications (tenant_id=%s): %s", tenant_id, raw)
-                await websocket.send_json({"type": "error", "message": "Invalid JSON"})
-    except WebSocketDisconnect:
-        logger.debug("WebSocket client disconnected normally from /ws/notifications (tenant_id=%s)", tenant_id)
-    except Exception as e:
-        logger.error(
-            "Unexpected WebSocket error on /ws/notifications: endpoint=/ws/notifications tenant_id=%s exception_type=%s error=%s traceback=%s",
-            tenant_id, type(e).__name__, str(e), traceback.format_exc()
-        )
-        try:
-            await websocket.close(code=1011, reason="Internal server error")
-        except Exception:
-            pass
-    finally:
-        await mgr.disconnect(websocket)
+    ep = "/ws/notifications"
+    handler = lambda ws, raw: _json_echo_handler(ws, raw, ep, tenant_id)
+    await _ws_loop(websocket, mgr, ep, tenant_id, handler=handler)
 
 @app.websocket("/ws/agent-activity")
 async def agent_activity_websocket(websocket: WebSocket):
@@ -257,30 +290,9 @@ async def agent_activity_websocket(websocket: WebSocket):
         return
     mgr = _c(websocket.app).agent_ws_manager
     await mgr.connect(websocket, tenant_id=tenant_id)
-    try:
-        while True:
-            data = await websocket.receive_text()
-            try:
-                msg = json.loads(data)
-                if msg.get("type") == "ping":
-                    await websocket.send_json({"type": "pong",
-                        "timestamp": datetime.utcnow().isoformat() + "Z"})
-            except json.JSONDecodeError:
-                logger.warning("Malformed JSON received on /ws/agent-activity (tenant_id=%s): %s", tenant_id, data)
-                await websocket.send_json({"type": "error", "message": "Invalid JSON"})
-    except WebSocketDisconnect:
-        logger.debug("WebSocket client disconnected normally from /ws/agent-activity (tenant_id=%s)", tenant_id)
-    except Exception as e:
-        logger.error(
-            "Unexpected WebSocket error on /ws/agent-activity: endpoint=/ws/agent-activity tenant_id=%s exception_type=%s error=%s traceback=%s",
-            tenant_id, type(e).__name__, str(e), traceback.format_exc()
-        )
-        try:
-            await websocket.close(code=1011, reason="Internal server error")
-        except Exception:
-            pass
-    finally:
-        await mgr.disconnect(websocket)
+    ep = "/ws/agent-activity"
+    handler = lambda ws, raw: _json_echo_handler(ws, raw, ep, tenant_id)
+    await _ws_loop(websocket, mgr, ep, tenant_id, handler=handler)
 
 @app.websocket("/api/fleet/live")
 async def fleet_live_websocket(websocket: WebSocket):
@@ -290,34 +302,27 @@ async def fleet_live_websocket(websocket: WebSocket):
         return
     mgr = _c(websocket.app).fleet_ws_manager
     await mgr.connect(websocket, tenant_id=tenant_id)
-    try:
-        while True:
-            data = await websocket.receive_text()
-            try:
-                msg = json.loads(data)
-                if msg.get("type") == "ping":
-                    await websocket.send_json({"type": "pong",
-                        "timestamp": datetime.utcnow().isoformat() + "Z"})
-                elif msg.get("type") == "subscribe":
-                    await websocket.send_json({"type": "subscribed",
-                        "message": "Subscribed to all fleet updates",
-                        "timestamp": datetime.utcnow().isoformat() + "Z"})
-            except json.JSONDecodeError:
-                logger.warning("Malformed JSON received on /api/fleet/live (tenant_id=%s): %s", tenant_id, data)
-                await websocket.send_json({"type": "error", "message": "Invalid JSON"})
-    except WebSocketDisconnect:
-        logger.debug("WebSocket client disconnected normally from /api/fleet/live (tenant_id=%s)", tenant_id)
-    except Exception as e:
-        logger.error(
-            "Unexpected WebSocket error on /api/fleet/live: endpoint=/api/fleet/live tenant_id=%s exception_type=%s error=%s traceback=%s",
-            tenant_id, type(e).__name__, str(e), traceback.format_exc()
-        )
-        try:
-            await websocket.close(code=1011, reason="Internal server error")
-        except Exception:
-            pass
-    finally:
-        await mgr.disconnect(websocket)
+    ep = "/api/fleet/live"
+    extras = {"subscribe": {"type": "subscribed", "message": "Subscribed to all fleet updates",
+              "timestamp": datetime.utcnow().isoformat() + "Z"}}
+    handler = lambda ws, raw: _json_echo_handler(ws, raw, ep, tenant_id, extra_types=extras)
+    await _ws_loop(websocket, mgr, ep, tenant_id, handler=handler)
+
+@app.websocket("/ws/driver")
+async def driver_live_websocket(websocket: WebSocket):
+    """Dedicated WebSocket channel for driver mobile clients.
+    Validates: Requirements 9.1, 9.2, 9.3, 9.4, 9.5, 9.6
+    """
+    c = _c(websocket.app)
+    auth = _ws_authenticate_driver(websocket)
+    if not auth:
+        await websocket.close(code=4001, reason="Authentication required")
+        return
+    tenant_id, driver_id = auth
+    mgr = c.driver_ws_manager
+    await mgr.connect_driver(websocket, driver_id=driver_id, tenant_id=tenant_id)
+    handler = lambda ws, raw: mgr.handle_driver_message(ws, raw)
+    await _ws_loop(websocket, mgr, "/ws/driver", tenant_id, handler=handler, check_connected=True)
 
 
 if __name__ == "__main__":

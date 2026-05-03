@@ -78,6 +78,7 @@ class ConfirmationProtocol:
         activity_log_service,
         business_validator,
         es_service=None,
+        notification_service=None,
     ):
         self._risk_registry = risk_registry
         self._approval_queue = approval_queue_service
@@ -85,6 +86,7 @@ class ConfirmationProtocol:
         self._activity_log = activity_log_service
         self._validator = business_validator
         self._es = es_service
+        self._notification_service = notification_service
 
     async def process_mutation(self, request: MutationRequest) -> MutationResult:
         """Route a mutation through risk classification and autonomy level checks.
@@ -216,6 +218,53 @@ class ConfirmationProtocol:
         Returns:
             A result message string.
         """
+        tool_name = request.tool_name
+        params = request.parameters
+        tenant_id = request.tenant_id
+
+        # Handle send_customer_notification before the ES check — this
+        # branch delegates to NotificationService rather than writing to
+        # ES directly.
+        if tool_name == "send_customer_notification":
+            if self._notification_service is None:
+                logger.warning(
+                    "ConfirmationProtocol: notification_service not wired, "
+                    "cannot execute send_customer_notification for tenant %s",
+                    tenant_id,
+                )
+                return (
+                    "Notification dispatch failed: notification_service not configured"
+                )
+
+            try:
+                notifications = await self._notification_service.notify_event(
+                    event_type=params.get("notification_type", "order_status_update"),
+                    event_data={
+                        "customer_id": params.get("customer_id"),
+                        "job_id": params.get("delivery_id"),
+                        "channel_override": params.get("channel"),
+                        "template_override": params.get("message_template"),
+                        "proposal_id": params.get("proposal_id"),
+                        **params.get("context", {}),
+                    },
+                    tenant_id=tenant_id,
+                )
+                if notifications:
+                    notification_ids = [n["notification_id"] for n in notifications]
+                    return (
+                        f"Dispatched {len(notifications)} notification(s): "
+                        f"{','.join(notification_ids)}"
+                    )
+                return "Notification dispatch failed: no notifications created"
+            except Exception as e:
+                logger.error(
+                    "ConfirmationProtocol: failed to execute %s for tenant %s: %s",
+                    tool_name,
+                    tenant_id,
+                    e,
+                )
+                return f"Failed to execute {tool_name}: {e}"
+
         if self._es is None:
             logger.warning(
                 "ConfirmationProtocol: no ES service wired, mutation %s "
@@ -229,10 +278,6 @@ class ConfirmationProtocol:
             )
 
         # Dispatch to tool-specific ES writes
-        tool_name = request.tool_name
-        params = request.parameters
-        tenant_id = request.tenant_id
-
         try:
             if tool_name == "update_job_status":
                 await self._es.update_document(

@@ -253,14 +253,24 @@ async def test_reassign_asset_logs_old_and_new_asset_ids():
 
     assert result.asset_assigned == "TRUCK_02"
 
-    # The event should be appended via index_document on job_events
-    assert es.index_document.await_count == 1
+    # The events should be appended via index_document on job_events:
+    # 1. asset_reassigned event
+    # 2. assignment_revoked event (Req 11.3)
+    assert es.index_document.await_count == 2
     event_call = es.index_document.await_args_list[0]
     assert event_call.args[0] == "job_events"
     event_doc = event_call.args[2]
     assert event_doc["event_type"] == "asset_reassigned"
     assert event_doc["event_payload"]["old_asset_id"] == "TRUCK_01"
     assert event_doc["event_payload"]["new_asset_id"] == "TRUCK_02"
+
+    # Verify the assignment_revoked event
+    revoked_call = es.index_document.await_args_list[1]
+    assert revoked_call.args[0] == "job_events"
+    revoked_doc = revoked_call.args[2]
+    assert revoked_doc["event_type"] == "assignment_revoked"
+    assert revoked_doc["event_payload"]["previous_driver_id"] == "TRUCK_01"
+    assert revoked_doc["event_payload"]["new_driver_id"] == "TRUCK_02"
 
 
 # ---------------------------------------------------------------------------

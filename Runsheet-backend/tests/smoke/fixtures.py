@@ -348,6 +348,13 @@ WS_FIXTURES: Dict[str, WSFixture] = {
     "/api/fleet/live": WSFixture(
         expects_confirmation=True,
     ),
+    "/ws/notifications": WSFixture(
+        expects_confirmation=True,
+    ),
+    "/ws/driver": WSFixture(
+        params={"token": ""},
+        expects_confirmation=False,
+    ),
 }
 
 
