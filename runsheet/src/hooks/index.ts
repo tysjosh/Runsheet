@@ -46,3 +46,13 @@ export type {
   UseSchedulingWebSocketReturn,
 } from "./useSchedulingWebSocket";
 export { useSchedulingWebSocket } from "./useSchedulingWebSocket";
+
+export type {
+  NotificationCreatedEvent,
+  NotificationEventType,
+  NotificationStatusChangedEvent,
+  NotificationWebSocketMessage,
+  NotificationWebSocketOptions,
+  UseNotificationWebSocketReturn,
+} from "./useNotificationWebSocket";
+export { useNotificationWebSocket } from "./useNotificationWebSocket";

@@ -63,6 +63,7 @@ class JobService:
         self._id_gen = JobIdGenerator(redis_url)
         self._settings = get_settings()
         self._ws_manager = None  # Wired in task 8.3
+        self._notification_service = None  # Wired by bootstrap/notifications
 
     # ------------------------------------------------------------------
     # Job Creation  (Requirements 2.1-2.8, 8.5)
@@ -1014,3 +1015,14 @@ class JobService:
                 event_type,
                 job_data.get("job_id"),
             )
+
+        # Notification pipeline (non-blocking)
+        if self._notification_service:
+            try:
+                await self._notification_service.notify_event(
+                    event_type=event_type,
+                    event_data=job_data,
+                    tenant_id=job_data.get("tenant_id", ""),
+                )
+            except Exception as e:
+                logger.warning(f"Notification pipeline error (non-blocking): {e}")

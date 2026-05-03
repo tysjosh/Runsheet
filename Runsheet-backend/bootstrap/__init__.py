@@ -18,7 +18,7 @@ from .container import ServiceContainer
 logger = logging.getLogger("bootstrap")
 
 # Ordered list of bootstrap modules — dependency order matters.
-_BOOT_ORDER = ["core", "middleware", "ops", "fuel", "scheduling", "agents"]
+_BOOT_ORDER = ["core", "middleware", "ops", "fuel", "scheduling", "notifications", "agents"]
 
 
 async def initialize_all(app, container: ServiceContainer) -> None:

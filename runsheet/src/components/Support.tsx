@@ -1,7 +1,17 @@
-import { Filter, MessageSquare, Plus, Search, X } from "lucide-react";
+import { Bell, Filter, MessageSquare, Plus, Search, Settings, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { apiService, type SupportTicket } from "../services/api";
 import LoadingSpinner from "./LoadingSpinner";
+import NotificationHistoryTab from "./NotificationHistoryTab";
+import NotificationSettingsTab from "./NotificationSettingsTab";
+
+type SupportTab = "tickets" | "notifications" | "settings";
+
+const TABS: { key: SupportTab; label: string; icon: React.ReactNode }[] = [
+  { key: "tickets", label: "Tickets", icon: <MessageSquare className="w-4 h-4" /> },
+  { key: "notifications", label: "Notifications", icon: <Bell className="w-4 h-4" /> },
+  { key: "settings", label: "Settings", icon: <Settings className="w-4 h-4" /> },
+];
 
 const TICKET_STATUSES: { value: string; label: string }[] = [
   { value: "all", label: "All Status" },
@@ -42,6 +52,7 @@ const STATUS_TRANSITIONS: Record<string, string[]> = {
  * Validates: Requirements 6.1–6.6, 12.1–12.4
  */
 export default function Support() {
+  const [activeTab, setActiveTab] = useState<SupportTab>("tickets");
   const [tickets, setTickets] = useState<SupportTicket[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -151,11 +162,11 @@ export default function Support() {
     return matchesSearch && matchesPriority && matchesStatus;
   });
 
-  if (loading) {
+  if (loading && activeTab === "tickets") {
     return <LoadingSpinner message="Loading support tickets..." />;
   }
 
-  if (error && tickets.length === 0) {
+  if (error && tickets.length === 0 && activeTab === "tickets") {
     return (
       <div className="h-full flex items-center justify-center bg-white">
         <div className="text-center">
@@ -176,7 +187,32 @@ export default function Support() {
   }
 
   return (
-    <div className="h-full flex bg-white">
+    <div className="h-full flex flex-col bg-white">
+      {/* Tab Bar */}
+      <div className="border-b border-gray-200 px-8">
+        <nav className="flex gap-6" aria-label="Support tabs">
+          {TABS.map((tab) => (
+            <button
+              key={tab.key}
+              onClick={() => setActiveTab(tab.key)}
+              className={`flex items-center gap-2 py-3 px-1 text-sm font-medium border-b-2 transition-colors ${
+                activeTab === tab.key
+                  ? "border-[#232323] text-[#232323]"
+                  : "border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"
+              }`}
+              aria-selected={activeTab === tab.key}
+              role="tab"
+            >
+              {tab.icon}
+              {tab.label}
+            </button>
+          ))}
+        </nav>
+      </div>
+
+      {/* Tab Content */}
+      {activeTab === "tickets" && (
+    <div className="flex-1 flex bg-white overflow-hidden">
       {/* Tickets List */}
       <div className="flex-1 flex flex-col">
         {/* Header */}
@@ -568,6 +604,12 @@ export default function Support() {
           onCreated={(ticket) => setTickets((prev) => [ticket, ...prev])}
         />
       )}
+    </div>
+      )}
+
+      {activeTab === "notifications" && <NotificationHistoryTab />}
+
+      {activeTab === "settings" && <NotificationSettingsTab />}
     </div>
   );
 }

@@ -33,6 +33,7 @@ from scheduling.api.endpoints import router as scheduling_router
 from agent_endpoints import router as agent_router
 from inline_endpoints import router as inline_router
 from import_endpoints import router as import_router
+from notifications.api.endpoints import router as notification_router
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -84,6 +85,7 @@ app.include_router(scheduling_router)
 app.include_router(agent_router)
 app.include_router(inline_router)
 app.include_router(import_router)
+app.include_router(notification_router)
 
 
 def _c(app: FastAPI) -> ServiceContainer:
@@ -204,6 +206,40 @@ async def scheduling_live_websocket(websocket: WebSocket):
     except Exception as e:
         logger.error(
             "Unexpected WebSocket error on /ws/scheduling: endpoint=/ws/scheduling tenant_id=%s exception_type=%s error=%s traceback=%s",
+            tenant_id, type(e).__name__, str(e), traceback.format_exc()
+        )
+        try:
+            await websocket.close(code=1011, reason="Internal server error")
+        except Exception:
+            pass
+    finally:
+        await mgr.disconnect(websocket)
+
+@app.websocket("/ws/notifications")
+async def notifications_live_websocket(websocket: WebSocket):
+    c = _c(websocket.app)
+    tenant_id = _ws_authenticate(websocket)
+    if not tenant_id:
+        await websocket.close(code=4001, reason="Authentication required")
+        return
+    mgr = c.notification_ws_manager
+    await mgr.connect(websocket, tenant_id=tenant_id)
+    try:
+        while True:
+            raw = await websocket.receive_text()
+            try:
+                msg = json.loads(raw)
+                if msg.get("type") == "ping":
+                    await websocket.send_json({"type": "pong",
+                        "timestamp": datetime.utcnow().isoformat() + "Z"})
+            except json.JSONDecodeError:
+                logger.warning("Malformed JSON received on /ws/notifications (tenant_id=%s): %s", tenant_id, raw)
+                await websocket.send_json({"type": "error", "message": "Invalid JSON"})
+    except WebSocketDisconnect:
+        logger.debug("WebSocket client disconnected normally from /ws/notifications (tenant_id=%s)", tenant_id)
+    except Exception as e:
+        logger.error(
+            "Unexpected WebSocket error on /ws/notifications: endpoint=/ws/notifications tenant_id=%s exception_type=%s error=%s traceback=%s",
             tenant_id, type(e).__name__, str(e), traceback.format_exc()
         )
         try:
