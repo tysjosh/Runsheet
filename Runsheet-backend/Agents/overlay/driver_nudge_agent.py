@@ -204,7 +204,8 @@ class DriverNudgeAgent(OverlayAgentBase):
         }
 
         try:
-            result = await self._es.search_documents("jobs", query, size=100)
+            from scheduling.services.scheduling_es_mappings import JOBS_CURRENT_INDEX
+            result = await self._es.search_documents(JOBS_CURRENT_INDEX, query, size=100)
             hits = result.get("hits", {}).get("hits", [])
             return [hit["_source"] for hit in hits]
         except Exception as e:

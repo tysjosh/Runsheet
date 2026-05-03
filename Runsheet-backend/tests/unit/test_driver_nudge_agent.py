@@ -549,7 +549,7 @@ class TestQueryUnackedJobs:
         await agent._query_unacked_jobs()
 
         call_args = deps["es_service"].search_documents.call_args
-        assert call_args[0][0] == "jobs"
+        assert call_args[0][0] == "jobs_current"
 
     @pytest.mark.asyncio
     async def test_query_filters_assigned_status(self):
