@@ -14,7 +14,7 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
@@ -31,23 +31,25 @@ ROUTER_AUTH_POLICY = "jwt_required"
 # ---------------------------------------------------------------------------
 
 class ChatRequest(BaseModel):
-    message: str
-    mode: str = "chat"
-    session_id: Optional[str] = None
+    message: str = Field(..., min_length=1, max_length=10000)
+    mode: str = Field(default="chat", pattern=r"^(chat|command|analysis)$")
+    session_id: Optional[str] = Field(default=None, max_length=128)
 
 class ClearChatRequest(BaseModel):
-    session_id: Optional[str] = None
+    session_id: Optional[str] = Field(default=None, max_length=128)
+
+VALID_DATA_TYPES = {"trucks", "fleet", "orders", "inventory", "support_tickets", "support"}
 
 class TemporalUploadRequest(BaseModel):
-    data_type: str
-    batch_id: str
-    operational_time: str
+    data_type: str = Field(..., min_length=1, max_length=50)
+    batch_id: str = Field(..., min_length=1, max_length=128)
+    operational_time: str = Field(..., pattern=r"^\d{2}:\d{2}$")
     sheets_url: str = None
 
 class SelectiveUploadRequest(BaseModel):
-    batch_id: str
-    operational_time: str
-    data_types: list[str]
+    batch_id: str = Field(..., min_length=1, max_length=128)
+    operational_time: str = Field(..., pattern=r"^\d{2}:\d{2}$")
+    data_types: list[str] = Field(..., min_length=1)
 
 
 def _container(request: Request):
@@ -136,6 +138,8 @@ async def get_demo_status():
 @router.post("/api/upload/csv")
 async def upload_csv_temporal(file: UploadFile = File(...), data_type: str = Form(...),
                               batch_id: str = Form(...), operational_time: str = Form(...)):
+    if data_type not in VALID_DATA_TYPES:
+        raise HTTPException(status_code=400, detail=f"Invalid data_type '{data_type}'. Must be one of: {sorted(VALID_DATA_TYPES)}")
     from services.data_seeder import data_seeder
     content = await file.read()
     documents = [d for d in (convert_csv_row_to_document(row, data_type)
@@ -236,8 +240,8 @@ def convert_csv_row_to_document(row: dict, data_type: str) -> dict:
                     for r in csv.DictReader(f):
                         m[r["name"]] = {"id": r["location_id"], "name": r["name"], "type": r["type"],
                                         "coordinates": {"lat": float(r["lat"]), "lon": float(r["lon"])}, "address": r["address"]}
-        except Exception:
-            pass
+        except Exception as loc_err:
+            logger.debug("Failed to read locations CSV: %s", loc_err)
         if name in m: return m[name]
         if lat is not None and lon is not None:
             return {"id": name.lower().replace(" ", "-").replace(",", ""), "name": name, "type": "location",
@@ -272,8 +276,8 @@ def convert_csv_row_to_document(row: dict, data_type: str) -> dict:
             return {"ticket_id": row.get("ticket_id"), "customer": row.get("customer"), "issue": row.get("issue"),
                     "description": row.get("description"), "priority": row.get("priority", "medium"),
                     "status": row.get("status", "open")}
-    except Exception:
-        pass
+    except Exception as conv_err:
+        logger.warning("Failed to convert CSV row to %s document: %s", data_type, conv_err)
     return None
 
 
@@ -291,5 +295,6 @@ def generate_demo_sheets_data(data_type: str, batch_id: str) -> list:
     try:
         with open(path, "r", encoding="utf-8") as f:
             return [d for d in (convert_csv_row_to_document(row, data_type) for row in csv.DictReader(f)) if d]
-    except Exception:
+    except Exception as read_err:
+        logger.warning("Failed to read demo CSV %s: %s", path, read_err)
         return []

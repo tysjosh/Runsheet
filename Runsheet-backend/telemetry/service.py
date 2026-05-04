@@ -411,6 +411,9 @@ class _SpanContextManager:
         return self._span_context.__exit__(exc_type, exc_val, exc_tb)
 
 
+_noop_logger = logging.getLogger("telemetry.noop_span")
+
+
 class _NoOpSpanContextManager:
     """
     No-op context manager for when tracing is not configured.
@@ -426,16 +429,16 @@ class _NoOpSpanContextManager:
         return False
     
     def set_attribute(self, key: str, value: Any) -> None:
-        """No-op attribute setter."""
-        pass
+        """No-op attribute setter — tracing not configured."""
+        _noop_logger.debug("Span attribute (no-op): %s=%s", key, value)
     
     def add_event(self, name: str, attributes: Optional[Dict[str, Any]] = None) -> None:
-        """No-op event adder."""
-        pass
+        """No-op event adder — tracing not configured."""
+        _noop_logger.debug("Span event (no-op): %s attrs=%s", name, attributes)
     
     def record_exception(self, exception: Exception) -> None:
-        """No-op exception recorder."""
-        pass
+        """No-op exception recorder — tracing not configured, logging instead."""
+        _noop_logger.warning("Span exception (no-op, tracing disabled): %s: %s", type(exception).__name__, exception)
 
 
 # Global telemetry service instance

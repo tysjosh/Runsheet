@@ -183,7 +183,11 @@ class RedisSessionStore(SessionStore):
             # Use PING command to verify connectivity
             result = await self.client.ping()
             return result is True
-        except Exception:
+        except Exception as exc:
+            import logging
+            logging.getLogger("session.redis_store").warning(
+                "Redis health check failed: %s", exc
+            )
             return False
     
     async def refresh_ttl(

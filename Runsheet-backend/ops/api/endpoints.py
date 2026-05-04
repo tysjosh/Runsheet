@@ -719,8 +719,8 @@ def _resolve_bucket(
             end_dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
             if (end_dt - start_dt).days > 90:
                 return "daily"
-        except (ValueError, TypeError):
-            pass
+        except (ValueError, TypeError) as e:
+            logger.debug("Could not parse date range for bucket resolution: %s", e)
     return bucket
 
 
@@ -1211,7 +1211,8 @@ async def get_indexing_metrics(
             index=OpsElasticsearchService.POISON_QUEUE, body=poison_query
         )
         indexing_errors = poison_result["hits"]["total"]["value"]
-    except Exception:
+    except Exception as exc:
+        logger.warning("Failed to query poison queue for indexing errors: %s", exc)
         indexing_errors = 0
 
     total_attempted = total_indexed + indexing_errors

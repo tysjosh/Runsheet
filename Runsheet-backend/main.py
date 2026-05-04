@@ -225,8 +225,8 @@ async def _ws_loop(websocket: WebSocket, mgr, endpoint: str, tenant_id: str,
         logger.error("Unexpected WebSocket error on %s: tenant_id=%s error=%s", endpoint, tenant_id, str(e))
         try:
             await websocket.close(code=1011, reason="Internal server error")
-        except Exception:
-            pass
+        except Exception as close_err:
+            logger.debug("Failed to close WebSocket on %s: %s", endpoint, close_err)
     finally:
         await mgr.disconnect(websocket)
 
