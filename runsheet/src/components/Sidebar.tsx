@@ -3,7 +3,6 @@ import {
   BarChart3,
   CalendarClock,
   ChevronLeft,
-  ClipboardList,
   Droplets,
   FileInput,
   Fuel,
@@ -42,7 +41,6 @@ export default function Sidebar({
 
   const menuItems = [
     { id: "fleet", label: "Fleet", icon: Truck },
-    { id: "orders", label: "Orders", icon: ClipboardList },
     { id: "scheduling", label: "Scheduling", icon: CalendarClock },
     { id: "fuel", label: "Fuel", icon: Fuel },
     { id: "fuel-distribution", label: "Fuel Distribution", icon: Droplets },

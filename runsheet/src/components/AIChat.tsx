@@ -45,7 +45,7 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
       id: "1",
       role: "assistant",
       content:
-        "Hello! I'm your logistics AI assistant. I can help you search orders, track fleet status, analyze delays, and answer questions about your operations. What would you like to know?",
+        "Hello! I'm your logistics AI assistant. I can help you track fleet status, search inventory, analyze delays, and answer questions about your operations. What would you like to know?",
       timestamp: new Date(),
     },
   ]);
@@ -96,8 +96,7 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
     switch (toolName) {
       case "search_fleet_data":
         return "🚛";
-      case "search_orders":
-        return "📦";
+
       case "search_support_tickets":
         return "🎫";
       case "search_inventory":

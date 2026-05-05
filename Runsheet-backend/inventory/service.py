@@ -203,6 +203,39 @@ class InventoryService:
         return await self.get_item(item_id, tenant_id)
 
     # ------------------------------------------------------------------
+    # Delete item
+    # ------------------------------------------------------------------
+
+    async def delete_item(self, item_id: str, tenant_id: str) -> bool:
+        """Delete an inventory item by ID, scoped to tenant.
+
+        Returns True if the item was deleted, raises if not found.
+        """
+        # Verify item exists and belongs to tenant (raises 404 if not)
+        await self.get_item(item_id, tenant_id)
+
+        # Find the ES document _id for this item
+        query: dict = {
+            "query": {
+                "bool": {
+                    "must": [
+                        {"term": {"item_id": item_id}},
+                        {"term": {"tenant_id": tenant_id}},
+                    ]
+                }
+            },
+            "size": 1,
+        }
+        response = await self._es.search_documents(INVENTORY_INDEX, query, size=1)
+        hits = response["hits"]["hits"]
+        if not hits:
+            return False
+
+        doc_id = hits[0]["_id"]
+        await self._es.delete_document(INVENTORY_INDEX, doc_id)
+        return True
+
+    # ------------------------------------------------------------------
     # Stock adjustment
     # ------------------------------------------------------------------
 

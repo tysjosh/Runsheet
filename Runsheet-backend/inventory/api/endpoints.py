@@ -164,6 +164,24 @@ async def update_item(
 
 
 # ---------------------------------------------------------------------------
+# Delete item
+# ---------------------------------------------------------------------------
+
+
+@router.delete("/items/{item_id}", status_code=204)
+@limiter.limit(_inventory_rate)
+async def delete_item(
+    request: Request,
+    item_id: str,
+    tenant: TenantContext = Depends(get_tenant_context),
+):
+    """Delete an inventory item by ID."""
+    service = _get_inventory_service()
+    await service.delete_item(item_id=item_id, tenant_id=tenant.tenant_id)
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Stock adjustment
 # ---------------------------------------------------------------------------
 

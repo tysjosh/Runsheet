@@ -4,7 +4,6 @@ import {
   Database,
   Loader2,
   Truck,
-  Package,
   Users,
   Fuel,
   Boxes,
@@ -28,7 +27,6 @@ const DATA_TYPE_CONFIG: Record<
   { label: string; icon: React.ElementType }
 > = {
   fleet: { label: "Fleet", icon: Truck },
-  orders: { label: "Orders", icon: Package },
   riders: { label: "Riders", icon: Users },
   fuel_stations: { label: "Fuel Stations", icon: Fuel },
   inventory: { label: "Inventory", icon: Boxes },
@@ -38,7 +36,6 @@ const DATA_TYPE_CONFIG: Record<
 
 const ALL_DATA_TYPES: DataType[] = [
   "fleet",
-  "orders",
   "riders",
   "fuel_stations",
   "inventory",

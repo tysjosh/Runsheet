@@ -324,7 +324,7 @@ export default function DataImport() {
               Data Import
             </h1>
             <p className="text-gray-500">
-              Migrate and onboard your data — import fleet records, orders,
+              Migrate and onboard your data — import fleet records,
               inventory, and more from CSV files or Google Sheets.
             </p>
           </div>

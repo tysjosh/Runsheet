@@ -20,7 +20,6 @@ interface ImportCompleteProps {
 
 const DATA_TYPE_LABELS: Record<string, string> = {
   fleet: "Fleet",
-  orders: "Orders",
   riders: "Riders",
   fuel_stations: "Fuel Stations",
   inventory: "Inventory",

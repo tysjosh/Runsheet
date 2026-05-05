@@ -287,18 +287,18 @@ class ApiService {
 
   // Inventory Management
   async getInventory(): Promise<ApiResponse<InventoryItem[]>> {
-    return this.request<InventoryItem[]>("/inventory");
+    return this.request<InventoryItem[]>("/inventory/items");
   }
 
   async getInventoryById(id: string): Promise<ApiResponse<InventoryItem>> {
-    return this.request<InventoryItem>(`/inventory/${id}`);
+    return this.request<InventoryItem>(`/inventory/items/${id}`);
   }
 
   async updateInventoryItem(
     id: string,
     data: Partial<InventoryItem>,
   ): Promise<ApiResponse<InventoryItem>> {
-    return this.request<InventoryItem>(`/inventory/${id}`, {
+    return this.request<InventoryItem>(`/inventory/items/${id}`, {
       method: "PATCH",
       body: JSON.stringify(data),
     });

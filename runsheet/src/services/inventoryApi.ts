@@ -247,3 +247,37 @@ export async function getAssetReadiness(
     request_id: string;
   }>(`/inventory/readiness/${encodeURIComponent(assetId)}`);
 }
+
+/** POST /inventory/items — create a new inventory item */
+export interface CreateInventoryItemPayload {
+  name: string;
+  category: InventoryCategory;
+  quantity?: number;
+  unit: string;
+  min_threshold: number;
+  max_capacity: number;
+  location: string;
+  unit_cost?: number | null;
+  supplier?: string | null;
+  compatible_assets?: string[] | null;
+}
+
+export async function createItem(
+  payload: CreateInventoryItemPayload,
+): Promise<{ data: InventoryItem; request_id: string }> {
+  return inventoryRequest<{ data: InventoryItem; request_id: string }>(
+    "/inventory/items",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+/** DELETE /inventory/items/:itemId — delete an inventory item */
+export async function deleteItem(itemId: string): Promise<void> {
+  await inventoryRequest<void>(
+    `/inventory/items/${encodeURIComponent(itemId)}`,
+    { method: "DELETE" },
+  );
+}

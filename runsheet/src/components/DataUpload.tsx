@@ -34,7 +34,7 @@ export default function DataUpload() {
     "batch",
   );
   const [sheetsUrl, setSheetsUrl] = useState("");
-  const [dataType, setDataType] = useState("orders");
+  const [dataType, setDataType] = useState("fleet");
   const [uploading, setUploading] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [result, setResult] = useState<UploadResult | null>(null);
@@ -44,7 +44,6 @@ export default function DataUpload() {
   // Batch upload options
   const [selectedDataTypes, setSelectedDataTypes] = useState<string[]>([
     "fleet",
-    "orders",
     "inventory",
     "support",
   ]);
@@ -172,7 +171,7 @@ export default function DataUpload() {
   const handleBatchModeChange = (mode: "all" | "selective") => {
     setBatchMode(mode);
     if (mode === "all") {
-      setSelectedDataTypes(["fleet", "orders", "inventory", "support"]);
+      setSelectedDataTypes(["fleet", "inventory", "support"]);
     }
   };
 
@@ -213,7 +212,7 @@ export default function DataUpload() {
         // Always use selective upload - simpler and more reliable
         const dataTypesToUpload =
           batchMode === "all"
-            ? ["fleet", "orders", "inventory", "support"]
+            ? ["fleet", "inventory", "support"]
             : selectedDataTypes;
 
         response = await apiService.uploadSelectiveTemporal(
@@ -538,12 +537,12 @@ export default function DataUpload() {
                       </span>
                     </div>
                     <div className="text-sm text-gray-600">
-                      Fleet, Orders, Inventory, Support Tickets
+                      Fleet, Inventory, Support Tickets
                     </div>
                   </div>
                 ) : (
                   <div className="grid grid-cols-2 gap-3">
-                    {["fleet", "orders", "inventory", "support"].map((type) => (
+                    {["fleet", "inventory", "support"].map((type) => (
                       <label
                         key={type}
                         className="flex items-center gap-3 p-3 border border-gray-200 rounded-xl hover:border-gray-300 cursor-pointer transition-colors"
@@ -576,7 +575,6 @@ export default function DataUpload() {
                 onChange={(e) => setDataType(e.target.value)}
                 className="w-full px-4 py-3 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white"
               >
-                <option value="orders">Orders</option>
                 <option value="fleet">Fleet</option>
                 <option value="inventory">Inventory</option>
                 <option value="support">Support Tickets</option>
@@ -822,13 +820,6 @@ export default function DataUpload() {
               </div>
               <div className="divide-y divide-gray-100">
                 <div className="px-6 py-4">
-                  <div className="font-medium text-[#232323] mb-2">Orders</div>
-                  <div className="text-xs text-gray-600 font-mono bg-gray-50 p-3 rounded-xl">
-                    order_id, customer, region, status, value, items, truck_id,
-                    description
-                  </div>
-                </div>
-                <div className="px-6 py-4">
                   <div className="font-medium text-[#232323] mb-2">Fleet</div>
                   <div className="text-xs text-gray-600 font-mono bg-gray-50 p-3 rounded-xl">
                     truck_id, driver, status, route, location, cargo,
@@ -906,10 +897,6 @@ export default function DataUpload() {
                 Download CSV templates to get started:
               </p>
               <div className="space-y-3">
-                <button className="w-full flex items-center gap-3 px-4 py-3 text-sm text-gray-700 hover:text-[#232323] hover:bg-gray-50 rounded-xl border border-gray-200 transition-colors">
-                  <FileText className="w-4 h-4" />
-                  Orders Template
-                </button>
                 <button className="w-full flex items-center gap-3 px-4 py-3 text-sm text-gray-700 hover:text-[#232323] hover:bg-gray-50 rounded-xl border border-gray-200 transition-colors">
                   <Database className="w-4 h-4" />
                   Fleet Template
