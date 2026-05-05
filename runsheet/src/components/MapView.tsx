@@ -1,7 +1,8 @@
 "use client";
 
 import { AdvancedMarker, APIProvider, Map } from "@vis.gl/react-google-maps";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { type LocationUpdateData, useFleetWebSocket } from "../hooks";
 import { apiService } from "../services/api";
 import type { AssetType, Truck } from "../types/api";
 
@@ -43,8 +44,60 @@ export default function MapView({
   const [activeTypeFilter, setActiveTypeFilter] = useState<AssetType | "all">(
     assetTypeFilter,
   );
+  const [clickedTruck, setClickedTruck] = useState<Truck | null>(null);
 
   const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
+
+  // Live position updates via WebSocket
+  const handleLocationUpdate = useCallback((update: LocationUpdateData) => {
+    setTrucks((prev) =>
+      prev.map((truck) => {
+        if (truck.id === update.truck_id) {
+          return {
+            ...truck,
+            currentLocation: {
+              ...truck.currentLocation,
+              coordinates: {
+                lat: update.coordinates.lat,
+                lon: update.coordinates.lon,
+              },
+            },
+            lastUpdate: update.timestamp,
+          };
+        }
+        return truck;
+      }),
+    );
+  }, []);
+
+  const handleBatchLocationUpdate = useCallback((updates: LocationUpdateData[]) => {
+    setTrucks((prev) => {
+      const updateMap = new Map(updates.map((u) => [u.truck_id, u]));
+      return prev.map((truck) => {
+        const update = updateMap.get(truck.id);
+        if (update) {
+          return {
+            ...truck,
+            currentLocation: {
+              ...truck.currentLocation,
+              coordinates: {
+                lat: update.coordinates.lat,
+                lon: update.coordinates.lon,
+              },
+            },
+            lastUpdate: update.timestamp,
+          };
+        }
+        return truck;
+      });
+    });
+  }, []);
+
+  useFleetWebSocket({
+    autoConnect: true,
+    onLocationUpdate: handleLocationUpdate,
+    onBatchLocationUpdate: handleBatchLocationUpdate,
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -106,6 +159,22 @@ export default function MapView({
             (!assetType && activeTypeFilter === "vehicle")
           );
         });
+
+  /** Compute map center from fleet data, fallback to Nigeria */
+  const mapCenter = (() => {
+    if (selectedTruck?.currentLocation?.coordinates) {
+      return {
+        lat: selectedTruck.currentLocation.coordinates.lat,
+        lng: selectedTruck.currentLocation.coordinates.lon,
+      };
+    }
+    if (filteredAssets.length > 0) {
+      const avgLat = filteredAssets.reduce((sum, t) => sum + t.currentLocation.coordinates.lat, 0) / filteredAssets.length;
+      const avgLng = filteredAssets.reduce((sum, t) => sum + t.currentLocation.coordinates.lon, 0) / filteredAssets.length;
+      return { lat: avgLat, lng: avgLng };
+    }
+    return { lat: 9.0820, lng: 8.6753 }; // Nigeria center
+  })();
 
   if (!apiKey) {
     return (
@@ -224,8 +293,8 @@ export default function MapView({
         <APIProvider apiKey={apiKey}>
           <Map
             mapId="ff5c9f40e270515093c1c77f"
-            defaultCenter={{ lat: -1.2921, lng: 36.8219 }}
-            defaultZoom={7}
+            defaultCenter={mapCenter}
+            defaultZoom={6}
             mapTypeId={mapMode}
             style={{ width: "100%", height: "100%" }}
             gestureHandling="greedy"
@@ -250,12 +319,13 @@ export default function MapView({
                   position={{ lat, lng }}
                   title={`${label} - ${truck.driverName || truck.id}`}
                   onClick={() => {
-                    // You can add click handler here if needed
+                    setClickedTruck(truck);
+                    setShowInfo(true);
                   }}
                 >
                   <div
                     className={`px-3 py-1.5 rounded-lg text-xs font-medium flex items-center space-x-1.5 shadow-sm transition-all ${
-                      selectedTruck?.id === truck.id
+                      selectedTruck?.id === truck.id || clickedTruck?.id === truck.id
                         ? "bg-[#232323] text-white ring-2 ring-gray-400 scale-110"
                         : "bg-white text-gray-900 hover:shadow-md border border-gray-200"
                     }`}
@@ -270,25 +340,28 @@ export default function MapView({
         </APIProvider>
 
         {/* Asset info panel */}
-        {selectedTruck && showInfo && (
+        {(selectedTruck || clickedTruck) && showInfo && (() => {
+          const displayTruck = selectedTruck || clickedTruck;
+          if (!displayTruck) return null;
+          return (
           <div className="absolute top-4 right-4 bg-white rounded-xl shadow-lg p-4 w-72 border border-gray-100 z-10">
             <div className="flex items-start justify-between mb-3">
               <div className="flex items-center space-x-2">
                 <h3 className="font-semibold text-gray-900 text-base">
-                  {getAssetLabel(selectedTruck)}
+                  {getAssetLabel(displayTruck)}
                 </h3>
                 <span
                   className={`px-2.5 py-0.5 rounded-full text-xs font-medium ${
-                    selectedTruck.status === "on_time"
+                    displayTruck.status === "on_time"
                       ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
                       : "bg-red-50 text-red-700 border border-red-200"
                   }`}
                 >
-                  {selectedTruck.status.replace("_", " ")}
+                  {displayTruck.status.replace("_", " ")}
                 </span>
               </div>
               <button
-                onClick={() => setShowInfo(false)}
+                onClick={() => { setShowInfo(false); setClickedTruck(null); }}
                 className="text-gray-400 hover:text-gray-600 transition-colors"
               >
                 <svg
@@ -311,77 +384,57 @@ export default function MapView({
               <div className="flex justify-between py-1.5 border-b border-gray-50">
                 <span className="text-gray-500">Type</span>
                 <span className="text-gray-900 font-medium">
-                  {getAssetIcon(selectedTruck)} {selectedTruck.assetSubtype?.replace("_", " ") ?? "truck"}
+                  {getAssetIcon(displayTruck)} {displayTruck.assetSubtype?.replace("_", " ") ?? "truck"}
                 </span>
               </div>
 
-              {selectedTruck.driverName && (
+              {displayTruck.driverName && (
                 <div className="flex justify-between py-1.5 border-b border-gray-50">
                   <span className="text-gray-500">Driver</span>
                   <span className="text-gray-900 font-medium">
-                    {selectedTruck.driverName}
+                    {displayTruck.driverName}
                   </span>
                 </div>
               )}
 
-              {selectedTruck.route?.origin?.name && (
+              {displayTruck.route?.origin?.name && (
                 <div className="flex justify-between py-1.5 border-b border-gray-50">
                   <span className="text-gray-500">Route</span>
                   <span className="text-gray-900 text-right">
-                    {selectedTruck.route.origin.name} →{" "}
-                    {selectedTruck.route?.destination?.name ?? "—"}
+                    {displayTruck.route.origin.name} →{" "}
+                    {displayTruck.route?.destination?.name ?? "—"}
                   </span>
                 </div>
               )}
 
-              {selectedTruck.route?.distance != null && (
+              {displayTruck.route?.distance != null && (
                 <div className="flex justify-between py-1.5 border-b border-gray-50">
                   <span className="text-gray-500">Distance</span>
                   <span className="text-gray-900 font-medium">
-                    {selectedTruck.route.distance} km
+                    {displayTruck.route.distance} km
                   </span>
                 </div>
               )}
 
-              {selectedTruck.cargo && (
+              {displayTruck.cargo && (
                 <div className="flex justify-between py-1.5 border-b border-gray-50">
                   <span className="text-gray-500">Cargo</span>
                   <span className="text-gray-900">
-                    {selectedTruck.cargo.type}
+                    {displayTruck.cargo.type}
                   </span>
-                </div>
-              )}
-
-              {selectedTruck.vesselName && (
-                <div className="flex justify-between py-1.5 border-b border-gray-50">
-                  <span className="text-gray-500">Vessel</span>
-                  <span className="text-gray-900">{selectedTruck.vesselName}</span>
-                </div>
-              )}
-
-              {selectedTruck.containerNumber && (
-                <div className="flex justify-between py-1.5 border-b border-gray-50">
-                  <span className="text-gray-500">Container</span>
-                  <span className="text-gray-900">{selectedTruck.containerNumber} {selectedTruck.containerSize ?? ""}</span>
-                </div>
-              )}
-
-              {selectedTruck.equipmentModel && (
-                <div className="flex justify-between py-1.5 border-b border-gray-50">
-                  <span className="text-gray-500">Model</span>
-                  <span className="text-gray-900">{selectedTruck.equipmentModel}</span>
                 </div>
               )}
 
               <div className="flex justify-between py-1.5">
                 <span className="text-gray-500">Location</span>
                 <span className="text-gray-900 text-right">
-                  {selectedTruck.currentLocation?.name ?? "Unknown"}
+                  {displayTruck.currentLocation?.name ?? "Unknown"}
                 </span>
               </div>
             </div>
           </div>
-        )}
+          );
+        })()}
 
         {/* Map attribution */}
         <div className="absolute bottom-3 left-3 bg-white/95 backdrop-blur-sm px-3 py-1.5 rounded-lg text-xs text-gray-500 shadow-sm border border-gray-100 z-10">
