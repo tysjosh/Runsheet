@@ -8,6 +8,15 @@
  * - Forecasts: Paginated tank forecasts with station/fuel_grade filters
  * - Priorities: Paginated delivery priority rankings
  *
+ * Plan Execution Lifecycle features:
+ * - Plan list fetched from backend with pagination and status filter
+ * - Status badges with color coding (draft=gray, dispatched=blue, completed=green, rejected=red)
+ * - Approve/Reject buttons for draft plans with confirmation dialog
+ * - Execution progress with real-time WebSocket updates for dispatched plans
+ * - Outcome comparison table for completed plans
+ * - Cost analysis breakdown for all plans
+ * - Toast notifications for success/error feedback
+ *
  * Validates:
  * - Requirement 1.1: Generate Plan button triggers POST /api/fuel/mvp/plan/generate
  * - Requirement 1.2: Display plan status and run_id
@@ -20,8 +29,10 @@
 
 import {
   AlertTriangle,
+  Check,
   ChevronLeft,
   ChevronRight,
+  DollarSign,
   Droplets,
   Eye,
   Loader2,
@@ -29,35 +40,48 @@ import {
   Play,
   RefreshCw,
   Route,
+  Settings,
   Truck,
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import type {
   CompartmentAssignment,
+  CostBreakdown,
+  CostConfig,
   DeliveryPriority,
   Forecast,
   GeneratePlanResponse,
-  LoadingPlan,
   PaginatedResponse,
   PaginationMeta,
   PlanDetail,
+  PlanListItem,
+  PlanOutcome,
   ReplanRequest,
   ReplanResponse,
   RouteAssignment,
-  RoutePlan,
+  StopVariance,
 } from "../../services/fuelApi";
 import {
+  approvePlan,
   generatePlan,
   getForecasts,
   getPlan,
+  getPlanCosts,
+  getPlanOutcomes,
   getPriorities,
+  listPlans,
+  rejectPlan,
   replan,
+  updateCostConfig,
 } from "../../services/fuelApi";
+import { usePlanExecutionSocket } from "../../hooks/usePlanExecutionSocket";
+import type { ExecutionUpdateData } from "../../hooks/usePlanExecutionSocket";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const TENANT_ID = "dev-tenant";
+const DISPATCHER_ID = "dispatcher-001";
 const PAGE_SIZE = 10;
 
 const TABS = [
@@ -74,6 +98,599 @@ const URGENCY_CONFIG: Record<string, { color: string; bg: string }> = {
   high: { color: "text-orange-700", bg: "bg-orange-100" },
   critical: { color: "text-red-700", bg: "bg-red-100" },
 };
+
+const STATUS_BADGE_CONFIG: Record<string, { color: string; bg: string }> = {
+  draft: { color: "text-gray-700", bg: "bg-gray-100" },
+  proposed: { color: "text-gray-700", bg: "bg-gray-100" },
+  dispatched: { color: "text-blue-700", bg: "bg-blue-100" },
+  completed: { color: "text-green-700", bg: "bg-green-100" },
+  rejected: { color: "text-red-700", bg: "bg-red-100" },
+};
+
+const VARIANCE_THRESHOLD = 5; // 5% threshold for color coding
+
+// Statuses that allow approve/reject actions
+const APPROVABLE_STATUSES = ["draft", "proposed"];
+
+// ─── Toast Notification System ───────────────────────────────────────────────
+
+interface Toast {
+  id: number;
+  message: string;
+  type: "success" | "error";
+}
+
+let toastIdCounter = 0;
+
+function ToastContainer({ toasts, onDismiss }: { toasts: Toast[]; onDismiss: (id: number) => void }) {
+  if (toasts.length === 0) return null;
+  return (
+    <div className="fixed top-4 right-4 z-[100] space-y-2">
+      {toasts.map((toast) => (
+        <div
+          key={toast.id}
+          className={`flex items-center gap-2 px-4 py-3 rounded-lg shadow-lg text-sm font-medium ${
+            toast.type === "success"
+              ? "bg-green-600 text-white"
+              : "bg-red-600 text-white"
+          }`}
+        >
+          {toast.type === "success" ? (
+            <Check className="w-4 h-4" />
+          ) : (
+            <AlertTriangle className="w-4 h-4" />
+          )}
+          <span>{toast.message}</span>
+          <button
+            onClick={() => onDismiss(toast.id)}
+            className="ml-2 p-0.5 hover:bg-white/20 rounded"
+            aria-label="Dismiss notification"
+          >
+            <X className="w-3 h-3" />
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function useToasts() {
+  const [toasts, setToasts] = useState<Toast[]>([]);
+
+  const addToast = useCallback((message: string, type: "success" | "error") => {
+    const id = ++toastIdCounter;
+    setToasts((prev) => [...prev, { id, message, type }]);
+    setTimeout(() => {
+      setToasts((prev) => prev.filter((t) => t.id !== id));
+    }, 4000);
+  }, []);
+
+  const dismissToast = useCallback((id: number) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
+
+  return { toasts, addToast, dismissToast };
+}
+
+// ─── Status Badge Component ──────────────────────────────────────────────────
+
+function StatusBadge({ status }: { status: string }) {
+  const config = STATUS_BADGE_CONFIG[status] ?? STATUS_BADGE_CONFIG.draft;
+  return (
+    <span
+      className={`inline-flex items-center text-[10px] px-2 py-0.5 rounded font-medium ${config.bg} ${config.color}`}
+    >
+      {status}
+    </span>
+  );
+}
+
+// ─── Rejection Confirmation Dialog ───────────────────────────────────────────
+
+interface RejectDialogProps {
+  planId: string;
+  onConfirm: (reason: string) => void;
+  onCancel: () => void;
+  loading: boolean;
+}
+
+function RejectDialog({ planId, onConfirm, onCancel, loading }: RejectDialogProps) {
+  const [reason, setReason] = useState("");
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-md mx-4">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+          <h2 className="text-lg font-semibold text-[#232323]">Reject Plan</h2>
+          <button
+            onClick={onCancel}
+            className="p-1 text-gray-400 hover:text-gray-600 rounded"
+            aria-label="Close rejection dialog"
+            disabled={loading}
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+        <div className="px-6 py-4 space-y-4">
+          <p className="text-sm text-gray-600">
+            Are you sure you want to reject plan <span className="font-medium">{planId}</span>?
+          </p>
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">
+              Reason (optional)
+            </label>
+            <textarea
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              placeholder="Enter rejection reason..."
+              rows={3}
+              className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white resize-none"
+              disabled={loading}
+            />
+          </div>
+          <div className="flex justify-end gap-3 pt-2">
+            <button
+              type="button"
+              onClick={onCancel}
+              disabled={loading}
+              className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800 rounded-lg hover:bg-gray-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => onConfirm(reason)}
+              disabled={loading}
+              className="px-4 py-2 text-sm text-white bg-red-600 hover:bg-red-700 rounded-lg disabled:opacity-50"
+            >
+              {loading ? "Rejecting..." : "Reject Plan"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Cost Configuration Panel ────────────────────────────────────────────────
+
+interface CostConfigPanelProps {
+  onClose: () => void;
+  onSave: () => void;
+  addToast: (message: string, type: "success" | "error") => void;
+}
+
+function CostConfigPanel({ onClose, onSave, addToast }: CostConfigPanelProps) {
+  const [config, setConfig] = useState<CostConfig>({
+    fuel_consumption_rate: 0.35,
+    fuel_price_per_liter: 1.5,
+    driver_hourly_rate: 25,
+    currency: "USD",
+  });
+  const [saving, setSaving] = useState(false);
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      await updateCostConfig(TENANT_ID, config);
+      addToast("Cost configuration saved", "success");
+      onSave();
+      onClose();
+    } catch (err) {
+      addToast(err instanceof Error ? err.message : "Failed to save cost config", "error");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const inputClass =
+    "w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white";
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-md mx-4">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+          <h2 className="text-lg font-semibold text-[#232323]">Cost Configuration</h2>
+          <button
+            onClick={onClose}
+            className="p-1 text-gray-400 hover:text-gray-600 rounded"
+            aria-label="Close cost configuration"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+        <div className="px-6 py-4 space-y-4">
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">
+              Fuel Consumption Rate (L/km)
+            </label>
+            <input
+              type="number"
+              step="0.01"
+              value={config.fuel_consumption_rate}
+              onChange={(e) => setConfig({ ...config, fuel_consumption_rate: parseFloat(e.target.value) || 0 })}
+              className={inputClass}
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">
+              Fuel Price per Liter ({config.currency})
+            </label>
+            <input
+              type="number"
+              step="0.01"
+              value={config.fuel_price_per_liter}
+              onChange={(e) => setConfig({ ...config, fuel_price_per_liter: parseFloat(e.target.value) || 0 })}
+              className={inputClass}
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">
+              Driver Hourly Rate ({config.currency})
+            </label>
+            <input
+              type="number"
+              step="0.5"
+              value={config.driver_hourly_rate}
+              onChange={(e) => setConfig({ ...config, driver_hourly_rate: parseFloat(e.target.value) || 0 })}
+              className={inputClass}
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">
+              Currency
+            </label>
+            <select
+              value={config.currency}
+              onChange={(e) => setConfig({ ...config, currency: e.target.value })}
+              className={inputClass}
+            >
+              <option value="USD">USD</option>
+              <option value="EUR">EUR</option>
+              <option value="GBP">GBP</option>
+              <option value="NGN">NGN</option>
+              <option value="KES">KES</option>
+            </select>
+          </div>
+          <div className="flex justify-end gap-3 pt-2">
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800 rounded-lg hover:bg-gray-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={handleSave}
+              disabled={saving}
+              className="px-4 py-2 text-sm text-white rounded-lg disabled:opacity-50"
+              style={{ backgroundColor: "#232323" }}
+            >
+              {saving ? "Saving..." : "Save Configuration"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+// ─── Execution Progress Section ──────────────────────────────────────────────
+
+interface ExecutionProgressProps {
+  planId: string;
+  executionData?: ExecutionUpdateData | null;
+}
+
+function ExecutionProgress({ planId, executionData }: ExecutionProgressProps) {
+  const completedStops = executionData?.completed_stops ?? 0;
+  const totalStops = executionData?.total_stops ?? 0;
+  const percentage = totalStops > 0 ? Math.round((completedStops / totalStops) * 100) : 0;
+
+  return (
+    <div className="border border-blue-100 rounded-lg p-4 bg-blue-50/30">
+      <div className="flex items-center gap-2 mb-3">
+        <Route className="w-4 h-4 text-blue-600" />
+        <h4 className="text-sm font-medium text-[#232323]">Execution Progress</h4>
+        <StatusBadge status="dispatched" />
+      </div>
+
+      {/* Progress bar */}
+      <div className="mb-3">
+        <div className="flex items-center justify-between text-xs text-gray-600 mb-1">
+          <span>{completedStops} / {totalStops} stops completed</span>
+          <span className="font-medium">{percentage}%</span>
+        </div>
+        <div className="w-full h-2.5 bg-gray-200 rounded-full overflow-hidden">
+          <div
+            className="h-full bg-blue-600 rounded-full transition-all duration-500"
+            style={{ width: `${percentage}%` }}
+          />
+        </div>
+      </div>
+
+      {/* Last update info */}
+      {executionData?.updated_at && (
+        <p className="text-xs text-gray-500">
+          Last update: {new Date(executionData.updated_at).toLocaleString()}
+        </p>
+      )}
+
+      {/* Stop status (from WebSocket data) */}
+      {executionData?.stop && (
+        <div className="mt-3 text-xs">
+          <p className="text-gray-600">
+            Latest: Stop #{executionData.stop.sequence} ({executionData.stop.station_id}) —{" "}
+            <span className={executionData.stop.status === "completed" ? "text-green-600 font-medium" : "text-yellow-600 font-medium"}>
+              {executionData.stop.status}
+            </span>
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Outcome Comparison Section ──────────────────────────────────────────────
+
+interface OutcomeComparisonProps {
+  planId: string;
+}
+
+function OutcomeComparison({ planId }: OutcomeComparisonProps) {
+  const [outcome, setOutcome] = useState<PlanOutcome | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      setLoading(true);
+      setError("");
+      try {
+        const result = await getPlanOutcomes(planId, TENANT_ID);
+        if (!cancelled) setOutcome(result.data);
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load outcomes");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    load();
+    return () => { cancelled = true; };
+  }, [planId]);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-8">
+        <Loader2 className="w-5 h-5 text-gray-400 animate-spin" />
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="border border-gray-100 rounded-lg p-4">
+        <p className="text-sm text-red-600">{error}</p>
+      </div>
+    );
+  }
+
+  if (!outcome) return null;
+
+  const varianceColor = (value: number) =>
+    Math.abs(value) <= VARIANCE_THRESHOLD ? "text-green-600" : "text-red-600";
+
+  return (
+    <div className="border border-green-100 rounded-lg p-4 bg-green-50/30">
+      <div className="flex items-center gap-2 mb-3">
+        <Check className="w-4 h-4 text-green-600" />
+        <h4 className="text-sm font-medium text-[#232323]">Plan vs Actual Outcomes</h4>
+      </div>
+
+      {/* Aggregate metrics */}
+      <div className="grid grid-cols-3 gap-4 mb-4">
+        <div className="bg-white rounded-lg p-3 border border-gray-100">
+          <p className="text-xs text-gray-500">Qty Variance</p>
+          <p className={`text-lg font-semibold ${varianceColor(outcome.aggregate_quantity_variance_pct)}`}>
+            {outcome.aggregate_quantity_variance_pct.toFixed(1)}%
+          </p>
+        </div>
+        <div className="bg-white rounded-lg p-3 border border-gray-100">
+          <p className="text-xs text-gray-500">Time Variance</p>
+          <p className={`text-lg font-semibold ${Math.abs(outcome.aggregate_time_variance_minutes) <= 15 ? "text-green-600" : "text-red-600"}`}>
+            {outcome.aggregate_time_variance_minutes.toFixed(0)} min
+          </p>
+        </div>
+        <div className="bg-white rounded-lg p-3 border border-gray-100">
+          <p className="text-xs text-gray-500">Missed Stops</p>
+          <p className={`text-lg font-semibold ${outcome.missed_stops_count === 0 ? "text-green-600" : "text-red-600"}`}>
+            {outcome.missed_stops_count}
+          </p>
+        </div>
+      </div>
+
+      {/* Per-stop comparison table */}
+      {outcome.stop_variances && outcome.stop_variances.length > 0 && (
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs" aria-label="Stop variance comparison">
+            <thead className="bg-white">
+              <tr>
+                <th className="px-3 py-2 text-left text-gray-600 font-medium">Station</th>
+                <th className="px-3 py-2 text-right text-gray-600 font-medium">Qty Variance %</th>
+                <th className="px-3 py-2 text-right text-gray-600 font-medium">Time Variance (min)</th>
+                <th className="px-3 py-2 text-left text-gray-600 font-medium">Status</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100">
+              {outcome.stop_variances.map((sv: StopVariance) => (
+                <tr key={`${sv.station_id}-${sv.sequence}`} className="hover:bg-white">
+                  <td className="px-3 py-2 text-gray-700">{sv.station_id} (#{sv.sequence})</td>
+                  <td className={`px-3 py-2 text-right font-medium ${varianceColor(sv.quantity_variance_pct)}`}>
+                    {sv.quantity_variance_pct.toFixed(1)}%
+                  </td>
+                  <td className={`px-3 py-2 text-right font-medium ${Math.abs(sv.time_variance_minutes) <= 15 ? "text-green-600" : "text-red-600"}`}>
+                    {sv.time_variance_minutes.toFixed(0)}
+                  </td>
+                  <td className="px-3 py-2">
+                    <span className={`inline-flex items-center text-[10px] px-1.5 py-0.5 rounded font-medium ${
+                      sv.status === "completed" ? "bg-green-50 text-green-600" : "bg-yellow-50 text-yellow-600"
+                    }`}>
+                      {sv.status}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Cost Breakdown Section ──────────────────────────────────────────────────
+
+interface CostBreakdownSectionProps {
+  planId: string;
+  planStatus: string;
+}
+
+function CostBreakdownSection({ planId, planStatus }: CostBreakdownSectionProps) {
+  const [costs, setCosts] = useState<{ estimated: CostBreakdown; actual?: CostBreakdown; cost_variance_pct?: number } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      setLoading(true);
+      setError("");
+      try {
+        const result = await getPlanCosts(planId, TENANT_ID);
+        if (!cancelled) setCosts(result.data);
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load costs");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    load();
+    return () => { cancelled = true; };
+  }, [planId]);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-8">
+        <Loader2 className="w-5 h-5 text-gray-400 animate-spin" />
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="border border-gray-100 rounded-lg p-4">
+        <p className="text-sm text-gray-500">{error}</p>
+      </div>
+    );
+  }
+
+  if (!costs) return null;
+
+  const { estimated, actual, cost_variance_pct } = costs;
+
+  return (
+    <div className="border border-gray-100 rounded-lg p-4">
+      <div className="flex items-center gap-2 mb-3">
+        <DollarSign className="w-4 h-4 text-gray-500" />
+        <h4 className="text-sm font-medium text-[#232323]">Cost Analysis</h4>
+      </div>
+
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs" aria-label="Cost breakdown">
+          <thead className="bg-gray-50">
+            <tr>
+              <th className="px-3 py-2 text-left text-gray-600 font-medium">Category</th>
+              <th className="px-3 py-2 text-right text-gray-600 font-medium">Estimated</th>
+              {planStatus === "completed" && actual && (
+                <>
+                  <th className="px-3 py-2 text-right text-gray-600 font-medium">Actual</th>
+                  <th className="px-3 py-2 text-right text-gray-600 font-medium">Variance</th>
+                </>
+              )}
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-100">
+            <tr>
+              <td className="px-3 py-2 text-gray-700">Fuel Cost</td>
+              <td className="px-3 py-2 text-right text-gray-700">
+                {estimated.currency ?? "$"}{estimated.fuel_cost.toFixed(2)}
+              </td>
+              {planStatus === "completed" && actual && (
+                <>
+                  <td className="px-3 py-2 text-right text-gray-700">
+                    {actual.currency ?? "$"}{actual.fuel_cost.toFixed(2)}
+                  </td>
+                  <td className={`px-3 py-2 text-right font-medium ${
+                    Math.abs(((actual.fuel_cost - estimated.fuel_cost) / estimated.fuel_cost) * 100) <= VARIANCE_THRESHOLD
+                      ? "text-green-600" : "text-red-600"
+                  }`}>
+                    {estimated.fuel_cost > 0
+                      ? `${(((actual.fuel_cost - estimated.fuel_cost) / estimated.fuel_cost) * 100).toFixed(1)}%`
+                      : "—"}
+                  </td>
+                </>
+              )}
+            </tr>
+            <tr>
+              <td className="px-3 py-2 text-gray-700">Driver Cost</td>
+              <td className="px-3 py-2 text-right text-gray-700">
+                {estimated.currency ?? "$"}{estimated.driver_cost.toFixed(2)}
+              </td>
+              {planStatus === "completed" && actual && (
+                <>
+                  <td className="px-3 py-2 text-right text-gray-700">
+                    {actual.currency ?? "$"}{actual.driver_cost.toFixed(2)}
+                  </td>
+                  <td className={`px-3 py-2 text-right font-medium ${
+                    Math.abs(((actual.driver_cost - estimated.driver_cost) / estimated.driver_cost) * 100) <= VARIANCE_THRESHOLD
+                      ? "text-green-600" : "text-red-600"
+                  }`}>
+                    {estimated.driver_cost > 0
+                      ? `${(((actual.driver_cost - estimated.driver_cost) / estimated.driver_cost) * 100).toFixed(1)}%`
+                      : "—"}
+                  </td>
+                </>
+              )}
+            </tr>
+            <tr className="font-medium">
+              <td className="px-3 py-2 text-[#232323]">Total</td>
+              <td className="px-3 py-2 text-right text-[#232323]">
+                {estimated.currency ?? "$"}{(estimated.total_estimated_cost ?? (estimated.fuel_cost + estimated.driver_cost)).toFixed(2)}
+              </td>
+              {planStatus === "completed" && actual && (
+                <>
+                  <td className="px-3 py-2 text-right text-[#232323]">
+                    {actual.currency ?? "$"}{(actual.total_actual_cost ?? (actual.fuel_cost + actual.driver_cost)).toFixed(2)}
+                  </td>
+                  <td className={`px-3 py-2 text-right ${
+                    cost_variance_pct != null && Math.abs(cost_variance_pct) <= VARIANCE_THRESHOLD
+                      ? "text-green-600" : "text-red-600"
+                  }`}>
+                    {cost_variance_pct != null ? `${cost_variance_pct.toFixed(1)}%` : "—"}
+                  </td>
+                </>
+              )}
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 
 // ─── Replan Modal ────────────────────────────────────────────────────────────
 
@@ -215,11 +832,15 @@ function ReplanForm({ planId, onClose, onSuccess }: ReplanFormProps) {
 
 interface PlanDetailViewProps {
   planId: string;
+  planStatus?: string;
   onBack: () => void;
   onReplan: () => void;
+  onApprove: (planId: string) => void;
+  onReject: (planId: string) => void;
+  executionData?: ExecutionUpdateData | null;
 }
 
-function PlanDetailView({ planId, onBack, onReplan }: PlanDetailViewProps) {
+function PlanDetailView({ planId, planStatus, onBack, onReplan, onApprove, onReject, executionData }: PlanDetailViewProps) {
   const [plan, setPlan] = useState<PlanDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -272,6 +893,8 @@ function PlanDetailView({ planId, onBack, onReplan }: PlanDetailViewProps) {
 
   if (!plan) return null;
 
+  const currentStatus = planStatus || (plan as any).status || "draft";
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -282,19 +905,55 @@ function PlanDetailView({ planId, onBack, onReplan }: PlanDetailViewProps) {
         >
           <ChevronLeft className="w-4 h-4" /> Back to plans
         </button>
-        <button
-          onClick={onReplan}
-          className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white rounded-lg"
-          style={{ backgroundColor: "#232323" }}
-        >
-          <RefreshCw className="w-4 h-4" />
-          Replan
-        </button>
+        <div className="flex items-center gap-2">
+          {APPROVABLE_STATUSES.includes(currentStatus) && (
+            <>
+              <button
+                onClick={() => onApprove(planId)}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-green-600 hover:bg-green-700 rounded-lg transition-colors"
+              >
+                <Check className="w-3 h-3" />
+                Approve
+              </button>
+              <button
+                onClick={() => onReject(planId)}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-red-600 hover:bg-red-700 rounded-lg transition-colors"
+              >
+                <X className="w-3 h-3" />
+                Reject
+              </button>
+            </>
+          )}
+          <button
+            onClick={onReplan}
+            className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white rounded-lg"
+            style={{ backgroundColor: "#232323" }}
+          >
+            <RefreshCw className="w-4 h-4" />
+            Replan
+          </button>
+        </div>
       </div>
 
-      <h3 className="text-sm font-semibold text-[#232323]">
-        Plan: {plan.plan_id}
-      </h3>
+      <div className="flex items-center gap-3">
+        <h3 className="text-sm font-semibold text-[#232323]">
+          Plan: {plan.plan_id}
+        </h3>
+        <StatusBadge status={currentStatus} />
+      </div>
+
+      {/* Execution Progress (dispatched plans) */}
+      {currentStatus === "dispatched" && (
+        <ExecutionProgress planId={planId} executionData={executionData} />
+      )}
+
+      {/* Outcome Comparison (completed plans) */}
+      {currentStatus === "completed" && (
+        <OutcomeComparison planId={planId} />
+      )}
+
+      {/* Cost Breakdown (all plans) */}
+      <CostBreakdownSection planId={planId} planStatus={currentStatus} />
 
       {/* Loading Plan */}
       {plan.loading_plan ? (
@@ -432,7 +1091,7 @@ function PlanDetailView({ planId, onBack, onReplan }: PlanDetailViewProps) {
         </div>
       )}
 
-      {/* Excluded Trucks — Equipment Unavailability (Requirement 7.7) */}
+      {/* Excluded Trucks — Equipment Unavailability */}
       {(plan as any).excluded_trucks && (plan as any).excluded_trucks.length > 0 && (
         <div className="border border-orange-100 rounded-lg p-4 bg-orange-50/50">
           <div className="flex items-center gap-2 mb-3">
@@ -471,6 +1130,7 @@ function PlanDetailView({ planId, onBack, onReplan }: PlanDetailViewProps) {
     </div>
   );
 }
+
 
 // ─── Pagination Controls ─────────────────────────────────────────────────────
 
@@ -513,41 +1173,127 @@ function PaginationControls({ pagination, onPageChange }: PaginationControlsProp
 // ─── Plans Tab ───────────────────────────────────────────────────────────────
 
 function PlansTab() {
-  const [plans, setPlans] = useState<GeneratePlanResponse[]>([]);
+  // Plan list state (fetched from backend)
+  const [planList, setPlanList] = useState<PlanListItem[]>([]);
+  const [planPagination, setPlanPagination] = useState<PaginationMeta | null>(null);
+  const [planPage, setPlanPage] = useState(1);
+  const [statusFilter, setStatusFilter] = useState<string>("");
+  const [listLoading, setListLoading] = useState(true);
+
+  // UI state
   const [selectedPlanId, setSelectedPlanId] = useState<string | null>(null);
+  const [selectedPlanStatus, setSelectedPlanStatus] = useState<string | undefined>(undefined);
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState("");
   const [showReplan, setShowReplan] = useState(false);
+  const [showRejectDialog, setShowRejectDialog] = useState<string | null>(null);
+  const [rejectLoading, setRejectLoading] = useState(false);
+  const [approveLoading, setApproveLoading] = useState<string | null>(null);
+  const [showCostConfig, setShowCostConfig] = useState(false);
 
+  // Toast notifications
+  const { toasts, addToast, dismissToast } = useToasts();
+
+  // WebSocket for real-time execution updates
+  const { lastUpdate: executionUpdate } = usePlanExecutionSocket(TENANT_ID, {
+    autoConnect: true,
+  });
+
+  // Fetch plan list from backend
+  const loadPlanList = useCallback(async () => {
+    setListLoading(true);
+    try {
+      const result = await listPlans(TENANT_ID, planPage, PAGE_SIZE, statusFilter || undefined);
+      setPlanList(result.data ?? []);
+      setPlanPagination(result.pagination ?? null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load plans");
+    } finally {
+      setListLoading(false);
+    }
+  }, [planPage, statusFilter]);
+
+  // Load plan list on mount and when page/filter changes
+  useEffect(() => {
+    loadPlanList();
+  }, [loadPlanList]);
+
+  // Refresh plan list helper
+  const refreshPlanList = useCallback(() => {
+    loadPlanList();
+  }, [loadPlanList]);
+
+  // Generate plan
   const handleGenerate = useCallback(async () => {
     setGenerating(true);
     setError("");
     try {
-      const result = await generatePlan(TENANT_ID);
-      setPlans((prev) => [result, ...prev]);
+      await generatePlan(TENANT_ID);
+      addToast("Plan generated successfully", "success");
+      refreshPlanList();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to generate plan");
+      addToast("Failed to generate plan", "error");
     } finally {
       setGenerating(false);
     }
-  }, []);
+  }, [addToast, refreshPlanList]);
 
-  const handleReplanSuccess = useCallback((response: ReplanResponse) => {
-    // Add the replanned entry to the list
-    setPlans((prev) => [
-      { run_id: response.plan_id, status: response.status },
-      ...prev,
-    ]);
-  }, []);
+  // Approve plan
+  const handleApprove = useCallback(async (planId: string) => {
+    setApproveLoading(planId);
+    try {
+      await approvePlan(planId, TENANT_ID, DISPATCHER_ID);
+      addToast(`Plan ${planId} approved and dispatched`, "success");
+      refreshPlanList();
+      if (selectedPlanId === planId) {
+        setSelectedPlanStatus("dispatched");
+      }
+    } catch (err) {
+      addToast(err instanceof Error ? err.message : "Failed to approve plan", "error");
+    } finally {
+      setApproveLoading(null);
+    }
+  }, [addToast, refreshPlanList, selectedPlanId]);
+
+  // Reject plan
+  const handleReject = useCallback(async (reason: string) => {
+    if (!showRejectDialog) return;
+    setRejectLoading(true);
+    try {
+      await rejectPlan(showRejectDialog, TENANT_ID, DISPATCHER_ID, reason || undefined);
+      addToast(`Plan ${showRejectDialog} rejected`, "success");
+      setShowRejectDialog(null);
+      refreshPlanList();
+      if (selectedPlanId === showRejectDialog) {
+        setSelectedPlanStatus("rejected");
+      }
+    } catch (err) {
+      addToast(err instanceof Error ? err.message : "Failed to reject plan", "error");
+    } finally {
+      setRejectLoading(false);
+    }
+  }, [showRejectDialog, addToast, refreshPlanList, selectedPlanId]);
+
+  // Replan success
+  const handleReplanSuccess = useCallback((_response: ReplanResponse) => {
+    addToast("Replan submitted successfully", "success");
+    refreshPlanList();
+  }, [addToast, refreshPlanList]);
 
   // If a plan is selected, show detail view
   if (selectedPlanId) {
     return (
       <>
+        <ToastContainer toasts={toasts} onDismiss={dismissToast} />
         <PlanDetailView
           planId={selectedPlanId}
-          onBack={() => setSelectedPlanId(null)}
+          planStatus={selectedPlanStatus}
+          onBack={() => { setSelectedPlanId(null); setSelectedPlanStatus(undefined); }}
           onReplan={() => setShowReplan(true)}
+          onApprove={handleApprove}
+          onReject={(id) => setShowRejectDialog(id)}
+          executionData={executionUpdate?.plan_id === selectedPlanId ? executionUpdate : null}
         />
         {showReplan && (
           <ReplanForm
@@ -556,29 +1302,71 @@ function PlansTab() {
             onSuccess={handleReplanSuccess}
           />
         )}
+        {showRejectDialog && (
+          <RejectDialog
+            planId={showRejectDialog}
+            onConfirm={handleReject}
+            onCancel={() => setShowRejectDialog(null)}
+            loading={rejectLoading}
+          />
+        )}
       </>
     );
   }
 
   return (
     <div className="space-y-4">
-      {/* Generate button + error */}
+      <ToastContainer toasts={toasts} onDismiss={dismissToast} />
+
+      {/* Header with generate button and settings */}
       <div className="flex items-center justify-between">
         <h3 className="text-sm font-semibold text-[#232323]">
           Distribution Plans
         </h3>
-        <button
-          onClick={handleGenerate}
-          disabled={generating}
-          className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white rounded-lg disabled:opacity-50"
-          style={{ backgroundColor: "#232323" }}
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowCostConfig(true)}
+            className="flex items-center gap-1.5 px-3 py-2 text-sm text-gray-600 hover:text-gray-800 hover:bg-gray-100 rounded-lg transition-colors"
+            aria-label="Cost configuration settings"
+          >
+            <Settings className="w-4 h-4" />
+          </button>
+          <button
+            onClick={handleGenerate}
+            disabled={generating}
+            className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white rounded-lg disabled:opacity-50"
+            style={{ backgroundColor: "#232323" }}
+          >
+            {generating ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Play className="w-4 h-4" />
+            )}
+            {generating ? "Generating..." : "Generate Plan"}
+          </button>
+        </div>
+      </div>
+
+      {/* Status filter */}
+      <div className="flex items-center gap-3">
+        <select
+          value={statusFilter}
+          onChange={(e) => { setStatusFilter(e.target.value); setPlanPage(1); }}
+          className="px-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white"
         >
-          {generating ? (
-            <Loader2 className="w-4 h-4 animate-spin" />
-          ) : (
-            <Play className="w-4 h-4" />
-          )}
-          {generating ? "Generating..." : "Generate Plan"}
+          <option value="">All statuses</option>
+          <option value="draft">Draft</option>
+          <option value="proposed">Proposed</option>
+          <option value="dispatched">Dispatched</option>
+          <option value="completed">Completed</option>
+          <option value="rejected">Rejected</option>
+        </select>
+        <button
+          onClick={refreshPlanList}
+          className="p-1.5 text-gray-400 hover:text-gray-600 rounded"
+          aria-label="Refresh plan list"
+        >
+          <RefreshCw className="w-4 h-4" />
         </button>
       </div>
 
@@ -589,52 +1377,124 @@ function PlansTab() {
       )}
 
       {/* Plan list */}
-      {plans.length === 0 ? (
+      {listLoading ? (
+        <div className="flex items-center justify-center py-16">
+          <Loader2 className="w-6 h-6 text-gray-400 animate-spin" />
+        </div>
+      ) : planList.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-16 text-gray-400">
           <Truck className="w-8 h-8 mb-2" />
-          <p className="text-sm">No plans generated yet</p>
+          <p className="text-sm">No plans found</p>
           <p className="text-xs mt-1">
             Click &quot;Generate Plan&quot; to create a distribution plan
           </p>
         </div>
       ) : (
         <div className="space-y-2">
-          {plans.map((p, i) => (
+          {planList.map((p) => (
             <div
-              key={`${p.run_id}-${i}`}
+              key={p.plan_id}
               className="flex items-center justify-between border border-gray-100 rounded-lg p-4 hover:border-gray-200 transition-colors"
             >
-              <div>
-                <p className="text-sm font-medium text-[#232323]">
-                  Run: {p.run_id}
-                </p>
-                <span
-                  className={`inline-flex items-center text-[10px] px-1.5 py-0.5 rounded font-medium mt-1 ${
-                    p.status === "completed"
-                      ? "bg-green-50 text-green-600"
-                      : p.status === "failed"
-                        ? "bg-red-50 text-red-600"
-                        : "bg-yellow-50 text-yellow-600"
-                  }`}
-                >
-                  {p.status}
-                </span>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  <p className="text-sm font-medium text-[#232323] truncate">
+                    {p.plan_id}
+                  </p>
+                  <StatusBadge status={p.status} />
+                </div>
+                <div className="flex items-center gap-4 mt-1 text-xs text-gray-500">
+                  {p.truck_id && <span>Truck: {p.truck_id}</span>}
+                  {p.created_at && (
+                    <span>{new Date(p.created_at).toLocaleDateString()}</span>
+                  )}
+                  {p.total_utilization_pct != null && (
+                    <span>{p.total_utilization_pct.toFixed(0)}% util</span>
+                  )}
+                  {/* Cost summary in list view */}
+                  {p.status === "completed" && p.actual_cost != null && (
+                    <span className="text-green-600 font-medium">
+                      Actual: ${p.actual_cost.toFixed(0)}
+                    </span>
+                  )}
+                  {p.status === "dispatched" && p.estimated_cost != null && (
+                    <span className="text-blue-600 font-medium">
+                      Est: ${p.estimated_cost.toFixed(0)}
+                    </span>
+                  )}
+                </div>
               </div>
-              <button
-                onClick={() => setSelectedPlanId(p.run_id)}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
-                aria-label={`View plan ${p.run_id}`}
-              >
-                <Eye className="w-3 h-3" />
-                View
-              </button>
+              <div className="flex items-center gap-2 ml-4">
+                {/* Approve/Reject buttons for draft/proposed plans */}
+                {APPROVABLE_STATUSES.includes(p.status) && (
+                  <>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); handleApprove(p.plan_id); }}
+                      disabled={approveLoading === p.plan_id}
+                      className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-white bg-green-600 hover:bg-green-700 rounded-lg transition-colors disabled:opacity-50"
+                      aria-label={`Approve plan ${p.plan_id}`}
+                    >
+                      {approveLoading === p.plan_id ? (
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                      ) : (
+                        <Check className="w-3 h-3" />
+                      )}
+                      Approve
+                    </button>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); setShowRejectDialog(p.plan_id); }}
+                      className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-white bg-red-600 hover:bg-red-700 rounded-lg transition-colors"
+                      aria-label={`Reject plan ${p.plan_id}`}
+                    >
+                      <X className="w-3 h-3" />
+                      Reject
+                    </button>
+                  </>
+                )}
+                <button
+                  onClick={() => { setSelectedPlanId(p.plan_id); setSelectedPlanStatus(p.status); }}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
+                  aria-label={`View plan ${p.plan_id}`}
+                >
+                  <Eye className="w-3 h-3" />
+                  View
+                </button>
+              </div>
             </div>
           ))}
+
+          {/* Pagination */}
+          {planPagination && (
+            <PaginationControls
+              pagination={planPagination}
+              onPageChange={setPlanPage}
+            />
+          )}
         </div>
+      )}
+
+      {/* Reject dialog */}
+      {showRejectDialog && (
+        <RejectDialog
+          planId={showRejectDialog}
+          onConfirm={handleReject}
+          onCancel={() => setShowRejectDialog(null)}
+          loading={rejectLoading}
+        />
+      )}
+
+      {/* Cost config panel */}
+      {showCostConfig && (
+        <CostConfigPanel
+          onClose={() => setShowCostConfig(false)}
+          onSave={refreshPlanList}
+          addToast={addToast}
+        />
       )}
     </div>
   );
 }
+
 
 // ─── Forecasts Tab ───────────────────────────────────────────────────────────
 
@@ -793,7 +1653,6 @@ function ForecastsTab() {
 
 function PrioritiesTab() {
   const [priorities, setPriorities] = useState<DeliveryPriority[]>([]);
-  const [pagination, setPagination] = useState<PaginationMeta | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [page, setPage] = useState(1);
@@ -804,17 +1663,21 @@ function PrioritiesTab() {
     try {
       const result = await getPriorities({
         tenant_id: TENANT_ID,
-        page,
-        size: PAGE_SIZE,
+        page: 1,
+        size: 1, // Get only the latest priority run
       });
-      // API may return nested priorities array or flat items
       const raw = (result as any).data ?? (result as any).items ?? [];
-      // If the API returns a single doc with nested priorities array, flatten it
-      const flat = raw.length === 1 && Array.isArray(raw[0]?.priorities)
-        ? raw[0].priorities
-        : raw;
+      let flat: any[] = [];
+      if (Array.isArray(raw)) {
+        for (const item of raw) {
+          if (Array.isArray(item?.priorities)) {
+            flat = flat.concat(item.priorities);
+          } else {
+            flat.push(item);
+          }
+        }
+      }
       setPriorities(flat);
-      setPagination((result as any).pagination ?? null);
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "Failed to load priorities",
@@ -822,11 +1685,25 @@ function PrioritiesTab() {
     } finally {
       setLoading(false);
     }
-  }, [page]);
+  }, []);
 
   useEffect(() => {
     loadPriorities();
   }, [loadPriorities]);
+
+  // Client-side pagination of the flattened items
+  const totalItems = priorities.length;
+  const totalPages = Math.ceil(totalItems / PAGE_SIZE);
+  const paginatedItems = priorities.slice(
+    (page - 1) * PAGE_SIZE,
+    page * PAGE_SIZE,
+  );
+  const paginationMeta: PaginationMeta = {
+    page,
+    page_size: PAGE_SIZE,
+    total: totalItems,
+    total_pages: totalPages,
+  };
 
   const handlePageChange = useCallback((newPage: number) => {
     setPage(newPage);
@@ -834,9 +1711,18 @@ function PrioritiesTab() {
 
   return (
     <div className="space-y-4">
-      <h3 className="text-sm font-semibold text-[#232323]">
-        Delivery Priorities
-      </h3>
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-semibold text-[#232323]">
+          Delivery Priorities
+        </h3>
+        <button
+          onClick={loadPriorities}
+          className="p-1.5 text-gray-400 hover:text-gray-600 rounded"
+          aria-label="Refresh priorities"
+        >
+          <RefreshCw className="w-4 h-4" />
+        </button>
+      </div>
 
       {error && (
         <p className="text-sm text-red-600 bg-red-50 px-4 py-3 rounded-lg">
@@ -878,7 +1764,7 @@ function PrioritiesTab() {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
-              {priorities.map((p, i) => {
+              {paginatedItems.map((p, i) => {
                 const urgencyStyle = URGENCY_CONFIG[(p as any).urgency ?? (p as any).priority_bucket ?? "low"] ?? URGENCY_CONFIG.low;
                 return (
                   <tr key={`${p.station_id}-${p.fuel_grade}-${i}`} className="hover:bg-gray-50">
@@ -909,9 +1795,9 @@ function PrioritiesTab() {
               })}
             </tbody>
           </table>
-          {pagination && (
+          {paginationMeta.total_pages > 1 && (
             <PaginationControls
-              pagination={pagination}
+              pagination={paginationMeta}
               onPageChange={handlePageChange}
             />
           )}

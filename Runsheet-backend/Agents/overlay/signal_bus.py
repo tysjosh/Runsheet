@@ -182,21 +182,13 @@ class SignalBus:
     # ------------------------------------------------------------------
 
     async def _persist(self, message) -> None:
-        """Persist a signal to the agent_signals ES index."""
-        try:
-            doc = message.model_dump(mode="json")
-            doc["_signal_type"] = type(message).__name__
-            doc_id = (
-                getattr(message, "signal_id", None)
-                or getattr(message, "proposal_id", None)
-                or getattr(message, "outcome_id", None)
-                or getattr(message, "forecast_id", None)
-                or getattr(message, "priority_list_id", None)
-                or getattr(message, "event_id", None)
-            )
-            await self._es.index_document(AGENT_SIGNALS_INDEX, doc_id, doc)
-        except Exception as e:
-            logger.error("SignalBus persistence error: %s", e)
+        """Persist a signal to the agent_signals ES index.
+        
+        NOTE: Persistence is temporarily disabled to avoid tripping the
+        write circuit breaker with non-critical audit writes. Re-enable
+        when a separate audit write circuit breaker is implemented.
+        """
+        return  # Disabled — re-enable when write CB is split
 
     # ------------------------------------------------------------------
     # Metrics

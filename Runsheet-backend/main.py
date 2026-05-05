@@ -327,6 +327,24 @@ async def driver_live_websocket(websocket: WebSocket):
     await _ws_loop(websocket, mgr, "/ws/driver", tenant_id, handler=handler, check_connected=True)
 
 
+@app.websocket("/ws/plan-execution")
+async def plan_execution_websocket(websocket: WebSocket):
+    """WebSocket channel for real-time plan execution updates.
+    Broadcasts driver check-ins and stop completions.
+    Validates: Requirements 3.6, 3.9
+    """
+    tenant_id = _ws_authenticate(websocket)
+    if not tenant_id:
+        await websocket.close(code=4001, reason="Authentication required")
+        return
+    from Agents.support.plan_execution_ws_manager import get_plan_execution_ws_manager
+    mgr = get_plan_execution_ws_manager()
+    await mgr.connect(websocket, tenant_id=tenant_id)
+    ep = "/ws/plan-execution"
+    handler = lambda ws, raw: _json_echo_handler(ws, raw, ep, tenant_id)
+    await _ws_loop(websocket, mgr, ep, tenant_id, handler=handler)
+
+
 if __name__ == "__main__":
     import uvicorn
     import os

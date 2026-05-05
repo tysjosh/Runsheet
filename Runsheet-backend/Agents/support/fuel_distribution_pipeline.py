@@ -245,6 +245,12 @@ class FuelDistributionPipeline:
             tenant_id,
         )
 
+        # Reset the write circuit breaker before pipeline execution to ensure
+        # plan persistence isn't blocked by unrelated background write failures
+        first_agent = self._agents.get(PIPELINE_STAGES[0][0])
+        if first_agent and hasattr(first_agent, '_es') and hasattr(first_agent._es, '_circuit_breaker'):
+            first_agent._es._circuit_breaker.reset()
+
         # Seed the first agent's signal buffer with a trigger signal so it
         # has input to process. Without this, the TankForecastingAgent's
         # monitor_cycle() returns immediately when _signal_buffer is empty.

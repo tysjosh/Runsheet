@@ -21,6 +21,8 @@ MVP_ROUTES_INDEX = "mvp_routes"
 MVP_REPLAN_EVENTS_INDEX = "mvp_replan_events"
 MVP_PLAN_OUTCOMES_INDEX = "mvp_plan_outcomes"
 TRUCK_COMPARTMENTS_INDEX = "truck_compartments"
+MVP_PLAN_EXECUTIONS_INDEX = "mvp_plan_executions"
+MVP_COST_CONFIGS_INDEX = "mvp_cost_configs"
 
 # ---------------------------------------------------------------------------
 # Mapping definitions
@@ -103,7 +105,16 @@ MVP_LOAD_PLANS_MAPPING = {
             "tenant_id":              {"type": "keyword"},
             "run_id":                 {"type": "keyword"},
             "created_at":             {"type": "date"},
+            "updated_at":             {"type": "date"},
             "status":                 {"type": "keyword"},
+            "approved_by":            {"type": "keyword"},
+            "approved_at":            {"type": "date"},
+            "rejected_by":            {"type": "keyword"},
+            "rejected_at":            {"type": "date"},
+            "rejection_reason":       {"type": "text"},
+            "estimated_cost":         {"type": "object", "dynamic": True},
+            "actual_cost":            {"type": "object", "dynamic": True},
+            "cost_variance_pct":      {"type": "float"},
         },
     },
     "settings": {
@@ -124,7 +135,7 @@ MVP_ROUTES_MAPPING = {
                 "properties": {
                     "station_id": {"type": "keyword"},
                     "eta":        {"type": "date"},
-                    "drop":       {"type": "object", "enabled": True},
+                    "drop":       {"type": "object", "dynamic": True},
                     "sequence":   {"type": "integer"},
                 },
             },
@@ -188,6 +199,19 @@ MVP_PLAN_OUTCOMES_MAPPING = {
             "before_kpis":    {"type": "object", "enabled": True},
             "after_kpis":     {"type": "object", "enabled": True},
             "realized_delta": {"type": "object", "enabled": True},
+            "stop_variances": {
+                "type": "nested",
+                "properties": {
+                    "station_id":            {"type": "keyword"},
+                    "sequence":              {"type": "integer"},
+                    "quantity_variance_pct":  {"type": "float"},
+                    "time_variance_minutes":  {"type": "float"},
+                    "status":                {"type": "keyword"},
+                },
+            },
+            "aggregate_quantity_variance_pct":  {"type": "float"},
+            "aggregate_time_variance_minutes":  {"type": "float"},
+            "missed_stops_count":              {"type": "integer"},
             "tenant_id":      {"type": "keyword"},
             "timestamp":      {"type": "date"},
             "status":         {"type": "keyword"},
@@ -210,9 +234,65 @@ TRUCK_COMPARTMENTS_MAPPING = {
             "capacity_liters": {"type": "float"},
             "allowed_grades":  {"type": "keyword"},
             "position_index":  {"type": "integer"},
+            "depot_city":      {"type": "keyword"},
+            "depot_location":  {"type": "geo_point"},
+            "latitude":        {"type": "float"},
+            "longitude":       {"type": "float"},
             "tenant_id":       {"type": "keyword"},
             "updated_at":      {"type": "date"},
             "created_at":      {"type": "date"},
+        },
+    },
+    "settings": {
+        "number_of_shards": 1,
+        "number_of_replicas": 1,
+    },
+}
+
+MVP_PLAN_EXECUTIONS_MAPPING = {
+    "mappings": {
+        "dynamic": "strict",
+        "properties": {
+            "execution_id":    {"type": "keyword"},
+            "plan_id":         {"type": "keyword"},
+            "route_id":        {"type": "keyword"},
+            "tenant_id":       {"type": "keyword"},
+            "stops": {
+                "type": "nested",
+                "properties": {
+                    "station_id":          {"type": "keyword"},
+                    "sequence":            {"type": "integer"},
+                    "status":              {"type": "keyword"},
+                    "planned_eta":         {"type": "date"},
+                    "actual_arrival":      {"type": "date"},
+                    "planned_quantities":  {"type": "object", "dynamic": True},
+                    "actual_quantities":   {"type": "object", "dynamic": True},
+                },
+            },
+            "completed_stops":  {"type": "integer"},
+            "total_stops":      {"type": "integer"},
+            "status":           {"type": "keyword"},
+            "created_at":       {"type": "date"},
+            "updated_at":       {"type": "date"},
+        },
+    },
+    "settings": {
+        "number_of_shards": 1,
+        "number_of_replicas": 1,
+    },
+}
+
+MVP_COST_CONFIGS_MAPPING = {
+    "mappings": {
+        "dynamic": "strict",
+        "properties": {
+            "tenant_id":              {"type": "keyword"},
+            "fuel_consumption_rate":  {"type": "float"},
+            "fuel_price_per_liter":   {"type": "float"},
+            "driver_hourly_rate":     {"type": "float"},
+            "currency":               {"type": "keyword"},
+            "created_at":             {"type": "date"},
+            "updated_at":             {"type": "date"},
         },
     },
     "settings": {
@@ -246,6 +326,8 @@ def setup_mvp_indices(es_service) -> None:
         MVP_REPLAN_EVENTS_INDEX: MVP_REPLAN_EVENTS_MAPPING,
         MVP_PLAN_OUTCOMES_INDEX: MVP_PLAN_OUTCOMES_MAPPING,
         TRUCK_COMPARTMENTS_INDEX: TRUCK_COMPARTMENTS_MAPPING,
+        MVP_PLAN_EXECUTIONS_INDEX: MVP_PLAN_EXECUTIONS_MAPPING,
+        MVP_COST_CONFIGS_INDEX: MVP_COST_CONFIGS_MAPPING,
     }
 
     for index_name, mapping in indices.items():

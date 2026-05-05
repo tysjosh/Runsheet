@@ -385,11 +385,20 @@ async def initialize(app, container: ServiceContainer) -> None:
     # Create FleetRegistrationService for fuel tanker fleet integration (Req 6.1, 6.3)
     fleet_registration_service = FleetRegistrationService(es_service=es_service)
 
+    # Create PlanExecutionService and get WebSocket manager (Req 3.1–3.9, 4.1–4.7, 5.1–5.6)
+    from Agents.support.plan_execution_service import PlanExecutionService
+    from Agents.support.plan_execution_ws_manager import get_plan_execution_ws_manager
+
+    plan_execution_service = PlanExecutionService(es_service=es_service)
+    plan_execution_ws_manager = get_plan_execution_ws_manager()
+
     configure_mvp_endpoints(
         pipeline=mvp_pipeline,
         es_service=es_service,
         exception_replanning_agent=exception_replanning_agent,
         fleet_registration_service=fleet_registration_service,
+        plan_execution_service=plan_execution_service,
+        plan_execution_ws_manager=plan_execution_ws_manager,
     )
     app.include_router(mvp_router)
     logger.info("MVP endpoints configured and router registered")

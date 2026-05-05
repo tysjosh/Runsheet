@@ -302,6 +302,60 @@ export interface UpdateStationPayload {
   alert_threshold_pct?: number;
 }
 
+// ─── Plan Execution Lifecycle Types ──────────────────────────────────────────
+
+export interface PlanListItem {
+  plan_id: string;
+  status: string;
+  truck_id: string;
+  created_at: string;
+  total_utilization_pct: number;
+  estimated_cost?: number;
+  actual_cost?: number;
+  cost_variance_pct?: number;
+}
+
+export interface CheckinRequest {
+  route_id: string;
+  station_id: string;
+  sequence: number;
+  actual_quantities: Record<string, number>;
+}
+
+export interface StopVariance {
+  station_id: string;
+  sequence: number;
+  quantity_variance_pct: number;
+  time_variance_minutes: number;
+  status: string;
+}
+
+export interface PlanOutcome {
+  outcome_id: string;
+  plan_id: string;
+  stop_variances: StopVariance[];
+  aggregate_quantity_variance_pct: number;
+  aggregate_time_variance_minutes: number;
+  missed_stops_count: number;
+}
+
+export interface CostBreakdown {
+  fuel_cost: number;
+  driver_cost: number;
+  total_estimated_cost?: number;
+  total_actual_cost?: number;
+  distance_km: number;
+  driver_hours: number;
+  currency: string;
+}
+
+export interface CostConfig {
+  fuel_consumption_rate: number;
+  fuel_price_per_liter: number;
+  driver_hourly_rate: number;
+  currency: string;
+}
+
 // ─── Fuel Distribution MVP Types ─────────────────────────────────────────────
 
 export interface GeneratePlanResponse {
@@ -537,6 +591,104 @@ export async function recordRefill(
     {
       method: "POST",
       body: JSON.stringify(data),
+    },
+  );
+}
+
+// ─── Plan Execution Lifecycle Endpoints ──────────────────────────────────────
+
+/** GET /api/fuel/mvp/plans — list plans with optional filters and pagination */
+export async function listPlans(
+  tenantId: string,
+  page?: number,
+  size?: number,
+  status?: string,
+): Promise<PaginatedResponse<PlanListItem>> {
+  const qs = buildQueryString({ tenant_id: tenantId, page, size, status });
+  return fuelRequest<PaginatedResponse<PlanListItem>>(
+    `/fuel/mvp/plans${qs}`,
+  );
+}
+
+/** POST /api/fuel/mvp/plan/:id/approve — approve a draft plan */
+export async function approvePlan(
+  planId: string,
+  tenantId: string,
+  dispatcherId: string,
+): Promise<{ plan_id: string; status: string }> {
+  const qs = buildQueryString({ tenant_id: tenantId, dispatcher_id: dispatcherId });
+  return fuelRequest<{ plan_id: string; status: string }>(
+    `/fuel/mvp/plan/${encodeURIComponent(planId)}/approve${qs}`,
+    { method: "POST" },
+  );
+}
+
+/** POST /api/fuel/mvp/plan/:id/reject — reject a draft plan */
+export async function rejectPlan(
+  planId: string,
+  tenantId: string,
+  dispatcherId: string,
+  reason?: string,
+): Promise<{ plan_id: string; status: string }> {
+  const qs = buildQueryString({ tenant_id: tenantId, dispatcher_id: dispatcherId });
+  return fuelRequest<{ plan_id: string; status: string }>(
+    `/fuel/mvp/plan/${encodeURIComponent(planId)}/reject${qs}`,
+    {
+      method: "POST",
+      body: reason ? JSON.stringify({ reason }) : undefined,
+    },
+  );
+}
+
+/** POST /api/fuel/mvp/plan/:id/checkin — record a driver check-in at a stop */
+export async function checkinStop(
+  planId: string,
+  tenantId: string,
+  body: CheckinRequest,
+): Promise<{ plan_id: string; completed_stops: number; total_stops: number; status: string }> {
+  const qs = buildQueryString({ tenant_id: tenantId });
+  return fuelRequest<{ plan_id: string; completed_stops: number; total_stops: number; status: string }>(
+    `/fuel/mvp/plan/${encodeURIComponent(planId)}/checkin${qs}`,
+    {
+      method: "POST",
+      body: JSON.stringify(body),
+    },
+  );
+}
+
+/** GET /api/fuel/mvp/plan/:id/outcomes — get plan vs actual outcome comparison */
+export async function getPlanOutcomes(
+  planId: string,
+  tenantId: string,
+): Promise<{ data: PlanOutcome; request_id: string }> {
+  const qs = buildQueryString({ tenant_id: tenantId });
+  return fuelRequest<{ data: PlanOutcome; request_id: string }>(
+    `/fuel/mvp/plan/${encodeURIComponent(planId)}/outcomes${qs}`,
+  );
+}
+
+/** GET /api/fuel/mvp/plan/:id/costs — get cost breakdown for a plan */
+export async function getPlanCosts(
+  planId: string,
+  tenantId: string,
+): Promise<{ data: { estimated: CostBreakdown; actual?: CostBreakdown; cost_variance_pct?: number }; request_id: string }> {
+  const qs = buildQueryString({ tenant_id: tenantId });
+  return fuelRequest<{ data: { estimated: CostBreakdown; actual?: CostBreakdown; cost_variance_pct?: number }; request_id: string }>(
+    `/fuel/mvp/plan/${encodeURIComponent(planId)}/costs${qs}`,
+  );
+}
+
+/** PUT /api/fuel/mvp/cost-config — upsert tenant cost configuration */
+export async function updateCostConfig(
+  tenantId: string,
+  config: CostConfig,
+): Promise<{ data: CostConfig; request_id: string }> {
+  const qs = buildQueryString({ tenant_id: tenantId });
+  return fuelRequest<{ data: CostConfig; request_id: string }>(
+    `/fuel/mvp/cost-config${qs}`,
+    {
+      method: "PUT",
+      body: JSON.stringify(config),
     },
   );
 }

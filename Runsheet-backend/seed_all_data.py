@@ -41,6 +41,8 @@ NIGERIAN_CITIES = {
     "Enugu":          {"lat": 6.4584, "lon": 7.5464},
     "Kaduna":         {"lat": 10.5105, "lon": 7.4165},
     "Benin City":     {"lat": 6.3350, "lon": 5.6037},
+    "Warri":          {"lat": 5.5167, "lon": 5.7500},
+    "Jos":            {"lat": 9.8965, "lon": 8.8583},
 }
 
 CITY_NAMES = list(NIGERIAN_CITIES.keys())
@@ -426,29 +428,54 @@ def seed_fuel_stations(force: bool = False):
         logger.info(f"⏭️  {index} already has data — skipping")
         return
 
+    # 14 stations across 10 Nigerian cities with diverse fuel grades and stock levels
+    # Tuple: (id, name, fuel_type, city, capacity, current_stock, daily_consumption, status)
     stations = [
-        ("FS-001", "Lagos Main Depot",       "AGO", "Lagos",          50000, 38000, 2500, "normal"),
-        ("FS-002", "Abuja Central Station",   "PMS", "Abuja",          40000, 32000, 1800, "normal"),
-        ("FS-003", "Kano North Terminal",     "AGO", "Kano",           35000, 28000, 1500, "normal"),
-        ("FS-004", "Port Harcourt Refinery",  "ATK", "Port Harcourt",  60000, 9000,  3000, "low"),
-        ("FS-005", "Ibadan Distribution Hub", "PMS", "Ibadan",         30000, 3000,  2000, "critical"),
-        ("FS-006", "Enugu LPG Plant",         "LPG", "Enugu",          25000, 0,     1200, "empty"),
+        # --- Lagos (major hub, 2 stations) ---
+        ("FS-001", "Lagos Apapa Main Depot",        "AGO", "Lagos",          80000, 62000, 3200, "normal"),
+        ("FS-002", "Lagos Ijegun PMS Terminal",     "PMS", "Lagos",          60000, 45000, 2800, "normal"),
+        # --- Abuja (capital, 2 stations) ---
+        ("FS-003", "Abuja Central Fuel Station",    "PMS", "Abuja",          45000, 5400,  2200, "critical"),
+        ("FS-004", "Abuja Airport ATK Depot",       "ATK", "Abuja",          35000, 28000, 1200, "normal"),
+        # --- Kano (north, 1 station) ---
+        ("FS-005", "Kano Bompai AGO Terminal",      "AGO", "Kano",           40000, 3600,  1800, "critical"),
+        # --- Port Harcourt (refinery city, 2 stations) ---
+        ("FS-006", "Port Harcourt Refinery Depot",  "AGO", "Port Harcourt",  70000, 58000, 3500, "normal"),
+        ("FS-007", "PH Eleme LPG Plant",            "LPG", "Port Harcourt",  30000, 18000, 1000, "normal"),
+        # --- Ibadan (southwest, 1 station) ---
+        ("FS-008", "Ibadan Oluyole PMS Hub",        "PMS", "Ibadan",         35000, 4200,  1900, "critical"),
+        # --- Enugu (southeast, 1 station) ---
+        ("FS-009", "Enugu Coal City LPG Depot",     "LPG", "Enugu",          25000, 6000,  800,  "low"),
+        # --- Warri (delta, 2 stations) ---
+        ("FS-010", "Warri Refinery AGO Terminal",   "AGO", "Warri",          55000, 42000, 2600, "normal"),
+        ("FS-011", "Warri Effurun PMS Station",     "PMS", "Warri",          30000, 7200,  1500, "low"),
+        # --- Benin City (midwest, 1 station) ---
+        ("FS-012", "Benin City Sapele Road Depot",  "PMS", "Benin City",     40000, 32000, 2000, "normal"),
+        # --- Kaduna (north-central, 1 station) ---
+        ("FS-013", "Kaduna Refinery AGO Depot",     "AGO", "Kaduna",         50000, 11000, 2200, "low"),
+        # --- Jos (plateau, 1 station) ---
+        ("FS-014", "Jos Bukuru LPG Terminal",       "LPG", "Jos",            20000, 1800,  600,  "critical"),
     ]
 
     actions = []
     for sid, name, ftype, city, cap, stock, daily, status in stations:
         days_left = round(stock / daily, 1) if daily > 0 and stock > 0 else 0
+        geo = _geo(city)
         doc = {
             "station_id": sid,
             "name": name,
             "fuel_type": ftype,
+            "fuel_grade": ftype,  # alias for TankForecastingAgent compatibility
             "capacity_liters": float(cap),
             "current_stock_liters": float(stock),
             "daily_consumption_rate": float(daily),
             "days_until_empty": days_left,
+            "stock_level_pct": round((stock / cap) * 100, 1) if cap > 0 else 0,
             "alert_threshold_pct": 15.0,
             "status": status,
-            "location": _geo(city),
+            "location": geo,
+            "latitude": geo["lat"],
+            "longitude": geo["lon"],
             "location_name": city,
             "tenant_id": TENANT,
             "created_at": _ago(days=90),
@@ -470,28 +497,44 @@ def seed_truck_compartments(force: bool = False):
         logger.info(f"⏭️  {index} already has data — skipping")
         return
 
-    # Two fuel tankers with multiple compartments each
+    # 4 fuel tankers with varied compartment configurations
+    # Tuple: (truck_id, comp_id, capacity, allowed_grades, position, depot_city)
     compartments = [
-        # Truck FT-001: 3 compartments, total 32000L
-        ("FT-001", "C1", 12000, ["AGO", "PMS"], 1),
-        ("FT-001", "C2", 12000, ["AGO", "PMS"], 2),
-        ("FT-001", "C3", 8000,  ["AGO", "PMS", "ATK"], 3),
-        # Truck FT-002: 4 compartments, total 28000L
-        ("FT-002", "C1", 10000, ["PMS"], 1),
-        ("FT-002", "C2", 8000,  ["PMS", "AGO"], 2),
-        ("FT-002", "C3", 6000,  ["AGO"], 3),
-        ("FT-002", "C4", 4000,  ["LPG", "ATK"], 4),
+        # Truck FT-001: 4 compartments, 40,000L total, AGO/PMS compatible, Lagos depot
+        ("FT-001", "C1", 12000, ["AGO", "PMS"], 1, "Lagos"),
+        ("FT-001", "C2", 12000, ["AGO", "PMS"], 2, "Lagos"),
+        ("FT-001", "C3", 10000, ["AGO", "PMS"], 3, "Lagos"),
+        ("FT-001", "C4", 6000,  ["AGO", "PMS"], 4, "Lagos"),
+        # Truck FT-002: 3 compartments, 25,000L total, PMS/ATK compatible, Abuja depot
+        ("FT-002", "C1", 10000, ["PMS", "ATK"], 1, "Abuja"),
+        ("FT-002", "C2", 9000,  ["PMS", "ATK"], 2, "Abuja"),
+        ("FT-002", "C3", 6000,  ["PMS", "ATK"], 3, "Abuja"),
+        # Truck FT-003: 5 compartments, 50,000L total, all grades, Port Harcourt depot
+        ("FT-003", "C1", 14000, ["AGO", "PMS", "ATK", "LPG"], 1, "Port Harcourt"),
+        ("FT-003", "C2", 12000, ["AGO", "PMS", "ATK", "LPG"], 2, "Port Harcourt"),
+        ("FT-003", "C3", 10000, ["AGO", "PMS", "ATK", "LPG"], 3, "Port Harcourt"),
+        ("FT-003", "C4", 8000,  ["AGO", "PMS", "ATK", "LPG"], 4, "Port Harcourt"),
+        ("FT-003", "C5", 6000,  ["AGO", "PMS", "ATK", "LPG"], 5, "Port Harcourt"),
+        # Truck FT-004: 3 compartments, 20,000L total, AGO only, Kano depot
+        ("FT-004", "C1", 8000,  ["AGO"], 1, "Kano"),
+        ("FT-004", "C2", 7000,  ["AGO"], 2, "Kano"),
+        ("FT-004", "C3", 5000,  ["AGO"], 3, "Kano"),
     ]
 
     actions = []
-    for truck_id, comp_id, capacity, grades, pos in compartments:
+    for truck_id, comp_id, capacity, grades, pos, depot in compartments:
         doc_id = f"{truck_id}_{comp_id}"
+        geo = _geo(depot)
         doc = {
             "compartment_id": comp_id,
             "truck_id": truck_id,
             "capacity_liters": float(capacity),
             "allowed_grades": grades,
             "position_index": pos,
+            "depot_city": depot,
+            "depot_location": geo,
+            "latitude": geo["lat"],
+            "longitude": geo["lon"],
             "tenant_id": TENANT,
             "created_at": _ago(days=30),
             "updated_at": _now(),

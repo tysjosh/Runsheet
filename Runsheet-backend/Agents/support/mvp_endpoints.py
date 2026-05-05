@@ -2,17 +2,19 @@
 REST API endpoints for the Fuel Distribution MVP pipeline.
 
 Provides endpoints for triggering pipeline runs, retrieving plans,
-initiating replanning, querying forecasts and priorities, and
-configuring truck compartments.
+initiating replanning, querying forecasts and priorities,
+configuring truck compartments, plan approval/rejection, driver
+check-ins, outcome retrieval, and cost analysis.
 
 Uses a ``configure_mvp_endpoints()`` function to wire service
 dependencies at startup (same pattern as agent_endpoints.py).
 
-Validates: Requirements 6.1, 6.3, 8.1–8.6
+Validates: Requirements 1.1–1.5, 2.1–2.6, 3.1–3.9, 4.1–4.7, 5.1–5.6, 6.1, 6.3, 8.1–8.6
 """
 
 import logging
-from typing import List, Optional
+from datetime import datetime, timezone
+from typing import Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
@@ -27,6 +29,8 @@ _pipeline = None
 _es_service = None
 _exception_replanning_agent = None
 _fleet_registration_service = None
+_plan_execution_service = None
+_plan_execution_ws_manager = None
 
 router = APIRouter(prefix="/api/fuel/mvp", tags=["fuel-mvp"])
 
@@ -76,6 +80,39 @@ class CompartmentConfigRequest(BaseModel):
     )
 
 
+class CheckinRequest(BaseModel):
+    """Body for POST /plan/{plan_id}/checkin."""
+    route_id: str = Field(..., description="Route identifier")
+    station_id: str = Field(..., description="Station being checked into")
+    sequence: int = Field(..., ge=0, description="Stop sequence number")
+    actual_quantities: Dict[str, float] = Field(
+        ..., description="Fuel grade to liters delivered mapping"
+    )
+
+
+class RejectRequest(BaseModel):
+    """Body for POST /plan/{plan_id}/reject."""
+    reason: Optional[str] = Field(
+        default=None, description="Optional rejection reason"
+    )
+
+
+class CostConfigRequest(BaseModel):
+    """Body for PUT /cost-config."""
+    fuel_consumption_rate: float = Field(
+        ..., ge=0, description="Fuel consumption rate in liters per km"
+    )
+    fuel_price_per_liter: float = Field(
+        ..., ge=0, description="Fuel price per liter"
+    )
+    driver_hourly_rate: float = Field(
+        ..., ge=0, description="Driver hourly rate"
+    )
+    currency: str = Field(
+        default="USD", description="Currency code"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Service wiring
 # ---------------------------------------------------------------------------
@@ -87,17 +124,23 @@ def configure_mvp_endpoints(
     es_service,
     exception_replanning_agent=None,
     fleet_registration_service=None,
+    plan_execution_service=None,
+    plan_execution_ws_manager=None,
 ) -> None:
     """Wire service dependencies into the MVP endpoints module.
 
     Called once during application startup so that the router handlers
     can access shared services without circular imports.
     """
-    global _pipeline, _es_service, _exception_replanning_agent, _fleet_registration_service
+    global _pipeline, _es_service, _exception_replanning_agent
+    global _fleet_registration_service, _plan_execution_service
+    global _plan_execution_ws_manager
     _pipeline = pipeline
     _es_service = es_service
     _exception_replanning_agent = exception_replanning_agent
     _fleet_registration_service = fleet_registration_service
+    _plan_execution_service = plan_execution_service
+    _plan_execution_ws_manager = plan_execution_ws_manager
 
 
 # ---------------------------------------------------------------------------
@@ -121,6 +164,24 @@ def _get_es():
             "Call configure_mvp_endpoints() during startup."
         )
     return _es_service
+
+
+def _get_execution_service():
+    if _plan_execution_service is None:
+        raise RuntimeError(
+            "PlanExecutionService not configured. "
+            "Call configure_mvp_endpoints() with plan_execution_service."
+        )
+    return _plan_execution_service
+
+
+def _get_ws_manager():
+    if _plan_execution_ws_manager is None:
+        raise RuntimeError(
+            "PlanExecutionWSManager not configured. "
+            "Call configure_mvp_endpoints() with plan_execution_ws_manager."
+        )
+    return _plan_execution_ws_manager
 
 
 # ---------------------------------------------------------------------------
@@ -467,4 +528,570 @@ async def configure_compartments(
         }
     except Exception as e:
         logger.error("Failed to configure compartments for %s: %s", truck_id, e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# GET /api/fuel/mvp/plans (Req 1.1–1.5)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/plans")
+async def list_plans(
+    request: Request,
+    tenant_id: str = Query(..., description="Tenant identifier"),
+    status: Optional[str] = Query(None, description="Filter by plan status"),
+    page: int = Query(1, ge=1, description="Page number"),
+    size: int = Query(20, ge=1, le=100, description="Page size"),
+):
+    """List plans for a tenant with optional status filter, paginated.
+
+    Queries mvp_load_plans by tenant_id, optionally filtered by status,
+    sorted by created_at descending.
+
+    Validates: Requirements 1.1, 1.3, 1.4, 1.5
+    """
+    es = _get_es()
+
+    must_clauses = [{"term": {"tenant_id": tenant_id}}]
+    if status:
+        must_clauses.append({"term": {"status": status}})
+
+    query = {
+        "query": {"bool": {"must": must_clauses}},
+        "sort": [{"created_at": {"order": "desc"}}],
+        "from": (page - 1) * size,
+        "size": size,
+    }
+
+    try:
+        resp = await es.search_documents("mvp_load_plans", query, size)
+        hits = resp.get("hits", {}).get("hits", [])
+        total = resp.get("hits", {}).get("total", {})
+        total_count = total.get("value", 0) if isinstance(total, dict) else total
+
+        items = [hit["_source"] for hit in hits]
+
+        from schemas.common import paginated_response_dict
+        return paginated_response_dict(
+            items=items,
+            total=total_count,
+            page=page,
+            page_size=size,
+        )
+    except Exception as e:
+        logger.error("Failed to list plans: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# POST /api/fuel/mvp/plan/{plan_id}/approve (Req 2.1, 2.3, 2.4)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/plan/{plan_id}/approve")
+async def approve_plan(
+    plan_id: str,
+    request: Request,
+    tenant_id: str = Query(..., description="Tenant identifier"),
+    dispatcher_id: str = Query(..., description="Dispatcher identifier"),
+):
+    """Approve a plan, transitioning from draft to dispatched.
+
+    Validates plan is in "draft" status, updates to "dispatched" with
+    dispatcher_id and approved_at timestamp, then creates execution
+    records for each route associated with the plan.
+
+    Returns 409 if plan is not in draft status.
+
+    Validates: Requirements 2.1, 2.3, 2.4
+    """
+    es = _get_es()
+    execution_service = _get_execution_service()
+
+    # Fetch the plan
+    plan_query = {
+        "query": {
+            "bool": {
+                "must": [
+                    {"term": {"tenant_id": tenant_id}},
+                    {"term": {"plan_id": plan_id}},
+                ],
+            },
+        },
+        "size": 1,
+    }
+
+    try:
+        resp = await es.search_documents("mvp_load_plans", plan_query, 1)
+        hits = resp.get("hits", {}).get("hits", [])
+        if not hits:
+            raise HTTPException(status_code=404, detail=f"Plan {plan_id} not found")
+
+        plan_doc = hits[0]["_source"]
+        plan_status = plan_doc.get("status", "")
+
+        if plan_status != "draft" and plan_status != "proposed":
+            raise HTTPException(
+                status_code=409,
+                detail=f"Plan {plan_id} is not in 'draft' or 'proposed' status (current: {plan_status}). "
+                       "Only draft/proposed plans can be approved.",
+            )
+
+        # Update plan status to dispatched
+        now = datetime.now(timezone.utc).isoformat()
+        update_doc = {
+            "status": "dispatched",
+            "approved_by": dispatcher_id,
+            "approved_at": now,
+        }
+        await es.update_document("mvp_load_plans", plan_id, update_doc)
+
+        # Fetch routes for this plan and create execution records
+        route_query = {
+            "query": {
+                "bool": {
+                    "must": [
+                        {"term": {"tenant_id": tenant_id}},
+                        {"term": {"plan_id": plan_id}},
+                    ],
+                },
+            },
+            "size": 20,
+        }
+        route_resp = await es.search_documents("mvp_routes", route_query, 20)
+        route_hits = route_resp.get("hits", {}).get("hits", [])
+
+        executions_created = []
+        for route_hit in route_hits:
+            route_doc = route_hit["_source"]
+            route_id = route_doc.get("route_id", "")
+            stops = route_doc.get("stops", [])
+
+            execution = await execution_service.create_execution(
+                plan_id=plan_id,
+                route_id=route_id,
+                tenant_id=tenant_id,
+                stops=stops,
+            )
+            executions_created.append(execution["execution_id"])
+
+        logger.info(
+            "Approved plan %s (tenant=%s, dispatcher=%s), created %d executions",
+            plan_id,
+            tenant_id,
+            dispatcher_id,
+            len(executions_created),
+        )
+
+        return {
+            "plan_id": plan_id,
+            "status": "dispatched",
+            "approved_by": dispatcher_id,
+            "approved_at": now,
+            "executions_created": len(executions_created),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to approve plan %s: %s", plan_id, e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# POST /api/fuel/mvp/plan/{plan_id}/reject (Req 2.2, 2.3, 2.5)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/plan/{plan_id}/reject")
+async def reject_plan(
+    plan_id: str,
+    request: Request,
+    tenant_id: str = Query(..., description="Tenant identifier"),
+    dispatcher_id: str = Query(..., description="Dispatcher identifier"),
+    body: Optional[RejectRequest] = None,
+):
+    """Reject a plan, transitioning from draft to rejected.
+
+    Validates plan is in "draft" status, updates to "rejected" with
+    dispatcher_id, rejected_at, and optional reason.
+
+    Returns 409 if plan is not in draft status.
+
+    Validates: Requirements 2.2, 2.3, 2.5
+    """
+    es = _get_es()
+
+    # Fetch the plan
+    plan_query = {
+        "query": {
+            "bool": {
+                "must": [
+                    {"term": {"tenant_id": tenant_id}},
+                    {"term": {"plan_id": plan_id}},
+                ],
+            },
+        },
+        "size": 1,
+    }
+
+    try:
+        resp = await es.search_documents("mvp_load_plans", plan_query, 1)
+        hits = resp.get("hits", {}).get("hits", [])
+        if not hits:
+            raise HTTPException(status_code=404, detail=f"Plan {plan_id} not found")
+
+        plan_doc = hits[0]["_source"]
+        plan_status = plan_doc.get("status", "")
+
+        if plan_status != "draft" and plan_status != "proposed":
+            raise HTTPException(
+                status_code=409,
+                detail=f"Plan {plan_id} is not in 'draft' or 'proposed' status (current: {plan_status}). "
+                       "Only draft/proposed plans can be rejected.",
+            )
+
+        # Update plan status to rejected
+        now = datetime.now(timezone.utc).isoformat()
+        reason = body.reason if body else None
+
+        update_doc = {
+            "status": "rejected",
+            "rejected_by": dispatcher_id,
+            "rejected_at": now,
+        }
+        if reason:
+            update_doc["rejection_reason"] = reason
+
+        await es.update_document("mvp_load_plans", plan_id, update_doc)
+
+        logger.info(
+            "Rejected plan %s (tenant=%s, dispatcher=%s, reason=%s)",
+            plan_id,
+            tenant_id,
+            dispatcher_id,
+            reason or "none",
+        )
+
+        return {
+            "plan_id": plan_id,
+            "status": "rejected",
+            "rejected_by": dispatcher_id,
+            "rejected_at": now,
+            "rejection_reason": reason,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to reject plan %s: %s", plan_id, e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# POST /api/fuel/mvp/plan/{plan_id}/checkin (Req 3.1–3.7)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/plan/{plan_id}/checkin")
+async def driver_checkin(
+    plan_id: str,
+    body: CheckinRequest,
+    request: Request,
+    tenant_id: str = Query(..., description="Tenant identifier"),
+):
+    """Record a driver check-in at a stop.
+
+    Validates plan is "dispatched", validates stop not already completed,
+    records check-in via PlanExecutionService, broadcasts via WebSocket,
+    and transitions to "completed" if all stops are done (triggering
+    outcome computation and actual cost calculation).
+
+    Returns 409 if plan is not dispatched or stop already completed.
+
+    Validates: Requirements 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7
+    """
+    execution_service = _get_execution_service()
+    ws_manager = _get_ws_manager()
+
+    try:
+        # record_checkin validates plan status and stop state internally
+        result = await execution_service.record_checkin(
+            plan_id=plan_id,
+            route_id=body.route_id,
+            station_id=body.station_id,
+            sequence=body.sequence,
+            actual_quantities=body.actual_quantities,
+            tenant_id=tenant_id,
+        )
+
+        # Broadcast execution update via WebSocket
+        stop_data = {
+            "station_id": body.station_id,
+            "sequence": body.sequence,
+            "status": "completed",
+        }
+        await ws_manager.broadcast_execution_update(
+            plan_id=plan_id,
+            route_id=body.route_id,
+            stop_data=stop_data,
+            completed_stops=result["completed_stops"],
+            total_stops=result["total_stops"],
+        )
+
+        # If all stops are complete, transition plan to "completed" and
+        # trigger outcome computation and actual cost calculation
+        if result.get("all_complete"):
+            es = _get_es()
+            now = datetime.now(timezone.utc).isoformat()
+            await es.update_document(
+                "mvp_load_plans", plan_id, {"status": "completed"}
+            )
+
+            # Trigger outcome computation (Req 4.1–4.4)
+            try:
+                await execution_service.compute_outcomes(plan_id, tenant_id)
+            except Exception as e:
+                logger.error(
+                    "Failed to compute outcomes for plan %s: %s", plan_id, e
+                )
+
+            # Trigger actual cost calculation (Req 5.3)
+            try:
+                await execution_service.compute_actual_cost(plan_id, tenant_id)
+            except Exception as e:
+                logger.error(
+                    "Failed to compute actual cost for plan %s: %s", plan_id, e
+                )
+
+            logger.info(
+                "Plan %s completed - all stops done, outcomes and costs computed",
+                plan_id,
+            )
+
+        return {
+            "plan_id": plan_id,
+            "route_id": body.route_id,
+            "station_id": body.station_id,
+            "sequence": body.sequence,
+            "completed_stops": result["completed_stops"],
+            "total_stops": result["total_stops"],
+            "all_complete": result["all_complete"],
+            "updated_at": result["updated_at"],
+        }
+
+    except ValueError as e:
+        # PlanExecutionService raises ValueError for state conflicts
+        error_msg = str(e)
+        if "not in 'dispatched' status" in error_msg:
+            raise HTTPException(status_code=409, detail=error_msg)
+        elif "already completed" in error_msg:
+            raise HTTPException(status_code=409, detail=error_msg)
+        else:
+            raise HTTPException(status_code=400, detail=error_msg)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to record check-in for plan %s: %s", plan_id, e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# GET /api/fuel/mvp/plan/{plan_id}/outcomes (Req 4.5, 4.6)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/plan/{plan_id}/outcomes")
+async def get_plan_outcomes(
+    plan_id: str,
+    request: Request,
+    tenant_id: str = Query(..., description="Tenant identifier"),
+):
+    """Retrieve outcome data for a completed plan.
+
+    Returns per-stop variance metrics and aggregates.
+    Returns 400 if plan is not in "completed" status.
+
+    Validates: Requirements 4.5, 4.6
+    """
+    es = _get_es()
+
+    # Verify plan is completed
+    plan_query = {
+        "query": {
+            "bool": {
+                "must": [
+                    {"term": {"tenant_id": tenant_id}},
+                    {"term": {"plan_id": plan_id}},
+                ],
+            },
+        },
+        "size": 1,
+    }
+
+    try:
+        resp = await es.search_documents("mvp_load_plans", plan_query, 1)
+        hits = resp.get("hits", {}).get("hits", [])
+        if not hits:
+            raise HTTPException(status_code=404, detail=f"Plan {plan_id} not found")
+
+        plan_doc = hits[0]["_source"]
+        plan_status = plan_doc.get("status", "")
+
+        if plan_status != "completed":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Plan {plan_id} is not completed (current status: {plan_status}). "
+                       "Outcome data is only available for completed plans.",
+            )
+
+        # Fetch outcome data from mvp_plan_outcomes
+        outcome_query = {
+            "query": {
+                "bool": {
+                    "must": [
+                        {"term": {"tenant_id": tenant_id}},
+                        {"term": {"plan_id": plan_id}},
+                    ],
+                },
+            },
+            "sort": [{"created_at": {"order": "desc"}}],
+            "size": 1,
+        }
+        outcome_resp = await es.search_documents(
+            "mvp_plan_outcomes", outcome_query, 1
+        )
+        outcome_hits = outcome_resp.get("hits", {}).get("hits", [])
+
+        if not outcome_hits:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No outcome data found for plan {plan_id}",
+            )
+
+        return outcome_hits[0]["_source"]
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to get outcomes for plan %s: %s", plan_id, e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# GET /api/fuel/mvp/plan/{plan_id}/costs (Req 5.1–5.5)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/plan/{plan_id}/costs")
+async def get_plan_costs(
+    plan_id: str,
+    request: Request,
+    tenant_id: str = Query(..., description="Tenant identifier"),
+):
+    """Retrieve cost data for a plan.
+
+    Returns estimated costs (always available after generation) and
+    actual costs if the plan is completed.
+    Returns 400 if cost config is not found for the tenant.
+
+    Validates: Requirements 5.1, 5.2, 5.4, 5.5
+    """
+    es = _get_es()
+    execution_service = _get_execution_service()
+
+    # Check cost config exists for tenant
+    cost_config = await execution_service.get_cost_config(tenant_id)
+    if cost_config is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cost configuration not found for tenant {tenant_id}. "
+                   "Please configure cost parameters first.",
+        )
+
+    # Fetch the plan
+    plan_query = {
+        "query": {
+            "bool": {
+                "must": [
+                    {"term": {"tenant_id": tenant_id}},
+                    {"term": {"plan_id": plan_id}},
+                ],
+            },
+        },
+        "size": 1,
+    }
+
+    try:
+        resp = await es.search_documents("mvp_load_plans", plan_query, 1)
+        hits = resp.get("hits", {}).get("hits", [])
+        if not hits:
+            raise HTTPException(status_code=404, detail=f"Plan {plan_id} not found")
+
+        plan_doc = hits[0]["_source"]
+        plan_status = plan_doc.get("status", "")
+
+        result = {
+            "plan_id": plan_id,
+            "status": plan_status,
+            "estimated_cost": plan_doc.get("estimated_cost"),
+            "actual_cost": None,
+            "cost_variance_pct": None,
+        }
+
+        # If plan is completed, include actual costs
+        if plan_status == "completed":
+            result["actual_cost"] = plan_doc.get("actual_cost")
+            result["cost_variance_pct"] = plan_doc.get("cost_variance_pct")
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to get costs for plan %s: %s", plan_id, e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# PUT /api/fuel/mvp/cost-config (Req 5.5)
+# ---------------------------------------------------------------------------
+
+
+@router.put("/cost-config")
+async def update_cost_config(
+    request: Request,
+    body: CostConfigRequest,
+    tenant_id: str = Query(..., description="Tenant identifier"),
+):
+    """Upsert tenant cost configuration.
+
+    Creates or updates the cost configuration for a tenant, used
+    for computing estimated and actual plan costs.
+
+    Validates: Requirement 5.5
+    """
+    execution_service = _get_execution_service()
+
+    try:
+        config = {
+            "fuel_consumption_rate": body.fuel_consumption_rate,
+            "fuel_price_per_liter": body.fuel_price_per_liter,
+            "driver_hourly_rate": body.driver_hourly_rate,
+            "currency": body.currency,
+        }
+
+        result = await execution_service.upsert_cost_config(tenant_id, config)
+
+        logger.info("Updated cost config for tenant %s", tenant_id)
+
+        return {
+            "tenant_id": tenant_id,
+            "status": "success",
+            "config": result,
+        }
+
+    except Exception as e:
+        logger.error("Failed to update cost config for tenant %s: %s", tenant_id, e)
         raise HTTPException(status_code=500, detail=str(e))

@@ -66,3 +66,13 @@ export type {
   UseInventoryWebSocketReturn,
 } from "./useInventoryWebSocket";
 export { useInventoryWebSocket } from "./useInventoryWebSocket";
+
+export type {
+  ExecutionStopUpdate,
+  ExecutionUpdateData,
+  PlanExecutionMessage,
+  PlanExecutionMessageType,
+  PlanExecutionSocketOptions,
+  UsePlanExecutionSocketReturn,
+} from "./usePlanExecutionSocket";
+export { usePlanExecutionSocket } from "./usePlanExecutionSocket";
