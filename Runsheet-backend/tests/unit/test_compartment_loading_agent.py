@@ -465,3 +465,387 @@ class TestBuildProposal:
 
         proposal = agent._build_proposal(plan, feasibility, "tenant-1")
         assert proposal.risk_class == RiskClass.MEDIUM
+
+
+# ---------------------------------------------------------------------------
+# Tests: _check_fuel_equipment() (Req 3.1, 3.2, 3.3, 3.5)
+# ---------------------------------------------------------------------------
+
+
+class TestCheckFuelEquipment:
+    @pytest.mark.asyncio
+    async def test_all_equipment_in_stock_returns_available(self):
+        """Req 3.2: All fuel_equipment in stock → truck available."""
+        agent, deps = _make_agent()
+        deps["es_service"].search_documents = AsyncMock(
+            return_value={
+                "hits": {
+                    "hits": [
+                        {
+                            "_source": {
+                                "item_id": "hose-1",
+                                "category": "fuel_equipment",
+                                "status": "in_stock",
+                                "location": "Depot A",
+                            }
+                        },
+                        {
+                            "_source": {
+                                "item_id": "nozzle-1",
+                                "category": "fuel_equipment",
+                                "status": "in_stock",
+                                "location": "Depot A",
+                            }
+                        },
+                    ]
+                }
+            }
+        )
+
+        available, missing = await agent._check_fuel_equipment(
+            "truck-1", "Depot A", "tenant-1"
+        )
+        assert available is True
+        assert missing == []
+
+    @pytest.mark.asyncio
+    async def test_equipment_out_of_stock_returns_unavailable(self):
+        """Req 3.3: Any fuel_equipment out_of_stock → truck excluded."""
+        agent, deps = _make_agent()
+        deps["es_service"].search_documents = AsyncMock(
+            return_value={
+                "hits": {
+                    "hits": [
+                        {
+                            "_source": {
+                                "item_id": "hose-1",
+                                "category": "fuel_equipment",
+                                "status": "in_stock",
+                                "location": "Depot A",
+                            }
+                        },
+                        {
+                            "_source": {
+                                "item_id": "seal-1",
+                                "category": "fuel_equipment",
+                                "status": "out_of_stock",
+                                "location": "Depot A",
+                            }
+                        },
+                    ]
+                }
+            }
+        )
+
+        available, missing = await agent._check_fuel_equipment(
+            "truck-1", "Depot A", "tenant-1"
+        )
+        assert available is False
+        assert missing == ["seal-1"]
+
+    @pytest.mark.asyncio
+    async def test_inventory_query_failure_fails_open(self):
+        """Req 3.5: Inventory query failure → fail-open (include truck)."""
+        agent, deps = _make_agent()
+        deps["es_service"].search_documents = AsyncMock(
+            side_effect=Exception("ES connection timeout")
+        )
+
+        available, missing = await agent._check_fuel_equipment(
+            "truck-1", "Depot A", "tenant-1"
+        )
+        assert available is True
+        assert missing == []
+
+    @pytest.mark.asyncio
+    async def test_no_equipment_at_depot_returns_available(self):
+        """No fuel_equipment items at depot → truck available (nothing missing)."""
+        agent, deps = _make_agent()
+        deps["es_service"].search_documents = AsyncMock(
+            return_value={"hits": {"hits": []}}
+        )
+
+        available, missing = await agent._check_fuel_equipment(
+            "truck-1", "Depot A", "tenant-1"
+        )
+        assert available is True
+        assert missing == []
+
+    @pytest.mark.asyncio
+    async def test_multiple_out_of_stock_items(self):
+        """Multiple out_of_stock items are all reported."""
+        agent, deps = _make_agent()
+        deps["es_service"].search_documents = AsyncMock(
+            return_value={
+                "hits": {
+                    "hits": [
+                        {
+                            "_source": {
+                                "item_id": "hose-1",
+                                "category": "fuel_equipment",
+                                "status": "out_of_stock",
+                                "location": "Depot A",
+                            }
+                        },
+                        {
+                            "_source": {
+                                "item_id": "seal-1",
+                                "category": "fuel_equipment",
+                                "status": "out_of_stock",
+                                "location": "Depot A",
+                            }
+                        },
+                    ]
+                }
+            }
+        )
+
+        available, missing = await agent._check_fuel_equipment(
+            "truck-1", "Depot A", "tenant-1"
+        )
+        assert available is False
+        assert set(missing) == {"hose-1", "seal-1"}
+
+
+# ---------------------------------------------------------------------------
+# Tests: _query_trucks_with_equipment_check() (Req 3.1–3.5)
+# ---------------------------------------------------------------------------
+
+
+class TestQueryTrucksWithEquipmentCheck:
+    @pytest.mark.asyncio
+    async def test_trucks_without_depot_location_included(self):
+        """Fail-open: trucks without depot_location are included."""
+        agent, deps = _make_agent()
+
+        # Return a truck without depot_location
+        deps["es_service"].search_documents = AsyncMock(
+            return_value={
+                "hits": {
+                    "hits": [
+                        {
+                            "_source": {
+                                "compartment_id": "comp-1",
+                                "truck_id": "truck-1",
+                                "capacity_liters": 10000.0,
+                                "allowed_grades": ["AGO"],
+                                "position_index": 0,
+                                "tenant_id": "tenant-1",
+                            }
+                        },
+                    ]
+                }
+            }
+        )
+
+        trucks = await agent._query_trucks_with_equipment_check("tenant-1")
+        assert "truck-1" in trucks
+
+    @pytest.mark.asyncio
+    async def test_truck_with_equipment_available_included(self):
+        """Req 3.2: Truck with all equipment in stock is included."""
+        agent, deps = _make_agent()
+
+        # First call: truck_compartments query
+        # Second call: inventory query for fuel_equipment
+        call_count = [0]
+
+        async def mock_search(index, query, size=None):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # truck_compartments
+                return {
+                    "hits": {
+                        "hits": [
+                            {
+                                "_source": {
+                                    "compartment_id": "comp-1",
+                                    "truck_id": "truck-1",
+                                    "capacity_liters": 10000.0,
+                                    "allowed_grades": ["AGO"],
+                                    "position_index": 0,
+                                    "tenant_id": "tenant-1",
+                                    "depot_location": "Depot A",
+                                }
+                            },
+                        ]
+                    }
+                }
+            else:
+                # inventory query — all in stock
+                return {
+                    "hits": {
+                        "hits": [
+                            {
+                                "_source": {
+                                    "item_id": "hose-1",
+                                    "category": "fuel_equipment",
+                                    "status": "in_stock",
+                                    "location": "Depot A",
+                                }
+                            },
+                        ]
+                    }
+                }
+
+        deps["es_service"].search_documents = AsyncMock(side_effect=mock_search)
+
+        trucks = await agent._query_trucks_with_equipment_check("tenant-1")
+        assert "truck-1" in trucks
+
+    @pytest.mark.asyncio
+    async def test_truck_with_missing_equipment_excluded(self):
+        """Req 3.3: Truck with out_of_stock equipment is excluded."""
+        agent, deps = _make_agent()
+
+        call_count = [0]
+
+        async def mock_search(index, query, size=None):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return {
+                    "hits": {
+                        "hits": [
+                            {
+                                "_source": {
+                                    "compartment_id": "comp-1",
+                                    "truck_id": "truck-1",
+                                    "capacity_liters": 10000.0,
+                                    "allowed_grades": ["AGO"],
+                                    "position_index": 0,
+                                    "tenant_id": "tenant-1",
+                                    "depot_location": "Depot A",
+                                }
+                            },
+                        ]
+                    }
+                }
+            else:
+                return {
+                    "hits": {
+                        "hits": [
+                            {
+                                "_source": {
+                                    "item_id": "seal-1",
+                                    "category": "fuel_equipment",
+                                    "status": "out_of_stock",
+                                    "location": "Depot A",
+                                }
+                            },
+                        ]
+                    }
+                }
+
+        deps["es_service"].search_documents = AsyncMock(side_effect=mock_search)
+
+        trucks = await agent._query_trucks_with_equipment_check("tenant-1")
+        assert "truck-1" not in trucks
+
+    @pytest.mark.asyncio
+    async def test_all_trucks_excluded_publishes_critical_signal(self):
+        """Req 3.5: All trucks excluded → critical RiskSignal published."""
+        agent, deps = _make_agent()
+
+        call_count = [0]
+
+        async def mock_search(index, query, size=None):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return {
+                    "hits": {
+                        "hits": [
+                            {
+                                "_source": {
+                                    "compartment_id": "comp-1",
+                                    "truck_id": "truck-1",
+                                    "capacity_liters": 10000.0,
+                                    "allowed_grades": ["AGO"],
+                                    "position_index": 0,
+                                    "tenant_id": "tenant-1",
+                                    "depot_location": "Depot A",
+                                }
+                            },
+                        ]
+                    }
+                }
+            else:
+                return {
+                    "hits": {
+                        "hits": [
+                            {
+                                "_source": {
+                                    "item_id": "seal-1",
+                                    "category": "fuel_equipment",
+                                    "status": "out_of_stock",
+                                    "location": "Depot A",
+                                }
+                            },
+                        ]
+                    }
+                }
+
+        deps["es_service"].search_documents = AsyncMock(side_effect=mock_search)
+
+        trucks = await agent._query_trucks_with_equipment_check("tenant-1")
+        assert trucks == {}
+
+        # Verify critical RiskSignal was published
+        deps["signal_bus"].publish.assert_called_once()
+        published_signal = deps["signal_bus"].publish.call_args[0][0]
+        assert isinstance(published_signal, RiskSignal)
+        assert published_signal.severity == Severity.CRITICAL
+        assert published_signal.entity_type == "equipment_shortage"
+        assert published_signal.tenant_id == "tenant-1"
+
+    @pytest.mark.asyncio
+    async def test_evaluate_uses_equipment_check(self):
+        """evaluate() calls _query_trucks_with_equipment_check."""
+        agent, deps = _make_agent()
+        agent._priority_buffer.append(_make_priority_list())
+
+        call_count = [0]
+
+        async def mock_search(index, query, size=None):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # truck_compartments — truck with depot
+                return {
+                    "hits": {
+                        "hits": [
+                            {
+                                "_source": {
+                                    "compartment_id": "comp-1",
+                                    "truck_id": "truck-1",
+                                    "capacity_liters": 10000.0,
+                                    "allowed_grades": ["AGO"],
+                                    "position_index": 0,
+                                    "tenant_id": "tenant-1",
+                                    "depot_location": "Depot A",
+                                }
+                            },
+                        ]
+                    }
+                }
+            else:
+                # inventory — equipment in stock
+                return {
+                    "hits": {
+                        "hits": [
+                            {
+                                "_source": {
+                                    "item_id": "hose-1",
+                                    "category": "fuel_equipment",
+                                    "status": "in_stock",
+                                    "location": "Depot A",
+                                }
+                            },
+                        ]
+                    }
+                }
+
+        deps["es_service"].search_documents = AsyncMock(side_effect=mock_search)
+
+        result = await agent.evaluate([])
+        # Should produce a proposal since equipment is available
+        assert len(result) == 1
+        assert result[0].source_agent == "compartment_loading"

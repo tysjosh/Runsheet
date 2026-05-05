@@ -157,63 +157,134 @@ function EventTimeline({ events }: EventTimelineProps) {
     );
   }
 
+  // Separate parts_consumed events for special rendering
+  const partsConsumedEvents = sorted.filter((e) => e.event_type === "parts_consumed");
+  const otherEvents = sorted.filter((e) => e.event_type !== "parts_consumed");
+
   return (
-    <div className="space-y-0">
-      {sorted.map((event, index) => (
-        <div
-          key={event.event_id}
-          className="relative flex gap-4 pb-6 last:pb-0"
-        >
-          {/* Timeline line */}
-          {index < sorted.length - 1 && (
-            <div className="absolute left-[15px] top-8 bottom-0 w-px bg-gray-200" />
-          )}
-
-          {/* Timeline dot */}
-          <div className="relative z-10 flex-shrink-0 w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center">
-            <Activity className="w-4 h-4 text-gray-500" />
+    <div className="space-y-6">
+      {/* Parts Consumed Section (Requirement 7.8) */}
+      {partsConsumedEvents.length > 0 && (
+        <div className="border border-blue-100 rounded-lg bg-blue-50/50 p-4">
+          <div className="flex items-center gap-2 mb-3">
+            <Package className="w-4 h-4 text-blue-600" />
+            <h4 className="text-sm font-medium text-[#232323]">Parts Consumed</h4>
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 font-medium">
+              {partsConsumedEvents.length} {partsConsumedEvents.length === 1 ? "event" : "events"}
+            </span>
           </div>
+          <div className="space-y-2">
+            {partsConsumedEvents.map((event) => {
+              const payload = event.event_payload || {};
+              const items = (payload.items as Array<{ name?: string; item_name?: string; quantity?: number }>) || [];
+              const itemName = payload.item_name as string | undefined;
+              const quantity = payload.quantity_change as number | undefined;
 
-          {/* Event content */}
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-sm font-medium text-[#232323]">
-                {formatEventType(event.event_type)}
-              </span>
-              <span className="text-xs text-gray-400">
-                {formatDateTime(event.event_timestamp)}
-              </span>
-            </div>
-
-            {event.actor_id && (
-              <div className="flex items-center gap-1 mt-1">
-                <User className="w-3 h-3 text-gray-400" />
-                <span className="text-xs text-gray-500">
-                  {event.actor_id}
-                </span>
-              </div>
-            )}
-
-            {/* Payload fields */}
-            {event.event_payload &&
-              Object.keys(event.event_payload).length > 0 && (
-                <div className="mt-2 bg-gray-50 rounded-lg px-3 py-2">
-                  {Object.entries(event.event_payload).map(([key, value]) => (
-                    <div
-                      key={key}
-                      className="flex items-center gap-2 text-xs text-gray-600"
-                    >
-                      <span className="font-medium text-gray-500">
-                        {key.replace(/_/g, " ")}:
-                      </span>
-                      <span>{String(value)}</span>
+              return (
+                <div key={event.event_id} className="bg-white rounded-lg px-3 py-2 border border-blue-100">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-xs text-gray-500">
+                      {formatDateTime(event.event_timestamp)}
+                    </span>
+                    {event.actor_id && (
+                      <span className="text-[10px] text-gray-400">by {event.actor_id}</span>
+                    )}
+                  </div>
+                  {items.length > 0 ? (
+                    <div className="space-y-1">
+                      {items.map((item, idx) => (
+                        <div key={idx} className="flex items-center justify-between text-xs">
+                          <span className="text-gray-700">{item.name || item.item_name || "Unknown item"}</span>
+                          <span className="font-medium text-blue-700">
+                            -{Math.abs(item.quantity || 0)} units
+                          </span>
+                        </div>
+                      ))}
                     </div>
-                  ))}
+                  ) : itemName ? (
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="text-gray-700">{itemName}</span>
+                      <span className="font-medium text-blue-700">
+                        -{Math.abs(quantity || 0)} units
+                      </span>
+                    </div>
+                  ) : (
+                    <div className="text-xs text-gray-500">
+                      {Object.entries(payload)
+                        .filter(([key]) => key !== "items")
+                        .map(([key, value]) => (
+                          <span key={key} className="mr-3">
+                            <span className="text-gray-400">{key.replace(/_/g, " ")}:</span>{" "}
+                            {String(value)}
+                          </span>
+                        ))}
+                    </div>
+                  )}
                 </div>
-              )}
+              );
+            })}
           </div>
         </div>
-      ))}
+      )}
+
+      {/* Regular Event Timeline */}
+      <div className="space-y-0">
+        {otherEvents.map((event, index) => (
+          <div
+            key={event.event_id}
+            className="relative flex gap-4 pb-6 last:pb-0"
+          >
+            {/* Timeline line */}
+            {index < otherEvents.length - 1 && (
+              <div className="absolute left-[15px] top-8 bottom-0 w-px bg-gray-200" />
+            )}
+
+            {/* Timeline dot */}
+            <div className="relative z-10 flex-shrink-0 w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center">
+              <Activity className="w-4 h-4 text-gray-500" />
+            </div>
+
+            {/* Event content */}
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-sm font-medium text-[#232323]">
+                  {formatEventType(event.event_type)}
+                </span>
+                <span className="text-xs text-gray-400">
+                  {formatDateTime(event.event_timestamp)}
+                </span>
+              </div>
+
+              {event.actor_id && (
+                <div className="flex items-center gap-1 mt-1">
+                  <User className="w-3 h-3 text-gray-400" />
+                  <span className="text-xs text-gray-500">
+                    {event.actor_id}
+                  </span>
+                </div>
+              )}
+
+              {/* Payload fields */}
+              {event.event_payload &&
+                Object.keys(event.event_payload).length > 0 && (
+                  <div className="mt-2 bg-gray-50 rounded-lg px-3 py-2">
+                    {Object.entries(event.event_payload).map(([key, value]) => (
+                      <div
+                        key={key}
+                        className="flex items-center gap-2 text-xs text-gray-600"
+                      >
+                        <span className="font-medium text-gray-500">
+                          {key.replace(/_/g, " ")}:
+                        </span>
+                        <span>{String(value)}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

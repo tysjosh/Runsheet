@@ -190,7 +190,7 @@ class ElasticsearchService:
     
     def _get_standard_ilm_policy(self) -> Dict[str, Any]:
         """
-        Get the standard ILM policy for operational data (trucks, orders, inventory, etc.).
+        Get the standard ILM policy for operational data (trucks, inventory, etc.).
         
         Policy phases:
         - Hot: Active data, optimized for indexing and search
@@ -378,7 +378,7 @@ class ElasticsearchService:
         Apply ILM policies to existing indices.
         
         Maps indices to their appropriate ILM policies:
-        - trucks, orders, inventory, support_tickets, locations -> standard policy
+        - trucks, inventory, support_tickets, locations -> standard policy
         - analytics_events -> analytics policy
         
         Skips if ILM is not available on the cluster.
@@ -394,7 +394,6 @@ class ElasticsearchService:
         # Define index to policy mapping
         index_policy_mapping = {
             "trucks": "runsheet-standard-policy",
-            "orders": "runsheet-standard-policy",
             "inventory": "runsheet-standard-policy",
             "support_tickets": "runsheet-standard-policy",
             "locations": "runsheet-standard-policy",
@@ -572,7 +571,6 @@ class ElasticsearchService:
         indices = {
             "trucks": self._get_trucks_mapping(),
             "locations": self._get_locations_mapping(),
-            "orders": self._get_orders_mapping(),
             "inventory": self._get_inventory_mapping(),
             "support_tickets": self._get_support_tickets_mapping(),
             "analytics_events": self._get_analytics_mapping(),
@@ -685,7 +683,6 @@ class ElasticsearchService:
         expected_mappings = {
             "trucks": self._get_trucks_mapping(),
             "locations": self._get_locations_mapping(),
-            "orders": self._get_orders_mapping(),
             "inventory": self._get_inventory_mapping(),
             "support_tickets": self._get_support_tickets_mapping(),
             "analytics_events": self._get_analytics_mapping()
@@ -1031,6 +1028,9 @@ class ElasticsearchService:
                     "seal_number": {"type": "keyword"},
                     "contents_description": {"type": "text"},
                     "weight_tonnes": {"type": "float"},
+                    # Fuel monitoring fields
+                    "fuel_level_pct": {"type": "float"},
+                    "tenant_id": {"type": "keyword"},
                 }
             }
         }
@@ -1047,28 +1047,6 @@ class ElasticsearchService:
                     "address": {"type": "semantic_text"},
                     "region": {"type": "keyword"},
                     "created_at": {"type": "date"},
-                    "updated_at": {"type": "date"}
-                }
-            }
-        }
-    
-    def _get_orders_mapping(self):
-        """Get mapping for orders index"""
-        return {
-            "mappings": {
-                "properties": {
-                    "order_id": {"type": "keyword"},
-                    "customer": {"type": "text"},
-                    "customer_id": {"type": "keyword"},
-                    "status": {"type": "keyword"},
-                    "value": {"type": "float"},
-                    "items": {"type": "semantic_text"},
-                    "truck_id": {"type": "keyword"},
-                    "region": {"type": "keyword"},
-                    "priority": {"type": "keyword"},
-                    "created_at": {"type": "date"},
-                    "delivery_eta": {"type": "date"},
-                    "delivered_at": {"type": "date"},
                     "updated_at": {"type": "date"}
                 }
             }
@@ -1301,7 +1279,6 @@ class ElasticsearchService:
                         "trucks": "truck_id",
                         "inventory": "item_id", 
                         "support_tickets": "ticket_id",
-                        "orders": "order_id",
                         "locations": "location_id",
                         "analytics_events": "event_id"
                     }

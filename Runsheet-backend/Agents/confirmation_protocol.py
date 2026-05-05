@@ -337,6 +337,33 @@ class ConfirmationProtocol:
                     params["station_id"],
                     {"threshold_pct": params["threshold_pct"], "tenant_id": tenant_id},
                 )
+            elif tool_name == "reroute_job":
+                from datetime import datetime, timezone
+                await self._es.update_document(
+                    "jobs_current",
+                    params["job_id"],
+                    {
+                        "destination": params["new_destination"],
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                        "tenant_id": tenant_id,
+                    },
+                )
+            elif tool_name == "truck_fuel_alert":
+                import uuid
+                from datetime import datetime, timezone
+                alert_id = f"FUEL_ALERT_{uuid.uuid4().hex[:8].upper()}"
+                await self._es.index_document(
+                    "agent_activity_log",
+                    alert_id,
+                    {
+                        "log_id": alert_id,
+                        "agent_id": "truck_fuel_monitor",
+                        "action_type": "truck_fuel_alert",
+                        "parameters": params,
+                        "tenant_id": tenant_id,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    },
+                )
             else:
                 logger.warning(
                     "ConfirmationProtocol: unknown tool %s, no ES write performed",

@@ -56,3 +56,13 @@ export type {
   UseNotificationWebSocketReturn,
 } from "./useNotificationWebSocket";
 export { useNotificationWebSocket } from "./useNotificationWebSocket";
+
+export type {
+  InventoryAlertEvent,
+  InventoryEventType,
+  InventoryWebSocketMessage,
+  InventoryWebSocketOptions,
+  StockChangedEvent,
+  UseInventoryWebSocketReturn,
+} from "./useInventoryWebSocket";
+export { useInventoryWebSocket } from "./useInventoryWebSocket";

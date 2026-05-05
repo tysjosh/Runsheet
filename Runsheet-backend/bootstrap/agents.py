@@ -379,6 +379,128 @@ async def initialize(app, container: ServiceContainer) -> None:
     app.include_router(mvp_router)
     logger.info("MVP endpoints configured and router registered")
 
+    # ---- Inventory Pipeline Integration ----
+    from Agents.autonomous.inventory_monitor import InventoryMonitorAgent
+
+    # L0: Inventory Monitor Agent (Req 2.1, 2.7)
+    inventory_monitor_agent = InventoryMonitorAgent(
+        es_service=es_service,
+        activity_log_service=activity_log_service,
+        ws_manager=agent_ws_manager,
+        confirmation_protocol=confirmation_protocol,
+        feature_flag_service=ops_feature_flags,
+        signal_bus=signal_bus,
+    )
+    scheduler.register(inventory_monitor_agent, RestartPolicy.ON_FAILURE)
+    await scheduler.start_all()
+    logger.info("InventoryMonitorAgent started via AgentScheduler")
+
+    # Add to autonomous_agents dict for health/pause/resume endpoints
+    app.state.autonomous_agents["inventory_monitor_agent"] = inventory_monitor_agent
+
+    # Add to module-level fallback list
+    _autonomous_agents.append(inventory_monitor_agent)
+
+    # ---- Inventory Pipeline Integration — Service Wiring (Req 1.1, 5.1, 6.1) ----
+    from inventory.asset_readiness import AssetReadinessChecker
+    from inventory.driver_exception_handler import DriverExceptionHandler
+
+    inventory_service = container.inventory_service if container.has("inventory_service") else None
+    tenant_inventory_config = container.tenant_inventory_config if container.has("tenant_inventory_config") else None
+
+    # AssetReadinessChecker — verifies critical parts before truck assignment
+    asset_readiness_checker = AssetReadinessChecker(
+        es_service=es_service,
+        tenant_config_service=tenant_inventory_config,
+    )
+
+    # DriverExceptionHandler — handles inventory lookup for driver exceptions
+    driver_exception_handler = DriverExceptionHandler(
+        es_service=es_service,
+        inventory_service=inventory_service,
+        signal_bus=signal_bus,
+    )
+    container.driver_exception_handler = driver_exception_handler
+
+    # Wire readiness checker into JobService (Req 1.1)
+    job_service = container.job_service
+    job_service.set_readiness_checker(asset_readiness_checker)
+
+    # Wire inventory service into JobService for auto-consume (Req 5.1)
+    job_service.set_inventory_service(inventory_service)
+
+    # Wire tenant inventory config into JobService for tenant settings
+    job_service.set_tenant_inventory_config(tenant_inventory_config)
+
+    # Wire inventory service into ExceptionReplanningAgent (Req 4.5, 6.1)
+    exception_replanning_agent.set_inventory_service(inventory_service)
+
+    logger.info("Inventory pipeline services wired into JobService and ExceptionReplanningAgent")
+
+    # ---- Cross-Domain Integration Agents ----
+    from Agents.autonomous.truck_fuel_monitor import TruckFuelMonitor
+    from Agents.autonomous.job_sla_monitor import JobSLAMonitor
+    from Agents.overlay.job_priority_engine import JobPriorityEngine
+    from scheduling.services.job_reroute_service import JobRerouteService
+
+    # L0: Truck Fuel Monitor (Req 1.1)
+    truck_fuel_monitor = TruckFuelMonitor(
+        es_service=es_service,
+        activity_log_service=activity_log_service,
+        ws_manager=agent_ws_manager,
+        confirmation_protocol=confirmation_protocol,
+        feature_flag_service=ops_feature_flags,
+        signal_bus=signal_bus,
+    )
+    scheduler.register(truck_fuel_monitor, RestartPolicy.ON_FAILURE)
+
+    # L0: Job SLA Monitor (Req 4.1)
+    job_sla_monitor = JobSLAMonitor(
+        es_service=es_service,
+        activity_log_service=activity_log_service,
+        ws_manager=agent_ws_manager,
+        confirmation_protocol=confirmation_protocol,
+        feature_flag_service=ops_feature_flags,
+        signal_bus=signal_bus,
+    )
+    scheduler.register(job_sla_monitor, RestartPolicy.ON_FAILURE)
+
+    # L1: Job Priority Engine (Req 3.1)
+    job_priority_engine = JobPriorityEngine(**overlay_common_args)
+    scheduler.register(job_priority_engine, RestartPolicy.ON_FAILURE)
+
+    # Wire delay_response_agent SignalBus explicitly (Req 5.7)
+    # Note: already set by the Layer 0 loop above, but explicit for traceability
+    delay_response_agent._signal_bus = signal_bus
+
+    # Job Reroute Service (Req 2.1)
+    job_reroute_service = JobRerouteService(
+        es_service=es_service,
+        confirmation_protocol=confirmation_protocol,
+    )
+
+    # Start cross-domain agents (only newly registered ones)
+    await scheduler.start_all()
+    logger.info("Cross-domain integration agents started via AgentScheduler")
+
+    # Store cross-domain agent references on app.state
+    app.state.cross_domain_agents = {
+        "truck_fuel_monitor": truck_fuel_monitor,
+        "job_sla_monitor": job_sla_monitor,
+        "job_priority_engine": job_priority_engine,
+        "job_reroute_service": job_reroute_service,
+    }
+
+    # Wire reroute REST routes (Req 2.8)
+    from scheduling.routes.job_reroute_routes import (
+        router as job_reroute_router,
+        configure_job_reroute_routes,
+    )
+
+    configure_job_reroute_routes(job_reroute_service=job_reroute_service)
+    app.include_router(job_reroute_router)
+    logger.info("Cross-domain integration wiring complete")
+
 
 async def shutdown(app, container: ServiceContainer) -> None:
     """Stop agents in order: L2 → L1 → L0, then close resources (Req 10.5)."""
@@ -395,10 +517,12 @@ async def shutdown(app, container: ServiceContainer) -> None:
             ]
             l2_agents = ["learning_policy_agent"]
             l1_agents = [
+                "job_priority_engine",
                 "dispatch_optimizer", "exception_commander",
                 "revenue_guard", "customer_promise",
             ]
             l0_agents = [
+                "inventory_monitor", "truck_fuel_monitor", "job_sla_monitor",
                 "delay_response_agent", "fuel_management_agent",
                 "sla_guardian_agent",
             ]

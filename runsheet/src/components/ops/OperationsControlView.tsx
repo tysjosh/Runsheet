@@ -5,6 +5,7 @@ import type { Job, OperationsControlSummary } from "../../types/api";
 import type { FuelAlert } from "../../services/fuelApi";
 import { getActiveJobs, getDelayedJobs } from "../../services/schedulingApi";
 import { getAlerts as getFuelAlerts } from "../../services/fuelApi";
+import { getAlerts as getInventoryAlerts } from "../../services/inventoryApi";
 import { apiService } from "../../services/api";
 import { useSchedulingWebSocket } from "../../hooks/useSchedulingWebSocket";
 import type {
@@ -19,6 +20,7 @@ import JobQueuePanel from "./JobQueuePanel";
 import DelayedOperationsPanel from "./DelayedOperationsPanel";
 import ApprovalQueuePanel from "./ApprovalQueuePanel";
 import FuelStatusSidebar from "./FuelStatusSidebar";
+import InventoryHealthBadge from "./InventoryHealthBadge";
 import LoadingSpinner from "../LoadingSpinner";
 
 interface AssetLocation {
@@ -46,6 +48,7 @@ export default function OperationsControlView() {
   const [delayedJobs, setDelayedJobs] = useState<Job[]>([]);
   const [fuelAlerts, setFuelAlerts] = useState<FuelAlert[]>([]);
   const [assetLocations, setAssetLocations] = useState<AssetLocation[]>([]);
+  const [inventoryAlertCount, setInventoryAlertCount] = useState(0);
   const [loading, setLoading] = useState(true);
 
   /** Build summary from current state */
@@ -60,16 +63,24 @@ export default function OperationsControlView() {
   const loadData = useCallback(async () => {
     try {
       setLoading(true);
-      const [activeRes, delayedRes, fuelRes, assetsRes] = await Promise.allSettled([
+      const [activeRes, delayedRes, fuelRes, assetsRes, inventoryRes] = await Promise.allSettled([
         getActiveJobs(),
         getDelayedJobs(),
         getFuelAlerts(),
         apiService.getAssets(),
+        getInventoryAlerts(),
       ]);
 
       setActiveJobs(activeRes.status === "fulfilled" ? activeRes.value.data : []);
       setDelayedJobs(delayedRes.status === "fulfilled" ? delayedRes.value.data : []);
       setFuelAlerts(fuelRes.status === "fulfilled" ? fuelRes.value.data : []);
+
+      // Inventory alerts count (fail-open: default to 0)
+      if (inventoryRes.status === "fulfilled") {
+        setInventoryAlertCount(inventoryRes.value.count ?? inventoryRes.value.data?.length ?? 0);
+      } else {
+        setInventoryAlertCount(0);
+      }
 
       const assets = assetsRes.status === "fulfilled" ? assetsRes.value.data : [];
 
@@ -204,6 +215,9 @@ export default function OperationsControlView() {
     <div className="h-full flex flex-col gap-4 p-6 bg-gray-50 overflow-hidden">
       {/* Top: Summary Bar */}
       <OperationsSummaryBar summary={summary} />
+
+      {/* Inventory Health Indicator */}
+      <InventoryHealthBadge alertCount={inventoryAlertCount} />
 
       {/* Main content: Map + Right sidebar */}
       <div className="flex-1 flex gap-4 min-h-0">

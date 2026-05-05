@@ -16,7 +16,7 @@ class DataSeeder:
     
     async def clear_all_data(self):
         """Clear all existing data from indices"""
-        indices = ["trucks", "locations", "orders", "inventory", "support_tickets", "analytics_events"]
+        indices = ["trucks", "locations", "inventory", "support_tickets", "analytics_events"]
         for index in indices:
             try:
                 # Delete all documents in the index
@@ -43,7 +43,6 @@ class DataSeeder:
             
             # Seed other entities
             await self.seed_trucks()
-            await self.seed_orders()
             await self.seed_inventory()
             await self.seed_support_tickets()
             await self.seed_analytics_events()
@@ -79,7 +78,6 @@ class DataSeeder:
             
             # Seed baseline operational data
             await self.seed_baseline_trucks(batch_metadata, base_timestamp)
-            await self.seed_baseline_orders(batch_metadata, base_timestamp)
             await self.seed_baseline_inventory(batch_metadata, base_timestamp)
             await self.seed_baseline_support_tickets(batch_metadata, base_timestamp)
             await self.seed_analytics_events(batch_metadata)
@@ -422,66 +420,6 @@ class DataSeeder:
         
         await self.es_service.bulk_index_documents("trucks", trucks_data)
         logger.info("✅ Seeded trucks data")
-    
-    async def seed_orders(self):
-        """Seed orders data"""
-        orders_data = [
-            {
-                "order_id": "ORD-001",
-                "customer": "Safaricom Ltd",
-                "customer_id": "CUST-001",
-                "status": "in_transit",
-                "value": 125000.0,
-                "items": "Network equipment including routers, switches, and fiber optic cables for telecommunications infrastructure",
-                "truck_id": "GI-58A",
-                "region": "Nairobi",
-                "priority": "high",
-                "created_at": "2024-01-14T08:00:00Z",
-                "delivery_eta": "2024-01-15T14:00:00Z"
-            },
-            {
-                "order_id": "ORD-002",
-                "customer": "Kenya Power",
-                "customer_id": "CUST-002",
-                "status": "pending",
-                "value": 89000.0,
-                "items": "Electrical transformers and power distribution equipment for grid expansion",
-                "region": "Mombasa",
-                "priority": "medium",
-                "created_at": "2024-01-15T09:30:00Z",
-                "delivery_eta": "2024-01-16T16:00:00Z"
-            },
-            {
-                "order_id": "ORD-003",
-                "customer": "Equity Bank",
-                "customer_id": "CUST-003",
-                "status": "delivered",
-                "value": 45000.0,
-                "items": "ATM machines and security equipment for new branch installations",
-                "truck_id": "MO-84A",
-                "region": "Kisumu",
-                "priority": "urgent",
-                "created_at": "2024-01-13T10:15:00Z",
-                "delivery_eta": "2024-01-14T12:00:00Z",
-                "delivered_at": "2024-01-14T11:45:00Z"
-            },
-            {
-                "order_id": "ORD-004",
-                "customer": "Tusker Breweries",
-                "customer_id": "CUST-004",
-                "status": "in_transit",
-                "value": 210000.0,
-                "items": "Brewing equipment including fermentation tanks and bottling machinery",
-                "truck_id": "CE-57A",
-                "region": "Nakuru",
-                "priority": "medium",
-                "created_at": "2024-01-14T11:20:00Z",
-                "delivery_eta": "2024-01-15T18:00:00Z"
-            }
-        ]
-        
-        await self.es_service.bulk_index_documents("orders", orders_data)
-        logger.info("✅ Seeded orders data")
     
     async def seed_inventory(self):
         """Seed inventory data"""
@@ -871,56 +809,6 @@ class DataSeeder:
         
         await self.es_service.bulk_index_documents("trucks", trucks_data)
         logger.info("✅ Seeded baseline trucks data")
-    
-    async def seed_baseline_orders(self, batch_metadata, base_timestamp):
-        """Seed baseline morning orders - fresh orders"""
-        orders_data = [
-            {
-                "order_id": "ORD-001",
-                "customer": "Safaricom Ltd",
-                "customer_id": "CUST-001",
-                "status": "in_transit",
-                "value": 125000.0,
-                "items": "Network equipment including routers and switches",
-                "truck_id": "GI-58A",
-                "region": "Nairobi",
-                "priority": "high",
-                "created_at": (base_timestamp - timedelta(hours=1)).isoformat() + "Z",
-                "delivery_eta": (base_timestamp + timedelta(hours=7)).isoformat() + "Z"
-            },
-            {
-                "order_id": "ORD-002",
-                "customer": "Kenya Power",
-                "customer_id": "CUST-002",
-                "status": "pending",
-                "value": 89000.0,
-                "items": "Electrical transformers and power equipment",
-                "region": "Mombasa",
-                "priority": "medium",
-                "created_at": base_timestamp.isoformat() + "Z",
-                "delivery_eta": (base_timestamp + timedelta(hours=8)).isoformat() + "Z"
-            },
-            {
-                "order_id": "ORD-003",
-                "customer": "Equity Bank",
-                "customer_id": "CUST-003",
-                "status": "in_transit",
-                "value": 45000.0,
-                "items": "ATM machines and security equipment",
-                "truck_id": "MO-84A",
-                "region": "Central",
-                "priority": "urgent",
-                "created_at": (base_timestamp - timedelta(minutes=30)).isoformat() + "Z",
-                "delivery_eta": (base_timestamp + timedelta(hours=3)).isoformat() + "Z"
-            }
-        ]
-        
-        # Add batch metadata
-        for order in orders_data:
-            order.update(batch_metadata)
-        
-        await self.es_service.bulk_index_documents("orders", orders_data)
-        logger.info("✅ Seeded baseline orders data")
     
     async def seed_baseline_inventory(self, batch_metadata, base_timestamp):
         """Seed baseline morning inventory - full stock"""

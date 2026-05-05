@@ -16,13 +16,14 @@ Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9, 3.10
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from Agents.overlay.base_overlay_agent import OverlayAgentBase
 from Agents.overlay.data_contracts import (
     InterventionProposal,
     RiskClass,
     RiskSignal,
+    Severity,
 )
 from Agents.overlay.signal_bus import SignalBus
 from Agents.support.compartment_models import (
@@ -45,11 +46,9 @@ from Agents.support.mvp_es_mappings import (
     MVP_LOAD_PLANS_INDEX,
     TRUCK_COMPARTMENTS_INDEX,
 )
+from inventory.es_mappings import INVENTORY_INDEX
 
 logger = logging.getLogger(__name__)
-
-# Elasticsearch indices consumed by this agent
-FUEL_TRUCKS_INDEX = "fuel_trucks"
 
 # Default minimum delivery quantity in liters (Req 3.5)
 DEFAULT_MIN_DROP_LITERS = 500.0
@@ -158,8 +157,8 @@ class CompartmentLoadingAgent(OverlayAgentBase):
         if not delivery_requests:
             return []
 
-        # Step 3: Query available trucks and compartments (Req 3.1)
-        trucks = await self._query_trucks(tenant_id)
+        # Step 3: Query available trucks with equipment check (Req 3.1, 3.2, 3.3)
+        trucks = await self._query_trucks_with_equipment_check(tenant_id)
         if not trucks:
             logger.info(
                 "CompartmentLoadingAgent: no trucks found for tenant %s",
@@ -265,6 +264,7 @@ class CompartmentLoadingAgent(OverlayAgentBase):
         - 'compartments': List[Compartment]
         - 'max_weight_kg': Optional[float]
         - 'tare_weight_kg': float
+        - 'depot_location': Optional[str]
         """
         query = {
             "query": {
@@ -314,6 +314,7 @@ class CompartmentLoadingAgent(OverlayAgentBase):
                         "compartments": [],
                         "max_weight_kg": source.get("max_weight_kg"),
                         "tare_weight_kg": source.get("tare_weight_kg", 0.0),
+                        "depot_location": source.get("depot_location"),
                     }
                 trucks[truck_id]["compartments"].append(compartment)
         except Exception as e:
@@ -323,6 +324,173 @@ class CompartmentLoadingAgent(OverlayAgentBase):
             )
 
         return trucks
+
+    # ------------------------------------------------------------------
+    # Fuel equipment availability check (Req 3.1, 3.2, 3.3, 3.4, 3.5)
+    # ------------------------------------------------------------------
+
+    async def _check_fuel_equipment(
+        self, truck_id: str, depot_location: str, tenant_id: str
+    ) -> Tuple[bool, List[str]]:
+        """Check fuel equipment availability at a truck's depot.
+
+        Queries the inventory index for items with category ``fuel_equipment``
+        at the given depot location. If any item has status ``out_of_stock``,
+        the truck is considered unavailable for loading.
+
+        Args:
+            truck_id: The truck being evaluated.
+            depot_location: The depot where the truck is based.
+            tenant_id: Tenant scope.
+
+        Returns:
+            Tuple of (available: bool, missing_item_ids: List[str]).
+            ``available`` is True if all fuel_equipment items are in stock.
+            ``missing_item_ids`` contains item_ids of out_of_stock items.
+        """
+        query = {
+            "query": {
+                "bool": {
+                    "must": [
+                        {"term": {"category": "fuel_equipment"}},
+                        {"term": {"tenant_id": tenant_id}},
+                        {"match": {"location": depot_location}},
+                    ],
+                },
+            },
+            "size": 100,
+        }
+
+        try:
+            resp = await self._es.search_documents(
+                INVENTORY_INDEX, query, 100
+            )
+            hits = resp.get("hits", {}).get("hits", [])
+
+            missing_item_ids: List[str] = []
+            for hit in hits:
+                source = hit["_source"]
+                if source.get("status") == "out_of_stock":
+                    item_id = source.get("item_id", "")
+                    if item_id:
+                        missing_item_ids.append(item_id)
+
+            available = len(missing_item_ids) == 0
+            return available, missing_item_ids
+
+        except Exception as e:
+            # Fail-open: on inventory query failure, include the truck (Req 3.5)
+            logger.warning(
+                "CompartmentLoadingAgent: inventory query failed for truck %s "
+                "at depot %s, failing open: %s",
+                truck_id,
+                depot_location,
+                e,
+            )
+            return True, []
+
+    async def _query_trucks_with_equipment_check(
+        self, tenant_id: str
+    ) -> Dict[str, Dict[str, Any]]:
+        """Query trucks and filter by fuel equipment availability.
+
+        Wraps ``_query_trucks`` and removes trucks whose depot lacks
+        required fuel_equipment items (status out_of_stock). If all trucks
+        are excluded, publishes a critical RiskSignal indicating equipment
+        shortage.
+
+        Fail-open: trucks without a known depot_location are included
+        without an equipment check.
+
+        Args:
+            tenant_id: Tenant scope.
+
+        Returns:
+            Filtered dict of trucks with equipment available at their depot.
+        """
+        trucks = await self._query_trucks(tenant_id)
+        if not trucks:
+            return trucks
+
+        eligible_trucks: Dict[str, Dict[str, Any]] = {}
+        excluded_trucks: List[Dict[str, Any]] = []
+
+        for truck_id, truck_data in trucks.items():
+            depot_location = truck_data.get("depot_location")
+
+            # Fail-open: if no depot_location known, include the truck
+            if not depot_location:
+                eligible_trucks[truck_id] = truck_data
+                continue
+
+            available, missing_item_ids = await self._check_fuel_equipment(
+                truck_id, depot_location, tenant_id
+            )
+
+            if available:
+                eligible_trucks[truck_id] = truck_data
+            else:
+                # Req 3.4: Log exclusion with truck_id, depot, and missing item_ids
+                logger.warning(
+                    "CompartmentLoadingAgent: excluding truck %s — "
+                    "depot %s missing fuel_equipment items: %s",
+                    truck_id,
+                    depot_location,
+                    missing_item_ids,
+                )
+                excluded_trucks.append({
+                    "truck_id": truck_id,
+                    "depot_location": depot_location,
+                    "missing_item_ids": missing_item_ids,
+                })
+
+        # Req 3.5: If all trucks excluded, publish critical RiskSignal
+        if not eligible_trucks and excluded_trucks:
+            await self._publish_equipment_shortage_signal(
+                tenant_id, excluded_trucks
+            )
+
+        return eligible_trucks
+
+    async def _publish_equipment_shortage_signal(
+        self,
+        tenant_id: str,
+        excluded_trucks: List[Dict[str, Any]],
+    ) -> None:
+        """Publish a critical RiskSignal when all trucks lack fuel equipment.
+
+        Args:
+            tenant_id: Tenant scope.
+            excluded_trucks: List of dicts with truck_id, depot_location,
+                and missing_item_ids for each excluded truck.
+        """
+        try:
+            signal = RiskSignal(
+                source_agent=self.agent_id,
+                entity_id="fuel_equipment_shortage",
+                entity_type="equipment_shortage",
+                severity=Severity.CRITICAL,
+                confidence=1.0,
+                ttl_seconds=3600,
+                tenant_id=tenant_id,
+                context={
+                    "reason": "All candidate trucks excluded due to fuel equipment shortage",
+                    "excluded_truck_count": len(excluded_trucks),
+                    "excluded_trucks": excluded_trucks,
+                },
+            )
+            await self._signal_bus.publish(signal)
+            logger.critical(
+                "CompartmentLoadingAgent: ALL trucks excluded for tenant %s "
+                "due to fuel equipment shortage — critical RiskSignal published",
+                tenant_id,
+            )
+        except Exception as e:
+            logger.error(
+                "CompartmentLoadingAgent: failed to publish equipment "
+                "shortage RiskSignal: %s",
+                e,
+            )
 
     # ------------------------------------------------------------------
     # Build InterventionProposal

@@ -12,11 +12,15 @@ mvp_replan_events.
 Routes all plan mutations through ConfirmationProtocol with MEDIUM
 risk classification (truck swaps classified as HIGH).
 
+For truck breakdowns, queries inventory for compatible repair parts
+at the nearest depot. If parts are in stock, proposes a repair with
+ETA; otherwise falls back to truck swap only.
+
 Default configuration:
     - decision_cycle: 30 seconds (continuous monitor)
     - cooldown: 5 minutes per entity
 
-Requirements: 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 5.7, 5.8
+Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 5.7, 5.8
 """
 
 import logging
@@ -43,6 +47,7 @@ from Agents.support.mvp_es_mappings import (
     MVP_REPLAN_EVENTS_INDEX,
     MVP_ROUTES_INDEX,
 )
+from inventory.es_mappings import INVENTORY_INDEX
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +66,12 @@ DISRUPTION_SOURCE_AGENTS = {
     "exception_commander",
 }
 
+# Repair part categories queried during breakdown handling (Req 4.1)
+REPAIR_PART_CATEGORIES = ["tires", "brake_parts", "engine_parts"]
+
+# Default estimated repair time in minutes per part category
+DEFAULT_REPAIR_ETA_MINUTES = 45
+
 
 class ExceptionReplanningAgent(OverlayAgentBase):
     """Patches plans when disruptions occur.
@@ -70,6 +81,10 @@ class ExceptionReplanningAgent(OverlayAgentBase):
     loads the current plan snapshot, attempts replanning, and produces
     patched plans or escalates.
 
+    For truck breakdowns, queries inventory for compatible repair parts
+    at the nearest depot. If parts are in stock, proposes a repair with
+    ETA and parts list; otherwise falls back to truck swap only.
+
     Args:
         signal_bus: SignalBus for pub/sub.
         es_service: Elasticsearch service for querying indices.
@@ -78,6 +93,7 @@ class ExceptionReplanningAgent(OverlayAgentBase):
         confirmation_protocol: For routing proposals.
         autonomy_config_service: For mode management.
         feature_flag_service: For per-tenant feature flags.
+        inventory_service: Optional InventoryService for parts consumption.
         poll_interval: Decision cycle interval in seconds (default 30).
         cooldown_minutes: Per-entity cooldown in minutes (default 5).
     """
@@ -91,6 +107,7 @@ class ExceptionReplanningAgent(OverlayAgentBase):
         confirmation_protocol,
         autonomy_config_service,
         feature_flag_service,
+        inventory_service=None,
         poll_interval: int = 30,
         cooldown_minutes: int = 5,
     ):
@@ -114,6 +131,7 @@ class ExceptionReplanningAgent(OverlayAgentBase):
             poll_interval=poll_interval,
             cooldown_minutes=cooldown_minutes,
         )
+        self._inventory_service = inventory_service
 
     # ------------------------------------------------------------------
     # Core evaluation (Req 5.1–5.8)
@@ -313,7 +331,7 @@ class ExceptionReplanningAgent(OverlayAgentBase):
         }
 
         handler = replan_handlers.get(disruption_type, self._handle_delay)
-        result = handler(signal, plan_snapshot)
+        result = await handler(signal, plan_snapshot)
 
         if result is None:
             # Step 4: No feasible replan — escalate (Req 5.6)
@@ -363,17 +381,18 @@ class ExceptionReplanningAgent(OverlayAgentBase):
     # Disruption handlers (Req 5.3–5.5)
     # ------------------------------------------------------------------
 
-    def _handle_truck_breakdown(
+    async def _handle_truck_breakdown(
         self,
         signal: RiskSignal,
         plan_snapshot: Dict[str, Any],
     ) -> Optional[tuple]:
-        """Handle truck breakdown: attempt truck swap (Req 5.3).
+        """Handle truck breakdown with inventory-aware repair/swap decision.
 
-        Checks if the broken truck is in the current plan. If so,
-        marks the truck as swapped and captures remaining stops for
-        reassignment. The actual replacement truck selection happens
-        during proposal execution via the ConfirmationProtocol.
+        1. Query inventory for repair parts compatible with broken truck
+           at the nearest depot (Req 4.1).
+        2. If parts available: include repair_proposal with ETA (Req 4.2).
+        3. If parts unavailable: propose truck_swap only (Req 4.3).
+        4. Include parts availability in proposal context (Req 4.4).
 
         Returns (ReplanDiff, patched_plan_id, RiskClass) or None.
         """
@@ -387,6 +406,11 @@ class ExceptionReplanningAgent(OverlayAgentBase):
             # Truck not in current plan — no replan needed
             return None
 
+        # Determine asset type and depot location from context
+        context = signal.context or {}
+        asset_type = context.get("asset_type", "truck")
+        depot_location = context.get("depot_location", "")
+
         # Collect remaining stops that need reassignment
         remaining_stops = []
         if route_plan:
@@ -396,15 +420,66 @@ class ExceptionReplanningAgent(OverlayAgentBase):
                 if s.get("station_id")
             ]
 
-        diff = ReplanDiff(
-            truck_swapped=broken_truck,
-            stops_reordered=remaining_stops,
+        # Query repair parts availability (Req 4.1)
+        tenant_id = signal.tenant_id
+        repair_parts = await self._query_repair_parts(
+            asset_type=asset_type,
+            depot_location=depot_location,
+            tenant_id=tenant_id,
         )
 
-        # Truck swaps are HIGH risk (Req 5.8)
-        return diff, None, RiskClass.HIGH
+        # Determine if all needed parts are in stock
+        parts_in_stock = (
+            len(repair_parts) > 0
+            and all(p.get("status") == "in_stock" for p in repair_parts)
+        )
 
-    def _handle_station_outage(
+        if parts_in_stock:
+            # Req 4.2: Include repair_proposal action with ETA and parts list
+            diff = ReplanDiff(
+                truck_swapped=None,
+                stops_reordered=remaining_stops,
+            )
+
+            # Attach repair context for proposal building
+            diff_context = {
+                "repair_proposal": True,
+                "repair_parts": repair_parts,
+                "depot_location": depot_location,
+                "estimated_repair_minutes": DEFAULT_REPAIR_ETA_MINUTES,
+                "parts_availability": "in_stock",
+                "broken_truck": broken_truck,
+            }
+            # Store context on the signal for downstream use
+            if signal.context is None:
+                signal.context = {}
+            signal.context["_repair_context"] = diff_context
+
+            return diff, None, RiskClass.MEDIUM
+        else:
+            # Req 4.3: Parts out of stock — propose truck_swap only
+            diff = ReplanDiff(
+                truck_swapped=broken_truck,
+                stops_reordered=remaining_stops,
+            )
+
+            # Attach parts availability context (Req 4.4)
+            parts_context = {
+                "repair_proposal": False,
+                "repair_parts": repair_parts,
+                "depot_location": depot_location,
+                "parts_availability": "out_of_stock",
+                "broken_truck": broken_truck,
+                "reason": "repair_parts_unavailable",
+            }
+            if signal.context is None:
+                signal.context = {}
+            signal.context["_repair_context"] = parts_context
+
+            # Truck swaps are HIGH risk (Req 5.8)
+            return diff, None, RiskClass.HIGH
+
+    async def _handle_station_outage(
         self,
         signal: RiskSignal,
         plan_snapshot: Dict[str, Any],
@@ -442,7 +517,7 @@ class ExceptionReplanningAgent(OverlayAgentBase):
 
         return diff, None, RiskClass.MEDIUM
 
-    def _handle_demand_spike(
+    async def _handle_demand_spike(
         self,
         signal: RiskSignal,
         plan_snapshot: Dict[str, Any],
@@ -472,7 +547,7 @@ class ExceptionReplanningAgent(OverlayAgentBase):
 
         return diff, None, RiskClass.MEDIUM
 
-    def _handle_delay(
+    async def _handle_delay(
         self,
         signal: RiskSignal,
         plan_snapshot: Dict[str, Any],
@@ -503,6 +578,154 @@ class ExceptionReplanningAgent(OverlayAgentBase):
         )
 
         return diff, None, RiskClass.MEDIUM
+
+    # ------------------------------------------------------------------
+    # Inventory-aware repair parts (Req 4.1, 4.4, 4.5)
+    # ------------------------------------------------------------------
+
+    async def _query_repair_parts(
+        self, asset_type: str, depot_location: str, tenant_id: str
+    ) -> List[Dict[str, Any]]:
+        """Query inventory for repair parts compatible with asset type at depot.
+
+        Searches the inventory index for items in critical repair categories
+        (tires, brake_parts, engine_parts) that are compatible with the
+        given asset type and located at the specified depot.
+
+        Args:
+            asset_type: The broken truck's asset type (e.g., "truck", "tanker").
+            depot_location: The nearest depot location to check.
+            tenant_id: Tenant scope.
+
+        Returns:
+            List of dicts with item_id, name, category, status, quantity,
+            min_threshold, and location for each matching part.
+            Returns empty list on query failure (fail-open).
+        """
+        # Build query for repair parts at the depot
+        must_clauses: List[Dict[str, Any]] = [
+            {"terms": {"category": REPAIR_PART_CATEGORIES}},
+            {"term": {"tenant_id": tenant_id}},
+        ]
+
+        # Filter by compatible_assets if asset_type is provided
+        if asset_type:
+            must_clauses.append({"term": {"compatible_assets": asset_type}})
+
+        # Filter by depot location if provided
+        if depot_location:
+            must_clauses.append(
+                {"match": {"location": depot_location}}
+            )
+
+        query = {
+            "query": {
+                "bool": {
+                    "must": must_clauses,
+                },
+            },
+            "size": 100,
+        }
+
+        try:
+            resp = await self._es.search_documents(
+                INVENTORY_INDEX, query, 100
+            )
+            hits = resp.get("hits", {}).get("hits", [])
+
+            parts: List[Dict[str, Any]] = []
+            for hit in hits:
+                source = hit["_source"]
+                parts.append({
+                    "item_id": source.get("item_id", ""),
+                    "name": source.get("name", ""),
+                    "category": source.get("category", ""),
+                    "status": source.get("status", ""),
+                    "quantity": source.get("quantity", 0),
+                    "min_threshold": source.get("min_threshold", 0),
+                    "location": source.get("location", ""),
+                })
+
+            return parts
+
+        except Exception as e:
+            # Fail-open: on inventory query failure, return empty list
+            # so the agent falls back to truck_swap (Req 4.3)
+            logger.warning(
+                "ExceptionReplanningAgent: inventory query failed for "
+                "repair parts (asset_type=%s, depot=%s): %s",
+                asset_type,
+                depot_location,
+                e,
+            )
+            return []
+
+    async def _consume_repair_parts(
+        self, parts: List[Dict[str, Any]], tenant_id: str
+    ) -> None:
+        """Trigger stock consumption for used repair parts via InventoryService.
+
+        Calls InventoryService.adjust_stock() for each part with a negative
+        quantity change of 1 unit, reason 'used_for_repair'.
+
+        Args:
+            parts: List of part dicts (must contain 'item_id').
+            tenant_id: Tenant scope.
+
+        Req 4.5: When a repair proposal is accepted and executed,
+        trigger parts consumption.
+        """
+        if not self._inventory_service:
+            logger.warning(
+                "ExceptionReplanningAgent: cannot consume repair parts — "
+                "InventoryService not wired"
+            )
+            return
+
+        from inventory.models import StockAdjustment
+
+        for part in parts:
+            item_id = part.get("item_id", "")
+            if not item_id:
+                continue
+
+            try:
+                adjustment = StockAdjustment(
+                    quantity_change=-1,
+                    reason="used_for_repair",
+                    reference_id=f"repair_{item_id}",
+                    notes=f"Consumed for truck repair (tenant: {tenant_id})",
+                )
+                await self._inventory_service.adjust_stock(
+                    item_id=item_id,
+                    adjustment=adjustment,
+                    tenant_id=tenant_id,
+                    actor_id=self.agent_id,
+                )
+                logger.info(
+                    "ExceptionReplanningAgent: consumed repair part %s "
+                    "for tenant %s",
+                    item_id,
+                    tenant_id,
+                )
+            except Exception as e:
+                logger.warning(
+                    "ExceptionReplanningAgent: failed to consume repair "
+                    "part %s: %s",
+                    item_id,
+                    e,
+                )
+
+    def set_inventory_service(self, inventory_service) -> None:
+        """Wire the InventoryService reference via setter.
+
+        Allows late-binding when the service is not available at
+        construction time.
+
+        Args:
+            inventory_service: An InventoryService instance.
+        """
+        self._inventory_service = inventory_service
 
     # ------------------------------------------------------------------
     # Escalation (Req 5.6)
@@ -543,24 +766,82 @@ class ExceptionReplanningAgent(OverlayAgentBase):
         Routes through ConfirmationProtocol with MEDIUM risk
         (truck swaps as HIGH) per Req 5.8.
 
+        For truck breakdowns, includes repair_proposal or truck_swap
+        action based on parts availability (Req 4.2, 4.3, 4.4).
+
         Computes confidence_score and confidence_rationale per Req 17.1–17.3.
         When confidence_score < 0.5, overrides risk_class to HIGH.
         """
-        actions = [
-            {
-                "tool_name": "apply_replan",
+        # Check for repair context from breakdown handler (Req 4.2, 4.3)
+        repair_context = None
+        if signal and signal.context:
+            repair_context = signal.context.get("_repair_context")
+
+        actions = []
+
+        if repair_context and repair_context.get("repair_proposal"):
+            # Req 4.2: Include repair_proposal action with ETA and parts list
+            actions.append({
+                "tool_name": "repair_proposal",
                 "parameters": {
                     "event_id": replan_event.event_id,
                     "original_plan_id": replan_event.original_plan_id,
-                    "replan_type": disruption_type,
-                    "diff": replan_event.diff.model_dump(mode="json"),
+                    "broken_truck": repair_context.get("broken_truck", ""),
+                    "depot_location": repair_context.get("depot_location", ""),
+                    "estimated_repair_minutes": repair_context.get(
+                        "estimated_repair_minutes", DEFAULT_REPAIR_ETA_MINUTES
+                    ),
+                    "repair_parts": repair_context.get("repair_parts", []),
+                    "parts_availability": repair_context.get(
+                        "parts_availability", "unknown"
+                    ),
+                    "checked_item_ids": [
+                        p.get("item_id", "")
+                        for p in repair_context.get("repair_parts", [])
+                    ],
                 },
+                "description": (
+                    f"Repair proposal for truck "
+                    f"{repair_context.get('broken_truck', '')} — "
+                    f"ETA {repair_context.get('estimated_repair_minutes', DEFAULT_REPAIR_ETA_MINUTES)} min, "
+                    f"{len(repair_context.get('repair_parts', []))} parts available"
+                ),
+            })
+        else:
+            # Default replan action (truck_swap or other)
+            action_params: Dict[str, Any] = {
+                "event_id": replan_event.event_id,
+                "original_plan_id": replan_event.original_plan_id,
+                "replan_type": disruption_type,
+                "diff": replan_event.diff.model_dump(mode="json"),
+            }
+            # Req 4.4: Include parts availability in proposal context
+            if repair_context:
+                action_params["parts_availability"] = repair_context.get(
+                    "parts_availability", "unknown"
+                )
+                action_params["depot_location"] = repair_context.get(
+                    "depot_location", ""
+                )
+                action_params["checked_item_ids"] = [
+                    p.get("item_id", "")
+                    for p in repair_context.get("repair_parts", [])
+                ]
+
+            actions.append({
+                "tool_name": "apply_replan",
+                "parameters": action_params,
                 "description": (
                     f"Replan ({disruption_type}) for plan "
                     f"{replan_event.original_plan_id}"
                 ),
-            }
-        ]
+            })
+
+        # Build expected KPI delta
+        expected_kpi_delta: Dict[str, Any] = {
+            "replan_count": 1,
+            "disruption_mitigated": 1,
+        }
 
         # Compute confidence score (Req 17.1, 17.2)
         signal_confidence = signal.confidence if signal else 0.5
@@ -599,10 +880,7 @@ class ExceptionReplanningAgent(OverlayAgentBase):
         return InterventionProposal(
             source_agent=self.agent_id,
             actions=actions,
-            expected_kpi_delta={
-                "replan_count": 1,
-                "disruption_mitigated": 1,
-            },
+            expected_kpi_delta=expected_kpi_delta,
             risk_class=effective_risk_class,
             confidence=signal_confidence,
             priority=2,

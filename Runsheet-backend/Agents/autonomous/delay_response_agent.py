@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from Agents.autonomous.base_agent import AutonomousAgentBase
 from Agents.confirmation_protocol import MutationRequest
+from Agents.overlay.data_contracts import RiskSignal, Severity
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,8 @@ class DelayResponseAgent(AutonomousAgentBase):
         ws_manager: WebSocket manager for broadcasting events.
         confirmation_protocol: Protocol for routing mutation requests.
         feature_flag_service: Optional service for tenant feature flags.
+        signal_bus: Optional SignalBus instance for publishing RiskSignals
+            to Layer 1 overlay agents.
         poll_interval: Seconds between polling cycles (default 60).
         cooldown_minutes: Minutes to suppress duplicate actions per job
             (default 15).
@@ -68,6 +71,7 @@ class DelayResponseAgent(AutonomousAgentBase):
         ws_manager,
         confirmation_protocol,
         feature_flag_service=None,
+        signal_bus=None,
         poll_interval: int = 60,
         cooldown_minutes: int = 15,
     ):
@@ -81,6 +85,7 @@ class DelayResponseAgent(AutonomousAgentBase):
             feature_flag_service=feature_flag_service,
         )
         self._es = es_service
+        self._signal_bus = signal_bus
 
     # ------------------------------------------------------------------
     # Core monitoring cycle
@@ -134,6 +139,42 @@ class DelayResponseAgent(AutonomousAgentBase):
             if self._is_on_cooldown(job_id):
                 continue
 
+            # Publish RiskSignal BEFORE MutationRequest (Req 5.6)
+            if self._signal_bus:
+                try:
+                    estimated_arrival_str = job.get("estimated_arrival")
+                    if estimated_arrival_str:
+                        est_arrival = datetime.fromisoformat(
+                            estimated_arrival_str.replace("Z", "+00:00")
+                        )
+                        delay_minutes = (
+                            datetime.now(timezone.utc) - est_arrival
+                        ).total_seconds() / 60.0
+                    else:
+                        delay_minutes = 0.0
+
+                    signal = RiskSignal(
+                        source_agent=self.agent_id,
+                        entity_id=job_id,
+                        entity_type="job",
+                        severity=self._derive_delay_severity(delay_minutes),
+                        confidence=0.9,
+                        ttl_seconds=1800,
+                        tenant_id=tenant_id,
+                        context={
+                            "job_type": job.get("job_type"),
+                            "priority": job.get("priority"),
+                            "asset_assigned": job.get("asset_assigned"),
+                            "estimated_arrival": job.get("estimated_arrival"),
+                            "detected_at": datetime.now(
+                                timezone.utc
+                            ).isoformat(),
+                        },
+                    )
+                    await self._signal_bus.publish(signal)
+                except Exception as e:
+                    self.logger.error(f"Failed to publish RiskSignal: {e}")
+
             # Find a compatible available asset (Req 3.3)
             job_type = job.get("job_type")
             asset_type = self._job_type_to_asset_type(job_type)
@@ -179,6 +220,25 @@ class DelayResponseAgent(AutonomousAgentBase):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _derive_delay_severity(delay_minutes: float) -> Severity:
+        """Derive severity from the delay magnitude in minutes.
+
+        Args:
+            delay_minutes: The delay duration in minutes.
+
+        Returns:
+            A ``Severity`` enum value based on the delay magnitude:
+            critical > 60, high > 30, medium > 15, low ≤ 15.
+        """
+        if delay_minutes > 60:
+            return Severity.CRITICAL
+        elif delay_minutes > 30:
+            return Severity.HIGH
+        elif delay_minutes > 15:
+            return Severity.MEDIUM
+        return Severity.LOW
 
     @staticmethod
     def _job_type_to_asset_type(job_type: Optional[str]) -> str:

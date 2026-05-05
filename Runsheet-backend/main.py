@@ -28,6 +28,7 @@ from data_endpoints import router as data_router
 from ops.webhooks.receiver import router as webhook_router
 from ops.api.endpoints import router as ops_router
 from fuel.api.endpoints import router as fuel_router
+from inventory.api.endpoints import router as inventory_router
 from scheduling.api.endpoints import router as scheduling_router
 from scheduling.api.driver_endpoints import router as driver_scheduling_router
 from driver.api.message_endpoints import router as message_router
@@ -86,6 +87,7 @@ app.include_router(data_router)
 app.include_router(webhook_router)
 app.include_router(ops_router)
 app.include_router(fuel_router)
+app.include_router(inventory_router)
 app.include_router(scheduling_router)
 app.include_router(driver_scheduling_router)
 app.include_router(message_router)

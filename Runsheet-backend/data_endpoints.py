@@ -234,341 +234,7 @@ class UpdateAsset(BaseModel):
 
 
 
-class InventoryItem(BaseModel):
-    id: str
-    name: str
-    category: str
-    quantity: int
-    unit: str
-    location: str
-    status: str
-    lastUpdated: str
 
-class Order(BaseModel):
-    id: str
-    customer: str
-    status: str
-    value: float
-    items: str
-    truckId: Optional[str] = None
-    region: str
-    createdAt: str
-    deliveryEta: str
-    priority: str
-
-class SupportTicket(BaseModel):
-    id: str
-    customer: str
-    issue: str
-    description: str
-    priority: str
-    status: str
-    createdAt: str
-    assignedTo: Optional[str] = None
-    relatedOrder: Optional[str] = None
-
-# Mock Data Functions
-def get_mock_locations():
-    return [
-        Location(
-            id="nairobi-station",
-            name="Nairobi Station",
-            type="station",
-            coordinates={"lat": -1.2921, "lng": 36.8219},
-            address="Nairobi, Kenya"
-        ),
-        Location(
-            id="mombasa-port",
-            name="Mombasa Port",
-            type="station",
-            coordinates={"lat": -4.0435, "lng": 39.6682},
-            address="Mombasa, Kenya"
-        ),
-        Location(
-            id="kisumu-depot",
-            name="Kisumu Depot",
-            type="depot",
-            coordinates={"lat": -0.0917, "lng": 34.7680},
-            address="Kisumu, Kenya"
-        ),
-        Location(
-            id="kinara-warehouse",
-            name="Kinara Warehouse",
-            type="warehouse",
-            coordinates={"lat": -1.3733, "lng": 36.7516},
-            address="Kinara, Kenya"
-        )
-    ]
-
-def get_mock_trucks():
-    locations = get_mock_locations()
-    route = Route(
-        id="kisumu-mombasa",
-        origin=locations[2],
-        destination=locations[1],
-        waypoints=[locations[0]],
-        distance=580,
-        estimatedDuration=480
-    )
-    
-    return [
-        Truck(
-            id="GI-58A",
-            plateNumber="GI-58A",
-            driverId="driver-001",
-            driverName="John Kamau",
-            currentLocation=locations[2],
-            destination=locations[1],
-            route=route,
-            status="on_time",
-            estimatedArrival="2024-01-15T14:15:00Z",
-            lastUpdate="2024-01-15T12:00:00Z",
-            cargo=CargoInfo(
-                type="General Cargo",
-                weight=15000,
-                volume=45,
-                description="Mixed goods",
-                priority="medium"
-            )
-        ),
-        Truck(
-            id="MO-84A",
-            plateNumber="MO-84A",
-            driverId="driver-002",
-            driverName="Mary Wanjiku",
-            currentLocation=locations[0],
-            destination=locations[3],
-            route=route,
-            status="delayed",
-            estimatedArrival="2024-01-15T16:25:00Z",
-            lastUpdate="2024-01-15T12:05:00Z",
-            cargo=CargoInfo(
-                type="Perishables",
-                weight=8000,
-                volume=25,
-                description="Fresh produce",
-                priority="high"
-            )
-        ),
-        Truck(
-            id="CE-57A",
-            plateNumber="CE-57A",
-            driverId="driver-003",
-            driverName="Peter Ochieng",
-            currentLocation=locations[2],
-            destination=locations[1],
-            route=route,
-            status="delayed",
-            estimatedArrival="2024-01-15T12:25:00Z",
-            lastUpdate="2024-01-15T12:10:00Z"
-        ),
-        Truck(
-            id="AL-94J",
-            plateNumber="AL-94J",
-            driverId="driver-004",
-            driverName="Grace Mutua",
-            currentLocation=locations[1],
-            destination=locations[0],
-            route=route,
-            status="delayed",
-            estimatedArrival="2024-01-15T12:25:00Z",
-            lastUpdate="2024-01-15T12:15:00Z"
-        ),
-        Truck(
-            id="PL-56A",
-            plateNumber="PL-56A",
-            driverId="driver-005",
-            driverName="Samuel Kiprotich",
-            currentLocation=locations[0],
-            destination=locations[2],
-            route=route,
-            status="delayed",
-            estimatedArrival="2024-01-15T12:25:00Z",
-            lastUpdate="2024-01-15T12:20:00Z"
-        ),
-        Truck(
-            id="DU-265",
-            plateNumber="DU-265",
-            driverId="driver-006",
-            driverName="Alice Nyong",
-            currentLocation=locations[1],
-            destination=locations[0],
-            route=route,
-            status="delayed",
-            estimatedArrival="2024-01-15T19:23:00Z",
-            lastUpdate="2024-01-15T12:25:00Z"
-        )
-    ]
-
-def get_mock_inventory():
-    return [
-        InventoryItem(
-            id="INV-001",
-            name="Diesel Fuel",
-            category="Fuel",
-            quantity=15000,
-            unit="liters",
-            location="Nairobi Depot",
-            status="in_stock",
-            lastUpdated="2024-01-15T10:30:00Z"
-        ),
-        InventoryItem(
-            id="INV-002",
-            name="Spare Tires",
-            category="Parts",
-            quantity=25,
-            unit="pieces",
-            location="Mombasa Warehouse",
-            status="low_stock",
-            lastUpdated="2024-01-15T09:15:00Z"
-        ),
-        InventoryItem(
-            id="INV-003",
-            name="Engine Oil",
-            category="Maintenance",
-            quantity=0,
-            unit="bottles",
-            location="Kisumu Station",
-            status="out_of_stock",
-            lastUpdated="2024-01-14T16:45:00Z"
-        ),
-        InventoryItem(
-            id="INV-004",
-            name="Brake Pads",
-            category="Parts",
-            quantity=120,
-            unit="sets",
-            location="Nairobi Depot",
-            status="in_stock",
-            lastUpdated="2024-01-15T08:20:00Z"
-        ),
-        InventoryItem(
-            id="INV-005",
-            name="Coolant Fluid",
-            category="Maintenance",
-            quantity=8,
-            unit="bottles",
-            location="Mombasa Warehouse",
-            status="low_stock",
-            lastUpdated="2024-01-15T11:00:00Z"
-        )
-    ]
-
-def get_mock_orders():
-    return [
-        Order(
-            id="ORD-001",
-            customer="Safaricom Ltd",
-            status="in_transit",
-            value=125000,
-            items="Network equipment, cables",
-            truckId="GI-58A",
-            region="Nairobi",
-            createdAt="2024-01-14T08:00:00Z",
-            deliveryEta="2024-01-15T14:00:00Z",
-            priority="high"
-        ),
-        Order(
-            id="ORD-002",
-            customer="Kenya Power",
-            status="pending",
-            value=89000,
-            items="Electrical transformers",
-            region="Mombasa",
-            createdAt="2024-01-15T09:30:00Z",
-            deliveryEta="2024-01-16T16:00:00Z",
-            priority="medium"
-        ),
-        Order(
-            id="ORD-003",
-            customer="Equity Bank",
-            status="delivered",
-            value=45000,
-            items="ATM machines, security equipment",
-            truckId="MO-84A",
-            region="Kisumu",
-            createdAt="2024-01-13T10:15:00Z",
-            deliveryEta="2024-01-14T12:00:00Z",
-            priority="urgent"
-        ),
-        Order(
-            id="ORD-004",
-            customer="Tusker Breweries",
-            status="in_transit",
-            value=210000,
-            items="Brewing equipment, containers",
-            truckId="NA-45B",
-            region="Nakuru",
-            createdAt="2024-01-14T11:20:00Z",
-            deliveryEta="2024-01-15T18:00:00Z",
-            priority="medium"
-        ),
-        Order(
-            id="ORD-005",
-            customer="Naivas Supermarket",
-            status="pending",
-            value=67000,
-            items="Refrigeration units, shelving",
-            region="Eldoret",
-            createdAt="2024-01-15T07:45:00Z",
-            deliveryEta="2024-01-16T10:00:00Z",
-            priority="low"
-        )
-    ]
-
-def get_mock_support_tickets():
-    return [
-        SupportTicket(
-            id="TKT-001",
-            customer="Safaricom Ltd",
-            issue="Delivery Delay",
-            description="Order ORD-001 is running 3 hours behind schedule. Customer needs urgent update on ETA.",
-            priority="high",
-            status="open",
-            createdAt="2024-01-15T09:30:00Z",
-            relatedOrder="ORD-001"
-        ),
-        SupportTicket(
-            id="TKT-002",
-            customer="Kenya Power",
-            issue="Damaged Goods",
-            description="Electrical transformer arrived with visible damage. Customer requesting replacement.",
-            priority="urgent",
-            status="in_progress",
-            createdAt="2024-01-15T11:15:00Z",
-            assignedTo="John Kamau",
-            relatedOrder="ORD-002"
-        ),
-        SupportTicket(
-            id="TKT-003",
-            customer="Equity Bank",
-            issue="Invoice Query",
-            description="Customer questioning additional charges on delivery invoice.",
-            priority="medium",
-            status="resolved",
-            createdAt="2024-01-14T14:20:00Z",
-            assignedTo="Mary Wanjiku"
-        ),
-        SupportTicket(
-            id="TKT-004",
-            customer="Nakumatt Holdings",
-            issue="Missing Items",
-            description="Partial delivery received. 5 items missing from the shipment.",
-            priority="high",
-            status="open",
-            createdAt="2024-01-15T13:45:00Z"
-        ),
-        SupportTicket(
-            id="TKT-005",
-            customer="Tusker Breweries",
-            issue="Route Change Request",
-            description="Customer requesting alternative delivery route due to road closure.",
-            priority="medium",
-            status="in_progress",
-            createdAt="2024-01-15T08:20:00Z",
-            assignedTo="Peter Omondi"
-        )
-    ]
 
 # API Endpoints
 
@@ -1054,84 +720,6 @@ async def update_fleet_asset(asset_id: str, body: UpdateAsset, request: Request,
         raise internal_error(message="Failed to update asset", details={"asset_id": asset_id, "error": str(e)})
 
 
-# Inventory Management
-@router.get("/inventory")
-@limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
-async def get_inventory(request: Request, tenant: TenantContext = Depends(get_tenant_context)):
-    try:
-        # Tenant-scoped query for inventory
-        query = inject_tenant_filter(
-            {"query": {"match_all": {}}},
-            tenant.tenant_id,
-        )
-        query["sort"] = [{"created_at": {"order": "desc"}}]
-        response = await elasticsearch_service.search_documents("inventory", query, size=1000)
-        inventory = [hit["_source"] for hit in response["hits"]["hits"]]
-        
-        # Convert to InventoryItem model format
-        formatted_inventory = []
-        for item in inventory:
-            formatted_item = {
-                "id": item.get("item_id"),
-                "name": item.get("name"),
-                "category": item.get("category"),
-                "quantity": item.get("quantity"),
-                "unit": item.get("unit"),
-                "location": item.get("location"),
-                "status": item.get("status"),
-                "lastUpdated": item.get("last_updated")
-            }
-            formatted_inventory.append(formatted_item)
-        
-        return {
-            "data": formatted_inventory,
-            "success": True,
-            "timestamp": datetime.now().isoformat()
-        }
-    except Exception as e:
-        logger.error(f"Error getting inventory: {e}")
-        raise internal_error(message="Failed to fetch inventory", details={"error": str(e)})
-
-# Orders Management
-@router.get("/orders")
-@limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
-async def get_orders(request: Request, tenant: TenantContext = Depends(get_tenant_context)):
-    try:
-        # Tenant-scoped query for orders
-        query = inject_tenant_filter(
-            {"query": {"match_all": {}}},
-            tenant.tenant_id,
-        )
-        query["sort"] = [{"created_at": {"order": "desc"}}]
-        response = await elasticsearch_service.search_documents("orders", query, size=1000)
-        orders = [hit["_source"] for hit in response["hits"]["hits"]]
-        
-        # Convert to Order model format
-        formatted_orders = []
-        for order in orders:
-            formatted_order = {
-                "id": order.get("order_id"),
-                "customer": order.get("customer"),
-                "status": order.get("status"),
-                "value": order.get("value"),
-                "items": order.get("items"),
-                "truckId": order.get("truck_id"),
-                "region": order.get("region"),
-                "createdAt": order.get("created_at"),
-                "deliveryEta": order.get("delivery_eta"),
-                "priority": order.get("priority")
-            }
-            formatted_orders.append(formatted_order)
-        
-        return {
-            "data": formatted_orders,
-            "success": True,
-            "timestamp": datetime.now().isoformat()
-        }
-    except Exception as e:
-        logger.error(f"Error getting orders: {e}")
-        raise internal_error(message="Failed to fetch orders", details={"error": str(e)})
-
 # Support Management
 @router.get("/support/tickets")
 @limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
@@ -1230,30 +818,12 @@ async def get_time_series_data(request: Request, tenant: TenantContext = Depends
 # Semantic Search
 @router.get("/search")
 @limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
-async def semantic_search(request: Request, q: str, tenant: TenantContext = Depends(get_tenant_context), index: str = "orders", limit: int = 10):
+async def semantic_search(request: Request, q: str, tenant: TenantContext = Depends(get_tenant_context), index: str = "trucks", limit: int = 10):
     """
     Perform semantic search across different indices
     """
     try:
-        if index == "orders":
-            results = await elasticsearch_service.semantic_search(
-                "orders", q, ["items", "customer"], limit
-            )
-            # Format results
-            formatted_results = []
-            for result in results:
-                formatted_result = {
-                    "id": result.get("order_id"),
-                    "customer": result.get("customer"),
-                    "status": result.get("status"),
-                    "value": result.get("value"),
-                    "items": result.get("items"),
-                    "region": result.get("region"),
-                    "priority": result.get("priority")
-                }
-                formatted_results.append(formatted_result)
-            
-        elif index == "trucks":
+        if index == "trucks":
             results = await elasticsearch_service.semantic_search(
                 "trucks", q, ["cargo.description", "driver_name"], limit
             )
@@ -1284,7 +854,7 @@ async def semantic_search(request: Request, q: str, tenant: TenantContext = Depe
                 }
                 formatted_results.append(formatted_result)
         else:
-            raise validation_error(message="Invalid index. Use: orders, trucks, or support_tickets")
+            raise validation_error(message="Invalid index. Use: trucks, or support_tickets")
         
         return {
             "data": formatted_results,
@@ -1293,9 +863,30 @@ async def semantic_search(request: Request, q: str, tenant: TenantContext = Depe
             "success": True,
             "timestamp": datetime.now().isoformat()
         }
-    except AppException:
+    except AppException as exc:
+        # Handle missing index gracefully — return empty results
+        error_detail = str(exc.details) if hasattr(exc, 'details') and exc.details else str(exc)
+        if "index_not_found" in error_detail or "no such index" in error_detail or f"search_documents({index})" in str(exc):
+            logger.info("Search index '%s' does not exist yet — returning empty results", index)
+            return {
+                "data": [],
+                "query": q,
+                "index": index,
+                "success": True,
+                "timestamp": datetime.now().isoformat()
+            }
         raise
     except Exception as e:
+        error_str = str(e)
+        if "index_not_found_exception" in error_str or "no such index" in error_str:
+            logger.info("Search index '%s' does not exist yet — returning empty results", index)
+            return {
+                "data": [],
+                "query": q,
+                "index": index,
+                "success": True,
+                "timestamp": datetime.now().isoformat()
+            }
         logger.error(f"Error in semantic search: {e}")
         raise internal_error(message="Failed to perform semantic search", details={"error": str(e)})
 

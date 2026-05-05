@@ -156,6 +156,37 @@ AGENT_POLICY_EXPERIMENTS_MAPPING = {
     },
 }
 
+JOB_PRIORITIES_INDEX = "job_priorities"
+
+JOB_PRIORITIES_MAPPING = {
+    "mappings": {
+        "dynamic": "strict",
+        "properties": {
+            "priority_list_id": {"type": "keyword"},
+            "priorities": {
+                "type": "nested",
+                "properties": {
+                    "job_id":               {"type": "keyword"},
+                    "job_type":             {"type": "keyword"},
+                    "priority_score":       {"type": "float"},
+                    "priority_bucket":      {"type": "keyword"},
+                    "sla_urgency":          {"type": "float"},
+                    "cargo_priority_score": {"type": "float"},
+                    "customer_tier_score":  {"type": "float"},
+                    "reasons":              {"type": "keyword"},
+                },
+            },
+            "scoring_weights": {"type": "object", "enabled": True},
+            "tenant_id":       {"type": "keyword"},
+            "timestamp":       {"type": "date"},
+        },
+    },
+    "settings": {
+        "number_of_shards": 1,
+        "number_of_replicas": 1,
+    },
+}
+
 
 def setup_overlay_indices(es_service) -> None:
     """Create overlay ES indices if they don't already exist.
@@ -176,6 +207,7 @@ def setup_overlay_indices(es_service) -> None:
         AGENT_OUTCOMES_INDEX: AGENT_OUTCOMES_MAPPING,
         AGENT_REVENUE_REPORTS_INDEX: AGENT_REVENUE_REPORTS_MAPPING,
         AGENT_POLICY_EXPERIMENTS_INDEX: AGENT_POLICY_EXPERIMENTS_MAPPING,
+        JOB_PRIORITIES_INDEX: JOB_PRIORITIES_MAPPING,
     }
 
     for index_name, mapping in indices.items():

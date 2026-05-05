@@ -199,3 +199,9 @@ class AssetUtilizationMetric(BaseModel):
     completed_jobs: int
     total_active_hours: float
     idle_hours: float
+
+
+class RerouteJobRequest(BaseModel):
+    new_destination: str
+    new_destination_location: Optional[GeoPoint] = None
+    reason: str

@@ -58,6 +58,9 @@ def container():
     )
     c.es_service = MagicMock()
     c.ops_feature_flags = MagicMock()
+    c.inventory_service = MagicMock()
+    c.tenant_inventory_config = MagicMock()
+    c.job_service = MagicMock()
     return c
 
 

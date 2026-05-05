@@ -68,6 +68,37 @@ class JobService:
         self._driver_ws_manager = None  # Wired by bootstrap/scheduling
         self._notification_service = None  # Wired by bootstrap/notifications
         self._audit_timeline_service = None  # Wired by bootstrap/notifications
+        self._inventory_service = None  # Wired by bootstrap for auto-consume
+        self._tenant_inventory_config = None  # Wired by bootstrap for tenant settings
+        self._readiness_checker = None  # Wired by bootstrap for asset readiness checks
+
+    # ------------------------------------------------------------------
+    # Inventory service setter (wired by bootstrap)
+    # ------------------------------------------------------------------
+
+    def set_inventory_service(self, inventory_service) -> None:
+        """Wire the InventoryService for auto-consume on job completion.
+
+        Args:
+            inventory_service: An InventoryService instance.
+        """
+        self._inventory_service = inventory_service
+
+    def set_tenant_inventory_config(self, tenant_inventory_config) -> None:
+        """Wire the TenantInventoryConfigService for tenant settings checks.
+
+        Args:
+            tenant_inventory_config: A TenantInventoryConfigService instance.
+        """
+        self._tenant_inventory_config = tenant_inventory_config
+
+    def set_readiness_checker(self, readiness_checker) -> None:
+        """Wire the AssetReadinessChecker for pre-assignment readiness checks.
+
+        Args:
+            readiness_checker: An AssetReadinessChecker instance.
+        """
+        self._readiness_checker = readiness_checker
 
     # ------------------------------------------------------------------
     # Job Creation  (Requirements 2.1-2.8, 8.5)
@@ -258,7 +289,12 @@ class JobService:
 
         # Verify asset exists and is compatible
         job_type = JobType(job_doc["job_type"])
-        await self._verify_asset_compatible(asset_id, job_type)
+        asset_doc = await self._verify_asset_compatible(asset_id, job_type)
+
+        # Asset readiness check (after compatibility, before availability)
+        readiness_flags = await self._check_asset_readiness(
+            asset_id, asset_doc, tenant_id
+        )
 
         # Check asset availability (no overlapping active jobs)
         await self._check_asset_availability(
@@ -272,6 +308,10 @@ class JobService:
             "asset_assigned": asset_id,
             "updated_at": now,
         }
+
+        # Attach readiness flags if WARNING or CRITICAL
+        if readiness_flags:
+            update_fields["readiness_flags"] = readiness_flags
 
         await self._es.update_document(JOBS_CURRENT_INDEX, job_id, update_fields)
 
@@ -621,6 +661,10 @@ class JobService:
         # Merge updates and broadcast
         job_doc.update(update_fields)
         await self._broadcast_job_update("status_changed", job_doc)
+
+        # --- Auto-consume parts for completed maintenance jobs (Req 5.1, 5.3, 5.5) ---
+        if target_status == JobStatus.COMPLETED:
+            await self._try_auto_consume_on_completion(job_id, job_doc, tenant_id)
 
         return Job(**self._normalize_job_doc(job_doc))
 
@@ -1172,6 +1216,118 @@ class JobService:
             )
 
     # ------------------------------------------------------------------
+    # Asset readiness check helper  (Requirements 1.1-1.5)
+    # ------------------------------------------------------------------
+
+    async def _check_asset_readiness(
+        self,
+        asset_id: str,
+        asset_doc: dict,
+        tenant_id: str,
+    ) -> Optional[dict]:
+        """Check asset readiness before assignment.
+
+        Queries the AssetReadinessChecker for critical parts availability.
+        Respects tenant ``readiness_check_enabled`` setting. Follows fail-open
+        design: if the readiness checker is unavailable or throws, the
+        assignment proceeds without blocking.
+
+        Args:
+            asset_id: The asset being assigned.
+            asset_doc: The asset document from ES (contains asset_type).
+            tenant_id: Tenant scope.
+
+        Returns:
+            A readiness_flags dict if WARNING or CRITICAL, None otherwise.
+
+        Raises:
+            AppException: 400 if readiness status is BLOCKED.
+        """
+        if not self._readiness_checker:
+            return None
+
+        # Check tenant readiness_check_enabled setting
+        try:
+            if self._tenant_inventory_config:
+                enabled = await self._tenant_inventory_config.get_readiness_check_enabled(
+                    tenant_id
+                )
+                if not enabled:
+                    return None
+        except Exception as e:
+            logger.warning(
+                "JobService: failed to check tenant readiness_check_enabled "
+                "for tenant_id=%s — proceeding with check. Error: %s",
+                tenant_id,
+                e,
+            )
+
+        # Perform readiness check (fail-open)
+        asset_type = asset_doc.get("asset_type", "vehicle")
+        try:
+            from inventory.asset_readiness import ReadinessStatus
+
+            readiness = await self._readiness_checker.check_readiness(
+                asset_id=asset_id,
+                asset_type=asset_type,
+                tenant_id=tenant_id,
+            )
+        except Exception as e:
+            logger.warning(
+                "JobService: readiness check failed for asset_id=%s, "
+                "tenant_id=%s — failing open (proceeding with assignment). "
+                "Error: %s",
+                asset_id,
+                tenant_id,
+                e,
+            )
+            return None
+
+        # BLOCKED: raise validation error
+        if readiness.blocked:
+            raise validation_error(
+                readiness.block_reason
+                or "Assignment blocked due to critical parts shortage",
+                details={
+                    "asset_id": asset_id,
+                    "asset_type": asset_type,
+                    "readiness_status": readiness.status.value,
+                    "missing_parts": [
+                        {"item_id": p.item_id, "name": p.name, "category": p.category}
+                        for p in readiness.missing_parts
+                    ],
+                },
+            )
+
+        # WARNING or CRITICAL: attach readiness_flags to job document
+        if readiness.status in (ReadinessStatus.WARNING, ReadinessStatus.CRITICAL):
+            return {
+                "status": readiness.status.value,
+                "missing_parts": [
+                    {
+                        "item_id": p.item_id,
+                        "name": p.name,
+                        "category": p.category,
+                        "location": p.location,
+                    }
+                    for p in readiness.missing_parts
+                ],
+                "low_parts": [
+                    {
+                        "item_id": p.item_id,
+                        "name": p.name,
+                        "category": p.category,
+                        "quantity": p.quantity,
+                        "min_threshold": p.min_threshold,
+                    }
+                    for p in readiness.low_parts
+                ],
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+        return None
+
+    # ------------------------------------------------------------------
     # Event append helper  (Requirements 15.1, 15.3, 15.4)
     # ------------------------------------------------------------------
 
@@ -1307,3 +1463,190 @@ class JobService:
                 job_id,
                 exc,
             )
+
+    # ------------------------------------------------------------------
+    # Auto-consume parts on maintenance job completion (Req 5.1-5.4)
+    # ------------------------------------------------------------------
+
+    # Job types that are considered "maintenance" for auto-consume purposes
+    _MAINTENANCE_JOB_TYPES = {"maintenance", "inspection", "crane_booking"}
+
+    async def _try_auto_consume_on_completion(
+        self,
+        job_id: str,
+        job_doc: dict,
+        tenant_id: str,
+    ) -> None:
+        """Attempt auto-consume of parts for completed maintenance jobs.
+
+        Checks whether the job is a maintenance type and whether the tenant
+        has auto_consume_on_completion enabled. If so, calls
+        ``_auto_consume_parts`` with the job's cargo manifest.
+
+        This method never raises — all errors are caught and logged so that
+        job completion is never blocked by consumption failures.
+
+        Validates: Requirements 5.1, 5.3, 5.5
+
+        Args:
+            job_id: The completed job ID.
+            job_doc: The full job document dict.
+            tenant_id: Tenant scope.
+        """
+        try:
+            # Only trigger for maintenance job types
+            job_type = job_doc.get("job_type", "")
+            if job_type not in self._MAINTENANCE_JOB_TYPES:
+                return
+
+            # Check if job has a cargo manifest with items to consume
+            cargo_manifest = job_doc.get("cargo_manifest")
+            if not cargo_manifest:
+                return
+
+            # Check tenant auto_consume_on_completion setting
+            if self._tenant_inventory_config:
+                try:
+                    auto_consume_enabled = (
+                        await self._tenant_inventory_config
+                        .get_auto_consume_on_completion(tenant_id)
+                    )
+                    if not auto_consume_enabled:
+                        logger.info(
+                            "Auto-consume disabled for tenant %s; "
+                            "skipping for job %s",
+                            tenant_id,
+                            job_id,
+                        )
+                        return
+                except Exception as exc:
+                    # Tenant config unavailable — default to enabled (fail-open)
+                    logger.warning(
+                        "Could not check tenant auto_consume setting for "
+                        "tenant %s (proceeding with consume): %s",
+                        tenant_id,
+                        exc,
+                    )
+
+            # Check if InventoryService is available
+            if not self._inventory_service:
+                logger.error(
+                    "InventoryService not available; skipping auto-consume "
+                    "for completed maintenance job %s",
+                    job_id,
+                )
+                return
+
+            # Perform auto-consumption (never blocks job completion)
+            await self._auto_consume_parts(job_id, cargo_manifest, tenant_id)
+
+        except Exception as exc:
+            # Ensure job completion is NEVER blocked by consumption failures
+            logger.error(
+                "Auto-consume failed for job %s (non-blocking): %s",
+                job_id,
+                exc,
+            )
+
+    async def _auto_consume_parts(
+        self,
+        job_id: str,
+        cargo_manifest: list[dict],
+        tenant_id: str,
+    ) -> list[dict]:
+        """Auto-consume parts from inventory on maintenance job completion.
+
+        For each cargo manifest item, calls InventoryService.adjust_stock()
+        with a negative quantity_change, reason ``used_for_maintenance``, and
+        reference_id set to the job_id.
+
+        Items that would result in negative stock are skipped with a warning.
+        Successful consumptions are recorded as ``parts_consumed`` events in
+        the job timeline.
+
+        Validates: Requirements 5.1, 5.2, 5.3, 5.4
+
+        Args:
+            job_id: The completed maintenance job ID.
+            cargo_manifest: List of manifest item dicts, each containing at
+                least ``item_id`` and ``quantity``.
+            tenant_id: Tenant scope.
+
+        Returns:
+            List of successful consumption event records (dicts with item_id,
+            quantity_consumed, and event_id).
+        """
+        from inventory.models import StockAdjustment
+
+        if not self._inventory_service:
+            logger.error(
+                "InventoryService not wired; skipping auto-consume for job %s",
+                job_id,
+            )
+            return []
+
+        if not cargo_manifest:
+            return []
+
+        consumed_items: list[dict] = []
+
+        for item in cargo_manifest:
+            item_id = item.get("item_id")
+            quantity = item.get("quantity", 0)
+
+            if not item_id or quantity <= 0:
+                continue
+
+            adjustment = StockAdjustment(
+                quantity_change=-quantity,
+                reason="used_for_maintenance",
+                reference_id=job_id,
+                notes=f"Auto-consumed on job {job_id} completion",
+            )
+
+            try:
+                result = await self._inventory_service.adjust_stock(
+                    item_id=item_id,
+                    adjustment=adjustment,
+                    tenant_id=tenant_id,
+                    actor_id="system",
+                )
+                consumed_items.append({
+                    "item_id": item_id,
+                    "quantity_consumed": quantity,
+                    "event_id": result.event_id,
+                    "new_quantity": result.new_quantity,
+                })
+            except AppException as exc:
+                # Catch validation error for negative quantity — skip item
+                logger.warning(
+                    "Auto-consume skipped for item %s on job %s: %s",
+                    item_id,
+                    job_id,
+                    exc.message,
+                )
+                continue
+            except Exception as exc:
+                # Unexpected errors should not block job completion
+                logger.warning(
+                    "Auto-consume failed for item %s on job %s: %s",
+                    item_id,
+                    job_id,
+                    exc,
+                )
+                continue
+
+        # Record successful consumption events in job timeline
+        if consumed_items:
+            await self._append_event(
+                job_id=job_id,
+                event_type="parts_consumed",
+                tenant_id=tenant_id,
+                actor_id="system",
+                payload={
+                    "consumed_items": consumed_items,
+                    "total_items_consumed": len(consumed_items),
+                },
+            )
+
+        return consumed_items

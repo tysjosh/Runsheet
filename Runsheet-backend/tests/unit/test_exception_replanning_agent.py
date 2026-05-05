@@ -323,30 +323,33 @@ class TestDetectDisruptionType:
 
 
 class TestHandleTruckBreakdown:
-    def test_returns_diff_with_truck_swap(self):
+    @pytest.mark.asyncio
+    async def test_returns_diff_with_truck_swap(self):
         """Req 5.3: Truck breakdown produces truck swap diff."""
         agent, _ = _make_agent()
         signal = _make_signal(entity_id="truck-1")
         plan_snapshot = _make_plan_snapshot(truck_id="truck-1")
 
-        result = agent._handle_truck_breakdown(signal, plan_snapshot)
+        result = await agent._handle_truck_breakdown(signal, plan_snapshot)
         assert result is not None
         diff, patched_plan_id, risk_class = result
         assert diff.truck_swapped == "truck-1"
         assert risk_class == RiskClass.HIGH  # Req 5.8
 
-    def test_returns_none_when_truck_not_in_plan(self):
+    @pytest.mark.asyncio
+    async def test_returns_none_when_truck_not_in_plan(self):
         """No replan needed if broken truck is not in current plan."""
         agent, _ = _make_agent()
         signal = _make_signal(entity_id="truck-99")
         plan_snapshot = _make_plan_snapshot(truck_id="truck-1")
 
-        result = agent._handle_truck_breakdown(signal, plan_snapshot)
+        result = await agent._handle_truck_breakdown(signal, plan_snapshot)
         assert result is None
 
 
 class TestHandleStationOutage:
-    def test_returns_diff_with_deferred_station(self):
+    @pytest.mark.asyncio
+    async def test_returns_diff_with_deferred_station(self):
         """Req 5.4: Station outage defers station and reorders stops."""
         agent, _ = _make_agent()
         signal = _make_signal(entity_id="station-2")
@@ -354,32 +357,35 @@ class TestHandleStationOutage:
             station_ids=["station-1", "station-2", "station-3"]
         )
 
-        result = agent._handle_station_outage(signal, plan_snapshot)
+        result = await agent._handle_station_outage(signal, plan_snapshot)
         assert result is not None
         diff, _, risk_class = result
         assert "station-2" in diff.stations_deferred
         assert "station-2" not in diff.stops_reordered
         assert risk_class == RiskClass.MEDIUM
 
-    def test_returns_none_when_station_not_in_route(self):
+    @pytest.mark.asyncio
+    async def test_returns_none_when_station_not_in_route(self):
         agent, _ = _make_agent()
         signal = _make_signal(entity_id="station-99")
         plan_snapshot = _make_plan_snapshot()
 
-        result = agent._handle_station_outage(signal, plan_snapshot)
+        result = await agent._handle_station_outage(signal, plan_snapshot)
         assert result is None
 
-    def test_returns_none_when_no_route_plan(self):
+    @pytest.mark.asyncio
+    async def test_returns_none_when_no_route_plan(self):
         agent, _ = _make_agent()
         signal = _make_signal(entity_id="station-1")
         plan_snapshot = {"loading_plan": {"plan_id": "p1"}, "route_plan": None}
 
-        result = agent._handle_station_outage(signal, plan_snapshot)
+        result = await agent._handle_station_outage(signal, plan_snapshot)
         assert result is None
 
 
 class TestHandleDemandSpike:
-    def test_returns_diff_with_volume_reallocation(self):
+    @pytest.mark.asyncio
+    async def test_returns_diff_with_volume_reallocation(self):
         """Req 5.5: Demand spike reallocates volume."""
         agent, _ = _make_agent()
         signal = _make_signal(
@@ -388,24 +394,26 @@ class TestHandleDemandSpike:
         )
         plan_snapshot = _make_plan_snapshot()
 
-        result = agent._handle_demand_spike(signal, plan_snapshot)
+        result = await agent._handle_demand_spike(signal, plan_snapshot)
         assert result is not None
         diff, _, risk_class = result
         assert "station-1" in diff.volumes_reallocated
         assert diff.volumes_reallocated["station-1"] == 2000.0
         assert risk_class == RiskClass.MEDIUM
 
-    def test_returns_none_when_station_not_in_plan(self):
+    @pytest.mark.asyncio
+    async def test_returns_none_when_station_not_in_plan(self):
         agent, _ = _make_agent()
         signal = _make_signal(entity_id="station-99")
         plan_snapshot = _make_plan_snapshot()
 
-        result = agent._handle_demand_spike(signal, plan_snapshot)
+        result = await agent._handle_demand_spike(signal, plan_snapshot)
         assert result is None
 
 
 class TestHandleDelay:
-    def test_returns_diff_with_reordered_stops(self):
+    @pytest.mark.asyncio
+    async def test_returns_diff_with_reordered_stops(self):
         """Req 5.2: Delay reorders stops."""
         agent, _ = _make_agent()
         signal = _make_signal(entity_id="station-1")
@@ -413,28 +421,30 @@ class TestHandleDelay:
             station_ids=["station-1", "station-2", "station-3"]
         )
 
-        result = agent._handle_delay(signal, plan_snapshot)
+        result = await agent._handle_delay(signal, plan_snapshot)
         assert result is not None
         diff, _, risk_class = result
         # Delayed station should be moved to end
         assert diff.stops_reordered[-1] == "station-1"
         assert risk_class == RiskClass.MEDIUM
 
-    def test_returns_none_when_no_route(self):
+    @pytest.mark.asyncio
+    async def test_returns_none_when_no_route(self):
         agent, _ = _make_agent()
         signal = _make_signal(entity_id="station-1")
         plan_snapshot = {"loading_plan": {"plan_id": "p1"}, "route_plan": None}
 
-        result = agent._handle_delay(signal, plan_snapshot)
+        result = await agent._handle_delay(signal, plan_snapshot)
         assert result is None
 
-    def test_returns_none_when_single_stop(self):
+    @pytest.mark.asyncio
+    async def test_returns_none_when_single_stop(self):
         """Cannot reorder with only one stop."""
         agent, _ = _make_agent()
         signal = _make_signal(entity_id="station-1")
         plan_snapshot = _make_plan_snapshot(station_ids=["station-1"])
 
-        result = agent._handle_delay(signal, plan_snapshot)
+        result = await agent._handle_delay(signal, plan_snapshot)
         assert result is None
 
 

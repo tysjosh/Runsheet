@@ -86,6 +86,10 @@ class ServiceContainer:
     # -- Fuel --
     fuel_service: FuelService
 
+    # -- Inventory --
+    inventory_service: Any  # InventoryService
+    tenant_inventory_config: Any  # TenantInventoryConfigService
+
     # -- Scheduling --
     job_service: JobService
     cargo_service: CargoService

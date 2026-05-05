@@ -151,19 +151,6 @@ export interface InventoryItem {
   lastUpdated: string;
 }
 
-export interface Order {
-  id: string;
-  customer: string;
-  status: "pending" | "in_transit" | "delivered" | "cancelled";
-  value: number;
-  items: string;
-  truckId?: string;
-  region: string;
-  createdAt: string;
-  deliveryEta: string;
-  priority: "low" | "medium" | "high" | "urgent";
-}
-
 export interface SupportTicket {
   id: string;
   customer: string;
@@ -314,34 +301,6 @@ class ApiService {
     return this.request<InventoryItem>(`/inventory/${id}`, {
       method: "PATCH",
       body: JSON.stringify(data),
-    });
-  }
-
-  // Orders Management
-  async getOrders(): Promise<ApiResponse<Order[]>> {
-    return this.request<Order[]>("/orders");
-  }
-
-  async getOrderById(id: string): Promise<ApiResponse<Order>> {
-    return this.request<Order>(`/orders/${id}`);
-  }
-
-  async createOrder(
-    order: Omit<Order, "id" | "createdAt">,
-  ): Promise<ApiResponse<Order>> {
-    return this.request<Order>("/orders", {
-      method: "POST",
-      body: JSON.stringify(order),
-    });
-  }
-
-  async updateOrderStatus(
-    id: string,
-    status: string,
-  ): Promise<ApiResponse<Order>> {
-    return this.request<Order>(`/orders/${id}/status`, {
-      method: "PATCH",
-      body: JSON.stringify({ status }),
     });
   }
 

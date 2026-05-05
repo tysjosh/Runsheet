@@ -431,6 +431,43 @@ function PlanDetailView({ planId, onBack, onReplan }: PlanDetailViewProps) {
           No route plan available
         </div>
       )}
+
+      {/* Excluded Trucks — Equipment Unavailability (Requirement 7.7) */}
+      {(plan as any).excluded_trucks && (plan as any).excluded_trucks.length > 0 && (
+        <div className="border border-orange-100 rounded-lg p-4 bg-orange-50/50">
+          <div className="flex items-center gap-2 mb-3">
+            <AlertTriangle className="w-4 h-4 text-orange-600" />
+            <h4 className="text-sm font-medium text-orange-800">
+              Excluded Trucks — Equipment Unavailable
+            </h4>
+          </div>
+          <div className="space-y-2">
+            {((plan as any).excluded_trucks as Array<{ truck_id: string; missing_equipment?: string[]; reason?: string }>).map(
+              (excluded, i) => (
+                <div
+                  key={excluded.truck_id || i}
+                  className="flex items-start gap-2 text-xs bg-white rounded-lg px-3 py-2 border border-orange-100"
+                >
+                  <Truck className="w-3.5 h-3.5 text-orange-500 mt-0.5 flex-shrink-0" />
+                  <div>
+                    <span className="font-medium text-[#232323]">
+                      {excluded.truck_id}
+                    </span>
+                    {excluded.missing_equipment && excluded.missing_equipment.length > 0 && (
+                      <p className="text-gray-600 mt-0.5">
+                        Missing: {excluded.missing_equipment.join(", ")}
+                      </p>
+                    )}
+                    {excluded.reason && (
+                      <p className="text-gray-600 mt-0.5">{excluded.reason}</p>
+                    )}
+                  </div>
+                </div>
+              ),
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

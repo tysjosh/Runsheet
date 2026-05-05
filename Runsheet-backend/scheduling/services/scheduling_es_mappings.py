@@ -47,7 +47,8 @@ JOBS_CURRENT_MAPPING = {
                     "seal_number":       {"type": "keyword"},
                     "item_status":       {"type": "keyword"}
                 }
-            }
+            },
+            "readiness_flags":   {"type": "object", "enabled": False}
         }
     },
     "settings": {

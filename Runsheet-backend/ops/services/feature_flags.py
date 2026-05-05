@@ -70,12 +70,22 @@ class FeatureFlagService:
         Check whether the Ops Intelligence Layer is enabled for a tenant.
 
         Returns True if the flag key exists in Redis, False otherwise.
+        Returns False (fail-closed) when Redis is unavailable.
         Validates: Req 27.1
         """
         if not self.client:
-            raise RuntimeError("Redis client not connected. Call connect() first.")
-        key = self._get_key(tenant_id)
-        return await self.client.exists(key) > 0
+            logger.warning("FeatureFlagService: Redis client not connected, defaulting to disabled for tenant %s", tenant_id)
+            return False
+        try:
+            key = self._get_key(tenant_id)
+            return await self.client.exists(key) > 0
+        except Exception as exc:
+            logger.warning(
+                "FeatureFlagService: Redis error checking flag for tenant %s: %s — defaulting to disabled",
+                tenant_id,
+                exc,
+            )
+            return False
 
     async def enable(self, tenant_id: str, user_id: str) -> None:
         """
@@ -201,7 +211,8 @@ class FeatureFlagService:
             return False
         try:
             return await self.client.ping() is True
-        except Exception:
+        except Exception as exc:
+            logger.warning("FeatureFlagService health check failed: %s", exc)
             return False
 
     # ── Overlay agent feature-flag methods ──────────────────────────
