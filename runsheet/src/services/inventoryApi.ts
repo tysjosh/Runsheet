@@ -281,3 +281,32 @@ export async function deleteItem(itemId: string): Promise<void> {
     { method: "DELETE" },
   );
 }
+
+// ─── Stock Movement History ──────────────────────────────────────────────────
+
+export interface StockMovementEvent {
+  event_id: string;
+  item_id: string;
+  quantity_change: number;
+  quantity_before: number;
+  quantity_after: number;
+  reason: string;
+  reference_id: string | null;
+  actor_id: string;
+  status_before: string;
+  status_after: string;
+  tenant_id: string;
+  event_timestamp: string;
+}
+
+/** GET /inventory/items/:itemId/history — paginated stock movement history */
+export async function getItemHistory(
+  itemId: string,
+  page: number = 1,
+  size: number = 20,
+): Promise<PaginatedResponse<StockMovementEvent>> {
+  const qs = buildQueryString({ page, size });
+  return inventoryRequest<PaginatedResponse<StockMovementEvent>>(
+    `/inventory/items/${encodeURIComponent(itemId)}/history${qs}`,
+  );
+}

@@ -33,6 +33,7 @@ export default function FleetTracking({ onTruckSelect }: FleetTrackingProps) {
   const [showInTransit, setShowInTransit] = useState(true);
   const [selectedTruck, setSelectedTruck] = useState<string | null>(null);
   const [assetTypeFilter, setAssetTypeFilter] = useState<AssetType | "all">("all");
+  const [page, setPage] = useState(1);
 
   /**
    * Handle real-time location updates from WebSocket
@@ -221,6 +222,10 @@ export default function FleetTracking({ onTruckSelect }: FleetTrackingProps) {
     ? trucks.filter((truck) => ["on_time", "delayed"].includes(truck.status))
     : trucks;
 
+  const PAGE_SIZE = 20;
+  const totalPages = Math.max(1, Math.ceil(filteredTrucks.length / PAGE_SIZE));
+  const paginatedTrucks = filteredTrucks.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+
   if (loading) {
     return <LoadingSpinner message="Loading fleet data..." />;
   }
@@ -259,7 +264,7 @@ export default function FleetTracking({ onTruckSelect }: FleetTrackingProps) {
               <span className="text-gray-600">Asset type</span>
               <select
                 value={assetTypeFilter}
-                onChange={(e) => setAssetTypeFilter(e.target.value as AssetType | "all")}
+                onChange={(e) => { setAssetTypeFilter(e.target.value as AssetType | "all"); setPage(1); }}
                 className="text-sm border border-gray-300 rounded px-2 py-1 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
               >
                 {ASSET_TYPE_OPTIONS.map((opt) => (
@@ -274,7 +279,7 @@ export default function FleetTracking({ onTruckSelect }: FleetTrackingProps) {
               <input
                 type="checkbox"
                 checked={showInTransit}
-                onChange={(e) => setShowInTransit(e.target.checked)}
+                onChange={(e) => { setShowInTransit(e.target.checked); setPage(1); }}
                 className="w-4 h-4 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
               />
             </label>
@@ -373,7 +378,7 @@ export default function FleetTracking({ onTruckSelect }: FleetTrackingProps) {
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
-            {filteredTrucks.map((truck) => (
+            {paginatedTrucks.map((truck) => (
               <tr
                 key={truck.id}
                 className={`cursor-pointer transition-colors ${
@@ -430,6 +435,19 @@ export default function FleetTracking({ onTruckSelect }: FleetTrackingProps) {
             ))}
           </tbody>
         </table>
+
+        {/* Pagination */}
+        {totalPages > 1 && (
+          <div className="flex items-center justify-between px-4 py-3 border-t border-gray-100">
+            <span className="text-xs text-gray-500">
+              Page {page} of {totalPages} ({filteredTrucks.length} items)
+            </span>
+            <div className="flex items-center gap-2">
+              <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page <= 1} className="px-3 py-1 text-xs border border-gray-200 rounded-lg disabled:opacity-30">Prev</button>
+              <button onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page >= totalPages} className="px-3 py-1 text-xs border border-gray-200 rounded-lg disabled:opacity-30">Next</button>
+            </div>
+          </div>
+        )}
 
         {filteredTrucks.length === 0 && (
           <div className="text-center py-12 text-gray-500">

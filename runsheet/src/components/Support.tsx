@@ -64,6 +64,7 @@ export default function Support() {
   );
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [actionError, setActionError] = useState<Record<string, string>>({});
+  const [page, setPage] = useState(1);
 
   const loadSupportData = useCallback(async () => {
     try {
@@ -162,6 +163,10 @@ export default function Support() {
     return matchesSearch && matchesPriority && matchesStatus;
   });
 
+  const PAGE_SIZE = 20;
+  const totalPages = Math.max(1, Math.ceil(filteredTickets.length / PAGE_SIZE));
+  const paginatedTickets = filteredTickets.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+
   if (loading && activeTab === "tickets") {
     return <LoadingSpinner message="Loading support tickets..." />;
   }
@@ -249,7 +254,7 @@ export default function Support() {
                 type="text"
                 placeholder="Search tickets, customers, issues..."
                 value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
+                onChange={(e) => { setSearchTerm(e.target.value); setPage(1); }}
                 className="w-full pl-10 pr-4 py-3 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-gray-200 focus:border-gray-300"
               />
             </div>
@@ -257,7 +262,7 @@ export default function Support() {
               <Filter className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
               <select
                 value={filterPriority}
-                onChange={(e) => setFilterPriority(e.target.value)}
+                onChange={(e) => { setFilterPriority(e.target.value); setPage(1); }}
                 className="pl-10 pr-8 py-3 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white min-w-[140px]"
               >
                 {TICKET_PRIORITIES.map((p) => (
@@ -269,7 +274,7 @@ export default function Support() {
             </div>
             <select
               value={filterStatus}
-              onChange={(e) => setFilterStatus(e.target.value)}
+              onChange={(e) => { setFilterStatus(e.target.value); setPage(1); }}
               className="px-4 py-3 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white min-w-[120px]"
             >
               {TICKET_STATUSES.map((s) => (
@@ -343,7 +348,7 @@ export default function Support() {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
-              {filteredTickets.map((ticket) => (
+              {paginatedTickets.map((ticket) => (
                 <tr
                   key={ticket.id}
                   className={`cursor-pointer transition-colors ${
@@ -438,6 +443,19 @@ export default function Support() {
               ))}
             </tbody>
           </table>
+
+          {/* Pagination */}
+          {totalPages > 1 && (
+            <div className="flex items-center justify-between px-8 py-3 border-t border-gray-100">
+              <span className="text-xs text-gray-500">
+                Page {page} of {totalPages} ({filteredTickets.length} items)
+              </span>
+              <div className="flex items-center gap-2">
+                <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page <= 1} className="px-3 py-1 text-xs border border-gray-200 rounded-lg disabled:opacity-30">Prev</button>
+                <button onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page >= totalPages} className="px-3 py-1 text-xs border border-gray-200 rounded-lg disabled:opacity-30">Next</button>
+              </div>
+            </div>
+          )}
 
           {filteredTickets.length === 0 && (
             <div className="text-center py-16 text-gray-500">

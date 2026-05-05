@@ -258,10 +258,12 @@ async function opsRequest<T>(
 
     if (!response.ok) {
       const body = await response.json().catch(() => ({}));
-      throw new ApiError(
-        body.detail || body.message || `HTTP error! status: ${response.status}`,
-        response.status,
-      );
+      const detail = body.detail;
+      const message =
+        typeof detail === "string"
+          ? detail
+          : detail?.message || body.message || `HTTP error! status: ${response.status}`;
+      throw new ApiError(message, response.status);
     }
 
     return await response.json();

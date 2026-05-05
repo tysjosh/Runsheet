@@ -283,9 +283,11 @@ export async function getEfficiencyMetrics(
 // ─── Station CRUD Types ──────────────────────────────────────────────────────
 
 export interface CreateStationPayload {
+  station_id: string;
   name: string;
   fuel_type: FuelType;
   capacity_liters: number;
+  initial_stock_liters: number;
   location?: GeoPoint;
   location_name?: string;
   alert_threshold_pct: number;

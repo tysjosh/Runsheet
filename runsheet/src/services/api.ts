@@ -287,11 +287,23 @@ class ApiService {
 
   // Inventory Management
   async getInventory(): Promise<ApiResponse<InventoryItem[]>> {
-    return this.request<InventoryItem[]>("/inventory/items");
+    const response = await this.request<any[]>("/inventory/items");
+    // Map backend item_id to frontend id
+    response.data = (response.data || []).map((item: any) => ({
+      ...item,
+      id: item.id || item.item_id,
+      lastUpdated: item.lastUpdated || item.last_restocked || item.updated_at || new Date().toISOString(),
+    }));
+    return response as ApiResponse<InventoryItem[]>;
   }
 
   async getInventoryById(id: string): Promise<ApiResponse<InventoryItem>> {
-    return this.request<InventoryItem>(`/inventory/items/${id}`);
+    const response = await this.request<any>(`/inventory/items/${id}`);
+    if (response.data) {
+      response.data.id = response.data.id || response.data.item_id;
+      response.data.lastUpdated = response.data.lastUpdated || response.data.last_restocked || response.data.updated_at || new Date().toISOString();
+    }
+    return response as ApiResponse<InventoryItem>;
   }
 
   async updateInventoryItem(

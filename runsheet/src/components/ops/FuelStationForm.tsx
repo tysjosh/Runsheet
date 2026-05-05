@@ -51,6 +51,7 @@ export interface StationFormValues {
   name: string;
   fuel_type: FuelType;
   capacity_liters: number;
+  initial_stock_liters: number;
   location_name: string;
   alert_threshold_pct: number;
 }
@@ -123,6 +124,7 @@ export default function FuelStationForm({
     name: station?.name ?? "",
     fuel_type: station?.fuel_type ?? "AGO",
     capacity_liters: station?.capacity_liters ?? 0,
+    initial_stock_liters: 0,
     location_name: station?.location_name ?? "",
     alert_threshold_pct: station?.alert_threshold_pct ?? 20,
   });
@@ -160,9 +162,11 @@ export default function FuelStationForm({
 
       if (mode === "create") {
         const payload: CreateStationPayload = {
+          station_id: `FS-${Date.now().toString(36).toUpperCase()}`,
           name: form.name.trim(),
           fuel_type: form.fuel_type,
           capacity_liters: form.capacity_liters,
+          initial_stock_liters: form.initial_stock_liters,
           alert_threshold_pct: form.alert_threshold_pct,
         };
         if (form.location_name.trim()) {
@@ -323,6 +327,31 @@ export default function FuelStationForm({
                 </p>
               )}
             </div>
+
+            {mode === "create" && (
+              <div>
+                <label
+                  htmlFor="initial-stock"
+                  className="block text-xs font-medium text-gray-600 mb-1"
+                >
+                  Initial Stock (Liters)
+                </label>
+                <input
+                  id="initial-stock"
+                  type="number"
+                  value={form.initial_stock_liters || ""}
+                  onChange={(e) => {
+                    const val = e.target.value === "" ? 0 : Number(e.target.value);
+                    setForm({ ...form, initial_stock_liters: val });
+                  }}
+                  placeholder="e.g. 30000"
+                  min="0"
+                  step="any"
+                  className={inputClass}
+                  required
+                />
+              </div>
+            )}
           </div>
 
           {/* Location Name */}

@@ -172,19 +172,19 @@ export default function SchedulingMetricsPage() {
   }, [fetchAllMetrics]);
 
   return (
-    <div className="flex-1 flex flex-col h-full bg-gray-50">
+    <div className="flex-1 flex flex-col h-full bg-white overflow-y-auto">
       {/* Header */}
-      <div className="px-6 pt-6 pb-4">
+      <div className="border-b border-gray-100 px-8 py-6">
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3 mb-1">
-            <div className="w-9 h-9 bg-gray-700 rounded-lg flex items-center justify-center">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-[#232323] rounded-xl flex items-center justify-center">
               <TrendingUp className="w-5 h-5 text-white" />
             </div>
             <div>
-              <h2 className="text-lg font-semibold text-[#232323]">
+              <h1 className="text-2xl font-semibold text-[#232323]">
                 Scheduling Metrics
-              </h2>
-              <p className="text-xs text-gray-500">
+              </h1>
+              <p className="text-gray-500">
                 Job counts, completion rates, asset utilization & delay statistics
               </p>
             </div>

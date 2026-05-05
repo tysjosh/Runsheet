@@ -43,6 +43,7 @@ function getStockPercentage(station: FuelStation): number {
 }
 
 function formatLiters(liters: number): string {
+  if (liters == null || isNaN(liters)) return "0";
   if (liters >= 1_000) return `${(liters / 1_000).toFixed(1)}K`;
   return liters.toFixed(0);
 }

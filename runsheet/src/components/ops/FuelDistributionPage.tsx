@@ -771,7 +771,7 @@ function ForecastsTab() {
                     {(((f as any).runout_risk_24h ?? 0) * 100).toFixed(0)}%
                   </td>
                   <td className="px-4 py-3 text-xs text-gray-500">
-                    {new Date(f.timestamp).toLocaleString()}
+                    {f.timestamp ? new Date(f.timestamp).toLocaleString() : "—"}
                   </td>
                 </tr>
               ))}
@@ -902,7 +902,7 @@ function PrioritiesTab() {
                       </span>
                     </td>
                     <td className="px-4 py-3 text-xs text-gray-500">
-                      {new Date(p.timestamp).toLocaleString()}
+                      {p.timestamp ? new Date(p.timestamp).toLocaleString() : "—"}
                     </td>
                   </tr>
                 );

@@ -318,7 +318,12 @@ export default function FuelDashboardPage() {
           </div>
 
           {/* Station List — Validates: Requirements 6.1, 6.4 */}
-          <div className="flex-1 overflow-y-auto">
+          <div className="px-8 py-6">
+            <div className="flex items-center gap-2 mb-3">
+              <h2 className="text-sm font-medium text-gray-700">
+                Fuel Stations
+              </h2>
+            </div>
             <FuelStationList
               stations={stations}
               onSelectStation={handleSelectStation}

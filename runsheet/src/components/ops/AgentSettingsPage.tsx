@@ -37,6 +37,8 @@ import {
   Filter,
   Loader2,
   MessageSquare,
+  Pause,
+  Play,
   Settings,
   Shield,
   ShieldAlert,
@@ -49,6 +51,8 @@ import {
 import { useCallback, useEffect, useState } from "react";
 import { ApiError } from "../../services/api";
 import type {
+  AgentHealthEntry,
+  AgentHealthResponse,
   AutonomyLevel,
   AutonomyUpdateResponse,
   FeedbackEntry,
@@ -61,10 +65,13 @@ import type {
 } from "../../services/agentApi";
 import {
   deleteMemory,
+  getAgentHealth,
   getAutonomyLevel,
   getFeedback,
   getFeedbackStats,
   getMemories,
+  pauseAgent,
+  resumeAgent,
   updateAutonomyLevel,
 } from "../../services/agentApi";
 
@@ -352,6 +359,196 @@ function AutonomySection({ isAdmin }: AutonomySectionProps) {
             )}
             {saving ? "Updating..." : "Confirm Change"}
           </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Agent Health & Control Section ──────────────────────────────────────────
+
+function AgentHealthSection() {
+  const [agents, setAgents] = useState<AgentHealthEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [actionLoading, setActionLoading] = useState<string | null>(null);
+
+  const loadHealth = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const result = await getAgentHealth();
+      // The response has agents as a Record<string, AgentHealthEntry>
+      const agentList = Object.values(result.agents ?? {});
+      setAgents(agentList);
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Failed to load agent health",
+      );
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadHealth();
+  }, [loadHealth]);
+
+  const handlePause = useCallback(async (agentId: string) => {
+    setActionLoading(agentId);
+    try {
+      await pauseAgent(agentId);
+      setAgents((prev) =>
+        prev.map((a) =>
+          a.agent_id === agentId ? { ...a, status: "stopped" as const } : a,
+        ),
+      );
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Failed to pause agent",
+      );
+    } finally {
+      setActionLoading(null);
+    }
+  }, []);
+
+  const handleResume = useCallback(async (agentId: string) => {
+    setActionLoading(agentId);
+    try {
+      await resumeAgent(agentId);
+      setAgents((prev) =>
+        prev.map((a) =>
+          a.agent_id === agentId ? { ...a, status: "running" as const } : a,
+        ),
+      );
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Failed to resume agent",
+      );
+    } finally {
+      setActionLoading(null);
+    }
+  }, []);
+
+  const getStatusBadge = (status: string) => {
+    switch (status) {
+      case "running":
+        return (
+          <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full font-medium bg-green-50 text-green-700">
+            <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
+            Running
+          </span>
+        );
+      case "stopped":
+        return (
+          <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full font-medium bg-yellow-50 text-yellow-700">
+            <span className="w-1.5 h-1.5 rounded-full bg-yellow-500" />
+            Paused
+          </span>
+        );
+      case "error":
+        return (
+          <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full font-medium bg-red-50 text-red-700">
+            <span className="w-1.5 h-1.5 rounded-full bg-red-500" />
+            Stopped
+          </span>
+        );
+      default:
+        return (
+          <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full font-medium bg-gray-50 text-gray-600">
+            <span className="w-1.5 h-1.5 rounded-full bg-gray-400" />
+            {status}
+          </span>
+        );
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-2">
+        <Play className="w-4 h-4 text-gray-500" />
+        <h3 className="text-sm font-semibold text-[#232323]">
+          Agent Health & Control
+        </h3>
+      </div>
+
+      {error && (
+        <p className="text-sm text-red-600 bg-red-50 px-4 py-3 rounded-lg">
+          {error}
+        </p>
+      )}
+
+      {loading ? (
+        <div className="flex items-center justify-center py-16">
+          <Loader2 className="w-6 h-6 text-gray-400 animate-spin" />
+        </div>
+      ) : agents.length === 0 ? (
+        <div className="flex flex-col items-center justify-center py-16 text-gray-400">
+          <Settings className="w-8 h-8 mb-2" />
+          <p className="text-sm">No agents found</p>
+          <p className="text-xs mt-1">
+            Agents will appear here once they are registered
+          </p>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {agents.map((agent) => (
+            <div
+              key={agent.agent_id}
+              className="flex items-center justify-between border border-gray-100 rounded-lg p-4 hover:border-gray-200 transition-colors"
+            >
+              <div className="flex items-center gap-3">
+                <div className="w-8 h-8 bg-gray-100 rounded-lg flex items-center justify-center">
+                  <Settings className="w-4 h-4 text-gray-500" />
+                </div>
+                <div>
+                  <p className="text-sm font-medium text-[#232323]">
+                    {agent.agent_id}
+                  </p>
+                  <div className="mt-0.5">
+                    {getStatusBadge(agent.status)}
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                {(agent as any).type === "autonomous" && agent.status === "running" && (
+                  <button
+                    onClick={() => handlePause(agent.agent_id)}
+                    disabled={actionLoading === agent.agent_id}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-yellow-200 text-yellow-700 hover:bg-yellow-50 disabled:opacity-50 transition-colors"
+                    title="Pause agent"
+                  >
+                    {actionLoading === agent.agent_id ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Pause className="w-3.5 h-3.5" />
+                    )}
+                    Pause
+                  </button>
+                )}
+                {(agent as any).type === "autonomous" && agent.status === "stopped" && (
+                  <button
+                    onClick={() => handleResume(agent.agent_id)}
+                    disabled={actionLoading === agent.agent_id}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-green-200 text-green-700 hover:bg-green-50 disabled:opacity-50 transition-colors"
+                    title="Resume agent"
+                  >
+                    {actionLoading === agent.agent_id ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Play className="w-3.5 h-3.5" />
+                    )}
+                    Resume
+                  </button>
+                )}
+                {(agent as any).type === "overlay" && (
+                  <span className="text-[10px] text-gray-400 px-2 py-1">
+                    Event-driven
+                  </span>
+                )}
+              </div>
+            </div>
+          ))}
         </div>
       )}
     </div>
@@ -915,6 +1112,11 @@ export default function AgentSettingsPage() {
           {/* Autonomy Configuration */}
           <div className="bg-white border border-gray-200 rounded-lg p-6">
             <AutonomySection isAdmin={isAdmin} />
+          </div>
+
+          {/* Agent Health & Control */}
+          <div className="bg-white border border-gray-200 rounded-lg p-6">
+            <AgentHealthSection />
           </div>
 
           {/* Memory Management */}

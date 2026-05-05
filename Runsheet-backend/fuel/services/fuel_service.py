@@ -79,10 +79,10 @@ class FuelService:
         Estimate days until stock reaches zero.
 
         Returns:
-            Estimated days. ``float('inf')`` when daily_rate is zero.
+            Estimated days. 99999.0 when daily_rate is zero (JSON-safe).
         """
         if daily_rate <= 0:
-            return float("inf")
+            return 99999.0
         return current_stock / daily_rate
 
     def _determine_status(
@@ -372,7 +372,7 @@ class FuelService:
             "alert_threshold_pct", existing["alert_threshold_pct"]
         )
         current_stock = existing["current_stock_liters"]
-        days_empty = existing.get("days_until_empty", float("inf"))
+        days_empty = existing.get("days_until_empty", 99999.0)
 
         partial["status"] = self._determine_status(
             current_stock, capacity, threshold, days_empty
@@ -749,7 +749,7 @@ class FuelService:
         # Recalculate status with the new threshold
         current_stock = existing["current_stock_liters"]
         capacity = existing["capacity_liters"]
-        days_until_empty = existing.get("days_until_empty", float("inf"))
+        days_until_empty = existing.get("days_until_empty", 99999.0)
 
         new_status = self._determine_status(
             current_stock, capacity, threshold_pct, days_until_empty

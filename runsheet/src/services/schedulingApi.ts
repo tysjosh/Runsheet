@@ -338,3 +338,26 @@ export async function getDelayMetrics(
   );
 }
 
+/** GET /scheduling/jobs/:id/eta — get ETA for a job */
+export async function getJobEta(
+  jobId: string,
+): Promise<SingleResponse<{ eta_minutes: number; estimated_arrival: string; calculated_at: string }>> {
+  return schedulingRequest<SingleResponse<{ eta_minutes: number; estimated_arrival: string; calculated_at: string }>>(
+    `/scheduling/jobs/${encodeURIComponent(jobId)}/eta`,
+  );
+}
+
+/** PATCH /scheduling/jobs/:id/reassign — reassign asset to a job */
+export async function reassignAsset(
+  jobId: string,
+  newAssetId: string,
+): Promise<SingleResponse<Job>> {
+  return schedulingRequest<SingleResponse<Job>>(
+    `/scheduling/jobs/${encodeURIComponent(jobId)}/reassign`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ asset_id: newAssetId }),
+    },
+  );
+}
+

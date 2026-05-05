@@ -2,6 +2,7 @@ import {
   AlertTriangle,
   ArrowDownCircle,
   ArrowUpCircle,
+  Clock,
   Filter,
   Package,
   Pencil,
@@ -17,12 +18,14 @@ import {
   createItem,
   deleteItem,
   getAlerts,
+  getItemHistory,
   getSummary,
   type CreateInventoryItemPayload,
   type InventoryCategory,
   type InventoryItem as InvApiItem,
   type InventorySummary,
   type StockAdjustment,
+  type StockMovementEvent,
 } from "../services/inventoryApi";
 
 import LoadingSpinner from "./LoadingSpinner";
@@ -39,11 +42,13 @@ export default function Inventory() {
   const [searchTerm, setSearchTerm] = useState("");
   const [filterCategory, setFilterCategory] = useState("all");
   const [filterStatus, setFilterStatus] = useState("all");
+  const [page, setPage] = useState(1);
   const [editingItem, setEditingItem] = useState<InventoryItem | null>(null);
   const [adjustingItem, setAdjustingItem] = useState<InventoryItem | null>(null);
   const [adjustType, setAdjustType] = useState<"restock" | "consume">("restock");
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [deletingItem, setDeletingItem] = useState<InventoryItem | null>(null);
+  const [historyItem, setHistoryItem] = useState<InventoryItem | null>(null);
 
   // Dashboard state
   const [summary, setSummary] = useState<InventorySummary | null>(null);
@@ -110,6 +115,8 @@ export default function Inventory() {
     }
   };
 
+  const PAGE_SIZE = 20;
+
   const filteredInventory = inventory.filter((item) => {
     const matchesSearch =
       item.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -121,6 +128,9 @@ export default function Inventory() {
       filterStatus === "all" || item.status === filterStatus;
     return matchesSearch && matchesCategory && matchesStatus;
   });
+
+  const totalPages = Math.max(1, Math.ceil(filteredInventory.length / PAGE_SIZE));
+  const paginatedInventory = filteredInventory.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
 
   const categories = [
     "all",
@@ -207,7 +217,7 @@ export default function Inventory() {
               type="text"
               placeholder="Search inventory..."
               value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
+              onChange={(e) => { setSearchTerm(e.target.value); setPage(1); }}
               className="w-full pl-10 pr-4 py-3 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-gray-200 focus:border-gray-300"
             />
           </div>
@@ -215,7 +225,7 @@ export default function Inventory() {
             <Filter className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
             <select
               value={filterCategory}
-              onChange={(e) => setFilterCategory(e.target.value)}
+              onChange={(e) => { setFilterCategory(e.target.value); setPage(1); }}
               className="pl-10 pr-8 py-3 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white min-w-[160px]"
               aria-label="Filter by category"
             >
@@ -230,7 +240,7 @@ export default function Inventory() {
           </div>
           <select
             value={filterStatus}
-            onChange={(e) => setFilterStatus(e.target.value)}
+            onChange={(e) => { setFilterStatus(e.target.value); setPage(1); }}
             className="px-4 py-3 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white min-w-[140px]"
             aria-label="Filter by status"
           >
@@ -357,7 +367,7 @@ export default function Inventory() {
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
-            {filteredInventory.map((item) => (
+            {paginatedInventory.map((item) => (
               <tr key={item.id} className="hover:bg-gray-50 transition-colors">
                 <td className="px-8 py-4">
                   <div className="font-medium text-[#232323]">{item.name}</div>
@@ -420,6 +430,13 @@ export default function Inventory() {
                       <Pencil className="w-3 h-3" />
                     </button>
                     <button
+                      onClick={() => setHistoryItem(item)}
+                      className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded-md border border-blue-200 text-blue-600 hover:bg-blue-50 transition-colors"
+                      title="History"
+                    >
+                      <Clock className="w-3 h-3" />
+                    </button>
+                    <button
                       onClick={() => setDeletingItem(item)}
                       className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded-md border border-red-200 text-red-600 hover:bg-red-50 transition-colors"
                       title="Delete"
@@ -432,6 +449,19 @@ export default function Inventory() {
             ))}
           </tbody>
         </table>
+
+        {/* Pagination */}
+        {totalPages > 1 && (
+          <div className="flex items-center justify-between px-8 py-3 border-t border-gray-100">
+            <span className="text-xs text-gray-500">
+              Page {page} of {totalPages} ({filteredInventory.length} items)
+            </span>
+            <div className="flex items-center gap-2">
+              <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page <= 1} className="px-3 py-1 text-xs border border-gray-200 rounded-lg disabled:opacity-30">Prev</button>
+              <button onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page >= totalPages} className="px-3 py-1 text-xs border border-gray-200 rounded-lg disabled:opacity-30">Next</button>
+            </div>
+          </div>
+        )}
 
         {filteredInventory.length === 0 && (
           <div className="text-center py-16 text-gray-500">
@@ -479,6 +509,14 @@ export default function Inventory() {
           item={deletingItem}
           onClose={() => setDeletingItem(null)}
           onConfirm={handleDeleteConfirm}
+        />
+      )}
+
+      {/* Stock History Modal */}
+      {historyItem && (
+        <StockHistoryModal
+          item={historyItem}
+          onClose={() => setHistoryItem(null)}
         />
       )}
     </div>
@@ -1130,6 +1168,164 @@ function DeleteConfirmModal({ item, onClose, onConfirm }: DeleteConfirmModalProp
             className="px-4 py-2 text-sm text-white bg-red-600 rounded-lg hover:bg-red-700 disabled:opacity-50"
           >
             {submitting ? "Deleting..." : "Delete"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Stock History Modal                                                  */
+/* ------------------------------------------------------------------ */
+
+interface StockHistoryModalProps {
+  item: InventoryItem;
+  onClose: () => void;
+}
+
+function StockHistoryModal({ item, onClose }: StockHistoryModalProps) {
+  const [events, setEvents] = useState<StockMovementEvent[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      setLoading(true);
+      setError("");
+      try {
+        const result = await getItemHistory(item.id, 1, 50);
+        if (!cancelled) {
+          setEvents(result.data ?? []);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setError(
+            err instanceof Error ? err.message : "Failed to load history",
+          );
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, [item.id]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl mx-4 max-h-[80vh] flex flex-col">
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+          <div>
+            <h2 className="text-lg font-semibold text-[#232323]">
+              Stock History
+            </h2>
+            <p className="text-xs text-gray-500 mt-0.5">
+              {item.name} — Current qty: {item.quantity} {item.unit}
+            </p>
+          </div>
+          <button
+            onClick={onClose}
+            className="p-1 text-gray-400 hover:text-gray-600 rounded"
+            aria-label="Close history modal"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* Body */}
+        <div className="flex-1 overflow-y-auto px-6 py-4">
+          {loading && (
+            <div className="flex items-center justify-center py-16">
+              <div className="w-6 h-6 border-2 border-gray-300 border-t-[#232323] rounded-full animate-spin" />
+            </div>
+          )}
+
+          {error && (
+            <p className="text-sm text-red-600 bg-red-50 px-4 py-3 rounded-lg">
+              {error}
+            </p>
+          )}
+
+          {!loading && !error && events.length === 0 && (
+            <div className="flex flex-col items-center justify-center py-16 text-gray-400">
+              <Clock className="w-8 h-8 mb-2" />
+              <p className="text-sm">No stock movements recorded</p>
+            </div>
+          )}
+
+          {!loading && !error && events.length > 0 && (
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-gray-100">
+                  <th className="text-left px-3 py-2 text-xs font-medium text-gray-500">
+                    Timestamp
+                  </th>
+                  <th className="text-left px-3 py-2 text-xs font-medium text-gray-500">
+                    Change
+                  </th>
+                  <th className="text-left px-3 py-2 text-xs font-medium text-gray-500">
+                    Reason
+                  </th>
+                  <th className="text-left px-3 py-2 text-xs font-medium text-gray-500">
+                    Reference
+                  </th>
+                  <th className="text-left px-3 py-2 text-xs font-medium text-gray-500">
+                    Result Qty
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-50">
+                {events.map((event) => (
+                  <tr
+                    key={event.event_id}
+                    className="hover:bg-gray-50 transition-colors"
+                  >
+                    <td className="px-3 py-2.5 text-xs text-gray-600">
+                      {new Date(event.event_timestamp).toLocaleString()}
+                    </td>
+                    <td className="px-3 py-2.5">
+                      <span
+                        className={`text-xs font-semibold ${
+                          event.quantity_change > 0
+                            ? "text-green-600"
+                            : event.quantity_change < 0
+                              ? "text-red-600"
+                              : "text-gray-600"
+                        }`}
+                      >
+                        {event.quantity_change > 0 ? "+" : ""}
+                        {event.quantity_change}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2.5 text-xs text-gray-600">
+                      {event.reason}
+                    </td>
+                    <td className="px-3 py-2.5 text-xs text-gray-500 font-mono">
+                      {event.reference_id || "—"}
+                    </td>
+                    <td className="px-3 py-2.5 text-xs text-gray-700 font-medium">
+                      {event.quantity_after}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="flex justify-end px-6 py-4 border-t border-gray-100">
+          <button
+            onClick={onClose}
+            className="px-4 py-2 text-sm text-white rounded-lg"
+            style={{ backgroundColor: "#232323" }}
+          >
+            Close
           </button>
         </div>
       </div>

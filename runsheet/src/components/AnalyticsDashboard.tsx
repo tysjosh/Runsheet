@@ -1,15 +1,17 @@
 "use client";
 
 import { lazy, Suspense, useState } from "react";
-import { AlertTriangle, BarChart3 } from "lucide-react";
+import { AlertTriangle, BarChart3, TrendingUp } from "lucide-react";
 import ErrorBoundary from "./ErrorBoundary";
 import LoadingSpinner from "./LoadingSpinner";
 
 const Analytics = lazy(() => import("./Analytics"));
 const FailureAnalytics = lazy(() => import("../app/ops/failures/page"));
+const SchedulingMetricsPage = lazy(() => import("./ops/SchedulingMetricsPage"));
 
 const TABS = [
   { id: "overview", label: "Overview", icon: BarChart3 },
+  { id: "scheduling", label: "Scheduling Metrics", icon: TrendingUp },
   { id: "failures", label: "Failure Analytics", icon: AlertTriangle },
 ] as const;
 
@@ -55,6 +57,16 @@ export default function AnalyticsDashboard() {
             <ErrorBoundary componentName="Failure Analytics">
               <Suspense fallback={<LoadingSpinner message="Loading failure analytics..." />}>
                 <FailureAnalytics />
+              </Suspense>
+            </ErrorBoundary>
+          </div>
+        )}
+
+        {activeTab === "scheduling" && (
+          <div className="h-full bg-white border-t border-gray-200 overflow-auto">
+            <ErrorBoundary componentName="Scheduling Metrics">
+              <Suspense fallback={<LoadingSpinner message="Loading scheduling metrics..." />}>
+                <SchedulingMetricsPage />
               </Suspense>
             </ErrorBoundary>
           </div>

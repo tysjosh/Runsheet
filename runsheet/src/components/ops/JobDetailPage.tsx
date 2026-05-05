@@ -36,6 +36,8 @@ import {
   Hash,
   Flag,
   Timer,
+  RefreshCw,
+  Repeat,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import type {
@@ -44,7 +46,7 @@ import type {
   JobStatus,
   SchedulingCargoItem,
 } from "../../types/api";
-import { getJob, getCargo, transitionStatus } from "../../services/schedulingApi";
+import { getJob, getCargo, transitionStatus, getJobEta, reassignAsset } from "../../services/schedulingApi";
 import LoadingSpinner from "../LoadingSpinner";
 import CargoManifestEditor from "./CargoManifestEditor";
 import JobActionButtons from "./JobActionButtons";
@@ -323,14 +325,19 @@ export default function JobDetailPage({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [transitionError, setTransitionError] = useState("");
+  const [eta, setEta] = useState<{ eta_minutes: number; estimated_arrival: string } | null>(null);
+  const [showReassign, setShowReassign] = useState(false);
+  const [reassignAssetId, setReassignAssetId] = useState("");
+  const [reassigning, setReassigning] = useState(false);
 
   const loadData = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
-      const [jobRes, cargoRes] = await Promise.allSettled([
+      const [jobRes, cargoRes, etaRes] = await Promise.allSettled([
         getJob(jobId),
         getCargo(jobId),
+        getJobEta(jobId),
       ]);
 
       if (jobRes.status === "fulfilled") {
@@ -349,6 +356,11 @@ export default function JobDetailPage({
         setCargo(cargoRes.value.data);
       }
       // Cargo may not exist for non-cargo jobs — that's fine
+
+      if (etaRes.status === "fulfilled") {
+        setEta(etaRes.value.data);
+      }
+      // ETA is non-critical — ignore failures
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "Failed to load job details",
@@ -400,6 +412,23 @@ export default function JobDetailPage({
     },
     [onTransition, jobId],
   );
+
+  const handleReassign = useCallback(async () => {
+    if (!reassignAssetId.trim()) return;
+    setReassigning(true);
+    try {
+      await reassignAsset(jobId, reassignAssetId.trim());
+      setShowReassign(false);
+      setReassignAssetId("");
+      loadData(); // Refresh job data
+    } catch (err) {
+      setTransitionError(
+        err instanceof Error ? err.message : "Failed to reassign asset",
+      );
+    } finally {
+      setReassigning(false);
+    }
+  }, [reassignAssetId, jobId, loadData]);
 
   // ── Loading state ──────────────────────────────────────────────────────
 
@@ -491,13 +520,51 @@ export default function JobDetailPage({
           </div>
 
           {/* Status transition actions */}
-          <JobActionButtons
-            jobId={job.job_id}
-            currentStatus={job.status}
-            onTransition={handleTransition}
-          />
+          <div className="flex items-center gap-2">
+            {(job.status === "assigned" || job.status === "in_progress") && (
+              <button
+                onClick={() => setShowReassign(true)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-gray-200 text-gray-700 hover:bg-gray-50 transition-colors"
+              >
+                <Repeat className="w-3.5 h-3.5" />
+                Reassign
+              </button>
+            )}
+            <JobActionButtons
+              jobId={job.job_id}
+              currentStatus={job.status}
+              onTransition={handleTransition}
+            />
+          </div>
         </div>
       </div>
+
+      {/* Reassign form */}
+      {showReassign && (
+        <div className="mx-8 mt-2 flex items-center gap-3 bg-gray-50 px-4 py-3 rounded-lg border border-gray-200">
+          <input
+            type="text"
+            value={reassignAssetId}
+            onChange={(e) => setReassignAssetId(e.target.value)}
+            placeholder="New asset ID (e.g. TRK-005)"
+            className="flex-1 px-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200"
+          />
+          <button
+            onClick={handleReassign}
+            disabled={reassigning || !reassignAssetId.trim()}
+            className="px-3 py-1.5 text-xs font-medium text-white rounded-lg disabled:opacity-50"
+            style={{ backgroundColor: "#232323" }}
+          >
+            {reassigning ? "Reassigning..." : "Confirm"}
+          </button>
+          <button
+            onClick={() => { setShowReassign(false); setReassignAssetId(""); }}
+            className="px-3 py-1.5 text-xs text-gray-500 hover:text-gray-700"
+          >
+            Cancel
+          </button>
+        </div>
+      )}
 
       {/* Transition error */}
       {transitionError && (
@@ -581,6 +648,13 @@ export default function JobDetailPage({
                 label="Estimated Arrival"
                 value={formatDateTime(job.estimated_arrival)}
               />
+              {eta && (
+                <DetailField
+                  icon={<Clock className="w-4 h-4" />}
+                  label="Live ETA"
+                  value={`${eta.eta_minutes} min (${new Date(eta.estimated_arrival).toLocaleTimeString()})`}
+                />
+              )}
               <DetailField
                 icon={<Clock className="w-4 h-4" />}
                 label="Started At"

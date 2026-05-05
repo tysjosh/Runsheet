@@ -1,7 +1,6 @@
 "use client";
 
 import { Package } from "lucide-react";
-import Link from "next/link";
 
 interface InventoryHealthBadgeProps {
   alertCount: number;
@@ -9,8 +8,7 @@ interface InventoryHealthBadgeProps {
 
 /**
  * Compact inventory health indicator for the Operations Control View.
- * Shows the count of low-stock + out-of-stock items and links to the
- * dashboard inventory view.
+ * Shows the count of low-stock + out-of-stock items as a status badge.
  *
  * Validates: Requirement 7.6
  */
@@ -18,14 +16,13 @@ export default function InventoryHealthBadge({ alertCount }: InventoryHealthBadg
   const hasAlerts = alertCount > 0;
 
   return (
-    <Link
-      href="/dashboard?view=inventory"
-      className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors w-fit ${
+    <div
+      className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium w-fit ${
         hasAlerts
-          ? "bg-orange-50 text-orange-700 hover:bg-orange-100 border border-orange-200"
-          : "bg-green-50 text-green-700 hover:bg-green-100 border border-green-200"
+          ? "bg-orange-50 text-orange-700 border border-orange-200"
+          : "bg-green-50 text-green-700 border border-green-200"
       }`}
-      aria-label={`Inventory health: ${alertCount} items need attention. Click to view inventory.`}
+      aria-label={`Inventory health: ${alertCount} items need attention.`}
     >
       <Package className="w-3.5 h-3.5" aria-hidden="true" />
       <span>
@@ -33,6 +30,6 @@ export default function InventoryHealthBadge({ alertCount }: InventoryHealthBadg
           ? `${alertCount} inventory ${alertCount === 1 ? "alert" : "alerts"}`
           : "Inventory healthy"}
       </span>
-    </Link>
+    </div>
   );
 }
