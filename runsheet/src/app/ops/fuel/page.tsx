@@ -83,6 +83,9 @@ export default function FuelDashboardPage() {
   const [stationFormMode, setStationFormMode] = useState<"create" | "edit">("create");
   const [editingStation, setEditingStation] = useState<FuelStation | null>(null);
 
+  // Tab state
+  const [activeTab, setActiveTab] = useState<"efficiency" | "stations">("efficiency");
+
   const loadData = useCallback(async () => {
     try {
       setLoading(true);
@@ -247,46 +250,7 @@ export default function FuelDashboardPage() {
           </button>
         </div>
 
-        {/* Filters — Validates: Requirement 6.4 */}
-        <div className="flex flex-wrap items-center gap-3">
-          <select
-            value={fuelTypeFilter}
-            onChange={(e) => setFuelTypeFilter(e.target.value as "" | FuelType)}
-            className="px-3 py-1.5 text-sm border border-gray-200 rounded-lg bg-white focus:ring-2 focus:ring-gray-200 focus:border-gray-300"
-            aria-label="Filter by fuel type"
-          >
-            {FUEL_TYPE_OPTIONS.map((opt) => (
-              <option key={opt.value} value={opt.value}>
-                {opt.label}
-              </option>
-            ))}
-          </select>
-
-          <select
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value as "" | StationStatus)}
-            className="px-3 py-1.5 text-sm border border-gray-200 rounded-lg bg-white focus:ring-2 focus:ring-gray-200 focus:border-gray-300"
-            aria-label="Filter by status"
-          >
-            {STATUS_OPTIONS.map((opt) => (
-              <option key={opt.value} value={opt.value}>
-                {opt.label}
-              </option>
-            ))}
-          </select>
-
-          <div className="relative">
-            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" aria-hidden="true" />
-            <input
-              type="text"
-              value={locationFilter}
-              onChange={(e) => setLocationFilter(e.target.value)}
-              placeholder="Filter by location..."
-              className="pl-8 pr-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300"
-              aria-label="Filter by location"
-            />
-          </div>
-        </div>
+        {/* Filters removed from header — now inside Fuel Stations tab */}
       </div>
 
       {/* Summary Bar — Validates: Requirement 6.2 */}
@@ -295,65 +259,137 @@ export default function FuelDashboardPage() {
       </div>
 
       {/* Main content area */}
-      <div className="flex-1 overflow-hidden flex">
-        {/* Left: Station list + chart */}
-        <div className={`flex-1 flex flex-col overflow-y-auto ${stationDetail ? "lg:w-3/5" : "w-full"}`}>
-          {/* Consumption Chart — Validates: Requirement 6.3 */}
-          <div className="border-b border-gray-100 px-8 py-6">
-            <h2 className="text-sm font-medium text-gray-700 mb-3">
-              Daily Consumption Trend
-            </h2>
-            <FuelConsumptionChart data={consumptionData} />
-          </div>
-
-          {/* Efficiency Chart — Validates: Requirements 9.1, 9.2, 9.3, 9.4, 9.5, 9.6 */}
-          <div className="border-b border-gray-100 px-8 py-6">
-            <div className="flex items-center gap-2 mb-3">
-              <BarChart3 className="w-4 h-4 text-gray-500" aria-hidden="true" />
-              <h2 className="text-sm font-medium text-gray-700">
-                Fuel Efficiency by Asset
-              </h2>
-            </div>
-            <FuelEfficiencyChart />
-          </div>
-
-          {/* Station List — Validates: Requirements 6.1, 6.4 */}
-          <div className="px-8 py-6">
-            <div className="flex items-center gap-2 mb-3">
-              <h2 className="text-sm font-medium text-gray-700">
-                Fuel Stations
-              </h2>
-            </div>
-            <FuelStationList
-              stations={stations}
-              onSelectStation={handleSelectStation}
-              selectedStationId={selectedStationId}
-              onEditStation={handleEditStation}
-            />
-          </div>
+      <div className="flex-1 overflow-hidden flex flex-col">
+        {/* Tab bar */}
+        <div className="px-8 pt-4 pb-0 flex items-center gap-1">
+          <button
+            onClick={() => setActiveTab("efficiency")}
+            className={`flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-t-lg transition-colors ${
+              activeTab === "efficiency"
+                ? "bg-white text-[#232323] border border-gray-200 border-b-white -mb-px z-10"
+                : "text-gray-500 hover:text-gray-700 hover:bg-gray-100"
+            }`}
+          >
+            <BarChart3 className="w-4 h-4" />
+            Fuel Efficiency
+          </button>
+          <button
+            onClick={() => setActiveTab("stations")}
+            className={`flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-t-lg transition-colors ${
+              activeTab === "stations"
+                ? "bg-white text-[#232323] border border-gray-200 border-b-white -mb-px z-10"
+                : "text-gray-500 hover:text-gray-700 hover:bg-gray-100"
+            }`}
+          >
+            <Fuel className="w-4 h-4" />
+            Fuel Stations
+          </button>
         </div>
 
-        {/* Right: Station Detail Panel — Validates: Requirement 6.6 */}
-        {selectedStationId && (
-          <div className="hidden lg:block w-2/5 border-l border-gray-100 overflow-y-auto p-4">
-            {detailLoading ? (
-              <LoadingSpinner message="Loading station detail..." />
-            ) : stationDetail ? (
-              <FuelStationDetail
-                detail={stationDetail}
-                onClose={handleCloseDetail}
-                onEventRecorded={() => {
-                  if (selectedStationId) loadStationDetail(selectedStationId);
-                  loadData();
-                }}
-              />
-            ) : (
-              <p className="text-sm text-gray-400 text-center py-8">
-                Failed to load station detail
-              </p>
-            )}
-          </div>
-        )}
+        {/* Tab content */}
+        <div className="flex-1 overflow-hidden flex border-t border-gray-200">
+          {activeTab === "efficiency" && (
+            <div className="flex-1 overflow-y-auto">
+              {/* Consumption Chart — Validates: Requirement 6.3 */}
+              <div className="border-b border-gray-100 px-8 py-6">
+                <h2 className="text-sm font-medium text-gray-700 mb-3">
+                  Daily Consumption Trend
+                </h2>
+                <FuelConsumptionChart data={consumptionData} />
+              </div>
+
+              {/* Efficiency Chart — Validates: Requirements 9.1, 9.2, 9.3, 9.4, 9.5, 9.6 */}
+              <div className="px-8 py-6">
+                <div className="flex items-center gap-2 mb-3">
+                  <BarChart3 className="w-4 h-4 text-gray-500" aria-hidden="true" />
+                  <h2 className="text-sm font-medium text-gray-700">
+                    Fuel Efficiency by Asset
+                  </h2>
+                </div>
+                <FuelEfficiencyChart />
+              </div>
+            </div>
+          )}
+
+          {activeTab === "stations" && (
+            <div className="flex-1 overflow-hidden flex">
+              {/* Left: Station list */}
+              <div className={`flex-1 overflow-y-auto ${stationDetail ? "lg:w-3/5" : "w-full"}`}>
+                <div className="px-8 py-6">
+                  {/* Filters — Validates: Requirement 6.4 */}
+                  <div className="flex flex-wrap items-center gap-3 mb-4">
+                    <select
+                      value={fuelTypeFilter}
+                      onChange={(e) => setFuelTypeFilter(e.target.value as "" | FuelType)}
+                      className="px-3 py-1.5 text-sm border border-gray-200 rounded-lg bg-white focus:ring-2 focus:ring-gray-200 focus:border-gray-300"
+                      aria-label="Filter by fuel type"
+                    >
+                      {FUEL_TYPE_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+
+                    <select
+                      value={statusFilter}
+                      onChange={(e) => setStatusFilter(e.target.value as "" | StationStatus)}
+                      className="px-3 py-1.5 text-sm border border-gray-200 rounded-lg bg-white focus:ring-2 focus:ring-gray-200 focus:border-gray-300"
+                      aria-label="Filter by status"
+                    >
+                      {STATUS_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+
+                    <div className="relative">
+                      <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" aria-hidden="true" />
+                      <input
+                        type="text"
+                        value={locationFilter}
+                        onChange={(e) => setLocationFilter(e.target.value)}
+                        placeholder="Filter by location..."
+                        className="pl-8 pr-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300"
+                        aria-label="Filter by location"
+                      />
+                    </div>
+                  </div>
+
+                  <FuelStationList
+                    stations={stations}
+                    onSelectStation={handleSelectStation}
+                    selectedStationId={selectedStationId}
+                    onEditStation={handleEditStation}
+                  />
+                </div>
+              </div>
+
+              {/* Right: Station Detail Panel — Validates: Requirement 6.6 */}
+              {selectedStationId && (
+                <div className="hidden lg:block w-2/5 border-l border-gray-100 overflow-y-auto p-4">
+                  {detailLoading ? (
+                    <LoadingSpinner message="Loading station detail..." />
+                  ) : stationDetail ? (
+                    <FuelStationDetail
+                      detail={stationDetail}
+                      onClose={handleCloseDetail}
+                      onEventRecorded={() => {
+                        if (selectedStationId) loadStationDetail(selectedStationId);
+                        loadData();
+                      }}
+                    />
+                  ) : (
+                    <p className="text-sm text-gray-400 text-center py-8">
+                      Failed to load station detail
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Station Form Modal — Validates: Requirements 8.1, 8.3 */}
