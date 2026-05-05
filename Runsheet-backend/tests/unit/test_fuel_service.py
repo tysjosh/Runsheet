@@ -516,14 +516,14 @@ class TestCalculateDaysUntilEmpty:
         assert svc._calculate_days_until_empty(10000.0, 500.0) == 20.0
 
     def test_zero_rate_returns_infinity(self, settings_mock):
-        """Zero consumption rate → infinite days."""
+        """Zero consumption rate → JSON-safe sentinel (99999.0)."""
         svc = self._make_svc(settings_mock)
-        assert svc._calculate_days_until_empty(10000.0, 0.0) == float("inf")
+        assert svc._calculate_days_until_empty(10000.0, 0.0) == 99999.0
 
     def test_negative_rate_returns_infinity(self, settings_mock):
-        """Negative rate (edge case) → infinite days."""
+        """Negative rate (edge case) → JSON-safe sentinel (99999.0)."""
         svc = self._make_svc(settings_mock)
-        assert svc._calculate_days_until_empty(10000.0, -5.0) == float("inf")
+        assert svc._calculate_days_until_empty(10000.0, -5.0) == 99999.0
 
     def test_zero_stock_returns_zero(self, settings_mock):
         """Zero stock with positive rate → 0 days."""

@@ -17,6 +17,7 @@ Validates: Requirements 6.1–6.6, 9.1–9.4
 import asyncio
 import logging
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
@@ -24,6 +25,59 @@ from typing import Any, Dict, List, Optional
 from Agents.agent_ws_manager import AgentActivityWSManager
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Pipeline stage data model (Req 1.1, 2.1)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PipelineStageResult:
+    """Captures the output of each pipeline stage for injection into the next stage.
+
+    Validates: Requirements 1.1, 2.1
+    """
+
+    agent_id: str
+    signals_consumed: List[Any] = field(default_factory=list)
+    proposals_generated: List[Any] = field(default_factory=list)
+    published_messages: List[Any] = field(default_factory=list)
+
+
+class PipelinePublishCapture:
+    """Async context manager that captures messages published to SignalBus during a stage.
+
+    Monkey-patches SignalBus.publish to intercept messages while still calling
+    the original publish method. This allows the pipeline to know what each
+    stage published without modifying SignalBus internals.
+
+    Validates: Requirements 1.1, 2.1
+
+    Args:
+        signal_bus: The SignalBus instance to intercept publish calls on.
+    """
+
+    def __init__(self, signal_bus) -> None:
+        self._signal_bus = signal_bus
+        self._captured: List[Any] = []
+        self._original_publish = signal_bus.publish
+
+    async def __aenter__(self) -> "PipelinePublishCapture":
+        async def capturing_publish(message) -> int:
+            self._captured.append(message)
+            return await self._original_publish(message)
+
+        self._signal_bus.publish = capturing_publish
+        return self
+
+    async def __aexit__(self, *args) -> None:
+        self._signal_bus.publish = self._original_publish
+
+    @property
+    def captured(self) -> List[Any]:
+        """Return a copy of all captured messages."""
+        return list(self._captured)
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +245,31 @@ class FuelDistributionPipeline:
             tenant_id,
         )
 
-        for agent_id, stage_state in PIPELINE_STAGES:
+        # Seed the first agent's signal buffer with a trigger signal so it
+        # has input to process. Without this, the TankForecastingAgent's
+        # monitor_cycle() returns immediately when _signal_buffer is empty.
+        first_agent_id = PIPELINE_STAGES[0][0]
+        first_agent = self._agents.get(first_agent_id)
+        if first_agent is not None and hasattr(first_agent, "_signal_buffer"):
+            from Agents.overlay.data_contracts import RiskSignal, Severity
+
+            trigger_signal = RiskSignal(
+                source_agent="pipeline_trigger",
+                entity_id=f"pipeline_run_{run_id}",
+                entity_type="pipeline_trigger",
+                severity=Severity.MEDIUM,
+                confidence=1.0,
+                ttl_seconds=3600,
+                context={"trigger": "pipeline_run", "run_id": run_id},
+                tenant_id=tenant_id,
+            )
+            first_agent._signal_buffer.append(trigger_signal)
+            logger.info(
+                "FuelDistributionPipeline: seeded %s signal buffer with trigger signal",
+                first_agent_id,
+            )
+
+        for stage_idx, (agent_id, stage_state) in enumerate(PIPELINE_STAGES):
             agent = self._agents.get(agent_id)
             if agent is None:
                 logger.warning(
@@ -200,14 +278,46 @@ class FuelDistributionPipeline:
                 )
                 continue
 
+            # Determine the next agent for buffer injection (Req 1.2)
+            next_agent = None
+            if stage_idx + 1 < len(PIPELINE_STAGES):
+                next_agent_id = PIPELINE_STAGES[stage_idx + 1][0]
+                next_agent = self._agents.get(next_agent_id)
+
             # Transition state (Req 6.4)
             pipeline_run.state = stage_state
             await self._broadcast_state_transition(pipeline_run, agent_id)
 
             try:
-                # Trigger the agent's evaluation cycle
-                await agent.monitor_cycle()
+                # Inject run_id into agent if it supports it
+                agent._current_run_id = run_id
+
+                # Override agent mode to active_auto during pipeline execution
+                # so that feature flags don't block agent evaluation
+                if hasattr(agent, '_pipeline_mode_override'):
+                    agent._pipeline_mode_override = "active_auto"
+                else:
+                    agent._pipeline_mode_override = "active_auto"
+
+                # Capture published messages during monitor_cycle (Req 1.1, 2.1)
+                captured_messages: List[Any] = []
+                if self._signal_bus is not None:
+                    async with PipelinePublishCapture(self._signal_bus) as capture:
+                        await agent.monitor_cycle()
+                        captured_messages = capture.captured
+                else:
+                    await agent.monitor_cycle()
+
+                # Inject captured output into next agent's buffer (Req 1.2, 1.3)
+                await self._capture_and_inject(
+                    current_agent_id=agent_id,
+                    captured_messages=captured_messages,
+                    next_agent=next_agent,
+                )
+
                 pipeline_run.stage_results[agent_id] = "completed"
+                # Clear pipeline mode override after stage completes
+                agent._pipeline_mode_override = None
                 logger.info(
                     "FuelDistributionPipeline: agent %s completed for run %s",
                     agent_id,
@@ -325,6 +435,104 @@ class FuelDistributionPipeline:
                     "FuelDistributionPipeline: periodic run failed: %s", e
                 )
                 # Continue to next cycle (circuit-breaker retry — Req 6.5)
+
+    # ------------------------------------------------------------------
+    # Direct buffer injection (Req 1.1, 1.2, 1.3, 1.5)
+    # ------------------------------------------------------------------
+
+    # Stage-to-buffer mapping: determines which buffer on the *next* agent
+    # receives the captured messages from the *current* stage.
+    _STAGE_BUFFER_MAP: Dict[str, str] = {
+        "tank_forecasting": "_forecast_buffer",
+        "delivery_prioritization": "_priority_buffer",
+        "compartment_loading": "_proposal_buffer",
+    }
+
+    async def _capture_and_inject(
+        self,
+        current_agent_id: str,
+        captured_messages: List[Any],
+        next_agent: Optional[Any],
+    ) -> None:
+        """Capture stage output and inject into next agent's typed buffer.
+
+        Determines the target buffer based on the current stage's agent_id
+        and extends that buffer on the next agent with the captured messages.
+        This bypasses the SignalBus subscription mechanism for inter-stage
+        data transfer during synchronous pipeline execution.
+
+        If captured_messages is empty, logs a warning and returns.
+        If next_agent is None (last stage), returns immediately.
+
+        Validates: Requirements 1.1, 1.2, 1.3, 1.5
+
+        Args:
+            current_agent_id: The agent_id of the stage that just completed.
+            captured_messages: Messages captured from SignalBus.publish()
+                during the stage's monitor_cycle().
+            next_agent: The next agent in the pipeline sequence, or None
+                if this is the last stage.
+        """
+        if next_agent is None:
+            return
+
+        if not captured_messages:
+            logger.warning(
+                "FuelDistributionPipeline: stage '%s' produced no output; "
+                "injecting empty into next stage",
+                current_agent_id,
+            )
+            return
+
+        target_buffer_name = self._STAGE_BUFFER_MAP.get(current_agent_id)
+        if target_buffer_name is None:
+            logger.debug(
+                "FuelDistributionPipeline: no buffer mapping for stage '%s', "
+                "skipping injection",
+                current_agent_id,
+            )
+            return
+
+        if not hasattr(next_agent, target_buffer_name):
+            logger.warning(
+                "FuelDistributionPipeline: next agent does not have buffer '%s', "
+                "skipping injection",
+                target_buffer_name,
+            )
+            return
+
+        buffer = getattr(next_agent, target_buffer_name)
+        buffer.extend(captured_messages)
+
+        # If injecting into a typed buffer (not _signal_buffer), we also need
+        # to seed _signal_buffer with a trigger so that monitor_cycle() doesn't
+        # short-circuit with "if not signals: return [], []" before calling
+        # evaluate() which reads the typed buffer.
+        if target_buffer_name != "_signal_buffer" and hasattr(next_agent, "_signal_buffer"):
+            from Agents.overlay.data_contracts import RiskSignal, Severity
+
+            trigger = RiskSignal(
+                source_agent="pipeline_injection",
+                entity_id=f"pipeline_stage_{current_agent_id}",
+                entity_type="pipeline_trigger",
+                severity=Severity.LOW,
+                confidence=1.0,
+                ttl_seconds=3600,
+                context={"trigger": "pipeline_injection", "source_stage": current_agent_id},
+                tenant_id=next_agent._signal_buffer[0].tenant_id if next_agent._signal_buffer else (
+                    captured_messages[0].tenant_id if hasattr(captured_messages[0], 'tenant_id') else "unknown"
+                ),
+            )
+            next_agent._signal_buffer.append(trigger)
+
+        logger.info(
+            "FuelDistributionPipeline: injected %d message(s) from stage '%s' "
+            "into %s.%s",
+            len(captured_messages),
+            current_agent_id,
+            next_agent.agent_id if hasattr(next_agent, 'agent_id') else 'unknown',
+            target_buffer_name,
+        )
 
     async def _broadcast_state_transition(
         self,

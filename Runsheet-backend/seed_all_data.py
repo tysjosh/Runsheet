@@ -462,6 +462,48 @@ def seed_fuel_stations(force: bool = False):
 
 
 # ---------------------------------------------------------------------------
+# 5b. truck_compartments (fuel tanker configuration)
+# ---------------------------------------------------------------------------
+def seed_truck_compartments(force: bool = False):
+    index = "truck_compartments"
+    if not force and _index_count(index) > 0:
+        logger.info(f"⏭️  {index} already has data — skipping")
+        return
+
+    # Two fuel tankers with multiple compartments each
+    compartments = [
+        # Truck FT-001: 3 compartments, total 32000L
+        ("FT-001", "C1", 12000, ["AGO", "PMS"], 1),
+        ("FT-001", "C2", 12000, ["AGO", "PMS"], 2),
+        ("FT-001", "C3", 8000,  ["AGO", "PMS", "ATK"], 3),
+        # Truck FT-002: 4 compartments, total 28000L
+        ("FT-002", "C1", 10000, ["PMS"], 1),
+        ("FT-002", "C2", 8000,  ["PMS", "AGO"], 2),
+        ("FT-002", "C3", 6000,  ["AGO"], 3),
+        ("FT-002", "C4", 4000,  ["LPG", "ATK"], 4),
+    ]
+
+    actions = []
+    for truck_id, comp_id, capacity, grades, pos in compartments:
+        doc_id = f"{truck_id}_{comp_id}"
+        doc = {
+            "compartment_id": comp_id,
+            "truck_id": truck_id,
+            "capacity_liters": float(capacity),
+            "allowed_grades": grades,
+            "position_index": pos,
+            "tenant_id": TENANT,
+            "created_at": _ago(days=30),
+            "updated_at": _now(),
+        }
+        actions.append({"index": {"_index": index, "_id": doc_id}})
+        actions.append(doc)
+
+    _bulk(actions)
+    logger.info(f"✅ Seeded {len(compartments)} docs → {index}")
+
+
+# ---------------------------------------------------------------------------
 # 6. fuel_events
 # ---------------------------------------------------------------------------
 def seed_fuel_events(force: bool = False):
@@ -752,6 +794,7 @@ def main():
         ("shipment_events",       seed_shipment_events),
         ("jobs_current",          seed_jobs),
         ("fuel_stations",         seed_fuel_stations),
+        ("truck_compartments",    seed_truck_compartments),
         ("fuel_events",           seed_fuel_events),
         ("agent_memory",          seed_agent_memory),
         ("agent_approval_queue",  seed_approval_queue),

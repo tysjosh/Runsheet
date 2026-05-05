@@ -42,6 +42,8 @@ MVP_TANK_FORECASTS_MAPPING = {
             "tenant_id":           {"type": "keyword"},
             "run_id":              {"type": "keyword"},
             "timestamp":           {"type": "date"},
+            "updated_at":          {"type": "date"},
+            "created_at":          {"type": "date"},
         },
     },
     "settings": {
@@ -69,6 +71,8 @@ MVP_DELIVERY_PRIORITIES_MAPPING = {
             "tenant_id":       {"type": "keyword"},
             "run_id":          {"type": "keyword"},
             "timestamp":       {"type": "date"},
+            "updated_at":      {"type": "date"},
+            "created_at":      {"type": "date"},
         },
     },
     "settings": {
@@ -131,6 +135,8 @@ MVP_ROUTES_MAPPING = {
             "run_id":          {"type": "keyword"},
             "timestamp":       {"type": "date"},
             "status":          {"type": "keyword"},
+            "updated_at":      {"type": "date"},
+            "created_at":      {"type": "date"},
         },
     },
     "settings": {
@@ -162,6 +168,8 @@ MVP_REPLAN_EVENTS_MAPPING = {
             "tenant_id": {"type": "keyword"},
             "run_id":    {"type": "keyword"},
             "timestamp": {"type": "date"},
+            "updated_at": {"type": "date"},
+            "created_at": {"type": "date"},
         },
     },
     "settings": {
@@ -183,6 +191,8 @@ MVP_PLAN_OUTCOMES_MAPPING = {
             "tenant_id":      {"type": "keyword"},
             "timestamp":      {"type": "date"},
             "status":         {"type": "keyword"},
+            "updated_at":     {"type": "date"},
+            "created_at":     {"type": "date"},
         },
     },
     "settings": {
@@ -201,6 +211,8 @@ TRUCK_COMPARTMENTS_MAPPING = {
             "allowed_grades":  {"type": "keyword"},
             "position_index":  {"type": "integer"},
             "tenant_id":       {"type": "keyword"},
+            "updated_at":      {"type": "date"},
+            "created_at":      {"type": "date"},
         },
     },
     "settings": {

@@ -232,6 +232,9 @@ class RoutePlanningAgent(OverlayAgentBase):
                 utilization_pct=loading_plan.get("total_utilization_pct", 0.0),
             )
 
+            # Set run_id from pipeline context if available
+            route_plan.run_id = getattr(self, '_current_run_id', None) or ""
+
             # Step 6: Persist route plan to ES (Req 4.7)
             await self._persist_route_plan(route_plan)
 
@@ -282,7 +285,7 @@ class RoutePlanningAgent(OverlayAgentBase):
                     ],
                 },
             },
-            "_source": ["station_id", "latitude", "longitude"],
+            "_source": ["station_id", "latitude", "longitude", "location"],
             "size": 200,
         }
 
@@ -294,8 +297,15 @@ class RoutePlanningAgent(OverlayAgentBase):
             for hit in resp.get("hits", {}).get("hits", []):
                 source = hit["_source"]
                 sid = source.get("station_id", "")
+                # Try explicit lat/lon fields first
                 lat = source.get("latitude", 0.0)
                 lon = source.get("longitude", 0.0)
+                # Fall back to location geo_point field
+                if (lat == 0.0 and lon == 0.0) and source.get("location"):
+                    loc = source["location"]
+                    if isinstance(loc, dict):
+                        lat = loc.get("lat", 0.0)
+                        lon = loc.get("lon", 0.0)
                 if sid and (lat != 0.0 or lon != 0.0):
                     locations[sid] = {"lat": lat, "lon": lon}
         except Exception as e:

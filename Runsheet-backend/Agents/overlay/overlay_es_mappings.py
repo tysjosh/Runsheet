@@ -28,7 +28,7 @@ AGENT_SIGNALS_MAPPING = {
             "confidence":     {"type": "float"},
             "ttl_seconds":    {"type": "integer"},
             "timestamp":      {"type": "date"},
-            "context":        {"type": "object", "enabled": True},
+            "context":        {"type": "object", "dynamic": True},
             "tenant_id":      {"type": "keyword"},
             "schema_version": {"type": "keyword"},
             # InterventionProposal fields (shared index)
@@ -51,6 +51,9 @@ AGENT_SIGNALS_MAPPING = {
             "new_value":     {"type": "object", "enabled": True},
             "evidence":      {"type": "keyword"},
             "rollback_plan": {"type": "object", "enabled": True},
+            # Timestamp fields (auto-injected by ElasticsearchService)
+            "updated_at":    {"type": "date"},
+            "created_at":    {"type": "date"},
         },
     },
     "settings": {
@@ -81,6 +84,9 @@ AGENT_SHADOW_PROPOSALS_MAPPING = {
             "new_value":     {"type": "object", "enabled": True},
             "evidence":      {"type": "keyword"},
             "rollback_plan": {"type": "object", "enabled": True},
+            # Timestamp fields (auto-injected by ElasticsearchService)
+            "updated_at":    {"type": "date"},
+            "created_at":    {"type": "date"},
         },
     },
     "settings": {
@@ -106,6 +112,9 @@ AGENT_OUTCOMES_MAPPING = {
             "notification_ids":     {"type": "keyword"},
             "confidence_score":     {"type": "float"},
             "confidence_rationale": {"type": "keyword"},
+            # Timestamp fields (auto-injected by ElasticsearchService)
+            "updated_at":    {"type": "date"},
+            "created_at":    {"type": "date"},
         },
     },
     "settings": {
@@ -125,6 +134,9 @@ AGENT_REVENUE_REPORTS_MAPPING = {
             "total_routes_analyzed":     {"type": "integer"},
             "leakage_patterns_detected": {"type": "integer"},
             "generated_at":              {"type": "date"},
+            # Timestamp fields (auto-injected by ElasticsearchService)
+            "updated_at":    {"type": "date"},
+            "created_at":    {"type": "date"},
         },
     },
     "settings": {

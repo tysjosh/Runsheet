@@ -164,7 +164,7 @@ class TestGetPlan:
         data = resp.json()
         assert data["plan_id"] == "plan-1"
         assert data["loading_plan"]["truck_id"] == "truck-1"
-        assert data["route_plan"]["route_id"] == "route-1"
+        assert data["route_plan"]["routes"][0]["route_id"] == "route-1"
 
     def test_returns_empty_plan_when_not_found(self):
         app, _, _ = _create_test_app()

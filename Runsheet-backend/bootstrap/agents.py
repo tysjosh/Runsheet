@@ -61,6 +61,16 @@ async def initialize(app, container: ServiceContainer) -> None:
     settings = container.settings
     es_service = container.es_service
 
+    # ---- Startup Mapping Validation (Req 5.1, 5.5) ----
+    try:
+        from services.mapping_validator import MappingValidator
+
+        mapping_validator = MappingValidator(es_service=es_service)
+        drift_items = await mapping_validator.validate_all()
+        await mapping_validator.remediate(drift_items)
+    except Exception as exc:
+        logger.error("Mapping validation failed (non-blocking): %s", exc)
+
     # Agent WebSocket manager
     agent_ws_manager = AgentActivityWSManager()
     container.agent_ws_manager = agent_ws_manager
@@ -370,11 +380,16 @@ async def initialize(app, container: ServiceContainer) -> None:
 
     # Wire MVP REST endpoints (Req 8.1–8.6)
     from Agents.support.mvp_endpoints import configure_mvp_endpoints, router as mvp_router
+    from fuel.services.fleet_registration_service import FleetRegistrationService
+
+    # Create FleetRegistrationService for fuel tanker fleet integration (Req 6.1, 6.3)
+    fleet_registration_service = FleetRegistrationService(es_service=es_service)
 
     configure_mvp_endpoints(
         pipeline=mvp_pipeline,
         es_service=es_service,
         exception_replanning_agent=exception_replanning_agent,
+        fleet_registration_service=fleet_registration_service,
     )
     app.include_router(mvp_router)
     logger.info("MVP endpoints configured and router registered")

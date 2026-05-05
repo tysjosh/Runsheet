@@ -47,7 +47,7 @@ class ElasticsearchService:
         self._circuit_breaker = CircuitBreaker(
             name="elasticsearch_write",
             config=CircuitBreakerConfig(
-                failure_threshold=10,
+                failure_threshold=50,
             )
         )
         self._read_circuit_breaker = CircuitBreaker(

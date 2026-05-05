@@ -2,16 +2,17 @@
 REST API endpoints for the Fuel Distribution MVP pipeline.
 
 Provides endpoints for triggering pipeline runs, retrieving plans,
-initiating replanning, and querying forecasts and priorities.
+initiating replanning, querying forecasts and priorities, and
+configuring truck compartments.
 
 Uses a ``configure_mvp_endpoints()`` function to wire service
 dependencies at startup (same pattern as agent_endpoints.py).
 
-Validates: Requirements 8.1–8.6
+Validates: Requirements 6.1, 6.3, 8.1–8.6
 """
 
 import logging
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
@@ -25,6 +26,7 @@ logger = logging.getLogger(__name__)
 _pipeline = None
 _es_service = None
 _exception_replanning_agent = None
+_fleet_registration_service = None
 
 router = APIRouter(prefix="/api/fuel/mvp", tags=["fuel-mvp"])
 
@@ -59,6 +61,21 @@ class ReplanRequest(BaseModel):
     )
 
 
+class CompartmentConfig(BaseModel):
+    """A single compartment configuration entry."""
+    compartment_id: str = Field(..., description="Unique compartment identifier")
+    capacity_liters: float = Field(..., ge=0, description="Compartment capacity in liters")
+    allowed_grades: List[str] = Field(default_factory=list, description="Allowed fuel grades")
+    position_index: int = Field(default=0, ge=0, description="Position index on the truck")
+
+
+class CompartmentConfigRequest(BaseModel):
+    """Body for PUT /compartments/{truck_id}."""
+    compartments: List[CompartmentConfig] = Field(
+        ..., description="List of compartment configurations for the truck"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Service wiring
 # ---------------------------------------------------------------------------
@@ -69,16 +86,18 @@ def configure_mvp_endpoints(
     pipeline,
     es_service,
     exception_replanning_agent=None,
+    fleet_registration_service=None,
 ) -> None:
     """Wire service dependencies into the MVP endpoints module.
 
     Called once during application startup so that the router handlers
     can access shared services without circular imports.
     """
-    global _pipeline, _es_service, _exception_replanning_agent
+    global _pipeline, _es_service, _exception_replanning_agent, _fleet_registration_service
     _pipeline = pipeline
     _es_service = es_service
     _exception_replanning_agent = exception_replanning_agent
+    _fleet_registration_service = fleet_registration_service
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +201,7 @@ async def get_plan(
             "route_plan": None,
         }
 
-    # Query associated route plan using the same fallback strategy
+    # Query associated route plan(s) using the same fallback strategy
     route_plan = None
     for field in ("plan_id", "run_id"):
         route_query = {
@@ -194,13 +213,19 @@ async def get_plan(
                     ],
                 },
             },
-            "size": 1,
+            "size": 20,
         }
         try:
-            resp = await es.search_documents("mvp_routes", route_query, 1)
+            resp = await es.search_documents("mvp_routes", route_query, 20)
             hits = resp.get("hits", {}).get("hits", [])
             if hits:
-                route_plan = hits[0]["_source"]
+                routes = [hit["_source"] for hit in hits]
+                route_plan = {
+                    "plan_id": plan_id,
+                    "tenant_id": tenant_id,
+                    "routes": routes,
+                    "timestamp": routes[0].get("timestamp", ""),
+                }
                 break
         except Exception as e:
             logger.error("Failed to query route plan for %s (field=%s): %s", plan_id, field, e)
@@ -365,4 +390,81 @@ async def get_priorities(
         )
     except Exception as e:
         logger.error("Failed to query priorities: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ---------------------------------------------------------------------------
+# PUT /api/fuel/mvp/compartments/{truck_id} (Req 6.1, 6.3)
+# ---------------------------------------------------------------------------
+
+
+@router.put("/compartments/{truck_id}")
+async def configure_compartments(
+    truck_id: str,
+    body: CompartmentConfigRequest,
+    request: Request,
+    tenant_id: str = Query(..., description="Tenant identifier"),
+):
+    """Configure compartments for a fuel tanker.
+
+    Writes compartment documents to the truck_compartments index and
+    ensures the truck is registered in the fleet (trucks) index.
+
+    Validates: Requirements 6.1, 6.3
+    """
+    es = _get_es()
+
+    from Agents.support.mvp_es_mappings import TRUCK_COMPARTMENTS_INDEX
+
+    try:
+        # Write each compartment document to the truck_compartments index
+        written_compartments = []
+        for compartment in body.compartments:
+            doc = {
+                "compartment_id": compartment.compartment_id,
+                "truck_id": truck_id,
+                "capacity_liters": compartment.capacity_liters,
+                "allowed_grades": compartment.allowed_grades,
+                "position_index": compartment.position_index,
+                "tenant_id": tenant_id,
+            }
+            # Use composite key: truck_id + compartment_id
+            doc_id = f"{truck_id}_{compartment.compartment_id}"
+            await es.index_document(TRUCK_COMPARTMENTS_INDEX, doc_id, doc)
+            written_compartments.append(doc)
+
+        logger.info(
+            "Configured %d compartments for truck %s (tenant=%s)",
+            len(written_compartments),
+            truck_id,
+            tenant_id,
+        )
+
+        # After successful compartment write, ensure fleet registration (Req 6.1, 6.3)
+        if _fleet_registration_service is not None:
+            try:
+                await _fleet_registration_service.ensure_fleet_registration(
+                    truck_id=truck_id,
+                    tenant_id=tenant_id,
+                    compartments=[c.model_dump() for c in body.compartments],
+                )
+            except Exception as e:
+                # Fleet registration failure must not block compartment operation
+                logger.error(
+                    "Fleet registration failed for truck %s after compartment write: %s",
+                    truck_id,
+                    e,
+                )
+        else:
+            logger.warning(
+                "FleetRegistrationService not configured; skipping fleet registration for %s",
+                truck_id,
+            )
+
+        return {
+            "truck_id": truck_id,
+            "compartments_configured": len(written_compartments),
+            "status": "success",
+        }
+    except Exception as e:
+        logger.error("Failed to configure compartments for %s: %s", truck_id, e)
         raise HTTPException(status_code=500, detail=str(e))

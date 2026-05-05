@@ -57,7 +57,7 @@ import {
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const TENANT_ID = "default";
+const TENANT_ID = "dev-tenant";
 const PAGE_SIZE = 10;
 
 const TABS = [

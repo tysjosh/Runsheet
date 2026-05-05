@@ -73,6 +73,8 @@ INVENTORY_EVENTS_MAPPING = {
             "status_after": {"type": "keyword"},
             "tenant_id": {"type": "keyword"},
             "event_timestamp": {"type": "date"},
+            "created_at": {"type": "date"},
+            "updated_at": {"type": "date"},
         },
     },
 }

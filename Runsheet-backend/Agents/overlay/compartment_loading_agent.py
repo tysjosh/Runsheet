@@ -150,7 +150,8 @@ class CompartmentLoadingAgent(OverlayAgentBase):
         # Use the most recent priority list
         priority_list = priority_lists[-1]
         tenant_id = priority_list.tenant_id
-        run_id = priority_list.run_id
+        # Use pipeline run_id if available, otherwise fall back to priority list's run_id
+        run_id = getattr(self, '_current_run_id', None) or priority_list.run_id
 
         # Step 2: Build delivery requests from priorities (Req 3.1)
         delivery_requests = self._build_delivery_requests(priority_list)
@@ -224,7 +225,7 @@ class CompartmentLoadingAgent(OverlayAgentBase):
     ) -> List[DeliveryRequest]:
         """Convert priority list into delivery requests.
 
-        Only includes priorities with CRITICAL or HIGH buckets.
+        Includes priorities with CRITICAL, HIGH, or MEDIUM buckets.
         Assigns a default quantity based on priority score.
         """
         requests: List[DeliveryRequest] = []
@@ -232,6 +233,7 @@ class CompartmentLoadingAgent(OverlayAgentBase):
             if priority.priority_bucket not in (
                 PriorityBucket.CRITICAL,
                 PriorityBucket.HIGH,
+                PriorityBucket.MEDIUM,
             ):
                 continue
 

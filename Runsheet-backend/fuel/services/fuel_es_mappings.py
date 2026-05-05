@@ -35,6 +35,7 @@ FUEL_STATIONS_MAPPING = {
             },
             "tenant_id": {"type": "keyword"},
             "created_at": {"type": "date"},
+            "updated_at": {"type": "date"},
             "last_updated": {"type": "date"},
         },
     },

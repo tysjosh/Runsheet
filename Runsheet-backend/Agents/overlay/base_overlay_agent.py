@@ -185,6 +185,11 @@ class OverlayAgentBase(AutonomousAgentBase):
         Defaults to ``'shadow'`` when the feature flag service is
         unavailable or the flag is not set.
         """
+        # Pipeline mode override: when running inside a pipeline context,
+        # bypass feature flags and use the override mode directly.
+        if hasattr(self, '_pipeline_mode_override') and self._pipeline_mode_override:
+            return self._pipeline_mode_override
+
         if not self._feature_flags:
             return "shadow"
         try:
