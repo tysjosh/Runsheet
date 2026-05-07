@@ -345,6 +345,30 @@ async def plan_execution_websocket(websocket: WebSocket):
     await _ws_loop(websocket, mgr, ep, tenant_id, handler=handler)
 
 
+@app.websocket("/ws/fuel-planning")
+async def fuel_planning_websocket(websocket: WebSocket):
+    """WebSocket channel for fuel-planning events.
+
+    Emits per-tank forecast notifications (``customer_tank_forecast_ready``
+    per fuel-ops hardening Req 1.6.4), emergency-stop insertions, replan
+    diffs, and sourcing recommendations. See
+    :class:`fuel.services.fuel_planning_ws_manager.FuelPlanningWSManager`
+    for the event envelope shape.
+
+    Validates: Requirement 1.6.4
+    """
+    tenant_id = _ws_authenticate(websocket)
+    if not tenant_id:
+        await websocket.close(code=4001, reason="Authentication required")
+        return
+    from fuel.services.fuel_planning_ws_manager import get_fuel_planning_ws_manager
+    mgr = get_fuel_planning_ws_manager()
+    await mgr.connect(websocket, tenant_id=tenant_id)
+    ep = "/ws/fuel-planning"
+    handler = lambda ws, raw: _json_echo_handler(ws, raw, ep, tenant_id)
+    await _ws_loop(websocket, mgr, ep, tenant_id, handler=handler)
+
+
 if __name__ == "__main__":
     import uvicorn
     import os

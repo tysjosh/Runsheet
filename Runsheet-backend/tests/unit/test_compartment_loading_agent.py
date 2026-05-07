@@ -849,3 +849,360 @@ class TestQueryTrucksWithEquipmentCheck:
         # Should produce a proposal since equipment is available
         assert len(result) == 1
         assert result[0].source_agent == "compartment_loading"
+
+
+# ---------------------------------------------------------------------------
+# Tests: _persist_loading_plan — Task 6.6 / Req 7.1.2
+# ---------------------------------------------------------------------------
+#
+# After a successful mvp_load_plans write, the agent MUST update
+# last_loaded_product, last_loaded_at, and state on every assigned
+# compartment via the CompartmentStateRepository (atomic ES update).
+# ---------------------------------------------------------------------------
+
+
+class TestPersistLoadingPlanRecordsCompartmentState:
+    def _make_plan(self, **overrides):
+        from Agents.support.compartment_models import (
+            CompartmentAssignment,
+            LoadingPlan,
+        )
+
+        defaults = {
+            "plan_id": "plan-1",
+            "truck_id": "truck-1",
+            "tenant_id": "tenant-1",
+            "assignments": [
+                CompartmentAssignment(
+                    compartment_id="comp-1",
+                    station_id="s1",
+                    fuel_grade="AGO",  # NG alias canonicalizes to DIESEL_2
+                    quantity_liters=3_000.0,
+                    compartment_capacity_liters=5_000.0,
+                ),
+                CompartmentAssignment(
+                    compartment_id="comp-2",
+                    station_id="s2",
+                    fuel_grade="PMS",  # NG alias canonicalizes to GASOLINE_REG
+                    quantity_liters=2_000.0,
+                    compartment_capacity_liters=5_000.0,
+                ),
+            ],
+            "total_utilization_pct": 50.0,
+            "tenant_id": "tenant-1",
+        }
+        defaults.update(overrides)
+        return LoadingPlan(**defaults)
+
+    @pytest.mark.asyncio
+    async def test_marks_every_assigned_compartment_loaded(self):
+        """Req 7.1.2: every successful assignment commits last_loaded fields."""
+        agent, _ = _make_agent()
+        repo = MagicMock()
+        repo.mark_loaded = AsyncMock()
+        agent._compartment_state_repo = repo
+
+        plan = self._make_plan()
+        await agent._persist_loading_plan(plan)
+
+        # Two assignments → two mark_loaded calls.
+        assert repo.mark_loaded.await_count == 2
+
+        calls = repo.mark_loaded.await_args_list
+        # First assignment — canonicalized AGO → DIESEL_2, truck_id-qualified doc id.
+        first = calls[0].kwargs
+        assert first["tenant_id"] == "tenant-1"
+        assert first["compartment_doc_id"] == "truck-1_comp-1"
+        assert first["product_code"] == "DIESEL_2"
+        assert isinstance(first["loaded_at"], datetime)
+        assert first["loaded_at"].tzinfo is timezone.utc
+
+        second = calls[1].kwargs
+        assert second["compartment_doc_id"] == "truck-1_comp-2"
+        assert second["product_code"] == "GASOLINE_REG"
+
+    @pytest.mark.asyncio
+    async def test_uses_same_timestamp_for_all_assignments(self):
+        """All compartments loaded on the same plan get the same stamp."""
+        agent, _ = _make_agent()
+        repo = MagicMock()
+        repo.mark_loaded = AsyncMock()
+        agent._compartment_state_repo = repo
+
+        plan = self._make_plan()
+        await agent._persist_loading_plan(plan)
+
+        stamps = {
+            call.kwargs["loaded_at"]
+            for call in repo.mark_loaded.await_args_list
+        }
+        assert len(stamps) == 1
+
+    @pytest.mark.asyncio
+    async def test_skips_state_update_when_plan_persistence_fails(self):
+        """A compartment must not be marked loaded if the plan write failed."""
+        agent, deps = _make_agent()
+        repo = MagicMock()
+        repo.mark_loaded = AsyncMock()
+        agent._compartment_state_repo = repo
+
+        deps["es_service"].index_document = AsyncMock(
+            side_effect=RuntimeError("boom")
+        )
+
+        plan = self._make_plan()
+        await agent._persist_loading_plan(plan)
+
+        repo.mark_loaded.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_per_compartment_failure_does_not_block_other_updates(self):
+        """One failing mark_loaded should not prevent the sibling assignment."""
+        from fuel.compartment_state_models import CompartmentNotFoundError
+
+        agent, _ = _make_agent()
+        repo = MagicMock()
+
+        async def mark(*, tenant_id, compartment_doc_id, product_code, loaded_at):
+            if compartment_doc_id == "truck-1_comp-1":
+                raise CompartmentNotFoundError(tenant_id, compartment_doc_id)
+            return None
+
+        repo.mark_loaded = AsyncMock(side_effect=mark)
+        agent._compartment_state_repo = repo
+
+        plan = self._make_plan()
+        # Should not raise despite the first call failing.
+        await agent._persist_loading_plan(plan)
+
+        assert repo.mark_loaded.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_no_repo_configured_is_a_no_op(self):
+        """Legacy agents that lack a state repo should silently skip the write."""
+        agent, _ = _make_agent()
+        agent._compartment_state_repo = None
+
+        plan = self._make_plan()
+        # Should not raise even without a repository configured.
+        await agent._persist_loading_plan(plan)
+
+    @pytest.mark.asyncio
+    async def test_canonical_product_code_persisted_to_state(self):
+        """Legacy aliases must be canonicalized before landing on the compartment."""
+        from Agents.support.compartment_models import (
+            CompartmentAssignment,
+            LoadingPlan,
+        )
+
+        agent, _ = _make_agent()
+        repo = MagicMock()
+        repo.mark_loaded = AsyncMock()
+        agent._compartment_state_repo = repo
+
+        plan = LoadingPlan(
+            plan_id="plan-x",
+            truck_id="truck-x",
+            tenant_id="tenant-1",
+            assignments=[
+                CompartmentAssignment(
+                    compartment_id="c1",
+                    station_id="s1",
+                    fuel_grade="ATK",  # NG alias for KEROSENE
+                    quantity_liters=1_000.0,
+                    compartment_capacity_liters=2_000.0,
+                ),
+                CompartmentAssignment(
+                    compartment_id="c2",
+                    station_id="s2",
+                    fuel_grade="LPG",  # NG alias for PROPANE
+                    quantity_liters=500.0,
+                    compartment_capacity_liters=1_000.0,
+                ),
+            ],
+            total_utilization_pct=50.0,
+        )
+
+        await agent._persist_loading_plan(plan)
+
+        product_codes = [
+            call.kwargs["product_code"]
+            for call in repo.mark_loaded.await_args_list
+        ]
+        assert product_codes == ["KEROSENE", "PROPANE"]
+
+
+# ---------------------------------------------------------------------------
+# Tests: Constructor wires CompartmentStateRepository (Task 6.6)
+# ---------------------------------------------------------------------------
+
+
+class TestCompartmentStateRepoWiring:
+    def test_default_repo_is_constructed_from_es_service(self):
+        from fuel.compartment_state_models import CompartmentStateRepository
+
+        agent, deps = _make_agent()
+        assert isinstance(agent._compartment_state_repo, CompartmentStateRepository)
+        assert agent._compartment_state_repo._es is deps["es_service"]
+
+    def test_injected_repo_is_preserved(self):
+        sentinel = MagicMock()
+        agent, _ = _make_agent(compartment_state_repo=sentinel)
+        assert agent._compartment_state_repo is sentinel
+
+
+# ---------------------------------------------------------------------------
+# Tests: Shadow mode gates compartment-state write (Task 6.6 / Req 7.1.2)
+# ---------------------------------------------------------------------------
+#
+# The spec reserves the atomic ``last_loaded_product`` / ``last_loaded_at``
+# / ``state`` write for a successful assignment commit. Shadow-mode
+# evaluation still runs the full optimization so the plan can be logged
+# to ``agent_shadow_proposals`` for retrospective analysis, but
+# ``truck_compartments`` must stay untouched until the overlay is
+# flipped to an active mode.
+# ---------------------------------------------------------------------------
+
+
+class TestShadowModeGate:
+    def _make_plan(self):
+        from Agents.support.compartment_models import (
+            CompartmentAssignment,
+            LoadingPlan,
+        )
+
+        return LoadingPlan(
+            plan_id="plan-shadow",
+            truck_id="truck-shadow",
+            tenant_id="tenant-1",
+            assignments=[
+                CompartmentAssignment(
+                    compartment_id="c1",
+                    station_id="s1",
+                    fuel_grade="AGO",
+                    quantity_liters=2_000.0,
+                    compartment_capacity_liters=5_000.0,
+                ),
+            ],
+            total_utilization_pct=40.0,
+        )
+
+    @pytest.mark.asyncio
+    async def test_persist_skips_state_write_when_commit_flag_is_false(self):
+        """Req 7.1.2: shadow-mode cycles must not mutate compartment state."""
+        agent, deps = _make_agent()
+        repo = MagicMock()
+        repo.mark_loaded = AsyncMock()
+        agent._compartment_state_repo = repo
+
+        plan = self._make_plan()
+        await agent._persist_loading_plan(plan, commit_compartment_state=False)
+
+        # Plan itself still lands in mvp_load_plans for retrospective
+        # analysis in shadow mode — the spec only protects compartment
+        # state, not the plan log.
+        assert deps["es_service"].index_document.await_count == 1
+        assert deps["es_service"].index_document.await_args.args[0] == "mvp_load_plans"
+
+        # …but the compartment state write is suppressed.
+        repo.mark_loaded.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_persist_writes_state_when_commit_flag_is_true(self):
+        """Active-mode cycles continue to stamp compartment state."""
+        agent, _ = _make_agent()
+        repo = MagicMock()
+        repo.mark_loaded = AsyncMock()
+        agent._compartment_state_repo = repo
+
+        plan = self._make_plan()
+        await agent._persist_loading_plan(plan, commit_compartment_state=True)
+
+        repo.mark_loaded.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_evaluate_skips_state_write_in_shadow_mode(self):
+        """End-to-end: an evaluate() cycle in shadow mode must not mark compartments."""
+        agent, deps = _make_agent()
+        # Replace the default is_enabled-based mock so the base overlay
+        # resolves mode=='shadow' through the richer get_overlay_state
+        # path used in production.
+        deps["feature_flag_service"].get_overlay_state = AsyncMock(
+            return_value="shadow"
+        )
+        repo = MagicMock()
+        repo.mark_loaded = AsyncMock()
+        agent._compartment_state_repo = repo
+
+        agent._priority_buffer.append(_make_priority_list())
+        deps["es_service"].search_documents = AsyncMock(
+            return_value={
+                "hits": {
+                    "hits": [
+                        _make_compartment_hit(
+                            compartment_id="comp-1",
+                            truck_id="truck-1",
+                            capacity_liters=10_000.0,
+                        ),
+                    ]
+                }
+            }
+        )
+
+        proposals = await agent.evaluate([])
+
+        # The overlay still produces the proposal for shadow-log routing.
+        assert len(proposals) == 1
+        # …and the plan was persisted to mvp_load_plans for analysis.
+        plan_calls = [
+            call
+            for call in deps["es_service"].index_document.await_args_list
+            if call.args and call.args[0] == "mvp_load_plans"
+        ]
+        assert len(plan_calls) == 1
+        # But the compartment-state mutation never fired.
+        repo.mark_loaded.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_evaluate_writes_state_in_active_mode(self):
+        """End-to-end: an active overlay commits state once per assigned compartment."""
+        agent, deps = _make_agent()
+        deps["feature_flag_service"].get_overlay_state = AsyncMock(
+            return_value="active_auto"
+        )
+        repo = MagicMock()
+        repo.mark_loaded = AsyncMock()
+        agent._compartment_state_repo = repo
+
+        agent._priority_buffer.append(_make_priority_list())
+        deps["es_service"].search_documents = AsyncMock(
+            return_value={
+                "hits": {
+                    "hits": [
+                        _make_compartment_hit(
+                            compartment_id="comp-1",
+                            truck_id="truck-1",
+                            capacity_liters=10_000.0,
+                        ),
+                    ]
+                }
+            }
+        )
+
+        await agent.evaluate([])
+        repo.mark_loaded.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_mode_resolution_failure_defaults_to_no_write(self):
+        """A flaky feature-flag service must fail closed (no state mutation)."""
+        agent, deps = _make_agent()
+
+        async def _boom(*args, **kwargs):
+            raise RuntimeError("flags down")
+
+        deps["feature_flag_service"].get_overlay_state = AsyncMock(side_effect=_boom)
+        deps["feature_flag_service"].is_enabled = AsyncMock(side_effect=_boom)
+
+        # The helper should swallow the error and report non-commit.
+        is_active = await agent._is_active_commit_mode("tenant-1")
+        assert is_active is False

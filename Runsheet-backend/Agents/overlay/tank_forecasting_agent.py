@@ -1,23 +1,57 @@
 """
-Tank Forecasting Agent — overlay agent for per-station per-grade runout risk prediction.
+Tank Forecasting Agent — overlay agent for per-station and per-customer-tank
+runout risk prediction.
 
-Subscribes to RiskSignals from FuelManagementAgent, queries fuel_stations
-and fuel_events indices, computes consumption rates using existing
-fuel_calculations.py logic, estimates probabilistic hours-to-runout
-(p50/p90), computes runout_risk_24h, handles anomaly flags, persists
-forecasts to mvp_tank_forecasts, and publishes TankForecast to SignalBus.
+Subscribes to RiskSignals from FuelManagementAgent, queries fuel_stations,
+customer_tanks, and fuel_events indices, computes consumption rates using the
+existing fuel_calculations logic for retail stations and the pluggable
+``Consumption_Model`` strategies (``RetailStationModel``, ``PropaneKFactorModel``,
+``HeatingOilHDDRegressionModel``, ``DieselRollingModel``, ``GeneratorRuntimeModel``)
+for customer tanks, estimates probabilistic hours-to-runout (p50/p90), computes
+``runout_risk_24h``, handles anomaly flags, folds in Scheduled_Delivery entries
+within a 72-hour horizon, applies Customer_Type multipliers from tenant
+config, persists forecasts to ``mvp_tank_forecasts``, and publishes
+``TankForecast`` to the SignalBus.
+
+Extensions for fuel-ops hardening Capability 1 (Requirements 1.1.2, 1.2.3,
+1.2.5, 1.3.1–1.3.4, 1.4.2, 1.4.4, 1.5.3, 1.5.6):
+
+* Iterate over both ``fuel_stations`` (legacy retail) and the new
+  ``customer_tanks`` index.
+* Select the ``Consumption_Model`` per tank by ``fuel_type`` with optional
+  tenant-level overrides via a ``consumption_model_config:{tenant_id}`` Redis
+  key (structured as a JSON map of ``fuel_type → model_name``).
+* Call the injected ``Weather_Provider`` for propane and heating-oil tanks
+  over a ``[-14, +7]`` day window keyed by ``zip_code``. Network or provider
+  failures degrade gracefully to an empty weather list and annotate the
+  forecast with ``weather_fallback: true``.
+* Apply Customer_Type multipliers read from
+  ``consumption_segmentation_config:{tenant_id}`` (JSON map) with the
+  built-in defaults mandated by Req 1.3.1: residential 1.0, commercial 1.2,
+  keep_full 1.1, will_call 0.8, auto_fill 1.05.
+* Consult an injected ``ScheduledDeliveryQueryHelper`` that returns every
+  delivery with ``status in {scheduled, in_transit}`` for the tank within
+  the next 72 hours. The agent subtracts the projected consumption only up
+  to ``hours_to_runout``; if a delivery arrives before runout, the tank is
+  refilled and ``hours_to_runout`` extends out accordingly.
+* Record ``model_name``, ``customer_type_multiplier``, ``baseline_source``,
+  ``weather_fallback``, and ``scheduled_deliveries`` in each forecast for
+  traceability (Req 1.3.4, 1.4.3, 1.5.6, 1.6.1).
 
 Default configuration:
     - decision_cycle: 300 seconds (5 minutes)
     - cooldown: 15 minutes per station
+    - forecast horizon: 72 hours for scheduled-delivery awareness
 
-Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7
+Requirements: 1.1, 1.1.2, 1.2, 1.2.3, 1.2.5, 1.3, 1.3.1, 1.3.2, 1.3.3,
+1.3.4, 1.4, 1.4.2, 1.4.4, 1.5, 1.5.3, 1.5.6, 1.6, 1.7
 """
 
+import json
 import logging
 import math
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Protocol, Sequence
 
 from Agents.autonomous.fuel_calculations import (
     calculate_refill_priority,
@@ -32,6 +66,17 @@ from Agents.overlay.data_contracts import (
 from Agents.overlay.signal_bus import SignalBus
 from Agents.support.fuel_distribution_models import FuelGrade, TankForecast
 from Agents.support.mvp_es_mappings import MVP_TANK_FORECASTS_INDEX
+from fuel.customer_tank_models import CustomerTank, CustomerTankRepository
+from fuel.services.consumption_models import (
+    ConsumptionModel,
+    ConsumptionPrediction,
+    build_consumption_model,
+    select_consumption_model_for_tank,
+)
+from fuel.services.fuel_ops_es_mappings import CUSTOMER_TANKS_INDEX
+from fuel.services.fuel_planning_ws_manager import FuelPlanningWSManager
+from fuel.services.fuel_product_catalog import canonicalize_or_warn
+from fuel.services.weather_provider import DailyWeather, WeatherProvider
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +84,8 @@ logger = logging.getLogger(__name__)
 FUEL_STATIONS_INDEX = "fuel_stations"
 FUEL_EVENTS_INDEX = "fuel_events"
 
-# Default consumption rate (liters/hour) when no historical data exists
+# Default consumption rate (liters/hour) when no historical data exists.
+# Retained unchanged for the legacy retail-station path (Req 1.7).
 DEFAULT_CONSUMPTION_RATE = 50.0
 
 # Variance multiplier for p90 estimate (pessimistic)
@@ -48,14 +94,99 @@ P90_VARIANCE_MULTIPLIER = 1.5
 # Default hours horizon for risk calculation
 RISK_HORIZON_HOURS = 24.0
 
+# Scheduled-delivery look-ahead window (Req 1.4.1).
+SCHEDULED_DELIVERY_HORIZON_HOURS = 72
+
+# Weather-window bounds fed to the Consumption_Models (Req 1.2.3).
+WEATHER_TRAILING_DAYS = 14
+WEATHER_FORWARD_DAYS = 7
+
+#: Fuel-family tags that require weather data for their Consumption_Model
+#: (propane K-factor + heating-oil HDD regression). Other families
+#: (diesel / generator / gasoline) run without weather input.
+_WEATHER_REQUIRING_FUEL_TYPES = frozenset({"propane", "heating_oil"})
+
+#: Default Customer_Type multipliers (Req 1.3.1). Overridden per tenant via
+#: the Redis ``consumption_segmentation_config:{tenant_id}`` JSON map.
+DEFAULT_CUSTOMER_TYPE_MULTIPLIERS: Dict[str, float] = {
+    "residential": 1.0,
+    "commercial": 1.2,
+    "keep_full": 1.1,
+    "will_call": 0.8,
+    "auto_fill": 1.05,
+}
+
+#: Minimum prior deliveries for a Customer_Tank before the baseline is
+#: treated as "history"-backed rather than "default" (Req 1.3.2, 1.3.3).
+MIN_HISTORY_EVENTS_FOR_TANK_BASELINE = 3
+
+
+# ---------------------------------------------------------------------------
+# Injected helper protocols
+# ---------------------------------------------------------------------------
+
+
+class ScheduledDeliveryQueryHelper(Protocol):
+    """Shape the forecaster relies on to retrieve scheduled deliveries.
+
+    The helper is created by Task 3.4 of the fuel-ops hardening spec and
+    unifies retail-station and customer-tank scheduled deliveries behind a
+    single interface. The agent invokes it once per decision cycle with the
+    tenant_id and horizon; the helper returns a dict keyed by
+    ``(destination_type, destination_id)`` → list of scheduled-delivery
+    entries shaped as
+    ``{"delivery_id": str, "scheduled_eta": datetime, "planned_gallons": float}``.
+
+    Implementations MUST return an empty list for a tank with no scheduled
+    deliveries — ``None`` is not accepted because the forecaster treats
+    missing keys as "no scheduled deliveries" (Req 1.4.4).
+    """
+
+    async def list_scheduled_deliveries(  # pragma: no cover - protocol
+        self,
+        tenant_id: str,
+        *,
+        horizon_hours: int = SCHEDULED_DELIVERY_HORIZON_HOURS,
+    ) -> Dict[tuple, List[Dict[str, Any]]]:
+        ...
+
+
+class TenantConfigLookup(Protocol):
+    """Minimal Redis-like interface for tenant config reads."""
+
+    async def get(self, key: str) -> Optional[Any]:  # pragma: no cover - protocol
+        ...
+
 
 class TankForecastingAgent(OverlayAgentBase):
-    """Predicts per-station per-grade runout risk for the next 24-72 hours.
+    """Predicts per-station and per-customer-tank runout risk for the next 24-72 hours.
 
-    Consumes station inventory levels from ``fuel_stations``, historical
-    consumption rates from ``fuel_events``, and anomaly flags from
-    RiskSignals published by FuelManagementAgent. Produces TankForecast
-    messages for each (station_id, fuel_grade) pair.
+    Consumes station inventory from ``fuel_stations`` AND customer-tank
+    inventory from ``customer_tanks`` via :class:`CustomerTankRepository`,
+    historical consumption rates from ``fuel_events``, and anomaly flags
+    from ``RiskSignal``s published by :class:`FuelManagementAgent`. For
+    each active entity it produces a :class:`TankForecast` message.
+
+    For customer tanks the agent:
+
+    1. Selects a Consumption_Model per ``fuel_type`` with a tenant override
+       available via the ``consumption_model_config:{tenant_id}`` Redis
+       key (Req 1.5.3).
+    2. Calls the injected ``weather_provider`` for propane and heating_oil
+       tanks using the tank's ``zip_code`` and a ``[-14, +7]`` day window.
+       Failures degrade to an empty list and flag ``weather_fallback: true``
+       on the forecast (Req 1.2.5).
+    3. Applies the Customer_Type multiplier from
+       ``consumption_segmentation_config:{tenant_id}`` or the built-in
+       defaults (Req 1.3.1, 1.3.4).
+    4. Folds scheduled deliveries into the projected level: if a scheduled
+       delivery is expected within ``hours_to_runout`` then the tank is
+       refilled at that ETA before runout, extending the projection
+       (Req 1.4.2, 1.4.3).
+    5. Persists ``model_name``, ``customer_type_multiplier``,
+       ``baseline_source``, ``weather_fallback``, and
+       ``scheduled_deliveries`` on every forecast (Req 1.3.4, 1.4.3,
+       1.5.6, 1.6.1).
 
     Args:
         signal_bus: SignalBus for pub/sub.
@@ -65,6 +196,15 @@ class TankForecastingAgent(OverlayAgentBase):
         confirmation_protocol: For routing proposals.
         autonomy_config_service: For mode management.
         feature_flag_service: For per-tenant feature flags.
+        customer_tank_repository: Optional repository to list customer
+            tanks; constructed lazily from ``es_service`` if not supplied.
+        weather_provider: Optional WeatherProvider for HDD lookups.
+        scheduled_delivery_helper: Optional helper that returns scheduled
+            deliveries keyed by destination (see
+            :class:`ScheduledDeliveryQueryHelper`).
+        tenant_config: Optional Redis-like handle used to read
+            ``consumption_model_config`` and
+            ``consumption_segmentation_config`` keys.
         poll_interval: Decision cycle interval in seconds (default 300).
         cooldown_minutes: Per-station cooldown in minutes (default 15).
     """
@@ -78,6 +218,12 @@ class TankForecastingAgent(OverlayAgentBase):
         confirmation_protocol,
         autonomy_config_service,
         feature_flag_service,
+        *,
+        customer_tank_repository: Optional[CustomerTankRepository] = None,
+        weather_provider: Optional[WeatherProvider] = None,
+        scheduled_delivery_helper: Optional[ScheduledDeliveryQueryHelper] = None,
+        tenant_config: Optional[TenantConfigLookup] = None,
+        fuel_planning_ws_manager: Optional[FuelPlanningWSManager] = None,
         poll_interval: int = 300,
         cooldown_minutes: int = 15,
     ):
@@ -104,24 +250,96 @@ class TankForecastingAgent(OverlayAgentBase):
         # Cache anomaly flags from RiskSignals keyed by station_id
         self._anomaly_cache: Dict[str, List[str]] = {}
 
+        # Customer_Tank repository — resolves lazily so agents that never
+        # exercise the customer-tank path do not require a pre-built repo
+        # at construction time. This keeps the existing bootstrap callers
+        # (which only pass the seven base services) working unchanged.
+        self._customer_tank_repo: Optional[CustomerTankRepository] = (
+            customer_tank_repository
+        )
+        self._customer_tank_repo_auto_build: bool = (
+            customer_tank_repository is None
+        )
+
+        # Optional extension hooks. When unwired (production default until
+        # bootstrap registers them) the agent operates in "retail-only"
+        # mode and emits the same forecast shape as before.
+        self._weather_provider: Optional[WeatherProvider] = weather_provider
+        self._scheduled_delivery_helper: Optional[
+            ScheduledDeliveryQueryHelper
+        ] = scheduled_delivery_helper
+        self._tenant_config: Optional[TenantConfigLookup] = tenant_config
+
+        #: Dedicated fuel-planning WS manager used to emit
+        #: ``customer_tank_forecast_ready`` events on ``/ws/fuel-planning``
+        #: (Req 1.6.4). Distinct from ``self._ws`` (the agent-activity
+        #: manager from :class:`AutonomousAgentBase`) so planning events
+        #: reach dispatcher UIs that subscribe to the fuel-planning
+        #: channel rather than the generic agent-activity stream.
+        self._fuel_planning_ws: Optional[FuelPlanningWSManager] = (
+            fuel_planning_ws_manager
+        )
+
     # ------------------------------------------------------------------
-    # Core evaluation (Req 1.1–1.7)
+    # Public wiring hooks (bootstrap injects these after construction)
+    # ------------------------------------------------------------------
+
+    def set_customer_tank_repository(
+        self, repository: CustomerTankRepository
+    ) -> None:
+        """Inject the Customer_Tank repository post-construction."""
+        self._customer_tank_repo = repository
+        self._customer_tank_repo_auto_build = False
+
+    def set_weather_provider(self, provider: Optional[WeatherProvider]) -> None:
+        """Inject the WeatherProvider post-construction (``None`` disables)."""
+        self._weather_provider = provider
+
+    def set_scheduled_delivery_helper(
+        self, helper: Optional[ScheduledDeliveryQueryHelper]
+    ) -> None:
+        """Inject the Scheduled_Delivery helper post-construction."""
+        self._scheduled_delivery_helper = helper
+
+    def set_tenant_config(
+        self, lookup: Optional[TenantConfigLookup]
+    ) -> None:
+        """Inject the tenant-config lookup post-construction."""
+        self._tenant_config = lookup
+
+    def set_fuel_planning_ws_manager(
+        self, manager: Optional[FuelPlanningWSManager]
+    ) -> None:
+        """Inject the fuel-planning WS manager post-construction.
+
+        ``None`` disables the per-tank forecast broadcasts; the agent
+        otherwise still persists forecasts and publishes SignalBus
+        messages, so downstream consumers keep working unchanged.
+        """
+        self._fuel_planning_ws = manager
+
+    # ------------------------------------------------------------------
+    # Core evaluation (Req 1.1–1.7 + Capability 1 extensions)
     # ------------------------------------------------------------------
 
     async def evaluate(
         self, signals: List[RiskSignal]
     ) -> List[InterventionProposal]:
-        """Produce TankForecast for each (station, grade) pair.
+        """Produce TankForecast for each (station, grade) and (customer_tank) pair.
 
         Steps:
         1. Extract anomaly flags from incoming RiskSignals (Req 1.3).
         2. Query fuel_stations for current inventory (Req 1.2).
-        3. Query fuel_events for historical consumption (Req 1.2).
-        4. For each (station, grade): compute consumption rate using
-           fuel_calculations logic, estimate hours_to_runout p50/p90,
-           compute runout_risk_24h, handle zero-data default (Req 1.7).
-        5. Persist forecasts to mvp_tank_forecasts (Req 1.4).
-        6. Publish TankForecast to SignalBus (Req 1.5).
+        3. Query customer_tanks via the repository (Req 1.1.2).
+        4. Query fuel_events for historical consumption (Req 1.2).
+        5. Look up scheduled deliveries within the 72-hour horizon (Req 1.4.1).
+        6. Load per-tenant segmentation + model config from Redis (Req 1.3.1, 1.5.3).
+        7. Produce legacy retail-station forecasts (existing code path).
+        8. Produce customer-tank forecasts using the Consumption_Model
+           strategies + Weather_Provider + Customer_Type multipliers +
+           scheduled-delivery awareness.
+        9. Persist forecasts to mvp_tank_forecasts (Req 1.4).
+        10. Publish TankForecast messages to the SignalBus (Req 1.5).
 
         Returns:
             Empty list — forecasts are published directly to SignalBus
@@ -137,14 +355,35 @@ class TankForecastingAgent(OverlayAgentBase):
 
         # Step 2: Query fuel stations (Req 1.2)
         stations = await self._query_fuel_stations(tenant_id)
-        if not stations:
-            logger.info("TankForecastingAgent: no stations found for tenant %s", tenant_id)
+
+        # Step 3: Query customer tanks (Req 1.1.2). Absence is fine: agents
+        # without customer_tanks simply fall back to station-only output.
+        customer_tanks = await self._query_customer_tanks(tenant_id)
+
+        if not stations and not customer_tanks:
+            logger.info(
+                "TankForecastingAgent: no stations or customer_tanks for tenant %s",
+                tenant_id,
+            )
             return []
 
-        # Step 3: Query historical consumption events (Req 1.2)
+        # Step 4: Query historical consumption events (Req 1.2)
         consumption_data = await self._query_consumption_history(tenant_id)
 
-        # Step 4: Generate forecasts for each (station, grade) pair
+        # Step 5: Scheduled deliveries for the whole tenant (Req 1.4.1).
+        scheduled = await self._query_scheduled_deliveries(
+            tenant_id, horizon_hours=SCHEDULED_DELIVERY_HORIZON_HOURS
+        )
+
+        # Step 6: Load per-tenant segmentation + model config (Req 1.3.1, 1.5.3).
+        customer_type_multipliers = await self._load_customer_type_multipliers(
+            tenant_id
+        )
+        model_overrides = await self._load_consumption_model_overrides(
+            tenant_id
+        )
+
+        # Step 7–8: Forecast pass
         run_id = f"forecast_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
         forecasts: List[TankForecast] = []
 
@@ -154,18 +393,15 @@ class TankForecastingAgent(OverlayAgentBase):
             current_stock = station.get("current_stock_liters", 0.0)
             capacity = station.get("capacity_liters", 0.0)
 
-            # Resolve fuel grade
             try:
                 fuel_grade = FuelGrade(fuel_grade_str)
             except ValueError:
                 fuel_grade = FuelGrade.AGO
 
-            # Get historical consumption for this station+grade
             station_consumption = consumption_data.get(
                 f"{station_id}_{fuel_grade.value}", []
             )
 
-            # Compute forecast
             forecast = self._compute_forecast(
                 station_id=station_id,
                 fuel_grade=fuel_grade,
@@ -175,20 +411,56 @@ class TankForecastingAgent(OverlayAgentBase):
                 tenant_id=tenant_id,
                 run_id=run_id,
             )
+            # Attach any scheduled deliveries that apply to this retail
+            # station so the forecast surface matches the customer-tank
+            # path even when the legacy rolling model produced the core
+            # runout estimate.
+            station_scheduled = self._scheduled_for_destination(
+                scheduled, "retail_station", station_id
+            )
+            if station_scheduled:
+                forecast.scheduled_deliveries = [
+                    self._serialize_scheduled_delivery(entry)
+                    for entry in station_scheduled
+                ]
             forecasts.append(forecast)
 
-        # Step 5: Persist forecasts to ES (Req 1.4)
+        for tank in customer_tanks:
+            forecast = await self._compute_customer_tank_forecast(
+                tank=tank,
+                tenant_id=tenant_id,
+                run_id=run_id,
+                history=consumption_data,
+                scheduled=scheduled,
+                customer_type_multipliers=customer_type_multipliers,
+                model_overrides=model_overrides,
+            )
+            forecasts.append(forecast)
+
+        # Step 9: Persist forecasts to ES (Req 1.4)
         for forecast in forecasts:
             await self._persist_forecast(forecast)
 
-        # Step 6: Publish forecasts to SignalBus (Req 1.5)
+        # Step 10: Publish forecasts to SignalBus (Req 1.5)
         for forecast in forecasts:
             await self._signal_bus.publish(forecast)
 
+        # Step 11 (Req 1.6.4): Broadcast customer_tank_forecast_ready for
+        # every per-tank forecast so dispatcher UIs subscribed to
+        # /ws/fuel-planning see the update in real time. Only customer-tank
+        # forecasts fire the event; retail-station forecasts do not carry
+        # the customer_tank_id payload mandated by the requirement.
+        for forecast in forecasts:
+            if getattr(forecast, "customer_tank_id", None):
+                await self._broadcast_customer_tank_forecast_ready(forecast)
+
         logger.info(
-            "TankForecastingAgent: published %d forecasts for tenant %s (run_id=%s)",
+            "TankForecastingAgent: published %d forecasts for tenant %s "
+            "(stations=%d, customer_tanks=%d, run_id=%s)",
             len(forecasts),
             tenant_id,
+            len(stations),
+            len(customer_tanks),
             run_id,
         )
 
@@ -224,7 +496,7 @@ class TankForecastingAgent(OverlayAgentBase):
                 self._anomaly_cache[station_id] = merged
 
     # ------------------------------------------------------------------
-    # ES queries (Req 1.2)
+    # ES queries (Req 1.2 + 1.1.2)
     # ------------------------------------------------------------------
 
     async def _query_fuel_stations(self, tenant_id: str) -> List[Dict[str, Any]]:
@@ -246,13 +518,64 @@ class TankForecastingAgent(OverlayAgentBase):
             logger.error("TankForecastingAgent: failed to query fuel_stations: %s", e)
             return []
 
+    async def _query_customer_tanks(self, tenant_id: str) -> List[CustomerTank]:
+        """Query the customer_tanks index via :class:`CustomerTankRepository`.
+
+        Lazily builds the repository if one was not injected at
+        construction time so existing bootstrap callers keep working.
+        Degrades to an empty list on query failure so a broken index
+        never takes down the retail-station path.
+        """
+        repo = self._get_customer_tank_repository()
+        if repo is None:
+            return []
+        try:
+            tanks = await repo.list_for_tenant(tenant_id, status="active")
+        except Exception as exc:
+            logger.error(
+                "TankForecastingAgent: failed to list customer_tanks for "
+                "tenant=%s: %s",
+                tenant_id,
+                exc,
+            )
+            return []
+        return tanks
+
+    def _get_customer_tank_repository(
+        self,
+    ) -> Optional[CustomerTankRepository]:
+        """Return the injected repository or lazily build one.
+
+        Lazy construction uses ``self._es`` so the agent inherits the same
+        ES handle as the rest of its ES queries. Failures are logged and
+        swallowed so a missing repo degrades to "no customer_tanks".
+        """
+        if self._customer_tank_repo is not None:
+            return self._customer_tank_repo
+        if not self._customer_tank_repo_auto_build or self._es is None:
+            return None
+        try:
+            self._customer_tank_repo = CustomerTankRepository(self._es)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "TankForecastingAgent: failed to build CustomerTankRepository: %s",
+                exc,
+            )
+            self._customer_tank_repo_auto_build = False
+            return None
+        return self._customer_tank_repo
+
     async def _query_consumption_history(
         self, tenant_id: str
     ) -> Dict[str, List[Dict[str, Any]]]:
         """Query fuel_events for historical consumption data (last 7 days).
 
-        Returns a dict keyed by '{station_id}_{fuel_grade}' with lists
-        of consumption event records.
+        Returns a dict keyed by '{station_id}_{fuel_grade}' *and*
+        ``'customer_tank_id:{id}'`` with lists of consumption event
+        records. Events with ``customer_tank_id`` populated (new US-market
+        deliveries) are indexed under both a per-tank key (for the
+        per-tank Consumption_Model input) and the legacy station key for
+        retail flows.
         """
         now = datetime.now(timezone.utc)
         seven_days_ago = now - timedelta(days=7)
@@ -284,8 +607,13 @@ class TankForecastingAgent(OverlayAgentBase):
                 event = hit["_source"]
                 station_id = event.get("station_id", "")
                 fuel_grade = event.get("fuel_grade", "AGO")
-                key = f"{station_id}_{fuel_grade}"
-                consumption_data.setdefault(key, []).append(event)
+                if station_id:
+                    key = f"{station_id}_{fuel_grade}"
+                    consumption_data.setdefault(key, []).append(event)
+                tank_id = event.get("customer_tank_id")
+                if tank_id:
+                    tank_key = f"customer_tank_id:{tank_id}"
+                    consumption_data.setdefault(tank_key, []).append(event)
         except Exception as e:
             logger.error(
                 "TankForecastingAgent: failed to query fuel_events: %s", e
@@ -294,7 +622,548 @@ class TankForecastingAgent(OverlayAgentBase):
         return consumption_data
 
     # ------------------------------------------------------------------
-    # Forecast computation (Req 1.1, 1.6, 1.7)
+    # Scheduled_Delivery integration (Req 1.4.1, 1.4.2, 1.4.4)
+    # ------------------------------------------------------------------
+
+    async def _query_scheduled_deliveries(
+        self,
+        tenant_id: str,
+        *,
+        horizon_hours: int = SCHEDULED_DELIVERY_HORIZON_HOURS,
+    ) -> Dict[tuple, List[Dict[str, Any]]]:
+        """Return scheduled deliveries grouped by (destination_type, destination_id).
+
+        Delegates to the injected
+        :class:`ScheduledDeliveryQueryHelper` when one is wired; otherwise
+        returns an empty mapping so the agent cleanly degrades to a
+        "no scheduled deliveries known" state (Req 1.4.4: empty list is
+        the expected result in that case).
+        """
+        if self._scheduled_delivery_helper is None:
+            return {}
+        try:
+            return await self._scheduled_delivery_helper.list_scheduled_deliveries(
+                tenant_id,
+                horizon_hours=horizon_hours,
+            )
+        except Exception as exc:
+            logger.warning(
+                "TankForecastingAgent: scheduled-delivery lookup failed for "
+                "tenant=%s: %s",
+                tenant_id,
+                exc,
+            )
+            return {}
+
+    @staticmethod
+    def _scheduled_for_destination(
+        scheduled: Mapping[tuple, List[Dict[str, Any]]],
+        destination_type: str,
+        destination_id: str,
+    ) -> List[Dict[str, Any]]:
+        """Safely pull the list of scheduled deliveries for a destination."""
+        if not scheduled or not destination_id:
+            return []
+        return list(scheduled.get((destination_type, destination_id), []))
+
+    @staticmethod
+    def _serialize_scheduled_delivery(entry: Mapping[str, Any]) -> Dict[str, Any]:
+        """Return a ``{delivery_id, scheduled_eta, planned_gallons}`` dict.
+
+        ES mappings store ``scheduled_eta`` as a date; we emit an ISO-8601
+        string with a trailing ``Z`` for timezone-aware values so the
+        document round-trips cleanly through JSON.
+        """
+        eta = entry.get("scheduled_eta")
+        if isinstance(eta, datetime):
+            eta_iso = eta.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        elif isinstance(eta, date) and not isinstance(eta, datetime):
+            eta_iso = eta.isoformat()
+        elif eta is None:
+            eta_iso = None
+        else:
+            eta_iso = str(eta)
+        gallons = entry.get("planned_gallons")
+        try:
+            gallons_val = float(gallons) if gallons is not None else 0.0
+        except (TypeError, ValueError):
+            gallons_val = 0.0
+        return {
+            "delivery_id": str(entry.get("delivery_id", "")) or None,
+            "scheduled_eta": eta_iso,
+            "planned_gallons": max(0.0, gallons_val),
+        }
+
+    # ------------------------------------------------------------------
+    # Customer_Type multiplier + Consumption_Model selection (Req 1.3, 1.5.3)
+    # ------------------------------------------------------------------
+
+    async def _load_customer_type_multipliers(
+        self, tenant_id: str
+    ) -> Dict[str, float]:
+        """Return the Customer_Type multiplier map for the tenant.
+
+        Merges the tenant-specific overrides from the Redis key
+        ``consumption_segmentation_config:{tenant_id}`` on top of the
+        built-in defaults (Req 1.3.1). Invalid values (non-numeric or
+        negative) are dropped with a warning so one bad entry does not
+        taint the rest.
+        """
+        merged = dict(DEFAULT_CUSTOMER_TYPE_MULTIPLIERS)
+        payload = await self._load_tenant_config_json(
+            f"consumption_segmentation_config:{tenant_id}"
+        )
+        if isinstance(payload, Mapping):
+            for raw_key, raw_value in payload.items():
+                try:
+                    key = str(raw_key).strip().lower()
+                    value = float(raw_value)
+                except (TypeError, ValueError):
+                    logger.warning(
+                        "TankForecastingAgent: ignoring invalid customer_type "
+                        "multiplier entry %r=%r for tenant=%s",
+                        raw_key,
+                        raw_value,
+                        tenant_id,
+                    )
+                    continue
+                if not math.isfinite(value) or value < 0:
+                    logger.warning(
+                        "TankForecastingAgent: ignoring non-finite/negative "
+                        "multiplier %s=%s for tenant=%s",
+                        key,
+                        value,
+                        tenant_id,
+                    )
+                    continue
+                merged[key] = value
+        return merged
+
+    async def _load_consumption_model_overrides(
+        self, tenant_id: str
+    ) -> Dict[str, str]:
+        """Return the ``{fuel_type → model_name}`` override map, if any.
+
+        Backed by Redis key ``consumption_model_config:{tenant_id}``. The
+        payload is a JSON object mapping fuel-type strings to model
+        short-names recognized by :func:`build_consumption_model`. Unknown
+        entries are dropped with a warning — an unknown model name would
+        otherwise raise at forecast time inside the decision cycle.
+        """
+        out: Dict[str, str] = {}
+        payload = await self._load_tenant_config_json(
+            f"consumption_model_config:{tenant_id}"
+        )
+        if not isinstance(payload, Mapping):
+            return out
+        for raw_key, raw_value in payload.items():
+            key = str(raw_key).strip().lower()
+            if not isinstance(raw_value, str) or not raw_value.strip():
+                continue
+            out[key] = raw_value.strip()
+        return out
+
+    async def _load_tenant_config_json(self, key: str) -> Any:
+        """Read ``key`` from the tenant-config backend and parse JSON.
+
+        Returns ``None`` when the backend is unwired, the key is missing,
+        or the payload fails to parse. Never raises — forecast cycles
+        must not depend on Redis availability.
+        """
+        if self._tenant_config is None:
+            return None
+        try:
+            raw = await self._tenant_config.get(key)
+        except Exception as exc:
+            logger.warning(
+                "TankForecastingAgent: tenant config get(%s) failed: %s",
+                key,
+                exc,
+            )
+            return None
+        if raw is None:
+            return None
+        if isinstance(raw, (bytes, bytearray)):
+            try:
+                raw = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                return None
+        if isinstance(raw, str):
+            raw = raw.strip()
+            if not raw:
+                return None
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                logger.warning(
+                    "TankForecastingAgent: tenant config %s is not valid JSON",
+                    key,
+                )
+                return None
+        if isinstance(raw, Mapping):
+            return raw
+        return None
+
+    @staticmethod
+    def _resolve_customer_type_multiplier(
+        customer_type: str,
+        mapping: Mapping[str, float],
+    ) -> float:
+        """Return the multiplier for ``customer_type`` or 1.0 when absent."""
+        normalized = (customer_type or "").strip().lower()
+        if normalized in mapping:
+            return float(mapping[normalized])
+        # Unknown customer_type: neutral multiplier + log.
+        return 1.0
+
+    # ------------------------------------------------------------------
+    # Weather_Provider integration (Req 1.2.3, 1.2.5)
+    # ------------------------------------------------------------------
+
+    async def _get_weather_for_tank(
+        self,
+        tank: CustomerTank,
+    ) -> tuple[List[DailyWeather], bool]:
+        """Return ``(weather_rows, weather_fallback)`` for a Customer_Tank.
+
+        Short-circuits for fuel types that do not require weather: diesel,
+        generator fuel, farm fuel and gasoline all fall under the rolling
+        / runtime models and therefore do not consume HDD (Req 1.2.3 —
+        "…when the tank's fuel_type is propane or heating_oil"). For
+        unsupported types we return ``([], False)`` so the forecast is
+        not flagged as a weather fallback; the forecaster treats absent
+        weather as "not applicable" rather than "missing".
+        """
+        if tank.fuel_type not in _WEATHER_REQUIRING_FUEL_TYPES:
+            return [], False
+        if self._weather_provider is None:
+            # No provider configured for this tenant — Req 1.2.5 mandates
+            # the ``weather_fallback`` annotation.
+            return [], True
+        today = datetime.now(timezone.utc).date()
+        start = today - timedelta(days=WEATHER_TRAILING_DAYS)
+        end = today + timedelta(days=WEATHER_FORWARD_DAYS)
+        try:
+            rows = await self._weather_provider.fetch(
+                tank.zip_code,
+                start,
+                end,
+                tenant_id=tank.tenant_id,
+            )
+        except Exception as exc:
+            # WeatherProvider.fetch already swallows network errors and
+            # returns []; a raised exception here is a programmer error
+            # in a custom adapter. Log and degrade.
+            logger.warning(
+                "TankForecastingAgent: weather fetch for zip=%s tenant=%s "
+                "raised %s",
+                tank.zip_code,
+                tank.tenant_id,
+                exc,
+            )
+            return [], True
+        if not rows:
+            return [], True
+        return list(rows), False
+
+    # ------------------------------------------------------------------
+    # Customer-tank forecast computation (Req 1.1.2, 1.3, 1.4, 1.5, 1.6)
+    # ------------------------------------------------------------------
+
+    async def _compute_customer_tank_forecast(
+        self,
+        *,
+        tank: CustomerTank,
+        tenant_id: str,
+        run_id: str,
+        history: Mapping[str, List[Dict[str, Any]]],
+        scheduled: Mapping[tuple, List[Dict[str, Any]]],
+        customer_type_multipliers: Mapping[str, float],
+        model_overrides: Mapping[str, str],
+    ) -> TankForecast:
+        """Compute a :class:`TankForecast` for a single Customer_Tank.
+
+        Pipeline: consumption model selection → weather lookup → customer
+        type multiplier → scheduled-delivery folding → p50/p90 derivation →
+        runout-risk + confidence + metadata stamping.
+        """
+        tank_history = list(
+            history.get(f"customer_tank_id:{tank.customer_tank_id}", [])
+        )
+        weather_rows, weather_fallback = await self._get_weather_for_tank(tank)
+
+        model = self._select_consumption_model(tank, model_overrides)
+        prediction = await self._run_consumption_model(
+            model=model,
+            tank=tank,
+            history=tank_history,
+            weather=weather_rows,
+        )
+
+        # Customer_Type multiplier (Req 1.3.1–1.3.4).
+        multiplier = self._resolve_customer_type_multiplier(
+            tank.customer_type, customer_type_multipliers
+        )
+        adjusted_gpd = max(0.0, prediction.gallons_per_day * multiplier)
+
+        baseline_source = (
+            "history"
+            if len(tank_history) >= MIN_HISTORY_EVENTS_FOR_TANK_BASELINE
+            else "default"
+        )
+
+        # Scheduled deliveries for this tank (Req 1.4).
+        tank_scheduled_raw = self._scheduled_for_destination(
+            scheduled, "customer_tank", tank.customer_tank_id
+        )
+        scheduled_serialized = [
+            self._serialize_scheduled_delivery(entry) for entry in tank_scheduled_raw
+        ]
+
+        # Core runout math (Req 1.4.2).
+        hours_p50, hours_p90 = self._compute_hours_to_runout_with_schedule(
+            current_level=float(tank.current_level_gallons),
+            capacity=float(tank.capacity_gallons),
+            gallons_per_day=adjusted_gpd,
+            scheduled=tank_scheduled_raw,
+            now=datetime.now(timezone.utc),
+        )
+
+        runout_risk_24h = self._compute_runout_risk(hours_p50, hours_p90)
+
+        # Anomaly flags — merge the model's anomaly flags with any
+        # tank-specific anomalies we want to carry through. Add a
+        # "weather_fallback" flag so downstream consumers (Prioritization
+        # Agent) can surface the provenance.
+        anomaly_flags = list(prediction.anomaly_flags)
+        if weather_fallback and "weather_fallback" not in anomaly_flags:
+            anomaly_flags.append("weather_fallback")
+
+        # Confidence: start from the model's confidence, dampen slightly
+        # when no history was available to tune the baseline.
+        confidence = float(prediction.confidence)
+        if baseline_source == "default":
+            confidence = min(confidence, 0.5)
+
+        return TankForecast(
+            station_id=tank.customer_tank_id,  # keep station_id non-empty for legacy consumers
+            fuel_grade=self._fuel_grade_for_tank(tank),
+            hours_to_runout_p50=round(hours_p50, 2),
+            hours_to_runout_p90=round(hours_p90, 2),
+            runout_risk_24h=round(min(1.0, max(0.0, runout_risk_24h)), 4),
+            confidence=round(min(1.0, max(0.0, confidence)), 4),
+            feature_version="v1.0",
+            anomaly_flags=anomaly_flags,
+            tenant_id=tenant_id,
+            run_id=run_id,
+            customer_tank_id=tank.customer_tank_id,
+            customer_id=tank.customer_id,
+            customer_type=tank.customer_type,
+            fuel_type=tank.fuel_type,
+            model_name=prediction.model_name,
+            customer_type_multiplier=multiplier,
+            baseline_source=baseline_source,
+            weather_fallback=weather_fallback,
+            scheduled_deliveries=scheduled_serialized,
+        )
+
+    def _select_consumption_model(
+        self,
+        tank: CustomerTank,
+        model_overrides: Mapping[str, str],
+    ) -> ConsumptionModel:
+        """Return the ``ConsumptionModel`` to use for ``tank``.
+
+        Precedence:
+            1. Tenant override keyed by ``fuel_type`` (Req 1.5.3).
+            2. Built-in default via
+               :func:`select_consumption_model_for_tank` (Req 1.5.1).
+        """
+        override = model_overrides.get((tank.fuel_type or "").strip().lower())
+        if override:
+            try:
+                return build_consumption_model(override)
+            except ValueError as exc:
+                logger.warning(
+                    "TankForecastingAgent: invalid consumption model "
+                    "override %r for fuel_type=%s tenant=%s: %s",
+                    override,
+                    tank.fuel_type,
+                    tank.tenant_id,
+                    exc,
+                )
+        return select_consumption_model_for_tank(tank)
+
+    async def _run_consumption_model(
+        self,
+        *,
+        model: ConsumptionModel,
+        tank: CustomerTank,
+        history: Sequence[Dict[str, Any]],
+        weather: Sequence[DailyWeather],
+    ) -> ConsumptionPrediction:
+        """Invoke ``model.predict`` and never raise.
+
+        A model that bubbles up an exception (e.g. bad input from a new
+        adapter) must not kill the entire forecast cycle. We degrade to a
+        low-confidence "0 gpd" prediction with the offending flag so the
+        forecaster can still emit a valid TankForecast for the tank.
+        """
+        try:
+            return await model.predict(
+                tank.customer_tank_id,
+                history,
+                weather,
+                customer_type=tank.customer_type,
+            )
+        except Exception as exc:
+            logger.warning(
+                "TankForecastingAgent: Consumption_Model %s raised for "
+                "tank=%s tenant=%s: %s",
+                getattr(model, "model_name", type(model).__name__),
+                tank.customer_tank_id,
+                tank.tenant_id,
+                exc,
+            )
+            return ConsumptionPrediction(
+                gallons_per_day=0.0,
+                confidence=0.1,
+                model_name=getattr(model, "model_name", "unknown_model"),
+                features_used={"tank_id": tank.customer_tank_id, "error": str(exc)},
+                anomaly_flags=["consumption_model_error"],
+                as_of=datetime.now(timezone.utc),
+            )
+
+    @staticmethod
+    def _fuel_grade_for_tank(tank: CustomerTank) -> FuelGrade:
+        """Return a best-effort :class:`FuelGrade` for a Customer_Tank.
+
+        The legacy NG-flavoured FuelGrade enum only carries four values,
+        so we map the US catalog product codes to their closest NG alias
+        for the compatibility field on the persisted TankForecast.
+        Future-proofing the full US catalog is tracked by fuel-ops
+        hardening Capability 6; until then we stamp the most reasonable
+        grade so downstream queries keyed on this field keep working.
+        """
+        mapping = {
+            "DIESEL_2": FuelGrade.AGO,
+            "OFF_ROAD_DIESEL": FuelGrade.AGO,
+            "GASOLINE_REG": FuelGrade.PMS,
+            "GASOLINE_PREM": FuelGrade.PMS,
+            "ETHANOL_E85": FuelGrade.PMS,
+            "KEROSENE": FuelGrade.ATK,
+            "HEATING_OIL": FuelGrade.ATK,
+            "PROPANE": FuelGrade.LPG,
+            "DEF": FuelGrade.AGO,
+        }
+        return mapping.get(tank.fuel_product_code, FuelGrade.AGO)
+
+    # ------------------------------------------------------------------
+    # Hours-to-runout math with scheduled-delivery folding (Req 1.4.2)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def _compute_hours_to_runout_with_schedule(
+        cls,
+        *,
+        current_level: float,
+        capacity: float,
+        gallons_per_day: float,
+        scheduled: Sequence[Mapping[str, Any]],
+        now: datetime,
+    ) -> tuple[float, float]:
+        """Return ``(hours_p50, hours_p90)`` accounting for scheduled refills.
+
+        Integrates the projected consumption over time. At each scheduled
+        delivery ETA the projected level is increased by that delivery's
+        ``planned_gallons`` (capped at ``capacity``). Runout occurs at the
+        first moment the running level reaches zero. ``p90`` uses the
+        pessimistic multiplier (higher consumption rate).
+
+        When ``gallons_per_day`` is zero the result is unbounded; we cap
+        at 720 hours (30 days) to keep the output finite and compatible
+        with the existing p50/p90 clamps.
+        """
+        if capacity <= 0 or not math.isfinite(capacity):
+            capacity = float("inf")
+
+        p50 = cls._simulate_runout(
+            current_level=current_level,
+            capacity=capacity,
+            gallons_per_day=max(0.0, gallons_per_day),
+            scheduled=scheduled,
+            now=now,
+        )
+        p90 = cls._simulate_runout(
+            current_level=current_level,
+            capacity=capacity,
+            gallons_per_day=max(0.0, gallons_per_day) * P90_VARIANCE_MULTIPLIER,
+            scheduled=scheduled,
+            now=now,
+        )
+        # Cap to match the legacy retail behavior.
+        p50 = min(p50, 720.0)
+        p90 = min(p90, 720.0)
+        return p50, p90
+
+    @staticmethod
+    def _simulate_runout(
+        *,
+        current_level: float,
+        capacity: float,
+        gallons_per_day: float,
+        scheduled: Sequence[Mapping[str, Any]],
+        now: datetime,
+    ) -> float:
+        """Walk forward through scheduled deliveries to find the runout hour.
+
+        If ``gallons_per_day`` is 0 the tank never runs out and we return
+        ``inf`` (the caller caps the output). Scheduled deliveries are
+        sorted by ETA; the running level is decreased at ``gpd/24`` per
+        hour and increased by ``planned_gallons`` at each ETA (clamped to
+        ``capacity``). The returned value is the elapsed hours since
+        ``now`` when the level first reaches zero.
+        """
+        level = max(0.0, float(current_level))
+        if gallons_per_day <= 0:
+            return float("inf")
+        gph = gallons_per_day / 24.0
+
+        # Sort scheduled deliveries by ETA; drop any entries whose ETA
+        # is in the past or unparseable.
+        events: List[tuple[float, float]] = []
+        for entry in scheduled:
+            eta_hours = _parse_eta_hours_from_now(entry.get("scheduled_eta"), now)
+            if eta_hours is None or eta_hours <= 0:
+                continue
+            try:
+                gallons = float(entry.get("planned_gallons", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                gallons = 0.0
+            events.append((eta_hours, max(0.0, gallons)))
+        events.sort(key=lambda pair: pair[0])
+
+        elapsed = 0.0
+        for eta_hours, gallons in events:
+            hours_until_event = eta_hours - elapsed
+            hours_to_empty = level / gph
+            if hours_to_empty <= hours_until_event:
+                # Tank runs out before the next scheduled delivery.
+                return elapsed + hours_to_empty
+            # Tank survives to the delivery; consume until then, then refill.
+            level -= gph * hours_until_event
+            elapsed = eta_hours
+            level = min(capacity, level + gallons)
+            if level <= 0:
+                return elapsed
+
+        # After all scheduled deliveries: consume until empty.
+        if level <= 0:
+            return elapsed
+        return elapsed + (level / gph)
+
+    # ------------------------------------------------------------------
+    # Forecast computation (Req 1.1, 1.6, 1.7) — legacy retail station path
     # ------------------------------------------------------------------
 
     def _compute_forecast(
@@ -483,9 +1352,25 @@ class TankForecastingAgent(OverlayAgentBase):
     # ------------------------------------------------------------------
 
     async def _persist_forecast(self, forecast: TankForecast) -> None:
-        """Persist a TankForecast to the mvp_tank_forecasts ES index."""
+        """Persist a TankForecast to the mvp_tank_forecasts ES index.
+
+        Canonicalizes ``fuel_grade`` before write so forecasts generated
+        from NG-aliased stations (AGO/PMS/ATK/LPG) land in ES alongside
+        the US canonical codes (DIESEL_2/GASOLINE_REG/KEROSENE/PROPANE)
+        per Requirement 6.1.4. Uses the best-effort ``canonicalize_or_warn``
+        helper because forecasts originate from historical station data
+        that may predate the catalog migration — an unknown value is
+        logged but not allowed to block the forecast cycle.
+        """
         try:
             doc = forecast.model_dump(mode="json")
+            raw_grade = doc.get("fuel_grade")
+            if raw_grade is not None:
+                doc["fuel_grade"] = canonicalize_or_warn(
+                    raw_grade,
+                    context="mvp_tank_forecasts.fuel_grade",
+                    logger_=logger,
+                )
             await self._es.index_document(
                 MVP_TANK_FORECASTS_INDEX,
                 forecast.forecast_id,
@@ -497,3 +1382,91 @@ class TankForecastingAgent(OverlayAgentBase):
                 forecast.forecast_id,
                 e,
             )
+
+    # ------------------------------------------------------------------
+    # WebSocket broadcast (Req 1.6.4)
+    # ------------------------------------------------------------------
+
+    async def _broadcast_customer_tank_forecast_ready(
+        self, forecast: TankForecast
+    ) -> None:
+        """Emit ``customer_tank_forecast_ready`` for a Customer_Tank forecast.
+
+        Fires on ``/ws/fuel-planning`` via the injected
+        :class:`FuelPlanningWSManager`. Payload fields follow the strict
+        schema mandated by Requirement 1.6.4: ``run_id``, ``tenant_id``,
+        ``customer_tank_id``, ``fuel_type``, ``runout_risk_24h``, and
+        ``model_name``. Additional context (``customer_type``,
+        ``weather_fallback``, ``hours_to_runout_p90``) is included via
+        the ``extra`` parameter so dispatcher UIs can show richer tooltips
+        without a follow-up REST query.
+
+        Broadcast failures are logged and swallowed so a misbehaving WS
+        manager cannot break the forecasting cycle.
+        """
+        if self._fuel_planning_ws is None:
+            return
+        tank_id = getattr(forecast, "customer_tank_id", None)
+        if not tank_id:
+            return
+        try:
+            await self._fuel_planning_ws.broadcast_customer_tank_forecast_ready(
+                run_id=forecast.run_id or "",
+                tenant_id=forecast.tenant_id or "",
+                customer_tank_id=tank_id,
+                fuel_type=getattr(forecast, "fuel_type", None) or "",
+                runout_risk_24h=float(forecast.runout_risk_24h),
+                model_name=getattr(forecast, "model_name", None) or "",
+                extra={
+                    "customer_id": getattr(forecast, "customer_id", None),
+                    "customer_type": getattr(forecast, "customer_type", None),
+                    "hours_to_runout_p50": forecast.hours_to_runout_p50,
+                    "hours_to_runout_p90": forecast.hours_to_runout_p90,
+                    "weather_fallback": getattr(
+                        forecast, "weather_fallback", False
+                    ),
+                    "forecast_id": getattr(forecast, "forecast_id", None),
+                },
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "TankForecastingAgent: customer_tank_forecast_ready "
+                "broadcast failed for tank=%s: %s",
+                tank_id,
+                exc,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Module-level helpers
+# ---------------------------------------------------------------------------
+
+
+def _parse_eta_hours_from_now(
+    eta: Any, now: datetime
+) -> Optional[float]:
+    """Return the number of hours from ``now`` to ``eta``.
+
+    Accepts datetimes, ISO-8601 strings (with or without ``Z``), and
+    ``None``. Returns ``None`` for unparseable input. Naive datetimes
+    are assumed UTC so schedule math stays timezone-consistent.
+    """
+    if eta is None:
+        return None
+    if isinstance(eta, datetime):
+        target = eta
+    elif isinstance(eta, str):
+        raw = eta.strip()
+        if not raw:
+            return None
+        try:
+            target = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if target.tzinfo is None:
+        target = target.replace(tzinfo=timezone.utc)
+    reference = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+    delta = (target - reference).total_seconds() / 3600.0
+    return delta

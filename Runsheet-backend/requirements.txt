@@ -32,3 +32,18 @@ hypothesis==6.115.0
 
 # JWT token verification (Requirement 9.6)
 python-jose[cryptography]==3.3.0
+
+# AWS SDK for KMS envelope encryption (Fuel Ops Hardening Req 5.1 — credentials vault)
+# boto3 + cryptography are brought in transitively today; pin them explicitly
+# because services/credentials_vault.py imports them directly.
+boto3>=1.35.0
+cryptography>=43.0.0
+
+# scikit-learn for solver clustering pre-pass (Fuel Ops Hardening Req 2.3.2)
+# used by Agents/support/route_solver.optimize_route_large to run a KMeans
+# pre-pass on stop coordinates before per-cluster 2-opt, and by the
+# prioritization DBSCAN helper (Req 3.4.1).
+scikit-learn>=1.5.0
+
+# PDF generation for BOL documents (Fuel Ops Hardening Req 4.3 — services/bol_service.py)
+reportlab>=4.0.0

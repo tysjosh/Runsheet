@@ -36,6 +36,10 @@ from fuel.models import (
 )
 from fuel.services.fuel_es_mappings import FUEL_EVENTS_INDEX, FUEL_STATIONS_INDEX
 from services.elasticsearch_service import ElasticsearchService
+from fuel.services.fuel_product_catalog import (
+    UnknownFuelProductError,
+    canonicalize,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +58,25 @@ class FuelService:
     def _make_doc_id(self, station_id: str, fuel_type: str) -> str:
         """Build the composite document ID used in the fuel_stations index."""
         return f"{station_id}::{fuel_type}"
+
+    def _canonical_fuel_type(self, fuel_type: str) -> str:
+        """Resolve a user-supplied fuel_type to its canonical product_code.
+
+        Capability 6 (Requirement 6.1.4) requires every write path that
+        persists a fuel product identifier to pass it through
+        :func:`services.fuel_product_catalog.canonicalize` so US codes and
+        NG legacy aliases land in ES as the same canonical value (for
+        example ``AGO`` -> ``DIESEL_2``). An unknown code surfaces as a
+        400 VALIDATION_ERROR via the shared error handler rather than a
+        silent persistence of mis-labelled data.
+        """
+        try:
+            return canonicalize(fuel_type)
+        except UnknownFuelProductError as exc:
+            raise validation_error(
+                "Unknown fuel product code",
+                details={"fuel_type": exc.code_or_alias},
+            ) from exc
 
     def _calculate_daily_rate(self, events: list[dict]) -> float:
         """
@@ -272,6 +295,10 @@ class FuelService:
                 },
             )
 
+        # Canonicalize fuel_type so US codes and NG legacy aliases land in
+        # ES as the same canonical product_code (Req 6.1.4).
+        canonical_fuel_type = self._canonical_fuel_type(station.fuel_type)
+
         now = datetime.now(timezone.utc).isoformat()
         daily_rate = 0.0
         days_empty = self._calculate_days_until_empty(
@@ -287,7 +314,7 @@ class FuelService:
         doc: dict = {
             "station_id": station.station_id,
             "name": station.name,
-            "fuel_type": station.fuel_type,
+            "fuel_type": canonical_fuel_type,
             "capacity_liters": station.capacity_liters,
             "current_stock_liters": station.initial_stock_liters,
             "daily_consumption_rate": daily_rate,
@@ -301,13 +328,13 @@ class FuelService:
             "last_updated": now,
         }
 
-        doc_id = self._make_doc_id(station.station_id, station.fuel_type)
+        doc_id = self._make_doc_id(station.station_id, canonical_fuel_type)
         await self._es.index_document(FUEL_STATIONS_INDEX, doc_id, doc)
 
         logger.info(
             "Created fuel station %s (fuel_type=%s, tenant=%s)",
             station.station_id,
-            station.fuel_type,
+            canonical_fuel_type,
             tenant_id,
         )
 
@@ -402,6 +429,11 @@ class FuelService:
         - Recalculates days_until_empty
         - Updates station status based on new stock level
         """
+        # Canonicalize fuel_type before any persistence so AGO/PMS/ATK/LPG
+        # and DIESEL_2/GASOLINE_REG/KEROSENE/PROPANE all converge on the
+        # same canonical code in fuel_events (Req 6.1.4).
+        canonical_fuel_type = self._canonical_fuel_type(event.fuel_type)
+
         # 1. Find the station document
         query: dict = {
             "query": {
@@ -450,7 +482,7 @@ class FuelService:
             "event_id": event_id,
             "station_id": event.station_id,
             "event_type": "consumption",
-            "fuel_type": event.fuel_type,
+            "fuel_type": canonical_fuel_type,
             "quantity_liters": event.quantity_liters,
             "asset_id": event.asset_id,
             "operator_id": event.operator_id,
@@ -562,6 +594,11 @@ class FuelService:
         - Updates station status based on new stock level
         - Clears active alerts if stock restored above threshold
         """
+        # Canonicalize fuel_type before persistence so both US codes and
+        # NG legacy aliases land in fuel_events as the canonical code
+        # (Req 6.1.4).
+        canonical_fuel_type = self._canonical_fuel_type(event.fuel_type)
+
         # 1. Find the station document
         query: dict = {
             "query": {
@@ -611,7 +648,7 @@ class FuelService:
             "event_id": event_id,
             "station_id": event.station_id,
             "event_type": "refill",
-            "fuel_type": event.fuel_type,
+            "fuel_type": canonical_fuel_type,
             "quantity_liters": event.quantity_liters,
             "supplier": event.supplier,
             "delivery_reference": event.delivery_reference,

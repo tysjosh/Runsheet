@@ -44,6 +44,16 @@ from Agents.support.route_solver import (
     two_opt_improve,
     check_sla_windows,
     optimize_route,
+    optimize_route_large,
+    insert_emergency_stop,
+    InfeasibleInsertion,
+    StopCapExceededError,
+    DEFAULT_ROUTING_MAX_STOPS,
+    CLUSTERING_STOP_THRESHOLD,
+    DEFAULT_MAX_STOPS_PER_CLUSTER,
+    INSERT_REASON_CAPACITY,
+    INSERT_REASON_SLA,
+    INSERT_REASON_OFF_DUTY,
 )
 
 # ES mappings
@@ -86,6 +96,16 @@ __all__ = [
     "two_opt_improve",
     "check_sla_windows",
     "optimize_route",
+    "optimize_route_large",
+    "insert_emergency_stop",
+    "InfeasibleInsertion",
+    "StopCapExceededError",
+    "DEFAULT_ROUTING_MAX_STOPS",
+    "CLUSTERING_STOP_THRESHOLD",
+    "DEFAULT_MAX_STOPS_PER_CLUSTER",
+    "INSERT_REASON_CAPACITY",
+    "INSERT_REASON_SLA",
+    "INSERT_REASON_OFF_DUTY",
     # ES mappings
     "setup_mvp_indices",
     # Pipeline coordinator

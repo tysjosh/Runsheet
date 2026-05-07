@@ -46,6 +46,28 @@ MVP_TANK_FORECASTS_MAPPING = {
             "timestamp":           {"type": "date"},
             "updated_at":          {"type": "date"},
             "created_at":          {"type": "date"},
+            # --- fuel-ops hardening Capability 1 extensions ---
+            # Customer-tank context (Req 1.1.2, 1.6.1). Nullable so legacy
+            # retail-station forecasts continue to index without these
+            # fields populated.
+            "customer_tank_id":          {"type": "keyword"},
+            "customer_id":               {"type": "keyword"},
+            "customer_type":             {"type": "keyword"},
+            "fuel_type":                 {"type": "keyword"},
+            "model_name":                {"type": "keyword"},
+            "customer_type_multiplier":  {"type": "float"},
+            "baseline_source":           {"type": "keyword"},
+            "weather_fallback":          {"type": "boolean"},
+            # Scheduled_Delivery entries folded into the projected level
+            # (Req 1.4.3). Nested so individual fields remain queryable.
+            "scheduled_deliveries": {
+                "type": "nested",
+                "properties": {
+                    "delivery_id":     {"type": "keyword"},
+                    "scheduled_eta":   {"type": "date"},
+                    "planned_gallons": {"type": "double"},
+                },
+            },
         },
     },
     "settings": {
@@ -67,6 +89,23 @@ MVP_DELIVERY_PRIORITIES_MAPPING = {
                     "priority_score":  {"type": "float"},
                     "priority_bucket": {"type": "keyword"},
                     "reasons":         {"type": "keyword"},
+                    # --- Phase 5 extensions (fuel-ops hardening Capability 3) ---
+                    # Safe-to-delay tolerance (Req 3.1.3).
+                    "safe_to_delay_days":    {"type": "integer"},
+                    "safe_to_delay_bucket":  {"type": "keyword"},
+                    # Business-impact scoring (Req 3.3.3, 3.3.4).
+                    "business_impact_score":   {"type": "float"},
+                    "business_impact_reasons": {"type": "keyword"},
+                    # Route-friendly DBSCAN cluster (Req 3.4.2).
+                    "cluster_id":   {"type": "keyword"},
+                    "cluster_size": {"type": "integer"},
+                    "cluster_centroid": {
+                        "type": "object",
+                        "properties": {
+                            "lat": {"type": "float"},
+                            "lon": {"type": "float"},
+                        },
+                    },
                 },
             },
             "scoring_weights": {"type": "object", "enabled": True},
@@ -148,6 +187,9 @@ MVP_ROUTES_MAPPING = {
             "status":          {"type": "keyword"},
             "updated_at":      {"type": "date"},
             "created_at":      {"type": "date"},
+            # Fuel Ops Hardening Req 2.1.5 / 2.1.6 — traffic provenance
+            "traffic_provider": {"type": "keyword"},
+            "traffic_fallback": {"type": "boolean"},
         },
     },
     "settings": {
@@ -173,6 +215,78 @@ MVP_REPLAN_EVENTS_MAPPING = {
                     "truck_swapped":       {"type": "keyword"},
                     "stations_deferred":   {"type": "keyword"},
                     "stations_added":      {"type": "keyword"},
+                },
+            },
+            # --- fuel-ops hardening Capability 2 / Task 4.10 (Req 2.5.1–2.5.4) ---
+            # Structured "what changed" diff produced by
+            # :func:`Agents.support.replan_diff_models.compute_replan_diff`.
+            # Nested so each array entry stays independently queryable by
+            # stop_id / truck_id from the dispatcher UI. The legacy ``diff``
+            # field above continues to serve the MVP pipeline; this new
+            # ``replan_diff`` field is the canonical fuel-ops-hardening shape
+            # consumed by the ``/api/fuel/mvp/replans/{event_id}/diff``
+            # endpoint and the ``replan_diff_ready`` WebSocket event.
+            "replan_diff": {
+                "type": "object",
+                "properties": {
+                    "diff_id":           {"type": "keyword"},
+                    "original_route_id": {"type": "keyword"},
+                    "patched_route_id":  {"type": "keyword"},
+                    "added_stops": {
+                        "type": "nested",
+                        "properties": {
+                            "stop_id":      {"type": "keyword"},
+                            "index":        {"type": "integer"},
+                            "gallons":      {"type": "double"},
+                            "product_code": {"type": "keyword"},
+                            "eta":          {"type": "keyword"},
+                        },
+                    },
+                    "removed_stops": {
+                        "type": "nested",
+                        "properties": {
+                            "stop_id":      {"type": "keyword"},
+                            "index":        {"type": "integer"},
+                            "gallons":      {"type": "double"},
+                            "product_code": {"type": "keyword"},
+                            "eta":          {"type": "keyword"},
+                        },
+                    },
+                    "reordered_stops": {
+                        "type": "nested",
+                        "properties": {
+                            "stop_id":      {"type": "keyword"},
+                            "before_index": {"type": "integer"},
+                            "after_index":  {"type": "integer"},
+                        },
+                    },
+                    "reassigned_stops": {
+                        "type": "nested",
+                        "properties": {
+                            "stop_id":       {"type": "keyword"},
+                            "from_truck_id": {"type": "keyword"},
+                            "to_truck_id":   {"type": "keyword"},
+                        },
+                    },
+                    "quantity_changes": {
+                        "type": "nested",
+                        "properties": {
+                            "stop_id":        {"type": "keyword"},
+                            "before_gallons": {"type": "double"},
+                            "after_gallons":  {"type": "double"},
+                            "product_code":   {"type": "keyword"},
+                        },
+                    },
+                    "eta_shifts": {
+                        "type": "nested",
+                        "properties": {
+                            "stop_id":       {"type": "keyword"},
+                            "before_eta":    {"type": "keyword"},
+                            "after_eta":     {"type": "keyword"},
+                            "shift_minutes": {"type": "double"},
+                        },
+                    },
+                    "generated_at":      {"type": "date"},
                 },
             },
             "status":    {"type": "keyword"},
@@ -241,6 +355,21 @@ TRUCK_COMPARTMENTS_MAPPING = {
             "tenant_id":       {"type": "keyword"},
             "updated_at":      {"type": "date"},
             "created_at":      {"type": "date"},
+            # --- fuel-ops hardening Capability 7 (Requirement 7.1.1) ---
+            # Compartment-state tracking for cross-contamination prevention.
+            # All four fields are nullable in ES so legacy
+            # truck_compartments documents continue to index cleanly without
+            # populating them; the Compartment_Loading_Agent and Cleaning
+            # Event endpoints update them atomically via
+            # CompartmentStateRepository (see fuel/compartment_state_models.py).
+            #   state: one of clean | loaded | needs_cleaning
+            #   last_loaded_product: canonical US product_code (e.g. DIESEL_2)
+            #   last_loaded_at: timestamp of the most recent Loading_Plan commit
+            #   last_cleaned_at: timestamp of the most recent Cleaning_Event
+            "last_loaded_product": {"type": "keyword"},
+            "last_loaded_at":      {"type": "date"},
+            "last_cleaned_at":     {"type": "date"},
+            "state":               {"type": "keyword"},
         },
     },
     "settings": {

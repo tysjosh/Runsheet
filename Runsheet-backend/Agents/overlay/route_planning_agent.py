@@ -11,12 +11,18 @@ Default configuration:
     - decision_cycle: 60 seconds
     - cooldown: 15 minutes per truck
 
-Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.7, 4.8, 4.9
+Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.7, 4.8, 4.9,
+              and Fuel Ops Hardening 2.1.3, 2.1.5, 2.1.6 (Traffic_Provider
+              wiring with feature-flag gating and Haversine fallback).
 """
 
+import asyncio
+import json
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol, Tuple
+
+import httpx
 
 from Agents.overlay.base_overlay_agent import OverlayAgentBase
 from Agents.overlay.data_contracts import (
@@ -35,6 +41,22 @@ from Agents.support.route_solver import (
     check_sla_windows,
     optimize_route,
 )
+from fuel.services.fuel_product_catalog import (
+    UnknownFuelProductError,
+    canonicalize,
+    canonicalize_or_warn,
+)
+from fuel.services.sourcing_recommender import (
+    InvalidBrandedPreferenceError,
+    SourcingRecommender,
+)
+from fuel.services.traffic_provider import (
+    TrafficBudgetExceeded,
+    TrafficProvider,
+    TravelMatrix,
+    build_traffic_provider,
+)
+from fuel.terminal_models import SourcingRecommendation
 
 logger = logging.getLogger(__name__)
 
@@ -50,11 +72,66 @@ DEFAULT_OBJECTIVE_WEIGHTS: Dict[str, float] = {
     "plan_churn": 0.10,
 }
 
-# Average speed in km/h for ETA estimation
+# Average speed in km/h for ETA estimation and Haversine fallback
+# travel-time derivation (Req 2.1.5).
 DEFAULT_SPEED_KMH = 40.0
 
-# Default depot location (fallback)
+# Default depot location (legacy fallback). Task 4.2 removes the hardcoded
+# Lagos coordinate from the resolver chain; this constant remains only as
+# a module-level default consumed by the legacy single-depot code path
+# until Depot resolution is fully wired in downstream tasks.
 DEFAULT_DEPOT = {"lat": 6.5244, "lon": 3.3792}  # Lagos, Nigeria
+
+# Redis key template for the per-tenant Traffic_Provider selection
+# (Req 2.1.2). The value is a short provider name ("mapbox", "here",
+# "google") or a JSON object of the form {"name": "mapbox"}.
+TRAFFIC_PROVIDER_CONFIG_KEY_TEMPLATE = "overlay.traffic_provider:{tenant_id}"
+
+# Overlay feature-flag name that gates whether the configured
+# Traffic_Provider is actually consulted (Req 2.1.3).
+TRAFFIC_AWARE_ROUTING_FLAG_KEY = "overlay.traffic_aware_routing"
+
+#: Overlay feature flag name that gates whether the Route_Planning_Agent
+#: consults the Sourcing_Recommender for loading plans requiring a
+#: non-depot terminal lift (Req 8.5.5 / Task 7.10). When the flag is
+#: anything other than ``active_gated`` / ``active_auto`` the agent
+#: skips the recommender entirely and leaves
+#: :attr:`RoutePlan.sourced_terminal_id` / ``sourced_terminal_reasons``
+#: unset.
+TERMINAL_SOURCING_FLAG_KEY = "overlay.terminal_sourcing"
+
+# Hard timeout budget for the entire get_matrix call (Req 2.1.5). The
+# provider base class already applies the same 10-second budget inside
+# its own asyncio.wait_for. We set an outer timeout here as defense-in-
+# depth so a misbehaving subclass cannot block the decision cycle.
+TRAFFIC_MATRIX_TIMEOUT_SECONDS = 10.0
+
+#: Exact liters-per-gallon factor used to convert Loading_Plan assignment
+#: volumes (stored in liters) into the gallons unit the
+#: :class:`SourcingRecommender` expects (Task 7.10). Keep in sync with
+#: :data:`services.unit_conversion.GAL_TO_L`.
+LITERS_PER_GALLON = 3.785411784
+
+
+class TenantConfigLookup(Protocol):
+    """Minimal Redis-like interface for per-tenant config reads.
+
+    The Route_Planning_Agent uses this to resolve the
+    ``overlay.traffic_provider:{tenant_id}`` key (Req 2.1.2). The same
+    object is passed through to the injected Traffic_Provider factory so
+    every adapter shares a single tenant-scoped config backend.
+    """
+
+    async def get(self, key: str) -> Optional[Any]:  # pragma: no cover - protocol
+        ...
+
+
+#: Factory signature accepted by ``set_traffic_provider_factory``. Given a
+#: provider short-name (and the tenant_id so factories can inject per-
+#: tenant credentials), returns a constructed :class:`TrafficProvider`.
+#: Returning ``None`` tells the agent to fall back to Haversine for this
+#: tenant; raising is treated the same way.
+TrafficProviderFactory = Callable[[str, str], Optional[TrafficProvider]]
 
 
 class RoutePlanningAgent(OverlayAgentBase):
@@ -88,6 +165,10 @@ class RoutePlanningAgent(OverlayAgentBase):
         feature_flag_service,
         poll_interval: int = 60,
         cooldown_minutes: int = 15,
+        *,
+        traffic_provider_factory: Optional[TrafficProviderFactory] = None,
+        tenant_config: Optional[TenantConfigLookup] = None,
+        sourcing_recommender: Optional[SourcingRecommender] = None,
     ):
         super().__init__(
             agent_id="route_planning",
@@ -111,6 +192,75 @@ class RoutePlanningAgent(OverlayAgentBase):
         )
         # Buffer loading proposals between cycles
         self._proposal_buffer: List[InterventionProposal] = []
+
+        # ---- Traffic_Provider wiring (Req 2.1.2, 2.1.3, 2.1.5, 2.1.6) ---
+        # The factory is consulted once we know the provider short-name
+        # for a tenant; the agent caches the resolved instance per tenant
+        # so we don't rebuild the HTTP client on every cycle. Both the
+        # factory and the tenant-config lookup are optional — when either
+        # is missing the agent permanently falls back to Haversine and
+        # stamps ``traffic_fallback: true`` on every plan for visibility.
+        self._traffic_provider_factory: Optional[TrafficProviderFactory] = (
+            traffic_provider_factory
+        )
+        self._tenant_config: Optional[TenantConfigLookup] = tenant_config
+        self._traffic_provider_cache: Dict[Tuple[str, str], TrafficProvider] = {}
+
+        # ---- Sourcing_Recommender wiring (Task 7.10 / Req 8.5.5) --------
+        # When a Loading_Plan requires an external terminal lift (i.e.
+        # the plan's ``terminal_id`` is set and differs from the tenant's
+        # depot), the Route_Planning_Agent consults the recommender to
+        # choose a loading terminal and records the pick on the
+        # Route_Plan. The attribute is ``None`` until bootstrap injects
+        # the singleton via :meth:`set_sourcing_recommender`; until then
+        # every evaluation skips the sourcing step entirely so tests and
+        # early bootstrap states fail soft instead of raising.
+        self._sourcing_recommender: Optional[SourcingRecommender] = (
+            sourcing_recommender
+        )
+
+    # ------------------------------------------------------------------
+    # Public wiring hooks (bootstrap injects these after construction)
+    # ------------------------------------------------------------------
+
+    def set_traffic_provider_factory(
+        self, factory: Optional[TrafficProviderFactory]
+    ) -> None:
+        """Inject the Traffic_Provider factory post-construction.
+
+        Passing ``None`` disables the traffic-aware code path for every
+        tenant and forces a Haversine fallback with ``traffic_fallback:
+        true`` (Req 2.1.5).
+        """
+        self._traffic_provider_factory = factory
+        self._traffic_provider_cache.clear()
+
+    def set_tenant_config(
+        self, lookup: Optional[TenantConfigLookup]
+    ) -> None:
+        """Inject the tenant-config lookup post-construction.
+
+        Used to resolve ``overlay.traffic_provider:{tenant_id}`` per
+        tenant (Req 2.1.2). ``None`` disables provider selection and
+        therefore forces the Haversine fallback for every tenant.
+        """
+        self._tenant_config = lookup
+        self._traffic_provider_cache.clear()
+
+    def set_sourcing_recommender(
+        self, recommender: Optional[SourcingRecommender]
+    ) -> None:
+        """Inject the :class:`SourcingRecommender` post-construction.
+
+        Passing ``None`` disables the sourcing-recommender integration:
+        the agent leaves ``sourced_terminal_id`` / ``sourced_terminal_reasons``
+        / ``sourcing_recommendation_id`` on the Route_Plan unset for
+        every run. The bootstrap in :mod:`bootstrap.agents` invokes this
+        after constructing the recommender singleton so the Route_Plan
+        carries the chosen terminal id for every Loading_Plan that
+        required an external lift (Task 7.10, Req 8.5.5).
+        """
+        self._sourcing_recommender = recommender
 
     # ------------------------------------------------------------------
     # Signal handling override — buffer InterventionProposals
@@ -201,15 +351,38 @@ class RoutePlanningAgent(OverlayAgentBase):
                 if sid in station_sla_windows:
                     sla_windows_by_idx[i + 1] = station_sla_windows[sid]  # +1 for depot offset
 
+            # Step 3b: Traffic-aware travel matrix (Req 2.1.3, 2.1.5, 2.1.6).
+            # Returns a (distance_matrix, used_provider_name, traffic_fallback)
+            # triple. When the feature flag is disabled, no provider is
+            # configured, or any upstream error occurs (timeout, budget,
+            # HTTP failure), we fall back to the Haversine matrix built
+            # from the route-solver's shared helper and annotate the plan
+            # with ``traffic_fallback: true`` (Req 2.1.5).
+            (
+                traffic_distance_matrix,
+                used_provider_name,
+                traffic_fallback,
+            ) = await self._resolve_travel_matrix(
+                tenant_id=tenant_id, locations=locations
+            )
+
             # Step 4: Run route optimization (Req 4.5)
             optimized_order, total_distance = optimize_route(
                 locations, start_index=0
             )
 
-            # Check SLA window violations (Req 4.4)
+            # Check SLA window violations (Req 4.4). When we have a
+            # traffic-informed matrix use it for the SLA ETA check so
+            # window violations reflect real drive times; otherwise the
+            # existing Haversine matrix built by the solver is used.
+            sla_distance_matrix = (
+                traffic_distance_matrix
+                if traffic_distance_matrix is not None
+                else build_distance_matrix(locations)
+            )
             sla_violations = check_sla_windows(
                 order=optimized_order,
-                distance_matrix=build_distance_matrix(locations),
+                distance_matrix=sla_distance_matrix,
                 sla_windows=sla_windows_by_idx if sla_windows_by_idx else None,
                 speed_kmh=DEFAULT_SPEED_KMH,
             )
@@ -224,6 +397,8 @@ class RoutePlanningAgent(OverlayAgentBase):
                 assignments=assignments,
                 tenant_id=tenant_id,
                 sla_violations=sla_violations,
+                traffic_provider_name=used_provider_name,
+                traffic_fallback=traffic_fallback,
             )
 
             # Compute objective value (Req 4.6)
@@ -234,6 +409,23 @@ class RoutePlanningAgent(OverlayAgentBase):
 
             # Set run_id from pipeline context if available
             route_plan.run_id = getattr(self, '_current_run_id', None) or ""
+
+            # Step 5b: Sourcing_Recommender wiring (Task 7.10 / Req 8.5.5)
+            # When the Loading_Plan requires an external terminal lift
+            # (terminal_id present on the plan and sourcing flag active
+            # for the tenant), consult the already-wired recommender and
+            # stamp the winning terminal id + reasons on the route plan.
+            # Every failure path (flag off, no recommender, zero
+            # candidates, exception) leaves the sourcing fields None so
+            # the route still persists.
+            await self._maybe_apply_sourcing(
+                route_plan=route_plan,
+                loading_plan=loading_plan,
+                assignments=assignments,
+                locations=locations,
+                tenant_id=tenant_id,
+                truck_id=truck_id,
+            )
 
             # Step 6: Persist route plan to ES (Req 4.7)
             await self._persist_route_plan(route_plan)
@@ -402,6 +594,8 @@ class RoutePlanningAgent(OverlayAgentBase):
         assignments: List[Dict[str, Any]],
         tenant_id: str,
         sla_violations: Optional[List[Dict]] = None,
+        traffic_provider_name: Optional[str] = None,
+        traffic_fallback: bool = False,
     ) -> RoutePlan:
         """Build a RoutePlan from optimized route order."""
         # Build drop quantities per station
@@ -467,6 +661,8 @@ class RoutePlanningAgent(OverlayAgentBase):
             distance_km=round(total_distance, 2),
             eta_confidence=0.75 if not at_risk_indices else 0.4,
             tenant_id=tenant_id,
+            traffic_provider=traffic_provider_name,
+            traffic_fallback=traffic_fallback,
         )
 
     # ------------------------------------------------------------------
@@ -561,13 +757,348 @@ class RoutePlanningAgent(OverlayAgentBase):
         )
 
     # ------------------------------------------------------------------
+    # Traffic_Provider orchestration (Req 2.1.3, 2.1.5, 2.1.6)
+    # ------------------------------------------------------------------
+
+    async def _resolve_travel_matrix(
+        self,
+        *,
+        tenant_id: str,
+        locations: List[Dict[str, float]],
+    ) -> Tuple[Optional[List[List[float]]], Optional[str], bool]:
+        """Return ``(distance_matrix, provider_name, traffic_fallback)``.
+
+        Implements the tenant-gated Traffic_Provider flow mandated by
+        Fuel Ops Hardening Requirements 2.1.3, 2.1.5, and 2.1.6:
+
+        1. Check the ``overlay.traffic_aware_routing`` feature flag for
+           ``tenant_id``. If the flag is not in an active state we skip
+           the provider entirely and return ``(None, None, False)`` so
+           the caller keeps using the Haversine distance matrix and
+           **does not** stamp ``traffic_fallback: true`` — the plan is
+           simply not traffic-aware (Req 2.1.3).
+        2. Read ``overlay.traffic_provider:{tenant_id}`` from the tenant
+           config (Req 2.1.2). Absent / blank / unparseable values are
+           treated as a misconfiguration; we fall back to Haversine and
+           annotate ``traffic_fallback: true`` per Req 2.1.5.
+        3. Build (and cache) the concrete :class:`TrafficProvider` via
+           the injected factory. Unknown provider names or factory
+           failures also fall back to Haversine with the annotation.
+        4. Call :meth:`TrafficProvider.get_matrix` under a 10-second
+           outer timeout (Req 2.1.5). Any failure — asyncio timeout,
+           :class:`TrafficBudgetExceeded` (Req 2.1.7), httpx.HTTPError,
+           or runtime error — degrades to Haversine and stamps
+           ``traffic_fallback: true`` on the Route_Plan.
+        5. When the provider succeeds we return the distance matrix and
+           ``traffic_fallback: False`` so consumers see a fully
+           traffic-informed plan.
+
+        Args:
+            tenant_id: Owning tenant. Used for flag lookup, provider
+                selection, and the provider's own budget counter.
+            locations: Ordered list of ``{lat, lon}`` dicts where index 0
+                is the depot and indices ``1..N`` are customer stops.
+
+        Returns:
+            ``(distance_matrix, provider_name, traffic_fallback)``.
+
+            * ``distance_matrix`` — a ``List[List[float]]`` of km values
+              or ``None`` when traffic-aware routing is disabled. When a
+              matrix is returned the caller SHOULD use it for SLA ETA
+              checks so window violations reflect real drive times.
+            * ``provider_name`` — the short provider name actually used
+              (``"mapbox"``, ``"here"``, ``"google"``) on success, or
+              ``None`` when no provider was consulted.
+            * ``traffic_fallback`` — ``True`` only when a provider *was*
+              attempted (flag enabled AND provider configured) and the
+              attempt failed. When the flag is off or no provider is
+              configured, we don't consider the Haversine matrix a
+              "fallback" and leave this at ``False``.
+        """
+
+        # (1) Feature-flag gate ------------------------------------------
+        if not await self._traffic_aware_routing_enabled(tenant_id):
+            return None, None, False
+
+        # (2) Provider selection -----------------------------------------
+        provider_name = await self._resolve_traffic_provider_name(tenant_id)
+        if not provider_name:
+            logger.warning(
+                "RoutePlanningAgent: traffic-aware routing enabled for "
+                "tenant=%s but no provider configured; falling back to "
+                "Haversine + DEFAULT_SPEED_KMH",
+                tenant_id,
+            )
+            return None, None, True
+
+        # (3) Concrete provider ------------------------------------------
+        provider = self._get_or_build_traffic_provider(tenant_id, provider_name)
+        if provider is None:
+            logger.warning(
+                "RoutePlanningAgent: traffic_provider=%s unavailable for "
+                "tenant=%s; falling back to Haversine",
+                provider_name,
+                tenant_id,
+            )
+            return None, None, True
+
+        # (4) Call the provider under a 10-second budget -----------------
+        origins = [(loc["lat"], loc["lon"]) for loc in locations]
+        depart_at = datetime.now(timezone.utc)
+        try:
+            matrix = await asyncio.wait_for(
+                provider.get_matrix(
+                    origins=origins,
+                    destinations=origins,
+                    depart_at=depart_at,
+                    tenant_id=tenant_id,
+                ),
+                timeout=TRAFFIC_MATRIX_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "RoutePlanningAgent: Traffic_Provider[%s] timed out after "
+                "%.1fs for tenant=%s; falling back to Haversine",
+                provider_name,
+                TRAFFIC_MATRIX_TIMEOUT_SECONDS,
+                tenant_id,
+            )
+            return None, None, True
+        except TrafficBudgetExceeded as exc:
+            logger.warning(
+                "RoutePlanningAgent: Traffic_Provider[%s] budget exhausted "
+                "for tenant=%s month=%s (%d/%d); falling back to Haversine",
+                provider_name,
+                exc.tenant_id,
+                exc.month,
+                exc.current,
+                exc.limit,
+            )
+            return None, None, True
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "RoutePlanningAgent: Traffic_Provider[%s] HTTP error for "
+                "tenant=%s: %s; falling back to Haversine",
+                provider_name,
+                tenant_id,
+                exc,
+            )
+            return None, None, True
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.warning(
+                "RoutePlanningAgent: Traffic_Provider[%s] unexpected "
+                "failure for tenant=%s: %s; falling back to Haversine",
+                provider_name,
+                tenant_id,
+                exc,
+            )
+            return None, None, True
+
+        # (5) Success — return the provider's distance matrix ------------
+        try:
+            distance_matrix = [list(row) for row in matrix.distance_km]
+        except AttributeError:
+            logger.warning(
+                "RoutePlanningAgent: Traffic_Provider[%s] returned "
+                "non-TravelMatrix result for tenant=%s; falling back",
+                provider_name,
+                tenant_id,
+            )
+            return None, None, True
+
+        return distance_matrix, matrix.provider or provider_name, False
+
+    async def _traffic_aware_routing_enabled(self, tenant_id: str) -> bool:
+        """Return True when ``overlay.traffic_aware_routing`` is active.
+
+        The feature flag maps to an overlay state. We treat
+        ``active_gated`` and ``active_auto`` as "enabled" — both modes
+        route real traffic through the solver. ``shadow`` and
+        ``disabled`` keep the agent on the Haversine default so the
+        provider budget is never spent in shadow mode (Req 2.1.3).
+        """
+
+        if self._feature_flags is None:
+            return False
+        try:
+            state = await self._feature_flags.get_overlay_state(
+                TRAFFIC_AWARE_ROUTING_FLAG_KEY, tenant_id
+            )
+        except AttributeError:
+            # Legacy services expose only ``is_enabled``. We treat the
+            # boolean as "active" when True for backward compatibility.
+            try:
+                return bool(await self._feature_flags.is_enabled(tenant_id))
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(
+                    "RoutePlanningAgent: feature flag lookup failed for "
+                    "tenant=%s: %s",
+                    tenant_id,
+                    exc,
+                )
+                return False
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "RoutePlanningAgent: overlay state lookup failed for "
+                "tenant=%s: %s",
+                tenant_id,
+                exc,
+            )
+            return False
+        return state in {"active_gated", "active_auto"}
+
+    async def _resolve_traffic_provider_name(
+        self, tenant_id: str
+    ) -> Optional[str]:
+        """Read ``overlay.traffic_provider:{tenant_id}`` and return the name.
+
+        Accepts either a plain string (``"mapbox"``) or a JSON object
+        whose ``name`` key carries the short provider identifier. Unknown
+        shapes are logged and treated as "no provider configured" — the
+        caller surfaces this as a Haversine fallback with annotation.
+        """
+
+        if self._tenant_config is None:
+            return None
+        key = TRAFFIC_PROVIDER_CONFIG_KEY_TEMPLATE.format(tenant_id=tenant_id)
+        try:
+            raw = await self._tenant_config.get(key)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "RoutePlanningAgent: tenant_config.get(%s) failed: %s",
+                key,
+                exc,
+            )
+            return None
+        if raw is None:
+            return None
+        if isinstance(raw, (bytes, bytearray)):
+            try:
+                raw = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                return None
+        if isinstance(raw, str):
+            stripped = raw.strip()
+            if not stripped:
+                return None
+            # Try JSON first; fall back to treating the value as the
+            # provider short-name. A config value of "mapbox" is the
+            # common, idiomatic form so we don't require operators to
+            # wrap it in JSON.
+            if stripped.startswith("{"):
+                try:
+                    parsed = json.loads(stripped)
+                except json.JSONDecodeError:
+                    logger.warning(
+                        "RoutePlanningAgent: traffic_provider config for "
+                        "tenant=%s is not valid JSON: %r",
+                        tenant_id,
+                        stripped,
+                    )
+                    return None
+                name = parsed.get("name") if isinstance(parsed, Mapping) else None
+                if isinstance(name, str) and name.strip():
+                    return name.strip().lower()
+                return None
+            return stripped.lower()
+        if isinstance(raw, Mapping):
+            name = raw.get("name")
+            if isinstance(name, str) and name.strip():
+                return name.strip().lower()
+        return None
+
+    def _get_or_build_traffic_provider(
+        self, tenant_id: str, provider_name: str
+    ) -> Optional[TrafficProvider]:
+        """Return a cached TrafficProvider for the tenant, or build one.
+
+        Caches by ``(tenant_id, provider_name)`` so rotating a tenant's
+        provider invalidates only that tenant's entry. The injected
+        factory is tried first (so tests can stub providers); when no
+        factory is configured we fall back to the module-level
+        :func:`build_traffic_provider` registry.
+        """
+
+        cache_key = (tenant_id, provider_name)
+        cached = self._traffic_provider_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        provider: Optional[TrafficProvider] = None
+        if self._traffic_provider_factory is not None:
+            try:
+                provider = self._traffic_provider_factory(provider_name, tenant_id)
+            except Exception as exc:
+                logger.warning(
+                    "RoutePlanningAgent: traffic_provider_factory(%s) failed "
+                    "for tenant=%s: %s",
+                    provider_name,
+                    tenant_id,
+                    exc,
+                )
+                provider = None
+        if provider is None:
+            try:
+                provider = build_traffic_provider(provider_name)
+            except ValueError as exc:
+                logger.warning(
+                    "RoutePlanningAgent: unknown traffic_provider=%r for "
+                    "tenant=%s (%s)",
+                    provider_name,
+                    tenant_id,
+                    exc,
+                )
+                return None
+            except Exception as exc:
+                logger.warning(
+                    "RoutePlanningAgent: failed to build traffic_provider=%r "
+                    "for tenant=%s: %s",
+                    provider_name,
+                    tenant_id,
+                    exc,
+                )
+                return None
+
+        if provider is not None:
+            self._traffic_provider_cache[cache_key] = provider
+        return provider
+
+    # ------------------------------------------------------------------
     # Persistence (Req 4.7)
     # ------------------------------------------------------------------
 
     async def _persist_route_plan(self, route_plan: RoutePlan) -> None:
-        """Persist a RoutePlan to the mvp_routes ES index."""
+        """Persist a RoutePlan to the mvp_routes ES index.
+
+        Canonicalizes every ``drop`` key (a fuel grade) on each stop
+        before write so routes persisted from NG-aliased loading plans
+        land in ES with canonical US codes (Req 6.1.4). Quantities from
+        duplicate grade keys (e.g., both ``AGO`` and ``DIESEL_2`` on the
+        same stop after canonicalization) are summed to preserve total
+        drop volume. Unknown codes are preserved with a warning.
+        """
         try:
             doc = route_plan.model_dump(mode="json")
+            stops = doc.get("stops") or []
+            for stop in stops:
+                raw_drop = stop.get("drop") or {}
+                if not isinstance(raw_drop, dict):
+                    continue
+                canonical_drop: Dict[str, float] = {}
+                for grade, qty in raw_drop.items():
+                    canonical_grade = canonicalize_or_warn(
+                        grade,
+                        context="mvp_routes.stops.drop",
+                        logger_=logger,
+                    )
+                    # Accumulate quantities under the canonical key so a
+                    # stop carrying both a US code and its NG alias does
+                    # not lose volume after normalization.
+                    canonical_drop[canonical_grade] = (
+                        canonical_drop.get(canonical_grade, 0.0) + float(qty or 0.0)
+                    )
+                stop["drop"] = canonical_drop
+
             await self._es.index_document(
                 MVP_ROUTES_INDEX,
                 route_plan.route_id,

@@ -32,8 +32,14 @@ from fastapi.testclient import TestClient
 from errors.exceptions import AppException
 from ops.middleware.tenant_guard import (
     TenantContext,
+    configure_tenant_guard,
     get_tenant_context,
     inject_tenant_filter,
+)
+from services.tenant_settings import (
+    MeasurementUnits,
+    TenantSettings,
+    TenantSettingsService,
 )
 
 # ---------------------------------------------------------------------------
@@ -62,6 +68,8 @@ def _build_app() -> tuple[FastAPI, TestClient]:
             "tenant_id": tenant.tenant_id,
             "user_id": tenant.user_id,
             "has_pii_access": tenant.has_pii_access,
+            "region": tenant.region,
+            "measurement_units": tenant.measurement_units,
         }
 
     # Register the AppException handler so 403s come back as JSON
@@ -309,3 +317,126 @@ class TestInjectTenantFilter:
 
         assert result["query"]["bool"]["must"] == [{"match_all": {}}]
         assert result["query"]["bool"]["filter"] == [{"term": {"tenant_id": "t-empty"}}]
+
+
+# ---------------------------------------------------------------------------
+# Tenant Defaults (Region + measurement_units) — Validates: Req 6.1.5, 6.3.1
+# ---------------------------------------------------------------------------
+
+
+class _StubTenantSettingsService:
+    """Minimal TenantSettingsService stand-in for context hydration tests."""
+
+    def __init__(self, mapping: dict[str, TenantSettings]):
+        self._mapping = mapping
+        self.calls: list[str] = []
+
+    async def get(self, tenant_id: str) -> TenantSettings:
+        self.calls.append(tenant_id)
+        return self._mapping.get(
+            tenant_id,
+            TenantSettings(
+                region="US",
+                measurement_units=MeasurementUnits(volume="gal", distance="mi"),
+            ),
+        )
+
+
+class TestTenantDefaultsInContext:
+    """Tenant guard should expose Region + measurement_units on the context."""
+
+    def teardown_method(self, method):
+        # Always clear wiring to avoid leaking between tests.
+        configure_tenant_guard(None)
+
+    def test_context_falls_back_to_us_defaults_without_service(self):
+        """When no settings service is wired, context carries US/imperial defaults."""
+        configure_tenant_guard(None)
+        _, client = _build_app()
+        token = _make_token({"tenant_id": "tenant-new", "sub": "user-1"})
+
+        with _SETTINGS_PATCH:
+            resp = client.get("/test", headers={"Authorization": f"Bearer {token}"})
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["region"] == "US"
+        assert body["measurement_units"] == {"volume": "gal", "distance": "mi"}
+
+    def test_context_reflects_us_tenant_from_service(self):
+        """Req 6.1.5: US tenants carry gallons + miles."""
+        service = _StubTenantSettingsService(
+            {
+                "tenant-us": TenantSettings(
+                    region="US",
+                    measurement_units=MeasurementUnits(volume="gal", distance="mi"),
+                )
+            }
+        )
+        configure_tenant_guard(service)
+
+        _, client = _build_app()
+        token = _make_token({"tenant_id": "tenant-us", "sub": "user-1"})
+
+        with _SETTINGS_PATCH:
+            resp = client.get("/test", headers={"Authorization": f"Bearer {token}"})
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["tenant_id"] == "tenant-us"
+        assert body["region"] == "US"
+        assert body["measurement_units"] == {"volume": "gal", "distance": "mi"}
+        assert service.calls == ["tenant-us"]
+
+    def test_context_reflects_ng_tenant_from_service(self):
+        """Req 6.1.5: pre-pivot NG tenants carry liters + kilometers."""
+        service = _StubTenantSettingsService(
+            {
+                "tenant-ng": TenantSettings(
+                    region="NG",
+                    measurement_units=MeasurementUnits(volume="l", distance="km"),
+                )
+            }
+        )
+        configure_tenant_guard(service)
+
+        _, client = _build_app()
+        token = _make_token({"tenant_id": "tenant-ng", "sub": "user-1"})
+
+        with _SETTINGS_PATCH:
+            resp = client.get("/test", headers={"Authorization": f"Bearer {token}"})
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["region"] == "NG"
+        assert body["measurement_units"] == {"volume": "l", "distance": "km"}
+
+    def test_context_defaults_when_service_raises(self):
+        """A failing settings service must not break the request path."""
+
+        class _BoomService:
+            async def get(self, tenant_id: str) -> TenantSettings:
+                raise RuntimeError("redis is down")
+
+        configure_tenant_guard(_BoomService())
+
+        _, client = _build_app()
+        token = _make_token({"tenant_id": "tenant-xyz", "sub": "user-1"})
+
+        with _SETTINGS_PATCH:
+            resp = client.get("/test", headers={"Authorization": f"Bearer {token}"})
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["region"] == "US"
+        assert body["measurement_units"] == {"volume": "gal", "distance": "mi"}
+
+    def test_configure_tenant_guard_accepts_real_service(self):
+        """configure_tenant_guard should accept a real TenantSettingsService."""
+        service = TenantSettingsService(redis_client=None)
+        configure_tenant_guard(service)
+
+        # Exercise the public getter to confirm wiring without a live call.
+        from ops.middleware.tenant_guard import get_tenant_settings_service
+
+        assert get_tenant_settings_service() is service

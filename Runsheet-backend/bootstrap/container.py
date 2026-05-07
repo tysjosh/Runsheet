@@ -89,6 +89,7 @@ class ServiceContainer:
     # -- Inventory --
     inventory_service: Any  # InventoryService
     tenant_inventory_config: Any  # TenantInventoryConfigService
+    tenant_settings_service: Any  # TenantSettingsService
 
     # -- Scheduling --
     job_service: JobService

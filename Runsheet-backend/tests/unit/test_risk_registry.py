@@ -62,7 +62,7 @@ class TestDefaultRiskRegistry:
             assert isinstance(level, RiskLevel), f"{tool_name} has invalid risk level"
 
     def test_registry_has_expected_tool_count(self):
-        assert len(DEFAULT_RISK_REGISTRY) == 8
+        assert len(DEFAULT_RISK_REGISTRY) == 10
 
 
 class TestRiskRegistryClassifyWithoutRedis:

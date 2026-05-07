@@ -97,6 +97,17 @@ async def initialize(app, container: ServiceContainer) -> None:
     autonomy_config_service = AutonomyConfigService(redis_client=_agent_redis_client)
     container.autonomy_config_service = autonomy_config_service
 
+    # Tenant settings service (Region + measurement_units) — wired into the
+    # tenant guard middleware so every request's TenantContext carries the
+    # tenant's Region and display units.  Req 6.1.5, 6.3.1.
+    from services.tenant_settings import TenantSettingsService
+    from ops.middleware.tenant_guard import configure_tenant_guard
+
+    tenant_settings_service = TenantSettingsService(redis_client=_agent_redis_client)
+    container.tenant_settings_service = tenant_settings_service
+    configure_tenant_guard(tenant_settings_service)
+    logger.info("Tenant settings service wired into tenant guard")
+
     # Approval queue
     approval_queue_service = ApprovalQueueService(
         es_service=es_service,
@@ -403,6 +414,62 @@ async def initialize(app, container: ServiceContainer) -> None:
     app.include_router(mvp_router)
     logger.info("MVP endpoints configured and router registered")
 
+    # ---- Fuel Ops Hardening endpoints (Phase 3 Task 3.6 et al.) ----
+    # Register the fuel-domain router that owns the customer-tanks CRUD
+    # surface (Req 1.6.2, 1.6.3) and the destination/product endpoints
+    # added in Capability 6. Wired here so the Customer_Tank repository
+    # shares the application-scoped ES service.
+    from fuel.api.fuel_ops_endpoints import (
+        configure_fuel_ops_endpoints,
+        router as fuel_ops_router,
+        mvp_router as fuel_ops_mvp_router,
+    )
+
+    configure_fuel_ops_endpoints(es_service=es_service)
+    app.include_router(fuel_ops_router)
+    app.include_router(fuel_ops_mvp_router)
+    logger.info("Fuel-ops endpoints configured and routers registered")
+
+    # Wire the fuel-planning WebSocket manager into the Tank Forecasting
+    # Agent so it emits ``customer_tank_forecast_ready`` (Req 1.6.4) on
+    # ``/ws/fuel-planning`` whenever a per-tank forecast completes.
+    from fuel.services.fuel_planning_ws_manager import (
+        get_fuel_planning_ws_manager,
+    )
+    fuel_planning_ws_manager = get_fuel_planning_ws_manager()
+    container.fuel_planning_ws_manager = fuel_planning_ws_manager
+    tank_forecasting_agent.set_fuel_planning_ws_manager(fuel_planning_ws_manager)
+    # Task 4.10: wire the same manager into the Exception_Replanning_Agent
+    # so every replan broadcasts ``replan_diff_ready`` on /ws/fuel-planning
+    # (Req 2.5.4) alongside persisting the structured diff to
+    # ``mvp_replan_events``.
+    exception_replanning_agent.set_fuel_planning_ws_manager(
+        fuel_planning_ws_manager
+    )
+    logger.info(
+        "Fuel-planning WebSocket manager wired into Tank_Forecasting_Agent"
+        " and Exception_Replanning_Agent"
+    )
+
+    # Task 4.9: re-wire fuel-ops endpoints with ConfirmationProtocol and
+    # the fuel-planning WS manager now that both are constructed; the
+    # POST /api/fuel/mvp/routes/{route_id}/emergency-stop handler needs
+    # both to route the patched route through risk classification
+    # (Req 2.4.5) and broadcast ``emergency_stop_inserted`` (Req 2.4.6).
+    #
+    # Task 7.7: the wait-summary endpoint caches the rolling 2-hour
+    # average at ``terminal_wait:{tenant_id}:{terminal_id}`` in Redis so
+    # the Sourcing_Recommender (Task 7.9) can read it in O(1). Passing
+    # the shared ``_agent_redis_client`` wires that cache path. When
+    # Redis is unavailable the endpoint falls back to a direct ES
+    # aggregation, so a Redis outage never breaks the endpoint.
+    configure_fuel_ops_endpoints(
+        es_service=es_service,
+        confirmation_protocol=confirmation_protocol,
+        fuel_planning_ws_manager=fuel_planning_ws_manager,
+        redis_client=_agent_redis_client,
+    )
+
     # ---- Inventory Pipeline Integration ----
     from Agents.autonomous.inventory_monitor import InventoryMonitorAgent
 
@@ -600,5 +667,12 @@ async def shutdown(app, container: ServiceContainer) -> None:
             logger.info("Agent Redis client closed")
         except Exception:
             pass
+
+    # Reset tenant guard wiring so the next boot cycle starts clean
+    try:
+        from ops.middleware.tenant_guard import configure_tenant_guard
+        configure_tenant_guard(None)
+    except Exception:
+        pass
 
     logger.info("Agentic AI domain shut down")

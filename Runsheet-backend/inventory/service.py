@@ -25,8 +25,39 @@ from inventory.models import (
     UpdateInventoryItem,
 )
 from services.elasticsearch_service import ElasticsearchService
+from fuel.services.fuel_product_catalog import canonicalize_or_warn
 
 logger = logging.getLogger(__name__)
+
+
+def _canonicalize_compatible_assets(
+    compatible_assets: Optional[List[str]],
+) -> Optional[List[str]]:
+    """Best-effort canonicalize ``compatible_assets`` fuel-grade entries.
+
+    ``compatible_assets`` is a mixed-use field: for ``fuel_equipment``
+    inventory items it often carries fuel-grade aliases (e.g. ``AGO`` /
+    ``PMS``) identifying which products a hose or nozzle can carry, while
+    for other categories it carries asset types like ``heavy_truck`` or
+    ``boat`` that have no fuel meaning. Req 6.1.4 asks us to normalize
+    fuel-grade values on write; asset-type values must pass through
+    untouched so downstream equipment lookups keep working.
+
+    ``canonicalize_or_warn`` does exactly this: when the string resolves
+    to a catalog entry (e.g., ``AGO`` -> ``DIESEL_2``) the canonical code
+    is returned, otherwise the original string is preserved and a
+    warning is logged. None and empty inputs are passed through.
+    """
+    if compatible_assets is None:
+        return None
+    return [
+        canonicalize_or_warn(
+            value,
+            context="inventory.compatible_assets",
+            logger_=logger,
+        )
+        for value in compatible_assets
+    ]
 
 
 class InventoryService:
@@ -156,7 +187,9 @@ class InventoryService:
             "status": status.value,
             "unit_cost": data.unit_cost,
             "supplier": data.supplier,
-            "compatible_assets": data.compatible_assets,
+            "compatible_assets": _canonicalize_compatible_assets(
+                data.compatible_assets
+            ),
             "last_restocked": now if data.quantity > 0 else None,
             "tenant_id": tenant_id,
         }
@@ -183,6 +216,11 @@ class InventoryService:
                 # Convert enums to their string value
                 if isinstance(value, InventoryCategory):
                     value = value.value
+                # Canonicalize fuel-grade entries in compatible_assets on
+                # update so the persisted list stays consistent with the
+                # catalog (Req 6.1.4). Non-fuel values are preserved.
+                if field == "compatible_assets":
+                    value = _canonicalize_compatible_assets(value)
                 update_fields[field] = value
 
         if not update_fields:

@@ -8,6 +8,7 @@ Validates: Requirements 8.1, 8.2, 8.3, 8.4, 8.5
 """
 
 import sys
+from typing import Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -38,6 +39,29 @@ from driver.services.geo_utils import haversine_distance_meters
 JWT_SECRET = "test-jwt-secret"
 JWT_ALGORITHM = "HS256"
 TENANT_ID = "t1"
+
+# File_refs in the tenant-prefixed layout
+# ``tenants/{tenant_id}/{category}/{yyyy}/{mm}/{dd}/{uuid}.{ext}``.
+_SIGNATURE_REF = (
+    f"tenants/{TENANT_ID}/signature/2024/01/15/"
+    "11111111-1111-1111-1111-111111111111.png"
+)
+_PHOTO_REF_1 = (
+    f"tenants/{TENANT_ID}/photo/2024/01/15/"
+    "22222222-2222-2222-2222-222222222222.jpg"
+)
+_PHOTO_REF_2 = (
+    f"tenants/{TENANT_ID}/photo/2024/01/15/"
+    "33333333-3333-3333-3333-333333333333.jpg"
+)
+_METER_TICKET_REF = (
+    f"tenants/{TENANT_ID}/meter_ticket/2024/01/15/"
+    "44444444-4444-4444-4444-444444444444.jpg"
+)
+_CROSS_TENANT_SIGNATURE_REF = (
+    "tenants/other-tenant/signature/2024/01/15/"
+    "55555555-5555-5555-5555-555555555555.png"
+)
 
 _SETTINGS_PATCH = patch(
     "ops.middleware.tenant_guard.get_settings",
@@ -104,11 +128,30 @@ def _make_job_service(destination_location: dict = None) -> MagicMock:
     return svc
 
 
+def _make_file_storage() -> MagicMock:
+    """Create a mock FileStorageService that validates tenant-prefixed refs.
+
+    Mirrors the real ``FileStorageService.validate_ref`` contract used by
+    the submit_pod handler: refs whose prefix matches
+    ``tenants/{tenant_id}/`` return True; mismatches raise PermissionError.
+    """
+
+    def _validate_ref(tenant_id: str, file_ref: str, actor=None) -> bool:
+        if not file_ref or not file_ref.startswith(f"tenants/{tenant_id}/"):
+            raise PermissionError("cross_tenant_file_ref")
+        return True
+
+    svc = MagicMock()
+    svc.validate_ref = MagicMock(side_effect=_validate_ref)
+    return svc
+
+
 def _make_app(
     es_service=None,
     job_service=None,
     scheduling_ws=None,
     driver_ws=None,
+    file_storage=None,
 ) -> FastAPI:
     """Create a test FastAPI app with the POD router."""
     from errors.handlers import register_exception_handlers
@@ -122,26 +165,46 @@ def _make_app(
         job_service=job_service,
         scheduling_ws_manager=scheduling_ws,
         driver_ws_manager=driver_ws,
+        file_storage_service=file_storage or _make_file_storage(),
     )
     return app
 
 
 def _pod_payload(
     recipient_name: str = "John Doe",
-    signature_url: str = "https://example.com/sig.png",
-    photo_urls: list = None,
+    signature_ref: Optional[str] = _SIGNATURE_REF,
+    photo_refs: Optional[list] = None,
+    meter_ticket_ref: Optional[str] = None,
     geotag: dict = None,
     timestamp: str = "2024-01-15T10:30:00Z",
     otp: str = None,
+    # Deprecated raw-URL fields kept for backward-compat coverage.
+    signature_url: Optional[str] = None,
+    photo_urls: Optional[list] = None,
 ) -> dict:
-    """Build a valid POD request payload."""
-    payload = {
+    """Build a POD request payload exercising the file_ref path by default.
+
+    When ``signature_ref``/``photo_refs`` are ``None`` (and the deprecated
+    ``signature_url``/``photo_urls`` are not supplied) the corresponding
+    keys are omitted so validators can run against partial payloads.
+    """
+    payload: dict = {
         "recipient_name": recipient_name,
-        "signature_url": signature_url,
-        "photo_urls": photo_urls or ["https://example.com/photo1.jpg"],
         "geotag": geotag or {"lat": -33.8688, "lng": 151.2093},
         "timestamp": timestamp,
     }
+    if signature_ref is not None:
+        payload["signature_ref"] = signature_ref
+    if photo_refs is None and signature_ref is not None and signature_url is None:
+        payload["photo_refs"] = [_PHOTO_REF_1]
+    elif photo_refs is not None:
+        payload["photo_refs"] = photo_refs
+    if meter_ticket_ref is not None:
+        payload["meter_ticket_ref"] = meter_ticket_ref
+    if signature_url is not None:
+        payload["signature_url"] = signature_url
+    if photo_urls is not None:
+        payload["photo_urls"] = photo_urls
     if otp is not None:
         payload["otp"] = otp
     return payload
@@ -193,7 +256,7 @@ class TestSubmitPod:
     """Tests for the POST /jobs/{job_id}/pod endpoint."""
 
     def test_stores_pod_in_es(self):
-        """POD is stored in proof_of_delivery index. Validates: Req 8.1"""
+        """POD is stored in proof_of_delivery index. Validates: Requirements 8.1, 4.1.4"""
         es = _make_es_service()
         app = _make_app(es_service=es, job_service=_make_job_service())
 
@@ -212,7 +275,11 @@ class TestSubmitPod:
         doc = call_args.args[2]
         assert doc["job_id"] == "JOB_1"
         assert doc["recipient_name"] == "John Doe"
-        assert doc["signature_url"] == "https://example.com/sig.png"
+        # file_ref path is now preferred; the legacy signature_url echoes empty.
+        assert doc["signature_ref"] == _SIGNATURE_REF
+        assert doc["photo_refs"] == [_PHOTO_REF_1]
+        assert doc["signature_url"] == ""
+        assert doc["photo_urls"] == []
         assert doc["status"] == "submitted"
         assert doc["tenant_id"] == TENANT_ID
 
@@ -258,23 +325,111 @@ class TestSubmitPod:
         assert "pod_id" in data
         assert "timestamp" in data
 
-    def test_stores_photo_urls(self):
-        """Photo URLs are stored correctly. Validates: Req 8.1"""
+    def test_submit_pod_persists_hash_chain_fields(self):
+        """Submit POD writes pod_hash + previous_pod_hash atomically. Validates: Req 4.5.2."""
         es = _make_es_service()
         app = _make_app(es_service=es, job_service=_make_job_service())
 
-        photos = ["https://example.com/p1.jpg", "https://example.com/p2.jpg"]
         with _SETTINGS_PATCH:
             client = TestClient(app)
             resp = client.post(
                 "/api/driver/jobs/JOB_1/pod",
-                json=_pod_payload(photo_urls=photos),
+                json=_pod_payload(),
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 200
+        es.index_document.assert_called_once()
+        doc = es.index_document.call_args.args[2]
+        # First POD for this tenant — previous_pod_hash MUST be the zero-hash.
+        assert doc["previous_pod_hash"] == "0" * 64
+        # pod_hash is a 64-char lowercase SHA-256 hex digest.
+        pod_hash = doc["pod_hash"]
+        assert isinstance(pod_hash, str)
+        assert len(pod_hash) == 64
+        assert all(c in "0123456789abcdef" for c in pod_hash)
+        assert pod_hash != doc["previous_pod_hash"]
+        assert doc["chain_sequence"] == 1
+        # Response surfaces the hash-chain fields.
+        data = resp.json()["data"]
+        assert data["pod_hash"] == pod_hash
+        assert data["previous_pod_hash"] == "0" * 64
+        assert data["chain_sequence"] == 1
+
+    def test_submit_pod_links_to_prior_pod_in_chain(self):
+        """Second POD's previous_pod_hash equals the first POD's pod_hash. Validates: Req 4.5.2."""
+        es = _make_es_service()
+        # Simulate the presence of a prior POD in the tenant's chain.
+        prior_hash = "a1b2c3" + "0" * 58
+        es.search_documents = AsyncMock(
+            return_value={
+                "hits": {
+                    "hits": [
+                        {
+                            "_source": {
+                                "pod_id": "prior",
+                                "tenant_id": TENANT_ID,
+                                "pod_hash": prior_hash,
+                                "chain_sequence": 7,
+                            }
+                        }
+                    ],
+                    "total": {"value": 1},
+                }
+            }
+        )
+        app = _make_app(es_service=es, job_service=_make_job_service())
+
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.post(
+                "/api/driver/jobs/JOB_1/pod",
+                json=_pod_payload(),
                 headers=_auth_headers(),
             )
 
         assert resp.status_code == 200
         doc = es.index_document.call_args.args[2]
-        assert doc["photo_urls"] == photos
+        assert doc["previous_pod_hash"] == prior_hash
+        assert doc["chain_sequence"] == 8
+
+
+    def test_stores_photo_refs(self):
+        """Photo file_refs are stored correctly. Validates: Requirements 8.1, 4.1.4"""
+        es = _make_es_service()
+        app = _make_app(es_service=es, job_service=_make_job_service())
+
+        photos = [_PHOTO_REF_1, _PHOTO_REF_2]
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.post(
+                "/api/driver/jobs/JOB_1/pod",
+                json=_pod_payload(photo_refs=photos),
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 200
+        doc = es.index_document.call_args.args[2]
+        assert doc["photo_refs"] == photos
+        # Deprecated photo_urls is blanked when file_refs win.
+        assert doc["photo_urls"] == []
+
+    def test_stores_meter_ticket_ref(self):
+        """Optional meter_ticket_ref is persisted when provided. Validates: Requirement 4.1.4"""
+        es = _make_es_service()
+        app = _make_app(es_service=es, job_service=_make_job_service())
+
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.post(
+                "/api/driver/jobs/JOB_1/pod",
+                json=_pod_payload(meter_ticket_ref=_METER_TICKET_REF),
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 200
+        doc = es.index_document.call_args.args[2]
+        assert doc["meter_ticket_ref"] == _METER_TICKET_REF
 
     def test_missing_required_fields_returns_422(self):
         """Missing required fields return 422. Validates: Req 8.1"""
@@ -291,6 +446,212 @@ class TestSubmitPod:
             )
 
         assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Test: file_ref validation (tenant-prefix enforcement)
+# ---------------------------------------------------------------------------
+
+
+class TestPodFileRefs:
+    """Tests for the file_ref path on the POD endpoint.
+
+    Validates: Requirements 4.1.4, 4.1.6.
+    """
+
+    def test_file_refs_validated_via_file_storage_service(self):
+        """Each supplied file_ref is validated against the tenant prefix.
+
+        Validates: Requirement 4.1.4
+        """
+        fs = _make_file_storage()
+        app = _make_app(
+            es_service=_make_es_service(),
+            job_service=_make_job_service(),
+            file_storage=fs,
+        )
+
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.post(
+                "/api/driver/jobs/JOB_1/pod",
+                json=_pod_payload(
+                    signature_ref=_SIGNATURE_REF,
+                    photo_refs=[_PHOTO_REF_1, _PHOTO_REF_2],
+                    meter_ticket_ref=_METER_TICKET_REF,
+                ),
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 200
+        # signature + 2 photos + meter_ticket = 4 validation calls.
+        assert fs.validate_ref.call_count == 4
+        validated_refs = [
+            call.kwargs.get("file_ref") or call.args[1]
+            for call in fs.validate_ref.call_args_list
+        ]
+        assert _SIGNATURE_REF in validated_refs
+        assert _PHOTO_REF_1 in validated_refs
+        assert _PHOTO_REF_2 in validated_refs
+        assert _METER_TICKET_REF in validated_refs
+
+    def test_cross_tenant_signature_ref_returns_403(self):
+        """A signature_ref from another tenant is rejected with HTTP 403.
+
+        Validates: Requirements 4.1.4, 4.1.6
+        """
+        fs = _make_file_storage()
+        app = _make_app(
+            es_service=_make_es_service(),
+            job_service=_make_job_service(),
+            file_storage=fs,
+        )
+
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.post(
+                "/api/driver/jobs/JOB_1/pod",
+                json=_pod_payload(signature_ref=_CROSS_TENANT_SIGNATURE_REF),
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 403
+        body = resp.json()
+        # Drill into the standardized error payload regardless of wrapper shape.
+        details = body.get("details") or body.get("error", {}).get("details") or {}
+        assert details.get("reason") == "cross_tenant_file_ref"
+        assert details.get("field") == "signature_ref"
+
+    def test_cross_tenant_photo_ref_returns_403(self):
+        """A single cross-tenant photo_ref rejects the whole submission with 403.
+
+        Validates: Requirements 4.1.4, 4.1.6
+        """
+        fs = _make_file_storage()
+        app = _make_app(
+            es_service=_make_es_service(),
+            job_service=_make_job_service(),
+            file_storage=fs,
+        )
+        cross_photo = (
+            "tenants/other-tenant/photo/2024/01/15/"
+            "66666666-6666-6666-6666-666666666666.jpg"
+        )
+
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.post(
+                "/api/driver/jobs/JOB_1/pod",
+                json=_pod_payload(photo_refs=[_PHOTO_REF_1, cross_photo]),
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 403
+        body = resp.json()
+        details = body.get("details") or body.get("error", {}).get("details") or {}
+        assert details.get("reason") == "cross_tenant_file_ref"
+        assert "photo_refs" in (details.get("field") or "")
+
+    def test_cross_tenant_meter_ticket_ref_returns_403(self):
+        """A cross-tenant meter_ticket_ref is rejected with HTTP 403.
+
+        Validates: Requirements 4.1.4, 4.1.6
+        """
+        fs = _make_file_storage()
+        app = _make_app(
+            es_service=_make_es_service(),
+            job_service=_make_job_service(),
+            file_storage=fs,
+        )
+        cross_meter = (
+            "tenants/other-tenant/meter_ticket/2024/01/15/"
+            "77777777-7777-7777-7777-777777777777.jpg"
+        )
+
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.post(
+                "/api/driver/jobs/JOB_1/pod",
+                json=_pod_payload(meter_ticket_ref=cross_meter),
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 403
+        body = resp.json()
+        details = body.get("details") or body.get("error", {}).get("details") or {}
+        assert details.get("reason") == "cross_tenant_file_ref"
+        assert details.get("field") == "meter_ticket_ref"
+
+    def test_legacy_url_path_still_accepted(self):
+        """Submissions using only legacy signature_url/photo_urls still succeed.
+
+        Validates: Requirement 4.1.4 — backward compatibility for the
+        deprecated URL fields while the file_ref rollout completes.
+        """
+        fs = _make_file_storage()
+        es = _make_es_service()
+        app = _make_app(
+            es_service=es,
+            job_service=_make_job_service(),
+            file_storage=fs,
+        )
+
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.post(
+                "/api/driver/jobs/JOB_1/pod",
+                json=_pod_payload(
+                    signature_ref=None,
+                    photo_refs=None,
+                    signature_url="https://example.com/sig.png",
+                    photo_urls=["https://example.com/p1.jpg"],
+                ),
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 200
+        # No file_refs provided, so FileStorageService is never consulted.
+        assert fs.validate_ref.call_count == 0
+        doc = es.index_document.call_args.args[2]
+        assert doc["signature_ref"] is None
+        assert doc["photo_refs"] == []
+        assert doc["signature_url"] == "https://example.com/sig.png"
+        assert doc["photo_urls"] == ["https://example.com/p1.jpg"]
+
+    def test_file_ref_preferred_when_both_supplied(self):
+        """When both file_refs and legacy URLs are supplied, file_refs win.
+
+        Validates: Requirement 4.1.4 — handler prefers ``*_ref`` over the
+        deprecated ``*_url`` fields.
+        """
+        fs = _make_file_storage()
+        es = _make_es_service()
+        app = _make_app(
+            es_service=es,
+            job_service=_make_job_service(),
+            file_storage=fs,
+        )
+
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.post(
+                "/api/driver/jobs/JOB_1/pod",
+                json=_pod_payload(
+                    signature_ref=_SIGNATURE_REF,
+                    photo_refs=[_PHOTO_REF_1],
+                    signature_url="https://example.com/sig.png",
+                    photo_urls=["https://example.com/p1.jpg"],
+                ),
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 200
+        doc = es.index_document.call_args.args[2]
+        assert doc["signature_ref"] == _SIGNATURE_REF
+        assert doc["photo_refs"] == [_PHOTO_REF_1]
+        # Legacy fields are suppressed when file_refs are present.
+        assert doc["signature_url"] == ""
+        assert doc["photo_urls"] == []
 
 
 # ---------------------------------------------------------------------------

@@ -476,3 +476,516 @@ class TestComputeConfidence:
             ["sensor_drift", "station_outage", "demand_spike"],
         )
         assert conf >= 0.1
+
+
+# ---------------------------------------------------------------------------
+# Tests: Customer_Tank forecasting extension (fuel-ops hardening Capability 1)
+# ---------------------------------------------------------------------------
+#
+# These tests cover Task 3.5: iterating over customer_tanks, selecting
+# Consumption_Models by fuel_type + tenant config, calling the
+# Weather_Provider with graceful fallback, applying Customer_Type
+# multipliers, incorporating scheduled deliveries into projected levels,
+# and stamping model_name/customer_type_multiplier/weather_fallback/
+# scheduled_deliveries on every forecast.
+#
+# Validates: Requirements 1.1.2, 1.2.3, 1.2.5, 1.3.1, 1.3.2, 1.3.3, 1.3.4,
+# 1.4.2, 1.4.4, 1.5.3, 1.5.6
+
+import json
+from types import SimpleNamespace
+
+from Agents.overlay.tank_forecasting_agent import (
+    DEFAULT_CUSTOMER_TYPE_MULTIPLIERS,
+    SCHEDULED_DELIVERY_HORIZON_HOURS,
+)
+from fuel.customer_tank_models import CustomerTank
+from fuel.services.consumption_models import ConsumptionPrediction
+
+
+def _make_customer_tank(
+    *,
+    customer_tank_id: str = "tank-1",
+    tenant_id: str = "tenant-1",
+    customer_id: str = "cust-1",
+    customer_type: str = "residential",
+    fuel_type: str = "propane",
+    fuel_product_code: str = "PROPANE",
+    capacity: float = 500.0,
+    current_level: float = 250.0,
+    zip_code: str = "01060",
+    **overrides,
+) -> CustomerTank:
+    kwargs = {
+        "customer_tank_id": customer_tank_id,
+        "tenant_id": tenant_id,
+        "customer_id": customer_id,
+        "customer_type": customer_type,
+        "fuel_type": fuel_type,
+        "fuel_product_code": fuel_product_code,
+        "capacity_gallons": capacity,
+        "current_level_gallons": current_level,
+        "location_lat": 42.31,
+        "location_lon": -72.63,
+        "zip_code": zip_code,
+        "status": "active",
+    }
+    kwargs.update(overrides)
+    return CustomerTank(**kwargs)
+
+
+class _FakeCustomerTankRepo:
+    def __init__(self, tanks):
+        self.tanks = list(tanks)
+        self.calls = []
+
+    async def list_for_tenant(self, tenant_id, **kwargs):
+        self.calls.append({"tenant_id": tenant_id, **kwargs})
+        return [t for t in self.tanks if t.tenant_id == tenant_id]
+
+
+class _FakeWeatherProvider:
+    def __init__(self, rows=None, raise_exc=None):
+        self._rows = rows or []
+        self._raise = raise_exc
+        self.calls = []
+
+    async def fetch(self, zip_code, start, end, *, tenant_id):
+        self.calls.append(
+            {"zip_code": zip_code, "start": start, "end": end, "tenant_id": tenant_id}
+        )
+        if self._raise is not None:
+            raise self._raise
+        return list(self._rows)
+
+
+class _FakeScheduledDeliveryHelper:
+    def __init__(self, payload=None, raise_exc=None):
+        self._payload = payload or {}
+        self._raise = raise_exc
+        self.calls = []
+
+    async def list_scheduled_deliveries(self, tenant_id, *, horizon_hours=72):
+        self.calls.append({"tenant_id": tenant_id, "horizon_hours": horizon_hours})
+        if self._raise is not None:
+            raise self._raise
+        return dict(self._payload)
+
+
+class _FakeTenantConfig:
+    def __init__(self, data=None):
+        self.data = dict(data or {})
+
+    async def get(self, key):
+        return self.data.get(key)
+
+
+def _make_extended_agent(
+    *,
+    tanks=None,
+    weather_rows=None,
+    weather_raise=None,
+    scheduled=None,
+    scheduled_raise=None,
+    tenant_config=None,
+    stations=None,
+    events=None,
+):
+    agent, deps = _make_agent()
+    tank_objs = tanks or []
+    agent.set_customer_tank_repository(_FakeCustomerTankRepo(tank_objs))
+    if weather_rows is not None or weather_raise is not None:
+        agent.set_weather_provider(
+            _FakeWeatherProvider(weather_rows, raise_exc=weather_raise)
+        )
+    if scheduled is not None or scheduled_raise is not None:
+        agent.set_scheduled_delivery_helper(
+            _FakeScheduledDeliveryHelper(scheduled, raise_exc=scheduled_raise)
+        )
+    if tenant_config is not None:
+        agent.set_tenant_config(_FakeTenantConfig(tenant_config))
+
+    # Wire ES side_effect: fuel_stations → fuel_events
+    stations = stations or []
+    events = events or []
+    deps["es_service"].search_documents = AsyncMock(
+        side_effect=[
+            {"hits": {"hits": [{"_source": s} for s in stations]}},
+            {"hits": {"hits": [{"_source": e} for e in events]}},
+        ]
+    )
+    return agent, deps
+
+
+class TestCustomerTankIteration:
+    """Req 1.1.2 — agent iterates over customer_tanks in addition to fuel_stations."""
+
+    @pytest.mark.asyncio
+    async def test_forecast_produced_for_customer_tank(self):
+        tank = _make_customer_tank()
+        agent, deps = _make_extended_agent(tanks=[tank])
+        await agent.evaluate([_make_signal()])
+
+        # One customer-tank forecast should be published.
+        published = [c.args[0] for c in deps["signal_bus"].publish.call_args_list]
+        tank_forecasts = [
+            f for f in published if f.customer_tank_id == tank.customer_tank_id
+        ]
+        assert len(tank_forecasts) == 1
+        forecast = tank_forecasts[0]
+        assert forecast.customer_id == tank.customer_id
+        assert forecast.customer_type == tank.customer_type
+        assert forecast.fuel_type == tank.fuel_type
+
+    @pytest.mark.asyncio
+    async def test_no_customer_tanks_keeps_legacy_behavior(self):
+        agent, deps = _make_extended_agent(tanks=[])
+        await agent.evaluate([_make_signal()])
+        # No customer_tank forecasts should be produced.
+        published = [c.args[0] for c in deps["signal_bus"].publish.call_args_list]
+        assert all(f.customer_tank_id is None for f in published)
+
+
+class TestConsumptionModelSelection:
+    """Req 1.5.3 — select Consumption_Model by fuel_type + tenant config."""
+
+    @pytest.mark.asyncio
+    async def test_propane_tank_uses_propane_k_factor_model(self):
+        tank = _make_customer_tank(fuel_type="propane", fuel_product_code="PROPANE")
+        agent, deps = _make_extended_agent(tanks=[tank])
+        await agent.evaluate([_make_signal()])
+        forecasts = [c.args[0] for c in deps["signal_bus"].publish.call_args_list]
+        propane = [f for f in forecasts if f.customer_tank_id == tank.customer_tank_id][0]
+        assert propane.model_name == "propane_k_factor"
+
+    @pytest.mark.asyncio
+    async def test_heating_oil_tank_uses_regression_model(self):
+        tank = _make_customer_tank(
+            fuel_type="heating_oil", fuel_product_code="HEATING_OIL"
+        )
+        agent, deps = _make_extended_agent(tanks=[tank])
+        await agent.evaluate([_make_signal()])
+        forecasts = [c.args[0] for c in deps["signal_bus"].publish.call_args_list]
+        oil = [f for f in forecasts if f.customer_tank_id == tank.customer_tank_id][0]
+        assert oil.model_name == "heating_oil_hdd_regression"
+
+    @pytest.mark.asyncio
+    async def test_diesel_tank_uses_rolling_model(self):
+        tank = _make_customer_tank(fuel_type="diesel", fuel_product_code="DIESEL_2")
+        agent, deps = _make_extended_agent(tanks=[tank])
+        await agent.evaluate([_make_signal()])
+        forecasts = [c.args[0] for c in deps["signal_bus"].publish.call_args_list]
+        diesel = [f for f in forecasts if f.customer_tank_id == tank.customer_tank_id][0]
+        assert diesel.model_name == "diesel_rolling_28d"
+
+    @pytest.mark.asyncio
+    async def test_generator_tank_uses_runtime_model(self):
+        tank = _make_customer_tank(
+            fuel_type="generator_fuel", fuel_product_code="DIESEL_2"
+        )
+        agent, deps = _make_extended_agent(tanks=[tank])
+        await agent.evaluate([_make_signal()])
+        forecasts = [c.args[0] for c in deps["signal_bus"].publish.call_args_list]
+        gen = [f for f in forecasts if f.customer_tank_id == tank.customer_tank_id][0]
+        assert gen.model_name == "generator_runtime"
+
+    @pytest.mark.asyncio
+    async def test_tenant_override_selects_alternate_model(self):
+        tank = _make_customer_tank(fuel_type="propane", fuel_product_code="PROPANE")
+        agent, deps = _make_extended_agent(
+            tanks=[tank],
+            tenant_config={
+                "consumption_model_config:tenant-1": json.dumps(
+                    {"propane": "diesel_rolling_28d"}
+                )
+            },
+        )
+        await agent.evaluate([_make_signal()])
+        forecasts = [c.args[0] for c in deps["signal_bus"].publish.call_args_list]
+        tank_forecast = [
+            f for f in forecasts if f.customer_tank_id == tank.customer_tank_id
+        ][0]
+        assert tank_forecast.model_name == "diesel_rolling_28d"
+
+    @pytest.mark.asyncio
+    async def test_invalid_override_falls_back_to_default(self):
+        tank = _make_customer_tank(fuel_type="propane", fuel_product_code="PROPANE")
+        agent, deps = _make_extended_agent(
+            tanks=[tank],
+            tenant_config={
+                "consumption_model_config:tenant-1": json.dumps(
+                    {"propane": "no_such_model"}
+                )
+            },
+        )
+        await agent.evaluate([_make_signal()])
+        forecasts = [c.args[0] for c in deps["signal_bus"].publish.call_args_list]
+        tank_forecast = [
+            f for f in forecasts if f.customer_tank_id == tank.customer_tank_id
+        ][0]
+        assert tank_forecast.model_name == "propane_k_factor"
+
+
+class TestWeatherProviderIntegration:
+    """Req 1.2.3, 1.2.5 — Weather_Provider for propane/heating_oil + fallback."""
+
+    @pytest.mark.asyncio
+    async def test_propane_tank_calls_weather_provider(self):
+        tank = _make_customer_tank(fuel_type="propane", fuel_product_code="PROPANE")
+        weather = _FakeWeatherProvider(rows=[])
+        agent, deps = _make_agent()
+        agent.set_customer_tank_repository(_FakeCustomerTankRepo([tank]))
+        agent.set_weather_provider(weather)
+        deps["es_service"].search_documents = AsyncMock(
+            side_effect=[
+                {"hits": {"hits": []}},
+                {"hits": {"hits": []}},
+            ]
+        )
+        await agent.evaluate([_make_signal()])
+        assert len(weather.calls) == 1
+        assert weather.calls[0]["zip_code"] == tank.zip_code
+        assert weather.calls[0]["tenant_id"] == tank.tenant_id
+
+    @pytest.mark.asyncio
+    async def test_diesel_tank_skips_weather_provider(self):
+        tank = _make_customer_tank(fuel_type="diesel", fuel_product_code="DIESEL_2")
+        weather = _FakeWeatherProvider(rows=[])
+        agent, deps = _make_agent()
+        agent.set_customer_tank_repository(_FakeCustomerTankRepo([tank]))
+        agent.set_weather_provider(weather)
+        deps["es_service"].search_documents = AsyncMock(
+            side_effect=[
+                {"hits": {"hits": []}},
+                {"hits": {"hits": []}},
+            ]
+        )
+        await agent.evaluate([_make_signal()])
+        # Diesel tank should not trigger a weather lookup.
+        assert weather.calls == []
+
+    @pytest.mark.asyncio
+    async def test_missing_weather_provider_marks_fallback(self):
+        tank = _make_customer_tank(fuel_type="propane", fuel_product_code="PROPANE")
+        agent, deps = _make_extended_agent(tanks=[tank])
+        # Note: no weather provider wired.
+        await agent.evaluate([_make_signal()])
+        forecasts = [c.args[0] for c in deps["signal_bus"].publish.call_args_list]
+        t = [f for f in forecasts if f.customer_tank_id == tank.customer_tank_id][0]
+        assert t.weather_fallback is True
+        assert "weather_fallback" in t.anomaly_flags
+
+    @pytest.mark.asyncio
+    async def test_weather_provider_exception_degrades_gracefully(self):
+        tank = _make_customer_tank(fuel_type="heating_oil", fuel_product_code="HEATING_OIL")
+        agent, deps = _make_extended_agent(
+            tanks=[tank], weather_raise=RuntimeError("boom")
+        )
+        await agent.evaluate([_make_signal()])
+        forecasts = [c.args[0] for c in deps["signal_bus"].publish.call_args_list]
+        t = [f for f in forecasts if f.customer_tank_id == tank.customer_tank_id][0]
+        assert t.weather_fallback is True
+
+    @pytest.mark.asyncio
+    async def test_non_weather_fuel_not_marked_fallback(self):
+        tank = _make_customer_tank(fuel_type="diesel", fuel_product_code="DIESEL_2")
+        agent, deps = _make_extended_agent(tanks=[tank])
+        await agent.evaluate([_make_signal()])
+        forecasts = [c.args[0] for c in deps["signal_bus"].publish.call_args_list]
+        t = [f for f in forecasts if f.customer_tank_id == tank.customer_tank_id][0]
+        assert t.weather_fallback is False
+
+
+class TestCustomerTypeMultipliers:
+    """Req 1.3.1, 1.3.4 — customer-type multipliers from Redis config."""
+
+    @pytest.mark.asyncio
+    async def test_default_multipliers_applied(self):
+        tank = _make_customer_tank(customer_type="commercial")
+        agent, deps = _make_extended_agent(tanks=[tank])
+        await agent.evaluate([_make_signal()])
+        forecasts = [c.args[0] for c in deps["signal_bus"].publish.call_args_list]
+        t = [f for f in forecasts if f.customer_tank_id == tank.customer_tank_id][0]
+        assert t.customer_type_multiplier == DEFAULT_CUSTOMER_TYPE_MULTIPLIERS[
+            "commercial"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_tenant_overrides_replace_defaults(self):
+        tank = _make_customer_tank(customer_type="will_call")
+        agent, deps = _make_extended_agent(
+            tanks=[tank],
+            tenant_config={
+                "consumption_segmentation_config:tenant-1": json.dumps(
+                    {"will_call": 0.5}
+                ),
+            },
+        )
+        await agent.evaluate([_make_signal()])
+        forecasts = [c.args[0] for c in deps["signal_bus"].publish.call_args_list]
+        t = [f for f in forecasts if f.customer_tank_id == tank.customer_tank_id][0]
+        assert t.customer_type_multiplier == 0.5
+
+    @pytest.mark.asyncio
+    async def test_invalid_multiplier_falls_back_to_default(self):
+        tank = _make_customer_tank(customer_type="residential")
+        agent, deps = _make_extended_agent(
+            tanks=[tank],
+            tenant_config={
+                "consumption_segmentation_config:tenant-1": json.dumps(
+                    {"residential": "not-a-number"}
+                ),
+            },
+        )
+        await agent.evaluate([_make_signal()])
+        forecasts = [c.args[0] for c in deps["signal_bus"].publish.call_args_list]
+        t = [f for f in forecasts if f.customer_tank_id == tank.customer_tank_id][0]
+        # Invalid entry ignored, default 1.0 kept.
+        assert t.customer_type_multiplier == 1.0
+
+
+class TestScheduledDeliveriesFolded:
+    """Req 1.4.2, 1.4.4 — scheduled deliveries extend projected runout."""
+
+    @pytest.mark.asyncio
+    async def test_scheduled_delivery_extends_runout(self):
+        tank = _make_customer_tank(
+            fuel_type="diesel",
+            fuel_product_code="DIESEL_2",
+            current_level=100.0,
+            capacity=500.0,
+        )
+        future_eta = datetime.now(timezone.utc) + timedelta(hours=12)
+        scheduled = {
+            ("customer_tank", tank.customer_tank_id): [
+                {
+                    "delivery_id": "deliv-1",
+                    "scheduled_eta": future_eta,
+                    "planned_gallons": 300.0,
+                }
+            ]
+        }
+        # Feed one delivery event so the diesel rolling model produces a
+        # meaningful gallons-per-day value.
+        events = [
+            {
+                "customer_tank_id": tank.customer_tank_id,
+                "quantity_gallons": 100.0,
+                "timestamp": (datetime.now(timezone.utc) - timedelta(days=2))
+                .isoformat()
+                .replace("+00:00", "Z"),
+                "tenant_id": tank.tenant_id,
+            }
+        ]
+        agent, deps = _make_extended_agent(
+            tanks=[tank],
+            scheduled=scheduled,
+            events=events,
+        )
+        await agent.evaluate([_make_signal()])
+        forecasts = [c.args[0] for c in deps["signal_bus"].publish.call_args_list]
+        t = [f for f in forecasts if f.customer_tank_id == tank.customer_tank_id][0]
+        assert len(t.scheduled_deliveries) == 1
+        assert t.scheduled_deliveries[0]["delivery_id"] == "deliv-1"
+        assert t.scheduled_deliveries[0]["planned_gallons"] == 300.0
+
+    @pytest.mark.asyncio
+    async def test_missing_helper_results_in_empty_scheduled_list(self):
+        tank = _make_customer_tank()
+        agent, deps = _make_extended_agent(tanks=[tank])
+        await agent.evaluate([_make_signal()])
+        forecasts = [c.args[0] for c in deps["signal_bus"].publish.call_args_list]
+        t = [f for f in forecasts if f.customer_tank_id == tank.customer_tank_id][0]
+        assert t.scheduled_deliveries == []
+
+    @pytest.mark.asyncio
+    async def test_helper_exception_results_in_empty_scheduled_list(self):
+        tank = _make_customer_tank()
+        agent, deps = _make_extended_agent(
+            tanks=[tank], scheduled_raise=RuntimeError("upstream down")
+        )
+        await agent.evaluate([_make_signal()])
+        forecasts = [c.args[0] for c in deps["signal_bus"].publish.call_args_list]
+        t = [f for f in forecasts if f.customer_tank_id == tank.customer_tank_id][0]
+        assert t.scheduled_deliveries == []
+
+
+class TestForecastMetadataStamping:
+    """Req 1.5.6, 1.6.1 — metadata stamped on every forecast."""
+
+    @pytest.mark.asyncio
+    async def test_all_metadata_fields_populated(self):
+        tank = _make_customer_tank(
+            customer_type="commercial",
+            fuel_type="propane",
+            fuel_product_code="PROPANE",
+        )
+        agent, deps = _make_extended_agent(
+            tanks=[tank],
+            weather_rows=[],
+        )
+        await agent.evaluate([_make_signal()])
+        forecasts = [c.args[0] for c in deps["signal_bus"].publish.call_args_list]
+        t = [f for f in forecasts if f.customer_tank_id == tank.customer_tank_id][0]
+        assert t.customer_tank_id == tank.customer_tank_id
+        assert t.customer_id == tank.customer_id
+        assert t.customer_type == "commercial"
+        assert t.fuel_type == "propane"
+        assert t.model_name == "propane_k_factor"
+        assert t.customer_type_multiplier == DEFAULT_CUSTOMER_TYPE_MULTIPLIERS[
+            "commercial"
+        ]
+        assert t.baseline_source in ("history", "default")
+        assert isinstance(t.weather_fallback, bool)
+        assert isinstance(t.scheduled_deliveries, list)
+
+
+class TestScheduledDeliveryHorizon:
+    """Req 1.4.1 — scheduled deliveries queried for the next 72 hours."""
+
+    @pytest.mark.asyncio
+    async def test_horizon_is_72_hours(self):
+        tank = _make_customer_tank()
+        helper = _FakeScheduledDeliveryHelper({})
+        agent, deps = _make_agent()
+        agent.set_customer_tank_repository(_FakeCustomerTankRepo([tank]))
+        agent.set_scheduled_delivery_helper(helper)
+        deps["es_service"].search_documents = AsyncMock(
+            side_effect=[
+                {"hits": {"hits": []}},
+                {"hits": {"hits": []}},
+            ]
+        )
+        await agent.evaluate([_make_signal()])
+        assert helper.calls == [
+            {"tenant_id": "tenant-1", "horizon_hours": SCHEDULED_DELIVERY_HORIZON_HOURS}
+        ]
+
+
+class TestPersistenceWithExtendedFields:
+    """Req 1.4 — persist extended forecast payload to mvp_tank_forecasts."""
+
+    @pytest.mark.asyncio
+    async def test_persistence_includes_customer_tank_metadata(self):
+        tank = _make_customer_tank(
+            customer_type="keep_full", fuel_type="diesel", fuel_product_code="DIESEL_2"
+        )
+        agent, deps = _make_extended_agent(tanks=[tank])
+        await agent.evaluate([_make_signal()])
+        # Find the index_document call for the customer_tank forecast.
+        calls = [c for c in deps["es_service"].index_document.call_args_list]
+        tank_docs = [
+            c.args[2]
+            for c in calls
+            if c.args[2].get("customer_tank_id") == tank.customer_tank_id
+        ]
+        assert len(tank_docs) == 1
+        doc = tank_docs[0]
+        assert doc["customer_tank_id"] == tank.customer_tank_id
+        assert doc["customer_id"] == tank.customer_id
+        assert doc["customer_type"] == "keep_full"
+        assert doc["fuel_type"] == "diesel"
+        assert doc["model_name"] == "diesel_rolling_28d"
+        assert "customer_type_multiplier" in doc
+        assert "weather_fallback" in doc
+        assert "scheduled_deliveries" in doc

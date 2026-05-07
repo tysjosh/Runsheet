@@ -7,16 +7,43 @@ feasibility checks and optimization using the compartment_solver, produces
 InterventionProposals with loading plan actions, and persists plans to
 mvp_load_plans.
 
+Task 6.5 wires cross-contamination enforcement into the agent: every
+proposed compartment assignment passes through
+:func:`fuel.services.compatibility_matrix.check_compatibility` before it
+is committed to the Loading_Plan. Rejections persist a
+:class:`CrossContaminationViolation` to ``cross_contamination_events``
+and publish a ``cross_contamination_violation`` RiskSignal on the
+SignalBus so downstream overlays (dispatch, exception replanning) can
+react without parsing the loading plan. Assignments rejected by the
+engine are stripped from the Loading_Plan before persistence so
+``mvp_load_plans`` never carries a contaminating assignment; the unmet
+volume is charged to ``unserved_demand_liters`` so downstream metrics
+reflect the blocked delivery.
+
+Task 6.6 layers the compartment-state write on top: after a successful
+Loading_Plan commit, the agent calls
+:meth:`fuel.compartment_state_models.CompartmentStateRepository.mark_loaded`
+once per assignment to atomically update ``last_loaded_product``,
+``last_loaded_at``, and ``state`` on the ``truck_compartments`` doc.
+The repository uses ``if_seq_no`` / ``if_primary_term`` OCC so
+concurrent plan commits never overwrite each other. The state write is
+gated on overlay mode — shadow-mode evaluation still produces the plan
+for retrospective analysis but leaves the live compartment state
+untouched, matching the spec guarantee that the mutation fires only on
+a successful commit.
+
 Default configuration:
     - decision_cycle: 60 seconds
     - cooldown: 30 minutes per truck
 
-Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9, 3.10
+Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9, 3.10,
+              7.1.2, 7.2.2, 7.2.3, 7.2.6
 """
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
+from uuid import uuid4
 
 from Agents.overlay.base_overlay_agent import OverlayAgentBase
 from Agents.overlay.data_contracts import (
@@ -47,6 +74,30 @@ from Agents.support.mvp_es_mappings import (
     TRUCK_COMPARTMENTS_INDEX,
 )
 from inventory.es_mappings import INVENTORY_INDEX
+from fuel.compartment_state_models import (
+    CROSS_CONTAMINATION_VIOLATION_ENTITY_TYPE,
+    CompartmentNotFoundError,
+    CompartmentState,
+    CompartmentStateConflictError,
+    CompartmentStateRepository,
+    CrossContaminationViolation,
+    CrossTenantCompartmentAccessError,
+)
+from fuel.services.compatibility_matrix import (
+    DECISION_ALLOWED,
+    REASON_CLEANING_REQUIRED,
+    REASON_CROSS_CONTAMINATION_BLOCKED,
+    RuleType,
+    check_compatibility,
+    load_tenant_compatibility_rules,
+)
+from fuel.services.contract_lift_service import ContractLiftService
+from fuel.services.fuel_ops_es_mappings import CROSS_CONTAMINATION_EVENTS_INDEX
+from fuel.services.fuel_product_catalog import (
+    UnknownFuelProductError,
+    canonicalize,
+    canonicalize_or_warn,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +138,9 @@ class CompartmentLoadingAgent(OverlayAgentBase):
         feature_flag_service,
         poll_interval: int = 60,
         cooldown_minutes: int = 30,
+        compartment_state_repo: Optional[CompartmentStateRepository] = None,
+        tenant_config: Optional[Any] = None,
+        contract_lift_service: Optional[ContractLiftService] = None,
     ):
         super().__init__(
             agent_id="compartment_loading",
@@ -107,6 +161,104 @@ class CompartmentLoadingAgent(OverlayAgentBase):
         )
         # Buffer priority lists between cycles
         self._priority_buffer: List[DeliveryPriorityList] = []
+        # Repository for atomic truck_compartments state updates (Req 7.1.2).
+        # Lazily constructed from the shared ES service so existing call
+        # sites (bootstrap, tests) do not need to thread a new dependency.
+        self._compartment_state_repo = (
+            compartment_state_repo
+            if compartment_state_repo is not None
+            else CompartmentStateRepository(es_service)
+        )
+        # Optional Redis-like handle used to read the tenant
+        # ``compatibility_matrix_config:{tenant_id}`` override (Task 6.4).
+        # When unset the agent falls back to DEFAULT_COMPATIBILITY_RULES so
+        # a Redis outage never blocks the cross-contamination guard.
+        self._tenant_config: Optional[Any] = tenant_config
+        # Monthly rolling-lift counter (Task 7.6 / Req 8.3.4). Optional:
+        # when no service is injected we default to a no-op wrapper so
+        # legacy tests and bootstrap paths keep working unchanged. The
+        # default :class:`ContractLiftService` with ``redis_client=None``
+        # treats every write as a no-op and every read as zero, so
+        # constructing one unconditionally is safe.
+        self._contract_lift_service: ContractLiftService = (
+            contract_lift_service
+            if contract_lift_service is not None
+            else ContractLiftService(redis_client=None)
+        )
+
+    # ------------------------------------------------------------------
+    # Post-construction wiring helpers
+    # ------------------------------------------------------------------
+
+    def set_tenant_config(self, tenant_config: Optional[Any]) -> None:
+        """Inject or replace the tenant-config backend post-construction.
+
+        Bootstrap plumbs the Redis handle into the agent here rather than
+        threading it through the constructor kwargs so tests can continue
+        to use the existing ``overlay_common_args`` call shape.
+        """
+
+        self._tenant_config = tenant_config
+
+    def set_contract_lift_service(
+        self, contract_lift_service: Optional[ContractLiftService]
+    ) -> None:
+        """Inject or replace the monthly rolling-lift counter service.
+
+        Validates: Requirement 8.3.4.
+
+        Bootstrap injects a :class:`ContractLiftService` backed by the
+        shared Redis client after the agent is constructed so every
+        Loading_Plan commit with a ``contract_id`` bumps
+        ``contract_lift:{tenant_id}:{contract_id}:{YYYY-MM}``. When
+        ``contract_lift_service`` is ``None`` the agent falls back to
+        the no-op default wired in ``__init__`` so legacy plans that
+        don't carry a ``contract_id`` keep working unchanged.
+        """
+
+        self._contract_lift_service = (
+            contract_lift_service
+            if contract_lift_service is not None
+            else ContractLiftService(redis_client=None)
+        )
+
+    # ------------------------------------------------------------------
+    # Mode helpers (Task 6.6 / Req 7.1.2)
+    # ------------------------------------------------------------------
+
+    async def _is_active_commit_mode(self, tenant_id: str) -> bool:
+        """Return ``True`` when the overlay's mode represents a real commit.
+
+        Validates: Requirement 7.1.2.
+
+        The spec reserves the ``last_loaded_*`` / ``state`` write on
+        ``truck_compartments`` for "a successful assignment commit — not
+        during shadow-mode evaluation." Mode resolution mirrors the base
+        overlay's :meth:`_get_mode`: anything that is not ``shadow`` nor
+        ``disabled`` is treated as a commit path (``active_gated`` and
+        ``active_auto`` both flow through the ConfirmationProtocol, and
+        by the time the protocol accepts the mutation the compartment
+        has been committed).
+
+        The helper defaults to ``False`` on any error or on a missing
+        feature-flag service so a misconfigured environment never
+        silently overwrites compartment state in what the operator
+        thinks is shadow mode.
+        """
+
+        try:
+            mode = await self._get_mode(tenant_id)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "CompartmentLoadingAgent: failed to resolve overlay mode "
+                "for tenant %s, defaulting to shadow (no state write): %s",
+                tenant_id,
+                exc,
+            )
+            return False
+        if mode is None:
+            return False
+        return mode not in ("shadow", "disabled")
 
     # ------------------------------------------------------------------
     # Signal handling override — buffer DeliveryPriorityList messages
@@ -169,10 +321,29 @@ class CompartmentLoadingAgent(OverlayAgentBase):
 
         # Step 4: For each truck, check feasibility and optimize
         proposals: List[InterventionProposal] = []
+        # Task 6.5: load the tenant compatibility rule table once per
+        # cycle so each assignment is evaluated against the effective
+        # matrix (defaults merged with Redis overrides). A Redis outage
+        # degrades gracefully to the seed table.
+        compatibility_rules = await load_tenant_compatibility_rules(
+            tenant_id, self._tenant_config
+        )
+        # Task 6.6 / Req 7.1.2: the compartment-state write must only
+        # fire on a real commit path. Shadow-mode evaluation runs the
+        # full optimization so the plan can be logged for retrospective
+        # analysis, but the ``last_loaded_*`` / ``state`` fields on
+        # ``truck_compartments`` stay untouched until the overlay is
+        # flipped to an active mode. Resolve the current mode once per
+        # cycle so every truck processed in the same evaluation shares
+        # the same commit gate.
+        commit_compartment_state = await self._is_active_commit_mode(tenant_id)
         for truck_id, truck_data in trucks.items():
             compartments = truck_data["compartments"]
             max_weight_kg = truck_data.get("max_weight_kg")
             tare_weight_kg = truck_data.get("tare_weight_kg", 0.0)
+            compartment_states: Dict[str, CompartmentState] = truck_data.get(
+                "compartment_states", {}
+            )
 
             # Check feasibility with weight constraints (Req 3.3, 3.7)
             feasibility = check_feasibility(
@@ -195,8 +366,30 @@ class CompartmentLoadingAgent(OverlayAgentBase):
 
             loading_plan.run_id = run_id
 
+            # Task 6.5 / Req 7.2.2, 7.2.3, 7.2.6: before any assignment
+            # is committed, verify each proposed compartment/product
+            # pairing against the tenant compatibility matrix. Rejected
+            # assignments are stripped from the plan, persisted as a
+            # CrossContaminationViolation, and republished on the
+            # SignalBus so downstream overlays can react.
+            loading_plan = await self._enforce_cross_contamination(
+                loading_plan=loading_plan,
+                truck_id=truck_id,
+                tenant_id=tenant_id,
+                compartment_states=compartment_states,
+                compatibility_rules=compatibility_rules,
+                run_id=run_id,
+            )
+
+            if not loading_plan.assignments:
+                # Every assignment was blocked — skip the plan to avoid
+                # writing an empty Loading_Plan to mvp_load_plans.
+                continue
+
             # Step 5: Persist loading plan to ES (Req 3.9)
-            await self._persist_loading_plan(loading_plan)
+            await self._persist_loading_plan(
+                loading_plan, commit_compartment_state=commit_compartment_state
+            )
 
             # Step 6: Build InterventionProposal
             proposal = self._build_proposal(
@@ -267,6 +460,11 @@ class CompartmentLoadingAgent(OverlayAgentBase):
         - 'max_weight_kg': Optional[float]
         - 'tare_weight_kg': float
         - 'depot_location': Optional[str]
+        - 'compartment_states': Dict[str, CompartmentState] — keyed by
+          the in-memory ``compartment.compartment_id`` (not the composite
+          ES doc id) so the cross-contamination guard (Task 6.5) can
+          look the prior-load state up in O(1) without a second ES
+          round-trip.
         """
         query = {
             "query": {
@@ -317,8 +515,18 @@ class CompartmentLoadingAgent(OverlayAgentBase):
                         "max_weight_kg": source.get("max_weight_kg"),
                         "tare_weight_kg": source.get("tare_weight_kg", 0.0),
                         "depot_location": source.get("depot_location"),
+                        "compartment_states": {},
                     }
                 trucks[truck_id]["compartments"].append(compartment)
+
+                # Capture the compartment state triple for the
+                # cross-contamination guard. Legacy documents predating
+                # Task 6.1 have no state fields; build a permissive
+                # default (``clean``) so the guard treats them as empty
+                # rather than incorrectly blocking every load.
+                state = self._build_state_from_source(source, tenant_id, truck_id)
+                if state is not None:
+                    trucks[truck_id]["compartment_states"][compartment.compartment_id] = state
         except Exception as e:
             logger.error(
                 "CompartmentLoadingAgent: failed to query truck_compartments: %s",
@@ -326,6 +534,52 @@ class CompartmentLoadingAgent(OverlayAgentBase):
             )
 
         return trucks
+
+    # ------------------------------------------------------------------
+    # Compartment state parsing
+    # ------------------------------------------------------------------
+
+    def _build_state_from_source(
+        self,
+        source: Dict[str, Any],
+        tenant_id: str,
+        truck_id: str,
+    ) -> Optional[CompartmentState]:
+        """Extract a :class:`CompartmentState` from a truck_compartments hit.
+
+        Legacy pre-Task-6.1 documents that lack any of the four state
+        fields are coerced into a ``state=clean`` default so the
+        compatibility guard treats them as empty rather than raising.
+        An outright validation failure is logged and the state is
+        dropped — the guard falls back to the "empty compartment" branch
+        and allows the load in that case, matching the behavior of the
+        engine's ``_is_empty_previous`` short-circuit.
+        """
+
+        compartment_id = source.get("compartment_id")
+        if not compartment_id:
+            return None
+        payload = {
+            "compartment_id": compartment_id,
+            "truck_id": truck_id,
+            "tenant_id": tenant_id,
+            "state": source.get("state") or "clean",
+            "last_loaded_product": source.get("last_loaded_product"),
+            "last_loaded_at": source.get("last_loaded_at"),
+            "last_cleaned_at": source.get("last_cleaned_at"),
+        }
+        try:
+            return CompartmentState(**payload)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "CompartmentLoadingAgent: dropping unparsable compartment "
+                "state for %s (tenant=%s, truck=%s): %s",
+                compartment_id,
+                tenant_id,
+                truck_id,
+                exc,
+            )
+            return None
 
     # ------------------------------------------------------------------
     # Fuel equipment availability check (Req 3.1, 3.2, 3.3, 3.4, 3.5)
@@ -548,10 +802,46 @@ class CompartmentLoadingAgent(OverlayAgentBase):
     # Persistence (Req 3.9)
     # ------------------------------------------------------------------
 
-    async def _persist_loading_plan(self, loading_plan: LoadingPlan) -> None:
-        """Persist a LoadingPlan to the mvp_load_plans ES index."""
+    async def _persist_loading_plan(
+        self,
+        loading_plan: LoadingPlan,
+        *,
+        commit_compartment_state: bool = True,
+    ) -> None:
+        """Persist a LoadingPlan to the mvp_load_plans ES index.
+
+        Canonicalizes the ``fuel_grade`` on every assignment before write
+        so loading plans produced from NG-aliased forecasts land in ES as
+        the canonical US codes (Req 6.1.4). Unknown values are preserved
+        with a warning rather than dropped to avoid silently corrupting a
+        plan that has already passed feasibility.
+
+        On a successful plan commit, each assigned compartment's
+        ``last_loaded_product``, ``last_loaded_at``, and ``state`` fields
+        are updated atomically in the ``truck_compartments`` index via
+        :class:`CompartmentStateRepository` (Req 7.1.2, Task 6.6). Per-
+        compartment state failures are logged but never raised so a
+        transient ES hiccup on one compartment cannot invalidate a plan
+        that already landed in ``mvp_load_plans``.
+
+        ``commit_compartment_state`` gates the post-write state update
+        so shadow-mode evaluation — which still records the plan for
+        retrospective analysis via ``evaluate`` → ``_log_shadow_proposal``
+        — never mutates the live compartment state. Active and
+        active-gated/auto modes pass ``True`` so the spec's
+        "only on successful commit" guarantee (Req 7.1.2) holds.
+        """
         try:
             doc = loading_plan.model_dump(mode="json")
+            assignments = doc.get("assignments") or []
+            for assignment in assignments:
+                grade = assignment.get("fuel_grade")
+                if grade is not None:
+                    assignment["fuel_grade"] = canonicalize_or_warn(
+                        grade,
+                        context="mvp_load_plans.assignments.fuel_grade",
+                        logger_=logger,
+                    )
             await self._es.index_document(
                 MVP_LOAD_PLANS_INDEX,
                 loading_plan.plan_id,
@@ -563,3 +853,698 @@ class CompartmentLoadingAgent(OverlayAgentBase):
                 loading_plan.plan_id,
                 e,
             )
+            # Do not attempt compartment-state updates for a plan that did
+            # not land in mvp_load_plans — otherwise the compartment would
+            # report as loaded against a plan that was never committed.
+            return
+
+        # Req 7.1.2 / Task 6.6: write last_loaded_product, last_loaded_at,
+        # state=loaded on every compartment assigned by this plan. The
+        # canonical fuel_grade from the persisted doc is the source of
+        # truth so the compartment state matches what mvp_load_plans
+        # stores. Shadow-mode cycles skip this entirely — the spec
+        # reserves the state mutation for successful commits, and the
+        # mvp_load_plans write in shadow mode is recorded for analysis
+        # only (the ``InterventionProposal`` is shipped to
+        # ``agent_shadow_proposals`` rather than the ConfirmationProtocol).
+        if commit_compartment_state:
+            await self._record_compartment_loads(loading_plan, doc)
+        else:
+            logger.debug(
+                "CompartmentLoadingAgent: shadow mode — skipping last_loaded "
+                "state update for plan %s (tenant=%s)",
+                loading_plan.plan_id,
+                loading_plan.tenant_id,
+            )
+
+        # Task 7.6 / Req 8.3.4: bump the monthly rolling-lift counter
+        # whenever the plan was sourced against a specific
+        # Supplier_Contract. When no ``contract_id`` is attached (legacy
+        # plans, depot-only loads) this is a no-op.
+        await self._record_contract_lift(loading_plan)
+
+    async def _record_compartment_loads(
+        self,
+        loading_plan: LoadingPlan,
+        persisted_doc: Dict[str, Any],
+    ) -> None:
+        """Atomically stamp every loaded compartment with its last-loaded fields.
+
+        Validates: Requirement 7.1.2.
+
+        For each assignment in ``loading_plan``, build the truck-qualified
+        document id (``{truck_id}_{compartment_id}``, matching the write
+        key used by ``mvp_endpoints.configure_compartments``) and call
+        :meth:`CompartmentStateRepository.mark_loaded`. The repository
+        handles the ``_seq_no`` / ``_primary_term`` OCC loop so concurrent
+        plan commits cannot silently overwrite each other.
+
+        Failures for individual compartments are logged and swallowed:
+
+        * :class:`CompartmentNotFoundError` — misconfigured plan that
+          references a compartment no longer in ``truck_compartments``.
+        * :class:`CrossTenantCompartmentAccessError` — defensive guard,
+          should never fire because the plan is tenant-scoped.
+        * :class:`CompartmentStateConflictError` — persistent OCC
+          contention; surfaced as a warning so operators can investigate.
+        * :class:`UnknownFuelProductError` — already canonicalized above,
+          so only fires if the catalog rejected the value; logged as an
+          error and skipped.
+
+        The loading plan itself has already been persisted to
+        ``mvp_load_plans`` before this method is called, so swallowing
+        per-compartment errors never corrupts the primary write.
+        """
+
+        tenant_id = loading_plan.tenant_id
+        truck_id = loading_plan.truck_id
+        if not tenant_id or not truck_id:
+            # Defensive: the model validator guarantees non-empty values,
+            # but if a caller constructs a plan via __new__ bypassing the
+            # validator we want a clean skip rather than a noisy traceback.
+            logger.warning(
+                "CompartmentLoadingAgent: skipping compartment-state updates "
+                "for plan %s — missing tenant_id or truck_id",
+                loading_plan.plan_id,
+            )
+            return
+
+        # Defensive access: some callers (notably unit-test helpers that
+        # instantiate the agent via ``__new__``) skip ``__init__`` and
+        # therefore never wire the repository. Treat that as a no-op
+        # rather than a traceback — the primary mvp_load_plans write has
+        # already succeeded.
+        repo = getattr(self, "_compartment_state_repo", None)
+        if repo is None:
+            logger.debug(
+                "CompartmentLoadingAgent: no compartment_state_repo configured; "
+                "skipping last_loaded state update for plan %s",
+                loading_plan.plan_id,
+            )
+            return
+
+        loaded_at = datetime.now(timezone.utc)
+        # Drive the writes off the persisted doc so the canonical
+        # fuel_grade (post canonicalize_or_warn) is the value that lands
+        # on the compartment. This keeps mvp_load_plans and
+        # truck_compartments in agreement on product_code.
+        persisted_assignments = persisted_doc.get("assignments") or []
+        if len(persisted_assignments) != len(loading_plan.assignments):
+            # The doc is generated from the same plan in the same method,
+            # so a length mismatch would indicate a serializer change. Fall
+            # back to the in-memory assignments to stay safe.
+            persisted_assignments = [
+                {
+                    "compartment_id": a.compartment_id,
+                    "fuel_grade": a.fuel_grade,
+                }
+                for a in loading_plan.assignments
+            ]
+
+        for persisted in persisted_assignments:
+            compartment_id = persisted.get("compartment_id")
+            product_code = persisted.get("fuel_grade")
+            if not compartment_id or not product_code:
+                logger.warning(
+                    "CompartmentLoadingAgent: skipping state update for "
+                    "plan %s — assignment missing compartment_id/fuel_grade: %r",
+                    loading_plan.plan_id,
+                    persisted,
+                )
+                continue
+
+            compartment_doc_id = f"{truck_id}_{compartment_id}"
+            try:
+                await repo.mark_loaded(
+                    tenant_id=tenant_id,
+                    compartment_doc_id=compartment_doc_id,
+                    product_code=product_code,
+                    loaded_at=loaded_at,
+                )
+            except CompartmentNotFoundError:
+                logger.warning(
+                    "CompartmentLoadingAgent: compartment %s missing from "
+                    "truck_compartments during state update for plan %s "
+                    "(tenant=%s); skipping",
+                    compartment_doc_id,
+                    loading_plan.plan_id,
+                    tenant_id,
+                )
+            except CrossTenantCompartmentAccessError:
+                logger.error(
+                    "CompartmentLoadingAgent: refused cross-tenant compartment "
+                    "state update for %s on plan %s (tenant=%s)",
+                    compartment_doc_id,
+                    loading_plan.plan_id,
+                    tenant_id,
+                )
+            except CompartmentStateConflictError:
+                logger.warning(
+                    "CompartmentLoadingAgent: persistent OCC conflict on "
+                    "compartment %s for plan %s (tenant=%s); last_loaded "
+                    "fields may be stale",
+                    compartment_doc_id,
+                    loading_plan.plan_id,
+                    tenant_id,
+                )
+            except UnknownFuelProductError as exc:
+                logger.error(
+                    "CompartmentLoadingAgent: catalog rejected canonicalized "
+                    "product %r on compartment %s for plan %s (tenant=%s): %s",
+                    product_code,
+                    compartment_doc_id,
+                    loading_plan.plan_id,
+                    tenant_id,
+                    exc,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.exception(
+                    "CompartmentLoadingAgent: unexpected failure recording "
+                    "last_loaded state for compartment %s (plan=%s, "
+                    "tenant=%s): %s",
+                    compartment_doc_id,
+                    loading_plan.plan_id,
+                    tenant_id,
+                    exc,
+                )
+
+    # ------------------------------------------------------------------
+    # Contract lift counter (Task 7.6 / Req 8.3.4)
+    # ------------------------------------------------------------------
+
+    async def _record_contract_lift(self, loading_plan: LoadingPlan) -> None:
+        """Bump the monthly rolling-lift counter for the plan's contract.
+
+        Validates: Requirement 8.3.4.
+
+        When the Loading_Plan carries a ``contract_id`` — set by the
+        Route_Planning_Agent when the plan is sourced against a
+        Supplier_Contract (Task 7.10) — this method bumps the Redis
+        counter ``contract_lift:{tenant_id}:{contract_id}:{YYYY-MM}``
+        by the plan's total loaded volume (sum of
+        ``assignment.quantity_liters`` converted to gallons via the
+        canonical NIST factor).
+
+        When no ``contract_id`` is attached (the common case today for
+        depot-only loads) this method is a no-op.
+
+        Failures are logged and swallowed so a transient Redis outage
+        cannot invalidate a plan that already landed in
+        ``mvp_load_plans``. ``mvp_load_plans`` is the authoritative
+        source of truth; the counter is a derived aggregate.
+        """
+
+        contract_id = getattr(loading_plan, "contract_id", None)
+        if not contract_id:
+            return
+
+        service = self._contract_lift_service
+        if service is None:
+            return
+
+        total_liters = 0.0
+        for assignment in loading_plan.assignments:
+            qty = getattr(assignment, "quantity_liters", None)
+            if qty is None:
+                continue
+            try:
+                total_liters += max(0.0, float(qty))
+            except (TypeError, ValueError):
+                continue
+
+        if total_liters <= 0.0:
+            return
+
+        # Convert liters to canonical gallons for the counter. Using the
+        # exact NIST factor (1 gal = 3.785411784 L) keeps the counter
+        # stable across runs even when source units mix (the agent-side
+        # LoadingPlan is liters-valued, but the Redis counter and
+        # Supplier_Contract.minimum_lift_gallons_per_month are both in
+        # gallons).
+        gallons = total_liters / 3.785411784
+
+        try:
+            new_total = await service.record_lift(
+                tenant_id=loading_plan.tenant_id,
+                contract_id=contract_id,
+                gallons=gallons,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "CompartmentLoadingAgent: contract-lift bump failed "
+                "plan=%s tenant=%s contract=%s gallons=%.3f err=%s",
+                loading_plan.plan_id,
+                loading_plan.tenant_id,
+                contract_id,
+                gallons,
+                exc,
+            )
+            return
+
+        logger.info(
+            "CompartmentLoadingAgent: contract-lift bump "
+            "plan=%s tenant=%s contract=%s gallons=%.3f month_total=%.3f",
+            loading_plan.plan_id,
+            loading_plan.tenant_id,
+            contract_id,
+            gallons,
+            new_total,
+        )
+
+    # ------------------------------------------------------------------
+    # Cross-contamination enforcement (Task 6.5 / Req 7.2.2, 7.2.3, 7.2.6)
+    # ------------------------------------------------------------------
+
+    async def _enforce_cross_contamination(
+        self,
+        *,
+        loading_plan: LoadingPlan,
+        truck_id: str,
+        tenant_id: str,
+        compartment_states: Mapping[str, CompartmentState],
+        compatibility_rules: Mapping[Tuple[str, str], "RuleType"],
+        run_id: str,
+    ) -> LoadingPlan:
+        """Reject any assignment the compatibility matrix blocks or gates.
+
+        Validates: Requirements 7.2.2, 7.2.3, 7.2.6.
+
+        For each assignment in ``loading_plan``:
+
+            1. Canonicalize the proposed ``fuel_grade`` against the fuel
+               product catalog so NG aliases (``AGO``, ``PMS``, ``ATK``,
+               ``LPG``) resolve to their US equivalents before the matrix
+               lookup.
+            2. Look up the compartment's current
+               :class:`CompartmentState`. Missing state (legacy doc, ES
+               hiccup) is treated as an empty compartment — the engine's
+               ``_is_empty_previous`` short-circuit then allows the load.
+            3. Call :func:`check_compatibility`. If the decision is
+               ``allowed``, keep the assignment. Otherwise:
+
+                 * Persist a :class:`CrossContaminationViolation` to the
+                   ``cross_contamination_events`` index (best-effort; the
+                   write is wrapped so an ES failure never aborts the
+                   plan).
+                 * Publish a ``cross_contamination_violation`` RiskSignal
+                   on the SignalBus with the full rejection context.
+                 * Drop the assignment from the plan and charge its
+                   volume to ``unserved_demand_liters``.
+
+        The returned :class:`LoadingPlan` is either the original plan
+        (when nothing was rejected) or a fresh :meth:`model_copy` with
+        the filtered assignment list and recomputed totals so the
+        downstream ``_persist_loading_plan`` / ``_build_proposal`` calls
+        never see a rejected assignment.
+        """
+
+        original_assignments = loading_plan.assignments
+        kept_assignments: List[CompartmentAssignment] = []
+        rejected_count = 0
+        rejected_volume = 0.0
+
+        for assignment in original_assignments:
+            decision_info = self._evaluate_assignment_compatibility(
+                assignment=assignment,
+                compartment_states=compartment_states,
+                compatibility_rules=compatibility_rules,
+            )
+            if decision_info is None:
+                # Product could not be canonicalized — conservative
+                # default is to block the assignment so an unknown
+                # product never ends up in a loaded compartment. We
+                # still emit a violation record so operators see the
+                # drop.
+                await self._record_cross_contamination_rejection(
+                    assignment=assignment,
+                    truck_id=truck_id,
+                    tenant_id=tenant_id,
+                    plan_id=loading_plan.plan_id,
+                    run_id=run_id,
+                    previous_product=self._previous_product_for(
+                        assignment.compartment_id, compartment_states
+                    ),
+                    attempted_product=assignment.fuel_grade,
+                    governing_rule="blocked",
+                    decision="blocked",
+                    reason=REASON_CROSS_CONTAMINATION_BLOCKED,
+                    extra_context={"unknown_product_code": True},
+                )
+                rejected_count += 1
+                rejected_volume += float(assignment.quantity_liters)
+                continue
+
+            decision = decision_info["decision"]
+            if decision == DECISION_ALLOWED:
+                kept_assignments.append(assignment)
+                continue
+
+            # Non-allowed — persist, publish, and drop the assignment.
+            await self._record_cross_contamination_rejection(
+                assignment=assignment,
+                truck_id=truck_id,
+                tenant_id=tenant_id,
+                plan_id=loading_plan.plan_id,
+                run_id=run_id,
+                previous_product=decision_info["previous_product"],
+                attempted_product=decision_info["attempted_product"],
+                governing_rule=decision_info["governing_rule"],
+                decision=decision,
+                reason=decision_info["reason"] or REASON_CROSS_CONTAMINATION_BLOCKED,
+            )
+            rejected_count += 1
+            rejected_volume += float(assignment.quantity_liters)
+
+        if rejected_count == 0:
+            return loading_plan
+
+        # Build the filtered plan. Utilization and weight are recomputed
+        # against the retained assignments so mvp_load_plans and the
+        # intervention proposal reflect post-rejection reality. The
+        # rejected volume is added to unserved_demand_liters so the
+        # prioritization agent and dispatch KPIs see the blocked
+        # delivery as unmet demand rather than silently disappearing.
+        retained_volume = sum(a.quantity_liters for a in kept_assignments)
+        total_capacity = sum(
+            a.compartment_capacity_liters for a in original_assignments
+        )
+        # Recompute utilization from retained volume / original capacity
+        # so the metric stays proportional to the truck's total tank
+        # space (matching how optimize_loading_plan computes it).
+        new_utilization = (
+            round((retained_volume / total_capacity) * 100, 2)
+            if total_capacity > 0
+            else 0.0
+        )
+        # Fuel density table mirrors compartment_solver.FUEL_DENSITY but
+        # keyed on canonical product codes as well so the weight total
+        # is correct for mixed-catalog assignments.
+        new_weight = round(
+            sum(
+                _fuel_density_kg_per_liter(a.fuel_grade) * a.quantity_liters
+                for a in kept_assignments
+            ),
+            2,
+        )
+        new_unserved = round(
+            float(loading_plan.unserved_demand_liters) + rejected_volume, 2
+        )
+
+        logger.warning(
+            "CompartmentLoadingAgent: stripped %d assignment(s) totalling "
+            "%.0fL from plan %s (truck=%s, tenant=%s) due to "
+            "cross-contamination rules",
+            rejected_count,
+            rejected_volume,
+            loading_plan.plan_id,
+            truck_id,
+            tenant_id,
+        )
+
+        return loading_plan.model_copy(
+            update={
+                "assignments": kept_assignments,
+                "total_utilization_pct": new_utilization,
+                "total_weight_kg": new_weight,
+                "unserved_demand_liters": new_unserved,
+            }
+        )
+
+    def _evaluate_assignment_compatibility(
+        self,
+        *,
+        assignment: CompartmentAssignment,
+        compartment_states: Mapping[str, CompartmentState],
+        compatibility_rules: Mapping[Tuple[str, str], "RuleType"],
+    ) -> Optional[Dict[str, Any]]:
+        """Return the engine decision for an assignment, or None on unknown product.
+
+        The decision dict carries ``decision`` / ``reason`` /
+        ``governing_rule`` straight from
+        :func:`check_compatibility`, plus the canonical ``previous_product``
+        and ``attempted_product`` values so the rejection-record writer
+        does not have to re-canonicalize.
+        """
+
+        try:
+            attempted_product = canonicalize(assignment.fuel_grade)
+        except (UnknownFuelProductError, TypeError) as exc:
+            logger.error(
+                "CompartmentLoadingAgent: unknown product_code %r on "
+                "assignment for compartment %s; blocking: %s",
+                assignment.fuel_grade,
+                assignment.compartment_id,
+                exc,
+            )
+            return None
+
+        state = compartment_states.get(assignment.compartment_id)
+        previous_product_raw = (
+            state.last_loaded_product if state is not None else None
+        )
+
+        try:
+            decision = check_compatibility(
+                previous_product_raw,
+                attempted_product,
+                state,
+                rules=compatibility_rules,
+            )
+        except UnknownFuelProductError as exc:
+            # Only fires when previous_product is an unknown legacy value
+            # — treat as a hard block so the bad value never slips past
+            # the guard.
+            logger.error(
+                "CompartmentLoadingAgent: compartment %s last_loaded_product "
+                "%r is not in the fuel catalog; blocking next load: %s",
+                assignment.compartment_id,
+                previous_product_raw,
+                exc,
+            )
+            return {
+                "decision": "blocked",
+                "reason": REASON_CROSS_CONTAMINATION_BLOCKED,
+                "governing_rule": "blocked",
+                "previous_product": previous_product_raw,
+                "attempted_product": attempted_product,
+            }
+
+        # ``previous_product`` on the violation record is canonical, so
+        # pass through ``canonicalize_or_warn`` (tolerant of None) to
+        # preserve legacy/unknown values without crashing the audit
+        # write when they have already been accepted upstream.
+        canonical_prev = (
+            canonicalize_or_warn(
+                previous_product_raw,
+                context="cross_contamination_events.previous_product",
+                logger_=logger,
+            )
+            if previous_product_raw
+            else None
+        )
+
+        return {
+            "decision": decision["decision"],
+            "reason": decision["reason"],
+            "governing_rule": decision["governing_rule"],
+            "previous_product": canonical_prev,
+            "attempted_product": attempted_product,
+        }
+
+    @staticmethod
+    def _previous_product_for(
+        compartment_id: str,
+        compartment_states: Mapping[str, CompartmentState],
+    ) -> Optional[str]:
+        """Return the raw ``last_loaded_product`` for a compartment (or None)."""
+
+        state = compartment_states.get(compartment_id)
+        return state.last_loaded_product if state is not None else None
+
+    async def _record_cross_contamination_rejection(
+        self,
+        *,
+        assignment: CompartmentAssignment,
+        truck_id: str,
+        tenant_id: str,
+        plan_id: str,
+        run_id: str,
+        previous_product: Optional[str],
+        attempted_product: str,
+        governing_rule: str,
+        decision: str,
+        reason: str,
+        extra_context: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Persist a CrossContaminationViolation and publish a RiskSignal.
+
+        The two side effects are each wrapped in a try/except so a
+        transient failure (ES outage, signal bus blip) on one does not
+        abort the other — the important safety invariant is that the
+        Compartment_Loading_Agent keeps evaluating the remaining
+        assignments and never commits a rejected one to
+        ``mvp_load_plans``.
+        """
+
+        compartment_id = assignment.compartment_id
+        compartment_doc_id = f"{truck_id}_{compartment_id}"
+        event_id = f"ccv_{uuid4()}"
+        now_iso = datetime.now(timezone.utc)
+
+        # ---- Build + persist the violation record ----
+        try:
+            violation = CrossContaminationViolation(
+                event_id=event_id,
+                tenant_id=tenant_id,
+                compartment_id=compartment_doc_id,
+                truck_id=truck_id,
+                previous_product=previous_product,
+                attempted_product=attempted_product,
+                governing_rule=governing_rule,  # type: ignore[arg-type]
+                decision=decision,  # type: ignore[arg-type]
+                reason=reason,  # type: ignore[arg-type]
+                actor_id=self.agent_id,
+                plan_id=plan_id,
+                timestamp=now_iso,
+                created_at=now_iso,
+                updated_at=now_iso,
+            )
+        except Exception as exc:
+            # The Pydantic validator rejected the payload (e.g. the
+            # governing_rule was outside the literal set). Log a
+            # structured error and continue — the SignalBus publish
+            # below still fires so downstream overlays react.
+            logger.error(
+                "CompartmentLoadingAgent: failed to build "
+                "CrossContaminationViolation for compartment %s (plan=%s, "
+                "tenant=%s): %s",
+                compartment_doc_id,
+                plan_id,
+                tenant_id,
+                exc,
+            )
+            violation = None
+
+        if violation is not None:
+            try:
+                await self._es.index_document(
+                    CROSS_CONTAMINATION_EVENTS_INDEX,
+                    violation.event_id,
+                    violation.model_dump(mode="json", exclude_none=False),
+                )
+            except Exception as exc:
+                # An ES write failure here must never abort the plan —
+                # we log and keep going so the RiskSignal still fires.
+                logger.error(
+                    "CompartmentLoadingAgent: failed to persist "
+                    "CrossContaminationViolation %s for compartment %s "
+                    "(plan=%s, tenant=%s): %s",
+                    event_id,
+                    compartment_doc_id,
+                    plan_id,
+                    tenant_id,
+                    exc,
+                )
+
+        # ---- Publish the RiskSignal ----
+        context: Dict[str, Any] = {
+            "event_id": event_id,
+            "compartment_id": compartment_doc_id,
+            "truck_id": truck_id,
+            "previous_product": previous_product,
+            "attempted_product": attempted_product,
+            "decision": decision,
+            "reason": reason,
+            "governing_rule": governing_rule,
+            "plan_id": plan_id,
+            "run_id": run_id,
+            "fuel_grade": assignment.fuel_grade,
+            "station_id": assignment.station_id,
+            "quantity_liters": assignment.quantity_liters,
+        }
+        if extra_context:
+            context.update(extra_context)
+
+        try:
+            severity = (
+                Severity.HIGH if decision == "blocked" else Severity.MEDIUM
+            )
+            signal = RiskSignal(
+                source_agent=self.agent_id,
+                entity_id=compartment_doc_id,
+                entity_type=CROSS_CONTAMINATION_VIOLATION_ENTITY_TYPE,
+                severity=severity,
+                confidence=1.0,
+                ttl_seconds=3600,
+                tenant_id=tenant_id,
+                context=context,
+            )
+            await self._signal_bus.publish(signal)
+        except Exception as exc:
+            logger.error(
+                "CompartmentLoadingAgent: failed to publish "
+                "cross_contamination_violation RiskSignal for compartment "
+                "%s (plan=%s, tenant=%s): %s",
+                compartment_doc_id,
+                plan_id,
+                tenant_id,
+                exc,
+            )
+
+        logger.warning(
+            "CompartmentLoadingAgent: rejected assignment for compartment %s "
+            "(plan=%s, tenant=%s) — decision=%s reason=%s "
+            "previous_product=%r attempted_product=%r",
+            compartment_doc_id,
+            plan_id,
+            tenant_id,
+            decision,
+            reason,
+            previous_product,
+            attempted_product,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+_FUEL_DENSITY_CANONICAL: Dict[str, float] = {
+    # Canonical US product densities (kg/L). Matches the gasoline/diesel
+    # values used by compartment_solver.FUEL_DENSITY under the legacy NG
+    # codes so plans evaluated before and after Task 6.5 report the same
+    # total_weight_kg for the same assignments.
+    "DIESEL_2": 0.85,
+    "OFF_ROAD_DIESEL": 0.85,
+    "HEATING_OIL": 0.85,
+    "GASOLINE_REG": 0.74,
+    "GASOLINE_PREM": 0.74,
+    "ETHANOL_E85": 0.78,
+    "KEROSENE": 0.80,
+    "PROPANE": 0.51,
+    "DEF": 1.09,
+    # Legacy NG aliases carried forward so pre-canonicalization plans
+    # still compute a sensible weight even if the assignment slipped
+    # through without canonicalization.
+    "AGO": 0.85,
+    "PMS": 0.74,
+    "ATK": 0.80,
+    "LPG": 0.51,
+}
+
+
+def _fuel_density_kg_per_liter(fuel_grade: str) -> float:
+    """Return the fuel density for a canonical or legacy code.
+
+    Matches :data:`Agents.support.compartment_solver.FUEL_DENSITY` for
+    the legacy NG codes and extends coverage to every catalog product in
+    :data:`fuel.services.fuel_product_catalog.FUEL_PRODUCT_CATALOG`. An
+    unknown code falls back to 0.85 kg/L (the diesel default used by
+    ``compartment_solver``) so weight totals degrade gracefully.
+    """
+
+    if not isinstance(fuel_grade, str):
+        return 0.85
+    return _FUEL_DENSITY_CANONICAL.get(fuel_grade.strip().upper(), 0.85)
+

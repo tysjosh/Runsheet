@@ -140,7 +140,9 @@ class TestRecordConsumption:
         doc = call_args[0][2]
         assert doc["event_type"] == "consumption"
         assert doc["station_id"] == "STATION-001"
-        assert doc["fuel_type"] == "AGO"
+        # Per Req 6.1.4, "AGO" canonicalizes to the US code "DIESEL_2"
+        # before the consumption event is persisted.
+        assert doc["fuel_type"] == "DIESEL_2"
         assert doc["quantity_liters"] == 100.0
         assert doc["asset_id"] == "TRUCK-001"
         assert doc["operator_id"] == "OP-001"

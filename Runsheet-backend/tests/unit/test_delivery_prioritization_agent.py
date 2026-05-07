@@ -54,16 +54,22 @@ def _make_forecast(
     confidence=0.7,
     tenant_id="tenant-1",
     run_id="run-1",
+    hours_to_runout_p50=12.0,
+    hours_to_runout_p90=8.0,
+    customer_id=None,
+    customer_tank_id=None,
 ):
     return TankForecast(
         station_id=station_id,
         fuel_grade=fuel_grade,
-        hours_to_runout_p50=12.0,
-        hours_to_runout_p90=8.0,
+        hours_to_runout_p50=hours_to_runout_p50,
+        hours_to_runout_p90=hours_to_runout_p90,
         runout_risk_24h=runout_risk_24h,
         confidence=confidence,
         tenant_id=tenant_id,
         run_id=run_id,
+        customer_id=customer_id,
+        customer_tank_id=customer_tank_id,
     )
 
 
@@ -466,3 +472,339 @@ class TestLoadScoringWeights:
         )
         weights = await agent._load_scoring_weights("tenant-1")
         assert weights == DEFAULT_SCORING_WEIGHTS
+
+
+# ---------------------------------------------------------------------------
+# Tests: Phase 5 persistence fields (Req 3.1.3, 3.3.3, 3.3.4, 3.4.2)
+# ---------------------------------------------------------------------------
+
+
+class TestPersistNewFields:
+    """Verify the delivery priority entry carries the new Phase-5 fields.
+
+    Covers Task 5.5 persistence: ``safe_to_delay_days``,
+    ``safe_to_delay_bucket``, ``business_impact_score``,
+    ``business_impact_reasons``, ``cluster_id``, ``cluster_size``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_priority_entry_carries_safe_to_delay(self):
+        """Req 3.1.3: safe_to_delay_days + safe_to_delay_bucket persisted."""
+        agent, deps = _make_agent()
+        # hours_to_runout_p90 = 48 → (48 - 6)/24 = 1.75 → floor = 1 → "short"
+        forecast = _make_forecast(station_id="s1")
+        forecast.hours_to_runout_p90 = 48.0
+        agent._forecast_buffer.append(forecast)
+        deps["es_service"].search_documents = AsyncMock(
+            return_value={"hits": {"hits": []}}
+        )
+
+        await agent.evaluate([])
+
+        published = deps["signal_bus"].publish.call_args[0][0]
+        entry = published.priorities[0]
+        assert entry.safe_to_delay_days == 1
+        assert entry.safe_to_delay_bucket == "short"
+
+    @pytest.mark.asyncio
+    async def test_priority_entry_carries_business_impact(self):
+        """Req 3.3.3/3.3.4: business_impact_score + reasons persisted."""
+        agent, deps = _make_agent()
+        forecast = _make_forecast(station_id="s1")
+        agent._forecast_buffer.append(forecast)
+        # Legacy station-level business_impact path (no customer profile).
+        deps["es_service"].search_documents = AsyncMock(
+            return_value={
+                "hits": {
+                    "hits": [
+                        {
+                            "_source": {
+                                "station_id": "s1",
+                                "sla_tier": "gold",
+                                "business_impact_score": 0.7,
+                            }
+                        }
+                    ]
+                }
+            }
+        )
+
+        await agent.evaluate([])
+
+        entry = deps["signal_bus"].publish.call_args[0][0].priorities[0]
+        assert entry.business_impact_score == pytest.approx(0.7)
+        assert entry.business_impact_reasons == ["legacy_station_metadata"]
+
+    @pytest.mark.asyncio
+    async def test_cluster_fields_remain_none_without_coordinates(self):
+        """Req 3.4.2: without lat/lon the DBSCAN stamp stays None."""
+        agent, deps = _make_agent()
+        agent._forecast_buffer.append(_make_forecast(station_id="s1"))
+        # No station metadata → no lat/lon resolvable.
+        deps["es_service"].search_documents = AsyncMock(
+            return_value={"hits": {"hits": []}}
+        )
+
+        await agent.evaluate([])
+
+        entry = deps["signal_bus"].publish.call_args[0][0].priorities[0]
+        assert entry.cluster_id is None
+        assert entry.cluster_size is None
+
+    @pytest.mark.asyncio
+    async def test_cluster_fields_populated_from_dbscan(self):
+        """Req 3.4.1/3.4.2: cluster_id/cluster_size stamped from DBSCAN."""
+        agent, deps = _make_agent()
+        # Three stations: s1 & s2 within 3-mile DBSCAN eps, s3 isolated.
+        agent._forecast_buffer.append(_make_forecast(station_id="s1"))
+        agent._forecast_buffer.append(_make_forecast(station_id="s2"))
+        agent._forecast_buffer.append(_make_forecast(station_id="s3"))
+        deps["es_service"].search_documents = AsyncMock(
+            return_value={
+                "hits": {
+                    "hits": [
+                        {
+                            "_source": {
+                                "station_id": "s1",
+                                "latitude": 40.7128,
+                                "longitude": -74.0060,
+                            }
+                        },
+                        {
+                            "_source": {
+                                "station_id": "s2",
+                                "latitude": 40.7130,
+                                "longitude": -74.0062,
+                            }
+                        },
+                        {
+                            "_source": {
+                                "station_id": "s3",
+                                "latitude": 41.8781,
+                                "longitude": -87.6298,
+                            }
+                        },
+                    ]
+                }
+            }
+        )
+
+        await agent.evaluate([])
+
+        entries = {
+            p.station_id: p
+            for p in deps["signal_bus"].publish.call_args[0][0].priorities
+        }
+        # s1/s2 should land in the same dense cluster.
+        assert entries["s1"].cluster_id == entries["s2"].cluster_id
+        assert entries["s1"].cluster_id is not None
+        assert entries["s1"].cluster_id != "noise"
+        assert entries["s1"].cluster_size == 2
+        assert entries["s2"].cluster_size == 2
+        # s3 is isolated → DBSCAN noise label, exposed as "noise".
+        assert entries["s3"].cluster_id == "noise"
+        assert entries["s3"].cluster_size == 1
+
+    @pytest.mark.asyncio
+    async def test_persisted_doc_includes_new_fields(self):
+        """The ES write payload mirrors the DeliveryPriority model fields."""
+        agent, deps = _make_agent()
+        forecast = _make_forecast(station_id="s1")
+        forecast.hours_to_runout_p90 = 120.0  # (120-6)/24 = 4.75 → floor = 4 → medium
+        agent._forecast_buffer.append(forecast)
+        deps["es_service"].search_documents = AsyncMock(
+            return_value={"hits": {"hits": []}}
+        )
+
+        await agent.evaluate([])
+
+        indexed_doc = deps["es_service"].index_document.call_args[0][2]
+        entry_doc = indexed_doc["priorities"][0]
+        assert entry_doc["safe_to_delay_days"] == 4
+        assert entry_doc["safe_to_delay_bucket"] == "medium"
+        assert "business_impact_score" in entry_doc
+        assert "business_impact_reasons" in entry_doc
+        assert entry_doc["cluster_id"] is None
+        assert entry_doc["cluster_size"] is None
+
+
+# ---------------------------------------------------------------------------
+# Tests: Business_impact replaces placeholder weight (Req 3.3.3)
+# ---------------------------------------------------------------------------
+
+
+class TestBusinessImpactIntegration:
+    """Verify the real business-impact score replaces the placeholder
+    on the weighted ``priority_score`` with the 0.15 weight retained."""
+
+    @pytest.mark.asyncio
+    async def test_uses_customer_profile_when_available(self):
+        """When a customer profile is supplied, the helper-produced score
+        is used instead of the station-level placeholder (Req 3.3.3)."""
+        from fuel.storm_mode_models import CustomerProfile
+
+        profile = CustomerProfile(
+            customer_id="cust-1",
+            tenant_id="tenant-1",
+            annual_revenue_usd=100_000.0,
+            contract_penalty_usd_per_day=1_000.0,
+            missed_delivery_cost_usd=500.0,
+            sla_tier="platinum",
+        )
+
+        async def loader(tenant_id, customer_ids):
+            return {"cust-1": profile}
+
+        agent, deps = _make_agent(customer_profile_loader=loader)
+        forecast = _make_forecast(station_id="s1")
+        forecast.customer_id = "cust-1"
+        agent._forecast_buffer.append(forecast)
+        # Station metadata provides a *different* business_impact to make
+        # sure the profile-sourced score wins.
+        deps["es_service"].search_documents = AsyncMock(
+            return_value={
+                "hits": {
+                    "hits": [
+                        {
+                            "_source": {
+                                "station_id": "s1",
+                                "business_impact_score": 0.1,
+                            }
+                        }
+                    ]
+                }
+            }
+        )
+
+        await agent.evaluate([])
+
+        entry = deps["signal_bus"].publish.call_args[0][0].priorities[0]
+        # With maxima derived from the single profile, the monetary
+        # components each saturate (ratio=1.0 × weight=0.4/0.3/0.2) and
+        # the platinum SLA adds 0.1, giving a business_impact_score of
+        # 1.0 — far higher than the station-level 0.1.
+        assert entry.business_impact_score == pytest.approx(1.0)
+        assert "legacy_station_metadata" not in entry.business_impact_reasons
+
+    @pytest.mark.asyncio
+    async def test_business_impact_weight_retained(self):
+        """The 0.15 weight on ``business_impact`` remains intact."""
+        from Agents.overlay.delivery_prioritization_agent import (
+            DEFAULT_SCORING_WEIGHTS,
+        )
+
+        assert DEFAULT_SCORING_WEIGHTS["business_impact"] == 0.15
+
+
+# ---------------------------------------------------------------------------
+# Tests: Combinable_Group emission (Req 3.2.3)
+# ---------------------------------------------------------------------------
+
+
+class TestCombinableGroupEmission:
+    @pytest.mark.asyncio
+    async def test_emits_combinable_group_for_co_located_forecasts(self):
+        """Two close-by forecasts with compatible fuel grades produce a group."""
+        agent, deps = _make_agent()
+        f1 = _make_forecast(station_id="s1")
+        f2 = _make_forecast(station_id="s2")
+        agent._forecast_buffer.extend([f1, f2])
+
+        # Both stations within 2 miles of each other (0.005° ~ 350m).
+        deps["es_service"].search_documents = AsyncMock(
+            return_value={
+                "hits": {
+                    "hits": [
+                        {
+                            "_source": {
+                                "station_id": "s1",
+                                "latitude": 40.7128,
+                                "longitude": -74.0060,
+                            }
+                        },
+                        {
+                            "_source": {
+                                "station_id": "s2",
+                                "latitude": 40.7178,
+                                "longitude": -74.0110,
+                            }
+                        },
+                    ]
+                }
+            }
+        )
+
+        # Intercept the repository persist to count emitted groups.
+        persist_mock = AsyncMock(return_value=[])
+        agent._combinable_group_repo = MagicMock()
+        agent._combinable_group_repo.persist_groups = persist_mock
+
+        await agent.evaluate([])
+
+        # One call with a single 2-member group.
+        assert persist_mock.await_count == 1
+        tenant_arg, groups_arg = persist_mock.call_args[0]
+        groups_list = list(groups_arg)
+        assert tenant_arg == "tenant-1"
+        assert len(groups_list) == 1
+        assert len(groups_list[0].members) == 2
+
+    @pytest.mark.asyncio
+    async def test_no_groups_when_stations_far_apart(self):
+        """Forecasts whose stations are far apart yield no groups."""
+        agent, deps = _make_agent()
+        agent._forecast_buffer.extend([
+            _make_forecast(station_id="s1"),
+            _make_forecast(station_id="s2"),
+        ])
+
+        deps["es_service"].search_documents = AsyncMock(
+            return_value={
+                "hits": {
+                    "hits": [
+                        {
+                            "_source": {
+                                "station_id": "s1",
+                                "latitude": 40.0,
+                                "longitude": -74.0,
+                            }
+                        },
+                        {
+                            "_source": {
+                                "station_id": "s2",
+                                "latitude": 41.0,  # ~70 miles apart
+                                "longitude": -74.0,
+                            }
+                        },
+                    ]
+                }
+            }
+        )
+        persist_mock = AsyncMock(return_value=[])
+        agent._combinable_group_repo = MagicMock()
+        agent._combinable_group_repo.persist_groups = persist_mock
+
+        await agent.evaluate([])
+
+        # The repository is never called — no ≥2-member components found.
+        assert persist_mock.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_combinable_group_failure_does_not_block_priorities(self):
+        """A persist failure must never prevent priority-list publication."""
+        agent, deps = _make_agent()
+        agent._forecast_buffer.append(_make_forecast(station_id="s1"))
+        deps["es_service"].search_documents = AsyncMock(
+            return_value={"hits": {"hits": []}}
+        )
+
+        broken_repo = MagicMock()
+        broken_repo.persist_groups = AsyncMock(
+            side_effect=RuntimeError("ES down")
+        )
+        agent._combinable_group_repo = broken_repo
+
+        await agent.evaluate([])
+
+        # Priority signal still fan-ed out.
+        assert deps["signal_bus"].publish.call_count == 1

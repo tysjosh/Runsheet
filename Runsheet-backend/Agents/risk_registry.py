@@ -31,9 +31,16 @@ DEFAULT_RISK_REGISTRY: Dict[str, RiskLevel] = {
     "create_job": RiskLevel.MEDIUM,
     "escalate_shipment": RiskLevel.MEDIUM,
     "request_fuel_refill": RiskLevel.MEDIUM,
+    # Emergency stop insertion routes through ConfirmationProtocol with
+    # caller-selected risk. Two distinct tool names keep the classification
+    # deterministic: the REST endpoint picks ``emergency_stop_insertion``
+    # for the MEDIUM path and ``emergency_stop_insertion_high_risk`` when
+    # 3+ stops shift or the insertion risks an SLA breach (Req 2.4.5).
+    "emergency_stop_insertion": RiskLevel.MEDIUM,
     # High risk - explicit approval required
     "cancel_job": RiskLevel.HIGH,
     "reassign_rider": RiskLevel.HIGH,
+    "emergency_stop_insertion_high_risk": RiskLevel.HIGH,
 }
 
 

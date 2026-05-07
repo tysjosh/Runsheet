@@ -42,15 +42,35 @@ PROOF_OF_DELIVERY_MAPPING = {
         "properties": {
             "pod_id":             {"type": "keyword"},
             "job_id":             {"type": "keyword"},
+            "order_id":           {"type": "keyword"},
             "recipient_name":     {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
+            # Tenant-prefixed file_refs (preferred) + legacy URL fields.
+            "signature_ref":      {"type": "keyword"},
+            "photo_refs":         {"type": "keyword"},
+            "meter_ticket_ref":   {"type": "keyword"},
             "signature_url":      {"type": "keyword"},
             "photo_urls":         {"type": "keyword"},
+            "delivered_gallons":          {"type": "double"},
+            "delivered_gallons_source":   {"type": "keyword"},
+            "delivered_at":       {"type": "date"},
+            # OCR metadata (Capability 4, Requirement 4.2.4–4.2.6). Populated
+            # when a ``meter_ticket_ref`` is supplied and the POD endpoint
+            # invokes MeterTicketOCRService to extract gallons.
+            "ocr_result_id":               {"type": "keyword"},
+            "ocr_confidence":              {"type": "double"},
+            "ocr_requires_manual_review":  {"type": "boolean"},
+            "ocr_error":                   {"type": "keyword"},
             "geotag":             {"type": "geo_point"},
             "timestamp":          {"type": "date"},
             "otp_verified":       {"type": "boolean"},
             "location_mismatch":  {"type": "boolean"},
             "status":             {"type": "keyword"},
             "tenant_id":          {"type": "keyword"},
+            # Hash-chain fields (Capability 4, Requirement 4.5).
+            "pod_hash":           {"type": "keyword"},
+            "previous_pod_hash":  {"type": "keyword"},
+            "chain_sequence":     {"type": "long"},
+            "persisted_at":       {"type": "date"},
         }
     },
     "settings": {

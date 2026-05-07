@@ -158,7 +158,9 @@ class TestCreateStation:
         es.index_document.assert_called_once()
         call_args = es.index_document.call_args
         assert call_args[0][0] == FUEL_STATIONS_INDEX
-        assert call_args[0][1] == "ST-001::PMS"
+        # Per Req 6.1.4, the legacy NG alias "PMS" canonicalizes to
+        # "GASOLINE_REG" before the composite doc_id is built.
+        assert call_args[0][1] == "ST-001::GASOLINE_REG"
 
     @pytest.mark.asyncio
     async def test_rejects_initial_stock_exceeding_capacity(self, settings_mock):

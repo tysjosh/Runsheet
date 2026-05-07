@@ -47,6 +47,10 @@ from Agents.support.mvp_es_mappings import (
     MVP_REPLAN_EVENTS_INDEX,
     MVP_ROUTES_INDEX,
 )
+from Agents.support.replan_diff_models import (
+    ReplanDiff as StructuredReplanDiff,
+    compute_replan_diff,
+)
 from inventory.es_mappings import INVENTORY_INDEX
 
 logger = logging.getLogger(__name__)
@@ -108,6 +112,7 @@ class ExceptionReplanningAgent(OverlayAgentBase):
         autonomy_config_service,
         feature_flag_service,
         inventory_service=None,
+        fuel_planning_ws_manager=None,
         poll_interval: int = 30,
         cooldown_minutes: int = 5,
     ):
@@ -132,6 +137,16 @@ class ExceptionReplanningAgent(OverlayAgentBase):
             cooldown_minutes=cooldown_minutes,
         )
         self._inventory_service = inventory_service
+
+        #: Dedicated fuel-planning WS manager used to emit the
+        #: ``replan_diff_ready`` event (Req 2.5.4) on ``/ws/fuel-planning``.
+        #: Distinct from ``self._ws`` (the generic agent-activity manager
+        #: inherited from :class:`AutonomousAgentBase`) so dispatcher UIs
+        #: listening on the fuel-planning channel receive the diff summary
+        #: in real time. Optional so existing tests and bootstrap paths that
+        #: haven't wired the manager yet continue to work — broadcasts are
+        #: silently skipped when the manager is ``None``.
+        self._fuel_planning_ws = fuel_planning_ws_manager
 
     # ------------------------------------------------------------------
     # Core evaluation (Req 5.1–5.8)
@@ -364,7 +379,41 @@ class ExceptionReplanningAgent(OverlayAgentBase):
             status="applied",
             tenant_id=tenant_id,
         )
-        await self._persist_replan_event(replan_event)
+
+        # Req 2.5.1–2.5.4 (Task 4.10): compute a structured Replan_Diff for
+        # every replan so the dispatcher UI gets a typed "what changed"
+        # document alongside the legacy free-form ReplanEvent.diff. The
+        # structured diff is derived from a patched-route projection (what
+        # the route_plan looked like before the replan vs. what it would
+        # look like after applying ``diff``) rather than a real
+        # RoutePlan-vs-RoutePlan comparison because the handler chain here
+        # only emits the high-level change description; the solver-produced
+        # ``patched`` route is computed downstream. Attaching the diff to
+        # the event doc keeps the two representations consistent and makes
+        # the REST fetch endpoint trivially ``event.replan_diff``.
+        structured_diff = self._build_structured_replan_diff(
+            plan_snapshot=plan_snapshot,
+            legacy_diff=diff,
+            disruption_type=disruption_type,
+            signal=signal,
+        )
+
+        await self._persist_replan_event(
+            replan_event, structured_diff=structured_diff
+        )
+
+        # Req 2.5.4: broadcast replan_diff_ready on /ws/fuel-planning after
+        # the event has been written so dispatcher UIs can fetch the full
+        # diff via GET /api/fuel/mvp/replans/{event_id}/diff. Broadcast
+        # failures never block the replan path; the persisted event is the
+        # source of truth.
+        if structured_diff is not None:
+            await self._broadcast_replan_diff_ready(
+                event_id=replan_event.event_id,
+                structured_diff=structured_diff,
+                tenant_id=tenant_id,
+                disruption_type=disruption_type,
+            )
 
         # Build proposal (Req 5.8)
         proposal = self._build_replan_proposal(
@@ -727,6 +776,18 @@ class ExceptionReplanningAgent(OverlayAgentBase):
         """
         self._inventory_service = inventory_service
 
+    def set_fuel_planning_ws_manager(self, manager) -> None:
+        """Wire the fuel-planning WebSocket manager post-construction.
+
+        ``None`` disables the ``replan_diff_ready`` broadcasts; the agent
+        continues to persist diffs to ``mvp_replan_events`` either way so
+        the REST fetch-by-event endpoint keeps working.
+
+        Args:
+            manager: A :class:`FuelPlanningWSManager` instance, or None.
+        """
+        self._fuel_planning_ws = manager
+
     # ------------------------------------------------------------------
     # Escalation (Req 5.6)
     # ------------------------------------------------------------------
@@ -893,10 +954,27 @@ class ExceptionReplanningAgent(OverlayAgentBase):
     # Persistence (Req 5.7)
     # ------------------------------------------------------------------
 
-    async def _persist_replan_event(self, replan_event: ReplanEvent) -> None:
-        """Persist a ReplanEvent to the mvp_replan_events ES index."""
+    async def _persist_replan_event(
+        self,
+        replan_event: ReplanEvent,
+        structured_diff: Optional[StructuredReplanDiff] = None,
+    ) -> None:
+        """Persist a ReplanEvent to the mvp_replan_events ES index.
+
+        When ``structured_diff`` is supplied (Req 2.5.2), the serialized
+        Replan_Diff is merged into the persisted document under the
+        ``replan_diff`` key. The legacy ``diff`` field (MVP pipeline
+        contract) is preserved so downstream consumers that still read
+        the free-form shape continue to work.
+        """
         try:
             doc = replan_event.model_dump(mode="json")
+            if structured_diff is not None:
+                # ``model_dump(mode="json")`` on StructuredReplanDiff
+                # produces ES-friendly primitives (ISO timestamps for
+                # ``generated_at`` and plain dicts for nested rows) so we
+                # can write it straight into the ES document.
+                doc["replan_diff"] = structured_diff.model_dump(mode="json")
             await self._es.index_document(
                 MVP_REPLAN_EVENTS_INDEX,
                 replan_event.event_id,
@@ -907,4 +985,258 @@ class ExceptionReplanningAgent(OverlayAgentBase):
                 "ExceptionReplanningAgent: failed to persist replan event %s: %s",
                 replan_event.event_id,
                 e,
+            )
+
+    # ------------------------------------------------------------------
+    # Structured Replan_Diff construction and broadcast (Req 2.5.1–2.5.4)
+    # ------------------------------------------------------------------
+
+    def _build_structured_replan_diff(
+        self,
+        *,
+        plan_snapshot: Dict[str, Any],
+        legacy_diff: ReplanDiff,
+        disruption_type: str,
+        signal: RiskSignal,
+    ) -> Optional[StructuredReplanDiff]:
+        """Derive a :class:`StructuredReplanDiff` from the current replan.
+
+        Constructs a "before / after" route view from ``plan_snapshot`` and
+        the legacy :class:`ReplanDiff` returned by the disruption handler,
+        then delegates to
+        :func:`Agents.support.replan_diff_models.compute_replan_diff` so the
+        overlay agent and the emergency-stop insertion path (Task 4.9) emit
+        identical diff shapes. When the original route cannot be located we
+        return ``None`` so the caller skips the broadcast — the persisted
+        legacy ``diff`` field still contains the change summary.
+
+        Args:
+            plan_snapshot: The ``{"loading_plan", "route_plan"}`` view
+                loaded from ES.
+            legacy_diff: The :class:`ReplanDiff` produced by the
+                disruption handler (truck_breakdown / station_outage /
+                demand_spike / delay).
+            disruption_type: Used only to pick a sensible synthesized
+                ``patched_route_id`` so the diff is self-describing.
+            signal: The originating RiskSignal, consulted for the spike
+                station's additional volume on demand-spike replans.
+
+        Returns:
+            A validated :class:`StructuredReplanDiff`, or ``None`` when
+            the snapshot lacks a route plan.
+        """
+        route_plan = plan_snapshot.get("route_plan") or {}
+        original_stops = route_plan.get("stops") or []
+        original_route_id = route_plan.get("route_id")
+        if not original_route_id or not original_stops:
+            return None
+
+        original_truck_id = route_plan.get("truck_id") or ""
+
+        # Step 1: normalize the original stops into a shape compatible
+        # with ``compute_replan_diff``. The helper already understands
+        # ``station_id`` / ``drop`` / ``eta`` so we only need to copy.
+        normalized_original: List[Dict[str, Any]] = []
+        for idx, stop in enumerate(original_stops):
+            if not isinstance(stop, dict):
+                continue
+            normalized_original.append(
+                {
+                    "stop_id": stop.get("station_id")
+                    or stop.get("customer_tank_id")
+                    or stop.get("stop_id")
+                    or f"stop_{idx}",
+                    "station_id": stop.get("station_id"),
+                    "customer_tank_id": stop.get("customer_tank_id"),
+                    "eta": stop.get("eta"),
+                    "drop": dict(stop.get("drop") or {}),
+                    "planned_gallons": stop.get("planned_gallons"),
+                    "product_code": stop.get("product_code")
+                    or stop.get("fuel_grade"),
+                    "sequence": stop.get("sequence", idx),
+                }
+            )
+
+        # Step 2: project a patched stop list from the legacy diff.
+        patched_stops = self._project_patched_stops(
+            normalized_original=normalized_original,
+            legacy_diff=legacy_diff,
+            disruption_type=disruption_type,
+            signal=signal,
+        )
+
+        # Step 3: derive a deterministic patched_route_id so the diff
+        # document is self-describing even when no real patched Route_Plan
+        # has been persisted yet (the solver-produced patched route is
+        # written later in the replan pipeline).
+        patched_truck_id = legacy_diff.truck_swapped or original_truck_id
+        patched_route_id = f"{original_route_id}:{disruption_type}:patched"
+
+        original_view = {
+            "route_id": original_route_id,
+            "truck_id": original_truck_id,
+            "stops": normalized_original,
+        }
+        patched_view = {
+            "route_id": patched_route_id,
+            "truck_id": patched_truck_id,
+            "stops": patched_stops,
+        }
+
+        try:
+            return compute_replan_diff(original_view, patched_view)
+        except ValueError as exc:
+            logger.warning(
+                "ExceptionReplanningAgent: unable to build structured "
+                "replan diff (disruption=%s, route=%s): %s",
+                disruption_type,
+                original_route_id,
+                exc,
+            )
+            return None
+
+    def _project_patched_stops(
+        self,
+        *,
+        normalized_original: List[Dict[str, Any]],
+        legacy_diff: ReplanDiff,
+        disruption_type: str,
+        signal: RiskSignal,
+    ) -> List[Dict[str, Any]]:
+        """Project the patched stop list the legacy diff implies.
+
+        The disruption handlers return high-level change hints (a reorder,
+        a deferral, a volume reallocation) rather than a fully-formed
+        patched route. To feed :func:`compute_replan_diff` we reconstruct
+        the stop-level view those hints imply:
+
+        * ``stations_deferred`` → remove the matching stops.
+        * ``stops_reordered`` → reorder the *remaining* stops by the
+          ids in the list (unknown ids are ignored, known ids not in
+          the list keep their relative order at the end).
+        * ``volumes_reallocated`` → for demand-spike replans the signal
+          carries ``additional_liters`` that the handler reallocates to
+          the spike station; mirror that here so ``quantity_changes``
+          fires.
+
+        The projection only mutates a *copy* of the normalized original —
+        the caller keeps the original intact.
+        """
+        by_id: Dict[str, Dict[str, Any]] = {}
+        for stop in normalized_original:
+            by_id[str(stop["stop_id"])] = dict(stop)
+
+        deferred = set(legacy_diff.stations_deferred or [])
+        # Remove deferred stops up front; they also drop out of any
+        # reorder hint since that list is produced from the remaining
+        # stops anyway.
+        for stop_id in list(by_id.keys()):
+            if stop_id in deferred:
+                by_id.pop(stop_id, None)
+
+        # Apply quantity reallocations as a delta on planned_gallons so the
+        # downstream helper surfaces a QuantityChange entry for the spike
+        # station. Liters are not rescaled into gallons here — the diff
+        # consumer already tracks gallons in its own unit system and we
+        # pass whatever unit the legacy diff uses, which is the same one
+        # the stop drop dict uses (liters for MVP routes, gallons for
+        # fuel-ops-hardened routes).
+        for stop_id, delta in (legacy_diff.volumes_reallocated or {}).items():
+            stop = by_id.get(str(stop_id))
+            if stop is None:
+                continue
+            # Prefer ``planned_gallons`` when the route uses that field;
+            # otherwise fold the delta into ``drop`` for MVP routes.
+            if stop.get("planned_gallons") is not None:
+                try:
+                    stop["planned_gallons"] = (
+                        float(stop["planned_gallons"]) + float(delta)
+                    )
+                except (TypeError, ValueError):
+                    continue
+            else:
+                drop = dict(stop.get("drop") or {})
+                if drop:
+                    # Distribute the delta across the existing grades
+                    # proportionally; for single-grade drops this is a
+                    # straight add.
+                    total = sum(
+                        float(v) for v in drop.values() if v is not None
+                    )
+                    if total > 0:
+                        for grade, vol in list(drop.items()):
+                            try:
+                                share = float(vol) / total
+                                drop[grade] = float(vol) + (
+                                    float(delta) * share
+                                )
+                            except (TypeError, ValueError):
+                                continue
+                    else:
+                        # Empty drop dict — record the delta under an
+                        # unknown grade so quantity_changes still fires.
+                        drop["_spike_delta"] = float(delta)
+                    stop["drop"] = drop
+
+        # Apply reordering if the legacy diff carries an explicit list.
+        ordered_ids: List[str] = [
+            str(sid) for sid in (legacy_diff.stops_reordered or []) if sid
+        ]
+        if ordered_ids:
+            seen: List[Dict[str, Any]] = []
+            used: set[str] = set()
+            for sid in ordered_ids:
+                stop = by_id.get(sid)
+                if stop is not None and sid not in used:
+                    seen.append(stop)
+                    used.add(sid)
+            # Append any remaining unreferenced stops (defensive: the
+            # handlers already produce a complete list of remaining stops).
+            for sid, stop in by_id.items():
+                if sid in used:
+                    continue
+                seen.append(stop)
+                used.add(sid)
+            # Re-stamp the sequence so ``_index_stops_by_id`` sees the
+            # updated ordering — the helper itself indexes by enumeration,
+            # but keeping ``sequence`` consistent helps downstream tools.
+            for idx, stop in enumerate(seen):
+                stop["sequence"] = idx
+            return seen
+
+        return list(by_id.values())
+
+    async def _broadcast_replan_diff_ready(
+        self,
+        *,
+        event_id: str,
+        structured_diff: StructuredReplanDiff,
+        tenant_id: str,
+        disruption_type: str,
+    ) -> None:
+        """Fire ``replan_diff_ready`` on ``/ws/fuel-planning`` (Req 2.5.4).
+
+        Skips silently when no fuel-planning WS manager is wired so
+        existing bootstrap paths that run without it continue to work.
+        Any exception from the WS manager is logged and swallowed — the
+        persisted event remains the source of truth.
+        """
+        if self._fuel_planning_ws is None:
+            return
+        try:
+            await self._fuel_planning_ws.broadcast_replan_diff_ready(
+                event_id=event_id,
+                diff_id=structured_diff.diff_id,
+                tenant_id=tenant_id,
+                summary=structured_diff.summary_counts(),
+                replan_type=disruption_type,
+                original_route_id=structured_diff.original_route_id,
+                patched_route_id=structured_diff.patched_route_id,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "ExceptionReplanningAgent: replan_diff_ready broadcast "
+                "failed for event=%s: %s",
+                event_id,
+                exc,
             )

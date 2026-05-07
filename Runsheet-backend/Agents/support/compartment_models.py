@@ -48,6 +48,16 @@ class LoadingPlan(BaseModel):
     total_weight_kg: float = Field(default=0.0, ge=0.0)
     tenant_id: str
     run_id: str = ""
+    #: Optional :class:`fuel.terminal_models.SupplierContract` id that
+    #: sourced the load. When set, committing the plan bumps the
+    #: tenant's monthly rolling-lift counter for this contract in Redis
+    #: (Task 7.6 / Req 8.3.4). Defaults to ``None`` so legacy call
+    #: sites that do not yet go through the Sourcing_Recommender keep
+    #: working unchanged.
+    contract_id: Optional[str] = None
+    #: Optional terminal id carried alongside ``contract_id`` so audit
+    #: queries can correlate the counter bump with the terminal lift.
+    terminal_id: Optional[str] = None
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)
     )

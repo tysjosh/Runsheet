@@ -320,40 +320,32 @@ class TestGetForecasts:
 
 
 # ---------------------------------------------------------------------------
-# Tests: GET /api/fuel/mvp/priorities (Req 8.5)
+# Tests: GET /api/fuel/mvp/priorities (Req 8.5) — migrated to
+# fuel.api.fuel_ops_endpoints. Kept here as a regression guard so the
+# handler is never reintroduced on the legacy router (which would cause a
+# duplicate-route registration conflict with the migrated endpoint).
 # ---------------------------------------------------------------------------
 
 
 class TestGetPriorities:
-    def test_returns_paginated_priorities(self):
-        es = _make_mock_es()
-        priority_doc = {
-            "priority_list_id": "pl1",
-            "priorities": [],
-            "tenant_id": "tenant-1",
-        }
-        es.search_documents = AsyncMock(return_value={
-            "hits": {
-                "hits": [{"_source": priority_doc}],
-                "total": {"value": 1},
-            }
-        })
+    def test_priorities_not_on_legacy_router(self):
+        """Priorities handler has moved to fuel.api.fuel_ops_endpoints.
 
-        app, _, _ = _create_test_app(es_service=es)
-        client = TestClient(app)
-
-        resp = client.get("/api/fuel/mvp/priorities?tenant_id=tenant-1")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["total"] == 1
-        assert len(data["items"]) == 1
-
-    def test_requires_tenant_id(self):
+        The legacy :mod:`Agents.support.mvp_endpoints` router must not
+        register ``/api/fuel/mvp/priorities`` anymore; if it does, both
+        routers would attempt the same registration and the fuel-ops
+        router's tenant-JWT-based handler would collide with the legacy
+        query-param-based one. This test asserts the handler is truly
+        gone.
+        """
         app, _, _ = _create_test_app()
         client = TestClient(app)
 
-        resp = client.get("/api/fuel/mvp/priorities")
-        assert resp.status_code == 422
+        resp = client.get("/api/fuel/mvp/priorities?tenant_id=tenant-1")
+        # With only the legacy router mounted, the route should 404 —
+        # the real endpoint lives on the fuel-ops router and is covered
+        # by tests/unit/test_fuel_ops_priorities_endpoints.py.
+        assert resp.status_code == 404
 
 
 # ---------------------------------------------------------------------------

@@ -19,6 +19,11 @@ from typing import Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
+from fuel.services.fuel_product_catalog import (
+    UnknownFuelProductError,
+    canonicalize,
+)
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -357,7 +362,7 @@ async def replan(
 
 
 # ---------------------------------------------------------------------------
-# GET /api/fuel/mvp/forecasts (Req 8.4)
+# GET /api/fuel/mvp/forecasts (Req 8.4 + fuel-ops hardening Req 1.1.4, 1.6.1)
 # ---------------------------------------------------------------------------
 
 
@@ -367,12 +372,50 @@ async def get_forecasts(
     tenant_id: str = Query(..., description="Tenant identifier"),
     station_id: Optional[str] = Query(None, description="Filter by station ID"),
     fuel_grade: Optional[str] = Query(None, description="Filter by fuel grade"),
+    customer_tank_id: Optional[str] = Query(
+        None,
+        description=(
+            "Filter to a single Customer_Tank (fuel-ops hardening Req 1.1.4)."
+        ),
+    ),
+    customer_id: Optional[str] = Query(
+        None,
+        description=(
+            "Filter to all forecasts belonging to a customer_id "
+            "(fuel-ops hardening Req 1.1.4)."
+        ),
+    ),
+    customer_type: Optional[str] = Query(
+        None,
+        description=(
+            "Filter by customer_type (residential | commercial | keep_full | "
+            "will_call | auto_fill; Req 1.1.4)."
+        ),
+    ),
+    fuel_type: Optional[str] = Query(
+        None,
+        description=(
+            "Filter by fuel_type family (propane | heating_oil | diesel | "
+            "generator_fuel | farm_fuel | gasoline; Req 1.1.4)."
+        ),
+    ),
     page: int = Query(1, ge=1, description="Page number"),
     size: int = Query(20, ge=1, le=100, description="Page size"),
 ):
     """Retrieve the latest tank forecasts with optional filters.
 
-    Validates: Requirement 8.4
+    The ``customer_tank_id`` / ``customer_id`` / ``customer_type`` /
+    ``fuel_type`` parameters let fuel-marketer UIs slice forecasts per
+    residential / commercial / keep-full customer without pulling the
+    full retail-station list (fuel-ops hardening Req 1.1.4 and 1.6.1).
+
+    When ``fuel_grade`` is supplied, legacy NG aliases (``AGO``, ``PMS``,
+    ``ATK``, ``LPG``) are canonicalized before matching so queries work
+    regardless of whether the tenant has migrated to the US product
+    catalog. Unknown codes degrade to the raw value so they return an
+    empty result rather than a 400.
+
+    Validates: Requirements 8.4, 1.1.4, 1.6.1.
     """
     es = _get_es()
 
@@ -380,7 +423,23 @@ async def get_forecasts(
     if station_id:
         must_clauses.append({"term": {"station_id": station_id}})
     if fuel_grade:
-        must_clauses.append({"term": {"fuel_grade": fuel_grade}})
+        # Canonicalize legacy aliases so AGO → DIESEL_2 matches the
+        # canonicalized ``fuel_grade`` column written by the agent
+        # (Req 6.1.4). Unknown codes fall back to raw-value matching so
+        # the caller sees an empty result set rather than a 400.
+        try:
+            normalized_grade = canonicalize(fuel_grade)
+        except UnknownFuelProductError:
+            normalized_grade = fuel_grade
+        must_clauses.append({"term": {"fuel_grade": normalized_grade}})
+    if customer_tank_id:
+        must_clauses.append({"term": {"customer_tank_id": customer_tank_id}})
+    if customer_id:
+        must_clauses.append({"term": {"customer_id": customer_id}})
+    if customer_type:
+        must_clauses.append({"term": {"customer_type": customer_type}})
+    if fuel_type:
+        must_clauses.append({"term": {"fuel_type": fuel_type}})
 
     query = {
         "query": {"bool": {"must": must_clauses}},
@@ -410,48 +469,16 @@ async def get_forecasts(
 
 
 # ---------------------------------------------------------------------------
-# GET /api/fuel/mvp/priorities (Req 8.5)
+# GET /api/fuel/mvp/priorities (moved — see fuel.api.fuel_ops_endpoints)
 # ---------------------------------------------------------------------------
-
-
-@router.get("/priorities")
-async def get_priorities(
-    request: Request,
-    tenant_id: str = Query(..., description="Tenant identifier"),
-    page: int = Query(1, ge=1, description="Page number"),
-    size: int = Query(20, ge=1, le=100, description="Page size"),
-):
-    """Retrieve the latest delivery priority rankings.
-
-    Validates: Requirement 8.5
-    """
-    es = _get_es()
-
-    query = {
-        "query": {"bool": {"must": [{"term": {"tenant_id": tenant_id}}]}},
-        "sort": [{"timestamp": {"order": "desc"}}],
-        "from": (page - 1) * size,
-        "size": size,
-    }
-
-    try:
-        resp = await es.search_documents("mvp_delivery_priorities", query, size)
-        hits = resp.get("hits", {}).get("hits", [])
-        total = resp.get("hits", {}).get("total", {})
-        total_count = total.get("value", 0) if isinstance(total, dict) else total
-
-        items = [hit["_source"] for hit in hits]
-
-        from schemas.common import paginated_response_dict
-        return paginated_response_dict(
-            items=items,
-            total=total_count,
-            page=page,
-            page_size=size,
-        )
-    except Exception as e:
-        logger.error("Failed to query priorities: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+#
+# Task 5.6 of the fuel-ops-hardening spec migrated the priorities endpoint
+# to :mod:`fuel.api.fuel_ops_endpoints` so it can share the same JWT-backed
+# tenant context used by the rest of the fuel-ops surface and gain the
+# Capability-3 ``safe_to_delay_bucket`` filter. Keeping the handler here
+# would create a duplicate FastAPI route registration at
+# ``/api/fuel/mvp/priorities`` because both routers are mounted during
+# bootstrap. See ``fuel/api/fuel_ops_endpoints.list_priorities``.
 
 # ---------------------------------------------------------------------------
 # PUT /api/fuel/mvp/compartments/{truck_id} (Req 6.1, 6.3)
@@ -480,11 +507,34 @@ async def configure_compartments(
         # Write each compartment document to the truck_compartments index
         written_compartments = []
         for compartment in body.compartments:
+            # Canonicalize every allowed_grade before persistence so legacy
+            # NG aliases (AGO/PMS/ATK/LPG) and US codes
+            # (DIESEL_2/GASOLINE_REG/KEROSENE/PROPANE) both land as the
+            # canonical product_code in truck_compartments (Req 6.1.4).
+            # Unknown codes propagate as a 400 VALIDATION_ERROR with the
+            # offending value surfaced back to the caller.
+            canonical_grades: List[str] = []
+            for grade in compartment.allowed_grades:
+                try:
+                    canonical_grades.append(canonicalize(grade))
+                except UnknownFuelProductError as exc:
+                    raise HTTPException(
+                        status_code=400,
+                        detail={
+                            "error_code": "unknown_product_code",
+                            "message": "Unknown fuel product in allowed_grades",
+                            "details": {
+                                "compartment_id": compartment.compartment_id,
+                                "fuel_grade": exc.code_or_alias,
+                            },
+                        },
+                    ) from exc
+
             doc = {
                 "compartment_id": compartment.compartment_id,
                 "truck_id": truck_id,
                 "capacity_liters": compartment.capacity_liters,
-                "allowed_grades": compartment.allowed_grades,
+                "allowed_grades": canonical_grades,
                 "position_index": compartment.position_index,
                 "tenant_id": tenant_id,
             }
@@ -526,6 +576,10 @@ async def configure_compartments(
             "compartments_configured": len(written_compartments),
             "status": "success",
         }
+    except HTTPException:
+        # Surface the original status code (e.g. 400 for unknown_product_code)
+        # rather than hiding it behind a generic 500.
+        raise
     except Exception as e:
         logger.error("Failed to configure compartments for %s: %s", truck_id, e)
         raise HTTPException(status_code=500, detail=str(e))

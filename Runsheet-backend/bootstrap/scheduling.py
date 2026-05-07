@@ -112,12 +112,30 @@ async def initialize(app, container: ServiceContainer) -> None:
         driver_ws_manager=driver_ws_manager,
     )
 
-    # Wire driver POD endpoints
+    # Wire driver POD endpoints. The ``ocr_service`` is optional: when the
+    # container hasn't wired a MeterTicketOCRService (e.g. in local dev
+    # without AWS creds or in unit tests), the POD flow silently skips
+    # OCR and the driver must enter ``delivered_gallons`` manually.
+    ocr_service = (
+        container.meter_ticket_ocr_service
+        if container.has("meter_ticket_ocr_service")
+        else None
+    )
+    # Redis client is used to serialize the per-tenant POD hash-chain lock
+    # (``pod_chain_lock:{tenant_id}``, Requirement 4.5.2). Multi-replica
+    # deployments MUST have ``redis_client`` wired in the container; when
+    # absent, the hash-chain writer falls back to a process-local lock so
+    # single-replica deployments / unit tests still run correctly.
+    redis_client = (
+        container.redis_client if container.has("redis_client") else None
+    )
     configure_pod_endpoints(
         es_service=es_service,
         job_service=job_service,
         scheduling_ws_manager=scheduling_ws_manager,
         driver_ws_manager=driver_ws_manager,
+        ocr_service=ocr_service,
+        redis_client=redis_client,
     )
     logger.info("Scheduling API configured")
 

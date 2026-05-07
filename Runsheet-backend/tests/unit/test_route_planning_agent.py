@@ -441,3 +441,339 @@ class TestBuildLocationList:
         )
         assert len(locations) == 1  # depot only
         assert station_order == []
+
+
+# ---------------------------------------------------------------------------
+# Tests: Traffic_Provider wiring (Req 2.1.3, 2.1.5, 2.1.6)
+# ---------------------------------------------------------------------------
+
+
+class _FakeTenantConfig:
+    """In-memory stand-in for a Redis-like tenant config backend.
+
+    Matches the ``TenantConfigLookup`` protocol expected by the agent.
+    """
+
+    def __init__(self, values=None):
+        self._values = dict(values or {})
+
+    async def get(self, key):
+        return self._values.get(key)
+
+
+def _make_fake_provider(
+    provider_name="mapbox",
+    *,
+    fail_with=None,
+    distance_value=12.5,
+):
+    """Build a MagicMock Traffic_Provider whose ``get_matrix`` returns a
+    fully-valid :class:`TravelMatrix` or raises ``fail_with`` when set.
+    """
+    from fuel.services.traffic_provider import TravelMatrix
+
+    provider = MagicMock()
+    provider.name = provider_name
+
+    async def _get_matrix(origins, destinations, depart_at, *, tenant_id):
+        if fail_with is not None:
+            raise fail_with
+        n_o = len(list(origins))
+        n_d = len(list(destinations))
+        return TravelMatrix(
+            origins=list(origins),
+            destinations=list(destinations),
+            distance_km=[[distance_value] * n_d for _ in range(n_o)],
+            duration_minutes=[[30.0] * n_d for _ in range(n_o)],
+            provider=provider_name,
+        )
+
+    provider.get_matrix = AsyncMock(side_effect=_get_matrix)
+    return provider
+
+
+class TestTrafficProviderGating:
+    @pytest.mark.asyncio
+    async def test_flag_disabled_no_traffic_call_no_fallback_annotation(self):
+        """When overlay.traffic_aware_routing is 'disabled' we must skip
+        the provider entirely and leave traffic_fallback=False since no
+        fallback actually occurred (Req 2.1.3)."""
+        agent, deps = _make_agent()
+        deps["feature_flag_service"].get_overlay_state = AsyncMock(
+            return_value="disabled"
+        )
+
+        provider = _make_fake_provider()
+        agent.set_traffic_provider_factory(lambda name, tenant_id: provider)
+        agent.set_tenant_config(
+            _FakeTenantConfig(
+                {"overlay.traffic_provider:tenant-1": "mapbox"}
+            )
+        )
+
+        agent._proposal_buffer.append(
+            _make_loading_proposal(station_ids=["station-1"])
+        )
+        deps["es_service"].search_documents = AsyncMock(
+            return_value={
+                "hits": {
+                    "hits": [
+                        _make_station_location_hit("station-1", 6.45, 3.40),
+                    ]
+                }
+            }
+        )
+
+        result = await agent.evaluate([])
+        assert len(result) == 1
+        provider.get_matrix.assert_not_awaited()
+
+        # Persisted route plan must carry traffic_fallback=False and
+        # traffic_provider=None when the flag is disabled.
+        doc = deps["es_service"].index_document.call_args[0][2]
+        assert doc["traffic_fallback"] is False
+        assert doc["traffic_provider"] is None
+
+    @pytest.mark.asyncio
+    async def test_flag_active_no_provider_configured_falls_back(self):
+        """Flag enabled but no provider configured → Haversine fallback
+        with traffic_fallback=True (Req 2.1.5)."""
+        agent, deps = _make_agent()
+        deps["feature_flag_service"].get_overlay_state = AsyncMock(
+            return_value="active_auto"
+        )
+        agent.set_tenant_config(_FakeTenantConfig({}))
+
+        agent._proposal_buffer.append(
+            _make_loading_proposal(station_ids=["station-1"])
+        )
+        deps["es_service"].search_documents = AsyncMock(
+            return_value={
+                "hits": {
+                    "hits": [
+                        _make_station_location_hit("station-1", 6.45, 3.40),
+                    ]
+                }
+            }
+        )
+
+        await agent.evaluate([])
+        doc = deps["es_service"].index_document.call_args[0][2]
+        assert doc["traffic_fallback"] is True
+        assert doc["traffic_provider"] is None
+
+    @pytest.mark.asyncio
+    async def test_flag_active_provider_success_no_fallback(self):
+        """Flag enabled + provider returns OK → traffic_fallback=False
+        and traffic_provider name is persisted (Req 2.1.6)."""
+        agent, deps = _make_agent()
+        deps["feature_flag_service"].get_overlay_state = AsyncMock(
+            return_value="active_auto"
+        )
+
+        provider = _make_fake_provider(provider_name="mapbox")
+        agent.set_traffic_provider_factory(lambda name, tenant_id: provider)
+        agent.set_tenant_config(
+            _FakeTenantConfig(
+                {"overlay.traffic_provider:tenant-1": "mapbox"}
+            )
+        )
+
+        agent._proposal_buffer.append(
+            _make_loading_proposal(station_ids=["station-1"])
+        )
+        deps["es_service"].search_documents = AsyncMock(
+            return_value={
+                "hits": {
+                    "hits": [
+                        _make_station_location_hit("station-1", 6.45, 3.40),
+                    ]
+                }
+            }
+        )
+
+        await agent.evaluate([])
+        provider.get_matrix.assert_awaited_once()
+        doc = deps["es_service"].index_document.call_args[0][2]
+        assert doc["traffic_fallback"] is False
+        assert doc["traffic_provider"] == "mapbox"
+
+    @pytest.mark.asyncio
+    async def test_provider_timeout_falls_back(self):
+        """TrafficProvider raising asyncio.TimeoutError triggers
+        Haversine fallback (Req 2.1.5)."""
+        import asyncio
+
+        agent, deps = _make_agent()
+        deps["feature_flag_service"].get_overlay_state = AsyncMock(
+            return_value="active_auto"
+        )
+
+        provider = _make_fake_provider(fail_with=asyncio.TimeoutError())
+        agent.set_traffic_provider_factory(lambda name, tenant_id: provider)
+        agent.set_tenant_config(
+            _FakeTenantConfig(
+                {"overlay.traffic_provider:tenant-1": "mapbox"}
+            )
+        )
+
+        agent._proposal_buffer.append(
+            _make_loading_proposal(station_ids=["station-1"])
+        )
+        deps["es_service"].search_documents = AsyncMock(
+            return_value={
+                "hits": {
+                    "hits": [
+                        _make_station_location_hit("station-1", 6.45, 3.40),
+                    ]
+                }
+            }
+        )
+
+        await agent.evaluate([])
+        doc = deps["es_service"].index_document.call_args[0][2]
+        assert doc["traffic_fallback"] is True
+        # Provider name is not stamped because the matrix never arrived.
+        assert doc["traffic_provider"] is None
+
+    @pytest.mark.asyncio
+    async def test_provider_budget_exceeded_falls_back(self):
+        """TrafficBudgetExceeded is treated as a fallback trigger
+        (Req 2.1.7 hooks into the same fallback path as 2.1.5)."""
+        from fuel.services.traffic_provider import TrafficBudgetExceeded
+
+        agent, deps = _make_agent()
+        deps["feature_flag_service"].get_overlay_state = AsyncMock(
+            return_value="active_auto"
+        )
+
+        provider = _make_fake_provider(
+            fail_with=TrafficBudgetExceeded(
+                tenant_id="tenant-1", month="2030-01", current=10, limit=10
+            )
+        )
+        agent.set_traffic_provider_factory(lambda name, tenant_id: provider)
+        agent.set_tenant_config(
+            _FakeTenantConfig(
+                {"overlay.traffic_provider:tenant-1": "mapbox"}
+            )
+        )
+
+        agent._proposal_buffer.append(
+            _make_loading_proposal(station_ids=["station-1"])
+        )
+        deps["es_service"].search_documents = AsyncMock(
+            return_value={
+                "hits": {
+                    "hits": [
+                        _make_station_location_hit("station-1", 6.45, 3.40),
+                    ]
+                }
+            }
+        )
+
+        await agent.evaluate([])
+        doc = deps["es_service"].index_document.call_args[0][2]
+        assert doc["traffic_fallback"] is True
+
+    @pytest.mark.asyncio
+    async def test_unknown_provider_name_falls_back(self):
+        """An unknown provider name triggers Haversine fallback without
+        touching the network."""
+        agent, deps = _make_agent()
+        deps["feature_flag_service"].get_overlay_state = AsyncMock(
+            return_value="active_auto"
+        )
+        agent.set_tenant_config(
+            _FakeTenantConfig(
+                {"overlay.traffic_provider:tenant-1": "not-a-real-provider"}
+            )
+        )
+
+        agent._proposal_buffer.append(
+            _make_loading_proposal(station_ids=["station-1"])
+        )
+        deps["es_service"].search_documents = AsyncMock(
+            return_value={
+                "hits": {
+                    "hits": [
+                        _make_station_location_hit("station-1", 6.45, 3.40),
+                    ]
+                }
+            }
+        )
+
+        await agent.evaluate([])
+        doc = deps["es_service"].index_document.call_args[0][2]
+        assert doc["traffic_fallback"] is True
+        assert doc["traffic_provider"] is None
+
+
+class TestResolveTrafficProviderName:
+    @pytest.mark.asyncio
+    async def test_plain_string_value(self):
+        agent, _ = _make_agent()
+        agent.set_tenant_config(
+            _FakeTenantConfig(
+                {"overlay.traffic_provider:tenant-1": "Mapbox"}
+            )
+        )
+        name = await agent._resolve_traffic_provider_name("tenant-1")
+        assert name == "mapbox"
+
+    @pytest.mark.asyncio
+    async def test_json_object_with_name(self):
+        agent, _ = _make_agent()
+        agent.set_tenant_config(
+            _FakeTenantConfig(
+                {"overlay.traffic_provider:tenant-1": '{"name": "here"}'}
+            )
+        )
+        name = await agent._resolve_traffic_provider_name("tenant-1")
+        assert name == "here"
+
+    @pytest.mark.asyncio
+    async def test_missing_key_returns_none(self):
+        agent, _ = _make_agent()
+        agent.set_tenant_config(_FakeTenantConfig({}))
+        assert await agent._resolve_traffic_provider_name("tenant-1") is None
+
+    @pytest.mark.asyncio
+    async def test_no_tenant_config_returns_none(self):
+        agent, _ = _make_agent()
+        assert await agent._resolve_traffic_provider_name("tenant-1") is None
+
+
+class TestTrafficAwareRoutingFlag:
+    @pytest.mark.asyncio
+    async def test_active_auto_enabled(self):
+        agent, deps = _make_agent()
+        deps["feature_flag_service"].get_overlay_state = AsyncMock(
+            return_value="active_auto"
+        )
+        assert await agent._traffic_aware_routing_enabled("tenant-1") is True
+
+    @pytest.mark.asyncio
+    async def test_active_gated_enabled(self):
+        agent, deps = _make_agent()
+        deps["feature_flag_service"].get_overlay_state = AsyncMock(
+            return_value="active_gated"
+        )
+        assert await agent._traffic_aware_routing_enabled("tenant-1") is True
+
+    @pytest.mark.asyncio
+    async def test_shadow_not_enabled(self):
+        """Shadow mode must NOT consume the traffic budget (Req 2.1.3)."""
+        agent, deps = _make_agent()
+        deps["feature_flag_service"].get_overlay_state = AsyncMock(
+            return_value="shadow"
+        )
+        assert await agent._traffic_aware_routing_enabled("tenant-1") is False
+
+    @pytest.mark.asyncio
+    async def test_disabled_not_enabled(self):
+        agent, deps = _make_agent()
+        deps["feature_flag_service"].get_overlay_state = AsyncMock(
+            return_value="disabled"
+        )
+        assert await agent._traffic_aware_routing_enabled("tenant-1") is False
