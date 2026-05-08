@@ -190,6 +190,14 @@ MVP_ROUTES_MAPPING = {
             # Fuel Ops Hardening Req 2.1.5 / 2.1.6 — traffic provenance
             "traffic_provider": {"type": "keyword"},
             "traffic_fallback": {"type": "boolean"},
+            # Fuel Ops Hardening Task 7.10 / Req 8.5.5 — sourcing provenance
+            "sourced_terminal_id":        {"type": "keyword"},
+            "sourced_terminal_reasons":   {"type": "keyword"},
+            "sourcing_recommendation_id": {"type": "keyword"},
+            # Fuel Ops Hardening Task 9.7 / Req 5.4.6 — start-position provenance
+            "start_position_source": {"type": "keyword"},
+            "start_position_lat":    {"type": "double"},
+            "start_position_lon":    {"type": "double"},
         },
     },
     "settings": {

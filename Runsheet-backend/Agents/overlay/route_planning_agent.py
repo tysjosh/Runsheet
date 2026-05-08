@@ -56,6 +56,13 @@ from fuel.services.traffic_provider import (
     TravelMatrix,
     build_traffic_provider,
 )
+from fuel.services.truck_start_position import (
+    DepotResolver,
+    NoDepotConfiguredError,
+    SOURCE_DEPOT,
+    TruckStartPosition,
+    resolve_truck_start_position,
+)
 from fuel.terminal_models import SourcingRecommendation
 
 logger = logging.getLogger(__name__)
@@ -169,6 +176,7 @@ class RoutePlanningAgent(OverlayAgentBase):
         traffic_provider_factory: Optional[TrafficProviderFactory] = None,
         tenant_config: Optional[TenantConfigLookup] = None,
         sourcing_recommender: Optional[SourcingRecommender] = None,
+        depot_resolver: Optional[DepotResolver] = None,
     ):
         super().__init__(
             agent_id="route_planning",
@@ -219,6 +227,17 @@ class RoutePlanningAgent(OverlayAgentBase):
             sourcing_recommender
         )
 
+        # ---- Depot resolver wiring (Task 9.7 / Req 5.4.6) --------------
+        # Delegates the truck.assigned_depot_id → tenant.default_depot_id
+        # chain to the caller. The agent does not own depot lookups —
+        # it only decides whether to use fresh telemetry or fall back to
+        # the depot. ``None`` until bootstrap injects the resolver via
+        # :meth:`set_depot_resolver`; until then the agent preserves the
+        # legacy single-depot behaviour (``DEFAULT_DEPOT`` at index 0)
+        # for backward compatibility with existing tests that predate
+        # depot resolution.
+        self._depot_resolver: Optional[DepotResolver] = depot_resolver
+
     # ------------------------------------------------------------------
     # Public wiring hooks (bootstrap injects these after construction)
     # ------------------------------------------------------------------
@@ -261,6 +280,25 @@ class RoutePlanningAgent(OverlayAgentBase):
         required an external lift (Task 7.10, Req 8.5.5).
         """
         self._sourcing_recommender = recommender
+
+    def set_depot_resolver(
+        self, resolver: Optional[DepotResolver]
+    ) -> None:
+        """Inject the depot-resolution callable post-construction.
+
+        The resolver encapsulates the tenant-specific
+        ``truck.assigned_depot_id → tenant.default_depot_id`` chain and
+        returns ``(lat, lon)`` for the assigned depot — or ``None`` when
+        no depot is configured for the tenant. Passing ``None``
+        disables telemetry-first start-position resolution entirely:
+        the agent preserves the legacy single-depot behaviour
+        (``DEFAULT_DEPOT`` at index 0) so existing tests and bootstrap
+        states continue to work. The production bootstrap injects a
+        resolver backed by :class:`fuel.depot_models.DepotRepository`
+        and :class:`services.tenant_settings.TenantSettingsService`
+        (Task 9.7, Req 5.4.6).
+        """
+        self._depot_resolver = resolver
 
     # ------------------------------------------------------------------
     # Signal handling override — buffer InterventionProposals
@@ -345,6 +383,35 @@ class RoutePlanningAgent(OverlayAgentBase):
                 # Need at least depot + 1 station
                 continue
 
+            # Task 9.7 / Req 5.4.6 — resolve the truck's start position
+            # with telemetry-first, depot-fallback. When the resolver is
+            # not configured (legacy bootstrap or early tests) we leave
+            # the location list untouched so existing behaviour is
+            # preserved. On NoDepotConfiguredError we skip this loading
+            # plan entirely — the REST surface mirrors this behaviour by
+            # translating the same exception into HTTP 400
+            # ``no_depot_configured`` (Req 2.2.4).
+            start_position = await self._resolve_start_position(
+                tenant_id=tenant_id, truck_id=truck_id
+            )
+            if start_position is None and self._depot_resolver is not None:
+                # Resolver configured but produced neither telemetry nor
+                # depot coordinates — skip this loading plan rather than
+                # routing from DEFAULT_DEPOT.
+                logger.warning(
+                    "RoutePlanningAgent: skipping loading plan for "
+                    "tenant=%s truck=%s — no_depot_configured and no "
+                    "fresh truck_telemetry",
+                    tenant_id,
+                    truck_id,
+                )
+                continue
+            if start_position is not None:
+                locations[0] = {
+                    "lat": start_position.lat,
+                    "lon": start_position.lon,
+                }
+
             # Build SLA windows indexed by location list position
             sla_windows_by_idx = {}
             for i, sid in enumerate(station_order):
@@ -399,6 +466,7 @@ class RoutePlanningAgent(OverlayAgentBase):
                 sla_violations=sla_violations,
                 traffic_provider_name=used_provider_name,
                 traffic_fallback=traffic_fallback,
+                start_position=start_position,
             )
 
             # Compute objective value (Req 4.6)
@@ -596,6 +664,7 @@ class RoutePlanningAgent(OverlayAgentBase):
         sla_violations: Optional[List[Dict]] = None,
         traffic_provider_name: Optional[str] = None,
         traffic_fallback: bool = False,
+        start_position: Optional[TruckStartPosition] = None,
     ) -> RoutePlan:
         """Build a RoutePlan from optimized route order."""
         # Build drop quantities per station
@@ -663,6 +732,15 @@ class RoutePlanningAgent(OverlayAgentBase):
             tenant_id=tenant_id,
             traffic_provider=traffic_provider_name,
             traffic_fallback=traffic_fallback,
+            start_position_source=(
+                start_position.source if start_position is not None else None
+            ),
+            start_position_lat=(
+                start_position.lat if start_position is not None else None
+            ),
+            start_position_lon=(
+                start_position.lon if start_position is not None else None
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -947,6 +1025,248 @@ class RoutePlanningAgent(OverlayAgentBase):
             return False
         return state in {"active_gated", "active_auto"}
 
+    async def _terminal_sourcing_enabled(self, tenant_id: str) -> bool:
+        """Return True when ``overlay.terminal_sourcing`` is active.
+
+        Mirrors :meth:`_traffic_aware_routing_enabled`: the flag maps to
+        an overlay state and we treat ``active_gated`` / ``active_auto``
+        as "enabled". ``shadow`` / ``disabled`` skip the
+        Sourcing_Recommender entirely so the recommender's ES /
+        rack-price / Redis traffic is never consumed in shadow mode
+        (Task 7.10 / Req 8.5.5).
+        """
+
+        if self._feature_flags is None:
+            return False
+        try:
+            state = await self._feature_flags.get_overlay_state(
+                TERMINAL_SOURCING_FLAG_KEY, tenant_id
+            )
+        except AttributeError:
+            # Legacy services expose only ``is_enabled`` — best-effort
+            # coerce the boolean to "active" so tenants with older
+            # FeatureFlagService installs still exercise the recommender.
+            try:
+                return bool(await self._feature_flags.is_enabled(tenant_id))
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(
+                    "RoutePlanningAgent: terminal_sourcing flag lookup failed "
+                    "for tenant=%s: %s",
+                    tenant_id,
+                    exc,
+                )
+                return False
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "RoutePlanningAgent: terminal_sourcing overlay state lookup "
+                "failed for tenant=%s: %s",
+                tenant_id,
+                exc,
+            )
+            return False
+        return state in {"active_gated", "active_auto"}
+
+    async def _maybe_apply_sourcing(
+        self,
+        *,
+        route_plan: "RoutePlan",
+        loading_plan: Dict[str, Any],
+        assignments: List[Dict[str, Any]],
+        locations: List[Dict[str, float]],
+        tenant_id: str,
+        truck_id: str,
+    ) -> None:
+        """Populate ``route_plan.sourced_terminal_*`` when an external lift is required.
+
+        Implements Task 7.10 wiring into the Route_Planning_Agent:
+
+        1. Skip entirely when no :class:`SourcingRecommender` was wired
+           (bootstrap has not completed yet, or the flag is off for the
+           tenant). The route persists with the sourcing fields left at
+           their defaults (``None`` / empty list).
+        2. Detect the external-lift condition by inspecting the loading
+           plan's ``terminal_id``. A non-empty value is treated as
+           external (the Route_Planning_Agent does not own a depot
+           resolver today — the instruction set allows the simple
+           "non-empty" check until depot resolution is fully wired).
+        3. Pick the dominant fuel grade from the assignments (the grade
+           with the highest total volume) and canonicalize it so the
+           recommender sees a US product_code. Unknown grades are
+           preserved and passed through — the recommender surfaces an
+           :class:`UnknownFuelProductError` which we swallow and log.
+        4. Convert the total liters for that grade to gallons via
+           :data:`LITERS_PER_GALLON` so the recommender stays in its
+           native US unit.
+        5. Invoke ``recommender.recommend(...)`` under a try/except. Any
+           failure (unknown product, recommender exception, empty
+           candidate list) logs a warning and leaves the fields None so
+           the route still persists — the sourcing path is advisory, not
+           blocking (Task 7.10).
+
+        Args:
+            route_plan: The Route_Plan being built; mutated in place.
+            loading_plan: The extracted ``apply_loading_plan`` action
+                parameters dict. Provides ``terminal_id``.
+            assignments: The assignment list copied from the loading
+                plan. Used to derive the primary grade + volume.
+            locations: Ordered location list (index 0 is the depot).
+                Used as the sourcing origin.
+            tenant_id: Owning tenant — forwarded to the recommender for
+                tenant-scoped lookups.
+            truck_id: Truck stamped on the audit record for traceability.
+        """
+
+        recommender = self._sourcing_recommender
+        if recommender is None:
+            return
+
+        # Detect the external-lift signal. An absent, empty, or
+        # whitespace-only ``terminal_id`` means the plan will lift from
+        # the depot and we skip the recommender entirely.
+        terminal_id_raw = loading_plan.get("terminal_id")
+        terminal_id = (
+            terminal_id_raw.strip()
+            if isinstance(terminal_id_raw, str)
+            else ""
+        )
+        if not terminal_id:
+            return
+
+        # Feature-flag gate — skip when the tenant has not enabled the
+        # overlay. Consuming recommender dependencies in shadow mode
+        # would charge the tenant's rack-price provider budget for no
+        # observable effect.
+        if not await self._terminal_sourcing_enabled(tenant_id):
+            return
+
+        # Primary grade selection: pick the fuel_grade with the highest
+        # aggregate quantity_liters across assignments. Ties fall back
+        # to insertion order. Skip the sourcing path entirely when the
+        # loading plan is empty or carries no recognisable grade.
+        grade_totals: Dict[str, float] = {}
+        for assignment in assignments:
+            grade = assignment.get("fuel_grade")
+            if not isinstance(grade, str) or not grade.strip():
+                continue
+            qty = assignment.get("quantity_liters", 0.0)
+            try:
+                qty_f = float(qty)
+            except (TypeError, ValueError):
+                qty_f = 0.0
+            if qty_f <= 0:
+                continue
+            grade_totals[grade] = grade_totals.get(grade, 0.0) + qty_f
+        if not grade_totals:
+            logger.debug(
+                "RoutePlanningAgent: skipping sourcing for tenant=%s "
+                "truck=%s plan=%s — no volume-bearing assignments",
+                tenant_id,
+                truck_id,
+                loading_plan.get("plan_id"),
+            )
+            return
+
+        primary_grade, total_liters = max(
+            grade_totals.items(), key=lambda kv: (kv[1], kv[0])
+        )
+        volume_gallons = total_liters / LITERS_PER_GALLON
+        if volume_gallons <= 0:
+            return
+
+        # Canonicalize grade — the recommender accepts aliases natively
+        # via its own canonicalize() but we surface the resolved code on
+        # the log line for traceability. Unknown codes are preserved so
+        # the recommender can raise a clear UnknownFuelProductError.
+        product_code = canonicalize_or_warn(
+            primary_grade,
+            context="route_planning.sourcing.product_code",
+            logger_=logger,
+        )
+
+        # Origin coords come from ``locations[0]`` (the depot).
+        if not locations:
+            return
+        origin = locations[0]
+        origin_lat = float(origin.get("lat", 0.0))
+        origin_lon = float(origin.get("lon", 0.0))
+
+        run_id = getattr(self, "_current_run_id", None) or ""
+        as_of = datetime.now(timezone.utc)
+
+        try:
+            recommendation = await recommender.recommend(
+                tenant_id=tenant_id,
+                product_code=product_code,
+                volume_gallons=volume_gallons,
+                origin_lat_lon=(origin_lat, origin_lon),
+                as_of=as_of,
+                truck_id=truck_id or None,
+                run_id=run_id or None,
+            )
+        except UnknownFuelProductError as exc:
+            logger.warning(
+                "RoutePlanningAgent: sourcing skipped — unknown product_code "
+                "%r for tenant=%s truck=%s: %s",
+                product_code,
+                tenant_id,
+                truck_id,
+                exc,
+            )
+            return
+        except InvalidBrandedPreferenceError as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "RoutePlanningAgent: sourcing skipped — invalid branded preference "
+                "for tenant=%s truck=%s: %s",
+                tenant_id,
+                truck_id,
+                exc,
+            )
+            return
+        except Exception as exc:
+            logger.warning(
+                "RoutePlanningAgent: sourcing recommender failed for "
+                "tenant=%s truck=%s product=%s volume_gal=%.2f: %s",
+                tenant_id,
+                truck_id,
+                product_code,
+                volume_gallons,
+                exc,
+            )
+            return
+
+        candidates = getattr(recommendation, "candidates", None) or []
+        if not candidates:
+            logger.warning(
+                "RoutePlanningAgent: sourcing produced zero candidates for "
+                "tenant=%s truck=%s product=%s volume_gal=%.2f — route "
+                "persisted without sourced_terminal_id",
+                tenant_id,
+                truck_id,
+                product_code,
+                volume_gallons,
+            )
+            return
+
+        top = candidates[0]
+        route_plan.sourced_terminal_id = getattr(top, "terminal_id", None)
+        route_plan.sourced_terminal_reasons = list(
+            getattr(top, "reasons", None) or []
+        )
+        route_plan.sourcing_recommendation_id = getattr(
+            recommendation, "recommendation_id", None
+        )
+        logger.info(
+            "RoutePlanningAgent: sourced terminal=%s (score=%.4f) for "
+            "tenant=%s truck=%s product=%s volume_gal=%.2f recommendation_id=%s",
+            route_plan.sourced_terminal_id,
+            getattr(top, "score", 0.0),
+            tenant_id,
+            truck_id,
+            product_code,
+            volume_gallons,
+            route_plan.sourcing_recommendation_id,
+        )
+
     async def _resolve_traffic_provider_name(
         self, tenant_id: str
     ) -> Optional[str]:
@@ -1062,6 +1382,61 @@ class RoutePlanningAgent(OverlayAgentBase):
         if provider is not None:
             self._traffic_provider_cache[cache_key] = provider
         return provider
+
+    # ------------------------------------------------------------------
+    # Truck start-position resolution (Task 9.7 / Req 5.4.6)
+    # ------------------------------------------------------------------
+
+    async def _resolve_start_position(
+        self,
+        *,
+        tenant_id: str,
+        truck_id: str,
+    ) -> Optional[TruckStartPosition]:
+        """Return the telemetry-first / depot-fallback start position.
+
+        Returns ``None`` when no depot resolver is configured — the
+        agent then preserves the legacy single-depot behaviour
+        (``DEFAULT_DEPOT`` at index 0) so tests and early bootstrap
+        states continue to work. When a resolver *is* configured and
+        neither a fresh ``truck_telemetry`` reading nor a depot is
+        available, this method also returns ``None`` so the caller can
+        skip the loading plan (the REST surface translates the same
+        scenario into HTTP 400 ``no_depot_configured`` per Req 2.2.4).
+
+        Defense-in-depth: the helper enforces tenant isolation on the
+        telemetry row itself, so a drifted ``truck_telemetry`` document
+        can never leak another tenant's coordinates into this tenant's
+        Route_Plan (Req 5.4.6 + tenant-guard invariants).
+        """
+
+        if self._depot_resolver is None or not truck_id:
+            return None
+
+        truck: Dict[str, Any] = {"truck_id": truck_id}
+        try:
+            return await resolve_truck_start_position(
+                tenant_id=tenant_id,
+                truck=truck,
+                depot_resolver=self._depot_resolver,
+                es_service=self._es,
+            )
+        except NoDepotConfiguredError as exc:
+            logger.warning(
+                "RoutePlanningAgent: %s — will skip route for truck=%s",
+                exc,
+                truck_id,
+            )
+            return None
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "RoutePlanningAgent: start-position resolver failed for "
+                "tenant=%s truck=%s: %s — skipping route",
+                tenant_id,
+                truck_id,
+                exc,
+            )
+            return None
 
     # ------------------------------------------------------------------
     # Persistence (Req 4.7)

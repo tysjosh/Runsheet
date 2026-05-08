@@ -772,6 +772,13 @@ class CompartmentLoadingAgent(OverlayAgentBase):
                     "total_utilization_pct": loading_plan.total_utilization_pct,
                     "unserved_demand_liters": loading_plan.unserved_demand_liters,
                     "total_weight_kg": loading_plan.total_weight_kg,
+                    # Forward the optional external-lift terminal id so the
+                    # Route_Planning_Agent (Task 7.10) can detect the
+                    # external-lift condition and invoke the
+                    # Sourcing_Recommender. ``None`` when the plan will
+                    # lift from the tenant's depot.
+                    "terminal_id": loading_plan.terminal_id,
+                    "contract_id": loading_plan.contract_id,
                 },
                 "description": (
                     f"Loading plan for truck {loading_plan.truck_id}: "

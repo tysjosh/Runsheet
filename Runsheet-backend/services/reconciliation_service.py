@@ -35,21 +35,30 @@ document is keyed by the generated ``reconciliation_id`` so the downstream
 Capability 4 read endpoint (task 8.8) can look the record up by itself or by
 any of the (order_id, plan_id, pod_id) coordinates.
 
+The QuickBooks Online Connector (Phase 9) calls
+:meth:`ReconciliationService.update_invoice_fields` when an invoice event
+arrives so the reconciliation record carries ``invoiced_gallons`` and
+``variance_invoiced_vs_delivered_pct`` within 60 seconds of the QBO event
+(Requirement 4.4.5).
+
 Tenant isolation is enforced by:
 
     * Deriving ``tenant_id`` from the POD input and rejecting records that
       don't carry one.
     * Writing ``tenant_id`` as a top-level keyword on the persisted document
       so the GET endpoint can filter the query by the caller's tenant.
+    * Cross-tenant ``update_invoice_fields`` calls are rejected with
+      :class:`PermissionError` so a misrouted QBO webhook cannot mutate
+      another tenant's reconciliation record.
 
-Validates: Requirements 4.4.1, 4.4.2, 4.4.3.
+Validates: Requirements 4.4.1, 4.4.2, 4.4.3, 4.4.5.
 """
 from __future__ import annotations
 
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Iterable, List, Mapping, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -343,6 +352,358 @@ class ReconciliationService:
         document["created_at"] = document["generated_at"]
         document["updated_at"] = document["generated_at"]
         await self._es.index_document(self.INDEX, record.reconciliation_id, document)
+
+    # ------------------------------------------------------------------
+    # QuickBooks Online (Phase 9) integration seam (Req 4.4.5, Task 8.8)
+    # ------------------------------------------------------------------
+
+    async def update_invoice_fields(
+        self,
+        *,
+        tenant_id: str,
+        reconciliation_id: str,
+        invoice_id: str,
+        invoiced_gallons: float,
+        payment_status: Optional[str] = None,
+    ) -> ReconciliationRecord:
+        """Attach invoice data from QuickBooks Online to an existing record.
+
+        This is the seam the QuickBooks Online Connector (Phase 9,
+        :mod:`integrations.quickbooks_online`) calls when an invoice
+        event (created / updated / paid) arrives from QBO. The connector
+        is responsible for meeting the "within 60 seconds of invoice
+        events" SLA mandated by Requirement 4.4.5 — this method only
+        carries out the atomic update once the connector has decided
+        which :class:`ReconciliationRecord` an invoice maps to.
+
+        Integration contract (binding on the QBO Connector):
+
+            * ``tenant_id`` MUST match the tenant that owns the record.
+              Cross-tenant updates are rejected with :class:`PermissionError`
+              so a misrouted webhook can never mutate another tenant's
+              reconciliation.
+            * ``reconciliation_id`` MUST be a known record id already
+              persisted by :meth:`compute`. Unknown ids raise
+              :class:`LookupError` — the connector should then fall
+              back to its standard "create partial record" path rather
+              than silently swallowing the update.
+            * ``invoiced_gallons`` MUST be a non-negative float (QBO
+              invoice line ``Qty`` * unit conversion). Negative / NaN
+              inputs raise :class:`ValueError`.
+            * ``invoice_id`` MUST be the QBO ``Invoice.Id`` value so the
+              reconciliation record can be traced back to the source
+              document.
+            * ``payment_status`` MAY be supplied when the QBO event is
+              a payment update (``paid`` / ``partial`` / ``overdue``).
+              When omitted the payment_status is left unchanged so
+              separate invoice-created and payment-settled events do
+              not clobber each other.
+
+        After the update is applied, the service recomputes
+        ``variance_invoiced_vs_delivered_pct`` against the stored
+        ``delivered_gallons`` and re-evaluates the
+        ``variance_exceeds_threshold`` alert flag against the tenant's
+        configured threshold. Both are persisted atomically via
+        :meth:`ElasticsearchService.update_document`.
+
+        Returns:
+            The updated :class:`ReconciliationRecord` so the connector
+            can surface the new variance / alert_flag to the caller
+            (e.g. an audit webhook handler).
+
+        Raises:
+            ValueError: ``invoiced_gallons`` is negative / non-numeric
+                or ``reconciliation_id`` / ``invoice_id`` / ``tenant_id``
+                is empty.
+            LookupError: No record exists for ``reconciliation_id``.
+            PermissionError: The record exists but belongs to a
+                different tenant.
+        """
+        if not isinstance(tenant_id, str) or not tenant_id:
+            raise ValueError("tenant_id is required and must be a non-empty string")
+        if not isinstance(reconciliation_id, str) or not reconciliation_id:
+            raise ValueError(
+                "reconciliation_id is required and must be a non-empty string"
+            )
+        if not isinstance(invoice_id, str) or not invoice_id:
+            raise ValueError("invoice_id is required and must be a non-empty string")
+        try:
+            numeric_gallons = float(invoiced_gallons)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"invoiced_gallons must be numeric, got {invoiced_gallons!r}"
+            ) from exc
+        if numeric_gallons < 0 or numeric_gallons != numeric_gallons:  # NaN check
+            raise ValueError(
+                f"invoiced_gallons must be a finite non-negative float, got {numeric_gallons}"
+            )
+
+        # Fetch the record so we can recompute the variance against the
+        # stored ``delivered_gallons`` and honour tenant isolation.
+        try:
+            existing = await self._es.get_document(self.INDEX, reconciliation_id)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error(
+                "Reconciliation get_document failed id=%s tenant=%s: %s",
+                reconciliation_id,
+                tenant_id,
+                exc,
+            )
+            raise
+
+        if not existing:
+            raise LookupError(
+                f"Reconciliation record {reconciliation_id!r} not found"
+            )
+
+        # :meth:`ElasticsearchService.get_document` returns the raw ES
+        # hit; unwrap ``_source`` when present.
+        source = existing.get("_source") if isinstance(existing, dict) else None
+        if source is None and isinstance(existing, dict):
+            # Some test doubles return the source document directly.
+            source = existing
+        if not isinstance(source, dict):
+            raise LookupError(
+                f"Reconciliation record {reconciliation_id!r} has no source document"
+            )
+
+        if source.get("tenant_id") != tenant_id:
+            raise PermissionError(
+                f"Reconciliation record {reconciliation_id!r} belongs to a "
+                f"different tenant"
+            )
+
+        delivered_gallons = _require_non_negative_float(
+            source, "delivered_gallons", "reconciliation"
+        )
+
+        variance = _percent_variance(
+            numerator=numeric_gallons, denominator=delivered_gallons
+        )
+        threshold = await self._resolve_threshold(tenant_id)
+
+        # Recompute alert flags across all three variances (keeping any
+        # previously-flagged variance surfaced) so the QBO update can
+        # both raise and clear the flag based on the current data.
+        variance_load = _optional_non_negative_float(
+            source, "variance_load_vs_order_pct"
+        )
+        variance_delivered = _optional_non_negative_float(
+            source, "variance_delivered_vs_loaded_pct"
+        )
+        alert_flags = _derive_alert_flags(
+            threshold=threshold,
+            variances=(variance_load, variance_delivered, variance),
+        )
+
+        updated_at = _utcnow().isoformat()
+        patch: Dict[str, Any] = {
+            "invoice_id": invoice_id,
+            "invoiced_gallons": numeric_gallons,
+            "variance_invoiced_vs_delivered_pct": variance,
+            "alert_flags": alert_flags,
+            "updated_at": updated_at,
+        }
+        if payment_status is not None:
+            if not isinstance(payment_status, str) or not payment_status.strip():
+                raise ValueError(
+                    "payment_status must be a non-empty string when supplied"
+                )
+            patch["payment_status"] = payment_status.strip()
+
+        await self._es.update_document(self.INDEX, reconciliation_id, patch)
+
+        # Re-materialize a :class:`ReconciliationRecord` from the merged
+        # state so the connector can echo the post-update record back to
+        # its caller without an additional round-trip.
+        merged: Dict[str, Any] = dict(source)
+        merged.update(patch)
+        # ``generated_at`` is the original record's immutable timestamp
+        # — keep it as-is for the model. ``created_at`` / ``updated_at``
+        # on the persisted document are surfaced separately and are not
+        # part of the Pydantic schema.
+        merged.pop("created_at", None)
+        merged.pop("updated_at", None)
+        # ``payment_status`` is persisted but not part of the model —
+        # drop it so ``extra="forbid"`` does not trip.
+        merged.pop("payment_status", None)
+        try:
+            refreshed = ReconciliationRecord(**merged)
+        except Exception as exc:
+            logger.error(
+                "Reconciliation model rehydrate failed after QBO update "
+                "id=%s tenant=%s: %s",
+                reconciliation_id,
+                tenant_id,
+                exc,
+            )
+            raise
+
+        logger.info(
+            "Reconciliation QBO invoice update id=%s tenant=%s invoice=%s "
+            "invoiced_gallons=%.3f variance=%.4f threshold=%.3f flags=%s "
+            "payment_status=%s",
+            reconciliation_id,
+            tenant_id,
+            invoice_id,
+            numeric_gallons,
+            variance,
+            threshold,
+            alert_flags,
+            patch.get("payment_status"),
+        )
+        return refreshed
+
+    # ------------------------------------------------------------------
+    # Stripe (Phase 9) integration seam (Req 5.5.4, Task 9.8)
+    # ------------------------------------------------------------------
+
+    async def update_payment_status(
+        self,
+        *,
+        tenant_id: str,
+        reconciliation_id: str,
+        payment_status: str,
+        payment_intent_id: Optional[str] = None,
+        invoice_id: Optional[str] = None,
+    ) -> ReconciliationRecord:
+        """Set ``payment_status`` on an existing reconciliation record.
+
+        This is the seam the Stripe Connector
+        (:mod:`integrations.stripe_connector`) calls when a
+        ``payment_intent.*`` webhook event arrives from Stripe.
+        Unlike :meth:`update_invoice_fields` this method does NOT
+        require ``invoiced_gallons`` — a Stripe payment event does
+        not carry the line-item quantity, only the payment status.
+
+        Integration contract (binding on the Stripe Connector):
+
+            * ``tenant_id`` MUST match the tenant that owns the record.
+              Cross-tenant updates are rejected with
+              :class:`PermissionError` so a misrouted webhook can never
+              mutate another tenant's reconciliation.
+            * ``reconciliation_id`` MUST be a known record id already
+              persisted by :meth:`compute`. Unknown ids raise
+              :class:`LookupError`.
+            * ``payment_status`` MUST be a non-empty string
+              (``paid`` / ``failed`` / ``processing`` / ``refunded`` /
+              …). Stripe's event taxonomy is mirrored here verbatim.
+            * ``payment_intent_id`` is the Stripe ``PaymentIntent.id``
+              (optional). When provided it is persisted alongside the
+              status so the admin UI can deep-link back to the Stripe
+              dashboard for audit.
+            * ``invoice_id`` is an optional cross-reference for cases
+              where a Stripe invoice (not PaymentIntent) was used.
+              When supplied it is persisted on the record too.
+
+        Returns:
+            The updated :class:`ReconciliationRecord`.
+
+        Raises:
+            ValueError: ``tenant_id`` / ``reconciliation_id`` /
+                ``payment_status`` is empty or non-string.
+            LookupError: No record exists for ``reconciliation_id``.
+            PermissionError: The record exists but belongs to a
+                different tenant.
+        """
+
+        if not isinstance(tenant_id, str) or not tenant_id:
+            raise ValueError(
+                "tenant_id is required and must be a non-empty string"
+            )
+        if not isinstance(reconciliation_id, str) or not reconciliation_id:
+            raise ValueError(
+                "reconciliation_id is required and must be a non-empty string"
+            )
+        if not isinstance(payment_status, str) or not payment_status.strip():
+            raise ValueError(
+                "payment_status is required and must be a non-empty string"
+            )
+        if payment_intent_id is not None and (
+            not isinstance(payment_intent_id, str) or not payment_intent_id.strip()
+        ):
+            raise ValueError(
+                "payment_intent_id must be a non-empty string when supplied"
+            )
+        if invoice_id is not None and (
+            not isinstance(invoice_id, str) or not invoice_id.strip()
+        ):
+            raise ValueError(
+                "invoice_id must be a non-empty string when supplied"
+            )
+
+        try:
+            existing = await self._es.get_document(
+                self.INDEX, reconciliation_id
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error(
+                "Reconciliation get_document failed id=%s tenant=%s: %s",
+                reconciliation_id,
+                tenant_id,
+                exc,
+            )
+            raise
+
+        if not existing:
+            raise LookupError(
+                f"Reconciliation record {reconciliation_id!r} not found"
+            )
+
+        source = existing.get("_source") if isinstance(existing, dict) else None
+        if source is None and isinstance(existing, dict):
+            source = existing
+        if not isinstance(source, dict):
+            raise LookupError(
+                f"Reconciliation record {reconciliation_id!r} has no source document"
+            )
+
+        if source.get("tenant_id") != tenant_id:
+            raise PermissionError(
+                f"Reconciliation record {reconciliation_id!r} belongs to a "
+                f"different tenant"
+            )
+
+        patch: Dict[str, Any] = {
+            "payment_status": payment_status.strip(),
+            "updated_at": _utcnow().isoformat(),
+        }
+        if payment_intent_id is not None:
+            patch["payment_intent_id"] = payment_intent_id.strip()
+        if invoice_id is not None:
+            patch["invoice_id"] = invoice_id.strip()
+
+        await self._es.update_document(self.INDEX, reconciliation_id, patch)
+
+        merged: Dict[str, Any] = dict(source)
+        merged.update(patch)
+        # Drop persistence-only surrogates so ReconciliationRecord's
+        # ``extra="forbid"`` does not trip on rehydration.
+        merged.pop("created_at", None)
+        merged.pop("updated_at", None)
+        merged.pop("payment_status", None)
+        merged.pop("payment_intent_id", None)
+        try:
+            refreshed = ReconciliationRecord(**merged)
+        except Exception as exc:
+            logger.error(
+                "Reconciliation model rehydrate failed after Stripe "
+                "payment update id=%s tenant=%s: %s",
+                reconciliation_id,
+                tenant_id,
+                exc,
+            )
+            raise
+
+        logger.info(
+            "Reconciliation Stripe payment update id=%s tenant=%s "
+            "payment_status=%s payment_intent=%s",
+            reconciliation_id,
+            tenant_id,
+            patch["payment_status"],
+            patch.get("payment_intent_id"),
+        )
+        return refreshed
 
 
 # ---------------------------------------------------------------------------

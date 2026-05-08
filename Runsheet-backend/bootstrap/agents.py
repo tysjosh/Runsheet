@@ -463,12 +463,115 @@ async def initialize(app, container: ServiceContainer) -> None:
     # the shared ``_agent_redis_client`` wires that cache path. When
     # Redis is unavailable the endpoint falls back to a direct ES
     # aggregation, so a Redis outage never breaks the endpoint.
+    #
+    # Task 7.10: build the :class:`SourcingRecommender` singleton with
+    # its full dependency set (terminal + contract repositories, rack-
+    # price provider, wait-time resolver, rack-price sync service) and
+    # pass it through to both the sourcing endpoint and the
+    # Route_Planning_Agent. Every dependency is best-effort: if the
+    # rack-price CSV loader has not been configured yet (no tenant has
+    # uploaded a CSV) the provider returns an empty list and the
+    # recommender surfaces ``no_price_available``. The endpoint still
+    # returns HTTP 503 when this block raises so a misconfigured
+    # bootstrap fails loudly rather than silently skipping the
+    # recommender (Req 8.5.4 / 8.5.5).
+    sourcing_recommender = None
+    try:
+        from fuel.terminal_models import (
+            SupplierContractRepository,
+            TerminalRepository,
+            TerminalWaitReportRepository,
+        )
+        from fuel.services.terminal_wait_resolver import (
+            build_wait_time_resolver,
+        )
+        from integrations.rack_price_sync import RackPriceSyncService
+
+        sourcing_terminal_repo = TerminalRepository(es_service=es_service)
+        sourcing_contract_repo = SupplierContractRepository(
+            es_service=es_service
+        )
+        sourcing_wait_report_repo = TerminalWaitReportRepository(
+            es_service=es_service
+        )
+        sourcing_wait_resolver = build_wait_time_resolver(
+            redis_client=_agent_redis_client,
+            wait_report_repository=sourcing_wait_report_repo,
+        )
+
+        # Rack-price provider: default to the CSV-backed fallback
+        # adapter. The CSV loader is a no-op async callable until a
+        # tenant uploads a rack sheet via the admin UI; the provider
+        # safely degrades to an empty candidate set when no CSV is
+        # present, which the recommender surfaces as
+        # ``no_price_available``. Swap in ``OPISRackPriceProvider`` here
+        # once the tenant has subscribed.
+        from integrations.rack_price_provider_base import (
+            CSVFallbackRackPriceProvider,
+        )
+
+        async def _noop_csv_loader(tenant_id: str) -> bytes:
+            raise FileNotFoundError(
+                f"no rack-price CSV configured for tenant {tenant_id!r}"
+            )
+
+        sourcing_rack_provider = CSVFallbackRackPriceProvider(
+            csv_loader=_noop_csv_loader,
+            redis_client=_agent_redis_client,
+        )
+        sourcing_rack_sync = RackPriceSyncService(es_service=es_service)
+
+        # Tenant-config handle — the recommender uses the same minimal
+        # ``async get(key)`` contract as the Route_Planning_Agent's
+        # traffic-provider lookup, so the shared Redis client suffices.
+        class _RedisTenantConfig:
+            def __init__(self, client):
+                self._client = client
+
+            async def get(self, key: str):
+                if self._client is None:
+                    return None
+                try:
+                    return await self._client.get(key)
+                except Exception:  # pragma: no cover - defensive
+                    return None
+
+        sourcing_tenant_config = _RedisTenantConfig(_agent_redis_client)
+
+        from fuel.services.sourcing_recommender import SourcingRecommender
+
+        sourcing_recommender = SourcingRecommender(
+            terminal_repo=sourcing_terminal_repo,
+            contract_repo=sourcing_contract_repo,
+            rack_price_provider=sourcing_rack_provider,
+            wait_time_resolver=sourcing_wait_resolver,
+            tenant_config=sourcing_tenant_config,
+            rack_price_sync=sourcing_rack_sync,
+        )
+        logger.info("SourcingRecommender singleton constructed")
+    except Exception as exc:
+        logger.exception(
+            "SourcingRecommender construction failed — "
+            "/api/fuel/sourcing/recommendations will surface HTTP 503 "
+            "until bootstrap is fixed: %s",
+            exc,
+        )
+        sourcing_recommender = None
+
     configure_fuel_ops_endpoints(
         es_service=es_service,
         confirmation_protocol=confirmation_protocol,
         fuel_planning_ws_manager=fuel_planning_ws_manager,
         redis_client=_agent_redis_client,
+        sourcing_recommender=sourcing_recommender,
     )
+
+    # Task 7.10: inject the same recommender into the Route_Planning_Agent
+    # so Loading_Plans that carry an external ``terminal_id`` stamp the
+    # chosen terminal id + reasons on the persisted Route_Plan
+    # (Req 8.5.5). Safe to call with ``None`` — the agent then skips
+    # the sourcing step on every evaluation.
+    route_planning_agent.set_sourcing_recommender(sourcing_recommender)
 
     # ---- Inventory Pipeline Integration ----
     from Agents.autonomous.inventory_monitor import InventoryMonitorAgent

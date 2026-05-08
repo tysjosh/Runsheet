@@ -152,6 +152,7 @@ def _make_app(
     scheduling_ws=None,
     driver_ws=None,
     file_storage=None,
+    ocr_service=None,
 ) -> FastAPI:
     """Create a test FastAPI app with the POD router."""
     from errors.handlers import register_exception_handlers
@@ -166,6 +167,7 @@ def _make_app(
         scheduling_ws_manager=scheduling_ws,
         driver_ws_manager=driver_ws,
         file_storage_service=file_storage or _make_file_storage(),
+        ocr_service=ocr_service,
     )
     return app
 
@@ -178,6 +180,7 @@ def _pod_payload(
     geotag: dict = None,
     timestamp: str = "2024-01-15T10:30:00Z",
     otp: str = None,
+    delivered_gallons: Optional[float] = None,
     # Deprecated raw-URL fields kept for backward-compat coverage.
     signature_url: Optional[str] = None,
     photo_urls: Optional[list] = None,
@@ -207,6 +210,8 @@ def _pod_payload(
         payload["photo_urls"] = photo_urls
     if otp is not None:
         payload["otp"] = otp
+    if delivered_gallons is not None:
+        payload["delivered_gallons"] = delivered_gallons
     return payload
 
 
@@ -979,3 +984,323 @@ class TestJobServiceResilience:
         assert resp.status_code == 200
         doc = es.index_document.call_args.args[2]
         assert doc["location_mismatch"] is False
+
+
+# ---------------------------------------------------------------------------
+# Test: Meter-ticket OCR integration (Task 8.4)
+# ---------------------------------------------------------------------------
+
+
+def _make_ocr_service(
+    *,
+    extracted_gallons: Optional[float] = None,
+    confidence: float = 0.0,
+    requires_manual_review: bool = True,
+    error_details: Optional[str] = None,
+    side_effect=None,
+) -> MagicMock:
+    """Build a mock MeterTicketOCRService returning a configurable OCRResult.
+
+    The mock honors the duck-typed contract the POD handler reads against
+    (``ocr_result_id``, ``confidence``, ``extracted_gallons``,
+    ``requires_manual_review``, ``error_details``). Pass ``side_effect`` to
+    exercise timeout / provider failure paths.
+    """
+    svc = MagicMock()
+    if side_effect is not None:
+        svc.extract = AsyncMock(side_effect=side_effect)
+        return svc
+
+    result = MagicMock()
+    result.ocr_result_id = "ocr-result-1"
+    result.confidence = confidence
+    result.extracted_gallons = extracted_gallons
+    result.requires_manual_review = requires_manual_review
+    result.error_details = error_details
+    svc.extract = AsyncMock(return_value=result)
+    return svc
+
+
+class TestSubmitPodOcrIntegration:
+    """Tests for MeterTicketOCRService wiring into POD submission.
+
+    Validates: Requirements 4.2.4, 4.2.5, 4.2.6 (Task 8.4).
+    """
+
+    def test_ocr_fills_delivered_gallons_when_driver_value_absent(self):
+        """High-confidence OCR populates delivered_gallons with source=ocr.
+
+        Validates: Requirement 4.2.4.
+        """
+        ocr = _make_ocr_service(
+            extracted_gallons=812.5,
+            confidence=0.92,
+            requires_manual_review=False,
+        )
+        es = _make_es_service()
+        app = _make_app(
+            es_service=es,
+            job_service=_make_job_service(),
+            ocr_service=ocr,
+        )
+
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.post(
+                "/api/driver/jobs/JOB_1/pod",
+                json=_pod_payload(meter_ticket_ref=_METER_TICKET_REF),
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 200
+        ocr.extract.assert_called_once()
+        doc = es.index_document.call_args.args[2]
+        assert doc["delivered_gallons"] == pytest.approx(812.5)
+        assert doc["delivered_gallons_source"] == "ocr"
+        assert doc["ocr_result_id"] == "ocr-result-1"
+        assert doc["ocr_confidence"] == pytest.approx(0.92)
+        assert doc["ocr_requires_manual_review"] is False
+        assert doc["ocr_error"] is None
+
+    def test_driver_entered_gallons_suppresses_ocr(self):
+        """Driver-supplied delivered_gallons wins and OCR is skipped.
+
+        Validates: Requirement 4.2.4 (inverse — OCR only runs when the
+        driver did not hand-type a value).
+        """
+        ocr = _make_ocr_service(extracted_gallons=1.0, confidence=0.99)
+        es = _make_es_service()
+        app = _make_app(
+            es_service=es,
+            job_service=_make_job_service(),
+            ocr_service=ocr,
+        )
+
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.post(
+                "/api/driver/jobs/JOB_1/pod",
+                json=_pod_payload(
+                    meter_ticket_ref=_METER_TICKET_REF,
+                    delivered_gallons=750.0,
+                ),
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 200
+        ocr.extract.assert_not_called()
+        doc = es.index_document.call_args.args[2]
+        assert doc["delivered_gallons"] == pytest.approx(750.0)
+        assert doc["delivered_gallons_source"] == "manual"
+        assert doc["ocr_error"] is None
+
+    def test_requires_manual_review_falls_through_to_manual(self):
+        """``requires_manual_review=True`` forces manual confirmation.
+
+        Validates: Requirement 4.2.5.
+        """
+        ocr = _make_ocr_service(
+            extracted_gallons=500.0,
+            confidence=0.52,
+            requires_manual_review=True,
+        )
+        es = _make_es_service()
+        app = _make_app(
+            es_service=es,
+            job_service=_make_job_service(),
+            ocr_service=ocr,
+        )
+
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.post(
+                "/api/driver/jobs/JOB_1/pod",
+                json=_pod_payload(meter_ticket_ref=_METER_TICKET_REF),
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 200
+        doc = es.index_document.call_args.args[2]
+        assert doc["delivered_gallons"] is None
+        assert doc["delivered_gallons_source"] == "manual"
+        assert doc["ocr_requires_manual_review"] is True
+        assert doc["ocr_error"] == "requires_manual_review"
+
+    def test_ocr_provider_error_records_error_and_falls_back(self):
+        """OCR service returning an ``error_details`` falls through to manual.
+
+        Validates: Requirement 4.2.5 — any provider error must route the
+        POD through manual entry with the error recorded.
+        """
+        ocr = _make_ocr_service(
+            extracted_gallons=None,
+            confidence=0.0,
+            requires_manual_review=True,
+            error_details="textract_error:ThrottlingException",
+        )
+        es = _make_es_service()
+        app = _make_app(
+            es_service=es,
+            job_service=_make_job_service(),
+            ocr_service=ocr,
+        )
+
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.post(
+                "/api/driver/jobs/JOB_1/pod",
+                json=_pod_payload(meter_ticket_ref=_METER_TICKET_REF),
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 200
+        doc = es.index_document.call_args.args[2]
+        assert doc["delivered_gallons"] is None
+        assert doc["delivered_gallons_source"] == "manual"
+        assert doc["ocr_error"] == "textract_error:ThrottlingException"
+
+    def test_ocr_timeout_records_timeout_error(self):
+        """An OCR timeout beyond 15s falls through to manual with a logged error.
+
+        Validates: Requirement 4.2.6.
+        """
+        import asyncio
+
+        ocr = _make_ocr_service(side_effect=asyncio.TimeoutError())
+        es = _make_es_service()
+        app = _make_app(
+            es_service=es,
+            job_service=_make_job_service(),
+            ocr_service=ocr,
+        )
+
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.post(
+                "/api/driver/jobs/JOB_1/pod",
+                json=_pod_payload(meter_ticket_ref=_METER_TICKET_REF),
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 200
+        doc = es.index_document.call_args.args[2]
+        assert doc["delivered_gallons"] is None
+        assert doc["delivered_gallons_source"] == "manual"
+        assert doc["ocr_error"] == "textract_timeout"
+
+    def test_ocr_raises_unexpected_exception_falls_back_to_manual(self):
+        """Unexpected OCR exceptions are caught and translated to manual entry.
+
+        Validates: Requirement 4.2.5 — the POD flow must never hard-fail
+        because of a misbehaving OCR provider.
+        """
+        ocr = _make_ocr_service(side_effect=RuntimeError("boom"))
+        es = _make_es_service()
+        app = _make_app(
+            es_service=es,
+            job_service=_make_job_service(),
+            ocr_service=ocr,
+        )
+
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.post(
+                "/api/driver/jobs/JOB_1/pod",
+                json=_pod_payload(meter_ticket_ref=_METER_TICKET_REF),
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 200
+        doc = es.index_document.call_args.args[2]
+        assert doc["delivered_gallons"] is None
+        assert doc["delivered_gallons_source"] == "manual"
+        assert doc["ocr_error"] == "ocr_error:RuntimeError"
+
+    def test_ocr_cross_tenant_permission_error_returns_403(self):
+        """``PermissionError`` from the OCR service maps to HTTP 403.
+
+        Validates: Requirements 4.1.4, 4.1.6 — cross-tenant meter_ticket
+        refs must be rejected at every layer.
+        """
+        ocr = _make_ocr_service(side_effect=PermissionError("cross-tenant"))
+        # Use a permissive file_storage mock so the validate_ref step passes
+        # and we exercise the OCR-layer tenant guard directly.
+        fs = MagicMock()
+        fs.validate_ref = MagicMock(return_value=True)
+        app = _make_app(
+            es_service=_make_es_service(),
+            job_service=_make_job_service(),
+            file_storage=fs,
+            ocr_service=ocr,
+        )
+
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.post(
+                "/api/driver/jobs/JOB_1/pod",
+                json=_pod_payload(meter_ticket_ref=_METER_TICKET_REF),
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 403
+        body = resp.json()
+        details = body.get("details") or body.get("error", {}).get("details") or {}
+        assert details.get("reason") == "cross_tenant_file_ref"
+        assert details.get("field") == "meter_ticket_ref"
+
+    def test_no_meter_ticket_ref_skips_ocr_entirely(self):
+        """POD with no meter_ticket_ref skips OCR and defaults to manual=None.
+
+        Validates: Requirement 4.2.4 — OCR is only invoked when a
+        meter_ticket_ref is supplied.
+        """
+        ocr = _make_ocr_service(extracted_gallons=999.0, confidence=0.99)
+        es = _make_es_service()
+        app = _make_app(
+            es_service=es,
+            job_service=_make_job_service(),
+            ocr_service=ocr,
+        )
+
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.post(
+                "/api/driver/jobs/JOB_1/pod",
+                json=_pod_payload(),
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 200
+        ocr.extract.assert_not_called()
+        doc = es.index_document.call_args.args[2]
+        assert doc["delivered_gallons"] is None
+        assert doc["delivered_gallons_source"] == "manual"
+        assert doc["ocr_error"] is None
+        assert doc["ocr_result_id"] is None
+
+    def test_no_ocr_service_configured_skips_extraction(self):
+        """When ocr_service is not wired the handler falls through gracefully.
+
+        Validates: Requirement 4.2.5 — an unprovisioned OCR backend must
+        not break POD submission; the POD simply records manual entry.
+        """
+        es = _make_es_service()
+        app = _make_app(
+            es_service=es,
+            job_service=_make_job_service(),
+            ocr_service=None,
+        )
+
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.post(
+                "/api/driver/jobs/JOB_1/pod",
+                json=_pod_payload(meter_ticket_ref=_METER_TICKET_REF),
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 200
+        doc = es.index_document.call_args.args[2]
+        assert doc["delivered_gallons"] is None
+        assert doc["delivered_gallons_source"] == "manual"
+        assert doc["ocr_error"] is None

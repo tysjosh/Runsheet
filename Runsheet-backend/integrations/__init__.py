@@ -24,4 +24,8 @@ Sub-modules:
   and falls back to the most-recent cached price within 24 hours when
   the upstream provider fails or times out (Task 7.4 / Requirements
   8.2.3 and 8.2.5).
+* :mod:`integrations.integration_scheduler` — :class:`IntegrationScheduler`
+  that drives per-instance cron-scheduled ``sync_pull`` / ``sync_push``
+  calls with exponential-backoff retry and exhaustion alerting on the
+  SignalBus (Task 9.2 / Requirements 5.1.5, 5.1.6).
 """

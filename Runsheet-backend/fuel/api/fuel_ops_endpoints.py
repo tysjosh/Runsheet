@@ -81,6 +81,20 @@ introduced in Capabilities 1 and 6 of the fuel-ops-hardening spec:
   in Task 7.4 and re-validated through :class:`RackPrice` so a caller
   cannot force an upstream provider call through the read surface.
 
+* ``GET /api/fuel/mvp/reconciliation`` — paginated list of
+  :class:`ReconciliationRecord` documents persisted to the
+  ``mvp_reconciliation`` ES index by
+  :class:`services.reconciliation_service.ReconciliationService`
+  (Req 4.4.4, Task 8.8). Supports ``order_id``, ``plan_id``, ``pod_id``,
+  and ``min_variance_pct`` filters — the last one is an OR-across the
+  three variance percentages (load-vs-order, delivered-vs-loaded,
+  invoiced-vs-delivered). Tenant-scoped via the ES ``term`` filter and a
+  defensive re-check on every returned source document. ``invoiced_gallons``
+  and ``variance_invoiced_vs_delivered_pct`` surface after the
+  QuickBooks Online Connector (Phase 9) calls
+  :meth:`ReconciliationService.update_invoice_fields` on the record
+  (integration contract documented in Req 4.4.5).
+
 All endpoints are scoped by ``tenant_id`` exclusively from the signed JWT —
 query-parameter or header tenant_ids are ignored. Wiring follows the same
 ``configure_X`` pattern as :mod:`Agents.support.mvp_endpoints`: bootstrap
@@ -88,7 +102,7 @@ calls :func:`configure_fuel_ops_endpoints` once with an ES-service-like
 object; the routers are then registered in ``main.py``.
 
 Validates: Requirements 1.1.4, 1.6.1, 1.6.2, 1.6.3, 2.2.2, 2.5.3, 3.1.4, 3.2.4,
-6.1.3, 6.2.4, 7.2.5, 8.2.6, 8.4.2, 8.4.4.
+4.4.4, 4.4.5, 6.1.3, 6.2.4, 7.2.5, 8.2.6, 8.4.2, 8.4.4.
 """
 from __future__ import annotations
 
@@ -188,10 +202,28 @@ from fuel.services.contract_lift_service import (
     ContractLiftSummary,
     month_bucket,
 )
-from fuel.services.fuel_ops_es_mappings import RACK_PRICES_INDEX
+from fuel.services.fuel_ops_es_mappings import (
+    MVP_RECONCILIATION_INDEX,
+    RACK_PRICES_INDEX,
+)
 from fuel.services.sourcing_recommender import (
     InvalidBrandedPreferenceError,
     SourcingRecommender,
+)
+from fuel.services.storm_mode_evaluator import (
+    ACTIVE as STORM_MODE_ACTIVE,
+    DEFAULT_ACTIVATION_SEVERITY,
+    DEFAULT_ACTIVATION_WINDOW_HOURS,
+    INACTIVE as STORM_MODE_INACTIVE,
+    StormModeEvaluator,
+)
+from fuel.storm_mode_models import (
+    StormModeOverride,
+    StormModeOverrideAction,
+    WeatherAlert,
+    WeatherAlertSeverity,
+    WeatherAlertSource,
+    WeatherAlertStatus,
 )
 from integrations.rack_price_provider_base import RackPrice
 
@@ -199,10 +231,15 @@ from Agents.support.mvp_es_mappings import MVP_REPLAN_EVENTS_INDEX
 from Agents.support.replan_diff_models import ReplanDiff as StructuredReplanDiff
 
 from driver.services.driver_es_mappings import PROOF_OF_DELIVERY_INDEX
+from schemas.common import paginated_response_dict
 from services.pod_hash_chain import (
     ZERO_HASH,
     canonicalize_pod,
     compute_pod_hash,
+)
+from services.reconciliation_service import (
+    ReconciliationRecord,
+    ReconciliationService,
 )
 
 logger = logging.getLogger(__name__)
@@ -3064,6 +3101,283 @@ async def list_combinable_groups(
 # of the Capability-1+ surface. Until then, consumers should continue to
 # rely on the existing endpoint, which honours every filter documented
 # above.
+
+
+# ---------------------------------------------------------------------------
+# GET /api/fuel/mvp/reconciliation (Req 4.4.4, Task 8.8)
+# ---------------------------------------------------------------------------
+
+
+class ReconciliationListResponse(BaseModel):
+    """Envelope for ``GET /api/fuel/mvp/reconciliation`` (Req 4.4.4).
+
+    Mirrors the dual-field pagination shape used by the other fuel-ops
+    list endpoints (``items`` + ``total`` + ``page`` + ``page_size`` +
+    ``has_next`` plus the legacy ``data`` / ``pagination`` / ``request_id``
+    aliases produced by :func:`schemas.common.paginated_response_dict`)
+    so front-end pagination helpers consume it uniformly. ``items``
+    surface full :class:`services.reconciliation_service.ReconciliationRecord`
+    documents re-validated out of the ``mvp_reconciliation`` ES index —
+    internal ES wrapping (``_id`` / ``_source``) is never leaked.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    items: List[ReconciliationRecord]
+    total: int
+    page: int
+    page_size: int
+    has_next: bool
+
+
+@mvp_router.get("/reconciliation", response_model=ReconciliationListResponse)
+async def list_reconciliation_records(
+    request: Request,
+    tenant: TenantContext = Depends(get_tenant_context),
+    order_id: Optional[str] = Query(
+        default=None,
+        description="Filter to a single order_id.",
+    ),
+    plan_id: Optional[str] = Query(
+        default=None,
+        description="Filter to a single loading plan_id.",
+    ),
+    pod_id: Optional[str] = Query(
+        default=None,
+        description="Filter to a single POD pod_id.",
+    ),
+    min_variance_pct: Optional[float] = Query(
+        default=None,
+        ge=0.0,
+        description=(
+            "Return only records where the absolute value of ANY of "
+            "``variance_load_vs_order_pct``, "
+            "``variance_delivered_vs_loaded_pct``, or "
+            "``variance_invoiced_vs_delivered_pct`` meets or exceeds "
+            "this percentage. Must be non-negative."
+        ),
+    ),
+    page: int = Query(1, ge=1, description="Page number, 1-indexed."),
+    size: int = Query(
+        50,
+        ge=1,
+        le=500,
+        description="Page size (1–500). Defaults to 50.",
+    ),
+) -> Dict[str, Any]:
+    """Return paginated :class:`ReconciliationRecord` rows for the tenant.
+
+    The endpoint reads from the ``mvp_reconciliation`` ES index populated
+    by :class:`services.reconciliation_service.ReconciliationService`
+    (Task 8.7) and filtered further by the QuickBooks Online Connector
+    (Task 8.8 / Phase 9) as invoice events arrive.
+
+    Query filters:
+
+        * ``order_id`` / ``plan_id`` / ``pod_id`` — exact-match term
+          filters applied directly to the ES query, so narrowing is
+          cheap and O(log n).
+        * ``min_variance_pct`` — records are included when *any* of the
+          three variance percentages meets or exceeds this value. We
+          apply the filter post-hoc in Python (rather than as an ES
+          ``range`` query) so the OR across three fields, plus the
+          ``None`` handling on ``variance_invoiced_vs_delivered_pct``
+          before the QBO invoice lands, stays straightforward. The
+          endpoint caps ``size`` at 500 to keep the post-hoc scan bounded.
+
+    Tenant isolation is enforced twice:
+
+        1. The ES query filters on ``tenant_id`` via a ``term`` clause.
+        2. Every returned ``_source`` is re-validated against the
+           caller's ``tenant_id`` before it is surfaced — a mis-labelled
+           document never crosses the endpoint boundary.
+
+    Results are ordered by ``generated_at`` descending so clients see
+    the freshest reconciliation first. Invalid rows (failing
+    :class:`ReconciliationRecord` model validation) are dropped with a
+    warning rather than surfaced as a 500 so a single malformed
+    document does not break the entire list.
+
+    Validates: Requirements 4.4.4, 4.4.5.
+    """
+
+    es = _get_es()
+
+    must_clauses: List[Dict[str, Any]] = [
+        {"term": {"tenant_id": tenant.tenant_id}}
+    ]
+    if order_id and order_id.strip():
+        must_clauses.append({"term": {"order_id": order_id.strip()}})
+    if plan_id and plan_id.strip():
+        must_clauses.append({"term": {"plan_id": plan_id.strip()}})
+    if pod_id and pod_id.strip():
+        must_clauses.append({"term": {"pod_id": pod_id.strip()}})
+
+    # When ``min_variance_pct`` is supplied we need to scan enough rows
+    # to find ``page * size`` matches after the post-hoc filter. A
+    # bounded window (10× the requested page) gives the UI a usable
+    # result without an unbounded ES scan. Without the filter we fetch
+    # the requested page directly.
+    es_size = size if min_variance_pct is None else min(size * 10, 2000)
+    es_from = (page - 1) * size if min_variance_pct is None else 0
+
+    query: Dict[str, Any] = {
+        "query": {"bool": {"must": must_clauses}},
+        "sort": [{"generated_at": {"order": "desc"}}],
+        "from": es_from,
+        "size": es_size,
+    }
+
+    try:
+        resp = await es.search_documents(
+            MVP_RECONCILIATION_INDEX, query, es_size
+        )
+    except Exception as exc:
+        logger.error(
+            "fuel_ops.reconciliation: ES query failed for tenant=%s: %s",
+            tenant.tenant_id,
+            exc,
+        )
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    hits_outer = resp.get("hits", {}) if isinstance(resp, dict) else {}
+    hits = hits_outer.get("hits", []) or []
+    total_block = (
+        hits_outer.get("total", {}) if isinstance(hits_outer, dict) else {}
+    )
+    if isinstance(total_block, dict):
+        es_total = int(total_block.get("value", 0) or 0)
+    else:
+        try:
+            es_total = int(total_block or 0)
+        except (TypeError, ValueError):
+            es_total = 0
+
+    validated_rows: List[ReconciliationRecord] = []
+    for hit in hits:
+        source = hit.get("_source") if isinstance(hit, dict) else None
+        if not isinstance(source, dict):
+            continue
+        # Defense-in-depth: drop any row whose tenant_id does not match
+        # the caller. The ES ``term`` clause should already exclude
+        # them but a mis-labelled document must never leak.
+        if source.get("tenant_id") != tenant.tenant_id:
+            logger.warning(
+                "fuel_ops.reconciliation: dropping row with mismatched "
+                "tenant_id %s (expected %s)",
+                source.get("tenant_id"),
+                tenant.tenant_id,
+            )
+            continue
+        # Strip persistence-only fields that are not part of the model.
+        # ``_id``/``_source`` wrapping is already consumed above; here
+        # we drop the ``mvp_reconciliation`` mapping's ``created_at`` /
+        # ``updated_at`` / ``payment_status`` surrogates so the model's
+        # ``extra="forbid"`` does not trip. They are not part of the
+        # ReconciliationRecord contract.
+        doc = {k: v for k, v in source.items() if k not in (
+            "created_at",
+            "updated_at",
+            "payment_status",
+        )}
+        try:
+            validated_rows.append(ReconciliationRecord(**doc))
+        except ValidationError as exc:
+            logger.warning(
+                "fuel_ops.reconciliation: dropping row that failed "
+                "model validation (reconciliation_id=%s): %s",
+                source.get("reconciliation_id"),
+                exc,
+            )
+
+    # Apply the min_variance_pct filter after model validation so we can
+    # reason about the three variance percentages as floats in a single
+    # place. We treat ``None`` (no QBO invoice yet) as "does not
+    # contribute to the match" so partial records aren't excluded on
+    # the strength of a missing field alone — only the present
+    # variances need to cross the threshold.
+    if min_variance_pct is not None:
+        threshold = abs(float(min_variance_pct))
+
+        def _matches(record: ReconciliationRecord) -> bool:
+            candidates = (
+                record.variance_load_vs_order_pct,
+                record.variance_delivered_vs_loaded_pct,
+                record.variance_invoiced_vs_delivered_pct,
+            )
+            return any(
+                v is not None and abs(float(v)) >= threshold
+                for v in candidates
+            )
+
+        filtered = [r for r in validated_rows if _matches(r)]
+        # Apply pagination over the filtered set. ``has_next`` is
+        # conservative when the ES window exceeded ``es_size`` — we
+        # cannot know whether additional matches exist beyond the scan
+        # window so we report ``True`` when the post-scan count fills
+        # the page and the ES total is larger than what we scanned.
+        total_filtered = len(filtered)
+        start = (page - 1) * size
+        end = start + size
+        page_rows = filtered[start:end]
+        has_next_filtered = total_filtered > end or (
+            es_total > len(hits) and len(page_rows) == size
+        )
+        logger.debug(
+            "fuel_ops.reconciliation: tenant=%s order=%s plan=%s pod=%s "
+            "min_variance=%s page=%d size=%d es_window=%d filtered=%d "
+            "returned=%d",
+            tenant.tenant_id,
+            order_id,
+            plan_id,
+            pod_id,
+            min_variance_pct,
+            page,
+            size,
+            len(validated_rows),
+            total_filtered,
+            len(page_rows),
+        )
+        response = paginated_response_dict(
+            items=[r.model_dump(mode="json") for r in page_rows],
+            total=total_filtered,
+            page=page,
+            page_size=size,
+            request_id=getattr(request.state, "request_id", "unknown"),
+        )
+        # ``has_next`` from the paginator is based on total_pages only —
+        # override it with the scan-aware value so clients observe the
+        # correct truthy value on the last scanned page.
+        response["has_next"] = has_next_filtered
+        return response
+
+    # No post-hoc filter — the ES page is authoritative.
+    logger.debug(
+        "fuel_ops.reconciliation: tenant=%s order=%s plan=%s pod=%s "
+        "page=%d size=%d returned=%d total=%d",
+        tenant.tenant_id,
+        order_id,
+        plan_id,
+        pod_id,
+        page,
+        size,
+        len(validated_rows),
+        es_total,
+    )
+    has_next = es_total > page * size
+    response = paginated_response_dict(
+        items=[r.model_dump(mode="json") for r in validated_rows],
+        total=es_total,
+        page=page,
+        page_size=size,
+        request_id=getattr(request.state, "request_id", "unknown"),
+    )
+    # Override has_next from the paginator (which uses total / page_size
+    # to derive total_pages) so we can report ``True`` when there are
+    # additional ES rows beyond the current page even when total_pages
+    # math would disagree due to integer division rounding.
+    response["has_next"] = has_next
+    return response
 
 
 # ---------------------------------------------------------------------------

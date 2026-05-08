@@ -244,6 +244,7 @@ MVP_RECONCILIATION_MAPPING = {
             "variance_invoiced_vs_delivered_pct":    {"type": "float"},
             "alert_flags":                           {"type": "keyword"},
             "payment_status":                        {"type": "keyword"},
+            "payment_intent_id":                     {"type": "keyword"},
             "generated_at":                          {"type": "date"},
             "updated_at":                            {"type": "date"},
             "created_at":                            {"type": "date"},

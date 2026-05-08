@@ -283,6 +283,22 @@ class RoutePlan(BaseModel):
     #: :class:`fuel.terminal_models.SourcingRecommendation` that drove
     #: the pick. Empty string when no sourcing was run.
     sourcing_recommendation_id: Optional[str] = None
+    #: Fuel Ops Hardening Req 5.4.6 / Task 9.7 — provenance of the
+    #: route's start coordinates. ``"telemetry"`` means a fresh (<300s)
+    #: ``truck_telemetry`` reading was used; ``"depot"`` means the
+    #: resolver fell back to the truck's assigned depot (or the
+    #: tenant's default depot). ``None`` on legacy plans persisted
+    #: before this annotation was added so consumers can distinguish
+    #: "unknown" from "depot".
+    start_position_source: Optional[str] = None
+    #: Resolved start latitude (WGS84 degrees). Persisted alongside
+    #: ``start_position_source`` so downstream audit tooling can show
+    #: where the route actually started without re-querying the
+    #: telemetry index.
+    start_position_lat: Optional[float] = None
+    #: Resolved start longitude (WGS84 degrees). See
+    #: ``start_position_lat``.
+    start_position_lon: Optional[float] = None
 
 
 class ReplanDiff(BaseModel):

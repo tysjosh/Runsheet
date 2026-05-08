@@ -47,3 +47,31 @@ scikit-learn>=1.5.0
 
 # PDF generation for BOL documents (Fuel Ops Hardening Req 4.3 — services/bol_service.py)
 reportlab>=4.0.0
+
+# APScheduler for cron-driven integration sync runs (Fuel Ops Hardening
+# Req 5.1.5 — integrations/integration_scheduler.py). Used via the
+# AsyncIOScheduler + CronTrigger.from_crontab APIs to register per-
+# Integration_Instance cron jobs that invoke connector.sync_pull.
+APScheduler>=3.10.0
+
+# intuit-oauth (intuitlib) for QuickBooks Online Connector OAuth 2.0
+# refresh-token rotation (Fuel Ops Hardening Req 5.2.2, 5.2.5; Task 9.4 —
+# integrations/quickbooks_online.py). Imported lazily so unit tests that
+# mock the refresh flow do not require the dependency to be installed.
+intuit-oauth==1.2.6
+
+# mygeotab SDK for Geotab Connector (Fuel Ops Hardening Req 5.4.1–5.4.5;
+# Task 9.6 — integrations/geotab.py). Imported lazily: unit tests that
+# mock the Authenticate flow do not require the dependency to be
+# installed, but production deployments should pip-install this pin so
+# the connector uses the vendor-maintained client rather than the
+# HTTPS fallback.
+mygeotab==0.9.1
+
+# Stripe SDK for the Stripe Connector (Fuel Ops Hardening Req 5.5.*;
+# Task 9.8 — integrations/stripe_connector.py). Imported lazily so
+# unit tests that mock the SDK do not require it to be installed,
+# but production deployments should pip-install this pin so the
+# connector's PaymentIntent + Webhook.construct_event calls use the
+# vendor-maintained client.
+stripe>=10.0.0
