@@ -2461,6 +2461,12 @@ export interface TerminalWaitReportCreateRequest {
   reporter_id?: string;
   truck_id?: string;
   observed_at: string;
+  /**
+   * Optional free-form dispatcher / driver note. Capped at 1000 chars by
+   * the backend model; whitespace-only values are coerced to ``None``
+   * server-side (see :class:`fuel.terminal_models.TerminalWaitReport`).
+   */
+  notes?: string;
 }
 
 /**

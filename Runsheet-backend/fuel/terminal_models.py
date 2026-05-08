@@ -51,8 +51,17 @@ from __future__ import annotations
 import logging
 import re
 from datetime import date, datetime, timezone
-from typing import Any, Dict, List, Literal, Optional, Type, TypeVar
+from typing import Any, Dict, List, Literal, Optional, Tuple, Type, TypeVar
 from uuid import uuid4
+
+try:  # pragma: no cover - zoneinfo ships with Python 3.9+
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+except ImportError:  # pragma: no cover - defensive
+    ZoneInfo = None  # type: ignore[assignment]
+
+    class ZoneInfoNotFoundError(Exception):
+        """Fallback stub when zoneinfo is unavailable."""
+
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -92,6 +101,17 @@ WaitReportSource = Literal["driver_report", "eld_geofence", "connector_import"]
 
 # Match "HH:MM" 24-hour clock values used in Terminal.operating_hours.
 _TIME_HH_MM = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+
+
+#: Short codes for day-of-week lookup indexed by ``datetime.weekday()``.
+#: Must match :data:`DayOfWeek` so :meth:`Terminal.is_open_at` can look
+#: up the right window for an ``as_of`` datetime. Kept at module scope
+#: so both the model method and any helper (e.g. the
+#: ``proposed-load`` endpoint's next-open-window walk) share the same
+#: source of truth.
+_DAY_OF_WEEK_CODES: Tuple[str, ...] = (
+    "mon", "tue", "wed", "thu", "fri", "sat", "sun",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -263,6 +283,64 @@ class Terminal(BaseModel):
             seen.add(hours.day_of_week)
         return self
 
+    # ------------------------------------------------------------------
+    # Public helpers
+    # ------------------------------------------------------------------
+
+    def is_open_at(self, as_of: datetime) -> bool:
+        """Return ``True`` when this terminal is open at ``as_of``.
+
+        :attr:`operating_hours` entries are declared in the terminal's
+        local timezone (:attr:`timezone`). This method converts the
+        supplied ``as_of`` into that zone, looks up the matching
+        day-of-week window, and checks the ``HH:MM`` range using an
+        inclusive-lower / exclusive-upper comparison so ``close="22:00"``
+        does not incorrectly report open at exactly 22:00.
+
+        Closed days are encoded by *omission* of an entry for that day
+        (see :meth:`_check_unique_operating_days`), so a missing day
+        always returns ``False``.
+
+        Defensive on two edges that would otherwise break sourcing or
+        the proposed-load validator on misconfigured data:
+
+        * **Empty ``operating_hours``** — treated as 24/7 open. This is
+          the "operator did not constrain availability yet" posture we
+          use for newly-created terminals; the Req 8.1.4 proposed-load
+          validator separately surfaces a distinct reason when a
+          terminal has not yet been populated with a schedule.
+        * **Unknown timezone string** — degrades to ``True`` with a
+          warning log. Refusing to load because an operator typo'd an
+          IANA name would be a worse failure than the tiny chance of
+          recommending a closed terminal; the sourcing path logs the
+          warning so ops can chase the typo.
+        * **Naive ``as_of``** — assumed to be UTC so callers that drop
+          in a ``datetime.utcnow()`` do not get a surprising False
+          from timezone math.
+
+        Validates: Requirement 8.1.4.
+        """
+
+        if not self.operating_hours:
+            return True
+
+        local = _to_local_datetime(as_of, self.timezone)
+        if local is None:
+            # Unknown / unresolvable timezone. Degrade to "open" with a
+            # warning rather than refusing a load because an operator
+            # typo'd the IANA name — the warning logged inside
+            # ``_to_local_datetime`` makes the misconfiguration
+            # observable to ops.
+            return True
+        day_code = _DAY_OF_WEEK_CODES[local.weekday()]
+        hhmm = local.strftime("%H:%M")
+        for window in self.operating_hours:
+            if window.day_of_week != day_code:
+                continue
+            if window.open <= hhmm < window.close:
+                return True
+        return False
+
 
 # ---------------------------------------------------------------------------
 # SupplierContract model
@@ -405,6 +483,15 @@ class TerminalWaitReport(BaseModel):
             "observed_at."
         ),
     )
+    notes: Optional[str] = Field(
+        default=None,
+        max_length=1000,
+        description=(
+            "Optional free-form dispatcher / driver note explaining the "
+            "observation (why the wait was long, bottleneck cause, etc). "
+            "Capped at 1000 chars; strip-on-write via the validator below."
+        ),
+    )
     updated_at: Optional[datetime] = None
     created_at: Optional[datetime] = None
 
@@ -422,7 +509,7 @@ class TerminalWaitReport(BaseModel):
             raise ValueError("required string must not be blank")
         return stripped
 
-    @field_validator("reporter_id", "truck_id")
+    @field_validator("reporter_id", "truck_id", "notes")
     @classmethod
     def _strip_optional_strings(cls, value: Optional[str]) -> Optional[str]:
         if value is None:
@@ -1254,6 +1341,52 @@ def _utcnow_iso() -> str:
     """Return a timezone-aware UTC timestamp as an ISO-8601 string."""
 
     return datetime.now(timezone.utc).isoformat()
+
+
+def _ensure_utc(value: datetime) -> datetime:
+    """Coerce a naive datetime to UTC so downstream math is consistent.
+
+    Mirrors the helper in :mod:`fuel.services.sourcing_recommender` so
+    :meth:`Terminal.is_open_at` and every caller that reasons about the
+    terminal's local time share one notion of "assume UTC on naive
+    inputs".
+    """
+
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _to_local_datetime(value: datetime, tz_name: str) -> Optional[datetime]:
+    """Convert ``value`` into the IANA zone ``tz_name``.
+
+    Returns ``None`` when ``ZoneInfo`` is unavailable or ``tz_name`` is
+    not a known zone so the caller (notably :meth:`Terminal.is_open_at`)
+    can degrade its behavior — e.g. treat "unknown zone" as "assume
+    open" rather than incorrectly evaluating the UTC wall-clock against
+    operating_hours declared in a different locale. A warning is logged
+    so misconfigured terminals are observable.
+
+    Used by :meth:`Terminal.is_open_at` and the ``proposed-load``
+    validator to map ``operating_hours`` (expressed in local time) onto
+    a UTC-aware ``as_of``.
+    """
+
+    utc_value = _ensure_utc(value)
+    if ZoneInfo is None:  # pragma: no cover - Python <3.9 fallback
+        logger.warning(
+            "Terminal.is_open_at: ZoneInfo unavailable; cannot resolve %r",
+            tz_name,
+        )
+        return None
+    try:
+        tz = ZoneInfo(tz_name)
+    except (ZoneInfoNotFoundError, ValueError, KeyError):
+        logger.warning(
+            "Terminal.is_open_at: unknown timezone %r", tz_name
+        )
+        return None
+    return utc_value.astimezone(tz)
 
 
 def _extract_sources(resp: Any) -> List[Dict[str, Any]]:

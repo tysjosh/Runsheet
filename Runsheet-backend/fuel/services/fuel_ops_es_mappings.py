@@ -512,6 +512,7 @@ TERMINAL_WAIT_REPORTS_MAPPING = {
             "truck_id":      {"type": "keyword"},
             "observed_at":   {"type": "date"},
             "retrieved_at":  {"type": "date"},
+            "notes":         {"type": "text"},
             "updated_at":    {"type": "date"},
             "created_at":    {"type": "date"},
         },

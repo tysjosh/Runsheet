@@ -892,3 +892,146 @@ class TestSummaryEnrichments:
         assert body["source"] == "cache"
         assert body["wait_warning_threshold_minutes"] == 30.0
         assert body["wait_warning_exceeded"] is True
+
+
+# ---------------------------------------------------------------------------
+# Escalation #2 — optional ``notes`` field on TerminalWaitReport
+# ---------------------------------------------------------------------------
+
+
+class TestWaitReportNotesField:
+    """Lock down the optional dispatcher / driver ``notes`` field added
+    to ``TerminalWaitReport`` end-to-end (Pydantic model → POST payload
+    → ES document).
+
+    Validates: Requirement 8.4.2 (dispatcher-supplied context).
+    """
+
+    def test_notes_round_trip_via_post(self):
+        """A ``notes`` string in the request body is persisted verbatim
+        (after whitespace stripping) and returned in the 201 response."""
+
+        app, es, _ = _build_app(redis_client=_FakeRedis())
+        _seed_terminal(es)
+        client = TestClient(app)
+
+        resp = client.post(
+            "/api/fuel/terminals/term_001/wait-reports",
+            json={
+                "wait_minutes": 45.0,
+                "reporter_id": "driver_017",
+                "notes": "Tanker queue backed up after a rack outage.",
+            },
+        )
+
+        assert resp.status_code == 201, resp.text
+        body = resp.json()
+        assert body["notes"] == "Tanker queue backed up after a rack outage."
+
+        # Persisted ES document carries the same value so downstream
+        # analytics and the dispatcher audit trail can read it back.
+        stored = next(
+            doc for doc in es.docs.values() if "report_id" in doc
+        )
+        assert stored["notes"] == "Tanker queue backed up after a rack outage."
+
+    def test_notes_whitespace_only_coerced_to_none(self):
+        """The model's ``_strip_optional_strings`` validator collapses
+        a whitespace-only ``notes`` value to ``None`` so the ES
+        document doesn't carry a noise string."""
+
+        app, es, _ = _build_app(redis_client=_FakeRedis())
+        _seed_terminal(es)
+        client = TestClient(app)
+
+        resp = client.post(
+            "/api/fuel/terminals/term_001/wait-reports",
+            json={
+                "wait_minutes": 10.0,
+                "reporter_id": "driver_017",
+                "notes": "   ",
+            },
+        )
+
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["notes"] is None
+
+    def test_notes_empty_string_coerced_to_none(self):
+        """Empty-string ``notes`` normalizes to ``None`` so a blank
+        textarea from the UI does not persist an empty value."""
+
+        app, es, _ = _build_app(redis_client=_FakeRedis())
+        _seed_terminal(es)
+        client = TestClient(app)
+
+        resp = client.post(
+            "/api/fuel/terminals/term_001/wait-reports",
+            json={
+                "wait_minutes": 10.0,
+                "reporter_id": "driver_017",
+                "notes": "",
+            },
+        )
+
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["notes"] is None
+
+    def test_notes_omitted_defaults_to_none(self):
+        """Omitting ``notes`` entirely leaves it ``None`` — preserves
+        backwards compatibility with callers written before the field
+        existed."""
+
+        app, es, _ = _build_app(redis_client=_FakeRedis())
+        _seed_terminal(es)
+        client = TestClient(app)
+
+        resp = client.post(
+            "/api/fuel/terminals/term_001/wait-reports",
+            json={"wait_minutes": 10.0, "reporter_id": "driver_017"},
+        )
+
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["notes"] is None
+
+    def test_notes_exceeding_max_length_rejected(self):
+        """A ``notes`` string longer than 1000 characters trips the
+        Pydantic ``max_length`` constraint and surfaces as HTTP 422 so
+        the dispatcher UI gets an immediate validation error."""
+
+        app, es, _ = _build_app(redis_client=_FakeRedis())
+        _seed_terminal(es)
+        client = TestClient(app)
+
+        too_long = "x" * 1001
+        resp = client.post(
+            "/api/fuel/terminals/term_001/wait-reports",
+            json={
+                "wait_minutes": 10.0,
+                "reporter_id": "driver_017",
+                "notes": too_long,
+            },
+        )
+
+        assert resp.status_code == 422
+
+    def test_notes_at_max_length_accepted(self):
+        """Exactly 1000 characters is the supported upper bound — it
+        must still round-trip (off-by-one coverage on the ``max_length``
+        boundary)."""
+
+        app, es, _ = _build_app(redis_client=_FakeRedis())
+        _seed_terminal(es)
+        client = TestClient(app)
+
+        exact = "x" * 1000
+        resp = client.post(
+            "/api/fuel/terminals/term_001/wait-reports",
+            json={
+                "wait_minutes": 10.0,
+                "reporter_id": "driver_017",
+                "notes": exact,
+            },
+        )
+
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["notes"] == exact

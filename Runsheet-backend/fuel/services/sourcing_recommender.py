@@ -811,7 +811,7 @@ class SourcingRecommender:
                     _Disqualification(terminal.terminal_id, "product_unsupported")
                 )
                 continue
-            if not _is_open_at(terminal, as_of):
+            if not terminal.is_open_at(as_of):
                 disqualified.append(
                     _Disqualification(terminal.terminal_id, "terminal_closed")
                 )
@@ -896,38 +896,17 @@ def _haversine_km(origin: Tuple[float, float], terminal: Terminal) -> float:
 
 
 def _is_open_at(terminal: Terminal, as_of: datetime) -> bool:
-    """Return True when ``terminal`` is open at ``as_of`` in its local tz.
+    """Thin backward-compat wrapper over :meth:`Terminal.is_open_at`.
 
-    ``operating_hours`` is declared in the terminal's local timezone.
-    We convert the (tz-aware or naive) ``as_of`` into that timezone,
-    look up the matching day-of-week window, and check the HH:MM range
-    inclusive-exclusive. Closed days are encoded by omission of an
-    entry, so a missing day always returns ``False``.
-
-    Defensive on two edges:
-        * Unknown timezones (mis-typed / legacy IANA names) degrade to
-          ``True`` with a warning — refusing to load because operators
-          typo'd a time zone string would be a worse failure than the
-          tiny chance of recommending a closed terminal.
-        * Naive ``as_of`` values are assumed to be UTC.
+    The open/close window logic moved onto the :class:`Terminal` model
+    (Task 7.2) so the ``proposed-load`` REST endpoint (Req 8.1.4) and
+    the sourcing recommender share one implementation. This helper is
+    retained for any out-of-tree call sites that imported the private
+    function before the refactor — the recommender itself now calls
+    ``terminal.is_open_at(as_of)`` directly.
     """
 
-    if not terminal.operating_hours:
-        # No schedule configured → treat as 24/7 (Req 8.1.4 surfaces a
-        # separate 400 when a load request lands on a closed terminal,
-        # but for recommendation purposes missing schedules mean
-        # "operator did not constrain availability yet").
-        return True
-
-    local = _to_local(as_of, terminal.timezone)
-    day_code = _DAY_OF_WEEK_CODES[local.weekday()]
-    hhmm = local.strftime("%H:%M")
-    for window in terminal.operating_hours:
-        if window.day_of_week != day_code:
-            continue
-        if window.open <= hhmm < window.close:
-            return True
-    return False
+    return terminal.is_open_at(as_of)
 
 
 def _to_local(value: datetime, tz_name: str) -> datetime:

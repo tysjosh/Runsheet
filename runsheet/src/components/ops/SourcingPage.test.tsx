@@ -457,6 +457,12 @@ describe("SourcingPage", () => {
     fireEvent.change(within(form).getByLabelText(/Reporter ID/i), {
       target: { value: "driver-042" },
     });
+    // Escalation #2: dispatcher note is persisted end-to-end via
+    // ``TerminalWaitReportCreateRequest.notes``. The form should pass
+    // the trimmed value through to the API client.
+    fireEvent.change(within(form).getByLabelText(/Notes/i), {
+      target: { value: "  Rack outage delayed load  " },
+    });
     await act(async () => {
       fireEvent.submit(form);
     });
@@ -471,6 +477,7 @@ describe("SourcingPage", () => {
         wait_minutes: 42,
         source: "driver_report",
         reporter_id: "driver-042",
+        notes: "Rack outage delayed load",
       }),
     );
     expect(typeof body.observed_at).toBe("string");
@@ -479,6 +486,46 @@ describe("SourcingPage", () => {
     await waitFor(() => {
       expect(mockGetWait).toHaveBeenCalledWith("term_001");
     });
+  });
+
+  it("sends notes as undefined when the notes textarea is left blank", async () => {
+    // Escalation #2: a blank notes textarea must not forward an empty
+    // string to the backend — the helper coerces empty input to
+    // ``undefined`` so the server never stores noise.
+    mockGetRec.mockResolvedValue(recommendationFixture());
+    mockGetWait.mockResolvedValue(
+      waitSummaryFixture({ terminal_id: "term_001" }),
+    );
+    mockSubmitWait.mockResolvedValue(waitReportFixture());
+
+    render(<SourcingPage />);
+    await submitQuery();
+
+    await waitFor(() => {
+      expect(mockGetWait).toHaveBeenCalledWith("term_001");
+    });
+
+    const form = await screen.findByTestId("wait-report-form-term_001");
+    fireEvent.change(within(form).getByLabelText(/Wait minutes/i), {
+      target: { value: "30" },
+    });
+    fireEvent.change(within(form).getByLabelText(/Reporter ID/i), {
+      target: { value: "driver-099" },
+    });
+    // Notes textarea left empty — also exercise a whitespace-only
+    // value since the form helper trims before coercing.
+    fireEvent.change(within(form).getByLabelText(/Notes/i), {
+      target: { value: "   " },
+    });
+    await act(async () => {
+      fireEvent.submit(form);
+    });
+
+    await waitFor(() => {
+      expect(mockSubmitWait).toHaveBeenCalledTimes(1);
+    });
+    const [, body] = mockSubmitWait.mock.calls[0];
+    expect(body.notes).toBeUndefined();
   });
 
   it("blocks submit and shows an error when wait minutes are empty", async () => {

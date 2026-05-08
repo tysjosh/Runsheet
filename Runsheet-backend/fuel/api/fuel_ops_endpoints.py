@@ -4534,30 +4534,635 @@ async def insert_route_emergency_stop(
 
 
 # ---------------------------------------------------------------------------
-# Terminal_Wait endpoints (Task 7.7 — Req 8.4.2, 8.4.4)
+# Terminal CRUD endpoints (Task 7.2 — Req 8.1.2, 8.1.4)
 # ---------------------------------------------------------------------------
 #
-# Two endpoints back the Terminal_Wait data path:
+# Six endpoints back the Terminal admin + validator path:
 #
-# * ``POST /api/fuel/terminals/{terminal_id}/wait-reports`` — accepts a
-#   driver or dispatcher wait-time submission for a specific terminal and
-#   persists a :class:`TerminalWaitReport` to the ``terminal_wait_reports``
-#   index (Req 8.4.2).
+# * ``GET    /api/fuel/terminals``                          — paginated list
+# * ``POST   /api/fuel/terminals``                          — create
+# * ``GET    /api/fuel/terminals/{terminal_id}``            — fetch
+# * ``PATCH  /api/fuel/terminals/{terminal_id}``            — partial update
+# * ``DELETE /api/fuel/terminals/{terminal_id}``            — hard delete
+# * ``POST   /api/fuel/terminals/{terminal_id}/proposed-load`` — operating-
+#   hours / supported-product validator that surfaces the Req 8.1.4
+#   ``terminal_closed`` reason with a next-open-window suggestion before
+#   a dispatcher (or the Route_Planning_Agent) commits a load.
 #
-# * ``GET /api/fuel/terminals/{terminal_id}/wait-summary`` — returns the
-#   rolling 2-hour mean ``wait_minutes`` for the terminal (Req 8.4.4) and
-#   caches the result at ``terminal_wait:{tenant_id}:{terminal_id}`` in
-#   Redis so the Sourcing_Recommender (Task 7.9) can consume it without
-#   re-scanning ES on every recommendation request.
+# Shape mirrors the Depot CRUD endpoints (Task 4.3) so front-end
+# pagination helpers can consume both surfaces uniformly:
+# ``{items, total, page, page_size, has_next}``. The router stamps
+# ``tenant_id`` from the JWT context on every write so the caller cannot
+# spoof ownership. Cross-tenant accesses surface through the shared
+# :func:`_translate_terminal_cross_tenant_error` helper as HTTP 403
+# ``cross_tenant_access_denied``.
 #
-# Both endpoints are tenant-scoped via :func:`get_tenant_context` and
-# defense-in-depth tenant re-verification inside the repository.
-# Terminal existence is validated up-front so cross-tenant references
-# (or typos) surface as HTTP 404 with a structured ``terminal_not_found``
-# error code rather than leaking a 500 from a downstream persistence
-# failure.
+# The ``operator`` filter on the list endpoint is a case-insensitive
+# substring match applied on the post-query result set because
+# :meth:`TerminalRepository.list_for_tenant` only supports exact
+# equality. Substring filtering at the repository layer would need a
+# ``match``/ ``wildcard`` query and a re-mapped analyzer on the
+# ``operator`` keyword field; that is out of scope here and the seeded
+# terminal count per tenant is small enough that client-side filtering
+# on the fetched window is fine for now.
 #
-# Validates: Requirements 8.4.2, 8.4.4.
+# Validates: Requirements 8.1.2, 8.1.4.
+
+
+class TerminalCreateRequest(BaseModel):
+    """Body for ``POST /api/fuel/terminals`` (Req 8.1.2).
+
+    Mirrors :class:`fuel.terminal_models.Terminal` but omits repository-
+    managed fields (``tenant_id``, ``created_at``, ``updated_at``) and
+    makes ``terminal_id`` optional so the repository can mint one
+    (``term_<uuid4>``). Coordinate bounds are enforced at the Pydantic
+    layer so invalid values surface as a clean 422 from FastAPI's
+    request validation before reaching the repository.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    terminal_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional client-supplied identifier. When omitted the "
+            "repository mints a uuid4-based id (``term_<uuid4>``)."
+        ),
+    )
+    name: str = Field(..., min_length=1)
+    operator: str = Field(..., min_length=1)
+    location_lat: float = Field(..., ge=-90.0, le=90.0)
+    location_lon: float = Field(..., ge=-180.0, le=180.0)
+    address: str = Field(..., min_length=1)
+    timezone: str = Field(..., min_length=1)
+    operating_hours: List[OperatingHours] = Field(default_factory=list)
+    supported_products: List[str] = Field(default_factory=list)
+    branded: bool = Field(default=False)
+    supplier_brand: Optional[str] = Field(default=None)
+    status: TerminalActiveStatus = "active"
+
+
+class TerminalUpdateRequest(BaseModel):
+    """Body for ``PATCH /api/fuel/terminals/{terminal_id}`` (Req 8.1.2).
+
+    Every field is optional so callers can send just the delta. The
+    repository refuses to overwrite immutable fields (``terminal_id``,
+    ``tenant_id``, ``created_at``); those are not exposed here so
+    malicious or accidental payloads are rejected by the
+    ``extra="forbid"`` Pydantic policy before reaching the repository.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: Optional[str] = Field(default=None, min_length=1)
+    operator: Optional[str] = Field(default=None, min_length=1)
+    location_lat: Optional[float] = Field(default=None, ge=-90.0, le=90.0)
+    location_lon: Optional[float] = Field(default=None, ge=-180.0, le=180.0)
+    address: Optional[str] = Field(default=None, min_length=1)
+    timezone: Optional[str] = Field(default=None, min_length=1)
+    operating_hours: Optional[List[OperatingHours]] = None
+    supported_products: Optional[List[str]] = None
+    branded: Optional[bool] = None
+    supplier_brand: Optional[str] = None
+    status: Optional[TerminalActiveStatus] = None
+
+
+class TerminalListResponse(BaseModel):
+    """Envelope for ``GET /api/fuel/terminals`` (Req 8.1.2)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: List[Terminal]
+    total: int
+    page: int
+    page_size: int
+    has_next: bool
+
+
+class ProposedLoadRequest(BaseModel):
+    """Body for ``POST /api/fuel/terminals/{terminal_id}/proposed-load``.
+
+    A dispatcher (or the Route_Planning_Agent preflighting a
+    Loading_Plan) submits a ``{product_code, volume_gallons, as_of}``
+    triple to ask "can this terminal accept this load right now?"
+    without actually committing anything. The endpoint surfaces the
+    same ``terminal_closed`` reason the Sourcing_Recommender uses
+    (Req 8.1.4) plus a structured ``next_open_window`` so the caller
+    can schedule the load for the next viable slot.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    product_code: str = Field(
+        ...,
+        min_length=1,
+        description=(
+            "Canonical catalog product_code, or a legacy alias "
+            "(AGO, PMS, ATK, LPG) which is canonicalized before the "
+            "``supported_products`` membership check."
+        ),
+    )
+    volume_gallons: float = Field(..., gt=0)
+    as_of: Optional[datetime] = Field(
+        default=None,
+        description=(
+            "When the load would happen. Defaults to now() so a "
+            "dispatcher clicking 'load here' evaluates against the "
+            "current operating-hours window. Naive datetimes are "
+            "assumed UTC."
+        ),
+    )
+
+
+class ProposedLoadNextOpenWindow(BaseModel):
+    """Next-viable-open-window surfaced inside a ``terminal_closed`` 400.
+
+    Computed by walking forward up to 7 days from ``as_of`` in the
+    terminal's local timezone and returning the first
+    :class:`OperatingHours` window whose open time is on or after the
+    requested ``as_of``. ``starts_at_utc`` is the UTC conversion of that
+    local open time so the caller can schedule against an absolute
+    reference clock without re-doing the timezone math.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    day_of_week: str
+    open_local: str = Field(..., description="Local HH:MM open time.")
+    close_local: str = Field(..., description="Local HH:MM close time.")
+    starts_at_utc: datetime = Field(
+        ...,
+        description=(
+            "Absolute UTC start of the window. Convenient for callers "
+            "who want to re-evaluate at the exact open moment without "
+            "re-running the timezone resolution."
+        ),
+    )
+
+
+class ProposedLoadResponse(BaseModel):
+    """200 body for ``POST /terminals/{id}/proposed-load`` when the
+    load is permitted. The 400 path surfaces a structured detail
+    payload instead (see :func:`propose_load_at_terminal`).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    allowed: bool = Field(default=True)
+    terminal_id: str
+    product_code: str = Field(
+        ..., description="The canonical product_code the load was evaluated against."
+    )
+    volume_gallons: float = Field(..., gt=0)
+    as_of: datetime
+
+
+def _compute_next_open_window(
+    terminal: Terminal, as_of: datetime
+) -> Optional[ProposedLoadNextOpenWindow]:
+    """Return the first viable open window on/after ``as_of``, or ``None``.
+
+    Walks forward up to 7 days from ``as_of`` in the terminal's local
+    timezone. For the same day as ``as_of`` we only accept a window
+    whose ``open`` is still in the future; later days accept the
+    earliest window for that day. Tenants with an empty
+    ``operating_hours`` list never reach this helper — the 24/7 path in
+    :meth:`Terminal.is_open_at` short-circuits before the validator
+    surfaces a ``terminal_closed`` reason.
+    """
+
+    if not terminal.operating_hours:
+        return None
+
+    # Build a day-code → OperatingHours map for O(1) lookup.
+    by_day: Dict[str, OperatingHours] = {
+        w.day_of_week: w for w in terminal.operating_hours
+    }
+
+    local_now = _terminal_local_datetime(terminal, as_of)
+    if local_now is None:
+        # Unknown timezone — ``is_open_at`` degrades to True in that case
+        # so we would never be called; guard defensively anyway.
+        return None
+
+    day_codes = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+    for offset in range(0, 8):
+        probe = local_now + timedelta(days=offset)
+        day_code = day_codes[probe.weekday()]
+        window = by_day.get(day_code)
+        if window is None:
+            continue
+        open_h, open_m = (int(x) for x in window.open.split(":"))
+        candidate_local = probe.replace(
+            hour=open_h, minute=open_m, second=0, microsecond=0
+        )
+        if offset == 0 and candidate_local <= local_now:
+            # Open already passed earlier today — walk forward.
+            continue
+        starts_utc = candidate_local.astimezone(timezone.utc)
+        return ProposedLoadNextOpenWindow(
+            day_of_week=day_code,
+            open_local=window.open,
+            close_local=window.close,
+            starts_at_utc=starts_utc,
+        )
+    return None
+
+
+def _terminal_local_datetime(
+    terminal: Terminal, value: datetime
+) -> Optional[datetime]:
+    """Return ``value`` in the terminal's local timezone, or ``None``.
+
+    Thin wrapper over the shared ``_to_local_datetime`` helper in
+    :mod:`fuel.terminal_models` so the endpoint layer is not forced to
+    reach into the model module's underscore-prefixed helpers.
+    """
+
+    # Imported lazily to avoid a circular import: fuel_ops_endpoints
+    # already imports from fuel.terminal_models at module load, so the
+    # symbol exists by the time this helper runs, but the underscore
+    # prefix keeps us honest about the private contract.
+    from fuel.terminal_models import _to_local_datetime  # type: ignore
+
+    return _to_local_datetime(value, terminal.timezone)
+
+
+@router.get("/terminals", response_model=TerminalListResponse)
+async def list_terminals(
+    request: Request,
+    tenant: TenantContext = Depends(get_tenant_context),
+    status_filter: Optional[TerminalActiveStatus] = Query(
+        default=None,
+        alias="status",
+        description="Restrict to a single status (active | inactive).",
+    ),
+    operator: Optional[str] = Query(
+        default=None,
+        description=(
+            "Case-insensitive substring match against the terminal's "
+            "``operator`` field (e.g. ``buckeye`` matches ``Buckeye`` "
+            "and ``Buckeye Terminals``). Applied after the tenant-"
+            "scoped ES query so the filter respects every terminal the "
+            "caller owns."
+        ),
+    ),
+    product_code: Optional[str] = Query(
+        default=None,
+        description=(
+            "Filter by supported fuel product. Accepts the canonical "
+            "product_code (e.g. DIESEL_2) or a legacy alias (AGO / "
+            "PMS / ATK / LPG); aliases are resolved through the fuel "
+            "product catalog before the ES query is issued."
+        ),
+    ),
+    page: int = Query(1, ge=1, description="Page number, 1-indexed."),
+    size: int = Query(50, ge=1, le=500, description="Page size (1–500)."),
+) -> TerminalListResponse:
+    """Return the paginated list of Terminals for the tenant.
+
+    Flow:
+
+        1. Fetch a window of ``page * size + 1`` records so we can
+           compute ``has_next`` deterministically without an extra
+           round-trip.
+        2. Apply the client-side ``operator`` substring filter.
+        3. Slice into the requested page.
+
+    Validates: Requirement 8.1.2.
+    """
+
+    repo = _get_terminal_repository()
+
+    try:
+        window = await repo.list_for_tenant(
+            tenant_id=tenant.tenant_id,
+            status=status_filter,
+            supported_product=product_code,
+            size=page * size + 1,
+        )
+    except UnknownFuelProductError:
+        # An unknown product_code filter is a miss (not a 400) so we
+        # match the depot-list behavior.
+        window = []
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    if operator:
+        needle = operator.strip().lower()
+        if needle:
+            window = [t for t in window if needle in t.operator.lower()]
+
+    total = len(window)
+    start = (page - 1) * size
+    end = start + size
+    page_items = window[start:end]
+    has_next = len(window) > end
+
+    logger.debug(
+        "fuel_ops.terminals.list: tenant=%s page=%d size=%d total=%d returned=%d",
+        tenant.tenant_id,
+        page,
+        size,
+        total,
+        len(page_items),
+    )
+    return TerminalListResponse(
+        items=page_items,
+        total=total,
+        page=page,
+        page_size=size,
+        has_next=has_next,
+    )
+
+
+@router.post(
+    "/terminals",
+    response_model=Terminal,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_terminal(
+    body: TerminalCreateRequest,
+    request: Request,
+    tenant: TenantContext = Depends(get_tenant_context),
+) -> Terminal:
+    """Create a new Terminal scoped to the requesting tenant.
+
+    The router stamps ``tenant_id`` from the verified JWT context so the
+    caller cannot spoof ownership. ``supported_products`` entries are
+    canonicalized inside :class:`Terminal` via its field validator,
+    which surfaces :class:`UnknownFuelProductError` — we map that to a
+    400 with a structured ``unknown_product_code`` payload so clients
+    can distinguish "bad product" from generic validation errors.
+
+    Validates: Requirement 8.1.2.
+    """
+
+    repo = _get_terminal_repository()
+
+    payload: Dict[str, Any] = body.model_dump(exclude_none=True)
+    payload["tenant_id"] = tenant.tenant_id
+
+    try:
+        terminal = await repo.create(tenant.tenant_id, payload)
+    except TerminalCrossTenantAccessError as exc:
+        raise _translate_terminal_cross_tenant_error(exc)
+    except UnknownFuelProductError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error_code": "unknown_product_code",
+                "message": "Unknown fuel product code.",
+                "fuel_product_code": exc.code_or_alias,
+            },
+        )
+    except (ValidationError, ValueError, TypeError) as exc:
+        raise _translate_validation_error(exc)
+
+    logger.info(
+        "fuel_ops.terminals.create: tenant=%s terminal=%s",
+        tenant.tenant_id,
+        terminal.terminal_id,
+    )
+    return terminal
+
+
+@router.get("/terminals/{terminal_id}", response_model=Terminal)
+async def get_terminal(
+    terminal_id: str,
+    request: Request,
+    tenant: TenantContext = Depends(get_tenant_context),
+) -> Terminal:
+    """Fetch a single Terminal owned by the tenant.
+
+    Missing / cross-tenant records surface as HTTP 404 with
+    ``terminal_not_found`` via :func:`_ensure_terminal_owned` — we never
+    leak existence of another tenant's terminals.
+
+    Validates: Requirement 8.1.2.
+    """
+
+    return await _ensure_terminal_owned(tenant.tenant_id, terminal_id)
+
+
+@router.patch("/terminals/{terminal_id}", response_model=Terminal)
+async def update_terminal(
+    terminal_id: str,
+    body: TerminalUpdateRequest,
+    request: Request,
+    tenant: TenantContext = Depends(get_tenant_context),
+) -> Terminal:
+    """Apply a partial update to an owned Terminal.
+
+    Returns 404 when the terminal does not exist. Returns 403 when it
+    belongs to another tenant (:class:`CrossTenantAccessError` from the
+    repository). Returns 422 when the merged record would fail Pydantic
+    validation (invalid timezone, branded/supplier_brand mismatch,
+    coordinates out of range). Returns 400 when ``supported_products``
+    contains an unknown product code.
+
+    Validates: Requirement 8.1.2.
+    """
+
+    repo = _get_terminal_repository()
+
+    patch = body.model_dump(exclude_none=True)
+    if not patch:
+        existing = await repo.get(tenant.tenant_id, terminal_id)
+        if existing is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "error_code": "terminal_not_found",
+                    "terminal_id": terminal_id,
+                },
+            )
+        return existing
+
+    try:
+        updated = await repo.update(
+            tenant_id=tenant.tenant_id,
+            terminal_id=terminal_id,
+            patch=patch,
+        )
+    except TerminalCrossTenantAccessError as exc:
+        raise _translate_terminal_cross_tenant_error(exc)
+    except UnknownFuelProductError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error_code": "unknown_product_code",
+                "message": "Unknown fuel product code.",
+                "fuel_product_code": exc.code_or_alias,
+            },
+        )
+    except (ValidationError, ValueError, TypeError) as exc:
+        raise _translate_validation_error(exc)
+
+    if updated is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error_code": "terminal_not_found",
+                "terminal_id": terminal_id,
+            },
+        )
+
+    logger.info(
+        "fuel_ops.terminals.update: tenant=%s terminal=%s fields=%s",
+        tenant.tenant_id,
+        terminal_id,
+        sorted(patch.keys()),
+    )
+    return updated
+
+
+@router.delete(
+    "/terminals/{terminal_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_terminal(
+    terminal_id: str,
+    request: Request,
+    tenant: TenantContext = Depends(get_tenant_context),
+) -> None:
+    """Hard-delete a Terminal owned by the tenant.
+
+    * Owned + deleted → HTTP 204 (no body).
+    * Not-found → HTTP 404 with structured ``terminal_not_found`` detail.
+    * Cross-tenant → HTTP 403 with ``cross_tenant_access_denied``.
+
+    Validates: Requirement 8.1.2.
+    """
+
+    repo = _get_terminal_repository()
+
+    try:
+        deleted = await repo.delete(tenant.tenant_id, terminal_id)
+    except TerminalCrossTenantAccessError as exc:
+        raise _translate_terminal_cross_tenant_error(exc)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error_code": "terminal_not_found",
+                "terminal_id": terminal_id,
+            },
+        )
+    logger.info(
+        "fuel_ops.terminals.delete: tenant=%s terminal=%s",
+        tenant.tenant_id,
+        terminal_id,
+    )
+    return None
+
+
+@router.post(
+    "/terminals/{terminal_id}/proposed-load",
+    response_model=ProposedLoadResponse,
+)
+async def propose_load_at_terminal(
+    terminal_id: str,
+    body: ProposedLoadRequest,
+    request: Request,
+    tenant: TenantContext = Depends(get_tenant_context),
+) -> ProposedLoadResponse:
+    """Validate whether a proposed load would be accepted at the terminal.
+
+    Flow:
+
+        1. Verify the terminal exists and is owned by the tenant
+           (404 on miss via :func:`_ensure_terminal_owned`).
+        2. Canonicalize the requested ``product_code`` and 400 with
+           ``unknown_product_code`` if the catalog rejects it.
+        3. Confirm the canonical code is in
+           :attr:`Terminal.supported_products`; 400 with
+           ``product_not_supported`` otherwise.
+        4. Evaluate :meth:`Terminal.is_open_at` at ``as_of`` (default
+           now). When the terminal is closed, return 400 with
+           ``terminal_closed`` and a computed ``next_open_window``
+           (or ``null`` when no window lands within the next 7 days —
+           typical for a terminal that has been inactivated).
+        5. Otherwise return 200 with the canonicalized product_code so
+           the caller can pin the exact code the load would commit.
+
+    Validates: Requirement 8.1.4.
+    """
+
+    terminal = await _ensure_terminal_owned(tenant.tenant_id, terminal_id)
+
+    try:
+        canonical_product = canonicalize(body.product_code)
+    except UnknownFuelProductError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error_code": "unknown_product_code",
+                "message": "Unknown fuel product code.",
+                "fuel_product_code": exc.code_or_alias,
+            },
+        )
+
+    if canonical_product not in terminal.supported_products:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error_code": "product_not_supported",
+                "message": (
+                    "Terminal does not load the requested product."
+                ),
+                "terminal_id": terminal_id,
+                "product_code": canonical_product,
+                "supported_products": list(terminal.supported_products),
+            },
+        )
+
+    as_of = body.as_of or datetime.now(timezone.utc)
+    if as_of.tzinfo is None:
+        as_of = as_of.replace(tzinfo=timezone.utc)
+
+    if not terminal.is_open_at(as_of):
+        next_window = _compute_next_open_window(terminal, as_of)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error_code": "terminal_closed",
+                "message": (
+                    "Terminal is closed at the requested time."
+                ),
+                "terminal_id": terminal_id,
+                "as_of": as_of.isoformat(),
+                "next_open_window": (
+                    next_window.model_dump(mode="json")
+                    if next_window is not None
+                    else None
+                ),
+            },
+        )
+
+    logger.info(
+        "fuel_ops.terminals.proposed_load: tenant=%s terminal=%s product=%s "
+        "volume=%.2f allowed=True",
+        tenant.tenant_id,
+        terminal_id,
+        canonical_product,
+        float(body.volume_gallons),
+    )
+    return ProposedLoadResponse(
+        allowed=True,
+        terminal_id=terminal_id,
+        product_code=canonical_product,
+        volume_gallons=float(body.volume_gallons),
+        as_of=as_of,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Terminal_Wait endpoints (Task 7.7 — Req 8.4.2, 8.4.4)
+# ---------------------------------------------------------------------------
 
 
 #: Width of the rolling-window for Req 8.4.4. The summary endpoint
@@ -4660,6 +5265,16 @@ class TerminalWaitReportCreateRequest(BaseModel):
         description=(
             "Client-observed timestamp (driver wall-clock or geofence "
             "exit). Omit to have the server stamp it with now()."
+        ),
+    )
+    notes: Optional[str] = Field(
+        default=None,
+        max_length=1000,
+        description=(
+            "Optional free-form note from the dispatcher or driver "
+            "explaining the observation. Persisted verbatim after "
+            "whitespace-stripping (the model coerces empty strings to "
+            "None)."
         ),
     )
 
@@ -5091,6 +5706,7 @@ async def submit_terminal_wait_report(
         "reporter_id": body.reporter_id or tenant.user_id,
         "truck_id": body.truck_id,
         "observed_at": observed_at,
+        "notes": body.notes,
     }
 
     try:

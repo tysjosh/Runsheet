@@ -421,6 +421,45 @@ class TestTerminalWaitReportModel:
         with pytest.raises(ValidationError):
             TerminalWaitReport(**_base_wait_report_kwargs(terminal_id="   "))
 
+    def test_notes_field_round_trips(self):
+        """Escalation #2: the optional dispatcher / driver ``notes``
+        field persists the value verbatim after the
+        ``_strip_optional_strings`` validator trims surrounding
+        whitespace."""
+
+        report = TerminalWaitReport(
+            **_base_wait_report_kwargs(notes="  Rack outage delayed load  ")
+        )
+        assert report.notes == "Rack outage delayed load"
+
+    def test_notes_empty_string_coerced_to_none(self):
+        """Empty strings (and whitespace-only values) are normalized
+        to ``None`` just like ``reporter_id`` / ``truck_id`` so the
+        dispatcher textarea never persists an empty string."""
+
+        for blank in ("", "   ", "\n\t"):
+            report = TerminalWaitReport(
+                **_base_wait_report_kwargs(notes=blank)
+            )
+            assert report.notes is None, blank
+
+    def test_notes_defaults_to_none(self):
+        """Omitting ``notes`` leaves it ``None`` — backwards compatible
+        with callers written before the field existed."""
+
+        report = TerminalWaitReport(**_base_wait_report_kwargs())
+        assert report.notes is None
+
+    def test_notes_rejects_over_1000_chars(self):
+        """Pydantic ``max_length=1000`` trips a ValidationError on
+        over-long notes so downstream persistence never sees oversized
+        payloads."""
+
+        with pytest.raises(ValidationError):
+            TerminalWaitReport(
+                **_base_wait_report_kwargs(notes="x" * 1001)
+            )
+
 
 # ---------------------------------------------------------------------------
 # SourcingRecommendation model
@@ -1085,3 +1124,155 @@ class TestSourcingRecommendationRepository:
             await sourcing_repo.delete("tenant-A", "srec_001") is True
         )
         assert await sourcing_repo.get("tenant-A", "srec_001") is None
+
+
+# ---------------------------------------------------------------------------
+# Terminal.is_open_at (Task 7.2 — Req 8.1.4)
+# ---------------------------------------------------------------------------
+#
+# :meth:`Terminal.is_open_at` is consumed by:
+#
+# * the Sourcing_Recommender disqualification step (``terminal_closed``
+#   reason), which used to carry a module-private ``_is_open_at`` that
+#   has been promoted onto the model, and
+# * the Req 8.1.4 ``POST /api/fuel/terminals/{id}/proposed-load``
+#   validator which surfaces HTTP 400 with the same reason code plus a
+#   next-open-window suggestion.
+#
+# These tests cover the four documented behaviors: empty operating_hours
+# ≡ 24/7, weekday-scoped windows, IANA timezone handling (including the
+# known-local-time-during-DST edge), the unknown-timezone degrade-to-
+# open contract, and naive-UTC coercion.
+
+
+class TestTerminalIsOpenAt:
+    """Behaviour contract for :meth:`Terminal.is_open_at` (Req 8.1.4)."""
+
+    def _at(self, **kw: Any) -> datetime:
+        """Shorthand for a UTC datetime literal used in the checks."""
+
+        kw.setdefault("tzinfo", timezone.utc)
+        return datetime(**kw)
+
+    def test_empty_operating_hours_is_24_7(self):
+        """An unconstrained schedule always reports open (newly-
+        provisioned terminal posture)."""
+
+        terminal = Terminal(**_base_terminal_kwargs(operating_hours=[]))
+        # Sunday 03:00 UTC — outside any "normal" business window.
+        assert terminal.is_open_at(self._at(year=2025, month=3, day=16, hour=3))
+        # Wed 14:30 local.
+        assert terminal.is_open_at(
+            self._at(year=2025, month=3, day=12, hour=14, minute=30)
+        )
+
+    def test_closed_day_returns_false(self):
+        """Omitted day-of-week entries mean closed — not an implicit
+        fallback to the nearest adjacent window."""
+
+        terminal = Terminal(
+            **_base_terminal_kwargs(
+                timezone="UTC",
+                operating_hours=[
+                    {"day_of_week": "mon", "open": "06:00", "close": "22:00"},
+                ],
+            )
+        )
+        # 2025-03-11 is a Tuesday — no window, must return False.
+        assert not terminal.is_open_at(
+            self._at(year=2025, month=3, day=11, hour=12)
+        )
+        # 2025-03-10 is the matching Monday at 12:00 — within window.
+        assert terminal.is_open_at(
+            self._at(year=2025, month=3, day=10, hour=12)
+        )
+
+    def test_open_boundary_inclusive_close_exclusive(self):
+        """``open`` is inclusive; ``close`` is exclusive so the closed
+        edge matches the Sourcing_Recommender contract."""
+
+        terminal = Terminal(
+            **_base_terminal_kwargs(
+                timezone="UTC",
+                operating_hours=[
+                    {"day_of_week": "mon", "open": "06:00", "close": "22:00"},
+                ],
+            )
+        )
+        # 06:00 exact → open.
+        assert terminal.is_open_at(
+            self._at(year=2025, month=3, day=10, hour=6, minute=0)
+        )
+        # 22:00 exact → closed (exclusive upper bound).
+        assert not terminal.is_open_at(
+            self._at(year=2025, month=3, day=10, hour=22, minute=0)
+        )
+        # 21:59 → still open.
+        assert terminal.is_open_at(
+            self._at(year=2025, month=3, day=10, hour=21, minute=59)
+        )
+
+    def test_local_timezone_conversion(self):
+        """Operating_hours are declared in the terminal's local zone, so
+        a UTC ``as_of`` must be converted before the window lookup."""
+
+        # Newark: UTC-5 in March (EST; DST begins 2025-03-09). Monday
+        # 11:00 local == 15:00 UTC on 2025-03-10 (post-DST). The window
+        # is 08:00-18:00 local.
+        terminal = Terminal(
+            **_base_terminal_kwargs(
+                timezone="America/New_York",
+                operating_hours=[
+                    {"day_of_week": "mon", "open": "08:00", "close": "18:00"},
+                ],
+            )
+        )
+        # 15:00 UTC on Monday 2025-03-10 → 11:00 EDT (DST active) → open.
+        assert terminal.is_open_at(
+            self._at(year=2025, month=3, day=10, hour=15)
+        )
+        # 03:00 UTC on Monday 2025-03-10 → 23:00 Sunday 2025-03-09 local
+        # → Sunday is unscheduled → closed.
+        assert not terminal.is_open_at(
+            self._at(year=2025, month=3, day=10, hour=3)
+        )
+
+    def test_unknown_timezone_degrades_to_open_with_warning(self, caplog):
+        """Typo'd IANA names must not block sourcing — the method
+        degrades to True and emits a warning the ops team can action."""
+
+        terminal = Terminal(
+            **_base_terminal_kwargs(
+                timezone="Not/A_Real_TZ",
+                operating_hours=[
+                    {"day_of_week": "mon", "open": "06:00", "close": "22:00"},
+                ],
+            )
+        )
+        with caplog.at_level("WARNING"):
+            assert terminal.is_open_at(
+                self._at(year=2025, month=3, day=10, hour=12)
+            )
+        assert any(
+            "unknown timezone" in record.getMessage().lower()
+            for record in caplog.records
+        )
+
+    def test_naive_datetime_treated_as_utc(self):
+        """A naive ``as_of`` is coerced to UTC so a caller that drops
+        in ``datetime.utcnow()`` does not silently mis-evaluate."""
+
+        terminal = Terminal(
+            **_base_terminal_kwargs(
+                timezone="UTC",
+                operating_hours=[
+                    {"day_of_week": "mon", "open": "06:00", "close": "22:00"},
+                ],
+            )
+        )
+        # Naive datetime — must be treated as UTC (same wall clock).
+        naive_mon_noon = datetime(2025, 3, 10, 12, 0)
+        assert terminal.is_open_at(naive_mon_noon)
+        # Naive datetime on the closed day.
+        naive_tue_noon = datetime(2025, 3, 11, 12, 0)
+        assert not terminal.is_open_at(naive_tue_noon)

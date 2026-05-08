@@ -665,10 +665,11 @@ interface WaitReportFormProps {
 /**
  * Inline wait-report submission form rendered below the wait-summary
  * panel. Lets dispatchers file a manual observation against the
- * selected terminal without leaving the Sourcing page. Notes are
- * captured for dispatcher discretion but not yet persisted — the
- * backend ``TerminalWaitReportCreateRequest`` contract does not
- * currently expose a notes field, so the UI field is informational.
+ * selected terminal without leaving the Sourcing page. The optional
+ * dispatcher note typed into the Notes textarea is persisted end-to-
+ * end via ``TerminalWaitReportCreateRequest.notes`` so the rolling
+ * wait-time context survives into the ``terminal_wait_reports`` ES
+ * index for post-hoc analytics and audit (Req 8.4.2).
  */
 function WaitReportForm({ terminalId, onSubmitted }: WaitReportFormProps) {
   const [form, setForm] = useState<WaitReportFormValues>(
@@ -706,6 +707,7 @@ function WaitReportForm({ terminalId, onSubmitted }: WaitReportFormProps) {
         wait_minutes: Number(form.wait_minutes),
         source: form.source,
         observed_at: new Date().toISOString(),
+        notes: form.notes.trim() || undefined,
       };
       const reporter = form.reporter_id.trim();
       if (reporter) body.reporter_id = reporter;
@@ -821,7 +823,7 @@ function WaitReportForm({ terminalId, onSubmitted }: WaitReportFormProps) {
           htmlFor={`wr-notes-${terminalId}`}
           className="block text-[10px] uppercase text-gray-500 mb-1"
         >
-          Notes (optional, dispatcher only)
+          Notes (optional)
         </label>
         <textarea
           id={`wr-notes-${terminalId}`}
