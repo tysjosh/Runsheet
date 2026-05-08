@@ -1,7 +1,7 @@
 """
 Storm-Mode domain models for the fuel-ops hardening spec (Capability 9).
 
-This module introduces three first-class Pydantic models that together power
+This module introduces four first-class Pydantic models that together power
 Phase 10 (Storm and Disruption Mode):
 
 * :class:`WeatherAlert` — a forecast/active/cleared severe-weather event
@@ -18,6 +18,13 @@ Phase 10 (Storm and Disruption Mode):
   opts in to the keep-full program, the minimum water-level (in %) below
   which a refill is scheduled, and the priority_boost to apply when
   Storm_Mode is active.
+* :class:`StormRoadRestriction` — a tenant-uploaded GeoJSON polygon (or
+  multi-polygon) representing a road closure or impassable area while
+  Storm_Mode is active. Mirrors the strict ``storm_road_restrictions``
+  mapping and is consumed by :class:`RoutePlanningAgent` which runs
+  an ES ``geo_shape`` intersects query per route segment and defers
+  any stop whose inbound or outbound leg crosses a restriction with
+  severity ``>= severe`` (Req 9.3.3, 9.3.4, 9.3.5 / Task 10.8).
 
 The module also exports shared enumerations — :data:`WeatherAlertSeverity`,
 :data:`WeatherAlertStatus`, :data:`WeatherAlertSource`, and
@@ -41,7 +48,7 @@ Validates: Requirements 9.1.1, 9.1.2, 9.2.1, 9.2.2.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -621,6 +628,284 @@ class CustomerProfile(BaseModel):
         return stripped or None
 
 
+# ---------------------------------------------------------------------------
+# StormRoadRestriction
+# ---------------------------------------------------------------------------
+
+
+#: Accepted GeoJSON geometry types for a road-restriction polygon. We deliberately
+#: allow both ``Polygon`` and ``MultiPolygon`` because dispatchers routinely upload
+#: multi-part shapes (several disjoint closure zones produced by an incident map
+#: export). Line/point geometries are rejected because the Route_Planning_Agent
+#: intersects route segments (which are lines) against an area, and an
+#: area-on-area (or area-on-line) intersects query requires the index side to
+#: be an area.
+_SUPPORTED_POLYGON_TYPES: frozenset[str] = frozenset({"Polygon", "MultiPolygon"})
+
+
+def _validate_ring(ring: Any, *, path: str) -> List[List[float]]:
+    """Validate and normalise a single linear ring of a GeoJSON polygon.
+
+    A ring is a list of ``[lon, lat]`` positions whose first and last
+    position must be identical (GeoJSON closure requirement, RFC 7946
+    §3.1.6). Each position must carry at least two numeric coordinates;
+    optional altitudes after index 1 are preserved verbatim.
+
+    Raises :class:`ValueError` (which Pydantic converts to a validation
+    error) when the ring is shorter than 4 positions, the closure
+    requirement is violated, or any coordinate is out of the WGS84
+    bounds (``lon ∈ [-180, 180]``, ``lat ∈ [-90, 90]``).
+    """
+
+    if not isinstance(ring, list):
+        raise ValueError(f"{path} must be a list of positions")
+    if len(ring) < 4:
+        raise ValueError(
+            f"{path} must contain at least 4 positions (closed ring)"
+        )
+
+    normalised: List[List[float]] = []
+    for idx, position in enumerate(ring):
+        if not isinstance(position, (list, tuple)):
+            raise ValueError(
+                f"{path}[{idx}] must be a [lon, lat] position"
+            )
+        if len(position) < 2:
+            raise ValueError(
+                f"{path}[{idx}] must carry at least [lon, lat]"
+            )
+        try:
+            lon = float(position[0])
+            lat = float(position[1])
+        except (TypeError, ValueError) as exc:  # pragma: no cover - defensive
+            raise ValueError(
+                f"{path}[{idx}] has non-numeric coordinates: {exc}"
+            )
+        if not (-180.0 <= lon <= 180.0):
+            raise ValueError(
+                f"{path}[{idx}] longitude {lon} outside WGS84 bounds"
+            )
+        if not (-90.0 <= lat <= 90.0):
+            raise ValueError(
+                f"{path}[{idx}] latitude {lat} outside WGS84 bounds"
+            )
+        tail = [float(c) for c in position[2:]]
+        normalised.append([lon, lat, *tail])
+
+    first = normalised[0][:2]
+    last = normalised[-1][:2]
+    if first != last:
+        raise ValueError(
+            f"{path} is not closed (first != last position)"
+        )
+    return normalised
+
+
+def _validate_polygon_geometry(geometry: Any) -> Dict[str, Any]:
+    """Validate a GeoJSON ``Polygon`` or ``MultiPolygon`` geometry.
+
+    Returns a cleaned dict suitable for persisting to the
+    ``storm_road_restrictions`` ES index's ``polygon`` (``geo_shape``)
+    field. Elasticsearch's geo_shape field accepts the WGS84 GeoJSON
+    encoding verbatim, so we keep the same representation on the wire
+    and in the index.
+
+    Raises :class:`ValueError` with a specific reason when the geometry
+    is malformed — the REST surface translates these to HTTP 422.
+    """
+
+    if not isinstance(geometry, dict):
+        raise ValueError("polygon must be a GeoJSON object")
+
+    geom_type = geometry.get("type")
+    if not isinstance(geom_type, str) or geom_type not in _SUPPORTED_POLYGON_TYPES:
+        raise ValueError(
+            "polygon.type must be 'Polygon' or 'MultiPolygon' "
+            f"(got {geom_type!r})"
+        )
+
+    coordinates = geometry.get("coordinates")
+    if not isinstance(coordinates, list) or not coordinates:
+        raise ValueError("polygon.coordinates must be a non-empty list")
+
+    cleaned_coords: Any
+    if geom_type == "Polygon":
+        cleaned_coords = [
+            _validate_ring(ring, path=f"coordinates[{i}]")
+            for i, ring in enumerate(coordinates)
+        ]
+    else:  # MultiPolygon
+        cleaned_coords = []
+        for i, polygon in enumerate(coordinates):
+            if not isinstance(polygon, list) or not polygon:
+                raise ValueError(
+                    f"coordinates[{i}] must be a non-empty list of rings"
+                )
+            rings = [
+                _validate_ring(ring, path=f"coordinates[{i}][{j}]")
+                for j, ring in enumerate(polygon)
+            ]
+            cleaned_coords.append(rings)
+
+    # Preserve any foreign members on the geometry (``bbox``, ``crs``, …)
+    # verbatim so round-trips don't silently drop caller-supplied data.
+    normalised = {**geometry, "type": geom_type, "coordinates": cleaned_coords}
+    return normalised
+
+
+class StormRoadRestriction(BaseModel):
+    """A tenant-uploaded road-closure / restriction polygon.
+
+    Persisted in the ``storm_road_restrictions`` ES index (strict mapping
+    in :mod:`fuel.services.fuel_ops_es_mappings`). Consumed by the
+    :class:`Agents.overlay.route_planning_agent.RoutePlanningAgent` while
+    Storm_Mode is active — the agent runs an ES ``geo_shape`` intersects
+    query per route segment and defers any stop whose inbound or
+    outbound leg crosses a restriction with severity ``>= severe``,
+    tagging the deferral with the spec-mandated ``road_restriction``
+    reason (Req 9.3.4 / Task 10.8).
+
+    Field summary:
+
+    * ``restriction_id`` — stable, tenant-scoped identifier. The REST
+      upload endpoint mints this (``srr_<uuid4>``) so callers cannot
+      spoof ownership.
+    * ``tenant_id`` — owning tenant. The repository re-asserts this on
+      every read so a mis-queried row never leaks across tenants.
+    * ``polygon`` — GeoJSON ``Polygon`` or ``MultiPolygon`` geometry.
+      Validated for WGS84 coordinate bounds and ring closure;
+      Elasticsearch stores it in the ``polygon`` geo_shape field.
+    * ``effective_from`` / ``effective_to`` — UTC window during which
+      the restriction is active. ``effective_to`` is optional for
+      open-ended closures (e.g. long-duration ice damage).
+    * ``source`` — free-form label describing provenance
+      (``manual``, ``dot_feed``, ``ops_team``, etc.).
+    * ``severity`` — one of the :data:`WeatherAlertSeverity` buckets.
+      The route-segment intersects query filters on
+      ``severity >= severe`` so only ``severe`` and ``extreme``
+      restrictions trigger deferrals.
+    * ``reason`` — optional human-readable justification surfaced on
+      the dispatcher UI (``flooded underpass``, etc.).
+
+    Validates: Requirements 9.3.3, 9.3.4, 9.3.5.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    restriction_id: str = Field(
+        ...,
+        min_length=1,
+        description="Stable, tenant-scoped restriction identifier (``srr_<uuid4>``).",
+    )
+    tenant_id: str = Field(
+        ...,
+        min_length=1,
+        description="Owning tenant; the repository re-asserts this on every read.",
+    )
+    polygon: Dict[str, Any] = Field(
+        ...,
+        description=(
+            "GeoJSON ``Polygon`` or ``MultiPolygon`` geometry. Coordinates "
+            "are WGS84 (``[lon, lat]``) and rings must be closed per RFC "
+            "7946. Persisted to the ``polygon`` ``geo_shape`` field so "
+            "segment intersects queries execute on the index."
+        ),
+    )
+    effective_from: datetime = Field(
+        ...,
+        description=(
+            "UTC datetime at which the restriction begins to apply. Route "
+            "segments whose ``eta`` precedes this value are not affected."
+        ),
+    )
+    effective_to: Optional[datetime] = Field(
+        None,
+        description=(
+            "UTC datetime at which the restriction lapses. Optional so "
+            "open-ended closures (ice damage, long-duration detours) can "
+            "be recorded without an artificial end. When ``None`` the "
+            "restriction applies until the dispatcher deletes or "
+            "deactivates it."
+        ),
+    )
+    source: str = Field(
+        ...,
+        min_length=1,
+        description=(
+            "Free-form provenance label (``manual``, ``dot_feed``, "
+            "``ops_team``, etc.). Surfaced on the dispatcher map so "
+            "operators can tell trustworthy DOT feeds from ad-hoc manual "
+            "uploads."
+        ),
+    )
+    severity: WeatherAlertSeverity = Field(
+        ...,
+        description=(
+            "One of minor/moderate/severe/extreme. The Route_Planning_Agent "
+            "applies the restriction only when severity is ``severe`` or "
+            "``extreme`` (Req 9.3.4); lower-severity restrictions are "
+            "persisted for dispatcher awareness but do not defer stops."
+        ),
+    )
+    reason: Optional[str] = Field(
+        None,
+        description=(
+            "Optional human-readable justification (e.g. ``flooded "
+            "underpass``). Displayed on the dispatcher UI alongside the "
+            "polygon so operators understand why a segment is blocked."
+        ),
+    )
+    updated_at: Optional[datetime] = Field(
+        None,
+        description="Last-modification timestamp written by the repository.",
+    )
+    created_at: Optional[datetime] = Field(
+        None,
+        description="Creation timestamp written by the repository.",
+    )
+
+    # ------------------------------------------------------------------
+    # Validators
+    # ------------------------------------------------------------------
+
+    @field_validator("restriction_id", "tenant_id", "source")
+    @classmethod
+    def _strip_required_strings(cls, value: str) -> str:
+        """Collapse whitespace-only required strings into a validation error."""
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("required string must not be blank")
+        return stripped
+
+    @field_validator("reason")
+    @classmethod
+    def _strip_optional_reason(cls, value: Optional[str]) -> Optional[str]:
+        """Treat whitespace-only reason strings as missing instead of storing them."""
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
+
+    @field_validator("polygon")
+    @classmethod
+    def _validate_polygon(cls, value: Any) -> Dict[str, Any]:
+        """Validate the GeoJSON polygon geometry and return a cleaned copy."""
+        return _validate_polygon_geometry(value)
+
+    @model_validator(mode="after")
+    def _check_effective_window(self) -> "StormRoadRestriction":
+        """Reject an ``effective_to`` that precedes ``effective_from``."""
+        if (
+            self.effective_to is not None
+            and self.effective_to < self.effective_from
+        ):
+            raise ValueError(
+                f"effective_to ({self.effective_to.isoformat()}) must not "
+                f"precede effective_from ({self.effective_from.isoformat()})"
+            )
+        return self
+
+
 __all__ = [
     # Enumerations
     "WeatherAlertSeverity",
@@ -635,4 +920,5 @@ __all__ = [
     "KeepFullCustomer",
     "CustomerProfileStormFields",
     "CustomerProfile",
+    "StormRoadRestriction",
 ]

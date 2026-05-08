@@ -808,3 +808,324 @@ class TestCombinableGroupEmission:
 
         # Priority signal still fan-ed out.
         assert deps["signal_bus"].publish.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Tests: Storm_Mode keep-full / generator boosts (Task 10.6, Req 9.2.3)
+# ---------------------------------------------------------------------------
+
+
+class _FakeStormModeEvaluator:
+    """Minimal StormModeEvaluator stub for unit tests.
+
+    Exposes the single coroutine :meth:`get_state` used by the
+    :class:`DeliveryPrioritizationAgent` to gate the Task 10.6 boosts.
+    Accepts either a plain ``state`` string or a pre-built
+    :class:`PersistedState` so tests can drive both the active and
+    inactive paths without pulling the full evaluator graph.
+    """
+
+    def __init__(self, state="active"):
+        self._state = state
+
+    async def get_state(self, tenant_id):
+        from fuel.services.storm_mode_evaluator import PersistedState
+
+        if isinstance(self._state, PersistedState):
+            return self._state
+        return PersistedState(
+            state=self._state,
+            updated_at=None,
+            triggering_alert_ids=[],
+            expected_end_at=None,
+        )
+
+
+def _make_customer_profile(
+    customer_id="cust-1",
+    tenant_id="tenant-1",
+    keep_full_enabled=False,
+    keep_full_priority_boost=0.25,
+    is_generator_fuel=False,
+):
+    """Build a fully-validated CustomerProfile for the storm-mode tests."""
+    from fuel.storm_mode_models import CustomerProfile, KeepFullCustomer
+
+    return CustomerProfile(
+        customer_id=customer_id,
+        tenant_id=tenant_id,
+        keep_full=KeepFullCustomer(
+            keep_full_enabled=keep_full_enabled,
+            keep_full_priority_boost=keep_full_priority_boost,
+        ),
+        is_generator_fuel=is_generator_fuel,
+    )
+
+
+class TestStormModeBoosts:
+    """Task 10.6 — keep-full + generator Storm_Mode priority boosts."""
+
+    @pytest.mark.asyncio
+    async def test_no_storm_mode_means_no_boost(self):
+        """Without a wired evaluator, boosts must never be applied."""
+        agent, deps = _make_agent()
+        forecast = _make_forecast(
+            station_id="s1",
+            runout_risk_24h=0.5,
+            customer_id="cust-1",
+        )
+        agent._forecast_buffer.append(forecast)
+        # Inject a profile that would normally qualify for both boosts.
+        agent._customer_profile_loader = lambda tid, cids: {
+            "cust-1": _make_customer_profile(
+                keep_full_enabled=True, is_generator_fuel=True
+            )
+        }
+
+        await agent.evaluate([])
+
+        published = deps["signal_bus"].publish.call_args[0][0]
+        entry = published.priorities[0]
+        assert "keep_full_storm_mode" not in entry.reasons
+        assert "generator_storm_mode" not in entry.reasons
+
+    @pytest.mark.asyncio
+    async def test_storm_mode_inactive_is_noop(self):
+        """An inactive evaluator must leave the priority scores alone."""
+        agent, deps = _make_agent(
+            storm_mode_evaluator=_FakeStormModeEvaluator(state="inactive"),
+        )
+        forecast = _make_forecast(
+            station_id="s1", runout_risk_24h=0.5, customer_id="cust-1"
+        )
+        agent._forecast_buffer.append(forecast)
+        agent._customer_profile_loader = lambda tid, cids: {
+            "cust-1": _make_customer_profile(keep_full_enabled=True)
+        }
+
+        await agent.evaluate([])
+
+        published = deps["signal_bus"].publish.call_args[0][0]
+        entry = published.priorities[0]
+        assert "keep_full_storm_mode" not in entry.reasons
+        assert "generator_storm_mode" not in entry.reasons
+
+    @pytest.mark.asyncio
+    async def test_keep_full_boost_applied_and_tagged(self):
+        """Keep-full customers get their per-profile boost + reason tag."""
+        agent, deps = _make_agent(
+            storm_mode_evaluator=_FakeStormModeEvaluator(state="active"),
+        )
+        # Start from a score that will clearly change bucket after +0.25.
+        forecast = _make_forecast(
+            station_id="s1",
+            runout_risk_24h=0.5,
+            customer_id="cust-1",
+        )
+        agent._forecast_buffer.append(forecast)
+        agent._customer_profile_loader = lambda tid, cids: {
+            "cust-1": _make_customer_profile(
+                keep_full_enabled=True, keep_full_priority_boost=0.25
+            )
+        }
+
+        # Pre-compute unboosted score via a clean agent run.
+        await agent.evaluate([])
+        published = deps["signal_bus"].publish.call_args[0][0]
+        entry = published.priorities[0]
+
+        assert "keep_full_storm_mode" in entry.reasons
+        assert "generator_storm_mode" not in entry.reasons
+        # Score should be clamped to [0, 1] after boost applied.
+        assert 0.0 <= entry.priority_score <= 1.0
+        # Bucket must reflect the boosted score.
+        assert entry.priority_bucket == DeliveryPrioritizationAgent._assign_bucket(
+            entry.priority_score
+        )
+
+    @pytest.mark.asyncio
+    async def test_generator_boost_via_customer_tank(self):
+        """Generator use_case on the Customer_Tank triggers the boost."""
+        agent, deps = _make_agent(
+            storm_mode_evaluator=_FakeStormModeEvaluator(state="active"),
+        )
+        forecast = _make_forecast(
+            station_id="s1",
+            runout_risk_24h=0.3,
+            customer_id="cust-1",
+            customer_tank_id="tank-1",
+        )
+        agent._forecast_buffer.append(forecast)
+        agent._customer_profile_loader = lambda tid, cids: {
+            "cust-1": _make_customer_profile()
+        }
+        agent._customer_tank_loader = lambda tid, tids: {
+            "tank-1": {
+                "customer_tank_id": "tank-1",
+                "tenant_id": tid,
+                "use_case": "generator",
+            }
+        }
+
+        await agent.evaluate([])
+
+        published = deps["signal_bus"].publish.call_args[0][0]
+        entry = published.priorities[0]
+        assert "generator_storm_mode" in entry.reasons
+        assert "keep_full_storm_mode" not in entry.reasons
+
+    @pytest.mark.asyncio
+    async def test_generator_boost_via_profile_flag(self):
+        """is_generator_fuel on the profile also triggers the boost."""
+        agent, deps = _make_agent(
+            storm_mode_evaluator=_FakeStormModeEvaluator(state="active"),
+        )
+        forecast = _make_forecast(
+            station_id="s1",
+            runout_risk_24h=0.3,
+            customer_id="cust-1",
+        )
+        agent._forecast_buffer.append(forecast)
+        agent._customer_profile_loader = lambda tid, cids: {
+            "cust-1": _make_customer_profile(is_generator_fuel=True)
+        }
+
+        await agent.evaluate([])
+
+        published = deps["signal_bus"].publish.call_args[0][0]
+        entry = published.priorities[0]
+        assert "generator_storm_mode" in entry.reasons
+
+    @pytest.mark.asyncio
+    async def test_both_boosts_stack_and_rebucket(self):
+        """Both boosts applied together push the entry into a higher bucket."""
+        agent, deps = _make_agent(
+            storm_mode_evaluator=_FakeStormModeEvaluator(state="active"),
+        )
+        forecast = _make_forecast(
+            station_id="s1",
+            runout_risk_24h=0.6,
+            customer_id="cust-1",
+            customer_tank_id="tank-1",
+        )
+        agent._forecast_buffer.append(forecast)
+        agent._customer_profile_loader = lambda tid, cids: {
+            "cust-1": _make_customer_profile(
+                keep_full_enabled=True,
+                keep_full_priority_boost=0.25,
+                is_generator_fuel=True,
+            )
+        }
+        agent._customer_tank_loader = lambda tid, tids: {
+            "tank-1": {
+                "customer_tank_id": "tank-1",
+                "tenant_id": tid,
+                "use_case": "generator",
+            }
+        }
+
+        await agent.evaluate([])
+
+        published = deps["signal_bus"].publish.call_args[0][0]
+        entry = published.priorities[0]
+        assert "keep_full_storm_mode" in entry.reasons
+        assert "generator_storm_mode" in entry.reasons
+        # Score should land near the clamp ceiling (1.0) given 0.25 + 0.2 on
+        # top of a 0.6 runout-weighted baseline.
+        assert entry.priority_score >= 0.6
+        assert entry.priority_score <= 1.0
+
+    @pytest.mark.asyncio
+    async def test_boosted_score_clamped_to_one(self):
+        """Boosts cannot push a score above 1.0."""
+        agent, deps = _make_agent(
+            storm_mode_evaluator=_FakeStormModeEvaluator(state="active"),
+        )
+        forecast = _make_forecast(
+            station_id="s1",
+            runout_risk_24h=1.0,
+            customer_id="cust-1",
+            customer_tank_id="tank-1",
+        )
+        agent._forecast_buffer.append(forecast)
+        agent._customer_profile_loader = lambda tid, cids: {
+            "cust-1": _make_customer_profile(
+                keep_full_enabled=True, keep_full_priority_boost=1.0
+            )
+        }
+        agent._customer_tank_loader = lambda tid, tids: {
+            "tank-1": {
+                "customer_tank_id": "tank-1",
+                "tenant_id": tid,
+                "use_case": "generator",
+            }
+        }
+
+        await agent.evaluate([])
+
+        published = deps["signal_bus"].publish.call_args[0][0]
+        entry = published.priorities[0]
+        assert entry.priority_score <= 1.0
+
+    @pytest.mark.asyncio
+    async def test_non_generator_tank_gets_no_generator_boost(self):
+        """Tanks with non-generator use_case never trigger the boost."""
+        agent, deps = _make_agent(
+            storm_mode_evaluator=_FakeStormModeEvaluator(state="active"),
+        )
+        forecast = _make_forecast(
+            station_id="s1",
+            runout_risk_24h=0.3,
+            customer_id="cust-1",
+            customer_tank_id="tank-1",
+        )
+        agent._forecast_buffer.append(forecast)
+        agent._customer_profile_loader = lambda tid, cids: {
+            "cust-1": _make_customer_profile()
+        }
+        agent._customer_tank_loader = lambda tid, tids: {
+            "tank-1": {
+                "customer_tank_id": "tank-1",
+                "tenant_id": tid,
+                "use_case": "residential_heat",
+            }
+        }
+
+        await agent.evaluate([])
+
+        published = deps["signal_bus"].publish.call_args[0][0]
+        entry = published.priorities[0]
+        assert "generator_storm_mode" not in entry.reasons
+        assert "keep_full_storm_mode" not in entry.reasons
+
+    @pytest.mark.asyncio
+    async def test_keep_full_disabled_profile_no_boost(self):
+        """keep_full_enabled=False must short-circuit the keep-full boost."""
+        agent, deps = _make_agent(
+            storm_mode_evaluator=_FakeStormModeEvaluator(state="active"),
+        )
+        forecast = _make_forecast(
+            station_id="s1",
+            runout_risk_24h=0.3,
+            customer_id="cust-1",
+        )
+        agent._forecast_buffer.append(forecast)
+        agent._customer_profile_loader = lambda tid, cids: {
+            "cust-1": _make_customer_profile(keep_full_enabled=False)
+        }
+
+        await agent.evaluate([])
+
+        published = deps["signal_bus"].publish.call_args[0][0]
+        entry = published.priorities[0]
+        assert "keep_full_storm_mode" not in entry.reasons
+
+    def test_constructor_rejects_out_of_range_generator_boost(self):
+        with pytest.raises(ValueError):
+            _make_agent(generator_priority_boost=1.5)
+        with pytest.raises(ValueError):
+            _make_agent(generator_priority_boost=-0.1)
+
+    def test_constructor_accepts_custom_generator_boost(self):
+        agent, _ = _make_agent(generator_priority_boost=0.35)
+        assert agent._generator_priority_boost == 0.35

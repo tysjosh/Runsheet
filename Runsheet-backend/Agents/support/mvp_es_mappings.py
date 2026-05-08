@@ -198,6 +198,27 @@ MVP_ROUTES_MAPPING = {
             "start_position_source": {"type": "keyword"},
             "start_position_lat":    {"type": "double"},
             "start_position_lon":    {"type": "double"},
+            # Fuel Ops Hardening Task 10.7 / Req 9.2.4, 9.2.5, 9.3.1, 9.3.2 —
+            # Storm_Mode annotations. ``storm_mode_active`` is the master
+            # toggle; the three window/cap fields record the guard-rails
+            # actually enforced when the plan was built; ``deferred_stops``
+            # carries the subset of stops rejected by those guard-rails.
+            "storm_mode_active": {"type": "boolean"},
+            "storm_mode_max_stops_per_truck": {"type": "integer"},
+            "storm_mode_delivery_window_start_hour": {"type": "float"},
+            "storm_mode_delivery_window_end_hour":   {"type": "float"},
+            "deferred_stops": {
+                "type": "nested",
+                "properties": {
+                    "station_id":                 {"type": "keyword"},
+                    "reason":                     {"type": "keyword"},
+                    "deferral_cause":             {"type": "keyword"},
+                    "original_sequence":          {"type": "integer"},
+                    "original_eta":               {"type": "date"},
+                    "next_eligible_window_start": {"type": "date"},
+                    "next_eligible_window_end":   {"type": "date"},
+                },
+            },
         },
     },
     "settings": {

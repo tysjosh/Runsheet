@@ -357,14 +357,17 @@ class TestUpdateTemplate:
 class TestInitializeDefaultTemplates:
     """Tests for TemplateRenderer.initialize_default_templates."""
 
-    async def test_creates_all_12_default_templates(self):
+    async def test_creates_all_default_templates(self):
+        """Covers the 12 base templates + 12 severe-weather variants
+        introduced by Task 10.9 (Req 9.2.6)."""
         es = _make_es_mock()
         es.search_documents = AsyncMock(return_value=_es_response([]))
         renderer = _make_renderer(es)
 
         await renderer.initialize_default_templates("tenant-1")
 
-        assert es.index_document.call_count == 12  # 4 event types × 3 channels
+        # 4 base event types × 3 channels + 4 _storm variants × 3 channels
+        assert es.index_document.call_count == 24
 
         indexed_keys = set()
         for call in es.index_document.call_args_list:
@@ -378,10 +381,15 @@ class TestInitializeDefaultTemplates:
             assert doc["body_template"]  # non-empty
             indexed_keys.add((doc["event_type"], doc["channel"]))
 
-        # Verify all 12 combinations
-        expected_event_types = {
-            "delivery_confirmation", "delay_alert", "eta_change", "order_status_update"
+        # Verify all 24 combinations
+        base_event_types = {
+            "delivery_confirmation",
+            "delay_alert",
+            "eta_change",
+            "order_status_update",
         }
+        storm_event_types = {f"{et}_storm" for et in base_event_types}
+        expected_event_types = base_event_types | storm_event_types
         expected_channels = {"sms", "email", "whatsapp"}
         expected_keys = {
             (et, ch) for et in expected_event_types for ch in expected_channels
@@ -400,20 +408,30 @@ class TestInitializeDefaultTemplates:
 
         await renderer.initialize_default_templates("tenant-1")
 
-        # 12 total - 3 existing = 9 new
-        assert es.index_document.call_count == 9
+        # 24 total - 3 existing = 21 new
+        assert es.index_document.call_count == 21
         created_keys = {
             (call[0][2]["event_type"], call[0][2]["channel"])
             for call in es.index_document.call_args_list
         }
-        # None of the created templates should be delay_alert
+        # None of the created templates should be the non-storm delay_alert
+        # variants (those already exist).
         for key in created_keys:
             assert key[0] != "delay_alert"
 
     async def test_no_creates_when_all_exist(self):
+        all_event_types = [
+            "delivery_confirmation",
+            "delay_alert",
+            "eta_change",
+            "order_status_update",
+        ]
+        # Include the severe-weather (``_storm``) variants since Task
+        # 10.9 added them to the default set.
+        all_event_types += [f"{et}_storm" for et in all_event_types]
         existing = [
             _template_doc(event_type=et, channel=ch)
-            for et in ["delivery_confirmation", "delay_alert", "eta_change", "order_status_update"]
+            for et in all_event_types
             for ch in ["sms", "email", "whatsapp"]
         ]
         es = _make_es_mock()

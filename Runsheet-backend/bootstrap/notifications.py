@@ -136,6 +136,44 @@ async def initialize(app, container: ServiceContainer) -> None:
     notification_service = NotificationService(es_service)
     container.notification_service = notification_service
 
+    # Storm_Mode notification resolver (Task 10.9, Req 9.2.6). Wired
+    # here even when no Storm_Mode_Evaluator is yet on the container
+    # so the plumbing is ready for Task 12.1. The resolver short-
+    # circuits to "inactive" when ``state_provider`` is ``None``,
+    # which keeps non-fuel tenants on the pre-storm template flow.
+    try:
+        from notifications.services.storm_mode_notifications import (
+            StormModeNotificationResolver,
+        )
+
+        storm_state_provider = (
+            container.storm_mode_evaluator
+            if container.has("storm_mode_evaluator")
+            else None
+        )
+        storm_resolver = StormModeNotificationResolver(
+            state_provider=storm_state_provider,
+            es_service=es_service,
+        )
+        notification_service.set_storm_notification_resolver(storm_resolver)
+        container.storm_notification_resolver = storm_resolver
+        if storm_state_provider is None:
+            logger.info(
+                "Storm_Mode notification resolver wired without a "
+                "state provider — severe-weather templates will not "
+                "fire until a Storm_Mode_Evaluator is registered "
+                "on the container (Task 12.1)."
+            )
+        else:
+            logger.info(
+                "Storm_Mode notification resolver wired with active "
+                "state provider"
+            )
+    except Exception as exc:
+        logger.warning(
+            "Failed to wire Storm_Mode notification resolver: %s", exc
+        )
+
     # Audit timeline service (Req 12.1–12.4)
     audit_timeline_service = AuditTimelineService(es_service)
     container.audit_timeline_service = audit_timeline_service

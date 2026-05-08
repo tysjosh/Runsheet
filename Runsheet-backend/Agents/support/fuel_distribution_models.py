@@ -237,9 +237,32 @@ class RouteStop(BaseModel):
     sequence: int = Field(ge=0)
 
 
+class DeferredRouteStop(BaseModel):
+    """A stop removed from the route plan because a Storm_Mode guard-rail
+    fired (Req 9.2.4, 9.3.2 / Task 10.7).
+
+    ``reason`` is always the spec-mandated tag ``deferred_storm_mode`` so
+    downstream filters can pin on a single string. ``deferral_cause``
+    narrows the cause to either ``over_max_stops_per_truck`` (Req 9.2.4
+    — the per-truck cap was exceeded) or ``outside_delivery_window``
+    (Req 9.3.2 — the stop's ETA fell outside the configured window).
+    The ``next_eligible_window_*`` pair is populated only when the
+    cause is ``outside_delivery_window`` and identifies the soonest
+    window the stop could be rescheduled into.
+    """
+
+    station_id: str
+    reason: str = "deferred_storm_mode"
+    deferral_cause: str  # over_max_stops_per_truck | outside_delivery_window
+    original_sequence: Optional[int] = Field(default=None, ge=0)
+    original_eta: Optional[str] = None
+    next_eligible_window_start: Optional[str] = None
+    next_eligible_window_end: Optional[str] = None
+
+
 class RoutePlan(BaseModel):
     """An optimized delivery route.
-    Validates: Requirement 4.1, 2.1.5, 2.1.6, 8.5.5
+    Validates: Requirement 4.1, 2.1.5, 2.1.6, 8.5.5, 9.2.4, 9.2.5, 9.3.1, 9.3.2
     """
     route_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     truck_id: str
@@ -299,6 +322,31 @@ class RoutePlan(BaseModel):
     #: Resolved start longitude (WGS84 degrees). See
     #: ``start_position_lat``.
     start_position_lon: Optional[float] = None
+
+    # --- Storm_Mode annotations (Task 10.7, Req 9.2.4, 9.2.5, 9.3.1, 9.3.2) ---
+    #: Whether Storm_Mode guard-rails were applied while building this
+    #: plan. ``True`` when the :class:`StormModeEvaluator` reported
+    #: ``active`` for the tenant at plan time; ``False`` for all plans
+    #: built with the standard path. Surfaced on the persisted document
+    #: so auditors can distinguish storm-time plans without re-reading
+    #: the evaluator state.
+    storm_mode_active: bool = False
+    #: Per-truck stop cap enforced while this plan was built (Req 9.2.4).
+    #: ``None`` when Storm_Mode was inactive.
+    storm_mode_max_stops_per_truck: Optional[int] = None
+    #: Delivery-window start hour (0.0–24.0, tenant local time) enforced
+    #: while this plan was built (Req 9.3.1). ``None`` when Storm_Mode
+    #: was inactive.
+    storm_mode_delivery_window_start_hour: Optional[float] = None
+    #: Delivery-window end hour (0.0–24.0, tenant local time) enforced
+    #: while this plan was built (Req 9.3.1). ``None`` when Storm_Mode
+    #: was inactive.
+    storm_mode_delivery_window_end_hour: Optional[float] = None
+    #: Stops removed from the planned route because a Storm_Mode
+    #: guard-rail fired (Req 9.2.4, 9.3.2). Empty list for both
+    #: non-storm plans and storm plans where every stop cleared the
+    #: guard-rails.
+    deferred_stops: List[DeferredRouteStop] = Field(default_factory=list)
 
 
 class ReplanDiff(BaseModel):

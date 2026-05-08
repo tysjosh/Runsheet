@@ -1,0 +1,319 @@
+/**
+ * Component + helper tests for the reconciliation dashboard page (Task 11.5).
+ *
+ * Coverage is intentionally focused on the behaviors the spec calls out:
+ *
+ *  1. **Pure helpers** — variance formatters, row-alert decision, and
+ *     cell-color mapping are exercised directly so the UI tests can
+ *     stay simple.
+ *  2. **4-way variance table rendering** — rows with variances beyond
+ *     the threshold render with the ``bg-red-50`` row class (alert
+ *     highlighting, Req 4.4.3 visualization) and safe rows do not.
+ *  3. **BOL download link from POD detail** — opening a row fetches
+ *     the BOL via :func:`getPodBol`; the ``generated`` state exposes a
+ *     download link (Req 4.3.4) while ``pending_regeneration`` and the
+ *     404 / not-found path surface inline status chips instead.
+ *
+ * All backend calls are mocked — these tests must not depend on an ES
+ * instance or a running FastAPI server.
+ */
+
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+
+jest.mock("../../services/fuelApi", () => {
+  const actual = jest.requireActual("../../services/fuelApi");
+  return {
+    ...actual,
+    listReconciliationRecords: jest.fn(),
+    getPodBol: jest.fn(),
+  };
+});
+
+import type {
+  BOLDownloadResponse,
+  ReconciliationListResponse,
+  ReconciliationRecord,
+} from "../../services/fuelApi";
+import { getPodBol, listReconciliationRecords } from "../../services/fuelApi";
+import ReconciliationPage, {
+  formatGallons,
+  formatVariancePct,
+  isAlertedRow,
+  varianceCellClass,
+} from "./ReconciliationPage";
+
+const mockList = listReconciliationRecords as jest.MockedFunction<
+  typeof listReconciliationRecords
+>;
+const mockBol = getPodBol as jest.MockedFunction<typeof getPodBol>;
+
+// ─── Fixtures ────────────────────────────────────────────────────────────────
+
+function makeRecord(
+  overrides: Partial<ReconciliationRecord> = {},
+): ReconciliationRecord {
+  return {
+    reconciliation_id: "rec-1",
+    tenant_id: "t-1",
+    order_id: "ord-1",
+    plan_id: "plan-1",
+    pod_id: "pod-1",
+    invoice_id: null,
+    ordered_gallons: 1000,
+    loaded_gallons: 990,
+    delivered_gallons: 980,
+    invoiced_gallons: null,
+    variance_load_vs_order_pct: 1.0,
+    variance_delivered_vs_loaded_pct: 1.01,
+    variance_invoiced_vs_delivered_pct: null,
+    alert_flags: [],
+    generated_at: "2024-06-01T12:00:00Z",
+    ...overrides,
+  };
+}
+
+function makeListResponse(
+  items: ReconciliationRecord[],
+  overrides: Partial<ReconciliationListResponse> = {},
+): ReconciliationListResponse {
+  return {
+    items,
+    total: items.length,
+    page: 1,
+    page_size: 25,
+    has_next: false,
+    ...overrides,
+  };
+}
+
+beforeEach(() => {
+  jest.clearAllMocks();
+});
+
+// ─── Pure helper tests ───────────────────────────────────────────────────────
+
+describe("formatGallons", () => {
+  it("renders an em-dash for null / NaN", () => {
+    expect(formatGallons(null)).toBe("—");
+    expect(formatGallons(undefined)).toBe("—");
+    expect(formatGallons(Number.NaN)).toBe("—");
+  });
+
+  it("compacts values ≥ 10,000 to the 'K' suffix", () => {
+    expect(formatGallons(12_345)).toBe("12.3K");
+  });
+
+  it("renders small values with at most one decimal", () => {
+    expect(formatGallons(987.654)).toBe("987.7");
+    expect(formatGallons(100)).toBe("100");
+  });
+});
+
+describe("formatVariancePct", () => {
+  it("renders em-dash for null / NaN", () => {
+    expect(formatVariancePct(null)).toBe("—");
+    expect(formatVariancePct(undefined)).toBe("—");
+    expect(formatVariancePct(Number.NaN)).toBe("—");
+  });
+
+  it("formats to two decimals with a % suffix", () => {
+    expect(formatVariancePct(3.2)).toBe("3.20%");
+    expect(formatVariancePct(0)).toBe("0.00%");
+  });
+});
+
+describe("varianceCellClass", () => {
+  it("returns neutral color for null / NaN", () => {
+    expect(varianceCellClass(null)).toContain("text-gray-400");
+    expect(varianceCellClass(undefined)).toContain("text-gray-400");
+  });
+
+  it("returns red styling at or above threshold", () => {
+    expect(varianceCellClass(3.0)).toContain("text-red-700");
+    expect(varianceCellClass(-5.0)).toContain("text-red-700");
+  });
+
+  it("returns yellow styling between half and full threshold", () => {
+    expect(varianceCellClass(1.6)).toContain("text-yellow-700");
+  });
+
+  it("returns default styling for small variances", () => {
+    expect(varianceCellClass(0.5)).toContain("text-gray-700");
+  });
+});
+
+describe("isAlertedRow", () => {
+  it("returns true when variance_exceeds_threshold is in alert_flags", () => {
+    const record = makeRecord({
+      variance_load_vs_order_pct: 0.1,
+      variance_delivered_vs_loaded_pct: 0.1,
+      alert_flags: ["variance_exceeds_threshold"],
+    });
+    expect(isAlertedRow(record)).toBe(true);
+  });
+
+  it("returns true when any variance crosses the default threshold", () => {
+    const record = makeRecord({
+      variance_load_vs_order_pct: 0.1,
+      variance_delivered_vs_loaded_pct: 0.1,
+      variance_invoiced_vs_delivered_pct: 4.2,
+    });
+    expect(isAlertedRow(record)).toBe(true);
+  });
+
+  it("returns false for clean rows", () => {
+    const record = makeRecord({
+      variance_load_vs_order_pct: 0.1,
+      variance_delivered_vs_loaded_pct: 0.2,
+      variance_invoiced_vs_delivered_pct: null,
+      alert_flags: [],
+    });
+    expect(isAlertedRow(record)).toBe(false);
+  });
+});
+
+// ─── Page rendering tests ────────────────────────────────────────────────────
+
+describe("ReconciliationPage", () => {
+  it("renders rows returned by listReconciliationRecords", async () => {
+    const records = [
+      makeRecord({ reconciliation_id: "rec-1", pod_id: "pod-1" }),
+      makeRecord({ reconciliation_id: "rec-2", pod_id: "pod-2" }),
+    ];
+    mockList.mockResolvedValue(makeListResponse(records));
+
+    render(<ReconciliationPage />);
+
+    await waitFor(() => expect(mockList).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText("pod-1")).toBeInTheDocument();
+    expect(screen.getByText("pod-2")).toBeInTheDocument();
+  });
+
+  it("highlights rows where any variance crosses the threshold", async () => {
+    const highVariance = makeRecord({
+      reconciliation_id: "rec-high",
+      pod_id: "pod-high",
+      variance_delivered_vs_loaded_pct: 4.5,
+    });
+    const clean = makeRecord({
+      reconciliation_id: "rec-clean",
+      pod_id: "pod-clean",
+      variance_load_vs_order_pct: 0.1,
+      variance_delivered_vs_loaded_pct: 0.2,
+    });
+    mockList.mockResolvedValue(makeListResponse([highVariance, clean]));
+
+    const { container } = render(<ReconciliationPage />);
+
+    await waitFor(() => expect(mockList).toHaveBeenCalled());
+    const highRow = await waitFor(
+      () =>
+        container.querySelector(
+          '[data-testid="reconciliation-row-rec-high"]',
+        ) as HTMLTableRowElement | null,
+    );
+    const cleanRow = container.querySelector(
+      '[data-testid="reconciliation-row-rec-clean"]',
+    ) as HTMLTableRowElement | null;
+
+    expect(highRow).not.toBeNull();
+    expect(cleanRow).not.toBeNull();
+    expect(highRow?.className).toContain("bg-red-50");
+    expect(cleanRow?.className).not.toContain("bg-red-50");
+  });
+
+  it("renders an empty-state message when no records come back", async () => {
+    mockList.mockResolvedValue(makeListResponse([]));
+
+    render(<ReconciliationPage />);
+
+    expect(
+      await screen.findByText(
+        /no reconciliation records match the current filters/i,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("shows a BOL download link in the POD drawer when the BOL is generated", async () => {
+    const record = makeRecord({
+      reconciliation_id: "rec-bol",
+      pod_id: "pod-bol",
+    });
+    mockList.mockResolvedValue(makeListResponse([record]));
+
+    const bol: BOLDownloadResponse = {
+      bol_id: "bol-1",
+      pod_id: "pod-bol",
+      status: "generated",
+      hash: "abc123",
+      generated_at: "2024-06-01T12:05:00Z",
+      file_ref: "tenants/t/bol/2024/06/01/xyz.pdf",
+      download_url: "https://s3.example.com/bol-signed-url",
+      expires_at: "2024-06-01T12:20:00Z",
+      tenant_id: "t-1",
+    };
+    mockBol.mockResolvedValue(bol);
+
+    render(<ReconciliationPage />);
+    const openButton = await screen.findByRole("button", {
+      name: /open pod pod-bol/i,
+    });
+    fireEvent.click(openButton);
+
+    await waitFor(() => expect(mockBol).toHaveBeenCalledWith("pod-bol"));
+
+    const link = (await screen.findByRole("link", {
+      name: /download bol pdf for pod pod-bol/i,
+    })) as HTMLAnchorElement;
+    expect(link.href).toBe("https://s3.example.com/bol-signed-url");
+    expect(link.target).toBe("_blank");
+  });
+
+  it("renders the pending-regeneration state instead of a download link", async () => {
+    const record = makeRecord({ pod_id: "pod-pending" });
+    mockList.mockResolvedValue(makeListResponse([record]));
+    mockBol.mockResolvedValue({
+      bol_id: "bol-pending",
+      pod_id: "pod-pending",
+      status: "pending_regeneration",
+      hash: "",
+      generated_at: null,
+      file_ref: null,
+      download_url: null,
+      expires_at: null,
+      tenant_id: "t-1",
+    });
+
+    render(<ReconciliationPage />);
+    const openButton = await screen.findByRole("button", {
+      name: /open pod pod-pending/i,
+    });
+    fireEvent.click(openButton);
+
+    expect(
+      await screen.findByText(/BOL is queued for regeneration/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: /download bol pdf/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders the not-found state when the POD has no BOL", async () => {
+    const record = makeRecord({ pod_id: "pod-missing" });
+    mockList.mockResolvedValue(makeListResponse([record]));
+    mockBol.mockRejectedValue(new Error("bol_not_found: no BOL record exists"));
+
+    render(<ReconciliationPage />);
+    const openButton = await screen.findByRole("button", {
+      name: /open pod pod-missing/i,
+    });
+    fireEvent.click(openButton);
+
+    expect(
+      await screen.findByText(/no bol has been generated for this pod/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: /download bol pdf/i }),
+    ).not.toBeInTheDocument();
+  });
+});

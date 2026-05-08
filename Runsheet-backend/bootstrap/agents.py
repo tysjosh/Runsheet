@@ -19,11 +19,120 @@ logger = logging.getLogger(__name__)
 _autonomous_agents = []
 _agent_scheduler = None
 _agent_redis_client = None
+# Fuel-Ops Hardening (Task 12.1) — background services with their own
+# lifecycles that live outside the AgentScheduler.
+_storm_mode_evaluator = None
+_integration_scheduler = None
+
+
+# ---------------------------------------------------------------------------
+# Fuel-Ops Hardening helpers (Task 12.1)
+# ---------------------------------------------------------------------------
+
+
+#: Overlay feature flags introduced by the fuel-ops hardening spec.
+#: Every flag is seeded to ``disabled`` for new deployments so tenants
+#: must explicitly opt in via the admin UI before the corresponding
+#: capability becomes active. Integration Marketplace visibility is
+#: controlled via ``overlay.integration.{provider_name}`` so every
+#: connector surfaces to the UI only after the tenant enables it.
+#: Req 10.2.2.
+_FUEL_OPS_FEATURE_FLAG_DEFAULTS = (
+    "overlay.weather_provider",
+    "overlay.traffic_aware_routing",
+    "overlay.bol_generation",
+    "overlay.qbo_invoice_push",
+    "overlay.stripe_autocharge",
+    "overlay.rack_price_provider",
+    "overlay.storm_trigger",
+    "overlay.auto_storm_mode",
+    "overlay.terminal_sourcing",
+    "overlay.contamination_enforcement",
+    "overlay.integration.quickbooks_online",
+    "overlay.integration.veeder_root",
+    "overlay.integration.geotab",
+    "overlay.integration.stripe",
+)
+
+
+def _resolve_fuel_ops_settings(settings) -> dict:
+    """Resolve the fuel-ops hardening platform settings.
+
+    These values are not yet top-level pydantic fields on
+    :class:`config.settings.Settings` (they are optional deployment
+    parameters — a dev stack happily runs without S3 / KMS). The helper
+    reads them from the process environment with a stable set of names
+    so bootstrap wires real services when they are available and falls
+    back to ``None`` (service skipped) otherwise.
+    """
+
+    return {
+        "s3_bucket": os.environ.get("FUEL_OPS_S3_BUCKET"),
+        "s3_region": (
+            os.environ.get("FUEL_OPS_S3_REGION")
+            or os.environ.get("AWS_REGION")
+            or os.environ.get("AWS_DEFAULT_REGION")
+        ),
+        "kms_key_id": os.environ.get("FUEL_OPS_KMS_KEY_ID"),
+    }
+
+
+async def _seed_fuel_ops_feature_flag_defaults(
+    container,
+    redis_client,
+) -> None:
+    """Seed every fuel-ops overlay feature flag to ``disabled`` by default.
+
+    Uses the shared :class:`ops.services.feature_flags.FeatureFlagService`
+    Redis key layout (``overlay_ff:{flag_key}:{tenant_id}``). We only
+    set the key when it is absent so existing tenant overrides are
+    preserved across redeploys. Missing Redis simply logs a warning.
+
+    Validates: Requirement 10.2.2.
+    """
+
+    if redis_client is None:
+        return
+
+    # Feature flag defaults are keyed per tenant. Without a tenant
+    # enumeration we seed a ``default`` placeholder so the
+    # feature-flag admin UI sees the flags even before any tenant
+    # opts in. Per-tenant seeding is handled by the migration
+    # scripts referenced by Task 12.4.
+    placeholder_tenant = "__default__"
+    from ops.services.feature_flags import OVERLAY_PREFIX
+
+    seeded = []
+    for flag_key in _FUEL_OPS_FEATURE_FLAG_DEFAULTS:
+        redis_key = f"{OVERLAY_PREFIX}{flag_key}:{placeholder_tenant}"
+        try:
+            # SET NX so we never clobber an existing default.
+            existing = await redis_client.get(redis_key)
+            if existing is None:
+                await redis_client.set(redis_key, "disabled")
+                seeded.append(flag_key)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "Failed to seed fuel-ops feature flag %s: %s",
+                flag_key,
+                exc,
+            )
+
+    if seeded:
+        logger.info(
+            "Seeded fuel-ops overlay feature flags (defaults=OFF): %s",
+            ", ".join(seeded),
+        )
+    else:
+        logger.debug(
+            "Fuel-ops overlay feature flags already seeded; no changes made"
+        )
 
 
 async def initialize(app, container: ServiceContainer) -> None:
     """Create and register all agentic AI services."""
     global _autonomous_agents, _agent_scheduler, _agent_redis_client
+    global _storm_mode_evaluator, _integration_scheduler
 
     import redis.asyncio as aioredis
 
@@ -81,6 +190,184 @@ async def initialize(app, container: ServiceContainer) -> None:
     _agent_redis_client = aioredis.from_url(redis_url, decode_responses=False)
     container.redis_client = _agent_redis_client
     logger.info("Agent Redis client connected")
+
+    # ---- Fuel-Ops Hardening infrastructure (Task 12.1) ------------------
+    # Build the shared platform services introduced by the fuel-ops
+    # hardening spec before any downstream wiring that consumes them
+    # (POD endpoints, fuel-ops endpoints, overlay agents). Services are
+    # constructed with best-effort configuration: every dependency that
+    # has not yet been wired (AWS credentials, S3 bucket, KMS key,
+    # Textract client) falls back to ``None`` so the bootstrap still
+    # runs in local-dev / CI environments. Downstream consumers already
+    # tolerate ``None`` by degrading gracefully (see the test suites in
+    # ``tests/unit/test_fuel_ops_*``).
+    #
+    # Req 10.2.1, 10.2.2.
+    fuel_ops_settings = _resolve_fuel_ops_settings(settings)
+
+    # 1. FuelProductCatalog is a module-level catalog — nothing to
+    #    instantiate, but publish a reference on the container so
+    #    downstream callers can retrieve it uniformly.
+    try:
+        from fuel.services import fuel_product_catalog as _fuel_product_catalog
+        container.fuel_product_catalog = _fuel_product_catalog
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("FuelProductCatalog import failed: %s", exc)
+
+    # 2. UnitConversion is a set of module-level helpers — no
+    #    registration required, but expose on the container for
+    #    symmetry with the other fuel-ops services.
+    try:
+        from services import unit_conversion as _unit_conversion
+        container.unit_conversion = _unit_conversion
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("UnitConversion import failed: %s", exc)
+
+    # 3. TenantCredentialsVault — AWS KMS-backed credential store.
+    try:
+        from services.credentials_vault import TenantCredentialsVault
+
+        credentials_vault = TenantCredentialsVault(
+            es_service=es_service,
+            kms_key_id=fuel_ops_settings.get("kms_key_id"),
+        )
+        container.credentials_vault = credentials_vault
+        logger.info("TenantCredentialsVault registered")
+    except Exception as exc:
+        credentials_vault = None
+        logger.warning("TenantCredentialsVault wiring failed: %s", exc)
+
+    # 4. FileStorageService — S3-backed object store with tenant
+    #    prefixes and presigned URLs. Only constructed when a bucket is
+    #    configured; local-dev / CI skip the S3 path entirely.
+    file_storage_service = None
+    try:
+        from services.file_storage_service import FileStorageService
+
+        _bucket = fuel_ops_settings.get("s3_bucket")
+        _region = fuel_ops_settings.get("s3_region")
+        if _bucket and _region:
+            file_storage_service = FileStorageService(
+                bucket=_bucket,
+                region=_region,
+            )
+            container.file_storage_service = file_storage_service
+            logger.info(
+                "FileStorageService registered (bucket=%s region=%s)",
+                _bucket,
+                _region,
+            )
+        else:
+            logger.info(
+                "FileStorageService not registered — FUEL_OPS_S3_BUCKET / "
+                "FUEL_OPS_S3_REGION not configured"
+            )
+    except Exception as exc:
+        logger.warning("FileStorageService wiring failed: %s", exc)
+
+    # 5. MeterTicketOCRService — AWS Textract wrapper. Requires a
+    #    FileStorageService to fetch the meter-ticket bytes. When S3 is
+    #    not configured, the OCR service is simply skipped.
+    meter_ticket_ocr_service = None
+    if file_storage_service is not None:
+        try:
+            from services.meter_ticket_ocr_service import MeterTicketOCRService
+
+            meter_ticket_ocr_service = MeterTicketOCRService(
+                file_storage=file_storage_service,
+                es_service=es_service,
+                redis_client=_agent_redis_client,
+                region=fuel_ops_settings.get("s3_region") or "us-east-1",
+            )
+            container.meter_ticket_ocr_service = meter_ticket_ocr_service
+            logger.info("MeterTicketOCRService registered")
+        except Exception as exc:
+            logger.warning("MeterTicketOCRService wiring failed: %s", exc)
+
+    # 6. ReconciliationService — ordered/loaded/delivered variance
+    #    persister. Always constructable because it only needs the ES
+    #    service + optional Redis client.
+    reconciliation_service = None
+    try:
+        from services.reconciliation_service import ReconciliationService
+
+        reconciliation_service = ReconciliationService(
+            es_service=es_service,
+            redis_client=_agent_redis_client,
+        )
+        container.reconciliation_service = reconciliation_service
+        logger.info("ReconciliationService registered")
+    except Exception as exc:
+        logger.warning("ReconciliationService wiring failed: %s", exc)
+
+    # 7. BOLService — Bill-of-Lading generator. Requires both S3 and
+    #    reportlab (imported lazily inside the service).
+    bol_service = None
+    if file_storage_service is not None:
+        try:
+            from services.bol_service import BOLService
+
+            bol_service = BOLService(
+                file_storage=file_storage_service,
+                es_service=es_service,
+            )
+            container.bol_service = bol_service
+            logger.info("BOLService registered")
+        except Exception as exc:
+            logger.warning("BOLService wiring failed: %s", exc)
+
+    # 8. PodHashChainWriter — atomic hash-chain persistence for POD
+    #    records. Expose on the container as ``pod_hash_chain_service``
+    #    to match the task description (``services.pod_hash_chain`` is
+    #    the pure-function helper module; the writer is the stateful
+    #    service). The writer is always constructable.
+    pod_hash_chain_writer = None
+    try:
+        from services.pod_hash_chain_writer import PodHashChainWriter
+
+        pod_hash_chain_writer = PodHashChainWriter(
+            es_service=es_service,
+            redis_client=_agent_redis_client,
+        )
+        container.pod_hash_chain_service = pod_hash_chain_writer
+        logger.info("PodHashChainWriter registered")
+    except Exception as exc:
+        logger.warning("PodHashChainWriter wiring failed: %s", exc)
+
+    # 9. DeliveryDestinationService — unified reader over fuel_stations
+    #    and customer_tanks.
+    try:
+        from fuel.services.delivery_destination_service import (
+            DeliveryDestinationService,
+        )
+
+        delivery_destination_service = DeliveryDestinationService(
+            es_service=es_service
+        )
+        container.delivery_destination_service = delivery_destination_service
+        logger.info("DeliveryDestinationService registered")
+    except Exception as exc:
+        delivery_destination_service = None
+        logger.warning("DeliveryDestinationService wiring failed: %s", exc)
+
+    # ---- Fuel-Ops Hardening ES indices (Task 12.2 prerequisite) --------
+    # Create the 21 new indices introduced by this spec. The helper is
+    # idempotent — existing indices are left untouched.
+    try:
+        from fuel.services.fuel_ops_es_mappings import setup_fuel_ops_indices
+
+        setup_fuel_ops_indices(es_service)
+        logger.info("Fuel-ops ES indices ready")
+    except Exception as exc:
+        logger.warning("Fuel-ops ES index setup failed: %s", exc)
+
+    # ---- Fuel-Ops feature-flag defaults (Task 12.1, 12.7) -------------
+    # Seed every overlay feature flag introduced by this spec to
+    # ``disabled`` for every existing tenant when the key does not
+    # already exist, so freshly-deployed tenants pick up the new
+    # capabilities only after an explicit opt-in.
+    await _seed_fuel_ops_feature_flag_defaults(container, _agent_redis_client)
+
 
     # Core agent services (order matters — later services depend on earlier ones)
     risk_registry = RiskRegistry(redis_client=_agent_redis_client)
@@ -564,6 +851,9 @@ async def initialize(app, container: ServiceContainer) -> None:
         fuel_planning_ws_manager=fuel_planning_ws_manager,
         redis_client=_agent_redis_client,
         sourcing_recommender=sourcing_recommender,
+        file_storage_service=file_storage_service,
+        destination_service=delivery_destination_service,
+        storm_mode_evaluator=None,  # populated further below
     )
 
     # Task 7.10: inject the same recommender into the Route_Planning_Agent
@@ -695,10 +985,364 @@ async def initialize(app, container: ServiceContainer) -> None:
     app.include_router(job_reroute_router)
     logger.info("Cross-domain integration wiring complete")
 
+    # ---- Fuel-Ops Hardening autonomous services (Task 12.1) -----------
+    # Register the new autonomous agents and background services
+    # introduced by the fuel-ops hardening spec. Each piece is
+    # constructed best-effort: a missing dependency logs a warning and
+    # leaves the feature disabled rather than breaking the boot.
+
+    # WeatherAlertIngester (Task 10.2, Req 9.1.1 / 9.1.2) — 5-minute
+    # NOAA/NWS poller. Registered with the AgentScheduler so lifecycle
+    # tracking (restart, SLO) is handled alongside the other L0 agents.
+    try:
+        from Agents.autonomous.weather_alert_ingester import WeatherAlertIngester
+
+        weather_alert_ingester = WeatherAlertIngester(
+            es_service=es_service,
+            activity_log_service=activity_log_service,
+            ws_manager=agent_ws_manager,
+            confirmation_protocol=confirmation_protocol,
+            signal_bus=signal_bus,
+            feature_flag_service=ops_feature_flags,
+        )
+        scheduler.register(weather_alert_ingester, RestartPolicy.ON_FAILURE)
+        await scheduler.start_all()
+        app.state.autonomous_agents["weather_alert_ingester"] = (
+            weather_alert_ingester
+        )
+        _autonomous_agents.append(weather_alert_ingester)
+        container.weather_alert_ingester = weather_alert_ingester
+        logger.info("WeatherAlertIngester started via AgentScheduler")
+    except Exception as exc:
+        logger.warning("WeatherAlertIngester wiring failed: %s", exc)
+
+    # StormModeEvaluator (Task 10.3, Req 9.1.3–9.1.5) — runs its own
+    # poll loop rather than living in the AgentScheduler because
+    # downstream consumers (Delivery_Prioritization_Agent,
+    # Route_Planning_Agent, notification resolver) query its state via
+    # ``get_state(tenant_id)`` rather than via a SignalBus subscription.
+    storm_mode_evaluator = None
+    try:
+        from fuel.services.storm_mode_evaluator import StormModeEvaluator
+
+        storm_mode_evaluator = StormModeEvaluator(
+            es_service=es_service,
+            signal_bus=signal_bus,
+            redis_client=_agent_redis_client,
+        )
+        await storm_mode_evaluator.start()
+        _storm_mode_evaluator = storm_mode_evaluator
+        container.storm_mode_evaluator = storm_mode_evaluator
+        app.state.storm_mode_evaluator = storm_mode_evaluator
+        logger.info("StormModeEvaluator started")
+
+        # Back-wire the evaluator into the Storm_Mode notification
+        # resolver that was constructed by the notifications bootstrap
+        # (Task 10.9). When the resolver was created without a state
+        # provider it logged a warning — re-set it now so severe-
+        # weather templates start firing.
+        if container.has("storm_notification_resolver"):
+            resolver = container.storm_notification_resolver
+            if hasattr(resolver, "_state_provider"):
+                resolver._state_provider = storm_mode_evaluator
+                logger.info(
+                    "Storm_Mode notification resolver re-wired with active"
+                    " StormModeEvaluator"
+                )
+
+        # Inject the evaluator into the overlay agents that gate
+        # behaviour on Storm_Mode. Both setters tolerate ``None`` so a
+        # missing evaluator keeps the pre-storm behaviour.
+        if hasattr(route_planning_agent, "set_storm_mode_evaluator"):
+            route_planning_agent.set_storm_mode_evaluator(storm_mode_evaluator)
+        if hasattr(delivery_prioritization_agent, "_storm_mode_evaluator"):
+            # The agent accepts the evaluator via its constructor; no
+            # public setter exists, so wire the private attribute
+            # (mirrors the pattern used for ``_signal_bus`` above).
+            delivery_prioritization_agent._storm_mode_evaluator = (
+                storm_mode_evaluator
+            )
+    except Exception as exc:
+        logger.warning("StormModeEvaluator wiring failed: %s", exc)
+
+    # IntegrationScheduler (Task 9.2, Req 5.1.5 / 5.1.6) — APScheduler-
+    # backed cron orchestrator for every tenant's integration
+    # instances. Constructed only when its mandatory dependencies are
+    # available; a missing credentials vault or APScheduler install
+    # logs a warning rather than failing the boot so development
+    # tenants can keep running without integrations.
+    integration_scheduler = None
+    try:
+        from integrations.connector_base import IntegrationInstanceRepository
+        from integrations.integration_scheduler import IntegrationScheduler
+
+        integration_instance_repository = IntegrationInstanceRepository(
+            es_service=es_service
+        )
+        container.integration_instance_repository = (
+            integration_instance_repository
+        )
+
+        # ConnectorFactory is populated lazily once we register
+        # provider-specific factories. Until then the scheduler is
+        # constructed but not started, so no ticks fire. A future
+        # integration-bootstrap module can replace this stub with a
+        # real factory.
+        async def _placeholder_connector_factory(instance):
+            raise RuntimeError(
+                "IntegrationScheduler connector_factory is not configured; "
+                "install the per-provider factory via the integrations "
+                "bootstrap"
+            )
+
+        integration_scheduler = IntegrationScheduler(
+            repository=integration_instance_repository,
+            es_service=es_service,
+            connector_factory=_placeholder_connector_factory,
+            signal_bus=signal_bus,
+        )
+        container.integration_scheduler = integration_scheduler
+        _integration_scheduler = integration_scheduler
+        logger.info(
+            "IntegrationScheduler registered (connector_factory pending)"
+        )
+
+        # Register the built-in connector catalog entries so
+        # GET /api/integrations/providers returns the full list
+        # (Task 9.10, Req 5.6.2 / 5.6.6). Each entry defaults to
+        # ``overlay.integration.{provider_name}`` for Marketplace
+        # visibility.
+        try:
+            from integrations.provider_registry import register_all_providers
+
+            register_all_providers()
+            logger.info("Integration provider catalog registered")
+        except Exception as exc:
+            logger.warning("Integration provider catalog wiring failed: %s", exc)
+    except Exception as exc:
+        logger.warning("IntegrationScheduler wiring failed: %s", exc)
+
+    # ---- Integrations REST router wiring (Task 12.3, Req 5.1.7 / 5.1.8) ----
+    # The ``integrations_router`` is mounted in ``main.py`` at import
+    # time. Its handlers raise HTTP 500 until
+    # :func:`configure_integrations_endpoints` installs the repository,
+    # scheduler, and credentials vault references. Call it here so the
+    # full dependency graph (vault, repository, scheduler, ES) is
+    # available. Missing dependencies log a warning rather than
+    # breaking boot — dev environments without KMS can still run.
+    try:
+        from integrations.api.integrations_endpoints import (
+            configure_integrations_endpoints,
+        )
+
+        if (
+            integration_scheduler is not None
+            and container.has("integration_instance_repository")
+        ):
+            configure_integrations_endpoints(
+                repository=container.integration_instance_repository,
+                scheduler=integration_scheduler,
+                credentials_vault=credentials_vault,
+                es_service=es_service,
+            )
+            logger.info("Integrations REST endpoints configured")
+        else:
+            logger.warning(
+                "Integrations REST endpoints NOT configured "
+                "(scheduler=%s, repository=%s); "
+                "/api/integrations routes will return 500 until bootstrap"
+                " finishes wiring",
+                integration_scheduler is not None,
+                container.has("integration_instance_repository"),
+            )
+    except Exception as exc:
+        logger.warning(
+            "configure_integrations_endpoints() failed: %s", exc
+        )
+
+    # ---- Stripe REST + webhook router wiring (Task 12.3, Req 5.5.2 / 5.5.4) ----
+    # The Stripe endpoints module exposes two routers (tenant-scoped
+    # ``/api/integrations/stripe/*`` and the unauthenticated
+    # ``/webhooks/stripe/{tenant_id}``) and needs an async
+    # ``connector_factory(tenant_id) -> Optional[StripeConnector]`` so
+    # every request resolves a fresh connector bound to the caller's
+    # tenant credentials. The factory looks up the tenant's Stripe
+    # IntegrationInstance via the repository, short-circuits to
+    # ``None`` when no Stripe integration is configured (the endpoint
+    # then returns HTTP 404), and otherwise hands back a
+    # :class:`StripeConnector` wired with the shared vault,
+    # reconciliation_service, feature_flag_service, confirmation
+    # protocol, Redis client, and ES service.
+    try:
+        from integrations.api.stripe_endpoints import (
+            configure_stripe_endpoints,
+        )
+        from integrations.stripe_connector import StripeConnector
+
+        _stripe_repository = (
+            container.integration_instance_repository
+            if container.has("integration_instance_repository")
+            else None
+        )
+
+        async def _stripe_connector_factory(tenant_id: str):
+            """Resolve the Stripe connector for ``tenant_id``.
+
+            Returns ``None`` when the tenant has no active Stripe
+            integration instance so the endpoints surface HTTP 404
+            ``stripe_integration_not_configured`` uniformly.
+            """
+
+            if _stripe_repository is None or credentials_vault is None:
+                return None
+            try:
+                instances = await _stripe_repository.list_for_tenant(
+                    tenant_id=tenant_id,
+                    provider_name=StripeConnector.provider_name,
+                    enabled=None,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(
+                    "Stripe connector factory: repository lookup failed "
+                    "tenant=%s: %s",
+                    tenant_id,
+                    exc,
+                )
+                return None
+
+            if not instances:
+                return None
+            # Prefer an enabled instance; fall back to the first record
+            # so a disabled integration still serves webhooks (Stripe
+            # will keep delivering events until the operator removes
+            # the endpoint from their dashboard).
+            instance = next(
+                (i for i in instances if i.enabled), instances[0]
+            )
+
+            return StripeConnector(
+                tenant_id=tenant_id,
+                instance_id=instance.instance_id,
+                credentials_vault=credentials_vault,
+                credentials_ref=instance.credentials_ref,
+                reconciliation_service=reconciliation_service,
+                feature_flag_service=ops_feature_flags,
+                confirmation_protocol=confirmation_protocol,
+                redis_client=_agent_redis_client,
+                es_service=es_service,
+            )
+
+        configure_stripe_endpoints(
+            connector_factory=_stripe_connector_factory,
+        )
+        logger.info(
+            "Stripe REST endpoints + webhook router configured "
+            "(connector factory ready)"
+        )
+    except Exception as exc:
+        logger.warning(
+            "configure_stripe_endpoints() failed: %s", exc
+        )
+
+    # Re-wire POD endpoints with the fuel-ops services now that they
+    # exist on the container. ``bootstrap.scheduling.configure_pod_endpoints``
+    # fires earlier in the boot order and does not know about
+    # file_storage_service, pod_bol_finalizer, or pod_hash_chain_writer;
+    # calling configure_pod_endpoints again here overlays those refs
+    # without disturbing the existing wiring.
+    pod_bol_finalizer = None
+    try:
+        if bol_service is not None:
+            from driver.services.pod_bol_finalizer import PODBOLFinalizer
+
+            pod_bol_finalizer = PODBOLFinalizer(
+                bol_service=bol_service,
+                es_service=es_service,
+                feature_flag_service=ops_feature_flags,
+            )
+            container.pod_bol_finalizer = pod_bol_finalizer
+            logger.info("PODBOLFinalizer registered")
+    except Exception as exc:
+        logger.warning("PODBOLFinalizer wiring failed: %s", exc)
+
+    try:
+        from driver.api.pod_endpoints import configure_pod_endpoints
+
+        configure_pod_endpoints(
+            es_service=es_service,
+            job_service=container.job_service
+                if container.has("job_service") else None,
+            scheduling_ws_manager=container.scheduling_ws_manager
+                if container.has("scheduling_ws_manager") else None,
+            driver_ws_manager=container.driver_ws_manager
+                if container.has("driver_ws_manager") else None,
+            file_storage_service=file_storage_service,
+            redis_client=_agent_redis_client,
+            pod_bol_finalizer=pod_bol_finalizer,
+            ocr_service=meter_ticket_ocr_service,
+            pod_hash_chain_writer=pod_hash_chain_writer,
+        )
+        logger.info(
+            "POD endpoints re-wired with fuel-ops services "
+            "(file_storage=%s, ocr=%s, bol=%s, hash_chain=%s)",
+            file_storage_service is not None,
+            meter_ticket_ocr_service is not None,
+            pod_bol_finalizer is not None,
+            pod_hash_chain_writer is not None,
+        )
+    except Exception as exc:
+        logger.warning("POD endpoint re-wiring failed: %s", exc)
+
+    # Re-wire the fuel-ops endpoints one more time now that the
+    # StormModeEvaluator exists so GET /api/fuel/storm-mode/status can
+    # resolve state.
+    if storm_mode_evaluator is not None:
+        try:
+            configure_fuel_ops_endpoints(
+                es_service=es_service,
+                confirmation_protocol=confirmation_protocol,
+                fuel_planning_ws_manager=fuel_planning_ws_manager,
+                redis_client=_agent_redis_client,
+                sourcing_recommender=sourcing_recommender,
+                file_storage_service=file_storage_service,
+                destination_service=delivery_destination_service,
+                storm_mode_evaluator=storm_mode_evaluator,
+            )
+            logger.info(
+                "Fuel-ops endpoints re-wired with StormModeEvaluator"
+            )
+        except Exception as exc:
+            logger.warning(
+                "Fuel-ops endpoint Storm_Mode re-wire failed: %s", exc
+            )
+
+    logger.info("Fuel-ops hardening bootstrap complete")
+
 
 async def shutdown(app, container: ServiceContainer) -> None:
     """Stop agents in order: L2 → L1 → L0, then close resources (Req 10.5)."""
     global _autonomous_agents, _agent_scheduler, _agent_redis_client
+    global _storm_mode_evaluator, _integration_scheduler
+
+    # Stop the fuel-ops hardening services FIRST (before the
+    # AgentScheduler) so any in-flight tick cannot observe a
+    # partially-torn-down container. ``StormModeEvaluator`` and
+    # ``IntegrationScheduler`` each own their own asyncio task.
+    if _integration_scheduler is not None:
+        try:
+            await _integration_scheduler.shutdown(wait=False)
+            logger.info("IntegrationScheduler stopped")
+        except Exception as exc:
+            logger.warning("IntegrationScheduler shutdown failed: %s", exc)
+        _integration_scheduler = None
+
+    if _storm_mode_evaluator is not None:
+        try:
+            await _storm_mode_evaluator.stop()
+            logger.info("StormModeEvaluator stopped")
+        except Exception as exc:
+            logger.warning("StormModeEvaluator shutdown failed: %s", exc)
+        _storm_mode_evaluator = None
 
     if _agent_scheduler is not None:
         try:
@@ -716,6 +1360,7 @@ async def shutdown(app, container: ServiceContainer) -> None:
                 "revenue_guard", "customer_promise",
             ]
             l0_agents = [
+                "weather_alert_ingester",
                 "inventory_monitor", "truck_fuel_monitor", "job_sla_monitor",
                 "delay_response_agent", "fuel_management_agent",
                 "sla_guardian_agent",

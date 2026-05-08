@@ -336,3 +336,149 @@ class TestCustomerProfile:
         assert profile.keep_full.keep_full_enabled is True
         assert profile.keep_full.minimum_low_water_pct == 25.0
         assert profile.keep_full.keep_full_priority_boost == 0.4
+
+
+# ---------------------------------------------------------------------------
+# StormRoadRestriction (Task 10.8 — Req 9.3.3, 9.3.4, 9.3.5)
+# ---------------------------------------------------------------------------
+
+
+from fuel.storm_mode_models import StormRoadRestriction  # noqa: E402
+
+
+def _closed_rect(
+    *,
+    lon_min: float = -74.1,
+    lon_max: float = -74.0,
+    lat_min: float = 40.7,
+    lat_max: float = 40.8,
+):
+    return [
+        [lon_min, lat_min],
+        [lon_max, lat_min],
+        [lon_max, lat_max],
+        [lon_min, lat_max],
+        [lon_min, lat_min],
+    ]
+
+
+def _valid_restriction_kwargs(**overrides) -> dict:
+    base = {
+        "restriction_id": "srr_abc",
+        "tenant_id": "tenant-a",
+        "polygon": {"type": "Polygon", "coordinates": [_closed_rect()]},
+        "effective_from": _now(),
+        "source": "dot_feed",
+        "severity": "severe",
+    }
+    base.update(overrides)
+    return base
+
+
+class TestStormRoadRestriction:
+    def test_round_trip_polygon_preserves_coordinates(self):
+        restriction = StormRoadRestriction(**_valid_restriction_kwargs())
+        dumped = restriction.model_dump()
+        assert dumped["polygon"]["type"] == "Polygon"
+        assert dumped["polygon"]["coordinates"][0][0] == [
+            -74.1,
+            40.7,
+        ]
+
+    def test_multipolygon_is_accepted(self):
+        restriction = StormRoadRestriction(
+            **_valid_restriction_kwargs(
+                polygon={
+                    "type": "MultiPolygon",
+                    "coordinates": [
+                        [_closed_rect()],
+                        [
+                            _closed_rect(
+                                lon_min=-73.9,
+                                lon_max=-73.8,
+                                lat_min=40.5,
+                                lat_max=40.6,
+                            )
+                        ],
+                    ],
+                }
+            )
+        )
+        assert restriction.polygon["type"] == "MultiPolygon"
+        assert len(restriction.polygon["coordinates"]) == 2
+
+    def test_unclosed_ring_is_rejected(self):
+        unclosed = [
+            [-74.1, 40.7],
+            [-74.0, 40.7],
+            [-74.0, 40.8],
+            [-74.1, 40.8],
+        ]
+        with pytest.raises(ValidationError):
+            StormRoadRestriction(
+                **_valid_restriction_kwargs(
+                    polygon={"type": "Polygon", "coordinates": [unclosed]}
+                )
+            )
+
+    def test_out_of_bounds_longitude_is_rejected(self):
+        ring = _closed_rect()
+        ring[0][0] = -200.0
+        ring[-1][0] = -200.0  # match the first position so the ring is
+        # closed; the longitude check still rejects the value.
+        with pytest.raises(ValidationError):
+            StormRoadRestriction(
+                **_valid_restriction_kwargs(
+                    polygon={"type": "Polygon", "coordinates": [ring]}
+                )
+            )
+
+    def test_wrong_geometry_type_is_rejected(self):
+        with pytest.raises(ValidationError):
+            StormRoadRestriction(
+                **_valid_restriction_kwargs(
+                    polygon={
+                        "type": "Point",
+                        "coordinates": [-74.0, 40.7],
+                    }
+                )
+            )
+
+    def test_unknown_severity_is_rejected(self):
+        with pytest.raises(ValidationError):
+            StormRoadRestriction(
+                **_valid_restriction_kwargs(severity="catastrophic")
+            )
+
+    def test_effective_to_before_from_is_rejected(self):
+        now = _now()
+        with pytest.raises(ValidationError):
+            StormRoadRestriction(
+                **_valid_restriction_kwargs(
+                    effective_from=now,
+                    effective_to=now - timedelta(hours=1),
+                )
+            )
+
+    def test_open_ended_effective_to_is_allowed(self):
+        restriction = StormRoadRestriction(
+            **_valid_restriction_kwargs(effective_to=None)
+        )
+        assert restriction.effective_to is None
+
+    def test_blank_source_is_rejected(self):
+        with pytest.raises(ValidationError):
+            StormRoadRestriction(**_valid_restriction_kwargs(source="   "))
+
+    def test_blank_reason_becomes_none(self):
+        restriction = StormRoadRestriction(
+            **_valid_restriction_kwargs(reason="   ")
+        )
+        assert restriction.reason is None
+
+    def test_extra_fields_are_rejected(self):
+        with pytest.raises(ValidationError):
+            StormRoadRestriction(
+                **_valid_restriction_kwargs(),
+                unknown_field="x",  # type: ignore[call-arg]
+            )

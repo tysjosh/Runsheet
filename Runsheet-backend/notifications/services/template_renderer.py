@@ -62,7 +62,9 @@ def render_template(template_str: str, data: dict) -> str:
 # Default template definitions
 # ---------------------------------------------------------------------------
 
-# 4 event types × 3 channels = 12 default templates
+# 4 event types × 3 channels = 12 default templates, plus 4 × 3 = 12
+# severe-weather (``_storm`` suffix) variants used when Storm_Mode is
+# active for keep-full or generator customers (Task 10.9, Req 9.2.6).
 DEFAULT_TEMPLATES: list[dict] = [
     # --- delivery_confirmation ---
     {
@@ -172,6 +174,238 @@ DEFAULT_TEMPLATES: list[dict] = [
         "subject_template": "Order Update — {order_id}",
         "body_template": "Order {order_id} status changed from {previous_status} to {new_status}",
         "placeholders": ["order_id", "previous_status", "new_status"],
+    },
+    # ------------------------------------------------------------------
+    # Severe-weather variants (Task 10.9, Req 9.2.6)
+    #
+    # The Customer_Notification pipeline swaps to these templates when
+    # Storm_Mode is active for the tenant and the recipient is a
+    # keep-full or generator-fuel customer. Each variant surfaces the
+    # triggering ``{weather_alert_headline}`` / ``{weather_alert_type}``
+    # so customers understand why service is being re-prioritized. The
+    # ``event_type`` carries a ``_storm`` suffix so the existing render
+    # lookup keeps the non-storm templates untouched.
+    # ------------------------------------------------------------------
+    # --- delivery_confirmation_storm ---
+    {
+        "event_type": "delivery_confirmation_storm",
+        "channel": "sms",
+        "subject_template": "Storm Delivery Completed — Order {order_id}",
+        "body_template": (
+            "Severe weather ({weather_alert_type}) is active in your area. "
+            "Your priority delivery {order_id} has been completed. Stay safe."
+        ),
+        "placeholders": [
+            "order_id",
+            "weather_alert_type",
+            "weather_alert_headline",
+        ],
+    },
+    {
+        "event_type": "delivery_confirmation_storm",
+        "channel": "email",
+        "subject_template": "Storm Delivery Completed — Order {order_id}",
+        "body_template": (
+            "Dear {customer_name},\n\n"
+            "We successfully completed your priority delivery for order "
+            "{order_id} while severe weather is active in your area.\n\n"
+            "Active alert: {weather_alert_headline} ({weather_alert_type}, "
+            "severity {weather_alert_severity}).\n"
+            "Expected through: {weather_alert_expected_end_at}.\n\n"
+            "If you need a follow-up visit or conservation guidance, "
+            "reply to this message or call dispatch.\n\n"
+            "Stay safe."
+        ),
+        "placeholders": [
+            "order_id",
+            "customer_name",
+            "weather_alert_type",
+            "weather_alert_headline",
+            "weather_alert_severity",
+            "weather_alert_expected_end_at",
+        ],
+    },
+    {
+        "event_type": "delivery_confirmation_storm",
+        "channel": "whatsapp",
+        "subject_template": "Storm Delivery Completed — Order {order_id}",
+        "body_template": (
+            "Severe weather ({weather_alert_type}) is active. Your priority "
+            "delivery {order_id} is complete. Stay safe."
+        ),
+        "placeholders": [
+            "order_id",
+            "weather_alert_type",
+        ],
+    },
+    # --- delay_alert_storm ---
+    {
+        "event_type": "delay_alert_storm",
+        "channel": "sms",
+        "subject_template": "Storm Delay — Order {order_id}",
+        "body_template": (
+            "{weather_alert_type} in effect. Your delivery {order_id} is "
+            "delayed by {delay_minutes} min. New ETA: {new_eta}. "
+            "We are prioritizing critical customers."
+        ),
+        "placeholders": [
+            "order_id",
+            "delay_minutes",
+            "new_eta",
+            "weather_alert_type",
+        ],
+    },
+    {
+        "event_type": "delay_alert_storm",
+        "channel": "email",
+        "subject_template": "Storm Delay — Order {order_id}",
+        "body_template": (
+            "Dear {customer_name},\n\n"
+            "A {weather_alert_type} is active for your service area "
+            "({weather_alert_headline}). Your delivery for order "
+            "{order_id} is delayed by {delay_minutes} minutes.\n"
+            "New estimated arrival: {new_eta}.\n\n"
+            "During severe weather we prioritize keep-full and backup-"
+            "generator customers; we are keeping your service in that "
+            "priority queue. If your situation becomes urgent please "
+            "reply or call dispatch.\n\n"
+            "Alert expected through: {weather_alert_expected_end_at}."
+        ),
+        "placeholders": [
+            "order_id",
+            "delay_minutes",
+            "new_eta",
+            "customer_name",
+            "weather_alert_type",
+            "weather_alert_headline",
+            "weather_alert_expected_end_at",
+        ],
+    },
+    {
+        "event_type": "delay_alert_storm",
+        "channel": "whatsapp",
+        "subject_template": "Storm Delay — Order {order_id}",
+        "body_template": (
+            "{weather_alert_type} active. Delivery {order_id} delayed "
+            "{delay_minutes} min. New ETA: {new_eta}."
+        ),
+        "placeholders": [
+            "order_id",
+            "delay_minutes",
+            "new_eta",
+            "weather_alert_type",
+        ],
+    },
+    # --- eta_change_storm ---
+    {
+        "event_type": "eta_change_storm",
+        "channel": "sms",
+        "subject_template": "Storm ETA Update — Order {order_id}",
+        "body_template": (
+            "{weather_alert_type} active. ETA for {order_id} updated: "
+            "{new_eta} (was {previous_eta})."
+        ),
+        "placeholders": [
+            "order_id",
+            "new_eta",
+            "previous_eta",
+            "weather_alert_type",
+        ],
+    },
+    {
+        "event_type": "eta_change_storm",
+        "channel": "email",
+        "subject_template": "Storm ETA Update — Order {order_id}",
+        "body_template": (
+            "Dear {customer_name},\n\n"
+            "Severe weather ({weather_alert_headline}) is active in your "
+            "service area. The estimated arrival for your order "
+            "{order_id} has been updated.\n"
+            "Previous ETA: {previous_eta}\n"
+            "New ETA: {new_eta}\n\n"
+            "Alert expected through: {weather_alert_expected_end_at}.\n\n"
+            "Thank you for your patience while we prioritize critical "
+            "storm deliveries."
+        ),
+        "placeholders": [
+            "order_id",
+            "new_eta",
+            "previous_eta",
+            "customer_name",
+            "weather_alert_type",
+            "weather_alert_headline",
+            "weather_alert_expected_end_at",
+        ],
+    },
+    {
+        "event_type": "eta_change_storm",
+        "channel": "whatsapp",
+        "subject_template": "Storm ETA Update — Order {order_id}",
+        "body_template": (
+            "{weather_alert_type} active. New ETA for {order_id}: "
+            "{new_eta} (was {previous_eta})."
+        ),
+        "placeholders": [
+            "order_id",
+            "new_eta",
+            "previous_eta",
+            "weather_alert_type",
+        ],
+    },
+    # --- order_status_update_storm ---
+    {
+        "event_type": "order_status_update_storm",
+        "channel": "sms",
+        "subject_template": "Storm Order Update — {order_id}",
+        "body_template": (
+            "{weather_alert_type} active. Order {order_id} status: "
+            "{previous_status} → {new_status}."
+        ),
+        "placeholders": [
+            "order_id",
+            "previous_status",
+            "new_status",
+            "weather_alert_type",
+        ],
+    },
+    {
+        "event_type": "order_status_update_storm",
+        "channel": "email",
+        "subject_template": "Storm Order Update — {order_id}",
+        "body_template": (
+            "Dear {customer_name},\n\n"
+            "Severe weather ({weather_alert_headline}) is active for your "
+            "service area. Your order {order_id} status has changed.\n"
+            "Previous status: {previous_status}\n"
+            "New status: {new_status}\n\n"
+            "Alert expected through: {weather_alert_expected_end_at}.\n\n"
+            "We will continue to prioritize your service throughout this "
+            "event."
+        ),
+        "placeholders": [
+            "order_id",
+            "previous_status",
+            "new_status",
+            "customer_name",
+            "weather_alert_type",
+            "weather_alert_headline",
+            "weather_alert_expected_end_at",
+        ],
+    },
+    {
+        "event_type": "order_status_update_storm",
+        "channel": "whatsapp",
+        "subject_template": "Storm Order Update — {order_id}",
+        "body_template": (
+            "{weather_alert_type} active. {order_id}: {previous_status} "
+            "→ {new_status}."
+        ),
+        "placeholders": [
+            "order_id",
+            "previous_status",
+            "new_status",
+            "weather_alert_type",
+        ],
     },
 ]
 

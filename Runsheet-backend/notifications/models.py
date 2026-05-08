@@ -94,6 +94,12 @@ class Notification(BaseModel):
     provider_message_id: Optional[str] = None
     scheduled_retry_at: Optional[str] = None
     tenant_id: str
+    # Storm_Mode metadata — Task 10.9, Req 9.2.6. Populated when the
+    # pipeline selects a severe-weather template variant for a keep-full
+    # or generator customer while Storm_Mode is active.
+    storm_mode_active: Optional[bool] = None
+    weather_alert_ref: Optional[dict] = None
+    storm_variant_reason: Optional[str] = None
 
 
 class EventPreference(BaseModel):

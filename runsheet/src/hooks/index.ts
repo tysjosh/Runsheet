@@ -76,3 +76,19 @@ export type {
   UsePlanExecutionSocketReturn,
 } from "./usePlanExecutionSocket";
 export { usePlanExecutionSocket } from "./usePlanExecutionSocket";
+
+export type {
+  CrossContaminationViolationEvent,
+  CustomerTankForecastReadyEvent,
+  EmergencyStopInsertedEvent,
+  FuelPlanningEventType,
+  FuelPlanningWebSocketMessage,
+  FuelPlanningWebSocketOptions,
+  ReplanDiffReadyEvent,
+  ReplanDiffSummary,
+  SourcingRecommendationReadyEvent,
+  StormModeActivatedEvent,
+  StormModeClearedEvent,
+  UseFuelPlanningWebSocketReturn,
+} from "./useFuelPlanningWebSocket";
+export { useFuelPlanningWebSocket } from "./useFuelPlanningWebSocket";

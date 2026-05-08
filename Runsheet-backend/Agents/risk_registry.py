@@ -41,6 +41,12 @@ DEFAULT_RISK_REGISTRY: Dict[str, RiskLevel] = {
     "cancel_job": RiskLevel.HIGH,
     "reassign_rider": RiskLevel.HIGH,
     "emergency_stop_insertion_high_risk": RiskLevel.HIGH,
+    # Storm_Mode route-plan mutation (Task 10.7, Req 9.2.5). When
+    # Storm_Mode is active for the tenant, the Route_Planning_Agent
+    # stamps this tool name on every Route_Plan action so
+    # ConfirmationProtocol classifies the plan HIGH regardless of the
+    # standard MEDIUM default for non-storm plans.
+    "apply_route_plan_storm_mode": RiskLevel.HIGH,
 }
 
 

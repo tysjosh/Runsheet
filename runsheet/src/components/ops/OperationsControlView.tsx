@@ -1,27 +1,27 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import type { Job, OperationsControlSummary } from "../../types/api";
-import type { FuelAlert } from "../../services/fuelApi";
-import { getActiveJobs, getDelayedJobs } from "../../services/schedulingApi";
-import { getAlerts as getFuelAlerts } from "../../services/fuelApi";
-import { getAlerts as getInventoryAlerts } from "../../services/inventoryApi";
-import { apiService } from "../../services/api";
-import { useSchedulingWebSocket } from "../../hooks/useSchedulingWebSocket";
 import type {
+  DelayAlertEvent,
   JobCreatedEvent,
   StatusChangedEvent,
-  DelayAlertEvent,
 } from "../../hooks/useSchedulingWebSocket";
-import type { JobStatus } from "../../types/api";
-import OperationsSummaryBar from "./OperationsSummaryBar";
-import OperationsMap from "./OperationsMap";
-import JobQueuePanel from "./JobQueuePanel";
-import DelayedOperationsPanel from "./DelayedOperationsPanel";
+import { useSchedulingWebSocket } from "../../hooks/useSchedulingWebSocket";
+import { apiService } from "../../services/api";
+import type { FuelAlert } from "../../services/fuelApi";
+import { getAlerts as getFuelAlerts } from "../../services/fuelApi";
+import { getAlerts as getInventoryAlerts } from "../../services/inventoryApi";
+import { getActiveJobs, getDelayedJobs } from "../../services/schedulingApi";
+import type { Job, JobStatus, OperationsControlSummary } from "../../types/api";
+import LoadingSpinner from "../LoadingSpinner";
 import ApprovalQueuePanel from "./ApprovalQueuePanel";
+import DelayedOperationsPanel from "./DelayedOperationsPanel";
 import FuelStatusSidebar from "./FuelStatusSidebar";
 import InventoryHealthBadge from "./InventoryHealthBadge";
-import LoadingSpinner from "../LoadingSpinner";
+import JobQueuePanel from "./JobQueuePanel";
+import OperationsMap from "./OperationsMap";
+import OperationsSummaryBar from "./OperationsSummaryBar";
+import StormModeBanner from "./StormModeBanner";
 
 interface AssetLocation {
   asset_id: string;
@@ -63,30 +63,40 @@ export default function OperationsControlView() {
   const loadData = useCallback(async () => {
     try {
       setLoading(true);
-      const [activeRes, delayedRes, fuelRes, assetsRes, inventoryRes] = await Promise.allSettled([
-        getActiveJobs(),
-        getDelayedJobs(),
-        getFuelAlerts(),
-        apiService.getAssets(),
-        getInventoryAlerts(),
-      ]);
+      const [activeRes, delayedRes, fuelRes, assetsRes, inventoryRes] =
+        await Promise.allSettled([
+          getActiveJobs(),
+          getDelayedJobs(),
+          getFuelAlerts(),
+          apiService.getAssets(),
+          getInventoryAlerts(),
+        ]);
 
-      setActiveJobs(activeRes.status === "fulfilled" ? activeRes.value.data : []);
-      setDelayedJobs(delayedRes.status === "fulfilled" ? delayedRes.value.data : []);
+      setActiveJobs(
+        activeRes.status === "fulfilled" ? activeRes.value.data : [],
+      );
+      setDelayedJobs(
+        delayedRes.status === "fulfilled" ? delayedRes.value.data : [],
+      );
       setFuelAlerts(fuelRes.status === "fulfilled" ? fuelRes.value.data : []);
 
       // Inventory alerts count (fail-open: default to 0)
       if (inventoryRes.status === "fulfilled") {
-        setInventoryAlertCount(inventoryRes.value.count ?? inventoryRes.value.data?.length ?? 0);
+        setInventoryAlertCount(
+          inventoryRes.value.count ?? inventoryRes.value.data?.length ?? 0,
+        );
       } else {
         setInventoryAlertCount(0);
       }
 
-      const assets = assetsRes.status === "fulfilled" ? assetsRes.value.data : [];
+      const assets =
+        assetsRes.status === "fulfilled" ? assetsRes.value.data : [];
 
       // Build asset locations with job assignment info
       const jobsByAsset = new Map<string, Job>();
-      for (const job of (activeRes.status === "fulfilled" ? activeRes.value.data : [])) {
+      for (const job of activeRes.status === "fulfilled"
+        ? activeRes.value.data
+        : []) {
         if (job.asset_assigned) {
           jobsByAsset.set(job.asset_assigned, job);
         }
@@ -107,7 +117,12 @@ export default function OperationsControlView() {
           const assignedJob = jobsByAsset.get(a.id);
           return {
             asset_id: a.id,
-            name: a.name || a.plateNumber || a.vesselName || a.containerNumber || a.id,
+            name:
+              a.name ||
+              a.plateNumber ||
+              a.vesselName ||
+              a.containerNumber ||
+              a.id,
             lat: a.currentLocation.coordinates.lat,
             lng: a.currentLocation.coordinates.lon,
             job_status: assignedJob?.status,
@@ -134,74 +149,72 @@ export default function OperationsControlView() {
     setActiveJobs((prev) => [event.job, ...prev]);
   }, []);
 
-  const handleStatusChanged = useCallback(
-    (event: StatusChangedEvent) => {
-      setActiveJobs((prev) =>
-        prev.map((j) =>
-          j.job_id === event.job_id
-            ? {
-                ...j,
-                status: event.new_status as JobStatus,
-                asset_assigned: event.asset_assigned ?? j.asset_assigned,
-                estimated_arrival:
-                  event.estimated_arrival ?? j.estimated_arrival,
-                updated_at: new Date().toISOString(),
-              }
-            : j,
-        ),
-      );
-    },
-    [],
-  );
+  const handleStatusChanged = useCallback((event: StatusChangedEvent) => {
+    setActiveJobs((prev) =>
+      prev.map((j) =>
+        j.job_id === event.job_id
+          ? {
+              ...j,
+              status: event.new_status as JobStatus,
+              asset_assigned: event.asset_assigned ?? j.asset_assigned,
+              estimated_arrival: event.estimated_arrival ?? j.estimated_arrival,
+              updated_at: new Date().toISOString(),
+            }
+          : j,
+      ),
+    );
+  }, []);
 
-  const handleDelayAlert = useCallback(
-    (event: DelayAlertEvent) => {
-      setActiveJobs((prev) =>
-        prev.map((j) =>
+  const handleDelayAlert = useCallback((event: DelayAlertEvent) => {
+    setActiveJobs((prev) =>
+      prev.map((j) =>
+        j.job_id === event.job_id
+          ? {
+              ...j,
+              delayed: true,
+              delay_duration_minutes: event.delay_duration_minutes,
+            }
+          : j,
+      ),
+    );
+    setDelayedJobs((prev) => {
+      const exists = prev.some((j) => j.job_id === event.job_id);
+      if (exists) {
+        return prev.map((j) =>
           j.job_id === event.job_id
-            ? {
-                ...j,
-                delayed: true,
-                delay_duration_minutes: event.delay_duration_minutes,
-              }
+            ? { ...j, delay_duration_minutes: event.delay_duration_minutes }
             : j,
-        ),
-      );
-      setDelayedJobs((prev) => {
-        const exists = prev.some((j) => j.job_id === event.job_id);
-        if (exists) {
-          return prev.map((j) =>
-            j.job_id === event.job_id
-              ? { ...j, delay_duration_minutes: event.delay_duration_minutes }
-              : j,
-          );
-        }
-        // Add a minimal delayed job entry
-        return [
-          ...prev,
-          {
-            job_id: event.job_id,
-            job_type: event.job_type as Job["job_type"],
-            status: "in_progress" as const,
-            tenant_id: "",
-            origin: event.origin,
-            destination: event.destination,
-            scheduled_time: "",
-            created_at: "",
-            updated_at: new Date().toISOString(),
-            priority: "normal" as const,
-            delayed: true,
-            delay_duration_minutes: event.delay_duration_minutes,
-            asset_assigned: event.asset_assigned,
-          },
-        ];
-      });
-    },
-    [],
-  );
+        );
+      }
+      // Add a minimal delayed job entry
+      return [
+        ...prev,
+        {
+          job_id: event.job_id,
+          job_type: event.job_type as Job["job_type"],
+          status: "in_progress" as const,
+          tenant_id: "",
+          origin: event.origin,
+          destination: event.destination,
+          scheduled_time: "",
+          created_at: "",
+          updated_at: new Date().toISOString(),
+          priority: "normal" as const,
+          delayed: true,
+          delay_duration_minutes: event.delay_duration_minutes,
+          asset_assigned: event.asset_assigned,
+        },
+      ];
+    });
+  }, []);
 
   useSchedulingWebSocket({
-    subscriptions: ["job_created", "status_changed", "delay_alert", "cargo_update"],
+    subscriptions: [
+      "job_created",
+      "status_changed",
+      "delay_alert",
+      "cargo_update",
+    ],
     onJobCreated: handleJobCreated,
     onStatusChanged: handleStatusChanged,
     onDelayAlert: handleDelayAlert,
@@ -212,26 +225,34 @@ export default function OperationsControlView() {
   }
 
   return (
-    <div className="h-full flex flex-col gap-4 p-6 bg-gray-50 overflow-hidden">
-      {/* Top: Summary Bar */}
-      <OperationsSummaryBar summary={summary} />
+    <div className="h-full flex flex-col bg-gray-50 overflow-hidden">
+      {/* Storm_Mode banner (Task 11.7, Req 9.4.1) — pinned to the top of
+          the operations control center. Banner hides itself when
+          Storm_Mode is inactive; dispatcher/admin roles see the
+          override form inline. */}
+      <StormModeBanner roles={["dispatcher"]} />
 
-      {/* Inventory Health Indicator */}
-      <InventoryHealthBadge alertCount={inventoryAlertCount} />
+      <div className="h-full flex flex-col gap-4 p-6 overflow-hidden">
+        {/* Top: Summary Bar */}
+        <OperationsSummaryBar summary={summary} />
 
-      {/* Main content: Map + Right sidebar */}
-      <div className="flex-1 flex gap-4 min-h-0">
-        {/* Left: Map (~60%) */}
-        <div className="w-3/5 min-h-0">
-          <OperationsMap assets={assetLocations} />
-        </div>
+        {/* Inventory Health Indicator */}
+        <InventoryHealthBadge alertCount={inventoryAlertCount} />
 
-        {/* Right sidebar (~40%) */}
-        <div className="w-2/5 flex flex-col gap-4 overflow-y-auto min-h-0">
-          <JobQueuePanel jobs={activeJobs} />
-          <DelayedOperationsPanel jobs={activeJobs} />
-          <ApprovalQueuePanel />
-          <FuelStatusSidebar alerts={fuelAlerts} />
+        {/* Main content: Map + Right sidebar */}
+        <div className="flex-1 flex gap-4 min-h-0">
+          {/* Left: Map (~60%) */}
+          <div className="w-3/5 min-h-0">
+            <OperationsMap assets={assetLocations} />
+          </div>
+
+          {/* Right sidebar (~40%) */}
+          <div className="w-2/5 flex flex-col gap-4 overflow-y-auto min-h-0">
+            <JobQueuePanel jobs={activeJobs} />
+            <DelayedOperationsPanel jobs={activeJobs} />
+            <ApprovalQueuePanel />
+            <FuelStatusSidebar alerts={fuelAlerts} />
+          </div>
         </div>
       </div>
     </div>

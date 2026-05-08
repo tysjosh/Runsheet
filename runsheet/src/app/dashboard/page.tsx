@@ -20,7 +20,9 @@ const FleetDashboard = lazy(() => import("../../components/FleetDashboard"));
 const AIChat = lazy(() => import("../../components/AIChat"));
 const DataImport = lazy(() => import("../../components/DataImport"));
 const Inventory = lazy(() => import("../../components/Inventory"));
-const AnalyticsDashboard = lazy(() => import("../../components/AnalyticsDashboard"));
+const AnalyticsDashboard = lazy(
+  () => import("../../components/AnalyticsDashboard"),
+);
 const Support = lazy(() => import("../../components/Support"));
 
 // Ops components (previously on /ops/* routes)
@@ -30,10 +32,25 @@ const RiderUtilization = lazy(() => import("../ops/riders/page"));
 const OperationsControl = lazy(() => import("../ops/control/page"));
 
 // New feature pages
-const FuelDistributionPage = lazy(() => import("../../components/ops/FuelDistributionPage"));
-const AgentSettingsPage = lazy(() => import("../../components/ops/AgentSettingsPage"));
-const OpsMonitoringDashboard = lazy(() => import("../../components/ops/OpsMonitoringDashboard"));
-const SchedulingMetricsPage = lazy(() => import("../../components/ops/SchedulingMetricsPage"));
+const FuelDistributionPage = lazy(
+  () => import("../../components/ops/FuelDistributionPage"),
+);
+const AgentSettingsPage = lazy(
+  () => import("../../components/ops/AgentSettingsPage"),
+);
+const OpsMonitoringDashboard = lazy(
+  () => import("../../components/ops/OpsMonitoringDashboard"),
+);
+const SchedulingMetricsPage = lazy(
+  () => import("../../components/ops/SchedulingMetricsPage"),
+);
+const ReconciliationPage = lazy(
+  () => import("../../components/ops/ReconciliationPage"),
+);
+const SourcingPage = lazy(() => import("../../components/ops/SourcingPage"));
+const TruckCompartmentsPage = lazy(
+  () => import("../../components/ops/TruckCompartmentsPage"),
+);
 
 function MapLoadingPlaceholder() {
   return (
@@ -187,6 +204,39 @@ export default function Home() {
             <ErrorBoundary componentName="Fuel Distribution">
               <Suspense fallback={<ComponentLoadingPlaceholder />}>
                 <FuelDistributionPage />
+              </Suspense>
+            </ErrorBoundary>
+          </div>
+        );
+
+      case "reconciliation":
+        return (
+          <div className="flex-1 bg-gray-50">
+            <ErrorBoundary componentName="Reconciliation">
+              <Suspense fallback={<ComponentLoadingPlaceholder />}>
+                <ReconciliationPage />
+              </Suspense>
+            </ErrorBoundary>
+          </div>
+        );
+
+      case "sourcing":
+        return (
+          <div className="flex-1 bg-gray-50">
+            <ErrorBoundary componentName="Sourcing">
+              <Suspense fallback={<ComponentLoadingPlaceholder />}>
+                <SourcingPage />
+              </Suspense>
+            </ErrorBoundary>
+          </div>
+        );
+
+      case "truck-compartments":
+        return (
+          <div className="flex-1 bg-gray-50">
+            <ErrorBoundary componentName="Truck Compartments">
+              <Suspense fallback={<ComponentLoadingPlaceholder />}>
+                <TruckCompartmentsPage />
               </Suspense>
             </ErrorBoundary>
           </div>

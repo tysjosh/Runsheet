@@ -23,6 +23,10 @@ from notifications.services.channel_dispatchers import ChannelDispatcher
 from notifications.services.notification_es_mappings import NOTIFICATIONS_CURRENT_INDEX
 from notifications.services.preference_resolver import PreferenceResolver
 from notifications.services.rule_engine import RuleEngine
+from notifications.services.storm_mode_notifications import (
+    StormModeNotificationResolver,
+    StormNotificationDecision,
+)
 from notifications.services.template_renderer import TemplateRenderer
 from services.elasticsearch_service import ElasticsearchService
 
@@ -87,6 +91,13 @@ class NotificationService:
         self._dispatchers: dict[str, ChannelDispatcher] = {}
         self._ws_manager: NotificationWSManager | None = None
         self._retry_pipeline: RetryPipeline | None = None
+        # Storm_Mode-aware template selector (Task 10.9, Req 9.2.6). When
+        # no ``StormModeNotificationResolver`` is wired, ``notify_event``
+        # falls back to the default event_type / template flow, so
+        # tenants without Phase 10 enabled see no behavior change.
+        self._storm_notification_resolver: (
+            StormModeNotificationResolver | None
+        ) = None
 
     # ------------------------------------------------------------------
     # WS manager wiring (called by bootstrap after construction)
@@ -109,6 +120,25 @@ class NotificationService:
         Validates: Requirements 3.1, 3.3
         """
         self._retry_pipeline = retry_pipeline
+
+    def set_storm_notification_resolver(
+        self, resolver: StormModeNotificationResolver | None
+    ) -> None:
+        """Wire the Storm_Mode notification resolver.
+
+        When wired, :meth:`notify_event` consults the resolver for each
+        event and — when Storm_Mode is active for the recipient's
+        tenant *and* the recipient is a keep-full or generator
+        customer — swaps to the severe-weather template variant and
+        attaches the triggering Weather_Alert reference to the
+        persisted notification.
+
+        Passing ``None`` (or never calling this method) preserves the
+        pre-Storm_Mode behavior so non-fuel tenants see no change.
+
+        Validates: Requirement 9.2.6 / Task 10.9
+        """
+        self._storm_notification_resolver = resolver
 
     # ------------------------------------------------------------------
     # Dispatcher registration
@@ -224,6 +254,29 @@ class NotificationService:
             )
             return []
 
+        # --- 4b. Storm_Mode template swap (Task 10.9, Req 9.2.6) ---
+        # When Storm_Mode is active for the tenant and the recipient is a
+        # keep-full or generator customer, the resolver returns a
+        # decision that swaps the default template to the severe-weather
+        # variant and attaches a ``weather_alert_ref`` to the persisted
+        # notification. The resolver short-circuits to an "inactive"
+        # decision when no resolver is wired, no StormModeEvaluator is
+        # available, Storm_Mode is inactive for the tenant, or the
+        # recipient is not eligible — so the non-storm code path is a
+        # true no-op for every other caller.
+        storm_decision = await self._resolve_storm_decision(
+            tenant_id=tenant_id,
+            customer_id=customer_id,
+            event_type=notification_type.value,
+        )
+        if storm_decision.storm_mode_active and storm_decision.placeholder_data:
+            # Merge placeholder values without overwriting caller-
+            # supplied event_data. Callers always win because they own
+            # the semantic meaning of each field.
+            merged_event_data = dict(storm_decision.placeholder_data)
+            merged_event_data.update(event_data)
+            event_data = merged_event_data
+
         # --- 5. Per-channel: render → create → index → dispatch → update → broadcast ---
         notifications: list[dict] = []
 
@@ -238,6 +291,7 @@ class NotificationService:
                 event_data=event_data,
                 rule=rule,
                 tenant_id=tenant_id,
+                storm_decision=storm_decision,
             )
             notifications.append(notification)
 
@@ -533,6 +587,86 @@ class NotificationService:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    async def _resolve_storm_decision(
+        self,
+        *,
+        tenant_id: str,
+        customer_id: str,
+        event_type: str,
+    ) -> StormNotificationDecision:
+        """Return the Storm_Mode decision for an incoming event.
+
+        Delegates to the injected :class:`StormModeNotificationResolver`
+        when wired. Any upstream error — missing wiring, broken state
+        provider, malformed profile — collapses into
+        :meth:`StormNotificationDecision.inactive` so a bad Storm_Mode
+        signal never blocks a customer notification (Task 10.9,
+        Req 9.2.6).
+        """
+        resolver = self._storm_notification_resolver
+        if resolver is None:
+            return StormNotificationDecision.inactive()
+        try:
+            return await resolver.resolve(
+                tenant_id=tenant_id,
+                customer_id=customer_id,
+                event_type=event_type,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "NotificationService: Storm_Mode resolver raised for "
+                "tenant=%s customer=%s event=%s: %s — falling back to "
+                "default templates",
+                tenant_id,
+                customer_id,
+                event_type,
+                exc,
+            )
+            return StormNotificationDecision.inactive()
+
+    async def _render_by_event_and_channel(
+        self,
+        *,
+        tenant_id: str,
+        channel: str,
+        event_data: dict,
+        primary_event_type: str | None,
+        fallback_event_type: str,
+    ) -> dict | None:
+        """Resolve the template for ``event_type`` + ``channel`` and render it.
+
+        When ``primary_event_type`` is provided (Storm_Mode variant
+        selection), the method attempts the primary event_type first
+        and falls back to ``fallback_event_type`` when no template is
+        configured for the tenant / channel combination. Returns
+        ``None`` when neither lookup finds a usable template so the
+        caller can emit the generic "Notification: {event_type}"
+        message body.
+
+        Validates: Requirement 9.2.6 / Task 10.9 (graceful fallback).
+        """
+        attempt_order: list[str] = []
+        if primary_event_type and primary_event_type != fallback_event_type:
+            attempt_order.append(primary_event_type)
+        attempt_order.append(fallback_event_type)
+
+        for event_type in attempt_order:
+            templates = await self._template_renderer.list_templates(
+                tenant_id,
+                event_type=event_type,
+                channel=channel,
+            )
+            if not templates:
+                continue
+            tmpl = templates[0]
+            tmpl_id = tmpl.get("template_id")
+            if not tmpl_id:
+                continue
+            return await self._template_renderer.render(
+                tmpl_id, event_data, tenant_id
+            )
+        return None
+
     async def _process_channel(
         self,
         *,
@@ -542,12 +676,21 @@ class NotificationService:
         event_data: dict,
         rule: dict,
         tenant_id: str,
+        storm_decision: StormNotificationDecision | None = None,
     ) -> dict:
         """Process a single channel for a notification event.
 
         Renders the template, creates the notification document, indexes it
         in ES, dispatches via the channel dispatcher, updates the status,
         and broadcasts via WS.
+
+        When ``storm_decision.storm_mode_active`` is ``True`` the method
+        attempts to render the severe-weather variant template first and
+        stamps the triggering Weather_Alert reference plus a
+        ``storm_variant_reason`` onto the persisted notification
+        document (Task 10.9, Req 9.2.6). If the storm-variant template
+        is missing for the tenant/channel, rendering transparently falls
+        back to the default event_type so the notification still ships.
 
         Returns the notification dict.
         """
@@ -559,6 +702,13 @@ class NotificationService:
         body = ""
         template_id = rule.get("template_id")
 
+        storm_active = bool(
+            storm_decision and storm_decision.storm_mode_active
+        )
+        storm_event_type = (
+            storm_decision.storm_event_type if storm_active else None
+        )
+
         try:
             if template_id:
                 rendered = await self._template_renderer.render(
@@ -567,23 +717,16 @@ class NotificationService:
                 subject = rendered.get("subject", "")
                 body = rendered.get("body", "")
             else:
-                # Look up template by event_type + channel
-                templates = await self._template_renderer.list_templates(
-                    tenant_id,
-                    event_type=notification_type.value,
+                rendered = await self._render_by_event_and_channel(
+                    tenant_id=tenant_id,
                     channel=channel,
+                    event_data=event_data,
+                    primary_event_type=storm_event_type,
+                    fallback_event_type=notification_type.value,
                 )
-                if templates:
-                    tmpl = templates[0]
-                    tmpl_id = tmpl.get("template_id")
-                    if tmpl_id:
-                        rendered = await self._template_renderer.render(
-                            tmpl_id, event_data, tenant_id
-                        )
-                        subject = rendered.get("subject", "")
-                        body = rendered.get("body", "")
-                    else:
-                        body = f"Notification: {notification_type.value}"
+                if rendered is not None:
+                    subject = rendered.get("subject", "")
+                    body = rendered.get("body", "")
                 else:
                     body = f"Notification: {notification_type.value}"
         except Exception as exc:
@@ -621,6 +764,21 @@ class NotificationService:
         proposal_id = event_data.get("proposal_id")
         if proposal_id:
             notification["proposal_id"] = proposal_id
+
+        # Storm_Mode metadata (Task 10.9, Req 9.2.6) — only attached when
+        # the severe-weather variant was actually selected so non-storm
+        # notifications stay visually identical to the pre-Phase 10
+        # output.
+        if storm_active:
+            notification["storm_mode_active"] = True
+            if storm_decision.weather_alert_ref is not None:
+                notification["weather_alert_ref"] = (
+                    storm_decision.weather_alert_ref
+                )
+            if storm_decision.storm_variant_reason is not None:
+                notification["storm_variant_reason"] = (
+                    storm_decision.storm_variant_reason
+                )
 
         # --- Index in ES (status=pending) ---
         await self._es.index_document(

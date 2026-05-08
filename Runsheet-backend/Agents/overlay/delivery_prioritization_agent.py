@@ -28,7 +28,26 @@ the legacy flow:
   and stamped onto each priority before persistence (Req 3.4.1, 3.4.2).
   Entries without usable coordinates keep the default ``None`` values.
 
-Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 3.1.3, 3.2.3, 3.3.3, 3.3.4, 3.4.1, 3.4.2
+Phase 10 (Storm_Mode — Capability 9) layers these additional behaviours
+on top of the Phase-5 flow. The extensions are only applied when a
+:class:`fuel.services.storm_mode_evaluator.StormModeEvaluator` is wired
+and reports ``active`` for the run's tenant (Task 10.6, Req 9.2.3):
+
+* Customer_Profiles whose :class:`~fuel.storm_mode_models.KeepFullCustomer`
+  submodel has ``keep_full_enabled=True`` receive their per-customer
+  ``keep_full_priority_boost`` (default 0.25 per Req 9.2.1) added to
+  ``priority_score``; the reason ``keep_full_storm_mode`` is appended.
+* Entries whose Customer_Tank has ``use_case='generator'`` (Req 9.2.2)
+  or whose Customer_Profile has ``is_generator_fuel=True`` receive an
+  additional generator boost (default 0.2 per Req 9.2.2 / Task 10.6);
+  the reason ``generator_storm_mode`` is appended.
+* After boosts are applied, ``priority_score`` is re-clamped to
+  [0.0, 1.0] and ``priority_bucket`` is recomputed via
+  :func:`_assign_bucket` so the bucket always reflects the boosted
+  score (Req 9.2.3). The final priority list is re-sorted so boosted
+  entries float to the top of the ranked output.
+
+Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 3.1.3, 3.2.3, 3.3.3, 3.3.4, 3.4.1, 3.4.2, 9.2.3
 """
 
 import json
@@ -67,6 +86,10 @@ from fuel.services.prioritization_helpers import (
     compute_priority_clusters,
     compute_safe_to_delay,
 )
+from fuel.services.storm_mode_evaluator import (
+    ACTIVE as STORM_MODE_ACTIVE,
+    PersistedState as StormModePersistedState,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +120,31 @@ DEFAULT_COMBINABLE_RADIUS_MILES: float = 2.0
 # produce deterministic output when no override is supplied.
 DEFAULT_CLUSTER_EPS_MILES: float = 3.0
 DEFAULT_CLUSTER_MIN_SAMPLES: int = 2
+
+# --- Storm_Mode constants (Task 10.6, Req 9.2.1, 9.2.2, 9.2.3) -------------
+# Default additive boost applied to the priority_score of entries whose
+# Customer_Tank use_case is ``generator`` or whose Customer_Profile has
+# ``is_generator_fuel=True`` while Storm_Mode is active (Req 9.2.2).
+DEFAULT_GENERATOR_PRIORITY_BOOST: float = 0.2
+
+# Fallback boost applied to keep-full entries when a Customer_Profile is
+# available but its ``keep_full.keep_full_priority_boost`` field has been
+# explicitly cleared to 0.0 or is unparsable. Defaults to the spec value
+# documented on :class:`fuel.storm_mode_models.KeepFullCustomer` so the
+# boost behaves sensibly even when profile data is incomplete (Req 9.2.1).
+DEFAULT_KEEP_FULL_PRIORITY_BOOST: float = 0.25
+
+# Human-readable reason markers surfaced on boosted priority entries so
+# dispatchers and the UI can trace why a score jumped during Storm_Mode
+# (Req 9.2.3).
+REASON_KEEP_FULL_STORM_MODE: str = "keep_full_storm_mode"
+REASON_GENERATOR_STORM_MODE: str = "generator_storm_mode"
+
+# The :class:`CustomerTank.use_case` literal flagged for the generator
+# boost. Compared case-insensitively after trimming so upstream writers
+# that persist ``Generator`` or ``GENERATOR`` still match.
+GENERATOR_USE_CASE: str = "generator"
+
 
 # Default scoring weights (Req 2.2)
 DEFAULT_SCORING_WEIGHTS: Dict[str, float] = {
@@ -152,6 +200,21 @@ class DeliveryPrioritizationAgent(OverlayAgentBase):
             ``(tenant_id, customer_ids) -> mapping`` (or awaitable of one)
             used by :meth:`_load_customer_profiles`. When ``None`` the
             agent falls back to a direct ``customers`` ES query.
+        storm_mode_evaluator: Optional
+            :class:`fuel.services.storm_mode_evaluator.StormModeEvaluator`
+            used by :meth:`_is_storm_mode_active` to gate the Task 10.6
+            keep-full / generator priority boosts (Req 9.2.3). When
+            ``None`` the agent treats Storm_Mode as always inactive and
+            applies no boosts.
+        customer_tank_loader: Optional callable
+            ``(tenant_id, customer_tank_ids) -> mapping`` (or awaitable
+            of one) used to resolve Customer_Tank records for the
+            generator use_case lookup (Req 9.2.2). When ``None`` the
+            agent falls back to a direct ``customer_tanks`` ES query.
+        generator_priority_boost: Additive priority boost applied to
+            generator-fuel entries while Storm_Mode is active. Defaults
+            to :data:`DEFAULT_GENERATOR_PRIORITY_BOOST` (0.2) per
+            Req 9.2.2 / Task 10.6. Must fall within [0.0, 1.0].
     """
 
     def __init__(
@@ -170,6 +233,11 @@ class DeliveryPrioritizationAgent(OverlayAgentBase):
         customer_profile_loader: Optional[
             Callable[[str, List[str]], Any]
         ] = None,
+        storm_mode_evaluator: Optional[Any] = None,
+        customer_tank_loader: Optional[
+            Callable[[str, List[str]], Any]
+        ] = None,
+        generator_priority_boost: float = DEFAULT_GENERATOR_PRIORITY_BOOST,
     ):
         super().__init__(
             agent_id="delivery_prioritization",
@@ -210,6 +278,19 @@ class DeliveryPrioritizationAgent(OverlayAgentBase):
 
         self._customer_profile_loader = customer_profile_loader
 
+        # Storm_Mode wiring (Task 10.6, Req 9.2.3). ``storm_mode_evaluator``
+        # is optional so tenants that have not wired Phase-10 keep the
+        # pre-storm behaviour unchanged; when it is ``None`` the agent
+        # treats Storm_Mode as always inactive.
+        self._storm_mode_evaluator = storm_mode_evaluator
+        self._customer_tank_loader = customer_tank_loader
+        if generator_priority_boost < 0.0 or generator_priority_boost > 1.0:
+            raise ValueError(
+                "generator_priority_boost must fall within [0.0, 1.0]; "
+                f"got {generator_priority_boost!r}"
+            )
+        self._generator_priority_boost = float(generator_priority_boost)
+
     # ------------------------------------------------------------------
     # Signal handling override — buffer TankForecast messages
     # ------------------------------------------------------------------
@@ -241,6 +322,9 @@ class DeliveryPrioritizationAgent(OverlayAgentBase):
            (Req 3.1.3) and business-impact (Req 3.3.3, 3.3.4) fields.
         5b. Stamp DBSCAN cluster_id / cluster_size on each entry via
             :meth:`_stamp_priority_clusters` (Req 3.4.1, 3.4.2).
+        5c. When Storm_Mode is active for ``tenant_id``, apply the
+            keep-full and generator priority boosts via
+            :meth:`_apply_storm_mode_boosts` (Req 9.2.3, Task 10.6).
         6. Persist priority list to mvp_delivery_priorities (Req 2.4).
         7. Publish DeliveryPriorityList to SignalBus (Req 2.5).
         8. Emit Combinable_Groups for the run (Req 3.2.3).
@@ -297,7 +381,23 @@ class DeliveryPrioritizationAgent(OverlayAgentBase):
         # sklearn hiccup never blocks the priority signal.
         self._stamp_priority_clusters(priorities, forecasts, station_metadata)
 
-        # Sort by priority_score descending (most urgent first)
+        # Step 5c: Apply Storm_Mode keep-full / generator priority boosts
+        # (Task 10.6, Req 9.2.3). The helper checks the StormModeEvaluator
+        # state for ``tenant_id``; when Storm_Mode is inactive or the
+        # evaluator is not wired the method is a no-op. When active it
+        # mutates ``priorities`` in place so the re-bucketing, reason
+        # annotations, and down-stream sort all observe the boosted
+        # scores.
+        await self._apply_storm_mode_boosts(
+            tenant_id=tenant_id,
+            priorities=priorities,
+            forecasts=forecasts,
+            profiles_by_id=profiles_by_id,
+        )
+
+        # Sort by priority_score descending (most urgent first). Runs
+        # after Storm_Mode boosts so keep-full / generator customers
+        # rise to the top of the ranked output (Req 9.2.3).
         priorities.sort(key=lambda p: p.priority_score, reverse=True)
 
         # Build the priority list
@@ -919,6 +1019,333 @@ class DeliveryPrioritizationAgent(OverlayAgentBase):
         for priority_idx, assignment in zip(index_map, assignments):
             priorities[priority_idx].cluster_id = assignment.cluster_id
             priorities[priority_idx].cluster_size = assignment.cluster_size
+
+    # ------------------------------------------------------------------
+    # Storm_Mode priority boosts (Task 10.6, Req 9.2.1, 9.2.2, 9.2.3)
+    # ------------------------------------------------------------------
+
+    async def _apply_storm_mode_boosts(
+        self,
+        *,
+        tenant_id: str,
+        priorities: List[DeliveryPriority],
+        forecasts: List[TankForecast],
+        profiles_by_id: Dict[str, Any],
+    ) -> None:
+        """Apply keep-full + generator boosts when Storm_Mode is active.
+
+        This method implements Requirement 9.2.3 (Task 10.6):
+
+        1. Consult :class:`StormModeEvaluator.get_state` to decide whether
+           Storm_Mode is currently ``active`` for ``tenant_id``. When the
+           evaluator is not wired, when the state lookup fails, or when
+           the state is ``inactive``, the method is a no-op so tenants
+           without Phase-10 wiring keep the legacy behaviour.
+        2. Build a ``station_id -> TankForecast`` lookup so each priority
+           entry can be matched back to the forecast that spawned it.
+        3. For each priority:
+           a. If the owning :class:`CustomerProfile` has
+              ``keep_full.keep_full_enabled=True``, add the per-profile
+              ``keep_full_priority_boost`` (default 0.25 per Req 9.2.1)
+              and append :data:`REASON_KEEP_FULL_STORM_MODE` to the
+              entry's ``reasons`` list.
+           b. If the Customer_Tank tied to the forecast has
+              ``use_case='generator'`` (Req 9.2.2) — or, absent a tank,
+              the Customer_Profile has ``is_generator_fuel=True`` — add
+              :attr:`self._generator_priority_boost` (default 0.2) and
+              append :data:`REASON_GENERATOR_STORM_MODE`.
+        4. After applying boosts, each entry's ``priority_score`` is
+           re-clamped to [0.0, 1.0] and ``priority_bucket`` is recomputed
+           via :func:`_assign_bucket` so the bucket always reflects the
+           boosted score (Req 9.2.3).
+
+        Reasons are only appended once per entry — if the method is
+        invoked twice on the same list the reasons list will not grow
+        and the boosts are not re-applied, so Storm_Mode evaluation
+        remains idempotent across duplicate ticks.
+        """
+
+        if not priorities:
+            return
+        if not await self._is_storm_mode_active(tenant_id):
+            return
+
+        # Build a station_id -> forecast map so each priority can be
+        # paired with its source forecast for customer / tank lookups.
+        forecast_by_station: Dict[str, TankForecast] = {}
+        for forecast in forecasts:
+            if (
+                forecast.station_id
+                and forecast.station_id not in forecast_by_station
+            ):
+                forecast_by_station[forecast.station_id] = forecast
+
+        # Resolve Customer_Tank records for the generator use_case check.
+        tank_ids = sorted(
+            {
+                f.customer_tank_id
+                for f in forecasts
+                if f.customer_tank_id
+            }
+        )
+        tanks_by_id = await self._load_customer_tanks(tenant_id, tank_ids)
+
+        for priority in priorities:
+            forecast = forecast_by_station.get(priority.station_id)
+            if forecast is None:
+                continue
+
+            profile = (
+                profiles_by_id.get(forecast.customer_id)
+                if forecast.customer_id
+                else None
+            )
+            tank = (
+                tanks_by_id.get(forecast.customer_tank_id)
+                if forecast.customer_tank_id
+                else None
+            )
+
+            raw_score = float(priority.priority_score)
+            boosted_score = raw_score
+            reasons = list(priority.reasons)
+            reasons_mutated = False
+
+            # --- Keep-full boost (Req 9.2.1) ----------------------------
+            keep_full_boost = self._resolve_keep_full_boost(profile)
+            if (
+                keep_full_boost > 0.0
+                and REASON_KEEP_FULL_STORM_MODE not in reasons
+            ):
+                boosted_score += keep_full_boost
+                reasons.append(REASON_KEEP_FULL_STORM_MODE)
+                reasons_mutated = True
+
+            # --- Generator boost (Req 9.2.2) ----------------------------
+            if (
+                self._qualifies_for_generator_boost(tank, profile)
+                and REASON_GENERATOR_STORM_MODE not in reasons
+            ):
+                boosted_score += self._generator_priority_boost
+                reasons.append(REASON_GENERATOR_STORM_MODE)
+                reasons_mutated = True
+
+            if not reasons_mutated:
+                # Neither boost applied — leave the entry unchanged.
+                continue
+
+            # Clamp to [0.0, 1.0] and keep precision consistent with the
+            # pre-boost scoring path (round to 4 decimals).
+            clamped = round(max(0.0, min(1.0, boosted_score)), 4)
+            priority.priority_score = clamped
+            priority.priority_bucket = self._assign_bucket(clamped)
+            priority.reasons = reasons
+
+    async def _is_storm_mode_active(self, tenant_id: str) -> bool:
+        """Return ``True`` when Storm_Mode is ``active`` for ``tenant_id``.
+
+        Consults the injected :class:`StormModeEvaluator` via
+        :meth:`StormModeEvaluator.get_state`. Returns ``False`` when:
+
+        * The evaluator is not wired (pre-Phase-10 tenants).
+        * The tenant id is empty.
+        * The state lookup raises — we never let a transient evaluator
+          hiccup drop the priority signal.
+        * The persisted state is ``inactive``.
+        """
+
+        evaluator = self._storm_mode_evaluator
+        if evaluator is None or not tenant_id:
+            return False
+        try:
+            state = await evaluator.get_state(tenant_id)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "DeliveryPrioritizationAgent: StormModeEvaluator.get_state "
+                "raised for tenant=%s: %s",
+                tenant_id,
+                exc,
+            )
+            return False
+        # ``get_state`` normally returns a PersistedState; accept any
+        # object / mapping exposing a ``state`` attribute/key so test
+        # fakes can inject a plain dict.
+        raw_state: Any
+        if isinstance(state, StormModePersistedState):
+            raw_state = state.state
+        elif isinstance(state, dict):
+            raw_state = state.get("state")
+        else:
+            raw_state = getattr(state, "state", None)
+        return raw_state == STORM_MODE_ACTIVE
+
+    @staticmethod
+    def _resolve_keep_full_boost(profile: Optional[Any]) -> float:
+        """Return the keep-full boost for ``profile`` (0.0 when inactive).
+
+        A non-zero boost is returned only when the Customer_Profile's
+        ``keep_full`` submodel has ``keep_full_enabled=True`` — that is
+        the authoritative gate for Req 9.2.1. When the boost field is
+        missing, unparsable, or non-positive we fall back to
+        :data:`DEFAULT_KEEP_FULL_PRIORITY_BOOST` so the program-level
+        default applies even to partially-configured profiles.
+        """
+
+        if profile is None:
+            return 0.0
+
+        keep_full = DeliveryPrioritizationAgent._extract_attr(profile, "keep_full")
+        if keep_full is None:
+            return 0.0
+
+        enabled = DeliveryPrioritizationAgent._extract_attr(
+            keep_full, "keep_full_enabled"
+        )
+        if not bool(enabled):
+            return 0.0
+
+        raw_boost = DeliveryPrioritizationAgent._extract_attr(
+            keep_full, "keep_full_priority_boost"
+        )
+        try:
+            boost = float(raw_boost) if raw_boost is not None else 0.0
+        except (TypeError, ValueError):
+            boost = 0.0
+        if boost <= 0.0:
+            boost = DEFAULT_KEEP_FULL_PRIORITY_BOOST
+        # Clamp to the documented [0.0, 1.0] range so a misconfigured
+        # profile cannot push the boost outside the Pydantic guardrails.
+        return max(0.0, min(1.0, boost))
+
+    @staticmethod
+    def _qualifies_for_generator_boost(
+        tank: Optional[Any], profile: Optional[Any]
+    ) -> bool:
+        """Return ``True`` when the entry should receive the generator boost.
+
+        Preference order mirrors the spec (Req 9.2.2):
+
+        1. Customer_Tank ``use_case='generator'`` is the authoritative
+           signal for tank-level generator fueling.
+        2. Otherwise, a Customer_Profile with
+           ``is_generator_fuel=True`` qualifies the entry.
+
+        String comparison is case-insensitive after trimming so upstream
+        writers that persist ``Generator`` or ``GENERATOR`` still match.
+        """
+
+        if tank is not None:
+            raw = DeliveryPrioritizationAgent._extract_attr(tank, "use_case")
+            if isinstance(raw, str) and raw.strip().lower() == GENERATOR_USE_CASE:
+                return True
+
+        if profile is not None:
+            flag = DeliveryPrioritizationAgent._extract_attr(
+                profile, "is_generator_fuel"
+            )
+            if bool(flag):
+                return True
+
+        return False
+
+    @staticmethod
+    def _extract_attr(obj: Any, name: str) -> Any:
+        """Return ``obj[name]`` or ``obj.name`` whichever is available.
+
+        The helper lets the storm-mode code path accept either Pydantic
+        models, attribute-access objects, or plain dicts returned by the
+        ``customers`` / ``customer_tanks`` ES reads without duplicating
+        branching everywhere.
+        """
+
+        if obj is None:
+            return None
+        if isinstance(obj, dict):
+            return obj.get(name)
+        return getattr(obj, name, None)
+
+    async def _load_customer_tanks(
+        self, tenant_id: str, customer_tank_ids: List[str]
+    ) -> Dict[str, Any]:
+        """Return a ``{customer_tank_id: tank}`` map for ``tenant_id``.
+
+        Uses the injected :attr:`_customer_tank_loader` when available,
+        otherwise queries the ``customer_tanks`` ES index directly.
+        Failures are caught and swallowed — Storm_Mode generator boosts
+        are best-effort enrichment and must never block the priority
+        signal.
+        """
+
+        if not customer_tank_ids:
+            return {}
+
+        if self._customer_tank_loader is not None:
+            try:
+                loaded = self._customer_tank_loader(
+                    tenant_id, customer_tank_ids
+                )
+                if hasattr(loaded, "__await__"):
+                    loaded = await loaded  # type: ignore[assignment]
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(
+                    "DeliveryPrioritizationAgent: customer_tank_loader "
+                    "raised for tenant %s: %s",
+                    tenant_id,
+                    exc,
+                )
+                return {}
+            if isinstance(loaded, dict):
+                return {
+                    tid: tank
+                    for tid, tank in loaded.items()
+                    if tid in customer_tank_ids
+                }
+            logger.warning(
+                "DeliveryPrioritizationAgent: customer_tank_loader "
+                "returned %s; expected mapping",
+                type(loaded).__name__,
+            )
+            return {}
+
+        # Default path: direct ES query against ``customer_tanks``.
+        query = {
+            "query": {
+                "bool": {
+                    "must": [
+                        {"term": {"tenant_id": tenant_id}},
+                        {
+                            "terms": {
+                                "customer_tank_id": list(customer_tank_ids)
+                            }
+                        },
+                    ],
+                },
+            },
+            "size": max(len(customer_tank_ids), 1),
+        }
+        try:
+            resp = await self._es.search_documents(
+                "customer_tanks", query, query["size"]
+            )
+        except Exception as exc:
+            logger.debug(
+                "DeliveryPrioritizationAgent: customer_tanks lookup "
+                "skipped for tenant %s: %s",
+                tenant_id,
+                exc,
+            )
+            return {}
+
+        tanks_by_id: Dict[str, Any] = {}
+        for hit in resp.get("hits", {}).get("hits", []):
+            source = hit.get("_source") or {}
+            if source.get("tenant_id") != tenant_id:
+                continue
+            tid = source.get("customer_tank_id")
+            if not tid:
+                continue
+            tanks_by_id[tid] = source
+        return tanks_by_id
 
     # ------------------------------------------------------------------
     # Combinable-group emission (Req 3.2.1, 3.2.2, 3.2.3)

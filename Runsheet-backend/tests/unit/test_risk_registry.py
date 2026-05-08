@@ -53,7 +53,14 @@ class TestDefaultRiskRegistry:
             assert DEFAULT_RISK_REGISTRY[tool] == RiskLevel.MEDIUM, f"{tool} should be MEDIUM"
 
     def test_high_risk_tools(self):
-        high_tools = ["cancel_job", "reassign_rider"]
+        high_tools = [
+            "cancel_job",
+            "reassign_rider",
+            # Task 10.7 / Req 9.2.5 — Storm_Mode route plans are routed
+            # through ConfirmationProtocol at HIGH risk regardless of
+            # whether emergency insertion is involved.
+            "apply_route_plan_storm_mode",
+        ]
         for tool in high_tools:
             assert DEFAULT_RISK_REGISTRY[tool] == RiskLevel.HIGH, f"{tool} should be HIGH"
 
@@ -62,7 +69,9 @@ class TestDefaultRiskRegistry:
             assert isinstance(level, RiskLevel), f"{tool_name} has invalid risk level"
 
     def test_registry_has_expected_tool_count(self):
-        assert len(DEFAULT_RISK_REGISTRY) == 10
+        # Original 9 tools + emergency_stop_insertion_high_risk
+        # + apply_route_plan_storm_mode (Task 10.7).
+        assert len(DEFAULT_RISK_REGISTRY) == 11
 
 
 class TestRiskRegistryClassifyWithoutRedis:

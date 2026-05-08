@@ -42,6 +42,24 @@ NOTIFICATIONS_CURRENT_MAPPING = {
             "provider_message_id": {"type": "keyword"},
             "scheduled_retry_at":  {"type": "date"},
             "tenant_id":           {"type": "keyword"},
+            # Storm_Mode metadata (Task 10.9, Req 9.2.6): set when the
+            # notification used the severe-weather template variant.
+            "storm_mode_active":   {"type": "boolean"},
+            "weather_alert_ref":   {
+                "type": "object",
+                "properties": {
+                    "alert_id":          {"type": "keyword"},
+                    "alert_type":        {"type": "keyword"},
+                    "severity":          {"type": "keyword"},
+                    "headline":          {"type": "text"},
+                    "source":            {"type": "keyword"},
+                    "region_code":       {"type": "keyword"},
+                    "expected_start_at": {"type": "date"},
+                    "expected_end_at":   {"type": "date"},
+                    "affected_zip_codes": {"type": "keyword"},
+                },
+            },
+            "storm_variant_reason": {"type": "keyword"},
         }
     },
     "settings": {

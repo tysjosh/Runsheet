@@ -12,13 +12,21 @@ Default configuration:
     - cooldown: 15 minutes per truck
 
 Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.7, 4.8, 4.9,
-              and Fuel Ops Hardening 2.1.3, 2.1.5, 2.1.6 (Traffic_Provider
-              wiring with feature-flag gating and Haversine fallback).
+              Fuel Ops Hardening 2.1.3, 2.1.5, 2.1.6 (Traffic_Provider
+              wiring with feature-flag gating and Haversine fallback),
+              Fuel Ops Hardening 9.2.4, 9.2.5, 9.3.1, 9.3.2 (Storm_Mode
+              per-truck stop cap, delivery-window enforcement,
+              ``deferred_storm_mode`` tagging, and HIGH-risk
+              ConfirmationProtocol routing — Task 10.7),
+              Fuel Ops Hardening 9.3.3, 9.3.4, 9.3.5 (Storm_Mode
+              road-restriction polygon intersects filter with
+              ``road_restriction`` deferral tag — Task 10.8).
 """
 
 import asyncio
 import json
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol, Tuple
 
@@ -32,6 +40,7 @@ from Agents.overlay.data_contracts import (
 )
 from Agents.overlay.signal_bus import SignalBus
 from Agents.support.fuel_distribution_models import (
+    DeferredRouteStop,
     RoutePlan,
     RouteStop,
 )
@@ -49,6 +58,10 @@ from fuel.services.fuel_product_catalog import (
 from fuel.services.sourcing_recommender import (
     InvalidBrandedPreferenceError,
     SourcingRecommender,
+)
+from fuel.services.storm_mode_evaluator import (
+    ACTIVE as STORM_MODE_ACTIVE,
+    PersistedState as StormModePersistedState,
 )
 from fuel.services.traffic_provider import (
     TrafficBudgetExceeded,
@@ -120,6 +133,81 @@ TRAFFIC_MATRIX_TIMEOUT_SECONDS = 10.0
 LITERS_PER_GALLON = 3.785411784
 
 
+# ---------------------------------------------------------------------------
+# Storm_Mode constants (Task 10.7, Req 9.2.4, 9.2.5, 9.3.1, 9.3.2)
+# ---------------------------------------------------------------------------
+
+#: Default per-truck stop cap enforced while Storm_Mode is active
+#: (Req 9.2.4). Tenants can override via the injected settings loader;
+#: when the loader is absent or returns ``None`` this value applies.
+DEFAULT_STORM_MODE_MAX_STOPS_PER_TRUCK: int = 10
+
+#: Default Storm_Mode delivery-window start hour (tenant-local time,
+#: 0.0–24.0) enforced by Req 9.3.1. The spec default matches the
+#: requirements-document example of 08:00–16:00.
+DEFAULT_STORM_MODE_DELIVERY_WINDOW_START_HOUR: float = 8.0
+
+#: Default Storm_Mode delivery-window end hour (tenant-local time,
+#: 0.0–24.0) enforced by Req 9.3.1. See
+#: :data:`DEFAULT_STORM_MODE_DELIVERY_WINDOW_START_HOUR`.
+DEFAULT_STORM_MODE_DELIVERY_WINDOW_END_HOUR: float = 16.0
+
+#: Reason-tag stamped on every deferred stop. Req 9.3.2 mandates this
+#: exact string so dispatcher / audit filters can pin on a single label.
+REASON_DEFERRED_STORM_MODE: str = "deferred_storm_mode"
+
+#: Reason-tag stamped on stops deferred because a route segment
+#: intersected a :class:`fuel.storm_mode_models.StormRoadRestriction`
+#: with severity ``>= severe`` while Storm_Mode was active (Req 9.3.4 /
+#: Task 10.8). Req 9.3.4 mandates this exact string so the dispatcher
+#: UI and audit queries can distinguish road-restriction deferrals from
+#: window / cap deferrals.
+REASON_ROAD_RESTRICTION: str = "road_restriction"
+
+#: Cause labels narrowing ``REASON_DEFERRED_STORM_MODE`` to the
+#: guard-rail that fired. ``over_max_stops_per_truck`` covers Req 9.2.4;
+#: ``outside_delivery_window`` covers Req 9.3.2.
+CAUSE_OVER_MAX_STOPS: str = "over_max_stops_per_truck"
+CAUSE_OUTSIDE_WINDOW: str = "outside_delivery_window"
+
+#: Cause label stamped on stops deferred under the ``road_restriction``
+#: reason (Req 9.3.4 / Task 10.8). Narrows the deferral cause to "the
+#: inbound or outbound leg crossed a severe-or-higher restriction
+#: polygon" so dispatcher filters can disambiguate the two reasons.
+CAUSE_ROAD_RESTRICTION: str = "road_segment_restricted"
+
+#: Minimum severity that triggers a road-restriction deferral. Req 9.3.4
+#: mandates ``>= severe``. We express it as an explicit set so the
+#: geo_shape query filter stays in lock-step with the agent's
+#: intent (and so bumping the threshold later is a one-line change).
+ROAD_RESTRICTION_BLOCKING_SEVERITIES: Tuple[str, ...] = ("severe", "extreme")
+
+#: ES index name housing the tenant-uploaded polygons. Imported via
+#: :mod:`fuel.services.fuel_ops_es_mappings` so the constant stays in
+#: sync with the mapping definition (Task 10.8).
+STORM_ROAD_RESTRICTIONS_ES_INDEX: str = "storm_road_restrictions"
+
+#: Hard ceiling on the number of restriction matches returned per
+#: segment query. Tenants rarely upload more than a handful of active
+#: polygons; pin a small cap so a misbehaving ingestion process cannot
+#: balloon the response payload. The agent only needs to know whether
+#: *any* severe+ restriction matches — the returned ids are used for
+#: logging / annotation only.
+_ROAD_RESTRICTION_MATCH_CEILING: int = 25
+
+#: Tool name stamped on the Route_Plan mutation action when Storm_Mode
+#: is active (Req 9.2.5). Mapped to ``RiskLevel.HIGH`` in
+#: :data:`Agents.risk_registry.DEFAULT_RISK_REGISTRY` so every
+#: storm-mode plan routes through ConfirmationProtocol at HIGH risk
+#: regardless of whether the standard plan path would be MEDIUM. The
+#: non-storm tool name is :data:`APPLY_ROUTE_PLAN_TOOL`, which falls
+#: back to the registry default (MEDIUM is *not* currently configured
+#: for this name, so the default-HIGH behaviour kicks in — callers
+#: always receive *at least* MEDIUM approval routing).
+APPLY_ROUTE_PLAN_TOOL: str = "apply_route_plan"
+APPLY_ROUTE_PLAN_STORM_MODE_TOOL: str = "apply_route_plan_storm_mode"
+
+
 class TenantConfigLookup(Protocol):
     """Minimal Redis-like interface for per-tenant config reads.
 
@@ -139,6 +227,205 @@ class TenantConfigLookup(Protocol):
 #: Returning ``None`` tells the agent to fall back to Haversine for this
 #: tenant; raising is treated the same way.
 TrafficProviderFactory = Callable[[str, str], Optional[TrafficProvider]]
+
+
+# ---------------------------------------------------------------------------
+# Storm_Mode settings wiring (Task 10.7)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class StormModeRouteSettings:
+    """Per-tenant Storm_Mode route-planning guard-rails (Task 10.7).
+
+    Returned by the injected :data:`StormModeRouteSettingsLoader` and
+    consumed by :class:`RoutePlanningAgent` to decide how many stops a
+    truck can carry and which delivery-window hours are eligible while
+    Storm_Mode is active.
+
+    Fields:
+
+    * ``max_stops_per_truck`` — per-truck stop cap enforced by
+      Req 9.2.4. Must be positive. Defaults to
+      :data:`DEFAULT_STORM_MODE_MAX_STOPS_PER_TRUCK` (10).
+    * ``delivery_window_start_hour`` / ``delivery_window_end_hour`` —
+      hour-of-day bounds for the Storm_Mode delivery window (Req 9.3.1,
+      9.3.2). Values are in [0.0, 24.0]. The window is interpreted in
+      the tenant's timezone when ``timezone`` is set; otherwise UTC is
+      assumed so the caller can still make meaningful comparisons.
+    * ``timezone`` — optional IANA timezone identifier (e.g.,
+      ``"America/Chicago"``) controlling the local time the window is
+      interpreted in. The default ``None`` keeps the agent on UTC so
+      tenants without a configured timezone still receive a
+      deterministic window comparison.
+    """
+
+    max_stops_per_truck: int = DEFAULT_STORM_MODE_MAX_STOPS_PER_TRUCK
+    delivery_window_start_hour: float = (
+        DEFAULT_STORM_MODE_DELIVERY_WINDOW_START_HOUR
+    )
+    delivery_window_end_hour: float = (
+        DEFAULT_STORM_MODE_DELIVERY_WINDOW_END_HOUR
+    )
+    timezone: Optional[str] = None
+
+
+#: Async loader resolving :class:`StormModeRouteSettings` for a tenant.
+#: Bootstrap injects a Redis/ES-backed implementation; tests use a simple
+#: async lambda. Returning ``None`` (or the loader being ``None``) tells
+#: the agent to fall back to the module-level defaults so a tenant
+#: without custom settings still receives a deterministic guard-rail.
+StormModeRouteSettingsLoader = Callable[
+    [str], "asyncio.Future[Optional[StormModeRouteSettings]]"
+]
+
+
+def _resolve_timezone(tz_name: Optional[str]):
+    """Return a tzinfo for ``tz_name`` or UTC on any failure.
+
+    Uses the stdlib ``zoneinfo`` module. A ``None`` / blank name —
+    or an unknown IANA identifier — falls back to UTC so window
+    comparisons remain deterministic even on tenants without a
+    configured timezone (Task 10.7).
+    """
+
+    if not tz_name:
+        return timezone.utc
+    try:
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError  # local import
+
+        try:
+            return ZoneInfo(tz_name)
+        except ZoneInfoNotFoundError:
+            logger.warning(
+                "RoutePlanningAgent: unknown storm_mode timezone=%r — "
+                "falling back to UTC",
+                tz_name,
+            )
+            return timezone.utc
+    except Exception:  # pragma: no cover - defensive
+        return timezone.utc
+
+
+def _parse_eta(eta: Optional[str]) -> Optional[datetime]:
+    """Parse a RouteStop ISO-8601 ETA string into a tz-aware datetime.
+
+    Returns ``None`` on malformed / empty input. Naive timestamps are
+    promoted to UTC so the caller can ``.astimezone`` safely.
+    """
+
+    if not eta or not isinstance(eta, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(eta.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _hour_of_day(local_dt: datetime) -> float:
+    """Return ``local_dt``'s fractional hour-of-day in [0.0, 24.0).
+
+    Used to compare a stop's ETA against the Storm_Mode delivery window
+    bounds (Req 9.3.1 / 9.3.2).
+    """
+
+    return (
+        local_dt.hour
+        + local_dt.minute / 60.0
+        + local_dt.second / 3600.0
+        + local_dt.microsecond / 3_600_000_000.0
+    )
+
+
+def _is_within_window(
+    *, hour_of_day: float, start_hour: float, end_hour: float
+) -> bool:
+    """Return ``True`` when ``hour_of_day`` falls inside the window.
+
+    Supports:
+
+    * ``start <= end`` — normal daytime window (e.g. 08:00–16:00).
+    * ``start > end`` — overnight window (e.g. 22:00–06:00) so the
+      helper handles 24×7 deployments without extra special-casing.
+    * ``start == end`` — zero-length window rejects every stop, which
+      matches the spec's "all deliveries deferred" semantics for
+      tenants that manually squash the window during active storms.
+    """
+
+    if start_hour == end_hour:
+        return False
+    if start_hour < end_hour:
+        return start_hour <= hour_of_day < end_hour
+    # Overnight window: split into two ranges.
+    return hour_of_day >= start_hour or hour_of_day < end_hour
+
+
+def _next_eligible_window(
+    *,
+    local_eta: datetime,
+    start_hour: float,
+    end_hour: float,
+) -> Tuple[datetime, datetime]:
+    """Return the next eligible ``(start, end)`` window for a deferred stop.
+
+    Produces the window immediately following ``local_eta``. Handles the
+    two common cases:
+
+    * Daytime window (``start <= end``) — if ``local_eta`` is before the
+      window today, the next window starts today; otherwise it starts
+      tomorrow.
+    * Overnight window (``start > end``) — folded into a daytime-style
+      calculation by advancing the date when necessary.
+
+    Returned timestamps retain ``local_eta``'s tzinfo so the caller can
+    convert to UTC before persisting (the agent does this inline). When
+    start == end we still return a zero-length next window pointing at
+    the top of the next day so downstream UIs don't see a ``None`` /
+    missing timestamp.
+    """
+
+    tz = local_eta.tzinfo or timezone.utc
+    base_date = local_eta.date()
+    day_offset = timedelta(days=0)
+
+    if start_hour == end_hour:
+        # Zero-length window: next eligible slot is conceptually the
+        # start of tomorrow's window. Treat as 24h ahead so the UI has
+        # *some* chronology to render.
+        next_start_hour = start_hour
+        day_offset = timedelta(days=1)
+        duration_hours = 24.0
+    elif start_hour < end_hour:
+        # Daytime window.
+        current_hour = _hour_of_day(local_eta)
+        if current_hour < start_hour:
+            day_offset = timedelta(days=0)
+        else:
+            day_offset = timedelta(days=1)
+        next_start_hour = start_hour
+        duration_hours = end_hour - start_hour
+    else:
+        # Overnight window (e.g. 22:00-06:00). Simplify by anchoring the
+        # "next start" to the most recent start-hour boundary after
+        # ``local_eta``.
+        current_hour = _hour_of_day(local_eta)
+        if current_hour < start_hour:
+            day_offset = timedelta(days=0)
+        else:
+            day_offset = timedelta(days=1)
+        next_start_hour = start_hour
+        duration_hours = (24.0 - start_hour) + end_hour
+
+    start_dt = datetime.combine(
+        base_date + day_offset,
+        datetime.min.time(),
+        tzinfo=tz,
+    ) + timedelta(hours=next_start_hour)
+    end_dt = start_dt + timedelta(hours=duration_hours)
+    return start_dt, end_dt
 
 
 class RoutePlanningAgent(OverlayAgentBase):
@@ -177,6 +464,10 @@ class RoutePlanningAgent(OverlayAgentBase):
         tenant_config: Optional[TenantConfigLookup] = None,
         sourcing_recommender: Optional[SourcingRecommender] = None,
         depot_resolver: Optional[DepotResolver] = None,
+        storm_mode_evaluator: Optional[Any] = None,
+        storm_mode_settings_loader: Optional[
+            StormModeRouteSettingsLoader
+        ] = None,
     ):
         super().__init__(
             agent_id="route_planning",
@@ -237,6 +528,22 @@ class RoutePlanningAgent(OverlayAgentBase):
         # for backward compatibility with existing tests that predate
         # depot resolution.
         self._depot_resolver: Optional[DepotResolver] = depot_resolver
+
+        # ---- Storm_Mode wiring (Task 10.7, Req 9.2.4, 9.2.5, 9.3.1, 9.3.2) ----
+        # ``storm_mode_evaluator`` exposes ``get_state(tenant_id)`` (see
+        # :class:`fuel.services.storm_mode_evaluator.StormModeEvaluator`).
+        # When ``None`` the agent treats Storm_Mode as permanently
+        # inactive so tenants that haven't wired Phase 10 keep the
+        # pre-storm behaviour unchanged.
+        self._storm_mode_evaluator: Optional[Any] = storm_mode_evaluator
+        # ``storm_mode_settings_loader`` resolves the per-tenant
+        # guard-rails (max stops per truck + delivery window hours).
+        # When ``None`` the agent falls back to the module-level
+        # defaults (10 stops, 08:00–16:00). Bootstrap injects a Redis
+        # or tenant-config backed loader.
+        self._storm_mode_settings_loader: Optional[
+            StormModeRouteSettingsLoader
+        ] = storm_mode_settings_loader
 
     # ------------------------------------------------------------------
     # Public wiring hooks (bootstrap injects these after construction)
@@ -299,6 +606,31 @@ class RoutePlanningAgent(OverlayAgentBase):
         (Task 9.7, Req 5.4.6).
         """
         self._depot_resolver = resolver
+
+    def set_storm_mode_evaluator(self, evaluator: Optional[Any]) -> None:
+        """Inject the :class:`StormModeEvaluator` post-construction.
+
+        Passing ``None`` disables Storm_Mode guard-rails entirely: the
+        agent reports ``inactive`` for every tenant, skips the per-truck
+        stop cap / delivery-window checks, and routes plans through
+        ConfirmationProtocol with the non-storm tool name (Task 10.7,
+        Req 9.2.4, 9.2.5, 9.3.1, 9.3.2).
+        """
+        self._storm_mode_evaluator = evaluator
+
+    def set_storm_mode_settings_loader(
+        self, loader: Optional[StormModeRouteSettingsLoader]
+    ) -> None:
+        """Inject the per-tenant Storm_Mode settings loader.
+
+        When ``None`` the agent falls back to
+        :data:`DEFAULT_STORM_MODE_MAX_STOPS_PER_TRUCK` and the
+        :data:`DEFAULT_STORM_MODE_DELIVERY_WINDOW_START_HOUR` /
+        :data:`DEFAULT_STORM_MODE_DELIVERY_WINDOW_END_HOUR` defaults
+        so tenants without custom settings still receive a
+        deterministic guard-rail (Task 10.7).
+        """
+        self._storm_mode_settings_loader = loader
 
     # ------------------------------------------------------------------
     # Signal handling override — buffer InterventionProposals
@@ -495,10 +827,34 @@ class RoutePlanningAgent(OverlayAgentBase):
                 truck_id=truck_id,
             )
 
+            # Step 5c: Storm_Mode guard-rails (Task 10.7, Req 9.2.4,
+            # 9.2.5, 9.3.1, 9.3.2; Task 10.8, Req 9.3.3, 9.3.4, 9.3.5).
+            # When the StormModeEvaluator reports ``active`` for
+            # ``tenant_id``, this method applies the road-restriction
+            # geo_shape filter, caps the per-truck stop count, and
+            # enforces the tenant-configured delivery window; stops that
+            # fail any guard-rail are moved to
+            # ``route_plan.deferred_stops`` with the mandated reason tag
+            # (``road_restriction`` for segment intersects,
+            # ``deferred_storm_mode`` for window / cap). When Storm_Mode
+            # is inactive (or the evaluator is not wired) this method is
+            # a no-op so existing plans round-trip unchanged.
+            await self._maybe_apply_storm_mode(
+                route_plan=route_plan,
+                tenant_id=tenant_id,
+                truck_id=truck_id,
+                station_locations=station_locations,
+                start_position=start_position,
+            )
+
             # Step 6: Persist route plan to ES (Req 4.7)
             await self._persist_route_plan(route_plan)
 
-            # Step 7: Build InterventionProposal
+            # Step 7: Build InterventionProposal — the proposal's
+            # action tool_name and risk_class switch to the HIGH-risk
+            # storm variant when Storm_Mode is active so the platform
+            # routes the plan through ConfirmationProtocol at HIGH
+            # (Req 9.2.5, Task 10.7).
             proposal = self._build_route_proposal(
                 route_plan=route_plan,
                 tenant_id=tenant_id,
@@ -799,26 +1155,77 @@ class RoutePlanningAgent(OverlayAgentBase):
         route_plan: RoutePlan,
         tenant_id: str,
     ) -> InterventionProposal:
-        """Build an InterventionProposal from a route plan."""
+        """Build an InterventionProposal from a route plan.
+
+        When ``route_plan.storm_mode_active`` is ``True``, the action
+        ``tool_name`` is switched to
+        :data:`APPLY_ROUTE_PLAN_STORM_MODE_TOOL` and the proposal's
+        ``risk_class`` is set to :class:`RiskClass.HIGH` so the
+        platform-wide ConfirmationProtocol classifies the mutation at
+        HIGH risk instead of the standard LOW/MEDIUM path (Task 10.7,
+        Req 9.2.5). The HIGH mapping lives in
+        :data:`Agents.risk_registry.DEFAULT_RISK_REGISTRY` keyed by the
+        storm tool name so tenants can override via Redis without
+        touching code.
+        """
+        storm_mode_active = bool(route_plan.storm_mode_active)
+        tool_name = (
+            APPLY_ROUTE_PLAN_STORM_MODE_TOOL
+            if storm_mode_active
+            else APPLY_ROUTE_PLAN_TOOL
+        )
+
+        parameters: Dict[str, Any] = {
+            "route_id": route_plan.route_id,
+            "truck_id": route_plan.truck_id,
+            "plan_id": route_plan.plan_id,
+            "stops": [s.model_dump(mode="json") for s in route_plan.stops],
+            "distance_km": route_plan.distance_km,
+            "objective_value": route_plan.objective_value,
+        }
+        description = (
+            f"Route for truck {route_plan.truck_id}: "
+            f"{len(route_plan.stops)} stops, "
+            f"{route_plan.distance_km:.1f}km, "
+            f"objective={route_plan.objective_value:.3f}"
+        )
+
+        if storm_mode_active:
+            deferred_payload = [
+                d.model_dump(mode="json") for d in route_plan.deferred_stops
+            ]
+            parameters.update(
+                {
+                    "storm_mode_active": True,
+                    "storm_mode_max_stops_per_truck": (
+                        route_plan.storm_mode_max_stops_per_truck
+                    ),
+                    "storm_mode_delivery_window_start_hour": (
+                        route_plan.storm_mode_delivery_window_start_hour
+                    ),
+                    "storm_mode_delivery_window_end_hour": (
+                        route_plan.storm_mode_delivery_window_end_hour
+                    ),
+                    "deferred_stops": deferred_payload,
+                }
+            )
+            description = (
+                f"[storm_mode] Route for truck {route_plan.truck_id}: "
+                f"{len(route_plan.stops)} stops, "
+                f"{len(route_plan.deferred_stops)} deferred, "
+                f"{route_plan.distance_km:.1f}km, "
+                f"objective={route_plan.objective_value:.3f}"
+            )
+
         actions = [
             {
-                "tool_name": "apply_route_plan",
-                "parameters": {
-                    "route_id": route_plan.route_id,
-                    "truck_id": route_plan.truck_id,
-                    "plan_id": route_plan.plan_id,
-                    "stops": [s.model_dump(mode="json") for s in route_plan.stops],
-                    "distance_km": route_plan.distance_km,
-                    "objective_value": route_plan.objective_value,
-                },
-                "description": (
-                    f"Route for truck {route_plan.truck_id}: "
-                    f"{len(route_plan.stops)} stops, "
-                    f"{route_plan.distance_km:.1f}km, "
-                    f"objective={route_plan.objective_value:.3f}"
-                ),
+                "tool_name": tool_name,
+                "parameters": parameters,
+                "description": description,
             }
         ]
+
+        risk_class = RiskClass.HIGH if storm_mode_active else RiskClass.LOW
 
         return InterventionProposal(
             source_agent=self.agent_id,
@@ -826,9 +1233,10 @@ class RoutePlanningAgent(OverlayAgentBase):
             expected_kpi_delta={
                 "route_distance_km": -route_plan.distance_km,
                 "stops_served": len(route_plan.stops),
+                "stops_deferred": len(route_plan.deferred_stops),
                 "objective_value": route_plan.objective_value,
             },
-            risk_class=RiskClass.LOW,
+            risk_class=risk_class,
             confidence=route_plan.eta_confidence,
             priority=1,
             tenant_id=tenant_id,
@@ -1265,6 +1673,519 @@ class RoutePlanningAgent(OverlayAgentBase):
             product_code,
             volume_gallons,
             route_plan.sourcing_recommendation_id,
+        )
+
+    # ------------------------------------------------------------------
+    # Storm_Mode guard-rails (Task 10.7, Req 9.2.4, 9.2.5, 9.3.1, 9.3.2)
+    # ------------------------------------------------------------------
+
+    async def _maybe_apply_storm_mode(
+        self,
+        *,
+        route_plan: RoutePlan,
+        tenant_id: str,
+        truck_id: str,
+        station_locations: Optional[Mapping[str, Mapping[str, float]]] = None,
+        start_position: Optional[TruckStartPosition] = None,
+    ) -> None:
+        """Apply Storm_Mode guard-rails to ``route_plan`` in place.
+
+        This method implements Task 10.7 / Req 9.2.4, 9.2.5, 9.3.1, 9.3.2
+        and Task 10.8 / Req 9.3.3, 9.3.4, 9.3.5.
+
+        1. Consult the injected :class:`StormModeEvaluator` via
+           :meth:`_is_storm_mode_active`. When the evaluator is not wired
+           or the tenant's persisted state is ``inactive``, the method
+           is a no-op so pre-Phase-10 tenants keep the legacy behaviour.
+        2. Resolve the per-tenant guard-rails
+           (:class:`StormModeRouteSettings`) via the injected loader;
+           fall back to the module-level defaults when the loader is
+           not wired or the lookup fails.
+        3. Stamp ``storm_mode_active`` and the resolved guard-rail
+           values on ``route_plan`` so the persistence path and the
+           InterventionProposal carry the same view of the guard-rails.
+        4. Filter the stops list:
+
+           * Req 9.3.3 / 9.3.4 — when ``station_locations`` are
+             supplied, build a ``LineString`` for each inbound leg
+             (start → stop, stop_i-1 → stop_i) and run an ES
+             ``geo_shape`` intersects query against
+             ``storm_road_restrictions`` filtered by ``tenant_id``,
+             ``severity ∈ {severe, extreme}``, and an active
+             effective-window. Any stop whose inbound leg intersects
+             a matching restriction is moved to
+             ``route_plan.deferred_stops`` with reason
+             :data:`REASON_ROAD_RESTRICTION` and cause
+             :data:`CAUSE_ROAD_RESTRICTION`; the matched
+             restriction_ids are stamped on the deferred entry for
+             dispatcher forensics.
+           * Req 9.3.1 / 9.3.2 — drop stops whose ETA falls outside the
+             configured ``delivery_window_start_hour`` …
+             ``delivery_window_end_hour`` window; the stop is moved to
+             ``route_plan.deferred_stops`` with reason
+             ``deferred_storm_mode`` and cause
+             :data:`CAUSE_OUTSIDE_WINDOW`; the next-eligible window is
+             computed from the window config so the dispatcher UI can
+             reschedule it.
+           * Req 9.2.4 — after the window filter, if more than
+             ``max_stops_per_truck`` stops remain the surplus tail is
+             moved to ``deferred_stops`` with cause
+             :data:`CAUSE_OVER_MAX_STOPS`.
+
+        Idempotency: every mutation runs on a fresh ``route_plan.stops``
+        copy so calling this method twice on the same plan yields the
+        same outcome (and an empty second deferred list when the first
+        pass already filtered every stop out of scope).
+        """
+
+        if not await self._is_storm_mode_active(tenant_id):
+            return
+
+        settings = await self._load_storm_mode_settings(tenant_id)
+
+        route_plan.storm_mode_active = True
+        route_plan.storm_mode_max_stops_per_truck = settings.max_stops_per_truck
+        route_plan.storm_mode_delivery_window_start_hour = (
+            settings.delivery_window_start_hour
+        )
+        route_plan.storm_mode_delivery_window_end_hour = (
+            settings.delivery_window_end_hour
+        )
+
+        tz = _resolve_timezone(settings.timezone)
+
+        deferred: List[DeferredRouteStop] = []
+
+        # Pass 0 — road-restriction intersects filter (Req 9.3.3 / 9.3.4).
+        # Runs before the delivery-window filter so a stop whose inbound
+        # leg crosses a severe polygon is tagged with the more specific
+        # ``road_restriction`` reason rather than a generic window
+        # violation. When ``station_locations`` is absent (legacy tests
+        # that don't thread the lookup through) this pass is a no-op.
+        kept_after_restrictions = await self._apply_road_restriction_filter(
+            tenant_id=tenant_id,
+            truck_id=truck_id,
+            stops=list(route_plan.stops),
+            station_locations=station_locations,
+            start_position=start_position,
+            deferred=deferred,
+        )
+
+        # Pass 1 — delivery-window filter (Req 9.3.1, 9.3.2).
+        kept: List[RouteStop] = []
+        for stop in kept_after_restrictions:
+            eta_dt = _parse_eta(stop.eta)
+            if eta_dt is None:
+                # We cannot reason about the window without an ETA; keep
+                # the stop so we don't silently drop it.
+                kept.append(stop)
+                continue
+            local_eta = eta_dt.astimezone(tz)
+            hour_of_day = _hour_of_day(local_eta)
+            if _is_within_window(
+                hour_of_day=hour_of_day,
+                start_hour=settings.delivery_window_start_hour,
+                end_hour=settings.delivery_window_end_hour,
+            ):
+                kept.append(stop)
+                continue
+
+            next_start, next_end = _next_eligible_window(
+                local_eta=local_eta,
+                start_hour=settings.delivery_window_start_hour,
+                end_hour=settings.delivery_window_end_hour,
+            )
+            deferred.append(
+                DeferredRouteStop(
+                    station_id=stop.station_id,
+                    reason=REASON_DEFERRED_STORM_MODE,
+                    deferral_cause=CAUSE_OUTSIDE_WINDOW,
+                    original_sequence=stop.sequence,
+                    original_eta=stop.eta,
+                    next_eligible_window_start=next_start.astimezone(
+                        timezone.utc
+                    ).isoformat(),
+                    next_eligible_window_end=next_end.astimezone(
+                        timezone.utc
+                    ).isoformat(),
+                )
+            )
+
+        # Pass 2 — per-truck stop cap (Req 9.2.4). Applied after the
+        # window filter so the cap reflects the window-eligible subset.
+        cap = max(0, int(settings.max_stops_per_truck))
+        if cap < 0:
+            cap = 0
+        if len(kept) > cap:
+            surplus = kept[cap:]
+            kept = kept[:cap]
+            for stop in surplus:
+                deferred.append(
+                    DeferredRouteStop(
+                        station_id=stop.station_id,
+                        reason=REASON_DEFERRED_STORM_MODE,
+                        deferral_cause=CAUSE_OVER_MAX_STOPS,
+                        original_sequence=stop.sequence,
+                        original_eta=stop.eta,
+                    )
+                )
+
+        # Renumber surviving stops so the on-wire sequence stays dense
+        # — downstream consumers expect ``sequence = 0..N-1`` and the
+        # dispatcher UI renders stops in this order.
+        for new_idx, stop in enumerate(kept):
+            stop.sequence = new_idx
+
+        route_plan.stops = kept
+        route_plan.deferred_stops = deferred
+
+        if deferred:
+            logger.info(
+                "RoutePlanningAgent: Storm_Mode deferred %d stop(s) for "
+                "tenant=%s truck=%s (cap=%d, window=%.2f-%.2f)",
+                len(deferred),
+                tenant_id,
+                truck_id,
+                settings.max_stops_per_truck,
+                settings.delivery_window_start_hour,
+                settings.delivery_window_end_hour,
+            )
+        else:
+            logger.info(
+                "RoutePlanningAgent: Storm_Mode active for tenant=%s "
+                "truck=%s — all %d stops pass guard-rails",
+                tenant_id,
+                truck_id,
+                len(kept),
+            )
+
+    async def _apply_road_restriction_filter(
+        self,
+        *,
+        tenant_id: str,
+        truck_id: str,
+        stops: List[RouteStop],
+        station_locations: Optional[Mapping[str, Mapping[str, float]]],
+        start_position: Optional[TruckStartPosition],
+        deferred: List[DeferredRouteStop],
+    ) -> List[RouteStop]:
+        """Defer stops whose inbound leg crosses a severe+ restriction.
+
+        Implements Task 10.8 / Req 9.3.3, 9.3.4. For each stop in
+        ``stops`` we build a GeoJSON ``LineString`` representing the
+        inbound leg (``prev → stop``, where the first leg's origin is
+        the truck's start position) and run an ES ``geo_shape``
+        intersects query against ``storm_road_restrictions`` filtered by:
+
+        * ``tenant_id`` — multi-tenant isolation.
+        * ``severity ∈ {severe, extreme}`` — Req 9.3.4 mandates only
+          severities ``>= severe`` trigger deferrals. Lower severities
+          are kept in the index (dispatcher awareness) but do not
+          affect routing.
+        * active effective window (``effective_from <= now`` and
+          ``effective_to`` either absent or ``>= now``).
+
+        Stops whose inbound leg intersects a matching restriction are
+        appended to ``deferred`` with reason :data:`REASON_ROAD_RESTRICTION`
+        and cause :data:`CAUSE_ROAD_RESTRICTION`; the matched
+        restriction_ids are stamped on the deferred entry for forensics.
+
+        Missing ``station_locations`` or ``start_position`` degrades
+        gracefully: the filter is skipped and every stop is kept so
+        legacy tests that don't thread location context through the
+        call chain continue to pass.
+
+        Args:
+            tenant_id: Owning tenant — filters the ES query.
+            truck_id: Truck the plan is for — included in log lines so
+                a dispatcher can trace which truck had stops deferred.
+            stops: Current stop list (after route optimization but
+                before any Storm_Mode filters).
+            station_locations: Map of ``station_id → {"lat", "lon"}``.
+                Sourced from ``_query_station_locations`` in the main
+                run loop. Stops whose ``station_id`` is missing from
+                this map are kept as-is (there is no leg to intersect).
+            start_position: Origin for the first leg (``start → stop_0``).
+                Sourced from ``_resolve_start_position``. When ``None``
+                the first leg is skipped (equivalent to trusting the
+                stop's own location).
+            deferred: Output list — deferred entries are appended here.
+
+        Returns:
+            The list of stops that are *not* affected by a restriction.
+            Stops whose inbound leg intersects a severe+ restriction
+            are removed from the returned list and appended to
+            ``deferred``.
+        """
+
+        if not stops:
+            return []
+        if station_locations is None:
+            return list(stops)
+
+        kept: List[RouteStop] = []
+        prev_lat: Optional[float]
+        prev_lon: Optional[float]
+        if start_position is not None:
+            prev_lat = start_position.lat
+            prev_lon = start_position.lon
+        else:
+            prev_lat = None
+            prev_lon = None
+
+        for stop in stops:
+            stop_loc = station_locations.get(stop.station_id)
+            if stop_loc is None:
+                # No coordinates available — we cannot build a segment.
+                # Keep the stop so we don't silently drop it.
+                kept.append(stop)
+                continue
+            try:
+                next_lat = float(stop_loc.get("lat"))
+                next_lon = float(stop_loc.get("lon"))
+            except (TypeError, ValueError):
+                kept.append(stop)
+                continue
+
+            # First leg requires a known start position; when absent,
+            # fall back to "no segment to check" for this stop. The
+            # next iteration will have prev_* populated from the stop
+            # we just accepted, so subsequent legs are still checked.
+            if prev_lat is None or prev_lon is None:
+                prev_lat, prev_lon = next_lat, next_lon
+                kept.append(stop)
+                continue
+
+            match_ids = await self._query_road_restriction_intersects(
+                tenant_id=tenant_id,
+                line_start=(prev_lat, prev_lon),
+                line_end=(next_lat, next_lon),
+            )
+            if match_ids:
+                logger.info(
+                    "RoutePlanningAgent: Storm_Mode road-restriction "
+                    "match tenant=%s truck=%s stop=%s restrictions=%s",
+                    tenant_id,
+                    truck_id,
+                    stop.station_id,
+                    ",".join(match_ids),
+                )
+                deferred.append(
+                    DeferredRouteStop(
+                        station_id=stop.station_id,
+                        reason=REASON_ROAD_RESTRICTION,
+                        deferral_cause=CAUSE_ROAD_RESTRICTION,
+                        original_sequence=stop.sequence,
+                        original_eta=stop.eta,
+                    )
+                )
+                # Do not advance ``prev_*`` — the stop is not on the
+                # traversed route, so the next stop's inbound leg is
+                # measured from the same predecessor.
+                continue
+
+            kept.append(stop)
+            prev_lat, prev_lon = next_lat, next_lon
+
+        return kept
+
+    async def _query_road_restriction_intersects(
+        self,
+        *,
+        tenant_id: str,
+        line_start: Tuple[float, float],
+        line_end: Tuple[float, float],
+    ) -> List[str]:
+        """Return restriction_ids whose polygon intersects the segment.
+
+        Builds a GeoJSON ``LineString`` (``[[lon, lat], [lon, lat]]``)
+        and runs an ES ``geo_shape`` intersects query against
+        :data:`STORM_ROAD_RESTRICTIONS_ES_INDEX` filtered by
+        ``tenant_id``, active effective window, and severity
+        ``∈`` :data:`ROAD_RESTRICTION_BLOCKING_SEVERITIES`.
+
+        Returns an empty list on:
+
+        * missing ES service (shouldn't happen once bootstrap is wired),
+        * any transport error (logged and suppressed so Storm_Mode
+          routing never fails closed — the delivery-window / stop-cap
+          guard-rails still fire),
+        * a same-point "segment" (``line_start == line_end``) which
+          collapses to a point and cannot meaningfully intersect a
+          polygon.
+
+        The caller treats a non-empty return as "defer this stop".
+        """
+
+        if self._es is None:
+            return []
+
+        start_lat, start_lon = line_start
+        end_lat, end_lon = line_end
+        if start_lat == end_lat and start_lon == end_lon:
+            # Degenerate segment — skip the query entirely.
+            return []
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        # GeoJSON coordinate order is ``[lon, lat]`` (RFC 7946 §3.1.1).
+        # ``relation=intersects`` matches any polygon that overlaps,
+        # touches, or contains the line; this is exactly the semantics
+        # Req 9.3.4 describes ("crosses a matching polygon").
+        geo_shape_clause = {
+            "geo_shape": {
+                "polygon": {
+                    "shape": {
+                        "type": "LineString",
+                        "coordinates": [
+                            [float(start_lon), float(start_lat)],
+                            [float(end_lon), float(end_lat)],
+                        ],
+                    },
+                    "relation": "intersects",
+                }
+            }
+        }
+
+        filters: List[Dict[str, Any]] = [
+            {"term": {"tenant_id": tenant_id}},
+            {
+                "terms": {
+                    "severity": list(ROAD_RESTRICTION_BLOCKING_SEVERITIES)
+                }
+            },
+            {"range": {"effective_from": {"lte": now_iso}}},
+            {
+                "bool": {
+                    "should": [
+                        {
+                            "bool": {
+                                "must_not": {
+                                    "exists": {"field": "effective_to"}
+                                }
+                            }
+                        },
+                        {"range": {"effective_to": {"gte": now_iso}}},
+                    ],
+                    "minimum_should_match": 1,
+                }
+            },
+            geo_shape_clause,
+        ]
+
+        query: Dict[str, Any] = {
+            "query": {"bool": {"filter": filters}},
+            "_source": ["restriction_id", "tenant_id", "severity"],
+        }
+
+        try:
+            resp = await self._es.search_documents(
+                STORM_ROAD_RESTRICTIONS_ES_INDEX,
+                query,
+                _ROAD_RESTRICTION_MATCH_CEILING,
+            )
+        except Exception as exc:
+            logger.warning(
+                "RoutePlanningAgent: geo_shape intersects query failed "
+                "for tenant=%s segment=%s→%s: %s — skipping "
+                "road-restriction filter for this segment",
+                tenant_id,
+                line_start,
+                line_end,
+                exc,
+            )
+            return []
+
+        hits = (resp or {}).get("hits", {}).get("hits", []) or []
+        matches: List[str] = []
+        for hit in hits:
+            source = hit.get("_source") or {}
+            # Defensive tenant re-check — if the index layer ever returns
+            # a cross-tenant row (corrupt mapping, misrouted alias)
+            # silently drop it rather than deferring the wrong stop.
+            if source.get("tenant_id") != tenant_id:
+                continue
+            restriction_id = source.get("restriction_id")
+            if isinstance(restriction_id, str) and restriction_id:
+                matches.append(restriction_id)
+        return matches
+
+    async def _is_storm_mode_active(self, tenant_id: str) -> bool:
+        """Return ``True`` when Storm_Mode is ``active`` for ``tenant_id``.
+
+        Mirrors the :class:`DeliveryPrioritizationAgent` implementation:
+        tolerates a missing evaluator, empty tenant ids, and transient
+        lookup failures by returning ``False`` so the legacy non-storm
+        path stays engaged.
+        """
+
+        evaluator = self._storm_mode_evaluator
+        if evaluator is None or not tenant_id:
+            return False
+        try:
+            state = await evaluator.get_state(tenant_id)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "RoutePlanningAgent: StormModeEvaluator.get_state raised "
+                "for tenant=%s: %s",
+                tenant_id,
+                exc,
+            )
+            return False
+
+        raw_state: Any
+        if isinstance(state, StormModePersistedState):
+            raw_state = state.state
+        elif isinstance(state, dict):
+            raw_state = state.get("state")
+        else:
+            raw_state = getattr(state, "state", None)
+        return raw_state == STORM_MODE_ACTIVE
+
+    async def _load_storm_mode_settings(
+        self, tenant_id: str
+    ) -> StormModeRouteSettings:
+        """Return the tenant's Storm_Mode route settings (with defaults).
+
+        Invokes the injected loader when present; falls back to the
+        module-level defaults whenever the loader is ``None``, returns
+        ``None``, or raises. Out-of-range values coming from the loader
+        are clamped / replaced with defaults so a misconfigured tenant
+        still receives a deterministic guard-rail.
+        """
+
+        loader = self._storm_mode_settings_loader
+        raw: Optional[StormModeRouteSettings] = None
+        if loader is not None:
+            try:
+                raw = await loader(tenant_id)
+            except Exception as exc:
+                logger.warning(
+                    "RoutePlanningAgent: storm_mode_settings_loader "
+                    "failed for tenant=%s: %s — using defaults",
+                    tenant_id,
+                    exc,
+                )
+                raw = None
+
+        if raw is None:
+            return StormModeRouteSettings()
+
+        max_stops = int(raw.max_stops_per_truck)
+        if max_stops <= 0:
+            max_stops = DEFAULT_STORM_MODE_MAX_STOPS_PER_TRUCK
+
+        start_hour = float(raw.delivery_window_start_hour)
+        end_hour = float(raw.delivery_window_end_hour)
+        if not (0.0 <= start_hour <= 24.0) or not (0.0 <= end_hour <= 24.0):
+            start_hour = DEFAULT_STORM_MODE_DELIVERY_WINDOW_START_HOUR
+            end_hour = DEFAULT_STORM_MODE_DELIVERY_WINDOW_END_HOUR
+
+        return StormModeRouteSettings(
+            max_stops_per_truck=max_stops,
+            delivery_window_start_hour=start_hour,
+            delivery_window_end_hour=end_hour,
+            timezone=raw.timezone,
         )
 
     async def _resolve_traffic_provider_name(

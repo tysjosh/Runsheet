@@ -75,3 +75,10 @@ mygeotab==0.9.1
 # connector's PaymentIntent + Webhook.construct_event calls use the
 # vendor-maintained client.
 stripe>=10.0.0
+
+# Shapely for GeoJSON polygon validation on storm road restrictions
+# (Fuel Ops Hardening Req 9.3.3; Task 10.8 — fuel/storm_mode_models.py).
+# Imported lazily where used so unit tests can mock polygon validation
+# without requiring the dep; production deployments should pin this so
+# the StormRoadRestriction model validates WGS84 geometry robustly.
+shapely>=2.0.0

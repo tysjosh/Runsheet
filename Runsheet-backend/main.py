@@ -39,6 +39,11 @@ from inline_endpoints import router as inline_router
 from import_endpoints import router as import_router
 from notifications.api.endpoints import router as notification_router
 from notifications.api.metrics_endpoints import router as metrics_router
+from integrations.api.integrations_endpoints import router as integrations_router
+from integrations.api.stripe_endpoints import (
+    router as stripe_router,
+    webhook_router as stripe_webhook_router,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -98,6 +103,15 @@ app.include_router(inline_router)
 app.include_router(import_router)
 app.include_router(notification_router)
 app.include_router(metrics_router)
+# Fuel-Ops Hardening — Integration Marketplace and Stripe surfaces.
+# configure_integrations_endpoints() / configure_stripe_endpoints()
+# are invoked from bootstrap/agents.py where the credentials vault,
+# instance repository, scheduler, and connector factory are wired.
+# The router inclusion lives here so every top-level REST surface is
+# discoverable in one place.
+app.include_router(integrations_router)
+app.include_router(stripe_router)
+app.include_router(stripe_webhook_router)
 
 
 def _c(app: FastAPI) -> ServiceContainer:

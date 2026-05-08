@@ -95,6 +95,61 @@ introduced in Capabilities 1 and 6 of the fuel-ops-hardening spec:
   :meth:`ReconciliationService.update_invoice_fields` on the record
   (integration contract documented in Req 4.4.5).
 
+* ``GET /api/fuel/storm-mode/status`` — return the current Storm_Mode
+  state for the requesting tenant alongside the triggering alerts,
+  any active manual override, and the activation window (Req 9.1.6,
+  9.4.3, Task 10.4). The endpoint is backed by the already-wired
+  :class:`fuel.services.storm_mode_evaluator.StormModeEvaluator`: it
+  reads the persisted state via :meth:`StormModeEvaluator.get_state`
+  so the REST call never runs a full evaluation tick, then hydrates
+  the triggering :class:`WeatherAlert`\\ s from the ``weather_alerts``
+  ES index and the active :class:`StormModeOverride` (if any) from
+  ``storm_mode_overrides``. When an ``activate`` / ``deactivate`` /
+  ``snooze`` override is in effect, ``override_active`` is ``true``
+  and the response's top-level ``state`` reflects the override; the
+  computed (alert-derived) state is always preserved in
+  ``computed_state`` so the dispatcher UI can distinguish an
+  override-forced posture from the automatic one. The endpoint is
+  strictly tenant-scoped: the ES filter pins ``tenant_id`` and a
+  defensive re-check drops any row whose ``tenant_id`` does not
+  match the caller.
+
+* ``POST /api/fuel/storm-mode/override`` — persist a dispatcher or
+  admin Storm_Mode override (Req 9.4.2, 9.4.4, Task 10.5). Accepts
+  ``action`` (one of activate/deactivate/snooze/clear), ``reason``,
+  ``actor_id``, and optional ``expires_at``. The router stamps
+  ``tenant_id`` from the JWT context and mints ``override_id``
+  (``smo_<uuid4>``) so callers cannot spoof ownership or reuse an
+  existing id. Role-restricted to dispatcher or admin per Req 9.4.4 —
+  other callers receive HTTP 403 ``forbidden_role``. The persisted
+  record is visible to the :class:`StormModeEvaluator` on its next
+  5-minute tick, and the status endpoint reads overrides out of band
+  so the dispatcher banner reflects the submission immediately.
+
+* ``POST /api/fuel/storm-mode/road-restrictions`` — persist a
+  tenant-uploaded GeoJSON polygon / multi-polygon representing a
+  road closure or impassable area while Storm_Mode is active
+  (Req 9.3.3, 9.3.5, Task 10.8). The router stamps ``tenant_id``
+  from the JWT context and mints ``restriction_id``
+  (``srr_<uuid4>``) so callers cannot spoof ownership. The
+  polygon is validated for WGS84 coordinate bounds, ring closure,
+  and geometry type (``Polygon`` / ``MultiPolygon`` only); severity
+  is constrained to the NOAA bucket enum. Role-restricted to
+  dispatcher or admin per Req 9.4.4 — the same role gate the
+  override endpoint applies.
+
+* ``GET /api/fuel/storm-mode/road-restrictions`` — return active
+  restriction polygons for the tenant so the dispatcher UI's map
+  layer can render them with severity-coded colours (Req 9.3.5,
+  Task 10.8). By default only currently-applicable restrictions
+  are returned (``effective_from <= now`` and, when set,
+  ``effective_to >= now``); pass ``include_expired=true`` for
+  historical review. Supports an optional ``severity`` filter so
+  the UI can re-render a single severity layer without a client-
+  side filter pass. Tenant-scoped via the ES ``term`` filter and a
+  defensive per-row re-check; malformed rows are dropped rather
+  than failing the request.
+
 All endpoints are scoped by ``tenant_id`` exclusively from the signed JWT —
 query-parameter or header tenant_ids are ignored. Wiring follows the same
 ``configure_X`` pattern as :mod:`Agents.support.mvp_endpoints`: bootstrap
@@ -102,7 +157,8 @@ calls :func:`configure_fuel_ops_endpoints` once with an ES-service-like
 object; the routers are then registered in ``main.py``.
 
 Validates: Requirements 1.1.4, 1.6.1, 1.6.2, 1.6.3, 2.2.2, 2.5.3, 3.1.4, 3.2.4,
-4.4.4, 4.4.5, 6.1.3, 6.2.4, 7.2.5, 8.2.6, 8.4.2, 8.4.4.
+4.4.4, 4.4.5, 6.1.3, 6.2.4, 7.2.5, 8.2.6, 8.4.2, 8.4.4, 9.1.6, 9.3.3, 9.3.4,
+9.3.5, 9.4.2, 9.4.3, 9.4.4.
 """
 from __future__ import annotations
 
@@ -110,6 +166,7 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Literal, Mapping, Optional
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -205,6 +262,9 @@ from fuel.services.contract_lift_service import (
 from fuel.services.fuel_ops_es_mappings import (
     MVP_RECONCILIATION_INDEX,
     RACK_PRICES_INDEX,
+    STORM_MODE_OVERRIDES_INDEX,
+    STORM_ROAD_RESTRICTIONS_INDEX,
+    WEATHER_ALERTS_INDEX,
 )
 from fuel.services.sourcing_recommender import (
     InvalidBrandedPreferenceError,
@@ -220,6 +280,7 @@ from fuel.services.storm_mode_evaluator import (
 from fuel.storm_mode_models import (
     StormModeOverride,
     StormModeOverrideAction,
+    StormRoadRestriction,
     WeatherAlert,
     WeatherAlertSeverity,
     WeatherAlertSource,
@@ -282,6 +343,15 @@ _sourcing_recommender: Optional[SourcingRecommender] = None
 #: ``sourcing_recommendations`` index for audit. When unset, one is
 #: constructed lazily from ``es_service`` at wire-up time.
 _sourcing_recommendation_repository: Optional[SourcingRecommendationRepository] = None
+#: Optional :class:`fuel.services.storm_mode_evaluator.StormModeEvaluator`
+#: singleton used by the Task 10.4 ``GET /api/fuel/storm-mode/status``
+#: endpoint. Bootstrap constructs the evaluator once (with the shared
+#: ES service, Redis client, and SignalBus) and passes it through
+#: :func:`configure_fuel_ops_endpoints`. When unset the status endpoint
+#: returns HTTP 503 ``storm_mode_evaluator_unavailable`` so tests that
+#: do not wire the evaluator fail loudly rather than silently rendering
+#: stale state.
+_storm_mode_evaluator: Optional[StormModeEvaluator] = None
 #: Optional tenant-config Redis-handle used by the load-eligibility endpoint
 #: (Task 6.7) to fetch ``compatibility_matrix_config:{tenant_id}`` overrides.
 #: When unset the endpoint evaluates against the default seed table so a
@@ -393,6 +463,7 @@ def configure_fuel_ops_endpoints(
     fuel_planning_ws_manager: Optional[FuelPlanningWSManager] = None,
     sourcing_recommender: Optional[SourcingRecommender] = None,
     sourcing_recommendation_repository: Optional[SourcingRecommendationRepository] = None,
+    storm_mode_evaluator: Optional[StormModeEvaluator] = None,
     tenant_config: Any = None,
     redis_client: Any = None,
 ) -> None:
@@ -476,6 +547,16 @@ def configure_fuel_ops_endpoints(
             recommendation to the ``sourcing_recommendations`` index
             for audit. When omitted, one is constructed from
             ``es_service``.
+        storm_mode_evaluator: Optional pre-built
+            :class:`fuel.services.storm_mode_evaluator.StormModeEvaluator`
+            used by the Task 10.4
+            ``GET /api/fuel/storm-mode/status`` endpoint. Bootstrap
+            constructs the evaluator once with its SignalBus + Redis +
+            severity loader; tests can pass ``None`` and the status
+            endpoint returns HTTP 503 ``storm_mode_evaluator_unavailable``
+            until it is wired. The endpoint only calls
+            :meth:`StormModeEvaluator.get_state` so no write-path
+            dependencies are required at this seam.
         supplier_contract_repository: Optional pre-built repository for the
             ``supplier_contracts`` index. When omitted, one is constructed
             from ``es_service``. Introduced by Task 7.6 (Req 8.3.2 / 8.3.4)
@@ -515,6 +596,7 @@ def configure_fuel_ops_endpoints(
     global _file_storage_service, _combinable_group_repository
     global _confirmation_protocol, _fuel_planning_ws_manager, _tenant_config
     global _sourcing_recommender, _sourcing_recommendation_repository
+    global _storm_mode_evaluator
     _es_service = es_service
     _destination_service = destination_service or DeliveryDestinationService(es_service)
     _customer_tank_repository = (
@@ -559,6 +641,14 @@ def configure_fuel_ops_endpoints(
         sourcing_recommendation_repository
         or SourcingRecommendationRepository(es_service)
     )
+    # Storm_Mode_Evaluator wiring (Task 10.4). Bootstrap constructs the
+    # evaluator with its SignalBus + Redis + severity loader once; tests
+    # can pass ``None`` and the status endpoint will return HTTP 503
+    # ``storm_mode_evaluator_unavailable`` until it is wired. The
+    # evaluator is read-only here (the endpoint calls
+    # :meth:`StormModeEvaluator.get_state`) so no additional construction
+    # happens when the caller passes ``None``.
+    _storm_mode_evaluator = storm_mode_evaluator
 
 
 def _get_destination_service() -> DeliveryDestinationService:
@@ -1132,11 +1222,25 @@ def _translate_validation_error(exc: Exception) -> HTTPException:
 
     Sanitizes Pydantic's ``ValidationError.errors()`` output by dropping
     the ``ctx`` and ``url`` fields and converting any residual non-JSON
-    primitives (e.g. nested :class:`Exception` instances inside ``ctx``)
-    to strings. This is important because FastAPI's default JSON encoder
-    raises :class:`TypeError` when it encounters a raw exception object,
+    primitives (e.g. nested :class:`Exception` instances inside ``ctx``,
+    :class:`datetime` values inside ``input``) to strings. This is
+    important because FastAPI's default JSON encoder raises
+    :class:`TypeError` when it encounters a non-serializable object,
     which would otherwise mask the 422 as a 500 to the caller.
     """
+
+    def _to_jsonable(value: Any) -> Any:
+        """Best-effort conversion of Pydantic error values to JSON-safe types."""
+        if value is None or isinstance(value, (bool, int, float, str)):
+            return value
+        if isinstance(value, (list, tuple)):
+            return [_to_jsonable(item) for item in value]
+        if isinstance(value, dict):
+            return {str(k): _to_jsonable(v) for k, v in value.items()}
+        # datetime, Exception, and other opaque objects fall through here —
+        # str() produces a safe, readable representation so the 422 payload
+        # always renders.
+        return str(value)
 
     message = str(exc)
     details: Any
@@ -1151,9 +1255,9 @@ def _translate_validation_error(exc: Exception) -> HTTPException:
                     # help callers.
                     continue
                 if isinstance(value, tuple):
-                    clean[key] = list(value)
+                    clean[key] = [_to_jsonable(item) for item in value]
                 else:
-                    clean[key] = value
+                    clean[key] = _to_jsonable(value)
             details.append(clean)
     else:
         details = message
@@ -1783,6 +1887,222 @@ async def delete_depot(
         depot_id,
     )
     return None
+
+
+# ---------------------------------------------------------------------------
+# Truck compartments list response models (Req 7.1.1, 7.1.2, 7.1.3)
+# ---------------------------------------------------------------------------
+
+
+class TruckCompartmentStateItem(BaseModel):
+    """One row returned by ``GET /api/fuel/mvp/trucks/{truck_id}/compartments``.
+
+    Bundles the static compartment configuration (``capacity_liters``,
+    ``allowed_grades``, ``position_index``) with the lifecycle state
+    triple (``state``, ``last_loaded_product``, ``last_loaded_at``,
+    ``last_cleaned_at``) so the truck-detail UI can render a single
+    row per compartment with both the capability (what it can load)
+    and the posture (what it's currently holding, and whether it
+    needs cleaning before the next load).
+
+    Legacy pre-Task-6.1 documents that lack the lifecycle fields fall
+    back to ``state="clean"`` with null timestamps — same
+    degrade-gracefully contract the Compartment_Loading_Agent uses
+    when reading older documents.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    compartment_id: str = Field(
+        ..., description="Tenant-scoped, truck-qualified compartment id."
+    )
+    truck_id: str = Field(..., description="Parent truck identifier.")
+    capacity_liters: float = Field(
+        ..., ge=0, description="Compartment capacity in liters."
+    )
+    allowed_grades: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Canonical fuel product_codes the compartment may load "
+            "(post-canonicalization; legacy NG aliases are normalized "
+            "on write per Req 6.1.4)."
+        ),
+    )
+    position_index: int = Field(
+        default=0,
+        description="Ordinal position along the tanker axle for loading order.",
+    )
+    state: str = Field(
+        ...,
+        description=(
+            "Lifecycle flag: clean | loaded | needs_cleaning "
+            "(Req 7.1.1)."
+        ),
+    )
+    last_loaded_product: Optional[str] = Field(
+        default=None,
+        description=(
+            "Canonical product_code of the most recent load, or null "
+            "when the compartment is empty / freshly cleaned."
+        ),
+    )
+    last_loaded_at: Optional[str] = Field(
+        default=None,
+        description="ISO-8601 UTC timestamp of the most recent Loading_Plan commit.",
+    )
+    last_cleaned_at: Optional[str] = Field(
+        default=None,
+        description="ISO-8601 UTC timestamp of the most recent Cleaning_Event write.",
+    )
+
+
+class TruckCompartmentListResponse(BaseModel):
+    """Envelope for ``GET /api/fuel/mvp/trucks/{truck_id}/compartments``.
+
+    ``items`` is sorted by ``position_index`` so the UI renders
+    compartments in physical loading order without a client-side sort.
+    ``total`` matches ``len(items)`` and is surfaced for parity with
+    other list endpoints (there is no pagination — a single tanker
+    has at most a dozen compartments).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    truck_id: str
+    items: List[TruckCompartmentStateItem]
+    total: int
+
+
+# ---------------------------------------------------------------------------
+# GET /api/fuel/mvp/trucks/{truck_id}/compartments (Req 7.1.1, 7.1.2, 7.1.3)
+# ---------------------------------------------------------------------------
+
+
+@mvp_router.get(
+    "/trucks/{truck_id}/compartments",
+    response_model=TruckCompartmentListResponse,
+)
+async def list_truck_compartments(
+    truck_id: str,
+    request: Request,
+    tenant: TenantContext = Depends(get_tenant_context),
+) -> TruckCompartmentListResponse:
+    """Return the compartment roster + lifecycle state for a truck.
+
+    Serves the truck-detail page's compartment badges and cleaning-event
+    form (Task 11.9 / Req 7.1.4). Reads from ``truck_compartments`` with
+    a tenant-scoped ``bool.filter`` and a defensive per-row tenant
+    re-check so cross-tenant rows never leak. Empty-result (unknown
+    truck or no compartments configured) returns ``items: []`` rather
+    than 404 so the UI can render the "configure compartments" empty
+    state without special-casing the error.
+
+    Error modes:
+
+        * 400 ``invalid_truck_id`` — path parameter is blank.
+        * 500 ``truck_compartments_lookup_failed`` — ES query raised.
+    """
+
+    if not truck_id or not truck_id.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error_code": "invalid_truck_id",
+                "message": "truck_id must be a non-empty string.",
+            },
+        )
+
+    es = _get_es()
+    truck_id_clean = truck_id.strip()
+
+    query = {
+        "query": {
+            "bool": {
+                "must": [
+                    {"term": {"tenant_id": tenant.tenant_id}},
+                    {"term": {"truck_id": truck_id_clean}},
+                ],
+            },
+        },
+        "size": 200,
+    }
+
+    try:
+        resp = await es.search_documents(
+            TRUCK_COMPARTMENTS_INDEX, query, 200
+        )
+    except Exception as exc:
+        logger.exception(
+            "fuel_ops.truck_compartments.list: lookup failed "
+            "for truck=%s tenant=%s",
+            truck_id_clean,
+            tenant.tenant_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error_code": "truck_compartments_lookup_failed",
+                "message": str(exc),
+            },
+        )
+
+    items: List[TruckCompartmentStateItem] = []
+    for hit in resp.get("hits", {}).get("hits", []):
+        source = hit.get("_source") or {}
+        # Defensive per-row tenant re-check. The ES filter already
+        # pins tenant_id but a mis-indexed doc must not slip through.
+        if source.get("tenant_id") != tenant.tenant_id:
+            continue
+        compartment_id = source.get("compartment_id")
+        if not compartment_id:
+            continue
+
+        def _as_iso(value: Any) -> Optional[str]:
+            if value is None:
+                return None
+            if isinstance(value, str):
+                return value
+            if hasattr(value, "isoformat"):
+                return value.isoformat()
+            return str(value)
+
+        try:
+            item = TruckCompartmentStateItem(
+                compartment_id=compartment_id,
+                truck_id=source.get("truck_id") or truck_id_clean,
+                capacity_liters=float(source.get("capacity_liters") or 0.0),
+                allowed_grades=list(source.get("allowed_grades") or []),
+                position_index=int(source.get("position_index") or 0),
+                state=source.get("state") or "clean",
+                last_loaded_product=source.get("last_loaded_product"),
+                last_loaded_at=_as_iso(source.get("last_loaded_at")),
+                last_cleaned_at=_as_iso(source.get("last_cleaned_at")),
+            )
+        except (ValidationError, ValueError, TypeError) as exc:
+            logger.warning(
+                "fuel_ops.truck_compartments.list: dropping malformed row "
+                "compartment=%s truck=%s tenant=%s err=%s",
+                compartment_id,
+                truck_id_clean,
+                tenant.tenant_id,
+                exc,
+            )
+            continue
+        items.append(item)
+
+    items.sort(key=lambda c: (c.position_index, c.compartment_id))
+
+    logger.debug(
+        "fuel_ops.truck_compartments.list: tenant=%s truck=%s count=%d",
+        tenant.tenant_id,
+        truck_id_clean,
+        len(items),
+    )
+    return TruckCompartmentListResponse(
+        truck_id=truck_id_clean,
+        items=items,
+        total=len(items),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -5750,6 +6070,8 @@ __all__ = [
     "DepotListResponse",
     "ReplanDiffResponse",
     "CleaningEventCreateRequest",
+    "TruckCompartmentStateItem",
+    "TruckCompartmentListResponse",
     "LoadEligibilityCompartmentState",
     "LoadEligibilityResponse",
     "PriorityClusterCentroid",
@@ -6749,3 +7071,987 @@ async def get_pod_bol(
         expires_at=expires_at,
         tenant_id=tenant.tenant_id,
     )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/fuel/storm-mode/status (Req 9.1.6, 9.4.3, Task 10.4)
+# ---------------------------------------------------------------------------
+
+
+class StormModeTriggeringAlert(BaseModel):
+    """Condensed :class:`WeatherAlert` view embedded in the status response.
+
+    Mirrors the fields the dispatcher banner needs (alert_id, alert_type,
+    severity, headline, time window, affected ZIPs, source) without
+    surfacing the full persistence shape. The endpoint hydrates this
+    model from the ``weather_alerts`` ES index so the banner can render
+    a human-readable "triggering alert" section without a follow-up
+    fetch from the client.
+
+    Validates: Requirement 9.1.6.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    alert_id: str
+    alert_type: str
+    severity: WeatherAlertSeverity
+    headline: Optional[str] = None
+    description: Optional[str] = None
+    expected_start_at: datetime
+    expected_end_at: Optional[datetime] = None
+    affected_zip_codes: List[str] = Field(default_factory=list)
+    source: WeatherAlertSource
+    activation_status: WeatherAlertStatus
+
+
+class StormModeActiveOverride(BaseModel):
+    """Condensed :class:`StormModeOverride` view embedded in the response.
+
+    Mirrors Req 9.4.3's contract: ``override_active: true`` plus the
+    override's action / reason / actor / expiry. We intentionally do not
+    surface the override's ``created_at`` / ``updated_at`` timestamps so
+    the banner payload stays focused on what the dispatcher needs to
+    render.
+
+    Validates: Requirement 9.4.3.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    override_id: str
+    action: StormModeOverrideAction
+    reason: str
+    actor_id: str
+    expires_at: Optional[datetime] = None
+
+
+class StormModeActivationWindow(BaseModel):
+    """Activation window info surfaced on every status response.
+
+    The window carries both the evaluator's configured parameters
+    (``lookahead_hours`` + ``severity_threshold`` = "how does the
+    platform decide to activate") and the concrete transition
+    timestamps for the current state (``activated_at`` / ``clears_at``
+    = "when did this posture start and when do we expect it to end").
+    Nullable transition fields keep the shape stable across both
+    ``active`` and ``inactive`` states — the dispatcher UI renders the
+    nulls as "–" rather than hiding the block.
+
+    Validates: Requirement 9.1.6.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    lookahead_hours: int
+    severity_threshold: WeatherAlertSeverity
+    activated_at: Optional[datetime] = None
+    clears_at: Optional[datetime] = None
+
+
+class StormModeStatusResponse(BaseModel):
+    """Envelope for ``GET /api/fuel/storm-mode/status``.
+
+    Fields:
+
+    * ``tenant_id`` — echoed from the caller's JWT context so the client
+      can cross-check the response.
+    * ``state`` — the effective state after override precedence
+      (``active`` / ``inactive``). The dispatcher banner renders off
+      this field.
+    * ``computed_state`` — the state the evaluator would have selected
+      from alerts alone, before any override was applied. When an
+      override is active, this can differ from ``state`` and tells the
+      UI "the platform wanted this but the override forced otherwise".
+    * ``override_active`` — ``true`` when an ``activate`` / ``deactivate``
+      / ``snooze`` override is currently in effect (Req 9.4.3).
+    * ``override`` — the :class:`StormModeActiveOverride` describing the
+      override. ``None`` when ``override_active`` is ``false``.
+    * ``triggering_alerts`` — the hydrated :class:`StormModeTriggeringAlert`
+      list the evaluator last pinned state on. When ``state`` is
+      ``inactive`` and no override is active, this list is typically
+      empty. The evaluator persists up to a few alert ids, so the list
+      is capped to the same cardinality.
+    * ``activation_window`` — the :class:`StormModeActivationWindow`
+      (lookahead hours, severity threshold, transition timestamps).
+    * ``updated_at`` — when the persisted state was last written (or
+      ``None`` when the tenant has never transitioned).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    tenant_id: str
+    state: str
+    computed_state: str
+    override_active: bool
+    override: Optional[StormModeActiveOverride] = None
+    triggering_alerts: List[StormModeTriggeringAlert] = Field(default_factory=list)
+    activation_window: StormModeActivationWindow
+    updated_at: Optional[datetime] = None
+
+
+def _get_storm_mode_evaluator() -> StormModeEvaluator:
+    """Return the module-wired :class:`StormModeEvaluator` singleton.
+
+    When the evaluator has not been configured, the endpoint surfaces
+    HTTP 503 ``storm_mode_evaluator_unavailable`` so tests and early
+    bootstrap states fail loudly rather than silently rendering stale
+    state.
+    """
+    if _storm_mode_evaluator is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "error_code": "storm_mode_evaluator_unavailable",
+                "message": (
+                    "Storm_Mode evaluator is not configured. Finish the "
+                    "bootstrap wire-up (see bootstrap/agents.py) before "
+                    "calling /api/fuel/storm-mode/status."
+                ),
+            },
+        )
+    return _storm_mode_evaluator
+
+
+async def _hydrate_triggering_alerts(
+    es: Any,
+    tenant_id: str,
+    alert_ids: List[str],
+) -> List[StormModeTriggeringAlert]:
+    """Look up the persisted triggering WeatherAlerts by id.
+
+    The evaluator persists a short list of alert ids next to the state;
+    this helper hydrates them from the ``weather_alerts`` index so the
+    dispatcher banner can render alert metadata without a second round
+    trip from the client. Tenant isolation is enforced twice:
+
+    1. The ES ``bool.filter`` clause pins both ``tenant_id`` and
+       ``alert_id`` via ``terms``.
+    2. Every returned ``_source`` is re-validated against the caller's
+       tenant_id; any mis-labelled row is dropped with a warning.
+
+    Malformed rows are dropped (not raised) so a single bad document
+    cannot break the banner. Returns the alerts in the same order the
+    evaluator persisted them when possible.
+    """
+    if not alert_ids:
+        return []
+
+    query: Dict[str, Any] = {
+        "query": {
+            "bool": {
+                "filter": [
+                    {"term": {"tenant_id": tenant_id}},
+                    {"terms": {"alert_id": list(alert_ids)}},
+                ]
+            }
+        },
+        "size": max(len(alert_ids), 1),
+    }
+
+    try:
+        resp = await es.search_documents(
+            WEATHER_ALERTS_INDEX, query, query["size"]
+        )
+    except Exception as exc:
+        logger.warning(
+            "fuel_ops.storm_mode_status: failed to hydrate triggering "
+            "alerts for tenant=%s: %s",
+            tenant_id,
+            exc,
+        )
+        return []
+
+    hits = ((resp or {}).get("hits") or {}).get("hits") or []
+    by_id: Dict[str, StormModeTriggeringAlert] = {}
+    for hit in hits:
+        source = hit.get("_source") if isinstance(hit, dict) else None
+        if not isinstance(source, dict):
+            continue
+        if source.get("tenant_id") != tenant_id:
+            logger.warning(
+                "fuel_ops.storm_mode_status: dropping alert row with "
+                "mismatched tenant_id %s (expected %s)",
+                source.get("tenant_id"),
+                tenant_id,
+            )
+            continue
+        try:
+            alert = WeatherAlert.model_validate(source)
+        except ValidationError as exc:
+            logger.warning(
+                "fuel_ops.storm_mode_status: dropping malformed alert "
+                "(alert_id=%s) for tenant=%s: %s",
+                source.get("alert_id"),
+                tenant_id,
+                exc,
+            )
+            continue
+        by_id[alert.alert_id] = StormModeTriggeringAlert(
+            alert_id=alert.alert_id,
+            alert_type=alert.alert_type,
+            severity=alert.severity,
+            headline=alert.headline,
+            description=alert.description,
+            expected_start_at=alert.expected_start_at,
+            expected_end_at=alert.expected_end_at,
+            affected_zip_codes=list(alert.affected_zip_codes),
+            source=alert.source,
+            activation_status=alert.activation_status,
+        )
+
+    # Preserve the evaluator's ordering when possible so the UI renders
+    # the "primary" triggering alert first.
+    ordered: List[StormModeTriggeringAlert] = []
+    for alert_id in alert_ids:
+        hit = by_id.pop(alert_id, None)
+        if hit is not None:
+            ordered.append(hit)
+    # Append any remaining rows (should be empty unless the evaluator
+    # persisted duplicates) so nothing is silently dropped.
+    ordered.extend(by_id.values())
+    return ordered
+
+
+async def _fetch_active_storm_override(
+    es: Any,
+    tenant_id: str,
+    now: datetime,
+) -> Optional[StormModeOverride]:
+    """Return the most-recent non-expired override for ``tenant_id``.
+
+    Mirrors the evaluator's internal lookup but is invoked directly from
+    the REST layer so the status endpoint can report the override even
+    when Redis state lags behind the most-recent override (e.g. the
+    dispatcher just submitted a ``deactivate`` and the next tick has
+    not yet run). Tenant isolation is enforced on both the ES filter
+    and a defensive re-check.
+    """
+
+    query: Dict[str, Any] = {
+        "query": {
+            "bool": {
+                "filter": [{"term": {"tenant_id": tenant_id}}],
+                "should": [
+                    {
+                        "bool": {
+                            "must_not": [{"exists": {"field": "expires_at"}}]
+                        }
+                    },
+                    {"range": {"expires_at": {"gt": now.isoformat()}}},
+                ],
+                "minimum_should_match": 1,
+            }
+        },
+        "sort": [{"created_at": {"order": "desc"}}],
+        "size": 10,
+    }
+
+    try:
+        resp = await es.search_documents(
+            STORM_MODE_OVERRIDES_INDEX, query, 10
+        )
+    except Exception as exc:
+        logger.warning(
+            "fuel_ops.storm_mode_status: failed to fetch overrides for "
+            "tenant=%s: %s",
+            tenant_id,
+            exc,
+        )
+        return None
+
+    hits = ((resp or {}).get("hits") or {}).get("hits") or []
+    for hit in hits:
+        source = hit.get("_source") if isinstance(hit, dict) else None
+        if not isinstance(source, dict):
+            continue
+        if source.get("tenant_id") != tenant_id:
+            continue
+        try:
+            override = StormModeOverride.model_validate(source)
+        except ValidationError as exc:
+            logger.debug(
+                "fuel_ops.storm_mode_status: skipping malformed override "
+                "for tenant=%s: %s",
+                tenant_id,
+                exc,
+            )
+            continue
+        if (
+            override.expires_at is not None
+            and override.expires_at <= now
+        ):
+            continue
+        return override
+    return None
+
+
+def _override_forces_active(action: StormModeOverrideAction) -> Optional[str]:
+    """Return the state an override forces, or ``None`` for ``clear``.
+
+    Mirrors :func:`fuel.services.storm_mode_evaluator._override_forces_state`
+    so the status endpoint computes the same effective state the
+    evaluator would on its next tick — important when an operator just
+    submitted an override and has not yet waited for the 5-minute poll.
+    """
+    if action == "activate":
+        return STORM_MODE_ACTIVE
+    if action in ("deactivate", "snooze"):
+        return STORM_MODE_INACTIVE
+    return None
+
+
+@router.get(
+    "/storm-mode/status",
+    response_model=StormModeStatusResponse,
+)
+async def get_storm_mode_status(
+    request: Request,
+    tenant: TenantContext = Depends(get_tenant_context),
+) -> StormModeStatusResponse:
+    """Return the current Storm_Mode state for the tenant.
+
+    The response carries the effective state (after override precedence),
+    the underlying computed state, any active manual override, the
+    hydrated triggering :class:`WeatherAlert`\\ s, and the activation
+    window. The endpoint is strictly read-only: it calls
+    :meth:`StormModeEvaluator.get_state` to pull the last-persisted
+    evaluator state out of Redis (or the in-memory fallback) and then
+    hydrates auxiliary fields from ``weather_alerts`` and
+    ``storm_mode_overrides`` — it does **not** trigger a new evaluation
+    tick. The 5-minute poll loop owns state transitions.
+
+    When an ``activate`` / ``deactivate`` / ``snooze`` override is in
+    effect at read time, the response reflects the override:
+    ``state`` switches to the override's forced value,
+    ``override_active`` flips to ``true``, and the override details
+    surface in ``override``. The computed (alert-derived) state is
+    always preserved in ``computed_state`` so operators can see "the
+    platform wanted X but the override forced Y" (Req 9.4.3).
+
+    Validates: Requirements 9.1.6, 9.4.3.
+    """
+
+    evaluator = _get_storm_mode_evaluator()
+    es = _get_es()
+    now = datetime.now(timezone.utc)
+
+    persisted = await evaluator.get_state(tenant.tenant_id)
+    computed_state = persisted.state
+
+    override = await _fetch_active_storm_override(es, tenant.tenant_id, now)
+    forced = _override_forces_active(override.action) if override else None
+    effective_state = forced if forced is not None else computed_state
+    override_active = override is not None and forced is not None
+
+    triggering_alerts = await _hydrate_triggering_alerts(
+        es, tenant.tenant_id, list(persisted.triggering_alert_ids)
+    )
+
+    activation_window = StormModeActivationWindow(
+        lookahead_hours=DEFAULT_ACTIVATION_WINDOW_HOURS,
+        severity_threshold=DEFAULT_ACTIVATION_SEVERITY,
+        activated_at=persisted.updated_at
+        if computed_state == STORM_MODE_ACTIVE
+        else None,
+        clears_at=persisted.expected_end_at
+        if computed_state == STORM_MODE_ACTIVE
+        else None,
+    )
+
+    override_payload: Optional[StormModeActiveOverride] = None
+    if override is not None and override_active:
+        override_payload = StormModeActiveOverride(
+            override_id=override.override_id,
+            action=override.action,
+            reason=override.reason,
+            actor_id=override.actor_id,
+            expires_at=override.expires_at,
+        )
+
+    logger.debug(
+        "fuel_ops.storm_mode_status: tenant=%s state=%s computed=%s "
+        "override_active=%s triggering_alerts=%d",
+        tenant.tenant_id,
+        effective_state,
+        computed_state,
+        override_active,
+        len(triggering_alerts),
+    )
+
+    return StormModeStatusResponse(
+        tenant_id=tenant.tenant_id,
+        state=effective_state,
+        computed_state=computed_state,
+        override_active=override_active,
+        override=override_payload,
+        triggering_alerts=triggering_alerts,
+        activation_window=activation_window,
+        updated_at=persisted.updated_at,
+    )
+
+
+# ---------------------------------------------------------------------------
+# POST /api/fuel/storm-mode/override (Req 9.4.2, 9.4.4, Task 10.5)
+# ---------------------------------------------------------------------------
+
+
+#: Roles permitted to submit Storm_Mode overrides (Req 9.4.4). The frontend
+#: Storm_Mode banner (Task 11.7) gates the UI to the same roles, and the
+#: backend re-checks here for defense-in-depth so a caller cannot bypass
+#: the UI guard by hitting the endpoint directly. Any role containing
+#: ``dispatcher`` or ``admin`` (case-insensitive) is accepted so tenant
+#: role lexicons like ``dispatcher_lead`` / ``admin_ops`` still pass
+#: without requiring per-tenant config.
+_STORM_MODE_OVERRIDE_ROLES: frozenset[str] = frozenset({"dispatcher", "admin"})
+
+
+class StormModeOverrideCreateRequest(BaseModel):
+    """Request body for ``POST /api/fuel/storm-mode/override``.
+
+    Mirrors :class:`fuel.storm_mode_models.StormModeOverride` but omits
+    repository-managed fields (``override_id``, ``tenant_id``,
+    ``created_at``, ``updated_at``) so the caller cannot spoof ownership
+    or reuse an existing override id. ``action`` is constrained to the
+    same enum the :class:`StormModeOverride` model enforces.
+
+    The request body intentionally accepts ``expires_at`` as optional:
+    ``clear`` overrides are instantaneous by design (they remove any
+    prior override without changing state), and operators are allowed
+    to submit an indefinite ``activate`` / ``deactivate`` / ``snooze``
+    when they know a storm will outlast any reasonable TTL. The
+    :class:`StormModeEvaluator` tolerates both shapes.
+
+    Validates: Requirement 9.4.2.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: StormModeOverrideAction = Field(
+        ...,
+        description=(
+            "Override action. ``activate`` forces Storm_Mode on, "
+            "``deactivate`` forces it off, ``snooze`` suppresses "
+            "automatic activation until ``expires_at``, ``clear`` "
+            "removes any prior override without changing state."
+        ),
+    )
+    reason: str = Field(
+        ...,
+        min_length=1,
+        description=(
+            "Human-readable justification captured for audit (Req 9.4.4). "
+            "Required so every override is explainable at incident review."
+        ),
+    )
+    actor_id: str = Field(
+        ...,
+        min_length=1,
+        description=(
+            "Identifier of the user or service account issuing the "
+            "override. The router does not overwrite this with the JWT "
+            "``user_id`` so operators can submit on behalf of another "
+            "actor (e.g. a dispatcher submitting for an incident "
+            "commander); the JWT role check still gates who may call "
+            "the endpoint."
+        ),
+    )
+    expires_at: Optional[datetime] = Field(
+        default=None,
+        description=(
+            "Optional UTC datetime at which the override lapses. "
+            "Nullable because ``clear`` overrides are instantaneous and "
+            "because operators may submit an indefinite override when "
+            "the storm duration is unknown."
+        ),
+    )
+
+
+def _ensure_storm_mode_override_role(tenant: TenantContext) -> None:
+    """Enforce the Req 9.4.4 role gate on Storm_Mode override submissions.
+
+    Accepts any tenant role whose lowered form contains ``dispatcher`` or
+    ``admin`` so tenant role lexicons like ``dispatcher_lead`` /
+    ``admin_ops`` still pass without per-tenant config. Raises HTTP 403
+    with a structured ``forbidden_role`` error payload when the caller
+    has neither. We deliberately do not echo the caller's role list in
+    the response — that would leak role lexicon details to an attacker
+    probing the endpoint.
+    """
+
+    for raw_role in tenant.roles or ():
+        if not isinstance(raw_role, str):
+            continue
+        normalized = raw_role.strip().lower()
+        if not normalized:
+            continue
+        if any(allowed in normalized for allowed in _STORM_MODE_OVERRIDE_ROLES):
+            return
+
+    logger.warning(
+        "fuel_ops.storm_mode_override: forbidden role tenant=%s user=%s",
+        tenant.tenant_id,
+        tenant.user_id,
+    )
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={
+            "error_code": "forbidden_role",
+            "message": (
+                "Storm_Mode overrides are restricted to dispatcher or "
+                "admin roles."
+            ),
+        },
+    )
+
+
+@router.post(
+    "/storm-mode/override",
+    response_model=StormModeOverride,
+    status_code=status.HTTP_201_CREATED,
+)
+async def submit_storm_mode_override(
+    body: StormModeOverrideCreateRequest,
+    request: Request,
+    tenant: TenantContext = Depends(get_tenant_context),
+) -> StormModeOverride:
+    """Persist a dispatcher or admin Storm_Mode override.
+
+    Flow:
+
+        1. Enforce the role gate (Req 9.4.4) — only ``dispatcher`` or
+           ``admin`` roles may submit. Other callers receive HTTP 403
+           with ``forbidden_role``.
+        2. Validate the body through :class:`StormModeOverride` itself
+           so the same invariants enforced on evaluator-side reads
+           (non-blank reason / actor, enum action) are enforced on the
+           write path. The router stamps ``tenant_id`` from the JWT
+           context and mints an ``override_id`` (``smo_<uuid4>``) so
+           the caller cannot spoof ownership or reuse an existing id.
+        3. Persist to the ``storm_mode_overrides`` ES index via
+           :meth:`es.index_document`. Bootstrap indexing is idempotent
+           — the mapping is ``dynamic: strict`` so any rogue field the
+           request model misses surfaces as an ES validation error
+           which we map back to 422.
+        4. Return the persisted :class:`StormModeOverride`. The next
+           :class:`StormModeEvaluator` tick will pick the override up
+           from ES automatically; the status endpoint (Task 10.4) also
+           reads overrides directly so the dispatcher banner reflects
+           the submission within the 5-minute poll interval.
+
+    The :class:`StormModeEvaluator` is intentionally **not** nudged
+    here — the endpoint's job is durable persistence, and coupling it
+    to the evaluator's tick scheduler would make the write path depend
+    on a background service that may be down. The evaluator polls at a
+    5-minute cadence; the status endpoint reads overrides out of band
+    so the banner reflects the override immediately.
+
+    Error modes:
+
+        * 403 ``forbidden_role`` — caller lacks dispatcher/admin role.
+        * 422 ``validation_error`` — body failed Pydantic validation
+          (blank reason, unknown action, etc.).
+        * 503 — persistence layer unreachable. We surface ``str(exc)``
+          in the detail so the operator can diagnose upstream issues.
+
+    Validates: Requirements 9.4.2, 9.4.4.
+    """
+
+    _ensure_storm_mode_override_role(tenant)
+
+    es = _get_es()
+    now = datetime.now(timezone.utc)
+    override_id = f"smo_{uuid4().hex}"
+
+    try:
+        override = StormModeOverride(
+            override_id=override_id,
+            tenant_id=tenant.tenant_id,
+            action=body.action,
+            reason=body.reason,
+            actor_id=body.actor_id,
+            expires_at=body.expires_at,
+            created_at=now,
+            updated_at=now,
+        )
+    except (ValidationError, ValueError, TypeError) as exc:
+        raise _translate_validation_error(exc)
+
+    try:
+        await es.index_document(
+            STORM_MODE_OVERRIDES_INDEX,
+            override.override_id,
+            override.model_dump(mode="json"),
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.exception(
+            "fuel_ops.storm_mode_override: persistence failed tenant=%s "
+            "override=%s action=%s",
+            tenant.tenant_id,
+            override.override_id,
+            override.action,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "error_code": "storm_mode_override_persistence_failed",
+                "message": str(exc),
+            },
+        )
+
+    logger.info(
+        "fuel_ops.storm_mode_override: tenant=%s override=%s action=%s "
+        "actor=%s expires=%s",
+        tenant.tenant_id,
+        override.override_id,
+        override.action,
+        override.actor_id,
+        override.expires_at.isoformat() if override.expires_at else "never",
+    )
+
+    return override
+
+
+# ---------------------------------------------------------------------------
+# POST /api/fuel/storm-mode/road-restrictions (Req 9.3.3, 9.3.5, Task 10.8)
+# GET  /api/fuel/storm-mode/road-restrictions (Req 9.3.5, Task 10.8)
+# ---------------------------------------------------------------------------
+
+
+class StormRoadRestrictionCreateRequest(BaseModel):
+    """Request body for ``POST /api/fuel/storm-mode/road-restrictions``.
+
+    Mirrors :class:`fuel.storm_mode_models.StormRoadRestriction` but omits
+    repository-managed fields (``restriction_id``, ``tenant_id``,
+    ``created_at``, ``updated_at``) so callers cannot spoof ownership or
+    reuse an existing restriction id. Validation is delegated to the
+    :class:`StormRoadRestriction` model itself so the polygon geometry,
+    severity enum, and effective-window invariants are enforced on both
+    the upload path and any subsequent read.
+
+    Validates: Requirement 9.3.3.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    polygon: Dict[str, Any] = Field(
+        ...,
+        description=(
+            "GeoJSON ``Polygon`` or ``MultiPolygon`` geometry. "
+            "Coordinates are WGS84 (``[lon, lat]``) and rings must be "
+            "closed per RFC 7946. Validated for coordinate bounds and "
+            "closure by the :class:`StormRoadRestriction` model."
+        ),
+    )
+    effective_from: datetime = Field(
+        ...,
+        description=(
+            "UTC datetime at which the restriction begins to apply. "
+            "Route segments whose ``eta`` precedes this value are not "
+            "affected."
+        ),
+    )
+    effective_to: Optional[datetime] = Field(
+        default=None,
+        description=(
+            "Optional UTC datetime at which the restriction lapses. "
+            "``None`` for open-ended closures."
+        ),
+    )
+    source: str = Field(
+        ...,
+        min_length=1,
+        description=(
+            "Free-form provenance label (``manual``, ``dot_feed``, "
+            "``ops_team``, etc.). Surfaced on the dispatcher map so "
+            "operators can tell DOT feeds from ad-hoc uploads."
+        ),
+    )
+    severity: WeatherAlertSeverity = Field(
+        ...,
+        description=(
+            "One of minor/moderate/severe/extreme. The "
+            "Route_Planning_Agent applies the restriction only when "
+            "severity is ``severe`` or ``extreme`` (Req 9.3.4)."
+        ),
+    )
+    reason: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional human-readable justification displayed on the "
+            "dispatcher UI alongside the polygon."
+        ),
+    )
+
+
+class StormRoadRestrictionListResponse(BaseModel):
+    """Envelope for ``GET /api/fuel/storm-mode/road-restrictions``.
+
+    Matches the ``{items, total}`` shape used across other list endpoints
+    in this module so the dispatcher UI's pagination / map-render helpers
+    can consume it uniformly.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: List[StormRoadRestriction]
+    total: int
+
+
+# Maximum number of active restrictions returned by the GET endpoint in a
+# single call. Tenants rarely carry more than a handful of concurrent
+# road-closure polygons (DOT feeds rotate with the storm), so a hard cap
+# here protects the dispatcher UI from runaway payloads without needing
+# pagination. Above the cap the response is truncated and the caller can
+# narrow with filters in a future iteration.
+_STORM_ROAD_RESTRICTION_LIST_CEILING: int = 500
+
+
+@router.post(
+    "/storm-mode/road-restrictions",
+    response_model=StormRoadRestriction,
+    status_code=status.HTTP_201_CREATED,
+)
+async def upload_storm_road_restriction(
+    body: StormRoadRestrictionCreateRequest,
+    request: Request,
+    tenant: TenantContext = Depends(get_tenant_context),
+) -> StormRoadRestriction:
+    """Persist a tenant-uploaded Storm_Mode road-restriction polygon.
+
+    Flow:
+
+        1. Enforce the Req 9.4.4 role gate — only ``dispatcher`` or
+           ``admin`` roles may upload restrictions. Other callers
+           receive HTTP 403 with ``forbidden_role``. The same role
+           lexicon the Storm_Mode override endpoint uses is applied
+           here so tenants don't need a parallel authorization
+           surface.
+        2. Validate the body through :class:`StormRoadRestriction`
+           itself so the same invariants enforced on agent-side reads
+           (polygon geometry, severity enum, effective-window order)
+           are enforced on the write path. The router stamps
+           ``tenant_id`` from the JWT context and mints a
+           ``restriction_id`` (``srr_<uuid4>``) so the caller cannot
+           spoof ownership or reuse an existing id.
+        3. Persist to the ``storm_road_restrictions`` ES index via
+           :meth:`es.index_document`. The mapping is ``dynamic:
+           strict`` so any field the request model misses surfaces as
+           an ES validation error which we map back to 422.
+        4. Return the persisted :class:`StormRoadRestriction`. The
+           :class:`RoutePlanningAgent` will pick up new restrictions
+           on its next plan build; the GET endpoint below reads the
+           index directly so the dispatcher map reflects the upload
+           immediately.
+
+    Error modes:
+
+        * 403 ``forbidden_role`` — caller lacks dispatcher/admin role.
+        * 422 ``validation_error`` — body failed Pydantic validation
+          (malformed polygon, unknown severity, closed ring missing,
+          etc.).
+        * 503 — persistence layer unreachable. We surface ``str(exc)``
+          in the detail so the operator can diagnose upstream issues.
+
+    Validates: Requirements 9.3.3, 9.3.5.
+    """
+
+    _ensure_storm_mode_override_role(tenant)
+
+    es = _get_es()
+    now = datetime.now(timezone.utc)
+    restriction_id = f"srr_{uuid4().hex}"
+
+    try:
+        restriction = StormRoadRestriction(
+            restriction_id=restriction_id,
+            tenant_id=tenant.tenant_id,
+            polygon=body.polygon,
+            effective_from=body.effective_from,
+            effective_to=body.effective_to,
+            source=body.source,
+            severity=body.severity,
+            reason=body.reason,
+            created_at=now,
+            updated_at=now,
+        )
+    except (ValidationError, ValueError, TypeError) as exc:
+        raise _translate_validation_error(exc)
+
+    try:
+        await es.index_document(
+            STORM_ROAD_RESTRICTIONS_INDEX,
+            restriction.restriction_id,
+            restriction.model_dump(mode="json"),
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.exception(
+            "fuel_ops.storm_road_restriction: persistence failed tenant=%s "
+            "restriction=%s severity=%s source=%s",
+            tenant.tenant_id,
+            restriction.restriction_id,
+            restriction.severity,
+            restriction.source,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "error_code": "storm_road_restriction_persistence_failed",
+                "message": str(exc),
+            },
+        )
+
+    logger.info(
+        "fuel_ops.storm_road_restriction: tenant=%s restriction=%s "
+        "severity=%s source=%s effective_from=%s effective_to=%s",
+        tenant.tenant_id,
+        restriction.restriction_id,
+        restriction.severity,
+        restriction.source,
+        restriction.effective_from.isoformat(),
+        restriction.effective_to.isoformat()
+        if restriction.effective_to
+        else "open",
+    )
+
+    return restriction
+
+
+@router.get(
+    "/storm-mode/road-restrictions",
+    response_model=StormRoadRestrictionListResponse,
+)
+async def list_storm_road_restrictions(
+    request: Request,
+    tenant: TenantContext = Depends(get_tenant_context),
+    severity: Optional[WeatherAlertSeverity] = Query(
+        default=None,
+        description=(
+            "Filter the returned restrictions to a specific severity "
+            "bucket (minor/moderate/severe/extreme). When omitted all "
+            "active severities are returned so the dispatcher map can "
+            "render them with distinct colours."
+        ),
+    ),
+    include_expired: bool = Query(
+        default=False,
+        description=(
+            "When ``true``, include restrictions whose ``effective_to`` "
+            "is in the past. Defaults to ``false`` so the dispatcher "
+            "map only shows currently-applicable closures. The "
+            "Route_Planning_Agent uses its own per-plan effective-window "
+            "filter so this flag does not affect routing."
+        ),
+    ),
+) -> StormRoadRestrictionListResponse:
+    """Return active Storm_Mode road-restriction polygons for the tenant.
+
+    The dispatcher UI's map layer calls this endpoint to render every
+    active polygon with its severity-coded colour, source label, and
+    optional reason. By default only currently-applicable restrictions
+    (``effective_from <= now`` and either ``effective_to`` is null or
+    ``effective_to >= now``) are returned; pass ``include_expired=true``
+    to include restrictions whose ``effective_to`` has passed for
+    historical review.
+
+    Tenant scoping is enforced both by the ES filter (``term`` on
+    ``tenant_id``) and by a defensive per-row re-check that drops any
+    document whose ``tenant_id`` does not match the caller.
+
+    Error modes:
+
+        * 503 — ES unreachable. We surface ``str(exc)`` in the detail
+          so the operator can diagnose upstream issues.
+
+    Validates: Requirement 9.3.5.
+    """
+
+    es = _get_es()
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+
+    filters: List[Dict[str, Any]] = [
+        {"term": {"tenant_id": tenant.tenant_id}},
+    ]
+    if severity is not None:
+        filters.append({"term": {"severity": severity}})
+    if not include_expired:
+        # Only surface restrictions whose ``effective_from`` has arrived
+        # and whose ``effective_to`` (when set) has not yet passed.
+        filters.append({"range": {"effective_from": {"lte": now_iso}}})
+        filters.append(
+            {
+                "bool": {
+                    "should": [
+                        {
+                            "bool": {
+                                "must_not": {
+                                    "exists": {"field": "effective_to"}
+                                }
+                            }
+                        },
+                        {"range": {"effective_to": {"gte": now_iso}}},
+                    ],
+                    "minimum_should_match": 1,
+                }
+            }
+        )
+
+    query: Dict[str, Any] = {
+        "query": {"bool": {"filter": filters}},
+        "sort": [{"effective_from": {"order": "desc"}}],
+    }
+
+    try:
+        resp = await es.search_documents(
+            STORM_ROAD_RESTRICTIONS_INDEX,
+            query,
+            _STORM_ROAD_RESTRICTION_LIST_CEILING,
+        )
+    except Exception as exc:
+        logger.exception(
+            "fuel_ops.storm_road_restriction: search failed tenant=%s: %s",
+            tenant.tenant_id,
+            exc,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "error_code": "storm_road_restriction_search_failed",
+                "message": str(exc),
+            },
+        )
+
+    hits = (resp or {}).get("hits", {}).get("hits", []) or []
+    items: List[StormRoadRestriction] = []
+    for hit in hits:
+        source = hit.get("_source") or {}
+        if source.get("tenant_id") != tenant.tenant_id:
+            logger.warning(
+                "fuel_ops.storm_road_restriction: dropping row with "
+                "mismatched tenant_id %s (expected %s)",
+                source.get("tenant_id"),
+                tenant.tenant_id,
+            )
+            continue
+        try:
+            items.append(StormRoadRestriction(**source))
+        except ValidationError as exc:
+            logger.warning(
+                "fuel_ops.storm_road_restriction: dropping malformed row "
+                "(restriction_id=%s) for tenant=%s: %s",
+                source.get("restriction_id"),
+                tenant.tenant_id,
+                exc,
+            )
+
+    logger.debug(
+        "fuel_ops.storm_road_restriction: tenant=%s returned %d "
+        "restrictions (severity=%s include_expired=%s)",
+        tenant.tenant_id,
+        len(items),
+        severity or "any",
+        include_expired,
+    )
+
+    return StormRoadRestrictionListResponse(items=items, total=len(items))
