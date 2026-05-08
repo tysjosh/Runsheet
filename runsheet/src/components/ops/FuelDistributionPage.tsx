@@ -53,9 +53,13 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ExecutionUpdateData } from "../../hooks/usePlanExecutionSocket";
 import { usePlanExecutionSocket } from "../../hooks/usePlanExecutionSocket";
 import type {
+  CombinableGroup,
+  CombinableGroupListResponse,
   CompartmentAssignment,
   CostBreakdown,
   CostConfig,
+  DeliveryDestination,
+  DeliveryDestinationType,
   EmergencyStopRequest,
   EmergencyStopResponse,
   Forecast,
@@ -63,6 +67,8 @@ import type {
   PlanDetail,
   PlanListItem,
   PlanOutcome,
+  PriorityClusterItem,
+  PriorityClustersResponse,
   PriorityEntry,
   PriorityListEntry,
   ReplanDiff,
@@ -83,7 +89,10 @@ import {
   getPriorityLists,
   getReplanDiff,
   insertEmergencyStop,
+  listCombinableGroups,
+  listDeliveryDestinations,
   listPlans,
+  listPriorityClusters,
   rejectPlan,
   replan,
   updateCostConfig,
@@ -100,6 +109,7 @@ const TABS = [
   { id: "plans", label: "Plans", icon: Truck },
   { id: "forecasts", label: "Forecasts", icon: Droplets },
   { id: "priorities", label: "Priorities", icon: MapPin },
+  { id: "clusters", label: "Clusters", icon: Layers },
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"];
@@ -1000,6 +1010,41 @@ function EmergencyStopModal({
     priority_reason: "",
   });
 
+  // Destination picker state (Req 6.2.4). Fetches once on mount and
+  // re-fetches whenever ``destinationType`` flips. ``null`` items means
+  // "still loading"; ``fetchFailed`` drops to a free-text fallback with
+  // a warning banner so dispatchers are never blocked by a transient
+  // destinations-list failure.
+  const [destinations, setDestinations] = useState<
+    DeliveryDestination[] | null
+  >(null);
+  const [destinationsLoading, setDestinationsLoading] = useState(false);
+  const [destinationsFailed, setDestinationsFailed] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    const apiType: DeliveryDestinationType =
+      destinationType === "station" ? "retail_station" : "customer_tank";
+    setDestinations(null);
+    setDestinationsLoading(true);
+    setDestinationsFailed(false);
+    listDeliveryDestinations({ destination_type: apiType })
+      .then((res) => {
+        if (!cancelled) setDestinations(res.items);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.error("Failed to load delivery destinations", err);
+        setDestinationsFailed(true);
+      })
+      .finally(() => {
+        if (!cancelled) setDestinationsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [destinationType]);
+
   const inputClass =
     "w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white";
 
@@ -1116,37 +1161,111 @@ function EmergencyStopModal({
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">
+            <label
+              htmlFor="emergency-stop-destination"
+              className="block text-xs font-medium text-gray-600 mb-1"
+            >
               {destinationType === "station"
                 ? "Station ID"
                 : "Customer Tank ID"}
             </label>
-            <input
-              type="text"
-              value={
-                destinationType === "station"
-                  ? (form.station_id ?? "")
-                  : (form.customer_tank_id ?? "")
-              }
-              onChange={(e) =>
-                setForm((prev) => ({
-                  ...prev,
-                  station_id:
+            {destinationsFailed ? (
+              <>
+                <div
+                  className="mb-1 flex items-start gap-2 px-2 py-1.5 text-[11px] text-yellow-800 bg-yellow-50 border border-yellow-200 rounded"
+                  role="status"
+                >
+                  <AlertTriangle
+                    className="w-3.5 h-3.5 mt-0.5 flex-shrink-0"
+                    aria-hidden="true"
+                  />
+                  <span>Could not load destinations; enter ID manually.</span>
+                </div>
+                <input
+                  id="emergency-stop-destination"
+                  type="text"
+                  value={
                     destinationType === "station"
-                      ? e.target.value
-                      : prev.station_id,
-                  customer_tank_id:
-                    destinationType === "customer_tank"
-                      ? e.target.value
-                      : prev.customer_tank_id,
-                }))
-              }
-              placeholder={
-                destinationType === "station" ? "e.g. STN-042" : "e.g. CT-0193"
-              }
-              className={inputClass}
-              required
-            />
+                      ? (form.station_id ?? "")
+                      : (form.customer_tank_id ?? "")
+                  }
+                  onChange={(e) =>
+                    setForm((prev) => ({
+                      ...prev,
+                      station_id:
+                        destinationType === "station"
+                          ? e.target.value
+                          : prev.station_id,
+                      customer_tank_id:
+                        destinationType === "customer_tank"
+                          ? e.target.value
+                          : prev.customer_tank_id,
+                    }))
+                  }
+                  placeholder={
+                    destinationType === "station"
+                      ? "e.g. STN-042"
+                      : "e.g. CT-0193"
+                  }
+                  className={inputClass}
+                  required
+                />
+              </>
+            ) : destinationsLoading || destinations === null ? (
+              <select
+                id="emergency-stop-destination"
+                aria-label="Destination (loading)"
+                className={inputClass}
+                value=""
+                disabled
+              >
+                <option value="">Loading destinations…</option>
+              </select>
+            ) : (
+              <select
+                id="emergency-stop-destination"
+                className={inputClass}
+                data-testid="emergency-stop-destination-select"
+                value={
+                  destinationType === "station"
+                    ? (form.station_id ?? "")
+                    : (form.customer_tank_id ?? "")
+                }
+                onChange={(e) =>
+                  setForm((prev) => ({
+                    ...prev,
+                    station_id:
+                      destinationType === "station"
+                        ? e.target.value
+                        : prev.station_id,
+                    customer_tank_id:
+                      destinationType === "customer_tank"
+                        ? e.target.value
+                        : prev.customer_tank_id,
+                  }))
+                }
+                required
+              >
+                <option value="">
+                  {destinations.length === 0
+                    ? `No ${
+                        destinationType === "station"
+                          ? "stations"
+                          : "customer tanks"
+                      } available`
+                    : `Select a ${
+                        destinationType === "station"
+                          ? "station"
+                          : "customer tank"
+                      }…`}
+                </option>
+                {destinations.map((d) => (
+                  <option key={d.destination_id} value={d.destination_id}>
+                    {d.name?.trim() ? d.name : d.destination_id}
+                  </option>
+                ))}
+              </select>
+            )}
           </div>
 
           <div className="grid grid-cols-2 gap-3">
@@ -2875,6 +2994,560 @@ function PrioritiesTab() {
   );
 }
 
+// ─── Clusters Tab (Phase 2 Batch B) ──────────────────────────────────────────
+//
+// Surfaces two complementary groupings over the latest priority run:
+//
+//   * Priority clusters (DBSCAN) — geographic density clustering from
+//     ``/api/fuel/mvp/priority-clusters`` (Req 3.4.3).
+//   * Combinable groups (Union-Find) — connected components of the
+//     pairwise-combinable graph from ``/api/fuel/mvp/combinable-groups``
+//     (Req 3.2.4).
+//
+// Tenant stamping: both helpers accept tenant context from the JWT
+// server-side, but we also pass ``tenant_id: TENANT_ID`` on the query
+// so the test harness can assert the shape and any dev-only proxies
+// that require an explicit tenant get one.
+
+interface PriorityClustersPanelProps {
+  addError: (message: string) => void;
+}
+
+function PriorityClustersPanel({ addError }: PriorityClustersPanelProps) {
+  const [epsMiles, setEpsMiles] = useState(3);
+  const [minSamples, setMinSamples] = useState(2);
+  const [data, setData] = useState<PriorityClustersResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  const loadClusters = useCallback(
+    async (eps: number, samples: number) => {
+      setLoading(true);
+      setError("");
+      try {
+        const result = await listPriorityClusters({
+          tenant_id: TENANT_ID,
+          eps_miles: eps,
+          min_samples: samples,
+        } as Parameters<typeof listPriorityClusters>[0]);
+        setData(result);
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : "Failed to load clusters";
+        setError(message);
+        addError(message);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [addError],
+  );
+
+  // Initial load with default DBSCAN parameters (eps=3 miles,
+  // min_samples=2 — matches the backend's tenant-configurable defaults
+  // per Req 3.4.1).
+  useEffect(() => {
+    loadClusters(3, 2);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    loadClusters(epsMiles, minSamples);
+  };
+
+  const inputClass =
+    "w-full px-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white";
+
+  const generatedAt = (data as { generated_at?: string } | null)?.generated_at;
+
+  return (
+    <div
+      className="border border-gray-100 rounded-lg p-4 space-y-3"
+      data-testid="priority-clusters-panel"
+    >
+      <div className="flex items-center gap-2">
+        <Layers className="w-4 h-4 text-gray-500" />
+        <h4 className="text-sm font-medium text-[#232323]">
+          Priority Clusters (DBSCAN)
+        </h4>
+      </div>
+
+      <form
+        onSubmit={handleSubmit}
+        className="grid grid-cols-1 sm:grid-cols-[1fr_1fr_auto] items-end gap-3"
+      >
+        <div>
+          <label
+            htmlFor="priority-clusters-eps"
+            className="block text-[11px] font-medium text-gray-600 mb-1"
+          >
+            eps_miles
+          </label>
+          <input
+            id="priority-clusters-eps"
+            type="number"
+            min="0.5"
+            step="0.5"
+            value={epsMiles}
+            onChange={(e) => setEpsMiles(parseFloat(e.target.value) || 0)}
+            className={inputClass}
+          />
+        </div>
+        <div>
+          <label
+            htmlFor="priority-clusters-min-samples"
+            className="block text-[11px] font-medium text-gray-600 mb-1"
+          >
+            min_samples
+          </label>
+          <input
+            id="priority-clusters-min-samples"
+            type="number"
+            min="1"
+            step="1"
+            value={minSamples}
+            onChange={(e) =>
+              setMinSamples(Math.max(1, parseInt(e.target.value, 10) || 1))
+            }
+            className={inputClass}
+          />
+        </div>
+        <button
+          type="submit"
+          disabled={loading}
+          className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white rounded-lg disabled:opacity-50"
+          style={{ backgroundColor: "#232323" }}
+        >
+          {loading ? (
+            <Loader2 className="w-4 h-4 animate-spin" />
+          ) : (
+            <RefreshCw className="w-4 h-4" />
+          )}
+          Re-cluster
+        </button>
+      </form>
+
+      {data && (
+        <div className="flex flex-wrap items-center gap-2 text-[11px]">
+          <span className="inline-flex items-center px-2 py-0.5 rounded bg-blue-50 text-blue-700 font-medium">
+            clusters: {data.items.length}
+          </span>
+          <span className="inline-flex items-center px-2 py-0.5 rounded bg-gray-100 text-gray-700 font-medium">
+            eps_miles: {data.eps_miles}
+          </span>
+          <span className="inline-flex items-center px-2 py-0.5 rounded bg-gray-100 text-gray-700 font-medium">
+            min_samples: {data.min_samples}
+          </span>
+          <span className="inline-flex items-center px-2 py-0.5 rounded bg-gray-100 text-gray-500 font-medium">
+            generated_at:{" "}
+            {generatedAt ? new Date(generatedAt).toLocaleString() : "—"}
+          </span>
+        </div>
+      )}
+
+      {error && (
+        <p className="text-sm text-red-600 bg-red-50 px-3 py-2 rounded-lg">
+          {error}
+        </p>
+      )}
+
+      {loading ? (
+        <div className="flex items-center justify-center py-10">
+          <Loader2 className="w-5 h-5 text-gray-400 animate-spin" />
+          <span className="ml-2 text-xs text-gray-500">Loading…</span>
+        </div>
+      ) : !data || data.items.length === 0 ? (
+        <div className="text-center py-8 text-xs text-gray-400">No results</div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table
+            className="w-full text-xs"
+            aria-label="Priority clusters (DBSCAN)"
+          >
+            <thead className="bg-gray-50">
+              <tr>
+                <th className="px-3 py-2 text-left text-gray-600 font-medium">
+                  Cluster
+                </th>
+                <th className="px-3 py-2 text-right text-gray-600 font-medium">
+                  Members
+                </th>
+                <th className="px-3 py-2 text-left text-gray-600 font-medium">
+                  Highest Priority
+                </th>
+                <th className="px-3 py-2 text-left text-gray-600 font-medium">
+                  Centroid
+                </th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100">
+              {data.items.map((cluster: PriorityClusterItem) => {
+                const bucket = cluster.highest_priority_bucket ?? null;
+                const urgencyStyle = bucket
+                  ? (URGENCY_CONFIG[bucket] ?? URGENCY_CONFIG.low)
+                  : null;
+                return (
+                  <tr key={cluster.cluster_id} className="hover:bg-gray-50">
+                    <td className="px-3 py-2 font-medium text-[#232323]">
+                      {cluster.cluster_id}
+                    </td>
+                    <td className="px-3 py-2 text-right text-gray-700">
+                      {cluster.member_count}
+                    </td>
+                    <td className="px-3 py-2">
+                      {bucket && urgencyStyle ? (
+                        <span
+                          className={`inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium ${urgencyStyle.bg} ${urgencyStyle.color}`}
+                        >
+                          {bucket}
+                        </span>
+                      ) : (
+                        <span className="text-gray-400">—</span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2 text-gray-600">
+                      {cluster.centroid.lat.toFixed(5)},
+                      {cluster.centroid.lon.toFixed(5)}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+interface CombinableGroupsPanelProps {
+  addError: (message: string) => void;
+}
+
+function CombinableGroupsPanel({ addError }: CombinableGroupsPanelProps) {
+  const [runId, setRunId] = useState("");
+  const [fuelGrade, setFuelGrade] = useState("");
+  const [minMembers, setMinMembers] = useState(2);
+  const [page, setPage] = useState(1);
+  const [data, setData] = useState<CombinableGroupListResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  const loadGroups = useCallback(
+    async (
+      filters: {
+        run_id?: string;
+        fuel_grade?: string;
+        min_members: number;
+        page: number;
+      },
+      signalledByUser: boolean,
+    ) => {
+      setLoading(true);
+      setError("");
+      try {
+        const payload = {
+          tenant_id: TENANT_ID,
+          ...(filters.run_id ? { run_id: filters.run_id } : {}),
+          ...(filters.fuel_grade ? { fuel_grade: filters.fuel_grade } : {}),
+          min_members: filters.min_members,
+          page: filters.page,
+          size: PAGE_SIZE,
+        };
+        const result = await listCombinableGroups(
+          payload as Parameters<typeof listCombinableGroups>[0],
+        );
+        setData(result);
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : "Failed to load groups";
+        setError(message);
+        if (signalledByUser) {
+          addError(message);
+        }
+      } finally {
+        setLoading(false);
+      }
+    },
+    [addError],
+  );
+
+  // Initial load with default filters (min_members=2, page=1).
+  useEffect(() => {
+    loadGroups({ min_members: 2, page: 1 }, false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    setPage(1);
+    loadGroups(
+      {
+        run_id: runId.trim() || undefined,
+        fuel_grade: fuelGrade.trim() || undefined,
+        min_members: minMembers,
+        page: 1,
+      },
+      true,
+    );
+  };
+
+  const handlePageChange = (nextPage: number) => {
+    setPage(nextPage);
+    loadGroups(
+      {
+        run_id: runId.trim() || undefined,
+        fuel_grade: fuelGrade.trim() || undefined,
+        min_members: minMembers,
+        page: nextPage,
+      },
+      true,
+    );
+  };
+
+  const inputClass =
+    "w-full px-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white";
+
+  const totalPages = data
+    ? Math.max(1, Math.ceil(data.total / Math.max(1, data.page_size)))
+    : 1;
+
+  return (
+    <div
+      className="border border-gray-100 rounded-lg p-4 space-y-3"
+      data-testid="combinable-groups-panel"
+    >
+      <div className="flex items-center gap-2">
+        <GitBranch className="w-4 h-4 text-gray-500" />
+        <h4 className="text-sm font-medium text-[#232323]">
+          Combinable Groups (Union-Find)
+        </h4>
+      </div>
+
+      <form
+        onSubmit={handleSubmit}
+        className="grid grid-cols-1 sm:grid-cols-[1fr_1fr_1fr_auto] items-end gap-3"
+      >
+        <div>
+          <label
+            htmlFor="combinable-groups-run-id"
+            className="block text-[11px] font-medium text-gray-600 mb-1"
+          >
+            run_id
+          </label>
+          <input
+            id="combinable-groups-run-id"
+            type="text"
+            value={runId}
+            onChange={(e) => setRunId(e.target.value)}
+            placeholder="latest run"
+            className={inputClass}
+          />
+        </div>
+        <div>
+          <label
+            htmlFor="combinable-groups-fuel-grade"
+            className="block text-[11px] font-medium text-gray-600 mb-1"
+          >
+            fuel_grade
+          </label>
+          <input
+            id="combinable-groups-fuel-grade"
+            type="text"
+            value={fuelGrade}
+            onChange={(e) => setFuelGrade(e.target.value)}
+            placeholder="DIESEL_2 / PMS / ..."
+            className={inputClass}
+          />
+        </div>
+        <div>
+          <label
+            htmlFor="combinable-groups-min-members"
+            className="block text-[11px] font-medium text-gray-600 mb-1"
+          >
+            min_members
+          </label>
+          <input
+            id="combinable-groups-min-members"
+            type="number"
+            min="1"
+            step="1"
+            value={minMembers}
+            onChange={(e) =>
+              setMinMembers(Math.max(1, parseInt(e.target.value, 10) || 1))
+            }
+            className={inputClass}
+          />
+        </div>
+        <button
+          type="submit"
+          disabled={loading}
+          className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white rounded-lg disabled:opacity-50"
+          style={{ backgroundColor: "#232323" }}
+        >
+          {loading ? (
+            <Loader2 className="w-4 h-4 animate-spin" />
+          ) : (
+            <RefreshCw className="w-4 h-4" />
+          )}
+          Apply
+        </button>
+      </form>
+
+      {error && (
+        <p className="text-sm text-red-600 bg-red-50 px-3 py-2 rounded-lg">
+          {error}
+        </p>
+      )}
+
+      {loading ? (
+        <div className="flex items-center justify-center py-10">
+          <Loader2 className="w-5 h-5 text-gray-400 animate-spin" />
+          <span className="ml-2 text-xs text-gray-500">Loading…</span>
+        </div>
+      ) : !data || data.items.length === 0 ? (
+        <div className="text-center py-8 text-xs text-gray-400">No results</div>
+      ) : (
+        <div className="space-y-3">
+          {data.items.map((group: CombinableGroup) => (
+            <div
+              key={group.group_id}
+              className="border border-gray-100 rounded-lg p-3"
+              data-testid={`combinable-group-${group.group_id}`}
+            >
+              <div className="flex items-start justify-between gap-3 mb-2">
+                <div className="flex flex-wrap items-center gap-2 min-w-0">
+                  <span className="text-sm font-medium text-[#232323] truncate">
+                    {group.group_id}
+                  </span>
+                  {group.fuel_grades.map((grade) => (
+                    <span
+                      key={grade}
+                      className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium bg-gray-100 text-gray-700"
+                    >
+                      {grade}
+                    </span>
+                  ))}
+                </div>
+                <span className="inline-flex items-center gap-1 text-sm font-medium text-[#232323] whitespace-nowrap">
+                  <DollarSign className="w-3.5 h-3.5 text-gray-400" />
+                  <Droplets className="w-3.5 h-3.5 text-gray-400" />
+                  {group.estimated_combined_gallons.toLocaleString(undefined, {
+                    maximumFractionDigits: 0,
+                  })}{" "}
+                  gal
+                </span>
+              </div>
+              <p className="text-[11px] text-gray-500 mb-2">
+                Centroid: {group.centroid.lat.toFixed(5)},
+                {group.centroid.lon.toFixed(5)}
+              </p>
+              <ul className="divide-y divide-gray-50 border border-gray-50 rounded">
+                {group.members.map((member, idx) => {
+                  const bucket =
+                    (member as { priority_bucket?: string | null })
+                      .priority_bucket ?? null;
+                  const urgencyStyle = bucket
+                    ? (URGENCY_CONFIG[bucket] ?? URGENCY_CONFIG.low)
+                    : null;
+                  const priorityScore = (
+                    member as { priority_score?: number | null }
+                  ).priority_score;
+                  return (
+                    <li
+                      key={`${group.group_id}-${idx}-${member.destination_id}`}
+                      className="flex items-center justify-between px-2 py-1.5 text-[11px]"
+                    >
+                      <span className="flex items-center gap-2 min-w-0">
+                        <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-gray-50 text-gray-600">
+                          {member.destination_type}
+                        </span>
+                        <span className="font-medium text-[#232323] truncate">
+                          {member.destination_id}
+                        </span>
+                      </span>
+                      <span className="flex items-center gap-2 shrink-0">
+                        <span className="text-gray-600">
+                          score:{" "}
+                          {priorityScore != null
+                            ? priorityScore.toFixed(2)
+                            : "—"}
+                        </span>
+                        {bucket && urgencyStyle ? (
+                          <span
+                            className={`inline-flex items-center px-1.5 py-0.5 rounded font-medium ${urgencyStyle.bg} ${urgencyStyle.color}`}
+                          >
+                            {bucket}
+                          </span>
+                        ) : (
+                          <span className="text-gray-400">—</span>
+                        )}
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          ))}
+
+          {(data.has_next || page > 1) && (
+            <div className="flex items-center justify-between px-2 py-2">
+              <span className="text-xs text-gray-500">
+                Page {page}
+                {totalPages > 1 ? ` of ${totalPages}` : ""} ({data.total} total)
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => handlePageChange(page - 1)}
+                  disabled={page <= 1 || loading}
+                  className="p-1.5 text-gray-400 hover:text-gray-600 disabled:opacity-30 disabled:cursor-not-allowed rounded"
+                  aria-label="Previous page"
+                >
+                  <ChevronLeft className="w-4 h-4" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handlePageChange(page + 1)}
+                  disabled={!data.has_next || loading}
+                  className="p-1.5 text-gray-400 hover:text-gray-600 disabled:opacity-30 disabled:cursor-not-allowed rounded"
+                  aria-label="Next page"
+                >
+                  <ChevronRight className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ClustersTab() {
+  const { toasts, addToast, dismissToast } = useToasts();
+  const addError = useCallback(
+    (message: string) => addToast(message, "error"),
+    [addToast],
+  );
+
+  return (
+    <div className="space-y-4">
+      <ToastContainer toasts={toasts} onDismiss={dismissToast} />
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-semibold text-[#232323]">
+          Priority &amp; Combinable Clusters
+        </h3>
+      </div>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <PriorityClustersPanel addError={addError} />
+        <CombinableGroupsPanel addError={addError} />
+      </div>
+    </div>
+  );
+}
+
 // ─── Main Page Component ─────────────────────────────────────────────────────
 
 export default function FuelDistributionPage() {
@@ -2928,6 +3601,7 @@ export default function FuelDistributionPage() {
         {activeTab === "plans" && <PlansTab />}
         {activeTab === "forecasts" && <ForecastsTab />}
         {activeTab === "priorities" && <PrioritiesTab />}
+        {activeTab === "clusters" && <ClustersTab />}
       </div>
     </div>
   );

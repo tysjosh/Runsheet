@@ -60,6 +60,9 @@ const CustomerTankPage = lazy(
   () => import("../../components/ops/CustomerTankPage"),
 );
 const DepotsPage = lazy(() => import("../../components/admin/DepotsPage"));
+const RoadRestrictionsPanel = lazy(
+  () => import("../../components/admin/RoadRestrictionsPanel"),
+);
 
 function MapLoadingPlaceholder() {
   return (
@@ -268,6 +271,17 @@ export default function Home() {
             <ErrorBoundary componentName="Depots">
               <Suspense fallback={<ComponentLoadingPlaceholder />}>
                 <DepotsPage />
+              </Suspense>
+            </ErrorBoundary>
+          </div>
+        );
+
+      case "road-restrictions":
+        return (
+          <div className="flex-1 bg-gray-50">
+            <ErrorBoundary componentName="Road Restrictions">
+              <Suspense fallback={<ComponentLoadingPlaceholder />}>
+                <RoadRestrictionsPanel />
               </Suspense>
             </ErrorBoundary>
           </div>

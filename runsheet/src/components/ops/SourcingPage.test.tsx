@@ -40,6 +40,7 @@ jest.mock("../../services/fuelApi", () => {
     listRackPrices: jest.fn(),
     listSupplierContracts: jest.fn(),
     getTerminalWaitSummary: jest.fn(),
+    submitTerminalWaitReport: jest.fn(),
   };
 });
 
@@ -47,6 +48,7 @@ import type {
   RackPriceListResponse,
   SourcingRecommendation,
   SupplierContractListResponse,
+  TerminalWaitReport,
   TerminalWaitSummary,
 } from "../../services/fuelApi";
 import {
@@ -54,8 +56,12 @@ import {
   getTerminalWaitSummary,
   listRackPrices,
   listSupplierContracts,
+  submitTerminalWaitReport,
 } from "../../services/fuelApi";
-import SourcingPage, { validateQueryForm } from "./SourcingPage";
+import SourcingPage, {
+  validateQueryForm,
+  validateWaitReportForm,
+} from "./SourcingPage";
 
 const mockGetRec = getSourcingRecommendations as jest.MockedFunction<
   typeof getSourcingRecommendations
@@ -68,6 +74,9 @@ const mockListContracts = listSupplierContracts as jest.MockedFunction<
 >;
 const mockGetWait = getTerminalWaitSummary as jest.MockedFunction<
   typeof getTerminalWaitSummary
+>;
+const mockSubmitWait = submitTerminalWaitReport as jest.MockedFunction<
+  typeof submitTerminalWaitReport
 >;
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
@@ -143,6 +152,26 @@ function waitSummaryFixture(
     source: "computed",
     ...overrides,
   };
+}
+
+function waitReportFixture(
+  overrides: Partial<TerminalWaitReport> = {},
+): TerminalWaitReport {
+  const now = new Date().toISOString();
+  const base: TerminalWaitReport = {
+    report_id: "wr-001",
+    tenant_id: "tenant-a",
+    terminal_id: "term_001",
+    wait_minutes: 42,
+    source: "driver_report",
+    reporter_id: "driver-042",
+    truck_id: null,
+    observed_at: now,
+    retrieved_at: now,
+    created_at: now,
+    updated_at: now,
+  };
+  return { ...base, ...overrides };
 }
 
 // ─── Pure helper tests ───────────────────────────────────────────────────────
@@ -241,6 +270,7 @@ describe("SourcingPage", () => {
     mockListRack.mockReset();
     mockListContracts.mockReset();
     mockGetWait.mockReset();
+    mockSubmitWait.mockReset();
     mockListRack.mockResolvedValue(emptyRackList());
     mockListContracts.mockResolvedValue(emptyContractList());
     // The best candidate is auto-expanded and lazy-loads its wait
@@ -389,5 +419,145 @@ describe("SourcingPage", () => {
     expect(
       screen.queryByTestId("sourcing-candidate-term_001"),
     ).not.toBeInTheDocument();
+  });
+
+  it("renders the wait-report form alongside the wait summary on an expanded candidate", async () => {
+    mockGetRec.mockResolvedValue(recommendationFixture());
+    render(<SourcingPage />);
+    await submitQuery();
+
+    // term_001 (best) is auto-expanded; its wait-report form should
+    // sit under the wait-summary panel.
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("wait-report-form-term_001"),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("submits a wait report and re-fetches the wait summary on success", async () => {
+    mockGetRec.mockResolvedValue(recommendationFixture());
+    mockGetWait.mockResolvedValue(
+      waitSummaryFixture({ terminal_id: "term_001" }),
+    );
+    mockSubmitWait.mockResolvedValue(waitReportFixture());
+
+    render(<SourcingPage />);
+    await submitQuery();
+
+    await waitFor(() => {
+      expect(mockGetWait).toHaveBeenCalledWith("term_001");
+    });
+    mockGetWait.mockClear();
+
+    const form = await screen.findByTestId("wait-report-form-term_001");
+    fireEvent.change(within(form).getByLabelText(/Wait minutes/i), {
+      target: { value: "42" },
+    });
+    fireEvent.change(within(form).getByLabelText(/Reporter ID/i), {
+      target: { value: "driver-042" },
+    });
+    await act(async () => {
+      fireEvent.submit(form);
+    });
+
+    await waitFor(() => {
+      expect(mockSubmitWait).toHaveBeenCalledTimes(1);
+    });
+    const [terminalId, body] = mockSubmitWait.mock.calls[0];
+    expect(terminalId).toBe("term_001");
+    expect(body).toEqual(
+      expect.objectContaining({
+        wait_minutes: 42,
+        source: "driver_report",
+        reporter_id: "driver-042",
+      }),
+    );
+    expect(typeof body.observed_at).toBe("string");
+
+    // Summary is re-fetched after a successful submit.
+    await waitFor(() => {
+      expect(mockGetWait).toHaveBeenCalledWith("term_001");
+    });
+  });
+
+  it("blocks submit and shows an error when wait minutes are empty", async () => {
+    mockGetRec.mockResolvedValue(recommendationFixture());
+    render(<SourcingPage />);
+    await submitQuery();
+
+    const form = await screen.findByTestId("wait-report-form-term_001");
+    // Leave wait minutes blank, provide reporter_id.
+    fireEvent.change(within(form).getByLabelText(/Reporter ID/i), {
+      target: { value: "driver-042" },
+    });
+    await act(async () => {
+      fireEvent.submit(form);
+    });
+
+    expect(mockSubmitWait).not.toHaveBeenCalled();
+    expect(
+      within(form).getByText(/Wait minutes must be a non-negative number/i),
+    ).toBeInTheDocument();
+  });
+
+  it("blocks submit when source is driver_report and reporter_id is missing", async () => {
+    mockGetRec.mockResolvedValue(recommendationFixture());
+    render(<SourcingPage />);
+    await submitQuery();
+
+    const form = await screen.findByTestId("wait-report-form-term_001");
+    fireEvent.change(within(form).getByLabelText(/Wait minutes/i), {
+      target: { value: "30" },
+    });
+    // Leave reporter_id blank while source stays at the default.
+    await act(async () => {
+      fireEvent.submit(form);
+    });
+
+    expect(mockSubmitWait).not.toHaveBeenCalled();
+    expect(
+      within(form).getByText(/Reporter ID is required for driver reports/i),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("validateWaitReportForm", () => {
+  const base = {
+    wait_minutes: "30",
+    source: "driver_report" as const,
+    reporter_id: "driver-042",
+    notes: "",
+  };
+
+  it("returns no errors for a well-formed driver report", () => {
+    expect(validateWaitReportForm(base)).toEqual({});
+  });
+
+  it("flags a blank wait_minutes value", () => {
+    expect(validateWaitReportForm({ ...base, wait_minutes: "" })).toEqual(
+      expect.objectContaining({
+        wait_minutes: expect.stringMatching(/non-negative/i),
+      }),
+    );
+  });
+
+  it("flags a negative wait_minutes value", () => {
+    expect(validateWaitReportForm({ ...base, wait_minutes: "-5" })).toEqual(
+      expect.objectContaining({
+        wait_minutes: expect.stringMatching(/non-negative/i),
+      }),
+    );
+  });
+
+  it("requires reporter_id only for driver_report", () => {
+    const driver = validateWaitReportForm({ ...base, reporter_id: "" });
+    const eld = validateWaitReportForm({
+      ...base,
+      source: "eld_geofence",
+      reporter_id: "",
+    });
+    expect(driver.reporter_id).toMatch(/Reporter/i);
+    expect(eld.reporter_id).toBeUndefined();
   });
 });

@@ -57,6 +57,7 @@ import type {
   SourcingRecommendationsQuery,
   SourcingTerminalCandidate,
   SupplierContractResponse,
+  TerminalWaitReportCreateRequest,
   TerminalWaitSummary,
 } from "../../services/fuelApi";
 import {
@@ -64,6 +65,7 @@ import {
   getTerminalWaitSummary,
   listRackPrices,
   listSupplierContracts,
+  submitTerminalWaitReport,
 } from "../../services/fuelApi";
 
 // ─── Defaults and constants ──────────────────────────────────────────────────
@@ -609,6 +611,245 @@ interface CandidateRowProps {
   isBest: boolean;
 }
 
+// ─── Wait-report submission form ─────────────────────────────────────────────
+
+interface WaitReportFormValues {
+  wait_minutes: string;
+  source: "driver_report" | "eld_geofence";
+  reporter_id: string;
+  notes: string;
+}
+
+export interface WaitReportFormErrors {
+  wait_minutes?: string;
+  reporter_id?: string;
+}
+
+const EMPTY_WAIT_REPORT_FORM: WaitReportFormValues = {
+  wait_minutes: "",
+  source: "driver_report",
+  reporter_id: "",
+  notes: "",
+};
+
+/**
+ * Pure validator for the wait-report form. Mirrors the backend
+ * contract for ``POST /api/fuel/terminals/{terminal_id}/wait-reports``
+ * — ``wait_minutes`` must be a non-negative number and
+ * ``reporter_id`` is required when ``source === "driver_report"``
+ * (Req 8.4.2). Exported so the unit test can pin the exact rules.
+ */
+export function validateWaitReportForm(
+  values: WaitReportFormValues,
+): WaitReportFormErrors {
+  const errors: WaitReportFormErrors = {};
+  const waitNum = Number(values.wait_minutes);
+  if (
+    values.wait_minutes.trim() === "" ||
+    !Number.isFinite(waitNum) ||
+    waitNum < 0
+  ) {
+    errors.wait_minutes = "Wait minutes must be a non-negative number.";
+  }
+  if (values.source === "driver_report" && !values.reporter_id.trim()) {
+    errors.reporter_id = "Reporter ID is required for driver reports.";
+  }
+  return errors;
+}
+
+interface WaitReportFormProps {
+  terminalId: string;
+  onSubmitted: () => void;
+}
+
+/**
+ * Inline wait-report submission form rendered below the wait-summary
+ * panel. Lets dispatchers file a manual observation against the
+ * selected terminal without leaving the Sourcing page. Notes are
+ * captured for dispatcher discretion but not yet persisted — the
+ * backend ``TerminalWaitReportCreateRequest`` contract does not
+ * currently expose a notes field, so the UI field is informational.
+ */
+function WaitReportForm({ terminalId, onSubmitted }: WaitReportFormProps) {
+  const [form, setForm] = useState<WaitReportFormValues>(
+    EMPTY_WAIT_REPORT_FORM,
+  );
+  const [fieldErrors, setFieldErrors] = useState<WaitReportFormErrors>({});
+  const [apiError, setApiError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  const inputClass =
+    "w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white";
+  const errorInputClass =
+    "w-full px-3 py-2 text-sm border border-red-300 rounded-lg focus:ring-2 focus:ring-red-200 focus:border-red-400 bg-white";
+
+  function updateField<K extends keyof WaitReportFormValues>(
+    key: K,
+    value: WaitReportFormValues[K],
+  ) {
+    setForm((prev) => ({ ...prev, [key]: value }));
+    if (key in fieldErrors) {
+      setFieldErrors((prev) => ({ ...prev, [key]: undefined }));
+    }
+  }
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    const errors = validateWaitReportForm(form);
+    setFieldErrors(errors);
+    if (Object.keys(errors).length > 0) return;
+
+    setApiError(null);
+    setSubmitting(true);
+    try {
+      const body: TerminalWaitReportCreateRequest = {
+        wait_minutes: Number(form.wait_minutes),
+        source: form.source,
+        observed_at: new Date().toISOString(),
+      };
+      const reporter = form.reporter_id.trim();
+      if (reporter) body.reporter_id = reporter;
+      await submitTerminalWaitReport(terminalId, body);
+      setForm(EMPTY_WAIT_REPORT_FORM);
+      onSubmitted();
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setApiError(err.message || `Request failed (HTTP ${err.status}).`);
+      } else {
+        setApiError(
+          err instanceof Error ? err.message : "Failed to submit wait report.",
+        );
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <form
+      onSubmit={handleSubmit}
+      className="space-y-3"
+      data-testid={`wait-report-form-${terminalId}`}
+      aria-label={`Submit wait report for ${terminalId}`}
+    >
+      <div className="text-[10px] uppercase tracking-wide text-gray-500">
+        File a wait report
+      </div>
+      {apiError && (
+        <p
+          role="alert"
+          className="text-sm text-red-600 bg-red-50 px-3 py-2 rounded-lg"
+          data-testid={`wait-report-error-${terminalId}`}
+        >
+          {apiError}
+        </p>
+      )}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+        <div>
+          <label
+            htmlFor={`wr-minutes-${terminalId}`}
+            className="block text-[10px] uppercase text-gray-500 mb-1"
+          >
+            Wait minutes
+          </label>
+          <input
+            id={`wr-minutes-${terminalId}`}
+            type="number"
+            min="0"
+            step="1"
+            className={fieldErrors.wait_minutes ? errorInputClass : inputClass}
+            value={form.wait_minutes}
+            onChange={(e) => updateField("wait_minutes", e.target.value)}
+            placeholder="e.g. 45"
+            required
+          />
+          {fieldErrors.wait_minutes && (
+            <p className="text-xs text-red-600 mt-1">
+              {fieldErrors.wait_minutes}
+            </p>
+          )}
+        </div>
+        <div>
+          <label
+            htmlFor={`wr-source-${terminalId}`}
+            className="block text-[10px] uppercase text-gray-500 mb-1"
+          >
+            Source
+          </label>
+          <select
+            id={`wr-source-${terminalId}`}
+            className={inputClass}
+            value={form.source}
+            onChange={(e) =>
+              updateField(
+                "source",
+                e.target.value as WaitReportFormValues["source"],
+              )
+            }
+          >
+            <option value="driver_report">Driver report</option>
+            <option value="eld_geofence">ELD geofence</option>
+          </select>
+        </div>
+        <div>
+          <label
+            htmlFor={`wr-reporter-${terminalId}`}
+            className="block text-[10px] uppercase text-gray-500 mb-1"
+          >
+            Reporter ID
+            {form.source === "driver_report" && (
+              <span className="text-red-600"> *</span>
+            )}
+          </label>
+          <input
+            id={`wr-reporter-${terminalId}`}
+            type="text"
+            className={fieldErrors.reporter_id ? errorInputClass : inputClass}
+            value={form.reporter_id}
+            onChange={(e) => updateField("reporter_id", e.target.value)}
+            placeholder="e.g. driver-042"
+          />
+          {fieldErrors.reporter_id && (
+            <p className="text-xs text-red-600 mt-1">
+              {fieldErrors.reporter_id}
+            </p>
+          )}
+        </div>
+      </div>
+      <div>
+        <label
+          htmlFor={`wr-notes-${terminalId}`}
+          className="block text-[10px] uppercase text-gray-500 mb-1"
+        >
+          Notes (optional, dispatcher only)
+        </label>
+        <textarea
+          id={`wr-notes-${terminalId}`}
+          rows={2}
+          className={inputClass}
+          value={form.notes}
+          onChange={(e) => updateField("notes", e.target.value)}
+          placeholder="Why was this wait time observed?"
+        />
+      </div>
+      <div className="flex items-center justify-end">
+        <button
+          type="submit"
+          disabled={submitting}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white rounded-lg bg-[#232323] hover:bg-[#1a1a1a] disabled:opacity-50"
+        >
+          {submitting ? (
+            <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden="true" />
+          ) : null}
+          Submit wait report
+        </button>
+      </div>
+    </form>
+  );
+}
+
+// ─── Candidate row with collapsible details ──────────────────────────────────
+
 function CandidateRow({ candidate, rank, isBest }: CandidateRowProps) {
   const [expanded, setExpanded] = useState(isBest);
   const [waitSummary, setWaitSummary] = useState<TerminalWaitSummary | null>(
@@ -616,14 +857,22 @@ function CandidateRow({ candidate, rank, isBest }: CandidateRowProps) {
   );
   const [waitLoading, setWaitLoading] = useState(false);
   const [waitError, setWaitError] = useState<string | null>(null);
+  const [waitReloadToken, setWaitReloadToken] = useState(0);
 
   const handleToggle = useCallback(() => {
     setExpanded((prev) => !prev);
   }, []);
 
-  // Lazy-load wait summary once on first expand.
+  const refreshWaitSummary = useCallback(() => {
+    setWaitReloadToken((t) => t + 1);
+  }, []);
+
+  // Lazy-load wait summary on first expand, and re-fetch whenever the
+  // reload token is bumped (e.g. after a dispatcher submits a wait
+  // report through the inline form below).
   useEffect(() => {
-    if (!expanded || waitSummary || waitLoading) return;
+    if (!expanded) return;
+    if (waitReloadToken === 0 && (waitSummary || waitLoading)) return;
     let cancelled = false;
     setWaitLoading(true);
     setWaitError(null);
@@ -643,7 +892,11 @@ function CandidateRow({ candidate, rank, isBest }: CandidateRowProps) {
     return () => {
       cancelled = true;
     };
-  }, [expanded, candidate.terminal_id, waitSummary, waitLoading]);
+    // `waitSummary` / `waitLoading` are intentionally omitted from the
+    // dep list so a re-fetch driven by `waitReloadToken` is not
+    // short-circuited by the stale-memoized summary.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expanded, candidate.terminal_id, waitReloadToken]);
 
   return (
     <div
@@ -807,6 +1060,13 @@ function CandidateRow({ candidate, rank, isBest }: CandidateRowProps) {
                 </div>
               </dl>
             ) : null}
+          </div>
+
+          <div className="pt-3 border-t border-gray-100">
+            <WaitReportForm
+              terminalId={candidate.terminal_id}
+              onSubmitted={refreshWaitSummary}
+            />
           </div>
         </div>
       )}

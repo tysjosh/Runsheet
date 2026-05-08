@@ -33,22 +33,34 @@
 import {
   AlertTriangle,
   Check,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
+  ChevronUp,
+  Copy,
   Download,
   FileText,
   Loader2,
   RefreshCw,
   Search,
+  ShieldCheck,
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type {
   BOLDownloadResponse,
+  HashChainMismatch,
+  HashChainVerifyResponse,
+  HashProofResponse,
   ReconciliationListFilters,
   ReconciliationRecord,
 } from "../../services/fuelApi";
-import { getPodBol, listReconciliationRecords } from "../../services/fuelApi";
+import {
+  getPodBol,
+  getPodHashProof,
+  listReconciliationRecords,
+  verifyPodHashChain,
+} from "../../services/fuelApi";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -605,6 +617,8 @@ function PodDetailDrawer({ record, onClose, onError }: PodDetailDrawerProps) {
             )}
           </section>
 
+          <TamperEvidenceSection podId={record.pod_id} onError={onError} />
+
           <section>
             <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
               Metadata
@@ -630,6 +644,356 @@ function PodDetailDrawer({ record, onClose, onError }: PodDetailDrawerProps) {
   );
 }
 
+// ─── Tamper Evidence Section (Req 4.5.3, 4.5.4) ──────────────────────────────
+
+interface TamperEvidenceSectionProps {
+  podId: string;
+  onError: (message: string) => void;
+}
+
+/**
+ * Collapsible "Tamper evidence" panel inside the POD drawer. Exposes
+ * two auditor-facing controls:
+ *
+ *  1. **Show hash proof** — calls ``GET /api/fuel/pod/{pod_id}/hash-proof``
+ *     and renders the canonical payload + chain pointers so auditors
+ *     can re-hash offline (Req 4.5.3).
+ *  2. **Verify chain** — calls ``POST /api/fuel/pod/hash-chain/verify``
+ *     over a range starting at the current POD and reports the first
+ *     mismatch when the chain is broken (Req 4.5.4, 4.5.5).
+ *
+ * Transport / auth failures bubble up via the existing toast helper
+ * (``onError``); a missing hash proof renders inline instead of
+ * dismissing the section.
+ */
+function TamperEvidenceSection({ podId, onError }: TamperEvidenceSectionProps) {
+  const [open, setOpen] = useState(false);
+  const [showProof, setShowProof] = useState(false);
+  const [proof, setProof] = useState<HashProofResponse | null>(null);
+  const [proofLoading, setProofLoading] = useState(false);
+  const [proofError, setProofError] = useState<string | null>(null);
+  const [copyLabel, setCopyLabel] = useState<"Copy" | "Copied">("Copy");
+
+  const [showVerify, setShowVerify] = useState(false);
+  const [fromPodId, setFromPodId] = useState(podId);
+  const [toPodId, setToPodId] = useState("");
+  const [verifying, setVerifying] = useState(false);
+  const [verifyResult, setVerifyResult] =
+    useState<HashChainVerifyResponse | null>(null);
+
+  const payloadJson = useMemo(() => {
+    if (!proof) return "";
+    try {
+      return JSON.stringify(proof.canonical_payload, null, 2);
+    } catch {
+      return "";
+    }
+  }, [proof]);
+
+  const handleShowProof = useCallback(async () => {
+    setShowProof(true);
+    setProofLoading(true);
+    setProofError(null);
+    try {
+      const res = await getPodHashProof(podId);
+      setProof(res);
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Failed to load hash proof.";
+      setProofError(message);
+      onError(message);
+    } finally {
+      setProofLoading(false);
+    }
+  }, [podId, onError]);
+
+  const handleCopyPayload = useCallback(async () => {
+    if (!payloadJson) return;
+    try {
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(payloadJson);
+      }
+      setCopyLabel("Copied");
+      setTimeout(() => setCopyLabel("Copy"), 1500);
+    } catch {
+      onError("Copy to clipboard failed.");
+    }
+  }, [payloadJson, onError]);
+
+  const handleVerifyChain = useCallback(async () => {
+    if (!fromPodId.trim()) {
+      onError("from_pod_id is required.");
+      return;
+    }
+    setVerifying(true);
+    setVerifyResult(null);
+    try {
+      const body: { from_pod_id: string; to_pod_id?: string } = {
+        from_pod_id: fromPodId.trim(),
+      };
+      const trimmedTo = toPodId.trim();
+      if (trimmedTo) body.to_pod_id = trimmedTo;
+      const res = await verifyPodHashChain(body);
+      setVerifyResult(res);
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Failed to verify hash chain.";
+      onError(message);
+    } finally {
+      setVerifying(false);
+    }
+  }, [fromPodId, toPodId, onError]);
+
+  return (
+    <section>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center justify-between w-full text-left group"
+        aria-expanded={open}
+        aria-controls={`tamper-evidence-${podId}`}
+      >
+        <span className="flex items-center gap-2 text-xs font-semibold text-gray-500 uppercase tracking-wide">
+          <ShieldCheck className="w-3.5 h-3.5" aria-hidden="true" />
+          Tamper evidence
+        </span>
+        {open ? (
+          <ChevronUp
+            className="w-4 h-4 text-gray-400 group-hover:text-gray-600"
+            aria-hidden="true"
+          />
+        ) : (
+          <ChevronDown
+            className="w-4 h-4 text-gray-400 group-hover:text-gray-600"
+            aria-hidden="true"
+          />
+        )}
+      </button>
+
+      {open && (
+        <div
+          id={`tamper-evidence-${podId}`}
+          className="mt-3 space-y-3 border border-gray-200 rounded-lg p-3 bg-gray-50"
+        >
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={handleShowProof}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-700 bg-white border border-gray-200 rounded-lg hover:bg-gray-100"
+            >
+              Show hash proof
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowVerify((v) => !v)}
+              aria-expanded={showVerify}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-700 bg-white border border-gray-200 rounded-lg hover:bg-gray-100"
+            >
+              Verify chain
+            </button>
+          </div>
+
+          {showProof && (
+            <div className="rounded-lg border border-gray-200 bg-white p-3 space-y-2">
+              {proofLoading ? (
+                <div className="inline-flex items-center gap-2 text-sm text-gray-500">
+                  <Loader2
+                    className="w-4 h-4 animate-spin"
+                    aria-hidden="true"
+                  />
+                  Loading hash proof…
+                </div>
+              ) : proofError ? (
+                <div className="text-sm text-gray-700 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2">
+                  {proofError}
+                </div>
+              ) : proof ? (
+                <>
+                  <dl className="grid grid-cols-1 gap-2 text-xs">
+                    <div>
+                      <dt className="text-gray-500">pod_hash</dt>
+                      <dd
+                        className="font-mono break-all text-gray-900"
+                        data-testid="tamper-pod-hash"
+                      >
+                        {proof.pod_hash}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-gray-500">previous_pod_hash</dt>
+                      <dd
+                        className="font-mono break-all text-gray-900"
+                        data-testid="tamper-previous-pod-hash"
+                      >
+                        {proof.previous_pod_hash}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-gray-500">chain_sequence</dt>
+                      <dd className="font-mono text-gray-900">
+                        {typeof proof.canonical_payload?.chain_sequence ===
+                          "number" ||
+                        typeof proof.canonical_payload?.chain_sequence ===
+                          "string"
+                          ? String(proof.canonical_payload.chain_sequence)
+                          : "—"}
+                      </dd>
+                    </div>
+                  </dl>
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-xs text-gray-500">
+                        canonical_payload
+                      </span>
+                      <button
+                        type="button"
+                        onClick={handleCopyPayload}
+                        className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium text-gray-600 bg-white border border-gray-200 rounded hover:bg-gray-50"
+                        aria-label="Copy canonical payload"
+                      >
+                        <Copy className="w-3 h-3" aria-hidden="true" />
+                        {copyLabel}
+                      </button>
+                    </div>
+                    <pre className="text-[11px] font-mono text-gray-800 bg-gray-50 border border-gray-200 rounded p-2 overflow-auto max-h-[240px]">
+                      {payloadJson}
+                    </pre>
+                  </div>
+                </>
+              ) : null}
+            </div>
+          )}
+
+          {showVerify && (
+            <div className="rounded-lg border border-gray-200 bg-white p-3 space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label
+                    htmlFor={`verify-from-${podId}`}
+                    className="block text-[11px] font-medium text-gray-600 mb-1"
+                  >
+                    from_pod_id
+                  </label>
+                  <input
+                    id={`verify-from-${podId}`}
+                    type="text"
+                    value={fromPodId}
+                    onChange={(e) => setFromPodId(e.target.value)}
+                    className="w-full px-2.5 py-1.5 text-xs font-mono border border-gray-200 rounded focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white"
+                  />
+                </div>
+                <div>
+                  <label
+                    htmlFor={`verify-to-${podId}`}
+                    className="block text-[11px] font-medium text-gray-600 mb-1"
+                  >
+                    to_pod_id (optional)
+                  </label>
+                  <input
+                    id={`verify-to-${podId}`}
+                    type="text"
+                    value={toPodId}
+                    onChange={(e) => setToPodId(e.target.value)}
+                    placeholder="Leave blank to verify single POD"
+                    className="w-full px-2.5 py-1.5 text-xs font-mono border border-gray-200 rounded focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white"
+                  />
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleVerifyChain}
+                  disabled={verifying}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-[#232323] hover:bg-black rounded-lg disabled:opacity-50"
+                >
+                  {verifying ? (
+                    <Loader2
+                      className="w-3.5 h-3.5 animate-spin"
+                      aria-hidden="true"
+                    />
+                  ) : null}
+                  Verify
+                </button>
+              </div>
+
+              {verifyResult?.valid && (
+                <div
+                  data-testid="chain-intact-badge"
+                  className="inline-flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-green-800 bg-green-50 border border-green-200 rounded-lg"
+                >
+                  <Check className="w-3.5 h-3.5" aria-hidden="true" />
+                  Chain intact
+                  <span className="text-green-700">
+                    · {verifyResult.verified_count} POD
+                    {verifyResult.verified_count === 1 ? "" : "s"} verified
+                  </span>
+                </div>
+              )}
+
+              {verifyResult &&
+                !verifyResult.valid &&
+                verifyResult.first_mismatch && (
+                  <ChainMismatchCard mismatch={verifyResult.first_mismatch} />
+                )}
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ChainMismatchCard({ mismatch }: { mismatch: HashChainMismatch }) {
+  return (
+    <div
+      data-testid="chain-mismatch-card"
+      className="rounded-lg border border-red-200 bg-red-50 p-3 space-y-2"
+    >
+      <div className="flex items-center gap-2 text-sm font-semibold text-red-800">
+        <AlertTriangle className="w-4 h-4" aria-hidden="true" />
+        Tamper detected
+      </div>
+      <p className="text-xs text-red-700">
+        Hash chain verification failed at the POD below. Rehash the canonical
+        payload offline to confirm.
+      </p>
+      <dl className="grid grid-cols-1 gap-1.5 text-xs">
+        <div>
+          <dt className="text-red-700">pod_id</dt>
+          <dd
+            className="font-mono break-all text-red-900"
+            data-testid="mismatch-pod-id"
+          >
+            {mismatch.pod_id}
+          </dd>
+        </div>
+        <div>
+          <dt className="text-red-700">expected_hash</dt>
+          <dd
+            className="font-mono break-all text-red-900"
+            data-testid="mismatch-expected-hash"
+          >
+            {mismatch.expected_hash ?? "—"}
+          </dd>
+        </div>
+        <div>
+          <dt className="text-red-700">actual_hash</dt>
+          <dd
+            className="font-mono break-all text-red-900"
+            data-testid="mismatch-actual-hash"
+          >
+            {mismatch.stored_hash ?? mismatch.computed_hash ?? "—"}
+          </dd>
+        </div>
+        <div>
+          <dt className="text-red-700">reason</dt>
+          <dd className="text-red-900">{mismatch.reason}</dd>
+        </div>
+      </dl>
+    </div>
+  );
+}
+
 function GallonCard({
   label,
   value,
@@ -648,7 +1012,6 @@ function GallonCard({
     </div>
   );
 }
-
 function VarianceRow({
   label,
   value,

@@ -26,15 +26,24 @@ jest.mock("../../services/fuelApi", () => {
     ...actual,
     listReconciliationRecords: jest.fn(),
     getPodBol: jest.fn(),
+    getPodHashProof: jest.fn(),
+    verifyPodHashChain: jest.fn(),
   };
 });
 
 import type {
   BOLDownloadResponse,
+  HashChainVerifyResponse,
+  HashProofResponse,
   ReconciliationListResponse,
   ReconciliationRecord,
 } from "../../services/fuelApi";
-import { getPodBol, listReconciliationRecords } from "../../services/fuelApi";
+import {
+  getPodBol,
+  getPodHashProof,
+  listReconciliationRecords,
+  verifyPodHashChain,
+} from "../../services/fuelApi";
 import ReconciliationPage, {
   formatGallons,
   formatVariancePct,
@@ -46,6 +55,12 @@ const mockList = listReconciliationRecords as jest.MockedFunction<
   typeof listReconciliationRecords
 >;
 const mockBol = getPodBol as jest.MockedFunction<typeof getPodBol>;
+const mockHashProof = getPodHashProof as jest.MockedFunction<
+  typeof getPodHashProof
+>;
+const mockVerifyChain = verifyPodHashChain as jest.MockedFunction<
+  typeof verifyPodHashChain
+>;
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -315,5 +330,145 @@ describe("ReconciliationPage", () => {
     expect(
       screen.queryByRole("link", { name: /download bol pdf/i }),
     ).not.toBeInTheDocument();
+  });
+});
+
+// ─── Tamper evidence (hash-proof + chain verify) ─────────────────────────────
+
+async function openTamperEvidence(podId: string) {
+  const openButton = await screen.findByRole("button", {
+    name: new RegExp(`open pod ${podId}`, "i"),
+  });
+  fireEvent.click(openButton);
+  const tamperToggle = await screen.findByRole("button", {
+    name: /tamper evidence/i,
+  });
+  fireEvent.click(tamperToggle);
+}
+
+describe("ReconciliationPage — tamper evidence panel", () => {
+  beforeEach(() => {
+    // BOL fetch is triggered on drawer open; satisfy the Promise so
+    // the tamper-evidence tests don't leak unhandled rejections.
+    mockBol.mockResolvedValue({
+      bol_id: "bol-x",
+      pod_id: "pod-tamper",
+      status: "generated",
+      hash: "h",
+      generated_at: "2024-06-01T12:05:00Z",
+      file_ref: "tenants/t/bol/2024/06/01/xyz.pdf",
+      download_url: "https://s3.example.com/x",
+      expires_at: "2024-06-01T12:20:00Z",
+      tenant_id: "t-1",
+    });
+  });
+
+  it("calls getPodHashProof with the drawer pod_id and renders hashes", async () => {
+    const record = makeRecord({ pod_id: "pod-tamper" });
+    mockList.mockResolvedValue(makeListResponse([record]));
+    const proof: HashProofResponse = {
+      pod_id: "pod-tamper",
+      tenant_id: "t-1",
+      pod_hash: "hash-current-abcdef",
+      previous_pod_hash: "hash-prev-012345",
+      canonical_payload: {
+        pod_id: "pod-tamper",
+        chain_sequence: 7,
+        delivered_gallons: 500,
+      },
+      canonical_payload_bytes: '{"pod_id":"pod-tamper"}',
+    };
+    mockHashProof.mockResolvedValue(proof);
+
+    render(<ReconciliationPage />);
+    await openTamperEvidence("pod-tamper");
+
+    fireEvent.click(screen.getByRole("button", { name: /show hash proof/i }));
+
+    await waitFor(() =>
+      expect(mockHashProof).toHaveBeenCalledWith("pod-tamper"),
+    );
+    expect(await screen.findByTestId("tamper-pod-hash")).toHaveTextContent(
+      "hash-current-abcdef",
+    );
+    expect(screen.getByTestId("tamper-previous-pod-hash")).toHaveTextContent(
+      "hash-prev-012345",
+    );
+  });
+
+  it("verifies the chain with the default single-POD range", async () => {
+    const record = makeRecord({ pod_id: "pod-chain" });
+    mockList.mockResolvedValue(makeListResponse([record]));
+    const verify: HashChainVerifyResponse = {
+      tenant_id: "t-1",
+      verified_count: 1,
+      total_requested: 1,
+      valid: true,
+      first_mismatch: null,
+      pod_ids_checked: ["pod-chain"],
+    };
+    mockVerifyChain.mockResolvedValue(verify);
+
+    render(<ReconciliationPage />);
+    await openTamperEvidence("pod-chain");
+
+    fireEvent.click(screen.getByRole("button", { name: /verify chain/i }));
+    // The form exposes from_pod_id prefilled with the drawer pod_id.
+    expect(
+      (screen.getByLabelText(/from_pod_id/i) as HTMLInputElement).value,
+    ).toBe("pod-chain");
+    fireEvent.click(screen.getByRole("button", { name: /^verify$/i }));
+
+    await waitFor(() =>
+      expect(mockVerifyChain).toHaveBeenCalledWith({
+        from_pod_id: "pod-chain",
+      }),
+    );
+    expect(await screen.findByTestId("chain-intact-badge")).toHaveTextContent(
+      /chain intact/i,
+    );
+    expect(screen.getByTestId("chain-intact-badge")).toHaveTextContent(
+      /1 pod verified/i,
+    );
+  });
+
+  it("renders the first-mismatch card when valid is false", async () => {
+    const record = makeRecord({ pod_id: "pod-bad" });
+    mockList.mockResolvedValue(makeListResponse([record]));
+    const verify: HashChainVerifyResponse = {
+      tenant_id: "t-1",
+      verified_count: 2,
+      total_requested: 3,
+      valid: false,
+      first_mismatch: {
+        pod_id: "pod-bad-3",
+        reason: "stored_hash_mismatch",
+        expected_hash: "expected-abc",
+        stored_hash: "actual-xyz",
+        computed_hash: "computed-xyz",
+        message: "stored hash differs from recomputed hash",
+      },
+      pod_ids_checked: ["pod-bad-1", "pod-bad-2", "pod-bad-3"],
+    };
+    mockVerifyChain.mockResolvedValue(verify);
+
+    render(<ReconciliationPage />);
+    await openTamperEvidence("pod-bad");
+
+    fireEvent.click(screen.getByRole("button", { name: /verify chain/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^verify$/i }));
+
+    expect(await screen.findByTestId("chain-mismatch-card")).toHaveTextContent(
+      /tamper detected/i,
+    );
+    expect(screen.getByTestId("mismatch-pod-id")).toHaveTextContent(
+      "pod-bad-3",
+    );
+    expect(screen.getByTestId("mismatch-expected-hash")).toHaveTextContent(
+      "expected-abc",
+    );
+    expect(screen.getByTestId("mismatch-actual-hash")).toHaveTextContent(
+      "actual-xyz",
+    );
   });
 });

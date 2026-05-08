@@ -39,6 +39,7 @@ jest.mock("../../services/fuelApi", () => {
     ...actual,
     listTruckCompartments: jest.fn(),
     recordCleaningEvent: jest.fn(),
+    checkCompartmentLoadEligibility: jest.fn(),
   };
 });
 
@@ -50,15 +51,18 @@ jest.mock("../../services/driverApi", () => ({
 import { presignPodUpload, putPresignedFile } from "../../services/driverApi";
 import type {
   CleaningEvent,
+  LoadEligibilityResponse,
   TruckCompartmentListResponse,
   TruckCompartmentState,
 } from "../../services/fuelApi";
 import {
+  checkCompartmentLoadEligibility,
   listTruckCompartments,
   recordCleaningEvent,
 } from "../../services/fuelApi";
 import TruckCompartmentsPage, {
   CompartmentStateBadge,
+  ELIGIBILITY_DECISION_CONFIG,
   formatCapacity,
   litersToGallons,
   STATE_BADGE_CONFIG,
@@ -71,6 +75,10 @@ const mockList = listTruckCompartments as jest.MockedFunction<
 const mockRecord = recordCleaningEvent as jest.MockedFunction<
   typeof recordCleaningEvent
 >;
+const mockCheckEligibility =
+  checkCompartmentLoadEligibility as jest.MockedFunction<
+    typeof checkCompartmentLoadEligibility
+  >;
 const mockPresign = presignPodUpload as jest.MockedFunction<
   typeof presignPodUpload
 >;
@@ -120,6 +128,28 @@ function cleaningEventFixture(
     cleaned_at: now,
     created_at: now,
     updated_at: now,
+  };
+  return { ...base, ...overrides };
+}
+
+function eligibilityFixture(
+  overrides: Partial<LoadEligibilityResponse> = {},
+): LoadEligibilityResponse {
+  const base: LoadEligibilityResponse = {
+    compartment_id: "TRUCK-1_c1",
+    proposed_product: "DIESEL_2",
+    previous_product: "DIESEL_2",
+    decision: "allowed",
+    reason: null,
+    governing_rule: "allowed",
+    compartment_state: {
+      compartment_id: "TRUCK-1_c1",
+      truck_id: "TRUCK-1",
+      state: "clean",
+      last_loaded_product: "DIESEL_2",
+      last_loaded_at: null,
+      last_cleaned_at: null,
+    },
   };
   return { ...base, ...overrides };
 }
@@ -211,6 +241,7 @@ describe("TruckCompartmentsPage", () => {
   beforeEach(() => {
     mockList.mockReset();
     mockRecord.mockReset();
+    mockCheckEligibility.mockReset();
     mockPresign.mockReset();
     mockPut.mockReset();
   });
@@ -419,5 +450,113 @@ describe("TruckCompartmentsPage", () => {
     expect(payload.evidence_refs).toEqual([
       "tenants/tenant-a/photo/2024/06/01/abc.jpg",
     ]);
+  });
+
+  it("renders a Check eligibility button on every compartment row", async () => {
+    mockList.mockResolvedValue(
+      listResponseFixture([
+        compartmentFixture({ compartment_id: "TRUCK-1_c1" }),
+        compartmentFixture({
+          compartment_id: "TRUCK-1_c2",
+          position_index: 1,
+        }),
+      ]),
+    );
+    render(<TruckCompartmentsPage />);
+    await lookupTruck();
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("check-eligibility-TRUCK-1_c1"),
+      ).toBeInTheDocument();
+    });
+    expect(
+      screen.getByTestId("check-eligibility-TRUCK-1_c2"),
+    ).toBeInTheDocument();
+  });
+
+  it("submits a product code and renders the decision, governing rule, and reason", async () => {
+    mockList.mockResolvedValue(
+      listResponseFixture([
+        compartmentFixture({
+          compartment_id: "TRUCK-1_c1",
+          last_loaded_product: "HEATING_OIL",
+          state: "loaded",
+        }),
+      ]),
+    );
+    mockCheckEligibility.mockResolvedValue(
+      eligibilityFixture({
+        proposed_product: "DIESEL_2",
+        previous_product: "HEATING_OIL",
+        decision: "blocked",
+        governing_rule: "blocked",
+        reason: "cross_contamination_blocked",
+      }),
+    );
+
+    render(<TruckCompartmentsPage />);
+    await lookupTruck();
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("check-eligibility-TRUCK-1_c1"),
+      ).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByTestId("check-eligibility-TRUCK-1_c1"));
+
+    fireEvent.change(screen.getByLabelText(/Proposed product code/i), {
+      target: { value: "diesel_2" },
+    });
+    await act(async () => {
+      fireEvent.submit(screen.getByTestId("load-eligibility-form"));
+    });
+
+    await waitFor(() => {
+      expect(mockCheckEligibility).toHaveBeenCalledWith(
+        "TRUCK-1_c1",
+        "DIESEL_2",
+      );
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("load-eligibility-decision-blocked"),
+      ).toBeInTheDocument();
+    });
+    expect(
+      screen.getByTestId("load-eligibility-governing-blocked"),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("load-eligibility-reason")).toHaveTextContent(
+      /cross_contamination_blocked/,
+    );
+  });
+
+  it("dismisses the eligibility modal when the close button is clicked", async () => {
+    mockList.mockResolvedValue(listResponseFixture([compartmentFixture()]));
+    render(<TruckCompartmentsPage />);
+    await lookupTruck();
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("check-eligibility-TRUCK-1_c1"),
+      ).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByTestId("check-eligibility-TRUCK-1_c1"));
+    expect(screen.getByTestId("load-eligibility-form")).toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /Close load eligibility form/i }),
+    );
+    expect(
+      screen.queryByTestId("load-eligibility-form"),
+    ).not.toBeInTheDocument();
+  });
+});
+
+describe("ELIGIBILITY_DECISION_CONFIG", () => {
+  it("covers every eligibility decision", () => {
+    expect(Object.keys(ELIGIBILITY_DECISION_CONFIG).sort()).toEqual(
+      ["allowed", "blocked", "requires_cleaning"].sort(),
+    );
   });
 });

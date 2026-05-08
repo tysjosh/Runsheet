@@ -47,10 +47,12 @@ import type {
   CustomerTankStatus,
   CustomerTankUpdatePayload,
   CustomerTankUseCase,
+  FuelProductItem,
 } from "../../services/fuelApi";
 import {
   createCustomerTank,
   listCustomerTanks,
+  listFuelProducts,
   updateCustomerTank,
 } from "../../services/fuelApi";
 
@@ -538,6 +540,17 @@ function CustomerTankFormModal({
   const [submitting, setSubmitting] = useState(false);
   const [apiError, setApiError] = useState("");
   const [fieldErrors, setFieldErrors] = useState<CustomerTankFormErrors>({});
+  // Fuel product catalog for the canonical-code combobox (Req 6.1.3).
+  // ``null`` means "still loading"; an empty array means "loaded with no
+  // catalog rows" (the backend returns 200 + empty list for tenants
+  // whose Region has no configured products — we fall back to the
+  // free-text input in that case too).
+  const [fuelProducts, setFuelProducts] = useState<FuelProductItem[] | null>(
+    null,
+  );
+  // When the catalog fetch fails we silently fall back to the legacy
+  // free-text input. Logged via ``console.error`` per the spec.
+  const [fuelProductsFailed, setFuelProductsFailed] = useState(false);
 
   const [form, setForm] = useState<CustomerTankFormValues>(() => ({
     customer_tank_id: tank?.customer_tank_id ?? "",
@@ -558,6 +571,32 @@ function CustomerTankFormModal({
   const title = mode === "create" ? "Add Customer Tank" : "Edit Customer Tank";
   const submitLabel = mode === "create" ? "Create Tank" : "Save Changes";
   const submittingLabel = mode === "create" ? "Creating..." : "Saving...";
+
+  // Fetch the tenant's fuel product catalog once per modal open so the
+  // fuel_product_code input can surface canonical codes as dropdown
+  // suggestions (Req 6.1.3). A failed fetch silently falls back to the
+  // legacy free-text input; submission is never blocked on this.
+  //
+  // Note: there is no dedicated Jest test file for CustomerTankPage as
+  // of Phase 2 Batch D. The Playwright smoke run covers the render
+  // path end-to-end. When a ``CustomerTankPage.test.tsx`` is added,
+  // assert that the datalist rendered by this effect contains the
+  // canonical product codes returned by :func:`listFuelProducts`.
+  useEffect(() => {
+    let cancelled = false;
+    listFuelProducts()
+      .then((res) => {
+        if (!cancelled) setFuelProducts(res.items);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.error("Failed to load fuel product catalog", err);
+        setFuelProductsFailed(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const inputClass =
     "w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white";
@@ -805,7 +844,28 @@ function CustomerTankFormModal({
                 }
                 placeholder="e.g. PROPANE"
                 required
+                list={
+                  !fuelProductsFailed && fuelProducts && fuelProducts.length > 0
+                    ? "ct-product-code-options"
+                    : undefined
+                }
+                autoComplete="off"
               />
+              {!fuelProductsFailed &&
+                fuelProducts &&
+                fuelProducts.length > 0 && (
+                  <datalist id="ct-product-code-options">
+                    {fuelProducts.map((p) => (
+                      <option
+                        key={p.product_code}
+                        value={p.product_code}
+                        label={p.display_name}
+                      >
+                        {p.display_name}
+                      </option>
+                    ))}
+                  </datalist>
+                )}
               {fieldErrors.fuel_product_code && (
                 <p className="text-xs text-red-600 mt-1">
                   {fieldErrors.fuel_product_code}

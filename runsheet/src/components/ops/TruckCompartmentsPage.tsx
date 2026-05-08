@@ -52,9 +52,12 @@ import type {
   CleaningEvent,
   CleaningMethod,
   CompartmentLifecycleState,
+  LoadEligibilityDecision,
+  LoadEligibilityResponse,
   TruckCompartmentState,
 } from "../../services/fuelApi";
 import {
+  checkCompartmentLoadEligibility,
   listTruckCompartments,
   recordCleaningEvent,
 } from "../../services/fuelApi";
@@ -644,6 +647,254 @@ function CleaningEventModal({
   );
 }
 
+// ─── Load Eligibility Modal ──────────────────────────────────────────────────
+
+/**
+ * Badge styling for each possible load-eligibility decision. Exported
+ * so unit tests can assert the colour / label combinations without
+ * repeating the Tailwind class strings.
+ */
+export const ELIGIBILITY_DECISION_CONFIG: Record<
+  LoadEligibilityDecision,
+  { label: string; color: string; bg: string }
+> = {
+  allowed: {
+    label: "Allowed",
+    color: "text-green-700",
+    bg: "bg-green-100",
+  },
+  blocked: {
+    label: "Blocked",
+    color: "text-red-700",
+    bg: "bg-red-100",
+  },
+  requires_cleaning: {
+    label: "Requires cleaning",
+    color: "text-amber-700",
+    bg: "bg-amber-100",
+  },
+};
+
+interface LoadEligibilityModalProps {
+  compartment: TruckCompartmentState;
+  onClose: () => void;
+}
+
+function LoadEligibilityModal({
+  compartment,
+  onClose,
+}: LoadEligibilityModalProps) {
+  const [productCode, setProductCode] = useState("");
+  const [result, setResult] = useState<LoadEligibilityResponse | null>(null);
+  const [apiError, setApiError] = useState("");
+  const [checking, setChecking] = useState(false);
+
+  const inputClass =
+    "w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white uppercase";
+
+  async function handleCheck(e: React.FormEvent) {
+    e.preventDefault();
+    const trimmed = productCode.trim().toUpperCase();
+    if (!trimmed) {
+      setApiError("Product code is required.");
+      return;
+    }
+    setApiError("");
+    setChecking(true);
+    try {
+      const resp = await checkCompartmentLoadEligibility(
+        compartment.compartment_id,
+        trimmed,
+      );
+      setResult(resp);
+    } catch (err) {
+      setResult(null);
+      if (err instanceof ApiError) {
+        setApiError(err.message || `Request failed (HTTP ${err.status}).`);
+      } else {
+        setApiError(
+          err instanceof Error ? err.message : "Failed to check eligibility.",
+        );
+      }
+    } finally {
+      setChecking(false);
+    }
+  }
+
+  const decisionConfig = result
+    ? (ELIGIBILITY_DECISION_CONFIG[result.decision] ??
+      ELIGIBILITY_DECISION_CONFIG.allowed)
+    : null;
+  const governingConfig = result
+    ? (ELIGIBILITY_DECISION_CONFIG[result.governing_rule] ??
+      ELIGIBILITY_DECISION_CONFIG.allowed)
+    : null;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/30"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="load-eligibility-modal-title"
+    >
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-xl mx-4 max-h-[90vh] overflow-y-auto">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+          <div>
+            <h2
+              id="load-eligibility-modal-title"
+              className="text-lg font-semibold text-[#232323]"
+            >
+              Check load eligibility
+            </h2>
+            <p className="text-xs text-gray-500 mt-0.5">
+              Compartment {compartment.compartment_id} · Last loaded{" "}
+              <span className="font-medium text-[#232323]">
+                {compartment.last_loaded_product ?? "none"}
+              </span>
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="p-1 text-gray-400 hover:text-gray-600 rounded"
+            aria-label="Close load eligibility form"
+          >
+            <X className="w-5 h-5" aria-hidden="true" />
+          </button>
+        </div>
+
+        <form
+          onSubmit={handleCheck}
+          className="px-6 py-4 space-y-4"
+          data-testid="load-eligibility-form"
+        >
+          {apiError && (
+            <p
+              role="alert"
+              className="text-sm text-red-600 bg-red-50 px-3 py-2 rounded-lg"
+            >
+              {apiError}
+            </p>
+          )}
+
+          <div>
+            <label
+              htmlFor="le-product-code"
+              className="block text-xs font-medium text-gray-600 mb-1"
+            >
+              Proposed product code
+            </label>
+            <input
+              id="le-product-code"
+              type="text"
+              className={inputClass}
+              value={productCode}
+              onChange={(e) => setProductCode(e.target.value.toUpperCase())}
+              placeholder="e.g. DIESEL_2"
+              required
+            />
+            <p className="text-[10px] text-gray-400 mt-1">
+              Accepts canonical codes and legacy aliases (AGO, PMS). The backend
+              canonicalizes before consulting the compatibility matrix.
+            </p>
+          </div>
+
+          <div className="flex items-center justify-end gap-2 pt-2">
+            <button
+              type="submit"
+              disabled={checking}
+              className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white rounded-lg bg-[#232323] hover:bg-[#1a1a1a] disabled:opacity-50"
+            >
+              {checking ? (
+                <>
+                  <Loader2
+                    className="w-3.5 h-3.5 animate-spin"
+                    aria-hidden="true"
+                  />
+                  Checking...
+                </>
+              ) : (
+                <>
+                  <Search className="w-3.5 h-3.5" aria-hidden="true" />
+                  Check
+                </>
+              )}
+            </button>
+          </div>
+        </form>
+
+        {result && decisionConfig && governingConfig && (
+          <div className="px-6 pb-6" data-testid="load-eligibility-result">
+            <div className="border border-gray-200 rounded-lg p-4 space-y-3">
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] uppercase tracking-wide text-gray-500">
+                  Decision
+                </span>
+                <span
+                  className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded font-medium ${decisionConfig.bg} ${decisionConfig.color}`}
+                  data-testid={`load-eligibility-decision-${result.decision}`}
+                >
+                  {result.decision === "allowed" ? (
+                    <Check className="w-3 h-3" aria-hidden="true" />
+                  ) : (
+                    <AlertTriangle className="w-3 h-3" aria-hidden="true" />
+                  )}
+                  {decisionConfig.label}
+                </span>
+              </div>
+
+              <dl className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm">
+                <div>
+                  <dt className="text-[10px] uppercase tracking-wide text-gray-500">
+                    Proposed product
+                  </dt>
+                  <dd className="font-mono text-gray-900">
+                    {result.proposed_product}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-[10px] uppercase tracking-wide text-gray-500">
+                    Previous product
+                  </dt>
+                  <dd className="font-mono text-gray-900">
+                    {result.previous_product ?? "—"}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-[10px] uppercase tracking-wide text-gray-500">
+                    Governing rule
+                  </dt>
+                  <dd>
+                    <span
+                      className={`inline-flex items-center text-[11px] px-1.5 py-0.5 rounded font-medium ${governingConfig.bg} ${governingConfig.color}`}
+                      data-testid={`load-eligibility-governing-${result.governing_rule}`}
+                    >
+                      {governingConfig.label}
+                    </span>
+                  </dd>
+                </div>
+                {result.reason && (
+                  <div className="sm:col-span-2">
+                    <dt className="text-[10px] uppercase tracking-wide text-gray-500">
+                      Reason
+                    </dt>
+                    <dd
+                      className="text-gray-700"
+                      data-testid="load-eligibility-reason"
+                    >
+                      {result.reason}
+                    </dd>
+                  </div>
+                )}
+              </dl>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── Page ────────────────────────────────────────────────────────────────────
 
 export default function TruckCompartmentsPage() {
@@ -653,6 +904,8 @@ export default function TruckCompartmentsPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [modalCompartment, setModalCompartment] =
+    useState<TruckCompartmentState | null>(null);
+  const [eligibilityCompartment, setEligibilityCompartment] =
     useState<TruckCompartmentState | null>(null);
   const { toasts, addToast, dismissToast } = useToasts();
 
@@ -697,13 +950,13 @@ export default function TruckCompartmentsPage() {
 
   // Keep page scroll locked when modal is open.
   useEffect(() => {
-    if (!modalCompartment) return;
+    if (!modalCompartment && !eligibilityCompartment) return;
     const previous = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     return () => {
       document.body.style.overflow = previous;
     };
-  }, [modalCompartment]);
+  }, [modalCompartment, eligibilityCompartment]);
 
   return (
     <div className="flex-1 flex flex-col p-6 bg-gray-50 overflow-auto">
@@ -874,15 +1127,26 @@ export default function TruckCompartmentsPage() {
                         : "—"}
                     </td>
                     <td className="px-3 py-2 text-right">
-                      <button
-                        type="button"
-                        onClick={() => setModalCompartment(c)}
-                        className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-white rounded-md bg-[#232323] hover:bg-[#1a1a1a]"
-                        data-testid={`record-cleaning-${c.compartment_id}`}
-                      >
-                        <Sparkles className="w-3 h-3" aria-hidden="true" />
-                        Record cleaning
-                      </button>
+                      <div className="inline-flex items-center gap-1.5 justify-end">
+                        <button
+                          type="button"
+                          onClick={() => setEligibilityCompartment(c)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-[#232323] rounded-md bg-white border border-gray-200 hover:bg-gray-50"
+                          data-testid={`check-eligibility-${c.compartment_id}`}
+                        >
+                          <Search className="w-3 h-3" aria-hidden="true" />
+                          Check eligibility
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setModalCompartment(c)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-white rounded-md bg-[#232323] hover:bg-[#1a1a1a]"
+                          data-testid={`record-cleaning-${c.compartment_id}`}
+                        >
+                          <Sparkles className="w-3 h-3" aria-hidden="true" />
+                          Record cleaning
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -897,6 +1161,12 @@ export default function TruckCompartmentsPage() {
           compartment={modalCompartment}
           onClose={() => setModalCompartment(null)}
           onSuccess={handleCleaningSuccess}
+        />
+      )}
+      {eligibilityCompartment && (
+        <LoadEligibilityModal
+          compartment={eligibilityCompartment}
+          onClose={() => setEligibilityCompartment(null)}
         />
       )}
     </div>
