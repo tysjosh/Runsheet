@@ -327,7 +327,14 @@ class TestEvaluate:
 
 class TestBuildDeliveryRequests:
     def test_filters_critical_and_high_only(self):
-        """Only CRITICAL and HIGH priorities become delivery requests."""
+        """CRITICAL / HIGH / MEDIUM priorities become delivery requests.
+
+        The agent was widened (see commit c5be838) to include MEDIUM
+        priorities alongside CRITICAL and HIGH so loading plans can
+        absorb near-threshold runouts in the same truck-run. LOW
+        priorities remain excluded because they can safely wait for
+        the next cycle.
+        """
         agent, _ = _make_agent()
         priority_list = _make_priority_list(
             priorities=[
@@ -358,9 +365,9 @@ class TestBuildDeliveryRequests:
             ]
         )
         requests = agent._build_delivery_requests(priority_list)
-        assert len(requests) == 2
+        assert len(requests) == 3
         station_ids = {r.station_id for r in requests}
-        assert station_ids == {"s1", "s2"}
+        assert station_ids == {"s1", "s2", "s3"}
 
     def test_empty_priorities_returns_empty(self):
         agent, _ = _make_agent()

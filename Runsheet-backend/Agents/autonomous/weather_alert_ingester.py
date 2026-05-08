@@ -57,6 +57,13 @@ from fuel.storm_mode_models import (
     WeatherAlertSeverity,
     WeatherAlertStatus,
 )
+from services.external_call_tracing import (
+    CircuitBreaker,
+    CircuitOpenError,
+    default_circuit_breaker,
+    trace_external_call,
+)
+from services.metrics import fuelops_weather_alert_ingestion_total
 
 logger = logging.getLogger(__name__)
 
@@ -189,6 +196,7 @@ class WeatherAlertIngester(AutonomousAgentBase):
         nws_base_url: str = NWS_ACTIVE_ALERTS_URL,
         user_agent: str = DEFAULT_USER_AGENT,
         http_timeout_seconds: float = DEFAULT_HTTP_TIMEOUT_SECONDS,
+        circuit_breaker: Optional[CircuitBreaker] = None,
     ) -> None:
         super().__init__(
             agent_id=self.AGENT_ID,
@@ -211,6 +219,9 @@ class WeatherAlertIngester(AutonomousAgentBase):
         self._nws_base_url = nws_base_url
         self._user_agent = user_agent
         self._http_timeout = http_timeout_seconds
+        self._circuit_breaker = (
+            circuit_breaker if circuit_breaker is not None else default_circuit_breaker
+        )
 
     # ------------------------------------------------------------------
     # Base-class hook
@@ -379,6 +390,17 @@ class WeatherAlertIngester(AutonomousAgentBase):
     ) -> List[Dict[str, Any]]:
         """Call ``/alerts/active`` and return the raw NWS feature list.
 
+        Every fetch is wrapped in :func:`trace_external_call` so the
+        structured-log surface (``tenant_id``, ``provider=nws``,
+        ``operation=get_active_alerts``, ``duration_ms``, ``status``,
+        and — on failure — ``error_code``) is uniform with every other
+        external call in the platform, and the per-``(tenant_id, nws)``
+        circuit breaker trips after 5 consecutive failures, sparing the
+        upstream while the outage persists (Task 12.9 / Req 10.4.3).
+        Fallback behaviour is preserved: on any failure — including
+        :class:`CircuitOpenError` — we return an empty feature list so
+        the monitor cycle advances without raising.
+
         The NWS API does not accept a ZIP list directly; it filters by
         ``zone`` id or by ``area`` (two-letter state). For a practical
         first-pass the ingester submits the ZIP list as a ``point=`` /
@@ -401,31 +423,69 @@ class WeatherAlertIngester(AutonomousAgentBase):
             own_client = True
         try:
             try:
-                response = await client.get(
-                    self._nws_base_url, params=params, headers=headers
-                )
-            except httpx.HTTPError as exc:
-                self.logger.warning(
-                    "WeatherAlertIngester: NWS HTTP failure for tenant=%s: %s",
-                    tenant_id,
-                    exc,
-                )
+                async with trace_external_call(
+                    tenant_id=tenant_id,
+                    provider="nws",
+                    operation="get_active_alerts",
+                    circuit_breaker=self._circuit_breaker,
+                    # The weather-alert metric uses
+                    # (new|updated|duplicate|error) as its status
+                    # vocabulary; we do not feed it from the call
+                    # wrapper here because ingestion-level outcomes are
+                    # recorded per-alert by the cycle. The wrapper's
+                    # own circuit-open / timeout / error tally is
+                    # already surfaced through the structured-log line
+                    # so dashboards can grep it by ``event``.
+                    metric=None,
+                ) as call:
+                    try:
+                        response = await client.get(
+                            self._nws_base_url, params=params, headers=headers
+                        )
+                    except httpx.HTTPError as exc:
+                        call.set_error_code("http_error")
+                        self.logger.warning(
+                            "WeatherAlertIngester: NWS HTTP failure "
+                            "for tenant=%s: %s",
+                            tenant_id,
+                            exc,
+                        )
+                        raise
+                    if response.status_code >= 400:
+                        call.set_status("error")
+                        call.set_error_code(f"http_{response.status_code}")
+                        self.logger.warning(
+                            "WeatherAlertIngester: NWS returned HTTP "
+                            "%s for tenant=%s",
+                            response.status_code,
+                            tenant_id,
+                        )
+                        try:
+                            fuelops_weather_alert_ingestion_total.labels(
+                                tenant_id=tenant_id,
+                                provider="nws",
+                                status="error",
+                            ).inc()
+                        except Exception:  # pragma: no cover - defensive
+                            pass
+                        return []
+                    try:
+                        payload = response.json()
+                    except ValueError as exc:
+                        call.set_error_code("invalid_json")
+                        self.logger.warning(
+                            "WeatherAlertIngester: NWS returned non-JSON "
+                            "for tenant=%s: %s",
+                            tenant_id,
+                            exc,
+                        )
+                        raise
+            except CircuitOpenError:
+                # Breaker is open for this tenant's NWS feed — skip the
+                # cycle. Wrapper already emitted the
+                # ``external_call_rejected`` event.
                 return []
-            if response.status_code >= 400:
-                self.logger.warning(
-                    "WeatherAlertIngester: NWS returned HTTP %s for tenant=%s",
-                    response.status_code,
-                    tenant_id,
-                )
-                return []
-            try:
-                payload = response.json()
-            except ValueError as exc:
-                self.logger.warning(
-                    "WeatherAlertIngester: NWS returned non-JSON for tenant=%s: %s",
-                    tenant_id,
-                    exc,
-                )
+            except (httpx.HTTPError, ValueError):
                 return []
         finally:
             if own_client:

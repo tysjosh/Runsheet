@@ -41,6 +41,26 @@ from fuel.services.weather_provider import (
     build_weather_provider,
     compute_hdd,
 )
+from services.external_call_tracing import default_circuit_breaker
+
+
+# ---------------------------------------------------------------------------
+# Shared circuit-breaker isolation
+#
+# The weather provider uses the process-wide :data:`default_circuit_breaker`
+# singleton keyed by ``(tenant_id, provider)``. Failure-path tests here and
+# in the traffic/rack-price test modules share the ``("t-1", "stub")`` key
+# so a breaker tripped in one module would short-circuit callers in another.
+# The autouse fixture clears state between tests to keep them independent.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+async def _reset_default_circuit_breaker():
+    """Reset the shared breaker between tests to avoid cross-test leaks."""
+    await default_circuit_breaker.reset()
+    yield
+    await default_circuit_breaker.reset()
 
 
 # ---------------------------------------------------------------------------

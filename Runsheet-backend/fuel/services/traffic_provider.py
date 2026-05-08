@@ -72,6 +72,14 @@ from typing import (
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from services.external_call_tracing import (
+    CircuitBreaker,
+    CircuitOpenError,
+    default_circuit_breaker,
+    trace_external_call,
+)
+from services.metrics import fuelops_traffic_provider_calls_total
+
 logger = logging.getLogger(__name__)
 
 
@@ -331,6 +339,7 @@ class TrafficProvider(ABC):
         http_client: Optional[httpx.AsyncClient] = None,
         timeout_seconds: float = DEFAULT_HTTP_TIMEOUT_SECONDS,
         cache_ttl_seconds: int = DEFAULT_CACHE_TTL_SECONDS,
+        circuit_breaker: Optional[CircuitBreaker] = None,
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
@@ -340,6 +349,11 @@ class TrafficProvider(ABC):
         self._http_client = http_client
         self._timeout = timeout_seconds
         self._cache_ttl = cache_ttl_seconds
+        # Share a process-wide circuit breaker by default so every
+        # TrafficProvider subclass participates in the same
+        # ``(tenant_id, provider)`` state machine. Tests pass a fresh
+        # breaker per case so no state leaks across scenarios.
+        self._circuit_breaker = circuit_breaker or default_circuit_breaker
 
     # ------------------------------------------------------------------
     # Public API
@@ -417,15 +431,33 @@ class TrafficProvider(ABC):
         await self._assert_budget(tenant_id)
 
         # 3) Provider call under strict 10-second budget -------------------
-        raw_distance, raw_duration = await asyncio.wait_for(
-            self._fetch_raw(
-                origins=origins_list,
-                destinations=destinations_list,
-                depart_at=depart_at,
-            ),
-            timeout=self._timeout,
-        )
-        self._validate_raw_shape(raw_distance, raw_duration, n_o, n_d)
+        # Wrap the outbound HTTP call in ``trace_external_call`` so every
+        # attempt emits a structured log event and feeds the per-
+        # ``(tenant_id, provider)`` circuit breaker (Task 12.9 /
+        # Requirement 10.4.1, 10.4.3). ``TrafficBudgetExceeded`` is a
+        # client-side gate that runs before the wrapper, so it is not
+        # counted as an upstream failure here.
+        async with trace_external_call(
+            tenant_id=tenant_id,
+            provider=self.name,
+            operation="get_matrix",
+            circuit_breaker=self._circuit_breaker,
+            metric=fuelops_traffic_provider_calls_total,
+            extra={
+                "origin_count": n_o,
+                "destination_count": n_d,
+                "depart_at": depart_at.isoformat(),
+            },
+        ):
+            raw_distance, raw_duration = await asyncio.wait_for(
+                self._fetch_raw(
+                    origins=origins_list,
+                    destinations=destinations_list,
+                    depart_at=depart_at,
+                ),
+                timeout=self._timeout,
+            )
+            self._validate_raw_shape(raw_distance, raw_duration, n_o, n_d)
 
         # 4) Increment budget counter on success --------------------------
         await self._increment_budget(tenant_id)

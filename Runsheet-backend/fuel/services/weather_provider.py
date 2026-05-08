@@ -59,6 +59,13 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from fuel.services.fuel_ops_es_mappings import WEATHER_OBSERVATIONS_INDEX
+from services.external_call_tracing import (
+    CircuitBreaker,
+    CircuitOpenError,
+    default_circuit_breaker,
+    trace_external_call,
+)
+from services.metrics import fuelops_weather_provider_calls_total
 
 logger = logging.getLogger(__name__)
 
@@ -251,6 +258,7 @@ class WeatherProvider(ABC):
         http_client: Optional[httpx.AsyncClient] = None,
         timeout_seconds: float = DEFAULT_HTTP_TIMEOUT_SECONDS,
         cache_ttl_seconds: int = DEFAULT_CACHE_TTL_SECONDS,
+        circuit_breaker: Optional[CircuitBreaker] = None,
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
@@ -261,6 +269,11 @@ class WeatherProvider(ABC):
         self._http_client = http_client
         self._timeout = timeout_seconds
         self._cache_ttl = cache_ttl_seconds
+        # ``circuit_breaker`` defaults to the process-wide shared
+        # breaker so every WeatherProvider instance participates in the
+        # same ``(tenant_id, provider)`` state machine — tests inject a
+        # fresh breaker per case to keep state isolated.
+        self._circuit_breaker = circuit_breaker or default_circuit_breaker
 
     # ------------------------------------------------------------------
     # Public API
@@ -314,16 +327,42 @@ class WeatherProvider(ABC):
             return cached
 
         # 2) Provider call with strict 5-second budget ----------------------
+        # Wrapped in ``trace_external_call`` so every HTTP attempt emits a
+        # structured log event (tenant_id, provider, operation, duration_ms,
+        # status, error_code) and feeds the per-(tenant, provider) circuit
+        # breaker — Task 12.9 / Requirements 10.4.1, 10.4.3. The wrapper
+        # classifies asyncio.TimeoutError / httpx failures for us; we
+        # preserve the existing graceful-fallback behaviour (return ``[]``
+        # so the forecaster annotates ``weather_fallback: true``) by
+        # swallowing those exceptions after the wrapper has observed them.
         try:
-            rows = await asyncio.wait_for(
-                self._fetch_raw(
-                    zip_code=zip_code,
-                    start_date=start_date,
-                    end_date=end_date,
-                    tenant_id=tenant_id,
-                ),
-                timeout=self._timeout,
-            )
+            async with trace_external_call(
+                tenant_id=tenant_id,
+                provider=self.name,
+                operation="fetch",
+                circuit_breaker=self._circuit_breaker,
+                metric=fuelops_weather_provider_calls_total,
+                extra={
+                    "zip_code": zip_code,
+                    "start_date": start_date.isoformat(),
+                    "end_date": end_date.isoformat(),
+                },
+            ):
+                rows = await asyncio.wait_for(
+                    self._fetch_raw(
+                        zip_code=zip_code,
+                        start_date=start_date,
+                        end_date=end_date,
+                        tenant_id=tenant_id,
+                    ),
+                    timeout=self._timeout,
+                )
+        except CircuitOpenError:
+            # Breaker is open — skip this cycle and let the forecaster
+            # annotate ``weather_fallback: true``. The wrapper already
+            # emitted the rejection event and incremented the metric with
+            # ``status="circuit_open"``.
+            return []
         except asyncio.TimeoutError:
             logger.warning(
                 "WeatherProvider[%s]: timed out after %.1fs for zip=%s range=%s..%s",
@@ -574,6 +613,7 @@ class NOAAWeatherProvider(WeatherProvider):
         http_client: Optional[httpx.AsyncClient] = None,
         timeout_seconds: float = DEFAULT_HTTP_TIMEOUT_SECONDS,
         cache_ttl_seconds: int = DEFAULT_CACHE_TTL_SECONDS,
+        circuit_breaker: Optional[CircuitBreaker] = None,
     ) -> None:
         super().__init__(
             es_service=es_service,
@@ -581,6 +621,7 @@ class NOAAWeatherProvider(WeatherProvider):
             http_client=http_client,
             timeout_seconds=timeout_seconds,
             cache_ttl_seconds=cache_ttl_seconds,
+            circuit_breaker=circuit_breaker,
         )
         self._token = token or os.environ.get(NOAA_TOKEN_ENV)
         self._dataset_id = dataset_id
@@ -740,6 +781,7 @@ class OpenWeatherProvider(WeatherProvider):
         http_client: Optional[httpx.AsyncClient] = None,
         timeout_seconds: float = DEFAULT_HTTP_TIMEOUT_SECONDS,
         cache_ttl_seconds: int = DEFAULT_CACHE_TTL_SECONDS,
+        circuit_breaker: Optional[CircuitBreaker] = None,
     ) -> None:
         super().__init__(
             es_service=es_service,
@@ -747,6 +789,7 @@ class OpenWeatherProvider(WeatherProvider):
             http_client=http_client,
             timeout_seconds=timeout_seconds,
             cache_ttl_seconds=cache_ttl_seconds,
+            circuit_breaker=circuit_breaker,
         )
         self._explicit_key = api_key
         self._vault = credentials_vault

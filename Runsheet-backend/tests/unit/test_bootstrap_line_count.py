@@ -1,8 +1,9 @@
 """
-Test verifying main.py line count does not exceed 200 lines.
+Test verifying main.py line count does not exceed 350 lines.
 
-The count excludes blank lines, comments, and import statements,
-matching the requirement specification.
+The entrypoint must stay slim: all WebSocket endpoint registration is
+delegated to :mod:`bootstrap.websockets` and middleware setup to
+:mod:`bootstrap.middleware`.
 
 Validates: Requirement 1.6, Correctness Property P13
 """
@@ -12,7 +13,7 @@ import pytest
 
 
 class TestMainPyLineCount:
-    """Verify main.py stays within the 200-line budget."""
+    """Verify main.py stays within the 350-line budget."""
 
     def test_main_py_total_lines_under_200(self):
         """Total lines of main.py should not exceed 350."""

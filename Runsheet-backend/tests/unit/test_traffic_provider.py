@@ -55,6 +55,29 @@ from fuel.services.traffic_provider import (
     build_traffic_provider,
     compute_bucket_15min,
 )
+from services.external_call_tracing import default_circuit_breaker
+
+
+# ---------------------------------------------------------------------------
+# Shared circuit-breaker isolation
+#
+# The fuel-ops external-call wrapper persists breaker state on a
+# process-wide :data:`default_circuit_breaker` keyed by
+# ``(tenant_id, provider)``. Tests in this module deliberately push
+# the ``("t-1", "stub")`` key through failure paths (timeouts,
+# exceptions) and would otherwise leak an OPEN breaker into the next
+# test — or into the weather/rack-price test modules that share the
+# same key shape. Clearing the breaker before each test keeps every
+# case independent without changing production behaviour.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+async def _reset_default_circuit_breaker():
+    """Reset the shared breaker between tests to avoid cross-test leaks."""
+    await default_circuit_breaker.reset()
+    yield
+    await default_circuit_breaker.reset()
 
 
 # ---------------------------------------------------------------------------

@@ -85,6 +85,13 @@ from fuel.services.fuel_product_catalog import (
     UnknownFuelProductError,
     canonicalize,
 )
+from services.external_call_tracing import (
+    CircuitBreaker,
+    CircuitOpenError,
+    default_circuit_breaker,
+    trace_external_call,
+)
+from services.metrics import fuelops_rack_price_provider_calls_total
 
 logger = logging.getLogger(__name__)
 
@@ -330,6 +337,7 @@ class RackPriceProvider(ABC):
         timeout_seconds: float = DEFAULT_HTTP_TIMEOUT_SECONDS,
         cache_ttl_seconds: int = DEFAULT_CACHE_TTL_SECONDS,
         cache_bucket_minutes: int = CACHE_BUCKET_MINUTES,
+        circuit_breaker: Optional[CircuitBreaker] = None,
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
@@ -342,6 +350,9 @@ class RackPriceProvider(ABC):
         self._timeout = float(timeout_seconds)
         self._cache_ttl = int(cache_ttl_seconds)
         self._cache_bucket_minutes = int(cache_bucket_minutes)
+        self._circuit_breaker = (
+            circuit_breaker if circuit_breaker is not None else default_circuit_breaker
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -488,45 +499,84 @@ class RackPriceProvider(ABC):
         as_of: datetime,
         tenant_id: str,
     ) -> List[RackPrice]:
-        """Invoke :meth:`_fetch_raw` under the configured timeout."""
+        """Invoke :meth:`_fetch_raw` under the configured timeout.
+
+        Wraps the call in :func:`trace_external_call` so every attempt
+        emits a structured log event (``tenant_id``, ``provider``,
+        ``operation=fetch_prices``, ``duration_ms``, ``status``, and
+        — on failure — ``error_code``) and feeds the per-
+        ``(tenant_id, provider)`` circuit breaker (Task 12.9 /
+        Req 10.4.3). The breaker flips to OPEN after 5 consecutive
+        upstream failures and resets 60s later; while OPEN the wrapper
+        raises :class:`CircuitOpenError` before ``_fetch_raw`` is ever
+        invoked, preserving upstream budget and keeping the
+        recommender's ``rack_price_fallback: true`` path honest.
+        """
 
         try:
-            return await asyncio.wait_for(
-                self._fetch_raw(
-                    terminal_ids=terminal_ids,
-                    product_codes=product_codes,
-                    as_of=as_of,
-                    tenant_id=tenant_id,
-                ),
-                timeout=self._timeout,
-            )
+            async with trace_external_call(
+                tenant_id=tenant_id,
+                provider=self.name,
+                operation="fetch_prices",
+                circuit_breaker=self._circuit_breaker,
+                metric=fuelops_rack_price_provider_calls_total,
+            ) as call:
+                try:
+                    return await asyncio.wait_for(
+                        self._fetch_raw(
+                            terminal_ids=terminal_ids,
+                            product_codes=product_codes,
+                            as_of=as_of,
+                            tenant_id=tenant_id,
+                        ),
+                        timeout=self._timeout,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "RackPriceProvider[%s]: timed out after %.1fs for "
+                        "terminals=%s products=%s",
+                        self.name,
+                        self._timeout,
+                        terminal_ids,
+                        product_codes,
+                    )
+                    # Re-raise so the wrapper records a failure against
+                    # the breaker and emits ``status="timeout"``.
+                    raise
+                except (httpx.HTTPError, httpx.RequestError) as exc:
+                    logger.warning(
+                        "RackPriceProvider[%s]: HTTP error "
+                        "(terminals=%s products=%s): %s",
+                        self.name,
+                        terminal_ids,
+                        product_codes,
+                        exc,
+                    )
+                    call.set_error_code("http_error")
+                    raise
+                except Exception as exc:  # pragma: no cover - defensive catch-all
+                    logger.warning(
+                        "RackPriceProvider[%s]: unexpected error "
+                        "(terminals=%s products=%s): %s",
+                        self.name,
+                        terminal_ids,
+                        product_codes,
+                        exc,
+                    )
+                    raise
+        except CircuitOpenError:
+            # The breaker is open for this (tenant, provider) pair.
+            # Return an empty miss-list so the Sourcing_Recommender
+            # falls back to its most-recent-cached path and annotates
+            # the recommendation with ``rack_price_fallback: true``
+            # (Req 8.2.5). The wrapper already emitted the
+            # ``external_call_rejected`` structured log event.
+            return []
         except asyncio.TimeoutError:
-            logger.warning(
-                "RackPriceProvider[%s]: timed out after %.1fs for "
-                "terminals=%s products=%s",
-                self.name,
-                self._timeout,
-                terminal_ids,
-                product_codes,
-            )
             return []
-        except (httpx.HTTPError, httpx.RequestError) as exc:  # pragma: no cover
-            logger.warning(
-                "RackPriceProvider[%s]: HTTP error (terminals=%s products=%s): %s",
-                self.name,
-                terminal_ids,
-                product_codes,
-                exc,
-            )
+        except (httpx.HTTPError, httpx.RequestError):
             return []
-        except Exception as exc:  # pragma: no cover - defensive catch-all
-            logger.warning(
-                "RackPriceProvider[%s]: unexpected error (terminals=%s products=%s): %s",
-                self.name,
-                terminal_ids,
-                product_codes,
-                exc,
-            )
+        except Exception:  # pragma: no cover - defensive
             return []
 
     async def _get_http_client(self) -> httpx.AsyncClient:
@@ -689,12 +739,14 @@ class OPISRackPriceProvider(RackPriceProvider):
         http_client: Optional[httpx.AsyncClient] = None,
         timeout_seconds: float = DEFAULT_HTTP_TIMEOUT_SECONDS,
         cache_ttl_seconds: int = DEFAULT_CACHE_TTL_SECONDS,
+        circuit_breaker: Optional[CircuitBreaker] = None,
     ) -> None:
         super().__init__(
             redis_client=redis_client,
             http_client=http_client,
             timeout_seconds=timeout_seconds,
             cache_ttl_seconds=cache_ttl_seconds,
+            circuit_breaker=circuit_breaker,
         )
         self._explicit_api_key = api_key
         self._explicit_api_secret = api_secret
@@ -949,6 +1001,7 @@ class CSVFallbackRackPriceProvider(RackPriceProvider):
         timeout_seconds: float = DEFAULT_HTTP_TIMEOUT_SECONDS,
         cache_ttl_seconds: int = DEFAULT_CACHE_TTL_SECONDS,
         encoding: str = "utf-8",
+        circuit_breaker: Optional[CircuitBreaker] = None,
     ) -> None:
         if not callable(csv_loader):
             raise TypeError("csv_loader must be an async callable")
@@ -957,6 +1010,7 @@ class CSVFallbackRackPriceProvider(RackPriceProvider):
             http_client=None,
             timeout_seconds=timeout_seconds,
             cache_ttl_seconds=cache_ttl_seconds,
+            circuit_breaker=circuit_breaker,
         )
         self._csv_loader = csv_loader
         self._encoding = encoding

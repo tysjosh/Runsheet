@@ -81,6 +81,13 @@ from integrations.connector_base import (
     SyncOperation,
     SyncRun,
 )
+from services.external_call_tracing import (
+    CircuitBreaker,
+    CircuitOpenError,
+    default_circuit_breaker,
+    trace_external_call,
+)
+from services.metrics import fuelops_integration_sync_runs_total
 
 logger = logging.getLogger(__name__)
 
@@ -280,6 +287,7 @@ class IntegrationScheduler:
         clock: Callable[[], datetime] = _utcnow,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         alert_ttl_seconds: int = DEFAULT_ALERT_TTL_SECONDS,
+        circuit_breaker: Optional[CircuitBreaker] = None,
     ) -> None:
         if repository is None:
             raise ValueError("repository must not be None")
@@ -320,6 +328,9 @@ class IntegrationScheduler:
         self._clock = clock
         self._sleep = sleep
         self._alert_ttl_seconds = alert_ttl_seconds
+        self._circuit_breaker = (
+            circuit_breaker if circuit_breaker is not None else default_circuit_breaker
+        )
 
         # Lazy-constructed on ``start()`` so unit tests that only
         # exercise ``_run_sync_job`` never touch APScheduler at all.
@@ -798,22 +809,75 @@ class IntegrationScheduler:
         connector: IntegrationConnector,
         instance: IntegrationInstance,
     ) -> SyncRun:
-        """Dispatch to ``sync_pull`` or ``sync_push`` depending on mode."""
+        """Dispatch to ``sync_pull`` or ``sync_push`` depending on mode.
 
-        if self._operation == "pull":
-            since = instance.last_sync_at or datetime.fromtimestamp(0, tz=timezone.utc)
-            return await connector.sync_pull(since)
+        Every call is wrapped in :func:`trace_external_call` so the
+        structured-log surface (``tenant_id``, ``provider`` =
+        :attr:`IntegrationConnector.provider_name`, ``operation`` =
+        ``sync_pull`` / ``sync_push``, ``duration_ms``, ``status``,
+        ``error_code``) is uniform across QuickBooks Online,
+        Veeder-Root, Geotab, Stripe, and any future connector. The
+        per-``(tenant_id, provider)`` circuit breaker trips after 5
+        consecutive failures and resets 60s later (Task 12.9 /
+        Req 10.4.3), sparing the upstream while an outage persists.
 
-        assert self._push_payload_builder is not None
-        payload = self._push_payload_builder(instance)
-        if asyncio.iscoroutine(payload):
-            payload = await payload
-        if not isinstance(payload, dict):
-            raise TypeError(
-                "push_payload_builder must return a dict, got "
-                f"{type(payload).__name__}"
-            )
-        return await connector.sync_push(payload)
+        :class:`CircuitOpenError` is re-raised so the retry loop in
+        :meth:`_execute_sync` treats it as a failure attempt and honors
+        the exponential backoff before the next cycle. The metric
+        increment is driven by the :class:`SyncRun.status` the
+        connector returned, because the scheduler-owned metric maps to
+        the run's terminal state (``success`` / ``partial`` /
+        ``error``) rather than the raw call outcome.
+        """
+
+        async with trace_external_call(
+            tenant_id=instance.tenant_id,
+            provider=connector.provider_name,
+            operation=f"sync_{self._operation}",
+            circuit_breaker=self._circuit_breaker,
+            # The metric is incremented separately once the SyncRun
+            # terminal status is known (``success`` / ``partial`` /
+            # ``error``) so the label matches the SyncRun outcome
+            # rather than the raw wrapper status.
+            metric=None,
+            extra={"instance_id": instance.instance_id},
+        ) as call:
+            if self._operation == "pull":
+                since = instance.last_sync_at or datetime.fromtimestamp(
+                    0, tz=timezone.utc
+                )
+                run = await connector.sync_pull(since)
+            else:
+                assert self._push_payload_builder is not None
+                payload = self._push_payload_builder(instance)
+                if asyncio.iscoroutine(payload):
+                    payload = await payload
+                if not isinstance(payload, dict):
+                    raise TypeError(
+                        "push_payload_builder must return a dict, got "
+                        f"{type(payload).__name__}"
+                    )
+                run = await connector.sync_push(payload)
+
+            # A connector that reports a non-success SyncRun surfaces
+            # here as a soft failure so the breaker still records it.
+            if isinstance(run, SyncRun) and run.status == "error":
+                call.set_status("error")
+                if run.error_details:
+                    call.set_error_code("sync_run_error")
+
+            try:
+                fuelops_integration_sync_runs_total.labels(
+                    tenant_id=instance.tenant_id,
+                    provider=connector.provider_name,
+                    status=(
+                        run.status if isinstance(run, SyncRun) else "error"
+                    ),
+                ).inc()
+            except Exception:  # pragma: no cover - defensive
+                pass
+
+            return run
 
     # ------------------------------------------------------------------
     # Persistence helpers

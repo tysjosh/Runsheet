@@ -181,12 +181,40 @@ class DelayResponseAgent(AutonomousAgentBase):
             available = await self._find_available_asset(asset_type, tenant_id)
 
             if available:
-                # Propose reassignment via Confirmation Protocol (Req 3.4)
+                # Propose reassignment via Confirmation Protocol (Req 3.4).
+                #
+                # Older fleet documents seeded before the ``asset_id``
+                # alias was added only carry ``truck_id``. Both fields
+                # identify the same row (see ``data_endpoints.py`` where
+                # POST /api/fleet/assets writes both), so treat either
+                # as the canonical asset identifier and skip the row
+                # when neither is present rather than raising KeyError
+                # out of the monitor cycle.
+                asset_id = available.get("asset_id") or available.get("truck_id")
+                if not asset_id:
+                    self.logger.warning(
+                        "Skipping reassignment for job %s: available "
+                        "asset has neither asset_id nor truck_id "
+                        "(fields=%s)",
+                        job_id, list(available.keys()),
+                    )
+                    await self._ws.broadcast_event("delay_alert", {
+                        "job_id": job_id,
+                        "reason": "no_alternative_available",
+                        "job_details": job,
+                    })
+                    actions.append({
+                        "job_id": job_id,
+                        "action": "escalation",
+                    })
+                    self._set_cooldown(job_id)
+                    continue
+
                 request = MutationRequest(
                     tool_name="assign_asset_to_job",
                     parameters={
                         "job_id": job_id,
-                        "asset_id": available["asset_id"],
+                        "asset_id": asset_id,
                     },
                     tenant_id=tenant_id,
                     agent_id=self.agent_id,

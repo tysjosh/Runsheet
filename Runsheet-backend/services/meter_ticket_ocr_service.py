@@ -60,6 +60,13 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from pydantic import BaseModel, ConfigDict, Field
 
 from fuel.services.fuel_ops_es_mappings import METER_TICKET_OCR_RESULTS_INDEX
+from services.external_call_tracing import (
+    CircuitBreaker,
+    CircuitOpenError,
+    default_circuit_breaker,
+    trace_external_call,
+)
+from services.metrics import fuelops_ocr_calls_total
 
 logger = logging.getLogger(__name__)
 
@@ -230,6 +237,7 @@ class MeterTicketOCRService:
         region: str = "us-east-1",
         default_confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
         timeout_seconds: float = DEFAULT_TEXTRACT_TIMEOUT_SECONDS,
+        circuit_breaker: Optional[CircuitBreaker] = None,
     ) -> None:
         if file_storage is None:
             raise ValueError("file_storage is required")
@@ -247,6 +255,9 @@ class MeterTicketOCRService:
         self._region = region
         self._default_threshold = float(default_confidence_threshold)
         self._timeout = float(timeout_seconds)
+        self._circuit_breaker = (
+            circuit_breaker if circuit_breaker is not None else default_circuit_breaker
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -304,10 +315,16 @@ class MeterTicketOCRService:
         raw_text: str = ""
 
         try:
-            response = await self._call_textract(image_bytes)
-            extracted_gallons, confidence, raw_text = self._parse_textract_response(
-                response
+            response, extracted_gallons, confidence, raw_text = await self._wrapped_call_textract(
+                tenant_id=tenant_id, image_bytes=image_bytes, threshold=threshold
             )
+        except CircuitOpenError:
+            # Breaker is open for this tenant's Textract — skip the call
+            # and emit a failure result so POD submission falls back to
+            # manual entry. The wrapper already emitted the
+            # ``external_call_rejected`` log event and incremented the
+            # ``fuelops_ocr_calls_total{status="circuit_open"}`` counter.
+            error_details = "textract_circuit_open"
         except asyncio.TimeoutError:
             error_details = "textract_timeout"
             logger.warning(
@@ -448,6 +465,54 @@ class MeterTicketOCRService:
 
         self._textract_client = boto3.client("textract", region_name=self._region)
         return self._textract_client
+
+    async def _wrapped_call_textract(
+        self,
+        *,
+        tenant_id: str,
+        image_bytes: bytes,
+        threshold: float,
+    ) -> Tuple[Dict[str, Any], Optional[float], float, str]:
+        """Run Textract under the structured-log + circuit-breaker wrapper.
+
+        The wrapper emits ``external_call_started`` /
+        ``external_call_finished`` (or ``external_call_failed`` /
+        ``external_call_rejected``) events with ``tenant_id``,
+        ``provider=aws_textract``, ``operation=analyze_document``,
+        ``duration_ms``, ``status``, and (on failure) ``error_code``. It
+        also increments :data:`fuelops_ocr_calls_total` with the
+        matching ``(tenant_id, provider, status)`` labels (Task 12.8 /
+        Req 10.3.1).
+
+        The status is ``success`` on a clean extraction,
+        ``requires_manual_review`` when Textract returned but the
+        parsed confidence is below the tenant's threshold, and
+        ``timeout`` / ``error`` on upstream faults. ``circuit_open`` is
+        emitted by the wrapper itself when the breaker has already
+        tripped — the caller catches :class:`CircuitOpenError` and maps
+        it to the canonical ``textract_circuit_open`` error_details so
+        the POD flow falls back to manual entry.
+        """
+
+        async with trace_external_call(
+            tenant_id=tenant_id,
+            provider=PROVIDER_NAME,
+            operation="analyze_document",
+            circuit_breaker=self._circuit_breaker,
+            metric=fuelops_ocr_calls_total,
+        ) as call:
+            response = await self._call_textract(image_bytes)
+            extracted_gallons, confidence, raw_text = self._parse_textract_response(
+                response
+            )
+            # A low-confidence response is not an upstream error — the
+            # call itself succeeded — but the metric surface reserves a
+            # dedicated ``requires_manual_review`` status for it
+            # (Req 10.3.1 / Task 12.8) so the dashboard can separate
+            # network faults from low-confidence extractions.
+            if extracted_gallons is None or confidence < threshold:
+                call.set_status("requires_manual_review")
+            return response, extracted_gallons, confidence, raw_text
 
     async def _call_textract(self, image_bytes: bytes) -> Dict[str, Any]:
         """Invoke ``AnalyzeDocument`` with a hard timeout.

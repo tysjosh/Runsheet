@@ -14,8 +14,8 @@ fuel-marketer operations the system picked up three new obligations:
     measurement units (liters + kilometers) and routing defaults continue
     to behave the same way until they explicitly flip.
 
-(b) The Route_Planning_Agent no longer falls back to the hardcoded Lagos
-    coordinate pair ``{6.5244, 3.3792}``. Instead it resolves a depot via
+(b) The Route_Planning_Agent no longer falls back to any region-specific
+    coordinate default (Req 2.2.6). Instead it resolves a depot via
     ``truck.assigned_depot_id → tenant.default_depot_id → HTTP 400
     no_depot_configured``. Existing tenants therefore need at least one
     :class:`fuel.depot_models.Depot` in the ``depots`` index and their

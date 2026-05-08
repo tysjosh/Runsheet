@@ -320,6 +320,60 @@ class TestMonitorCycleWithReassignment:
         assert "JOB-001" in detections
 
     @pytest.mark.asyncio
+    async def test_accepts_legacy_asset_with_only_truck_id(self):
+        """Older ``trucks`` docs only expose ``truck_id`` (no ``asset_id``).
+
+        The monitor cycle used to index the ES hit by ``asset_id`` directly,
+        which raised ``KeyError: 'asset_id'`` on every cycle when the
+        trucks index still held data seeded before the asset_id alias
+        was added. Falling back to ``truck_id`` keeps the reassignment
+        path working for those rows.
+        """
+        agent = _make_agent()
+        job = _delayed_job()
+        legacy_asset = {
+            "truck_id": "TRUCK-LEGACY-1",
+            "asset_type": "vehicle",
+            "status": "on_time",
+            "tenant_id": "default",
+        }
+
+        agent._es.search_documents = AsyncMock(
+            side_effect=[_es_response([job]), _es_response([legacy_asset])]
+        )
+
+        detections, actions = await agent.monitor_cycle()
+        assert actions and actions[0]["action"] == "reassignment"
+        agent._confirmation_protocol.process_mutation.assert_called_once()
+        request = agent._confirmation_protocol.process_mutation.call_args[0][0]
+        assert request.parameters["asset_id"] == "TRUCK-LEGACY-1"
+
+    @pytest.mark.asyncio
+    async def test_escalates_when_asset_has_no_identifier(self):
+        """An asset row missing both ``asset_id`` and ``truck_id`` escalates.
+
+        Such a row cannot be targeted by the assignment mutation, so
+        the agent must skip the reassignment path and fire a delay
+        alert instead of raising out of the monitor cycle.
+        """
+        agent = _make_agent()
+        job = _delayed_job()
+        malformed_asset = {
+            "asset_type": "vehicle",
+            "status": "on_time",
+            "tenant_id": "default",
+        }
+
+        agent._es.search_documents = AsyncMock(
+            side_effect=[_es_response([job]), _es_response([malformed_asset])]
+        )
+
+        detections, actions = await agent.monitor_cycle()
+        assert actions and actions[0]["action"] == "escalation"
+        agent._confirmation_protocol.process_mutation.assert_not_called()
+        agent._ws.broadcast_event.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_proposes_reassignment(self):
         agent = _make_agent()
         job = _delayed_job()

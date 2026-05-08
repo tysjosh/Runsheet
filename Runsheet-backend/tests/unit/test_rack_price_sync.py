@@ -42,6 +42,26 @@ from integrations.rack_price_sync import (
     _select_latest_per_pair,
     annotate_rack_price_fallback,
 )
+from services.external_call_tracing import default_circuit_breaker
+
+
+# ---------------------------------------------------------------------------
+# Shared circuit-breaker isolation
+#
+# Rack-price providers share the process-wide :data:`default_circuit_breaker`
+# with the weather/traffic provider tests (key shape is
+# ``(tenant_id, provider)``). Resetting between tests keeps the property
+# test's 60 Hypothesis iterations from inheriting an OPEN breaker from a
+# prior module's failure-path case.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+async def _reset_default_circuit_breaker():
+    """Reset the shared breaker between tests to avoid cross-test leaks."""
+    await default_circuit_breaker.reset()
+    yield
+    await default_circuit_breaker.reset()
 
 
 # ---------------------------------------------------------------------------

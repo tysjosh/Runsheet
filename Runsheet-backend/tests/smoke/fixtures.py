@@ -355,6 +355,24 @@ WS_FIXTURES: Dict[str, WSFixture] = {
         params={"token": ""},
         expects_confirmation=False,
     ),
+    # Plan-execution channel (Req 3.6, 3.9) — broadcasts driver check-ins
+    # and stop completions. Connection confirmation is emitted by the
+    # plan-execution WS manager only after the tenant guard accepts the
+    # handshake, so we flag it as expected in this smoke test.
+    "/ws/plan-execution": WSFixture(
+        params={"token": ""},
+        expects_confirmation=True,
+    ),
+    # Fuel-planning channel (Req 1.6.4) — customer_tank_forecast_ready,
+    # emergency_stop_inserted, replan_diff_ready, and
+    # sourcing_recommendation_ready events from the fuel-ops hardening
+    # spec. Confirmation message is emitted by FuelPlanningWSManager on
+    # connect, matching the envelope shape used by the other overlay
+    # channels.
+    "/ws/fuel-planning": WSFixture(
+        params={"token": ""},
+        expects_confirmation=True,
+    ),
 }
 
 

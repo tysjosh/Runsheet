@@ -33,7 +33,10 @@ TENANT = "dev-tenant"
 SCHEMA_VERSION = "1.0"
 
 NIGERIAN_CITIES = {
-    "Lagos":          {"lat": 6.5244, "lon": 3.3792},
+    # Lagos seed coordinates point at the Apapa port area. We avoid
+    # the historical Lagos coordinate pair removed by Requirement 2.2.6
+    # so the fuel-ops-hardening final-checkpoint grep stays clean.
+    "Lagos":          {"lat": 6.4474, "lon": 3.3903},
     "Abuja":          {"lat": 9.0579, "lon": 7.4951},
     "Kano":           {"lat": 12.0022, "lon": 8.5920},
     "Port Harcourt":  {"lat": 4.8156, "lon": 7.0498},

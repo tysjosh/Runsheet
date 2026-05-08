@@ -96,11 +96,19 @@ DEFAULT_OBJECTIVE_WEIGHTS: Dict[str, float] = {
 # travel-time derivation (Req 2.1.5).
 DEFAULT_SPEED_KMH = 40.0
 
-# Default depot location (legacy fallback). Task 4.2 removes the hardcoded
-# Lagos coordinate from the resolver chain; this constant remains only as
-# a module-level default consumed by the legacy single-depot code path
-# until Depot resolution is fully wired in downstream tasks.
-DEFAULT_DEPOT = {"lat": 6.5244, "lon": 3.3792}  # Lagos, Nigeria
+# Default depot placeholder (Requirement 2.2.6). Task 4.2 removed the
+# hardcoded Lagos coordinates from the resolver chain and Req 2.2.6
+# forbids any region-specific coordinate default anywhere in the backend.
+# This constant is a non-geographic null-island sentinel (``(0.0, 0.0)``)
+# used solely by the legacy single-depot code path when no
+# :class:`DepotResolver` has been injected — that path survives only for
+# backward compatibility with tests that predate depot resolution. In
+# production, the bootstrap injects a resolver and this placeholder is
+# always overwritten before the solver sees a Route_Plan; when the
+# resolver yields neither telemetry nor a depot the caller skips the
+# loading plan and the REST surface returns HTTP 400
+# ``no_depot_configured`` (Req 2.2.4).
+DEFAULT_DEPOT = {"lat": 0.0, "lon": 0.0}  # null-island sentinel (Req 2.2.6)
 
 # Redis key template for the per-tenant Traffic_Provider selection
 # (Req 2.1.2). The value is a short provider name ("mapbox", "here",
