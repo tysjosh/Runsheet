@@ -51,6 +51,15 @@ const SourcingPage = lazy(() => import("../../components/ops/SourcingPage"));
 const TruckCompartmentsPage = lazy(
   () => import("../../components/ops/TruckCompartmentsPage"),
 );
+// Fuel-Ops Hardening Phase 11 — customer tanks (Task 3.6 / Req 1.6.2) and
+// depots admin (Task 4.3 / Req 2.2.2). These components shipped in Phase 11
+// but were never mounted in the dashboard switch, so their corresponding
+// sidebar entries appeared to lead nowhere. Mount them here so the full
+// fuel-ops surface is navigable from the main shell.
+const CustomerTankPage = lazy(
+  () => import("../../components/ops/CustomerTankPage"),
+);
+const DepotsPage = lazy(() => import("../../components/admin/DepotsPage"));
 
 function MapLoadingPlaceholder() {
   return (
@@ -237,6 +246,28 @@ export default function Home() {
             <ErrorBoundary componentName="Truck Compartments">
               <Suspense fallback={<ComponentLoadingPlaceholder />}>
                 <TruckCompartmentsPage />
+              </Suspense>
+            </ErrorBoundary>
+          </div>
+        );
+
+      case "customer-tanks":
+        return (
+          <div className="flex-1 bg-gray-50">
+            <ErrorBoundary componentName="Customer Tanks">
+              <Suspense fallback={<ComponentLoadingPlaceholder />}>
+                <CustomerTankPage />
+              </Suspense>
+            </ErrorBoundary>
+          </div>
+        );
+
+      case "depots":
+        return (
+          <div className="flex-1 bg-gray-50">
+            <ErrorBoundary componentName="Depots">
+              <Suspense fallback={<ComponentLoadingPlaceholder />}>
+                <DepotsPage />
               </Suspense>
             </ErrorBoundary>
           </div>

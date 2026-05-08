@@ -1,26 +1,25 @@
 /**
- * Driver-facing API client.
+ * Upload helpers for driver-facing artifacts.
  *
- * Covers the presigned-upload and POD submission endpoints added by the
- * Fuel Ops Hardening spec (Capability 4 — POD + Reconciliation):
+ * Historically this module covered both POD submission and its
+ * presigned-upload prerequisite, but POD submission now lives in the
+ * native driver app that talks to the backend directly. The web
+ * dispatcher UI only needs the presigned-upload primitives, which are
+ * also used for compartment cleaning-event evidence photos
+ * (`TruckCompartmentsPage`), so we keep:
  *
  *  • `POST /api/driver/pod/uploads/presign` — request a short-lived
- *    presigned PUT URL for a single POD artifact (signature, photo,
+ *    presigned PUT URL for a single artifact (signature, photo,
  *    meter-ticket, or BOL). See {@link presignPodUpload}.
- *  • `PUT <upload_url>` — upload the file bytes directly to S3 using the
- *    presigned URL; see {@link putPresignedFile}.
- *  • `POST /api/driver/jobs/{job_id}/pod` — submit the POD once every
- *    artifact has been uploaded; see {@link submitPOD}.
+ *  • `PUT <upload_url>` — upload the file bytes directly to S3 using
+ *    the presigned URL; see {@link putPresignedFile}.
  *
- * Kept in a separate module from `fuelApi.ts` because it targets the
- * driver-facing `/api/driver` router rather than the dispatcher-facing
- * `/api/fuel` router, and because it needs to send raw binary bodies to
- * externally-hosted presigned URLs (S3) rather than only the tenant's
- * backend. Style matches `fuelApi.ts` — same `fetchWithTimeout`,
- * `ApiError`, and `buildQueryString` helpers so the two clients feel
- * consistent.
+ * These remain here rather than moving to a generic `uploadsApi.ts`
+ * because the presigned-upload endpoint sits under the `/api/driver`
+ * router in the backend (`Runsheet-backend/driver/api/pod_endpoints.py`)
+ * and shares the POD-upload allowlist for category / content-type.
  *
- * Validates: Requirements 4.1.3, 4.1.4, 4.1.5, 4.1.6, 4.2.4, 4.2.5, 4.2.6.
+ * Validates: Requirements 4.1.3, 4.1.5.
  */
 
 import { API_TIMEOUTS, ApiError, ApiTimeoutError } from "./api";
@@ -78,82 +77,7 @@ export interface PresignResponse {
   max_file_bytes: number;
 }
 
-/** WGS 84 coordinate pair — matches the backend `GeoPoint` (`lat`, `lng`). */
-export interface GeoPoint {
-  lat: number;
-  lng: number;
-}
-
-/**
- * Body for `POST /api/driver/jobs/{job_id}/pod`.
- *
- * Mirrors the backend `PODRequest` model. The `*_ref` fields are the
- * preferred way to attach artifacts; they are `file_ref`s returned by
- * {@link presignPodUpload}. The legacy `*_url` fields are intentionally
- * omitted from this client — new driver UIs MUST upload via presigned
- * URLs so the server can enforce tenant isolation.
- */
-export interface DriverPODRequest {
-  recipient_name: string;
-  /** `file_ref` from the signature presigned upload. */
-  signature_ref: string;
-  /** `file_ref`s from the photo presigned uploads (one or more). */
-  photo_refs: string[];
-  /** Optional `file_ref` from the meter-ticket presigned upload. */
-  meter_ticket_ref?: string;
-  /**
-   * Driver-entered gallon count. When omitted and `meter_ticket_ref` is
-   * supplied, the server runs OCR. When provided, the value is treated
-   * as authoritative (`delivered_gallons_source = "manual"`).
-   */
-  delivered_gallons?: number;
-  geotag: GeoPoint;
-  /** ISO 8601 timestamp of the delivery. */
-  timestamp: string;
-  /** Optional one-time-password supplied by the customer. */
-  otp?: string;
-}
-
-/** Subset of the persisted POD document returned in the submit response. */
-export interface DriverPODResult {
-  pod_id: string;
-  job_id: string;
-  recipient_name: string;
-  signature_ref: string | null;
-  photo_refs: string[];
-  meter_ticket_ref: string | null;
-  delivered_gallons: number | null;
-  /** `"manual"` when the driver typed the value or OCR fell back. */
-  delivered_gallons_source: "manual" | "ocr";
-  /** Set by the server when the meter-ticket OCR produced a result. */
-  ocr_result_id?: string | null;
-  /** Confidence score [0.0, 1.0] from the OCR provider, if attempted. */
-  ocr_confidence?: number | null;
-  /**
-   * `true` when the OCR pipeline needs driver confirmation (low
-   * confidence or ambiguous extraction).
-   */
-  ocr_requires_manual_review?: boolean | null;
-  /** Short diagnostic string when OCR failed/timed out. */
-  ocr_error?: string | null;
-  geotag: { lat: number; lon: number };
-  timestamp: string;
-  otp_verified: boolean;
-  location_mismatch: boolean;
-  status: string;
-  tenant_id: string;
-  pod_hash?: string;
-  previous_pod_hash?: string;
-  chain_sequence?: number;
-}
-
-/** Envelope for the POD submission response. */
-export interface PODSubmissionResponse {
-  data: DriverPODResult;
-  request_id: string;
-}
-
-// ─── HTTP helpers (kept local so the driver client is self-contained) ────────
+// ─── HTTP helpers (kept local so the client is self-contained) ───────────────
 
 async function fetchWithTimeout(
   url: string,
@@ -179,20 +103,6 @@ async function fetchWithTimeout(
   } finally {
     clearTimeout(timeoutId);
   }
-}
-
-function buildQueryString(
-  params: Record<string, string | number | boolean | undefined | null> | object,
-): string {
-  const entries = Object.entries(params).filter(
-    ([, v]) => v !== undefined && v !== null && v !== "",
-  );
-  if (entries.length === 0) return "";
-  const searchParams = new URLSearchParams();
-  for (const [key, value] of entries) {
-    searchParams.set(key, String(value));
-  }
-  return `?${searchParams.toString()}`;
 }
 
 async function driverRequest<T>(
@@ -232,7 +142,7 @@ async function driverRequest<T>(
 // ─── Endpoints ───────────────────────────────────────────────────────────────
 
 /**
- * Request a presigned PUT URL for a POD artifact.
+ * Request a presigned PUT URL for a POD-category artifact.
  *
  * Validates: Requirement 4.1.3.
  */
@@ -301,35 +211,3 @@ export async function putPresignedFile(
     );
   }
 }
-
-/**
- * Submit a POD for a job.
- *
- * All artifact `file_ref`s must already be uploaded via
- * {@link putPresignedFile}; this call only persists the POD record and
- * triggers downstream reconciliation / BOL generation on the server.
- *
- * Validates: Requirements 4.1.4, 4.2.4, 4.2.5.
- */
-export async function submitPOD(
-  jobId: string,
-  payload: DriverPODRequest,
-  idempotencyKey?: string,
-): Promise<PODSubmissionResponse> {
-  const headers: Record<string, string> = {};
-  if (idempotencyKey) {
-    headers["Idempotency-Key"] = idempotencyKey;
-  }
-  return driverRequest<PODSubmissionResponse>(
-    `/driver/jobs/${encodeURIComponent(jobId)}/pod`,
-    {
-      method: "POST",
-      body: JSON.stringify(payload),
-      headers,
-    },
-  );
-}
-
-// ─── Utilities re-exported for consumers (mirrors fuelApi.ts style) ──────────
-
-export { buildQueryString };
