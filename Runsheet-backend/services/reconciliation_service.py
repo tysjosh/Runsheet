@@ -62,6 +62,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from config.settings import get_settings
 from fuel.services.fuel_ops_es_mappings import MVP_RECONCILIATION_INDEX
 
 logger = logging.getLogger(__name__)
@@ -504,6 +505,52 @@ class ReconciliationService:
             "alert_flags": alert_flags,
             "updated_at": updated_at,
         }
+
+        # ── Step 9.5a: Dual-write path ────────────────────────────────
+        #
+        # When commerce_reconciliation_dual_write is enabled, write BOTH:
+        #   - canonical_invoice_id: the commerce Invoice.invoice_id
+        #     (shape inv_<uuid4>) for forward-looking reads
+        #   - qbo_invoice_id: the existing free-form QBO Invoice.Id
+        #     for backward compatibility
+        #
+        # The legacy `invoice_id` field continues to be written for
+        # existing consumers that haven't migrated to get_invoice_id().
+        #
+        # This dual-write runs for a one-week soak period. After the soak,
+        # enable commerce_reconciliation_prefer_canonical (step 9.5b).
+        settings = get_settings()
+        if (
+            settings.commerce_backbone_enabled
+            and settings.commerce_reconciliation_dual_write
+        ):
+            # The canonical_invoice_id is the same value passed in as
+            # invoice_id when the caller is the commerce backbone
+            # (CommerceExternalSync). For legacy QBO connector calls,
+            # this is the QBO Invoice.Id — both are stored so the
+            # read-side can pick the right one based on the prefer flag.
+            patch["canonical_invoice_id"] = invoice_id
+            patch["qbo_invoice_id"] = invoice_id
+            # When the commerce backbone is the caller, it passes the
+            # canonical inv_<uuid4> as invoice_id. Store it in both
+            # fields. The QBO connector (legacy path) passes the QBO
+            # Invoice.Id. The external_refs.qbo field preserves the
+            # QBO cross-reference regardless of which caller wrote it.
+            if not patch.get("external_refs"):
+                patch["external_refs"] = {}
+            patch["external_refs"] = {"qbo": invoice_id}
+
+        # ── Step 9.5c TODO ─────────────────────────────────────────────
+        # After the second one-week soak (step 9.5b confirmed stable):
+        #   1. Remove the dual-write block above
+        #   2. Stop writing `qbo_invoice_id` — only write
+        #      `canonical_invoice_id`
+        #   3. Keep `external_refs.qbo` as a permanent cross-reference
+        #   4. Remove the `commerce_reconciliation_dual_write` flag
+        #   5. The `invoice_id` field becomes an alias for
+        #      `canonical_invoice_id`
+        # This step is independently committable and reversible by
+        # re-enabling the dual_write flag.
         if payment_status is not None:
             if not isinstance(payment_status, str) or not payment_status.strip():
                 raise ValueError(
@@ -527,6 +574,12 @@ class ReconciliationService:
         # ``payment_status`` is persisted but not part of the model —
         # drop it so ``extra="forbid"`` does not trip.
         merged.pop("payment_status", None)
+        # Dual-write fields (step 9.5a) are persistence-only — they live
+        # in ES for the read-side helper (get_invoice_id) but are not part
+        # of the ReconciliationRecord Pydantic schema.
+        merged.pop("canonical_invoice_id", None)
+        merged.pop("qbo_invoice_id", None)
+        merged.pop("external_refs", None)
         try:
             refreshed = ReconciliationRecord(**merged)
         except Exception as exc:
@@ -553,6 +606,62 @@ class ReconciliationService:
             patch.get("payment_status"),
         )
         return refreshed
+
+    # ------------------------------------------------------------------
+    # Step 9.5b: Read-side flip — get_invoice_id helper
+    # ------------------------------------------------------------------
+
+    def get_invoice_id(self, record: Mapping[str, Any]) -> Optional[str]:
+        """Return the appropriate invoice_id from a reconciliation record.
+
+        Step 9.5b of the reconciliation migration. This helper abstracts
+        the read-side so callers don't need to know which field to read.
+
+        Behavior controlled by ``commerce_reconciliation_prefer_canonical``:
+
+        * When True (post-soak): returns ``canonical_invoice_id`` if
+          present, falls back to ``qbo_invoice_id``, then to the legacy
+          ``invoice_id`` field.
+        * When False (legacy behavior): returns ``qbo_invoice_id`` if
+          present, falls back to the legacy ``invoice_id`` field.
+
+        The free-form QBO reference is always available via
+        ``external_refs.qbo`` for cross-reference regardless of which
+        field is returned as the primary invoice_id.
+
+        This method is independently toggleable via the
+        ``commerce_reconciliation_prefer_canonical`` flag and is
+        reversible by setting the flag back to False.
+
+        Args:
+            record: A reconciliation record (dict-like) as returned by
+                ES or as a model_dump() of ReconciliationRecord.
+
+        Returns:
+            The invoice_id string, or None if no invoice reference exists.
+        """
+        settings = get_settings()
+
+        if (
+            settings.commerce_backbone_enabled
+            and settings.commerce_reconciliation_prefer_canonical
+        ):
+            # Prefer canonical — this is the post-soak read path
+            canonical = record.get("canonical_invoice_id")
+            if canonical:
+                return canonical
+            # Fall back to qbo_invoice_id (dual-write period records)
+            qbo = record.get("qbo_invoice_id")
+            if qbo:
+                return qbo
+            # Final fallback: legacy invoice_id field
+            return record.get("invoice_id") or None
+        else:
+            # Legacy behavior — return qbo_invoice_id or invoice_id
+            qbo = record.get("qbo_invoice_id")
+            if qbo:
+                return qbo
+            return record.get("invoice_id") or None
 
     # ------------------------------------------------------------------
     # Stripe (Phase 9) integration seam (Req 5.5.4, Task 9.8)

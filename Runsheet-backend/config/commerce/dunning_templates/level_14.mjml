@@ -1,0 +1,45 @@
+<mjml>
+  <mj-head>
+    <mj-title>Second Payment Notice - 14 Days Overdue</mj-title>
+    <mj-attributes>
+      <mj-all font-family="Arial, sans-serif" />
+      <mj-text font-size="14px" color="#333333" line-height="1.6" />
+    </mj-attributes>
+  </mj-head>
+  <mj-body background-color="#f4f4f4">
+    <mj-section background-color="#ffffff" padding="20px">
+      <mj-column>
+        <mj-text font-size="20px" font-weight="bold" color="#cc6600">
+          Second Payment Notice
+        </mj-text>
+        <mj-divider border-color="#cc6600" />
+        <mj-text>
+          Dear {{customer_name}},
+        </mj-text>
+        <mj-text>
+          Our records indicate that invoice <strong>{{invoice_number}}</strong>
+          for account <strong>{{account_name}}</strong> remains unpaid. This
+          invoice was due on <strong>{{due_date}}</strong> and is now
+          <strong>{{days_overdue}} days</strong> past due.
+        </mj-text>
+        <mj-text>
+          <strong>Invoice Total:</strong> {{total_amount}}<br/>
+          <strong>Remaining Balance:</strong> {{remaining_amount}}
+        </mj-text>
+        <mj-text>
+          We kindly request that you remit payment as soon as possible to
+          avoid any disruption to your account. Continued non-payment may
+          result in a hold being placed on future orders.
+        </mj-text>
+        <mj-text>
+          If payment has already been sent, please contact us with the
+          payment details so we can update our records.
+        </mj-text>
+        <mj-divider border-color="#e0e0e0" />
+        <mj-text font-size="12px" color="#666666">
+          This is an automated notice. Please do not reply directly to this email.
+        </mj-text>
+      </mj-column>
+    </mj-section>
+  </mj-body>
+</mjml>

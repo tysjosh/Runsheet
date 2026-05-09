@@ -1,0 +1,20 @@
+Payment Reminder - 7 Days Overdue
+====================================
+
+Dear {{customer_name}},
+
+This is a friendly reminder that invoice {{invoice_number}} for account
+{{account_name}} was due on {{due_date}} and is now {{days_overdue}} days
+past due.
+
+Invoice Total: {{total_amount}}
+Remaining Balance: {{remaining_amount}}
+
+Please arrange payment at your earliest convenience. If you have already
+sent payment, please disregard this notice.
+
+If you have any questions about this invoice, please don't hesitate to
+contact our billing team.
+
+----
+This is an automated reminder. Please do not reply directly to this email.

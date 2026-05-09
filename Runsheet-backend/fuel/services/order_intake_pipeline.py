@@ -130,6 +130,37 @@ class OrderIntakePipeline:
         self._legacy_ws_manager = legacy_ws_manager
         self._clock = clock or utcnow
 
+        # Registry of IntakeHook instances that run before/after order
+        # acceptance. Commerce hooks (pricing, credit-check) register
+        # here at startup via register_hook().
+        self._hooks: List[Any] = []
+
+    # ------------------------------------------------------------------
+    # Hook registration
+    # ------------------------------------------------------------------
+
+    def register_hook(self, hook: Any) -> None:
+        """Register an IntakeHook that runs during order intake.
+
+        Hooks are called in sequence during _ingest_common:
+        - before_accept: called after adapter transform but before persist.
+          May mutate the order draft or raise to reject the order.
+        - after_accept: called after the order is persisted. Used for
+          side-effects (notifications, event emission).
+
+        Hooks must conform to the IntakeHook protocol:
+            async def before_accept(self, order_draft: dict) -> dict
+            async def after_accept(self, order: dict) -> None
+
+        Args:
+            hook: An object conforming to the IntakeHook protocol.
+        """
+        self._hooks.append(hook)
+        logger.info(
+            "OrderIntakePipeline: registered hook %s",
+            type(hook).__name__,
+        )
+
     # ------------------------------------------------------------------
     # Public entry points
     # ------------------------------------------------------------------
@@ -390,6 +421,18 @@ class OrderIntakePipeline:
                     },
                 )
 
+        # (i2) Run registered IntakeHook.before_accept hooks.
+        # Commerce hooks (PricingHook, CreditCheckHook) run here.
+        # Each hook may mutate the order_doc (e.g. attach pricing fields)
+        # or raise to reject the order.
+        for hook in self._hooks:
+            try:
+                order_doc = await hook.before_accept(order_doc)
+            except Exception as hook_exc:
+                # Re-raise hook exceptions — they signal order rejection
+                # (e.g. PricingError.no_rule_matched).
+                raise hook_exc
+
         # (j) Validate via FuelOrder.model_validate BEFORE writing
         FuelOrder.model_validate(order_doc)
 
@@ -413,6 +456,20 @@ class OrderIntakePipeline:
         # state: disabled/shadow/active_gated → dual-broadcast;
         # active_auto → stop legacy broadcast.
         await self._dual_broadcast_legacy_if_enabled(order_doc, tenant_id)
+
+        # (m3) Run registered IntakeHook.after_accept hooks.
+        # Side-effects only — failures are logged but do not block intake.
+        for hook in self._hooks:
+            try:
+                await hook.after_accept(order_doc)
+            except Exception as hook_exc:
+                logger.warning(
+                    "OrderIntakePipeline: after_accept hook %s failed for "
+                    "order=%s: %s",
+                    type(hook).__name__,
+                    order_doc.get("order_id"),
+                    hook_exc,
+                )
 
         # (n) Dual-write through LegacyDualWriter (if enabled)
         await self._dual_write_legacy_if_enabled(order_doc, tenant_id)

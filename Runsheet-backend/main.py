@@ -51,6 +51,31 @@ from integrations.api.stripe_endpoints import (
     router as stripe_router,
     webhook_router as stripe_webhook_router,
 )
+from commerce.api.customer_endpoints import (
+    router as commerce_customer_router,
+    configure_customer_api,
+)
+from commerce.api.account_endpoints import (
+    router as commerce_account_router,
+    configure_account_api,
+)
+from commerce.api.price_book_endpoints import (
+    router as commerce_price_book_router,
+    pricing_router as commerce_pricing_router,
+    configure_price_book_api,
+)
+from commerce.api.invoice_endpoints import (
+    router as commerce_invoice_router,
+    configure_invoice_api,
+)
+from commerce.api.payment_endpoints import (
+    router as commerce_payment_router,
+    configure_payment_api,
+)
+from commerce.api.ar_aging_endpoints import (
+    router as commerce_ar_aging_router,
+    configure_ar_aging_api,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -115,6 +140,26 @@ for _router in (
     stripe_router, stripe_webhook_router,
 ):
     app.include_router(_router)
+
+# Commerce Backbone routers — conditionally included when the master
+# feature flag is on. Individual endpoint-level guards still check
+# sub-flags per-request (Req 8.1, 8.2).
+from config.settings import get_settings as _get_settings
+
+try:
+    _settings = _get_settings()
+    if getattr(_settings, "commerce_backbone_enabled", False):
+        app.include_router(commerce_customer_router)
+        app.include_router(commerce_account_router)
+        app.include_router(commerce_price_book_router)
+        app.include_router(commerce_pricing_router)
+        app.include_router(commerce_invoice_router)
+        app.include_router(commerce_payment_router)
+        app.include_router(commerce_ar_aging_router)
+except Exception:
+    # Settings may not load cleanly at import time in test environments;
+    # the router will be registered during lifespan if needed.
+    pass
 
 
 def _c(app: FastAPI) -> ServiceContainer:

@@ -587,10 +587,35 @@ class QuickBooksOnlineConnector(IntegrationConnector):
         )
 
     async def sync_push(self, payload: Mapping[str, Any]) -> SyncRun:
-        """Create a QBO Invoice for a finalized POD.
+        """Create a QBO Invoice from a finalized delivery or canonical Invoice.
 
-        Expected ``payload`` shape (provider-agnostic — the overlay
-        that triggers the push decides the mapping):
+        When ``commerce.qbo_pushes_canonical`` is ON (default when
+        commerce backbone is live), the payload is expected to be the
+        canonical Invoice shape built by
+        :meth:`CommerceExternalSync._build_qbo_push_payload`:
+
+            {
+                "invoice_id": "inv_...",
+                "customer_id": "cust_...",
+                "customer_name": "...",
+                "delivery_date": "2025-01-14",
+                "product_code": "DIESEL_2",
+                "delivered_gallons": 480.0,
+                "unit_price_usd": 3.289,
+                "total_cents": 157872,
+                "subtotal_cents": 150000,
+                "tax_cents": 7872,
+                "line_items": [...],
+                "memo": "Invoice INV-0042",
+                "reconciliation_id": "...",
+                "invoice_doc_number": "INV-0042",
+                "tenant_id": "...",
+                "account_id": "acct_...",
+                "external_refs": {...},
+            }
+
+        When the flag is OFF, the legacy free-form POD payload shape is
+        used (rollback path):
 
             {
                 "pod_id": "...",
@@ -646,22 +671,32 @@ class QuickBooksOnlineConnector(IntegrationConnector):
             )
 
         try:
-            body = _build_invoice_body(payload)
+            # Determine whether to use the canonical Invoice path or
+            # the legacy free-form POD path based on the
+            # commerce.qbo_pushes_canonical feature flag.
+            use_canonical = self._should_use_canonical_push()
+            if use_canonical:
+                body = _build_invoice_body_from_canonical(payload)
+            else:
+                body = _build_invoice_body(payload)
+
             created = await self._http_request_with_retry(
                 method="POST",
                 path=f"/v3/company/{{realm_id}}/invoice",
                 json_body=body,
             )
             invoice_node = (created or {}).get("Invoice") or {}
-            invoice_id = invoice_node.get("Id") or ""
+            qbo_invoice_id = invoice_node.get("Id") or ""
             counts["invoices_pushed"] = 1
             finished_at = _utcnow()
             logger.info(
                 "QuickBooksOnlineConnector.sync_push: created invoice "
-                "tenant=%s pod=%s qbo_invoice_id=%s",
+                "tenant=%s %s=%s qbo_invoice_id=%s canonical=%s",
                 self._tenant_id,
-                payload.get("pod_id"),
-                invoice_id,
+                "invoice_id" if use_canonical else "pod",
+                payload.get("invoice_id") if use_canonical else payload.get("pod_id"),
+                qbo_invoice_id,
+                use_canonical,
             )
             return SyncRun(
                 run_id=run_id,
@@ -1229,6 +1264,33 @@ class QuickBooksOnlineConnector(IntegrationConnector):
             return False
         return state in _ACTIVE_OVERLAY_STATES
 
+    def _should_use_canonical_push(self) -> bool:
+        """Determine whether to use the canonical Invoice push path.
+
+        Returns True when ``commerce.qbo_pushes_canonical`` is on,
+        meaning the push payload is a canonical Invoice document built
+        by CommerceExternalSync._build_qbo_push_payload. Returns False
+        to fall back to the legacy free-form POD payload path.
+
+        The flag defaults to True when ``commerce.backbone_enabled`` is
+        on. This method reads the flag from config/settings.py via the
+        feature_flag_service or falls back to the settings module
+        directly. A lookup failure defaults to True (canonical path)
+        when commerce backbone is enabled, False otherwise.
+        """
+        try:
+            from config.settings import get_settings
+            settings = get_settings()
+            # The flag is only meaningful when commerce backbone is on.
+            # When backbone is off, always use the legacy path.
+            if not getattr(settings, "commerce_backbone_enabled", False):
+                return False
+            return getattr(settings, "commerce_qbo_pushes_canonical", True)
+        except Exception:
+            # If settings cannot be loaded (e.g. in tests without full
+            # config), default to False (legacy path) for safety.
+            return False
+
     # ------------------------------------------------------------------
     # sync_pull helpers
     # ------------------------------------------------------------------
@@ -1487,6 +1549,9 @@ class QuickBooksOnlineConnector(IntegrationConnector):
 def _build_invoice_body(payload: Mapping[str, Any]) -> Dict[str, Any]:
     """Shape a ``sync_push`` payload into a QBO Invoice creation body.
 
+    This is the LEGACY path — reads from the free-form POD payload.
+    Used when ``commerce.qbo_pushes_canonical`` is OFF.
+
     Raises :class:`ValueError` when required fields are missing so the
     scheduler surfaces the error to the operator rather than creating
     a malformed Invoice in QBO.
@@ -1537,6 +1602,115 @@ def _build_invoice_body(payload: Mapping[str, Any]) -> Dict[str, Any]:
         body["CustomerMemo"] = {"value": str(payload["memo"])}
     if payload.get("invoice_doc_number"):
         body["DocNumber"] = str(payload["invoice_doc_number"])
+    return body
+
+
+def _build_invoice_body_from_canonical(payload: Mapping[str, Any]) -> Dict[str, Any]:
+    """Shape a canonical Invoice payload into a QBO Invoice creation body.
+
+    This is the CANONICAL path — reads from the Invoice document built
+    by :meth:`CommerceExternalSync._build_qbo_push_payload`. Used when
+    ``commerce.qbo_pushes_canonical`` is ON (default once commerce
+    backbone is live).
+
+    The canonical payload carries structured line_items with integer-cent
+    pricing, which this function converts to the QBO decimal-dollar
+    format. Falls back to the legacy fields (``delivered_gallons``,
+    ``unit_price_usd``) when ``line_items`` is empty so the transition
+    is graceful.
+
+    Raises :class:`ValueError` when required fields are missing.
+    """
+
+    customer_id = payload.get("customer_id")
+    if not customer_id:
+        raise ValueError(
+            "sync_push canonical payload missing required field 'customer_id'"
+        )
+
+    line_items = payload.get("line_items") or []
+
+    qbo_lines: list = []
+    if line_items:
+        # Build QBO line items from the canonical line_items array.
+        # Each line item has product_code, quantity_gallons,
+        # unit_price_cents, subtotal_cents.
+        for item in line_items:
+            qty = float(item.get("quantity_gallons", 0))
+            unit_price_cents = int(item.get("unit_price_cents", 0))
+            unit_price_usd = unit_price_cents / 100.0
+            subtotal_cents = int(item.get("subtotal_cents", 0))
+            amount_usd = subtotal_cents / 100.0
+            product_code = item.get("product_code", "FUEL")
+
+            description = (
+                f"{product_code} delivery"
+                f" on {payload.get('delivery_date') or _iso(_utcnow())[:10]}"
+                f" (invoice={payload.get('invoice_id', '')})"
+            ).strip()
+
+            qbo_lines.append({
+                "Amount": round(amount_usd, 2),
+                "DetailType": "SalesItemLineDetail",
+                "Description": description,
+                "SalesItemLineDetail": {
+                    "Qty": qty,
+                    "UnitPrice": round(unit_price_usd, 4),
+                },
+            })
+    else:
+        # Fallback: use the top-level delivered_gallons / unit_price_usd
+        # fields that CommerceExternalSync._build_qbo_push_payload also
+        # populates for backwards compatibility.
+        gallons = float(payload.get("delivered_gallons", 0))
+        unit_price = float(payload.get("unit_price_usd", 0))
+        if gallons <= 0:
+            raise ValueError(
+                "sync_push canonical payload has no line_items and "
+                "delivered_gallons <= 0"
+            )
+
+        description = (
+            f"{payload.get('product_code', 'FUEL')} delivery"
+            f" on {payload.get('delivery_date') or _iso(_utcnow())[:10]}"
+            f" (invoice={payload.get('invoice_id', '')})"
+        ).strip()
+
+        qbo_lines.append({
+            "Amount": round(gallons * unit_price, 2),
+            "DetailType": "SalesItemLineDetail",
+            "Description": description,
+            "SalesItemLineDetail": {
+                "Qty": gallons,
+                "UnitPrice": unit_price,
+            },
+        })
+
+    body: Dict[str, Any] = {
+        "CustomerRef": {"value": str(customer_id)},
+        "Line": qbo_lines,
+    }
+
+    if payload.get("delivery_date"):
+        body["TxnDate"] = str(payload["delivery_date"])
+    if payload.get("memo"):
+        body["CustomerMemo"] = {"value": str(payload["memo"])}
+    if payload.get("invoice_doc_number"):
+        body["DocNumber"] = str(payload["invoice_doc_number"])
+
+    # Attach the canonical invoice_id as a CustomField so QBO-side
+    # queries can correlate back to the platform's Invoice record.
+    invoice_id = payload.get("invoice_id")
+    if invoice_id:
+        body["CustomField"] = [
+            {
+                "DefinitionId": "1",
+                "Name": "InvoiceId",
+                "Type": "StringType",
+                "StringValue": str(invoice_id),
+            }
+        ]
+
     return body
 
 
@@ -1592,6 +1766,7 @@ __all__ = [
     "QuickBooksRateLimitExceeded",
     "RATE_LIMIT_KEY_TEMPLATE",
     "VAULT_CREDENTIAL_KEY",
+    "_build_invoice_body_from_canonical",
     "build_catalog_entry",
     "register_catalog_entry",
 ]

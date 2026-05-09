@@ -1,0 +1,44 @@
+<mjml>
+  <mj-head>
+    <mj-title>Payment Reminder - 7 Days Overdue</mj-title>
+    <mj-attributes>
+      <mj-all font-family="Arial, sans-serif" />
+      <mj-text font-size="14px" color="#333333" line-height="1.6" />
+    </mj-attributes>
+  </mj-head>
+  <mj-body background-color="#f4f4f4">
+    <mj-section background-color="#ffffff" padding="20px">
+      <mj-column>
+        <mj-text font-size="20px" font-weight="bold" color="#1a1a1a">
+          Payment Reminder
+        </mj-text>
+        <mj-divider border-color="#e0e0e0" />
+        <mj-text>
+          Dear {{customer_name}},
+        </mj-text>
+        <mj-text>
+          This is a friendly reminder that invoice <strong>{{invoice_number}}</strong>
+          for account <strong>{{account_name}}</strong> was due on
+          <strong>{{due_date}}</strong> and is now <strong>{{days_overdue}} days</strong>
+          past due.
+        </mj-text>
+        <mj-text>
+          <strong>Invoice Total:</strong> {{total_amount}}<br/>
+          <strong>Remaining Balance:</strong> {{remaining_amount}}
+        </mj-text>
+        <mj-text>
+          Please arrange payment at your earliest convenience. If you have
+          already sent payment, please disregard this notice.
+        </mj-text>
+        <mj-text>
+          If you have any questions about this invoice, please don't hesitate
+          to contact our billing team.
+        </mj-text>
+        <mj-divider border-color="#e0e0e0" />
+        <mj-text font-size="12px" color="#666666">
+          This is an automated reminder. Please do not reply directly to this email.
+        </mj-text>
+      </mj-column>
+    </mj-section>
+  </mj-body>
+</mjml>

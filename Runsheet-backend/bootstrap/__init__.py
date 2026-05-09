@@ -42,6 +42,23 @@ async def initialize_all(app, container: ServiceContainer) -> None:
                 exc_info=True,
             )
 
+    # Post-initialization assertions (non-production only).
+    # These run after all modules are wired so cross-domain invariants
+    # can be validated against the fully-populated container.
+    try:
+        from bootstrap.core import assert_commerce_requires_intake
+
+        await assert_commerce_requires_intake(container)
+    except Exception as exc:
+        # Re-raise configuration errors so the app fails loudly.
+        from bootstrap.core import CommerceIntakeMisconfigurationError
+
+        if isinstance(exc, CommerceIntakeMisconfigurationError):
+            raise
+        logger.warning(
+            "Post-initialization assertion failed: %s", exc
+        )
+
 
 async def shutdown_all(app, container: ServiceContainer) -> None:
     """Shutdown all bootstrap modules in reverse dependency order.

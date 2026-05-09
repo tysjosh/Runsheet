@@ -333,6 +333,118 @@ class Settings(BaseSettings):
         description="Maximum concurrent active jobs per asset"
     )
 
+    # ── Commerce Backbone Feature Flags ────────────────────────────────
+    #
+    # These flags control the commerce backbone rollout per-tenant.
+    # When the master flag (commerce_backbone_enabled) is off, no commerce
+    # endpoint serves traffic, no pricing hook fires, and no invoice
+    # generation runs (Req 8.1). Individual sub-flags are independently
+    # gateable so operators can stage rollout in layers (Req 8.2).
+    #
+    # Default: OFF in production, ON in development.
+
+    commerce_backbone_enabled: bool = Field(
+        default=False,
+        description=(
+            "Master feature flag for the Commerce Backbone module. "
+            "When off, all commerce endpoints return 404, pricing hooks "
+            "are disabled, and invoice generation does not run. "
+            "Requires intake.pipeline_enabled to be active for the same "
+            "tenant. Default: False (off in production, override to True "
+            "in development)."
+        ),
+    )
+
+    commerce_customers_enabled: bool = Field(
+        default=False,
+        description=(
+            "Sub-flag enabling the Customer master endpoints and service. "
+            "Independently gateable for staged rollout. "
+            "Default: False (off in production, override to True in development)."
+        ),
+    )
+
+    commerce_pricing_engine_enabled: bool = Field(
+        default=False,
+        description=(
+            "Sub-flag enabling the PricingEngine hook on the order intake "
+            "pipeline. When off, orders proceed without pricing attached. "
+            "Default: False (off in production, override to True in development)."
+        ),
+    )
+
+    commerce_credit_holds_enabled: bool = Field(
+        default=False,
+        description=(
+            "Sub-flag enabling credit-hold enforcement on order intake. "
+            "When off, credit checks are skipped and orders are never "
+            "held for credit reasons. "
+            "Default: False (off in production, override to True in development)."
+        ),
+    )
+
+    commerce_invoicing_enabled: bool = Field(
+        default=False,
+        description=(
+            "Sub-flag enabling automatic invoice generation when an order "
+            "transitions to delivered. When off, no canonical invoices are "
+            "created. Default: False (off in production, override to True "
+            "in development)."
+        ),
+    )
+
+    commerce_dunning_enabled: bool = Field(
+        default=False,
+        description=(
+            "Sub-flag enabling the dunning service that sends automated "
+            "collection notifications when invoices cross overdue "
+            "thresholds. Default: False (off in production, override to "
+            "True in development)."
+        ),
+    )
+
+    commerce_qbo_pushes_canonical: bool = Field(
+        default=True,
+        description=(
+            "When True, the QBO connector's push path reads from the "
+            "canonical Invoice document (built by "
+            "CommerceExternalSync._build_qbo_push_payload) rather than "
+            "the legacy free-form POD payload. Default True when "
+            "commerce.backbone_enabled is on. Set to False to roll back "
+            "to the legacy POD-based push path."
+        ),
+    )
+
+    # ── Reconciliation Migration Flags (Task 9.5) ─────────────────────
+    #
+    # These flags stage the reconciliation_service.update_invoice_fields
+    # migration from free-form QBO Invoice.Id to canonical Invoice.invoice_id.
+    # Each step is independently committable and reversible.
+
+    commerce_reconciliation_dual_write: bool = Field(
+        default=True,
+        description=(
+            "Step 9.5a — dual-write. When True (and commerce_backbone_enabled "
+            "is on), update_invoice_fields writes BOTH the canonical "
+            "invoice_id as 'canonical_invoice_id' AND the existing free-form "
+            "QBO Invoice.Id as 'qbo_invoice_id' to the reconciliation record. "
+            "Default True when commerce is on. After a one-week soak with "
+            "no issues, enable commerce_reconciliation_prefer_canonical."
+        ),
+    )
+
+    commerce_reconciliation_prefer_canonical: bool = Field(
+        default=False,
+        description=(
+            "Step 9.5b — read-side flip. When True, get_invoice_id() returns "
+            "the canonical_invoice_id (falling back to qbo_invoice_id if not "
+            "present). When False, returns qbo_invoice_id (legacy behavior). "
+            "Enable after the first one-week dual-write soak confirms data "
+            "integrity. After a second one-week soak, disable "
+            "commerce_reconciliation_dual_write to complete the migration."
+        ),
+    )
+
     # Order Intake Pipeline Configuration
     orders_intake_pipeline_shadow_divergence_sample_rate: float = Field(
         default=1.0,

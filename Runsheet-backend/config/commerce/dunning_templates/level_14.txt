@@ -1,0 +1,21 @@
+Second Payment Notice - 14 Days Overdue
+=========================================
+
+Dear {{customer_name}},
+
+Our records indicate that invoice {{invoice_number}} for account
+{{account_name}} remains unpaid. This invoice was due on {{due_date}}
+and is now {{days_overdue}} days past due.
+
+Invoice Total: {{total_amount}}
+Remaining Balance: {{remaining_amount}}
+
+We kindly request that you remit payment as soon as possible to avoid
+any disruption to your account. Continued non-payment may result in a
+hold being placed on future orders.
+
+If payment has already been sent, please contact us with the payment
+details so we can update our records.
+
+----
+This is an automated notice. Please do not reply directly to this email.

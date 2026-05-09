@@ -1,0 +1,26 @@
+Final Payment Notice - 30 Days Overdue
+========================================
+
+Dear {{customer_name}},
+
+Despite previous notices, invoice {{invoice_number}} for account
+{{account_name}} remains unpaid. This invoice was due on {{due_date}}
+and is now {{days_overdue}} days past due.
+
+Invoice Total: {{total_amount}}
+Remaining Balance: {{remaining_amount}}
+
+*** THIS IS YOUR FINAL NOTICE BEFORE ACCOUNT ACTION IS TAKEN. ***
+
+Immediate payment is required to maintain your account in good standing.
+Failure to remit payment may result in:
+
+  - Suspension of credit privileges
+  - Hold on all pending and future orders
+  - Referral to collections
+
+Please contact our billing team immediately if you are experiencing
+difficulties or wish to arrange a payment plan.
+
+----
+This is an automated notice. Please do not reply directly to this email.

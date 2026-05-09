@@ -1,0 +1,127 @@
+# Commerce Backbone — Alert Rules (Design §10)
+#
+# These alerts are evaluated by the monitoring pipeline (Prometheus/Alertmanager
+# or equivalent). Each rule references structured metrics emitted by
+# commerce/services/commerce_metrics.py.
+
+groups:
+  - name: commerce_alerts
+    rules:
+
+      # ─── Pricing ───────────────────────────────────────────────────────
+
+      - alert: CommercePricingCacheMiss
+        expr: |
+          (
+            sum(rate(commerce_pricing_resolve_total{outcome="cache_miss"}[10m])) by (tenant_id)
+            /
+            sum(rate(commerce_pricing_resolve_total[10m])) by (tenant_id)
+          ) > 0.40
+        for: 10m
+        labels:
+          severity: warning
+          domain: commerce
+          subsystem: pricing
+        annotations:
+          summary: "Pricing cache miss rate > 40% for tenant {{ $labels.tenant_id }}"
+          description: |
+            The pricing engine cache miss rate has exceeded 40% over the last
+            10 minutes for tenant {{ $labels.tenant_id }}. This may indicate
+            cache invalidation storms, Redis connectivity issues, or a sudden
+            influx of new product/account combinations.
+          runbook: "https://runbook.internal/commerce/pricing-cache-miss"
+
+      # ─── QBO Push ──────────────────────────────────────────────────────
+
+      - alert: CommerceQBOPushFailureRate
+        expr: |
+          (
+            sum(rate(commerce_invoice_qbo_push_total{outcome="failure"}[1h])) by (tenant_id)
+            /
+            sum(rate(commerce_invoice_qbo_push_total[1h])) by (tenant_id)
+          ) > 0.05
+        for: 1h
+        labels:
+          severity: critical
+          domain: commerce
+          subsystem: invoicing
+        annotations:
+          summary: "QBO push failure rate > 5% for tenant {{ $labels.tenant_id }}"
+          description: |
+            More than 5% of invoice pushes to QuickBooks Online have failed
+            over the last hour for tenant {{ $labels.tenant_id }}. Check the
+            QBO connector health, OAuth token freshness, and rate limits.
+            Failed invoices are in the dead-letter queue and can be retried
+            via POST /api/commerce/invoices/{id}/retry-qbo-push.
+          runbook: "https://runbook.internal/commerce/qbo-push-failure"
+
+      # ─── Credit Hold Spike ─────────────────────────────────────────────
+
+      - alert: CommerceCreditHoldSpike
+        expr: |
+          sum(rate(commerce_credit_hold_triggered_total[1h])) by (tenant_id)
+          > 10 *
+          sum(avg_over_time(
+            rate(commerce_credit_hold_triggered_total[1h])[7d:1h]
+          )) by (tenant_id)
+        for: 15m
+        labels:
+          severity: warning
+          domain: commerce
+          subsystem: credit
+        annotations:
+          summary: "Credit hold spike (>10× 7-day avg) for tenant {{ $labels.tenant_id }}"
+          description: |
+            The rate of credit holds triggered in the last hour is more than
+            10× the 7-day moving average for tenant {{ $labels.tenant_id }}.
+            This may indicate a bulk payment failure, a pricing misconfiguration
+            causing unexpectedly high invoices, or a legitimate credit event
+            affecting multiple accounts.
+          runbook: "https://runbook.internal/commerce/credit-hold-spike"
+
+      # ─── Invoice Stuck in Draft ────────────────────────────────────────
+
+      - alert: CommerceInvoiceStuckInDraft
+        expr: |
+          (time() - commerce_invoice_state_duration_seconds{from_state="draft"})
+          > 900
+        for: 5m
+        labels:
+          severity: warning
+          domain: commerce
+          subsystem: invoicing
+        annotations:
+          summary: "Invoice stuck in draft > 15 minutes for tenant {{ $labels.tenant_id }}"
+          description: |
+            At least one invoice has remained in draft state for more than
+            15 minutes for tenant {{ $labels.tenant_id }}. Invoices should
+            transition from draft to open within seconds of generation.
+            Check the invoice finalization job and any pending pricing
+            resolution failures.
+          runbook: "https://runbook.internal/commerce/invoice-stuck-draft"
+
+      # ─── AR 90+ Day Bucket Growth ─────────────────────────────────────
+
+      - alert: CommerceARBucket90PlusGrowth
+        expr: |
+          (
+            commerce_ar_bucket_90_plus_cents
+            - commerce_ar_bucket_90_plus_cents offset 7d
+          )
+          /
+          (commerce_ar_bucket_90_plus_cents offset 7d > 0)
+          > 0.20
+        for: 1h
+        labels:
+          severity: critical
+          domain: commerce
+          subsystem: ar_aging
+        annotations:
+          summary: "AR 90+ bucket grew > 20% week-over-week for tenant {{ $labels.tenant_id }}"
+          description: |
+            The 90+ day aging bucket has grown more than 20% compared to
+            7 days ago for tenant {{ $labels.tenant_id }}. This indicates
+            worsening collections and may require escalated dunning or
+            manual intervention. Review the top accounts in the AR aging
+            dashboard.
+          runbook: "https://runbook.internal/commerce/ar-90-plus-growth"

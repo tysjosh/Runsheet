@@ -117,6 +117,34 @@ class ErrorCode(str, Enum):
     SECURITY_TENANT_ID_MISMATCH = "SECURITY_TENANT_ID_MISMATCH"
     """Payload tenant_id does not match the channel's tenant_id (HTTP 403)"""
 
+    # Commerce Backbone errors (4xx)
+    COMMERCE_PRICING_NO_RULE = "COMMERCE_PRICING_NO_RULE"
+    """PricingEngine found no matching rule for the given product/account/moment (HTTP 422)"""
+
+    COMMERCE_PRICING_UNKNOWN_PRODUCT = "COMMERCE_PRICING_UNKNOWN_PRODUCT"
+    """Product code failed canonicalization (HTTP 400)"""
+
+    COMMERCE_PRICING_AMBIGUOUS_RESOLVED = "COMMERCE_PRICING_AMBIGUOUS_RESOLVED"
+    """Two pricing rules tied at the same precedence — deterministic tiebreak applied (HTTP 200, warning)"""
+
+    COMMERCE_CREDIT_HOLD = "COMMERCE_CREDIT_HOLD"
+    """Credit check blocks the order because account is at/over limit (HTTP 402)"""
+
+    COMMERCE_CREDIT_OVERRIDE_EXPIRED = "COMMERCE_CREDIT_OVERRIDE_EXPIRED"
+    """Credit override has expired and is no longer valid (HTTP 409)"""
+
+    COMMERCE_INVOICE_INVALID_STATE = "COMMERCE_INVOICE_INVALID_STATE"
+    """Requested invoice state transition is not allowed (HTTP 409)"""
+
+    COMMERCE_INVOICE_ALREADY_VOIDED = "COMMERCE_INVOICE_ALREADY_VOIDED"
+    """Attempted to void an invoice that is already voided (HTTP 409)"""
+
+    COMMERCE_PAYMENT_DUPLICATE = "COMMERCE_PAYMENT_DUPLICATE"
+    """Duplicate payment detected via IdempotencyService (HTTP 409)"""
+
+    COMMERCE_PAYMENT_AMOUNT_EXCEEDS_INVOICE = "COMMERCE_PAYMENT_AMOUNT_EXCEEDS_INVOICE"
+    """Payment amount exceeds the invoice remaining balance (HTTP 422)"""
+
     # Internal errors (5xx)
     INTERNAL_ERROR = "INTERNAL_ERROR"
     """Unexpected server error (HTTP 500)"""
@@ -146,6 +174,17 @@ ERROR_CODE_STATUS_MAP: dict[ErrorCode, int] = {
     ErrorCode.POISON_QUEUE_MAX_RETRIES: 422,
     ErrorCode.DRIFT_THRESHOLD_EXCEEDED: 409,
     ErrorCode.BACKFILL_IN_PROGRESS: 409,
+    # Order Intake Pipeline error codes
+    # Commerce Backbone error codes
+    ErrorCode.COMMERCE_PRICING_NO_RULE: 422,
+    ErrorCode.COMMERCE_PRICING_UNKNOWN_PRODUCT: 400,
+    ErrorCode.COMMERCE_PRICING_AMBIGUOUS_RESOLVED: 200,
+    ErrorCode.COMMERCE_CREDIT_HOLD: 402,
+    ErrorCode.COMMERCE_CREDIT_OVERRIDE_EXPIRED: 409,
+    ErrorCode.COMMERCE_INVOICE_INVALID_STATE: 409,
+    ErrorCode.COMMERCE_INVOICE_ALREADY_VOIDED: 409,
+    ErrorCode.COMMERCE_PAYMENT_DUPLICATE: 409,
+    ErrorCode.COMMERCE_PAYMENT_AMOUNT_EXCEEDS_INVOICE: 422,
     # Order Intake Pipeline error codes
     ErrorCode.INVALID_CUSTOMER_TANK_REF: 400,
     ErrorCode.MISSING_VOLUME: 400,

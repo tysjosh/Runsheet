@@ -293,3 +293,18 @@ def register_websocket_routes(app: FastAPI) -> None:
         ep = "/ws/fuel-planning"
         handler = lambda ws, raw: _json_echo_handler(ws, raw, ep, tenant_id)
         await _ws_loop(websocket, mgr, ep, tenant_id, handler=handler)
+
+    @app.websocket("/ws/commerce/invoices")
+    async def commerce_invoices_websocket(websocket: WebSocket):
+        """Real-time invoice state updates. Design §6."""
+        tenant_id = _authenticate_tenant(websocket)
+        if not tenant_id:
+            return await _reject(websocket)
+        from commerce.websocket.commerce_ws import (
+            get_commerce_invoice_ws_manager,
+        )
+        mgr = get_commerce_invoice_ws_manager()
+        await mgr.connect(websocket, tenant_id=tenant_id)
+        ep = "/ws/commerce/invoices"
+        handler = lambda ws, raw: _json_echo_handler(ws, raw, ep, tenant_id)
+        await _ws_loop(websocket, mgr, ep, tenant_id, handler=handler)

@@ -117,6 +117,13 @@ class OrderService:
         # register callables here via register_intake_hook().
         self._intake_hooks: List[Callable] = []
 
+        # Registry of status-event subscribers. Keyed by event name
+        # (e.g. "order.delivered"). Each subscriber is an async callable
+        # with signature: async def handler(order: dict) -> None.
+        # Subscribers are called after the transition is persisted and
+        # broadcast. Failures are logged but never block the main path.
+        self._event_subscribers: Dict[str, List[Callable]] = {}
+
     # ------------------------------------------------------------------
     # Hook registration
     # ------------------------------------------------------------------
@@ -132,6 +139,42 @@ class OrderService:
         returned reason as the updated ``hold_reason``.
         """
         self._intake_hooks.append(hook)
+
+    # ------------------------------------------------------------------
+    # Event subscription (public subscription helper)
+    # ------------------------------------------------------------------
+
+    def subscribe(self, event_name: str, handler: Callable) -> None:
+        """Subscribe a handler to a named order status event.
+
+        This is the public subscription helper that downstream modules
+        (e.g. commerce invoice generation) use to react to order
+        lifecycle events without coupling to the OrderService internals.
+
+        Supported event names follow the pattern ``order.<status>``:
+            - ``order.delivered``
+            - ``order.cancelled``
+            - ``order.failed``
+            - etc.
+
+        Handlers are async callables with signature:
+            async def handler(order: dict) -> None
+
+        Handlers are called after the transition is persisted and
+        broadcast. Failures are logged but MUST NOT block the main path.
+
+        Args:
+            event_name: The event to subscribe to (e.g. "order.delivered").
+            handler: An async callable that receives the order dict.
+        """
+        if event_name not in self._event_subscribers:
+            self._event_subscribers[event_name] = []
+        self._event_subscribers[event_name].append(handler)
+        logger.info(
+            "OrderService: registered subscriber for %s: %s",
+            event_name,
+            getattr(handler, "__name__", repr(handler)),
+        )
 
     # ------------------------------------------------------------------
     # Core transition method
@@ -241,6 +284,9 @@ class OrderService:
 
         # 9. Legacy dual-write (when enabled)
         await self._mirror_legacy_if_enabled(order)
+
+        # 10. Notify event subscribers (e.g. commerce invoice generation)
+        await self._notify_event_subscribers(order, new_status)
 
         return order
 
@@ -444,6 +490,35 @@ class OrderService:
                 logger.warning(
                     "LegacyDualWriter.mirror_order raised unexpectedly "
                     "for order=%s: %s",
+                    order.get("order_id"),
+                    exc,
+                )
+
+    async def _notify_event_subscribers(
+        self,
+        order: Dict[str, Any],
+        new_status: str,
+    ) -> None:
+        """Notify registered subscribers for the given status event.
+
+        Constructs the event name as ``order.<new_status>`` and calls
+        all registered handlers. Failures are logged but MUST NOT block
+        the main path.
+        """
+        event_name = f"order.{new_status}"
+        handlers = self._event_subscribers.get(event_name, [])
+        if not handlers:
+            return
+
+        for handler in handlers:
+            try:
+                await handler(order)
+            except Exception as exc:
+                logger.warning(
+                    "OrderService: event subscriber %s failed for "
+                    "event=%s, order=%s: %s",
+                    getattr(handler, "__name__", repr(handler)),
+                    event_name,
                     order.get("order_id"),
                     exc,
                 )

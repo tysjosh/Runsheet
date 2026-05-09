@@ -113,3 +113,96 @@ class TestCoreBootstrap:
 
         assert container.has("settings")
         assert container.has("es_service")
+
+
+class TestCommerceESIndexProvisioning:
+    """Tests for commerce ES index provisioning behind commerce_backbone_enabled flag."""
+
+    @pytest.mark.asyncio
+    async def test_commerce_indices_provisioned_when_flag_on(
+        self, mock_app, container, _mock_external_services
+    ):
+        """When commerce_backbone_enabled is True, setup_commerce_indices is called."""
+        mock_settings = MagicMock()
+        mock_settings.commerce_backbone_enabled = True
+        mock_settings.seed_demo_data = False
+
+        mock_setup = MagicMock()
+
+        with patch("config.settings.get_settings", return_value=mock_settings), \
+             patch("telemetry.service.initialize_telemetry", return_value=MagicMock()), \
+             patch("health.service.HealthCheckService", return_value=MagicMock()), \
+             patch("ingestion.service.DataIngestionService", return_value=MagicMock()), \
+             patch("websocket.connection_manager.ConnectionManager", return_value=MagicMock()), \
+             patch("websocket.connection_manager.bind_container"), \
+             patch("errors.handlers.register_exception_handlers"), \
+             patch(
+                 "commerce.services.commerce_es_mappings.setup_commerce_indices",
+                 mock_setup,
+             ):
+
+            sys.modules.pop("bootstrap.core", None)
+            from bootstrap.core import initialize
+            await initialize(mock_app, container)
+
+        mock_setup.assert_called_once_with(
+            _mock_external_services["es_service"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_commerce_indices_not_provisioned_when_flag_off(
+        self, mock_app, container, _mock_external_services
+    ):
+        """When commerce_backbone_enabled is False, setup_commerce_indices is NOT called."""
+        mock_settings = MagicMock()
+        mock_settings.commerce_backbone_enabled = False
+        mock_settings.seed_demo_data = False
+
+        mock_setup = MagicMock()
+
+        with patch("config.settings.get_settings", return_value=mock_settings), \
+             patch("telemetry.service.initialize_telemetry", return_value=MagicMock()), \
+             patch("health.service.HealthCheckService", return_value=MagicMock()), \
+             patch("ingestion.service.DataIngestionService", return_value=MagicMock()), \
+             patch("websocket.connection_manager.ConnectionManager", return_value=MagicMock()), \
+             patch("websocket.connection_manager.bind_container"), \
+             patch("errors.handlers.register_exception_handlers"), \
+             patch(
+                 "commerce.services.commerce_es_mappings.setup_commerce_indices",
+                 mock_setup,
+             ):
+
+            sys.modules.pop("bootstrap.core", None)
+            from bootstrap.core import initialize
+            await initialize(mock_app, container)
+
+        mock_setup.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_commerce_index_setup_failure_does_not_crash(
+        self, mock_app, container, _mock_external_services
+    ):
+        """If setup_commerce_indices raises, initialization continues."""
+        mock_settings = MagicMock()
+        mock_settings.commerce_backbone_enabled = True
+        mock_settings.seed_demo_data = False
+
+        with patch("config.settings.get_settings", return_value=mock_settings), \
+             patch("telemetry.service.initialize_telemetry", return_value=MagicMock()), \
+             patch("health.service.HealthCheckService", return_value=MagicMock()), \
+             patch("ingestion.service.DataIngestionService", return_value=MagicMock()), \
+             patch("websocket.connection_manager.ConnectionManager", return_value=MagicMock()), \
+             patch("websocket.connection_manager.bind_container"), \
+             patch("errors.handlers.register_exception_handlers"), \
+             patch(
+                 "commerce.services.commerce_es_mappings.setup_commerce_indices",
+                 side_effect=RuntimeError("ES connection failed"),
+             ):
+
+            sys.modules.pop("bootstrap.core", None)
+            from bootstrap.core import initialize
+            await initialize(mock_app, container)
+
+        # Should not raise — initialization completes despite the failure
+        assert container.has("settings")
+        assert container.has("es_service")
