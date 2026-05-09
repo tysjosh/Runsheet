@@ -18,6 +18,7 @@ Validates:
 import logging
 import time
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 from strands import tool
 from services.elasticsearch_service import elasticsearch_service
 from .logging_wrapper import get_telemetry_service
@@ -553,7 +554,7 @@ async def get_scheduling_summary(tenant_id: str = DEFAULT_TENANT_ID) -> str:
 
 
 @tool
-async def generate_dispatch_report(days: int = 7, tenant_id: str = DEFAULT_TENANT_ID) -> str:
+async def generate_dispatch_report(days: int = 7, tenant_id: str = DEFAULT_TENANT_ID, intake_channel: Optional[str] = None) -> str:
     """
     Generate a markdown dispatch report covering job completion rates,
     delay analysis, asset utilization, and recommendations for a specified
@@ -562,9 +563,14 @@ async def generate_dispatch_report(days: int = 7, tenant_id: str = DEFAULT_TENAN
     Args:
         days: Number of days to cover in the report (default: 7)
         tenant_id: Tenant identifier for data scoping
+        intake_channel: Optional filter by intake channel (voice, web_portal,
+                        dispatcher, csv, edi, api_partner, legacy). When provided,
+                        only orders/jobs from that channel are included.
 
     Returns:
         Markdown-formatted dispatch operations report
+
+    Validates: Requirements 14.5, 6.1.5
     """
     start_time = time.time()
     success = False
@@ -578,14 +584,18 @@ async def generate_dispatch_report(days: int = 7, tenant_id: str = DEFAULT_TENAN
         report_date = now.strftime("%Y-%m-%d %H:%M UTC")
 
         # --- 1. Job counts by status and type ---
+        base_filter = [
+            {"term": {"tenant_id": tenant_id}},
+            {"range": {"created_at": {"gte": start_date.isoformat(), "lte": now.isoformat()}}}
+        ]
+        if intake_channel:
+            base_filter.append({"term": {"intake_channel": intake_channel}})
+
         jobs_agg_query = {
             "size": 0,
             "query": {
                 "bool": {
-                    "filter": [
-                        {"term": {"tenant_id": tenant_id}},
-                        {"range": {"created_at": {"gte": start_date.isoformat(), "lte": now.isoformat()}}}
-                    ]
+                    "filter": base_filter
                 }
             },
             "aggs": {
@@ -632,15 +642,19 @@ async def generate_dispatch_report(days: int = 7, tenant_id: str = DEFAULT_TENAN
         completion_rate = (completed / total_jobs * 100) if total_jobs > 0 else 0
 
         # --- 2. Asset utilization ---
+        asset_filter = [
+            {"term": {"tenant_id": tenant_id}},
+            {"exists": {"field": "asset_assigned"}},
+            {"range": {"created_at": {"gte": start_date.isoformat(), "lte": now.isoformat()}}}
+        ]
+        if intake_channel:
+            asset_filter.append({"term": {"intake_channel": intake_channel}})
+
         asset_util_query = {
             "size": 0,
             "query": {
                 "bool": {
-                    "filter": [
-                        {"term": {"tenant_id": tenant_id}},
-                        {"exists": {"field": "asset_assigned"}},
-                        {"range": {"created_at": {"gte": start_date.isoformat(), "lte": now.isoformat()}}}
-                    ]
+                    "filter": asset_filter
                 }
             },
             "aggs": {
@@ -656,15 +670,19 @@ async def generate_dispatch_report(days: int = 7, tenant_id: str = DEFAULT_TENAN
         top_assets = a_aggs.get("top_assets", {}).get("buckets", [])
 
         # --- 3. Delay analysis by job type ---
+        delay_filter = [
+            {"term": {"tenant_id": tenant_id}},
+            {"term": {"delayed": True}},
+            {"range": {"created_at": {"gte": start_date.isoformat(), "lte": now.isoformat()}}}
+        ]
+        if intake_channel:
+            delay_filter.append({"term": {"intake_channel": intake_channel}})
+
         delay_by_type_query = {
             "size": 0,
             "query": {
                 "bool": {
-                    "filter": [
-                        {"term": {"tenant_id": tenant_id}},
-                        {"term": {"delayed": True}},
-                        {"range": {"created_at": {"gte": start_date.isoformat(), "lte": now.isoformat()}}}
-                    ]
+                    "filter": delay_filter
                 }
             },
             "aggs": {
@@ -681,7 +699,10 @@ async def generate_dispatch_report(days: int = 7, tenant_id: str = DEFAULT_TENAN
 
         # --- Build the report ---
         report = f"# 📋 Dispatch Operations Report\n"
-        report += f"**Period:** Last {days} days | **Generated:** {report_date}\n\n"
+        report += f"**Period:** Last {days} days | **Generated:** {report_date}\n"
+        if intake_channel:
+            report += f"**Intake Channel Filter:** {intake_channel}\n"
+        report += "\n"
 
         # Job overview
         report += "## Job Overview\n\n"
@@ -766,6 +787,6 @@ async def generate_dispatch_report(days: int = 7, tenant_id: str = DEFAULT_TENAN
     finally:
         _log_tool_invocation(
             "generate_dispatch_report",
-            {"days": days, "tenant_id": tenant_id},
+            {"days": days, "tenant_id": tenant_id, "intake_channel": intake_channel},
             start_time, success, error_msg
         )

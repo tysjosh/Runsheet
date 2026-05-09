@@ -1,0 +1,337 @@
+/**
+ * Typed HTTP client for the Order Intake Pipeline REST surface.
+ *
+ * Mirrors the backend contract defined in
+ * :mod:`Runsheet-backend/fuel/api/order_endpoints.py` for the Orders
+ * page, Order Detail page, and Create Order modal. Follows the same
+ * pattern as {@link fuelApi.ts} — local `ordersRequest` helper with
+ * timeout + typed generics, no runtime fetch changes.
+ *
+ * Validates: Requirements 2.4, 2.5.
+ */
+
+import { API_TIMEOUTS, ApiError, ApiTimeoutError } from "./api";
+
+// ─── Configuration ───────────────────────────────────────────────────────────
+
+const API_BASE_URL =
+  process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
+
+// ─── Shared Types ────────────────────────────────────────────────────────────
+
+export type OrderStatus =
+  | "placed"
+  | "confirmed"
+  | "scheduled"
+  | "dispatched"
+  | "in_transit"
+  | "delivered"
+  | "failed"
+  | "cancelled"
+  | "on_hold";
+
+export type CallType = "will_call" | "auto_fill" | "keep_full" | "one_off";
+
+export type IntakeChannelType =
+  | "voice"
+  | "web_portal"
+  | "dispatcher"
+  | "csv"
+  | "edi"
+  | "api_partner"
+  | "legacy";
+
+export interface PaginationMeta {
+  page: number;
+  size: number;
+  total: number;
+  total_pages: number;
+}
+
+export interface PaginatedResponse<T> {
+  data: T[];
+  pagination: PaginationMeta;
+  request_id: string;
+}
+
+// ─── Order Types ─────────────────────────────────────────────────────────────
+
+export interface IntakeMetadata {
+  call_id?: string | null;
+  recording_url?: string | null;
+  transcript?: string | null;
+  agent_confidence?: number | null;
+  dispatcher_user_id?: string | null;
+  session_id?: string | null;
+  portal_session_id?: string | null;
+  user_agent?: string | null;
+  import_batch_id?: string | null;
+  csv_row_number?: number | null;
+  edi_interchange_id?: string | null;
+  partner_ref?: string | null;
+  legacy_shipment_id?: string | null;
+}
+
+export interface FuelOrder {
+  order_id: string;
+  tenant_id: string;
+  customer_id: string;
+  customer_name: string;
+  customer_phone?: string | null;
+  customer_email?: string | null;
+  ship_to_address: string;
+  ship_to_lat: number;
+  ship_to_lon: number;
+  customer_tank_id?: string | null;
+  product_code?: string | null;
+  gallons_requested?: number | null;
+  fill_to_full: boolean;
+  call_type: CallType;
+  delivery_window_start?: string | null;
+  delivery_window_end?: string | null;
+  hold_reason?: string | null;
+  po_number?: string | null;
+  special_instructions?: string | null;
+  intake_channel: IntakeChannelType;
+  intake_channel_id: string;
+  intake_metadata: IntakeMetadata;
+  status: OrderStatus;
+  assigned_driver_id?: string | null;
+  assigned_run_id?: string | null;
+  legacy_origin_snapshot?: string | null;
+  source_schema_version: string;
+  trace_id: string;
+  created_at: string;
+  updated_at: string;
+  last_event_timestamp: string;
+}
+
+export interface FuelOrderEvent {
+  event_id: string;
+  order_id: string;
+  tenant_id: string;
+  event_type: string;
+  event_payload: Record<string, unknown>;
+  event_timestamp: string;
+  ingested_at: string;
+  source_schema_version: string;
+  trace_id: string;
+  location?: { lat: number; lon: number } | null;
+}
+
+// ─── Request / Filter Types ──────────────────────────────────────────────────
+
+export interface OrderListFilters {
+  status?: OrderStatus;
+  customer_id?: string;
+  driver_id?: string;
+  call_type?: CallType;
+  product_code?: string;
+  start_date?: string;
+  end_date?: string;
+  intake_channel?: IntakeChannelType;
+  page?: number;
+  size?: number;
+  sort?: string;
+}
+
+export interface CreateOrderPayload {
+  customer_id: string;
+  customer_name: string;
+  customer_phone?: string;
+  customer_email?: string;
+  ship_to_address: string;
+  ship_to_lat: number;
+  ship_to_lon: number;
+  customer_tank_id?: string;
+  product_code: string;
+  gallons_requested?: number;
+  fill_to_full?: boolean;
+  call_type: CallType;
+  delivery_window_start?: string;
+  delivery_window_end?: string;
+  po_number?: string;
+  special_instructions?: string;
+  client_event_id: string;
+}
+
+export interface UpdateOrderStatusPayload {
+  new_status: OrderStatus;
+  reason?: string;
+  notes?: string;
+}
+
+export interface AssignDriverPayload {
+  driver_id: string;
+  run_id?: string;
+}
+
+export interface CancelOrderPayload {
+  reason: string;
+}
+
+// ─── Response Types ──────────────────────────────────────────────────────────
+
+export interface OrderResponse {
+  data: FuelOrder;
+  request_id: string;
+}
+
+export interface OrderEventsResponse {
+  data: FuelOrderEvent[];
+  request_id: string;
+}
+
+// ─── HTTP Helpers ────────────────────────────────────────────────────────────
+
+async function fetchWithTimeout(
+  url: string,
+  options: RequestInit = {},
+  timeout: number = API_TIMEOUTS.STANDARD,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+    return response;
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new ApiTimeoutError(
+        `Request timed out after ${timeout / 1000} seconds`,
+      );
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function buildQueryString(
+  params: Record<string, string | number | boolean | undefined | null> | object,
+): string {
+  const entries = Object.entries(params).filter(
+    ([, v]) => v !== undefined && v !== null && v !== "",
+  );
+  if (entries.length === 0) return "";
+  const searchParams = new URLSearchParams();
+  for (const [key, value] of entries) {
+    searchParams.set(key, String(value));
+  }
+  return `?${searchParams.toString()}`;
+}
+
+async function ordersRequest<T>(
+  endpoint: string,
+  options?: RequestInit,
+): Promise<T> {
+  const url = `${API_BASE_URL}${endpoint}`;
+  try {
+    const response = await fetchWithTimeout(url, {
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+      },
+      ...options,
+    });
+
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new ApiError(
+        body.detail || body.message || `HTTP error! status: ${response.status}`,
+        response.status,
+      );
+    }
+
+    return await response.json();
+  } catch (error) {
+    if (error instanceof ApiTimeoutError || error instanceof ApiError) {
+      throw error;
+    }
+    throw new ApiError(
+      error instanceof Error ? error.message : "Unknown error",
+      0,
+    );
+  }
+}
+
+// ─── Order Endpoints ─────────────────────────────────────────────────────────
+
+/** GET /api/orders — list orders with filters and pagination */
+export async function listOrders(
+  filters: OrderListFilters = {},
+): Promise<PaginatedResponse<FuelOrder>> {
+  const qs = buildQueryString(filters);
+  return ordersRequest<PaginatedResponse<FuelOrder>>(`/orders${qs}`);
+}
+
+/** GET /api/orders/:order_id — fetch a single order by ID */
+export async function getOrder(orderId: string): Promise<OrderResponse> {
+  return ordersRequest<OrderResponse>(
+    `/orders/${encodeURIComponent(orderId)}`,
+  );
+}
+
+/** GET /api/orders/:order_id/events — fetch the event timeline for an order */
+export async function getOrderEvents(
+  orderId: string,
+): Promise<OrderEventsResponse> {
+  return ordersRequest<OrderEventsResponse>(
+    `/orders/${encodeURIComponent(orderId)}/events`,
+  );
+}
+
+/** POST /api/orders — create a new fuel order (dispatcher keyboard) */
+export async function createOrder(
+  payload: CreateOrderPayload,
+): Promise<OrderResponse> {
+  return ordersRequest<OrderResponse>("/orders", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+/** PATCH /api/orders/:order_id/status — transition order status */
+export async function updateOrderStatus(
+  orderId: string,
+  payload: UpdateOrderStatusPayload,
+): Promise<OrderResponse> {
+  return ordersRequest<OrderResponse>(
+    `/orders/${encodeURIComponent(orderId)}/status`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+/** PATCH /api/orders/:order_id/assign — assign a driver to an order */
+export async function assignDriver(
+  orderId: string,
+  payload: AssignDriverPayload,
+): Promise<OrderResponse> {
+  return ordersRequest<OrderResponse>(
+    `/orders/${encodeURIComponent(orderId)}/assign`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+/** POST /api/orders/:order_id/cancel — cancel an order with a reason */
+export async function cancelOrder(
+  orderId: string,
+  payload: CancelOrderPayload,
+): Promise<OrderResponse> {
+  return ordersRequest<OrderResponse>(
+    `/orders/${encodeURIComponent(orderId)}/cancel`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}

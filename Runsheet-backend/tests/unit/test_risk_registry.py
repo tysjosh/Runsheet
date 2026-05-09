@@ -48,6 +48,9 @@ class TestDefaultRiskRegistry:
             "create_job",
             "escalate_shipment",
             "request_fuel_refill",
+            # Order mutation tools (Task 12.2, Design §10)
+            "update_order_status",
+            "assign_driver_to_order",
         ]
         for tool in medium_tools:
             assert DEFAULT_RISK_REGISTRY[tool] == RiskLevel.MEDIUM, f"{tool} should be MEDIUM"
@@ -60,6 +63,8 @@ class TestDefaultRiskRegistry:
             # through ConfirmationProtocol at HIGH risk regardless of
             # whether emergency insertion is involved.
             "apply_route_plan_storm_mode",
+            # Order mutation tools (Task 12.2, Design §10)
+            "cancel_order",
         ]
         for tool in high_tools:
             assert DEFAULT_RISK_REGISTRY[tool] == RiskLevel.HIGH, f"{tool} should be HIGH"
@@ -70,8 +75,10 @@ class TestDefaultRiskRegistry:
 
     def test_registry_has_expected_tool_count(self):
         # Original 9 tools + emergency_stop_insertion_high_risk
-        # + apply_route_plan_storm_mode (Task 10.7).
-        assert len(DEFAULT_RISK_REGISTRY) == 11
+        # + apply_route_plan_storm_mode (Task 10.7)
+        # + 3 order mutation tools (Task 12.2): update_order_status,
+        #   assign_driver_to_order, cancel_order.
+        assert len(DEFAULT_RISK_REGISTRY) == 14
 
 
 class TestRiskRegistryClassifyWithoutRedis:

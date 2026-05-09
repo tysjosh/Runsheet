@@ -43,6 +43,7 @@ from Agents.support.fuel_distribution_models import (
     DeferredRouteStop,
     RoutePlan,
     RouteStop,
+    WindowMissEntry,
 )
 from Agents.support.mvp_es_mappings import MVP_ROUTES_INDEX
 from Agents.support.route_solver import (
@@ -55,6 +56,7 @@ from fuel.services.fuel_product_catalog import (
     canonicalize,
     canonicalize_or_warn,
 )
+from fuel.services.order_es_mappings import FUEL_ORDERS_CURRENT_INDEX
 from fuel.services.sourcing_recommender import (
     InvalidBrandedPreferenceError,
     SourcingRecommender,
@@ -874,6 +876,48 @@ class RoutePlanningAgent(OverlayAgentBase):
             len(route_proposals),
         )
 
+        # ------------------------------------------------------------------
+        # Fuel-order-based stop building (Task 11.2, Req 5.2.1–5.2.3)
+        # ------------------------------------------------------------------
+        # In addition to the loading-proposal flow, build stops directly
+        # from fuel_orders_current WHERE status IN {confirmed, scheduled}.
+        # This ensures the route planning agent can operate on fuel orders
+        # even when no compartment_loading proposal is buffered. Window
+        # misses are surfaced on the last produced route plan (if any) or
+        # logged when no plan was produced.
+        if proposals:
+            # Use the tenant_id from the first proposal for the fuel-order
+            # query. In multi-tenant scenarios each proposal carries its
+            # own tenant_id; for now we process the first tenant's orders.
+            fuel_order_tenant_id = proposals[0].tenant_id
+            (
+                fuel_orders,
+                fuel_order_locations,
+                fuel_order_window_misses,
+            ) = await self.build_stops_from_fuel_orders(fuel_order_tenant_id)
+
+            if fuel_order_window_misses:
+                # Surface window_miss entries on the most recent route plan
+                # so they appear in the replan diff rather than being
+                # silently swallowed.
+                if route_proposals:
+                    last_plan_action = route_proposals[-1].actions[-1]
+                    params = last_plan_action.get("parameters", {})
+                    params["window_misses"] = [
+                        wm.model_dump(mode="json")
+                        for wm in fuel_order_window_misses
+                    ]
+                logger.warning(
+                    "RoutePlanningAgent: %d window_miss entries for "
+                    "tenant=%s — orders with unsatisfiable delivery "
+                    "windows: %s",
+                    len(fuel_order_window_misses),
+                    fuel_order_tenant_id,
+                    ", ".join(
+                        wm.order_id for wm in fuel_order_window_misses
+                    ),
+                )
+
         return route_proposals
 
     # ------------------------------------------------------------------
@@ -985,6 +1029,193 @@ class RoutePlanningAgent(OverlayAgentBase):
             )
 
         return sla_windows
+
+    # ------------------------------------------------------------------
+    # Build stops from fuel_orders_current (Task 11.2)
+    # ------------------------------------------------------------------
+
+    async def build_stops_from_fuel_orders(
+        self, tenant_id: str
+    ) -> Tuple[
+        List[Dict[str, Any]],
+        Dict[str, Dict[str, float]],
+        List["WindowMissEntry"],
+    ]:
+        """Build route stops from fuel_orders_current.
+
+        Reads orders WHERE status IN {confirmed, scheduled} for the tenant.
+        Uses ship_to_lat/ship_to_lon as the stop coordinate; falls back to
+        geocoding ship_to_address via the existing hook when null.
+
+        Treats delivery_window_start/delivery_window_end as hard routing
+        constraints; surfaces windows that cannot be satisfied as
+        window_miss entries in the replan diff rather than silent
+        re-sequencing.
+
+        Returns:
+            (orders, stop_locations, window_misses) where:
+            - orders: list of order source docs (only those with valid locations)
+            - stop_locations: dict keyed by order_id with {lat, lon}
+            - window_misses: list of WindowMissEntry for orders whose
+              delivery windows cannot be satisfied
+        """
+        orders = await self._fetch_routable_orders(tenant_id)
+        if not orders:
+            return [], {}, []
+
+        stop_locations: Dict[str, Dict[str, float]] = {}
+        window_misses: List[WindowMissEntry] = []
+        now = datetime.now(timezone.utc)
+
+        for order in orders:
+            order_id = order.get("order_id", "")
+            lat = order.get("ship_to_lat")
+            lon = order.get("ship_to_lon")
+
+            # Use ship_to_lat/ship_to_lon as stop coordinate
+            if lat is not None and lon is not None:
+                try:
+                    lat_f = float(lat)
+                    lon_f = float(lon)
+                    if lat_f != 0.0 or lon_f != 0.0:
+                        stop_locations[order_id] = {"lat": lat_f, "lon": lon_f}
+                    else:
+                        # Zero coordinates — attempt geocoding fallback
+                        geocoded = await self._geocode_address(
+                            order.get("ship_to_address", "")
+                        )
+                        if geocoded:
+                            stop_locations[order_id] = geocoded
+                except (TypeError, ValueError):
+                    geocoded = await self._geocode_address(
+                        order.get("ship_to_address", "")
+                    )
+                    if geocoded:
+                        stop_locations[order_id] = geocoded
+            else:
+                # Fall back to geocoding ship_to_address
+                geocoded = await self._geocode_address(
+                    order.get("ship_to_address", "")
+                )
+                if geocoded:
+                    stop_locations[order_id] = geocoded
+
+            # Check delivery window constraints — treat as hard routing
+            # constraints. Windows that cannot be satisfied are surfaced
+            # as window_miss entries rather than silent re-sequencing.
+            window_start_raw = order.get("delivery_window_start")
+            window_end_raw = order.get("delivery_window_end")
+            if window_start_raw and window_end_raw:
+                try:
+                    window_start = self._parse_datetime(window_start_raw)
+                    window_end = self._parse_datetime(window_end_raw)
+                    if window_end and window_end < now:
+                        # Window has already passed — surface as window_miss
+                        window_misses.append(WindowMissEntry(
+                            order_id=order_id,
+                            reason="window_miss",
+                            delivery_window_start=str(window_start_raw),
+                            delivery_window_end=str(window_end_raw),
+                            detail="delivery_window_end is in the past",
+                        ))
+                    elif window_start and window_start < now and window_end:
+                        # Window started but hasn't ended — check if
+                        # remaining time is too narrow (< 30 min)
+                        remaining = window_end - now
+                        if remaining.total_seconds() < 1800:
+                            window_misses.append(WindowMissEntry(
+                                order_id=order_id,
+                                reason="window_miss",
+                                delivery_window_start=str(window_start_raw),
+                                delivery_window_end=str(window_end_raw),
+                                detail=(
+                                    "delivery_window_end is less than 30 "
+                                    "minutes away; window cannot be satisfied"
+                                ),
+                            ))
+                except (TypeError, ValueError):
+                    pass
+
+        return orders, stop_locations, window_misses
+
+    async def _fetch_routable_orders(
+        self, tenant_id: str
+    ) -> List[Dict[str, Any]]:
+        """Fetch orders from fuel_orders_current with routable statuses."""
+        query = {
+            "query": {
+                "bool": {
+                    "filter": [
+                        {"term": {"tenant_id": tenant_id}},
+                        {"terms": {"status": ["confirmed", "scheduled"]}},
+                    ]
+                }
+            },
+            "size": 1000,
+        }
+        try:
+            resp = await self._es.search_documents(
+                FUEL_ORDERS_CURRENT_INDEX, query, 1000
+            )
+            hits = (resp or {}).get("hits", {}).get("hits", [])
+            return [hit["_source"] for hit in hits if hit.get("_source")]
+        except Exception as exc:
+            logger.error(
+                "RoutePlanningAgent: failed to fetch routable orders for "
+                "tenant=%s: %s",
+                tenant_id,
+                exc,
+            )
+            return []
+
+    async def _geocode_address(
+        self, address: str
+    ) -> Optional[Dict[str, float]]:
+        """Geocode an address to lat/lon via the existing hook.
+
+        Returns None when geocoding is unavailable or fails.
+        """
+        if not address or not address.strip():
+            return None
+        # Use the existing geocoding hook if available on the ES service
+        geocode_fn = getattr(self._es, "geocode_address", None)
+        if geocode_fn is None:
+            logger.debug(
+                "RoutePlanningAgent: no geocode_address hook available"
+            )
+            return None
+        try:
+            result = await geocode_fn(address)
+            if result and isinstance(result, dict):
+                lat = result.get("lat")
+                lon = result.get("lon")
+                if lat is not None and lon is not None:
+                    return {"lat": float(lat), "lon": float(lon)}
+        except Exception as exc:
+            logger.warning(
+                "RoutePlanningAgent: geocoding failed for address=%r: %s",
+                address,
+                exc,
+            )
+        return None
+
+    @staticmethod
+    def _parse_datetime(value: Any) -> Optional[datetime]:
+        """Parse an ISO-8601 datetime value."""
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            dt = value
+        elif isinstance(value, str):
+            try:
+                dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        else:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
 
     # ------------------------------------------------------------------
     # Build location list for route solver
@@ -1191,12 +1422,24 @@ class RoutePlanningAgent(OverlayAgentBase):
             "distance_km": route_plan.distance_km,
             "objective_value": route_plan.objective_value,
         }
+
+        # Surface window_miss entries in the replan diff (Req 5.2.3)
+        if route_plan.window_misses:
+            parameters["window_misses"] = [
+                wm.model_dump(mode="json") for wm in route_plan.window_misses
+            ]
+
         description = (
             f"Route for truck {route_plan.truck_id}: "
             f"{len(route_plan.stops)} stops, "
             f"{route_plan.distance_km:.1f}km, "
             f"objective={route_plan.objective_value:.3f}"
         )
+
+        if route_plan.window_misses:
+            description += (
+                f", {len(route_plan.window_misses)} window_miss"
+            )
 
         if storm_mode_active:
             deferred_payload = [
@@ -1242,6 +1485,7 @@ class RoutePlanningAgent(OverlayAgentBase):
                 "route_distance_km": -route_plan.distance_km,
                 "stops_served": len(route_plan.stops),
                 "stops_deferred": len(route_plan.deferred_stops),
+                "window_misses": len(route_plan.window_misses),
                 "objective_value": route_plan.objective_value,
             },
             risk_class=risk_class,

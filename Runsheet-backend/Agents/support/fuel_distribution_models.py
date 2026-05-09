@@ -260,6 +260,22 @@ class DeferredRouteStop(BaseModel):
     next_eligible_window_end: Optional[str] = None
 
 
+class WindowMissEntry(BaseModel):
+    """An order whose delivery window cannot be satisfied (Req 5.2.3).
+
+    Surfaced in the replan diff so dispatchers see explicit window
+    violations rather than silent re-sequencing. The Route_Planning_Agent
+    populates these when ``delivery_window_end`` has already passed or
+    when the window is too narrow to reach given the current route state.
+    """
+
+    order_id: str
+    reason: str = "window_miss"
+    delivery_window_start: Optional[str] = None
+    delivery_window_end: Optional[str] = None
+    detail: Optional[str] = None
+
+
 class RoutePlan(BaseModel):
     """An optimized delivery route.
     Validates: Requirement 4.1, 2.1.5, 2.1.6, 8.5.5, 9.2.4, 9.2.5, 9.3.1, 9.3.2
@@ -347,6 +363,12 @@ class RoutePlan(BaseModel):
     #: non-storm plans and storm plans where every stop cleared the
     #: guard-rails.
     deferred_stops: List[DeferredRouteStop] = Field(default_factory=list)
+    #: Orders whose delivery_window_start/delivery_window_end cannot be
+    #: satisfied as hard routing constraints (Req 5.2.3). Surfaced in
+    #: the replan diff rather than silent re-sequencing. Each entry
+    #: carries the order_id, the window bounds, and a human-readable
+    #: detail explaining why the window cannot be met.
+    window_misses: List[WindowMissEntry] = Field(default_factory=list)
 
 
 class ReplanDiff(BaseModel):
@@ -356,6 +378,11 @@ class ReplanDiff(BaseModel):
     truck_swapped: Optional[str] = None
     stations_deferred: List[str] = Field(default_factory=list)
     stations_added: List[str] = Field(default_factory=list)
+    #: Orders whose delivery_window_start/delivery_window_end cannot be
+    #: satisfied as hard routing constraints (Req 5.2.3). Surfaced
+    #: explicitly so dispatchers see window violations rather than
+    #: silent re-sequencing.
+    window_misses: List[WindowMissEntry] = Field(default_factory=list)
 
 
 class ReplanEvent(BaseModel):

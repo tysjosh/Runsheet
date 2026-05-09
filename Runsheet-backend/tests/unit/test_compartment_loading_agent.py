@@ -815,6 +815,27 @@ class TestQueryTrucksWithEquipmentCheck:
         async def mock_search(index, query, size=None):
             call_count[0] += 1
             if call_count[0] == 1:
+                # fuel_orders_current query — return a matching order so
+                # the new order-based path is exercised
+                return {
+                    "hits": {
+                        "hits": [
+                            {
+                                "_source": {
+                                    "order_id": "ord-1",
+                                    "customer_id": "station-1",
+                                    "product_code": "DIESEL_2",
+                                    "gallons_requested": 1000.0,
+                                    "fill_to_full": False,
+                                    "customer_tank_id": None,
+                                    "status": "placed",
+                                    "tenant_id": "tenant-1",
+                                }
+                            },
+                        ]
+                    }
+                }
+            elif call_count[0] == 2:
                 # truck_compartments — truck with depot
                 return {
                     "hits": {
@@ -1213,3 +1234,276 @@ class TestShadowModeGate:
         # The helper should swallow the error and report non-commit.
         is_active = await agent._is_active_commit_mode("tenant-1")
         assert is_active is False
+
+
+# ---------------------------------------------------------------------------
+# Tests: _build_delivery_requests_from_orders (Task 11.3 / Req 5.3.1, 5.3.2)
+# ---------------------------------------------------------------------------
+
+
+class TestBuildDeliveryRequestsFromOrders:
+    """Tests for reading product_code and gallons_requested directly from
+    Fuel_Orders, fill_to_full resolution, and unresolved_fill_volume failure.
+
+    Validates: Requirements 5.3.1, 5.3.2.
+    """
+
+    @pytest.mark.asyncio
+    async def test_reads_product_code_and_gallons_directly(self):
+        """product_code and gallons_requested are read directly from the order."""
+        agent, deps = _make_agent()
+        priority_list = _make_priority_list()
+
+        # Mock fuel_orders_current to return an order with product_code and gallons
+        deps["es_service"].search_documents = AsyncMock(
+            return_value={
+                "hits": {
+                    "hits": [
+                        {
+                            "_source": {
+                                "order_id": "ord-1",
+                                "customer_id": "station-1",
+                                "product_code": "DIESEL_2",
+                                "gallons_requested": 500.0,
+                                "fill_to_full": False,
+                                "customer_tank_id": None,
+                                "status": "placed",
+                                "tenant_id": "tenant-1",
+                            }
+                        },
+                    ]
+                }
+            }
+        )
+
+        requests = await agent._build_delivery_requests_from_orders(
+            "tenant-1", priority_list
+        )
+        assert len(requests) == 1
+        # product_code DIESEL_2 maps to FuelGrade.AGO
+        assert requests[0].fuel_grade == FuelGrade.AGO
+        # gallons_requested converted to liters (500 * 3.785411784)
+        expected_liters = round(500.0 * 3.785411784, 2)
+        assert requests[0].quantity_liters == expected_liters
+        assert requests[0].station_id == "station-1"
+
+    @pytest.mark.asyncio
+    async def test_fill_to_full_computes_target_volume(self):
+        """fill_to_full=true fetches customer_tank and computes target_volume."""
+        agent, deps = _make_agent()
+        priority_list = _make_priority_list()
+
+        # Mock fuel_orders_current
+        deps["es_service"].search_documents = AsyncMock(
+            return_value={
+                "hits": {
+                    "hits": [
+                        {
+                            "_source": {
+                                "order_id": "ord-1",
+                                "customer_id": "station-1",
+                                "product_code": "PROPANE",
+                                "gallons_requested": None,
+                                "fill_to_full": True,
+                                "customer_tank_id": "tank-1",
+                                "status": "placed",
+                                "tenant_id": "tenant-1",
+                            }
+                        },
+                    ]
+                }
+            }
+        )
+
+        # Mock customer_tank_repo.get to return a tank
+        from fuel.customer_tank_models import CustomerTank
+
+        mock_tank = MagicMock(spec=CustomerTank)
+        mock_tank.capacity_gallons = 1000.0
+        mock_tank.current_level_gallons = 300.0
+        agent._customer_tank_repo = MagicMock()
+        agent._customer_tank_repo.get = AsyncMock(return_value=mock_tank)
+
+        requests = await agent._build_delivery_requests_from_orders(
+            "tenant-1", priority_list
+        )
+        assert len(requests) == 1
+        # target_volume = max(0, 1000 - 300) = 700 gallons → liters
+        expected_liters = round(700.0 * 3.785411784, 2)
+        assert requests[0].quantity_liters == expected_liters
+        # PROPANE maps to FuelGrade.LPG
+        assert requests[0].fuel_grade == FuelGrade.LPG
+
+    @pytest.mark.asyncio
+    async def test_fill_to_full_unresolved_publishes_risk_signal(self):
+        """fill_to_full=true with no tank and no gallons_requested fails
+        with unresolved_fill_volume and publishes a RiskSignal."""
+        agent, deps = _make_agent()
+        priority_list = _make_priority_list()
+
+        # Mock fuel_orders_current
+        deps["es_service"].search_documents = AsyncMock(
+            return_value={
+                "hits": {
+                    "hits": [
+                        {
+                            "_source": {
+                                "order_id": "ord-1",
+                                "customer_id": "station-1",
+                                "product_code": "DIESEL_2",
+                                "gallons_requested": None,
+                                "fill_to_full": True,
+                                "customer_tank_id": "tank-1",
+                                "status": "placed",
+                                "tenant_id": "tenant-1",
+                            }
+                        },
+                    ]
+                }
+            }
+        )
+
+        # Mock customer_tank_repo.get to return None (tank not found)
+        agent._customer_tank_repo = MagicMock()
+        agent._customer_tank_repo.get = AsyncMock(return_value=None)
+
+        requests = await agent._build_delivery_requests_from_orders(
+            "tenant-1", priority_list
+        )
+        # The failed order falls back to legacy path (priority list)
+        # since no orders could be resolved from fuel_orders_current
+        assert len(requests) == 1  # legacy fallback
+
+        # A RiskSignal was published for the unresolved order
+        deps["signal_bus"].publish.assert_called_once()
+        signal = deps["signal_bus"].publish.call_args[0][0]
+        assert signal.entity_id == "ord-1"
+        assert signal.context["reason"] == "unresolved_fill_volume"
+
+    @pytest.mark.asyncio
+    async def test_fill_to_full_falls_back_to_gallons_requested(self):
+        """fill_to_full=true with unresolvable tank but gallons_requested
+        available uses gallons_requested as fallback."""
+        agent, deps = _make_agent()
+        priority_list = _make_priority_list()
+
+        deps["es_service"].search_documents = AsyncMock(
+            return_value={
+                "hits": {
+                    "hits": [
+                        {
+                            "_source": {
+                                "order_id": "ord-1",
+                                "customer_id": "station-1",
+                                "product_code": "DIESEL_2",
+                                "gallons_requested": 400.0,
+                                "fill_to_full": True,
+                                "customer_tank_id": "tank-1",
+                                "status": "placed",
+                                "tenant_id": "tenant-1",
+                            }
+                        },
+                    ]
+                }
+            }
+        )
+
+        # Tank not found — but gallons_requested is available
+        agent._customer_tank_repo = MagicMock()
+        agent._customer_tank_repo.get = AsyncMock(return_value=None)
+
+        requests = await agent._build_delivery_requests_from_orders(
+            "tenant-1", priority_list
+        )
+        assert len(requests) == 1
+        expected_liters = round(400.0 * 3.785411784, 2)
+        assert requests[0].quantity_liters == expected_liters
+
+    @pytest.mark.asyncio
+    async def test_no_product_code_skips_order(self):
+        """Orders without product_code are skipped."""
+        agent, deps = _make_agent()
+        priority_list = _make_priority_list()
+
+        deps["es_service"].search_documents = AsyncMock(
+            return_value={
+                "hits": {
+                    "hits": [
+                        {
+                            "_source": {
+                                "order_id": "ord-1",
+                                "customer_id": "station-1",
+                                "product_code": None,
+                                "gallons_requested": 500.0,
+                                "fill_to_full": False,
+                                "customer_tank_id": None,
+                                "status": "placed",
+                                "tenant_id": "tenant-1",
+                            }
+                        },
+                    ]
+                }
+            }
+        )
+
+        requests = await agent._build_delivery_requests_from_orders(
+            "tenant-1", priority_list
+        )
+        # Falls back to legacy path since no orders could be resolved
+        # (legacy path produces requests from priority list)
+        assert len(requests) == 1
+        assert requests[0].fuel_grade == FuelGrade.AGO  # from priority list
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_legacy_when_no_fuel_orders(self):
+        """When fuel_orders_current is empty, falls back to legacy path."""
+        agent, deps = _make_agent()
+        priority_list = _make_priority_list()
+
+        deps["es_service"].search_documents = AsyncMock(
+            return_value={"hits": {"hits": []}}
+        )
+
+        requests = await agent._build_delivery_requests_from_orders(
+            "tenant-1", priority_list
+        )
+        # Legacy path produces requests from priority list
+        assert len(requests) == 1
+        assert requests[0].fuel_grade == FuelGrade.AGO
+
+    @pytest.mark.asyncio
+    async def test_no_gallons_no_fill_to_full_fails(self):
+        """Orders with no gallons_requested and fill_to_full=false fail
+        with unresolved_fill_volume."""
+        agent, deps = _make_agent()
+        priority_list = _make_priority_list()
+
+        deps["es_service"].search_documents = AsyncMock(
+            return_value={
+                "hits": {
+                    "hits": [
+                        {
+                            "_source": {
+                                "order_id": "ord-1",
+                                "customer_id": "station-1",
+                                "product_code": "DIESEL_2",
+                                "gallons_requested": None,
+                                "fill_to_full": False,
+                                "customer_tank_id": None,
+                                "status": "placed",
+                                "tenant_id": "tenant-1",
+                            }
+                        },
+                    ]
+                }
+            }
+        )
+
+        requests = await agent._build_delivery_requests_from_orders(
+            "tenant-1", priority_list
+        )
+        # Falls back to legacy since no orders resolved
+        # But a RiskSignal was published for the failed order
+        deps["signal_bus"].publish.assert_called_once()
+        signal = deps["signal_bus"].publish.call_args[0][0]
+        assert signal.context["reason"] == "unresolved_fill_volume"

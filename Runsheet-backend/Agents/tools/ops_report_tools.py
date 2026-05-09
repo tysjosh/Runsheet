@@ -243,6 +243,7 @@ async def generate_failure_report(
     start_date: str,
     end_date: str,
     tenant_id: str,
+    intake_channel: Optional[str] = None,
 ) -> str:
     """
     Generate a failure analysis report for a specified time range.
@@ -255,14 +256,17 @@ async def generate_failure_report(
         start_date: Start of time range (ISO-8601).
         end_date: End of time range (ISO-8601).
         tenant_id: The tenant ID (from authenticated context).
+        intake_channel: Optional filter by intake channel (voice, web_portal,
+                        dispatcher, csv, edi, api_partner, legacy). When provided,
+                        only failures from that channel are included.
 
     Returns:
         Structured markdown report string for the AI agent to present.
 
-    Validates: Requirements 18.2, 18.4, 18.5, 19.1, 19.2, 19.5
+    Validates: Requirements 18.2, 18.4, 18.5, 19.1, 19.2, 19.5, 6.1.5
     """
     start_time = time.time()
-    params = {"start_date": start_date, "end_date": end_date}
+    params = {"start_date": start_date, "end_date": end_date, "intake_channel": intake_channel}
     _log_tool_call("generate_failure_report", params, tenant_id)
 
     disabled = await check_ops_feature_flag(tenant_id)
@@ -273,13 +277,17 @@ async def generate_failure_report(
         es = _get_es()
 
         # Failed shipments with aggregation by failure_reason and time trend
+        filter_clauses = [
+            {"term": {"status": "failed"}},
+            {"range": {"updated_at": {"gte": start_date, "lte": end_date}}},
+        ]
+        if intake_channel:
+            filter_clauses.append({"term": {"intake_channel": intake_channel}})
+
         es_query = {
             "query": {
                 "bool": {
-                    "filter": [
-                        {"term": {"status": "failed"}},
-                        {"range": {"updated_at": {"gte": start_date, "lte": end_date}}},
-                    ]
+                    "filter": filter_clauses
                 }
             }
         }
@@ -317,6 +325,9 @@ async def generate_failure_report(
 
         # Build markdown report
         md = _report_header("Failure Analysis Report", start_date, end_date, tenant_id)
+
+        if intake_channel:
+            md += f"**Intake Channel Filter:** {intake_channel}\n\n"
 
         md += "## Summary\n\n"
         md += f"| Metric | Value |\n"

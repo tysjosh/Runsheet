@@ -77,6 +77,46 @@ class ErrorCode(str, Enum):
     BACKFILL_IN_PROGRESS = "BACKFILL_IN_PROGRESS"
     """A backfill job is already running for this tenant (HTTP 409)"""
     
+    # Order Intake Pipeline errors (4xx / conflict)
+    INVALID_CUSTOMER_TANK_REF = "INVALID_CUSTOMER_TANK_REF"
+    """Referenced customer tank does not exist or belongs to another tenant (HTTP 400)"""
+
+    MISSING_VOLUME = "MISSING_VOLUME"
+    """Order has no gallons_requested and fill_to_full is false (HTTP 400)"""
+
+    INVALID_DELIVERY_WINDOW = "INVALID_DELIVERY_WINDOW"
+    """Delivery window is invalid — end is before or equal to start (HTTP 400)"""
+
+    MISSING_DELIVERY_WINDOW = "MISSING_DELIVERY_WINDOW"
+    """Order lacks a delivery window required for the target status (HTTP 409)"""
+
+    MISSING_PRODUCT_CODE = "MISSING_PRODUCT_CODE"
+    """Non-legacy intake channel order is missing a product code (HTTP 400)"""
+
+    MISSING_CLIENT_EVENT_ID = "MISSING_CLIENT_EVENT_ID"
+    """Dispatcher intake request is missing the required client_event_id (HTTP 400)"""
+
+    MISSING_HOLD_REASON = "MISSING_HOLD_REASON"
+    """Order placed on hold without a hold_reason (HTTP 400)"""
+
+    INVALID_STATUS_TRANSITION = "INVALID_STATUS_TRANSITION"
+    """Requested status transition is not allowed by the order state machine (HTTP 409)"""
+
+    CHANNEL_DISABLED = "CHANNEL_DISABLED"
+    """Intake channel is disabled and cannot accept orders (HTTP 403)"""
+
+    INSUFFICIENT_ROLE = "INSUFFICIENT_ROLE"
+    """Caller lacks the required role for this operation (HTTP 403)"""
+
+    DRIVER_UNAVAILABLE = "DRIVER_UNAVAILABLE"
+    """Driver is off_duty or inactive and cannot be assigned (HTTP 409)"""
+
+    LEGACY_ROUTE_SUNSET = "LEGACY_ROUTE_SUNSET"
+    """Legacy route has been sunset and is no longer available (HTTP 410)"""
+
+    SECURITY_TENANT_ID_MISMATCH = "SECURITY_TENANT_ID_MISMATCH"
+    """Payload tenant_id does not match the channel's tenant_id (HTTP 403)"""
+
     # Internal errors (5xx)
     INTERNAL_ERROR = "INTERNAL_ERROR"
     """Unexpected server error (HTTP 500)"""
@@ -106,6 +146,20 @@ ERROR_CODE_STATUS_MAP: dict[ErrorCode, int] = {
     ErrorCode.POISON_QUEUE_MAX_RETRIES: 422,
     ErrorCode.DRIFT_THRESHOLD_EXCEEDED: 409,
     ErrorCode.BACKFILL_IN_PROGRESS: 409,
+    # Order Intake Pipeline error codes
+    ErrorCode.INVALID_CUSTOMER_TANK_REF: 400,
+    ErrorCode.MISSING_VOLUME: 400,
+    ErrorCode.INVALID_DELIVERY_WINDOW: 400,
+    ErrorCode.MISSING_DELIVERY_WINDOW: 409,
+    ErrorCode.MISSING_PRODUCT_CODE: 400,
+    ErrorCode.MISSING_CLIENT_EVENT_ID: 400,
+    ErrorCode.MISSING_HOLD_REASON: 400,
+    ErrorCode.INVALID_STATUS_TRANSITION: 409,
+    ErrorCode.CHANNEL_DISABLED: 403,
+    ErrorCode.INSUFFICIENT_ROLE: 403,
+    ErrorCode.DRIVER_UNAVAILABLE: 409,
+    ErrorCode.LEGACY_ROUTE_SUNSET: 410,
+    ErrorCode.SECURITY_TENANT_ID_MISMATCH: 403,
 }
 
 

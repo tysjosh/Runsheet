@@ -76,6 +76,7 @@ class ServiceContainer:
     ops_ws_manager: OpsWebSocketManager
     scheduling_ws_manager: SchedulingWebSocketManager
     agent_ws_manager: AgentActivityWSManager
+    orders_ws_manager: Any  # OrdersWSManager (fuel.websocket.orders_ws)
 
     # -- Ops --
     ops_es_service: OpsElasticsearchService

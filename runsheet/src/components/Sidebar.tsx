@@ -4,6 +4,7 @@ import {
   Building2,
   CalendarClock,
   ChevronLeft,
+  ClipboardList,
   Database,
   Droplets,
   FileInput,
@@ -23,11 +24,24 @@ import {
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 
+/**
+ * Determines whether legacy ops surface links (Shipments, Riders) should
+ * be visible. They are hidden when the tenant's overlay.order_intake_pipeline
+ * state is `active_auto`.
+ */
+export function showLegacyOpsSurface(
+  overlayState?: string | null,
+): boolean {
+  return overlayState !== "active_auto";
+}
+
 interface SidebarProps {
   activeItem?: string;
   isCollapsed: boolean;
   onToggle: () => void;
   onNavigate: (item: string) => void;
+  /** Tenant's overlay.order_intake_pipeline state for legacy link visibility */
+  overlayOrderIntakePipelineState?: string | null;
 }
 
 export default function Sidebar({
@@ -35,6 +49,7 @@ export default function Sidebar({
   isCollapsed,
   onToggle,
   onNavigate,
+  overlayOrderIntakePipelineState,
 }: SidebarProps) {
   const router = useRouter();
 
@@ -43,8 +58,12 @@ export default function Sidebar({
     router.push("/signin");
   };
 
+  const legacyVisible = showLegacyOpsSurface(overlayOrderIntakePipelineState);
+
   const menuItems = [
     { id: "fleet", label: "Fleet", icon: Truck },
+    { id: "orders", label: "Orders", icon: ClipboardList },
+    { id: "drivers", label: "Drivers", icon: Users },
     { id: "scheduling", label: "Scheduling", icon: CalendarClock },
     { id: "fuel", label: "Fuel Stations", icon: Fuel },
     { id: "customer-tanks", label: "Customer Tanks", icon: Gauge },
@@ -55,7 +74,9 @@ export default function Sidebar({
     { id: "road-restrictions", label: "Road Restrictions", icon: MapIcon },
     { id: "reconciliation", label: "Reconciliation", icon: ListChecks },
     { id: "inventory", label: "Inventory", icon: Package },
-    { id: "riders", label: "Riders", icon: Users },
+    ...(legacyVisible
+      ? [{ id: "riders", label: "Riders", icon: Users }]
+      : []),
     { id: "analytics", label: "Analytics", icon: BarChart3 },
     { id: "ops-monitoring", label: "Ops Monitoring", icon: Activity },
     { id: "control-center", label: "Control Center", icon: Radio },

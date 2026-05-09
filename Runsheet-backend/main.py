@@ -43,6 +43,10 @@ from import_endpoints import router as import_router
 from notifications.api.endpoints import router as notification_router
 from notifications.api.metrics_endpoints import router as metrics_router
 from integrations.api.integrations_endpoints import router as integrations_router
+from integrations.api.intake_channel_endpoints import router as intake_channel_router
+from fuel.api.order_endpoints import router as order_router
+from fuel.api.order_webhook_endpoints import router as order_webhook_router
+from fuel.api.driver_endpoints import router as driver_ops_router
 from integrations.api.stripe_endpoints import (
     router as stripe_router,
     webhook_router as stripe_webhook_router,
@@ -106,6 +110,8 @@ for _router in (
     scheduling_router, driver_scheduling_router, message_router,
     exception_router, pod_router, agent_router, inline_router, import_router,
     notification_router, metrics_router, integrations_router,
+    intake_channel_router, order_router, order_webhook_router,
+    driver_ops_router,
     stripe_router, stripe_webhook_router,
 ):
     app.include_router(_router)

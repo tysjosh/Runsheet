@@ -92,3 +92,11 @@ export type {
   UseFuelPlanningWebSocketReturn,
 } from "./useFuelPlanningWebSocket";
 export { useFuelPlanningWebSocket } from "./useFuelPlanningWebSocket";
+
+export type {
+  OrdersEventType,
+  OrdersWebSocketMessage,
+  OrdersWebSocketOptions,
+  UseOrdersWebSocketReturn,
+} from "./useOrdersWebSocket";
+export { useOrdersWebSocket } from "./useOrdersWebSocket";

@@ -47,6 +47,12 @@ DEFAULT_RISK_REGISTRY: Dict[str, RiskLevel] = {
     # ConfirmationProtocol classifies the plan HIGH regardless of the
     # standard MEDIUM default for non-storm plans.
     "apply_route_plan_storm_mode": RiskLevel.HIGH,
+    # Order mutation tools (Design §10, Task 12.2). Status updates and
+    # driver assignments are MEDIUM risk; cancellations are HIGH risk
+    # requiring explicit dispatcher approval.
+    "update_order_status": RiskLevel.MEDIUM,
+    "assign_driver_to_order": RiskLevel.MEDIUM,
+    "cancel_order": RiskLevel.HIGH,
 }
 
 

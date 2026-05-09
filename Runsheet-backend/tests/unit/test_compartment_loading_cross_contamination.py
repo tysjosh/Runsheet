@@ -183,18 +183,23 @@ def _priority_list(
 def _install_compartments(deps: Dict[str, Any], *hits: Dict[str, Any]) -> None:
     """Wire the ES mock so the agent sees exactly these compartment hits.
 
-    The agent issues two searches inside ``_query_trucks_with_equipment_check``:
-    first against ``truck_compartments`` and, for trucks with a depot,
-    a second against ``inventory`` to verify fuel_equipment. We return
-    the compartment rows on the first call and "no inventory rows" on
-    subsequent calls so the fail-open equipment branch keeps the truck.
+    The agent issues searches in this order:
+    1. ``fuel_orders_current`` — for the new order-based delivery request path.
+       We return empty so the agent falls back to the legacy priority-list path.
+    2. ``truck_compartments`` — for available trucks.
+    3. ``inventory`` — for fuel_equipment availability check.
+       We return empty so the fail-open equipment branch keeps the truck.
     """
 
     call_count = [0]
 
     async def _search(index: str, query: Dict[str, Any], size: int = None):
         call_count[0] += 1
-        if call_count[0] == 1:
+        if index == "fuel_orders_current":
+            # Return empty so the agent falls back to legacy priority-list path
+            return {"hits": {"hits": []}}
+        if call_count[0] <= 2:
+            # First non-fuel-orders call is truck_compartments
             return {"hits": {"hits": list(hits)}}
         return {"hits": {"hits": []}}
 

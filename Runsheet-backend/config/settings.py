@@ -332,6 +332,34 @@ class Settings(BaseSettings):
         ge=1,
         description="Maximum concurrent active jobs per asset"
     )
+
+    # Order Intake Pipeline Configuration
+    orders_intake_pipeline_shadow_divergence_sample_rate: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Fraction of orders sampled for shadow-mode divergence comparison "
+            "between the new intake pipeline and the legacy path. "
+            "0.0 = no sampling, 1.0 = sample all orders. Default: 1.0"
+        ),
+    )
+    orders_legacy_sunset_date: Optional[str] = Field(
+        default=None,
+        description=(
+            "ISO-8601 date after which legacy shipment/rider routes return "
+            "410 Gone. None means no sunset scheduled (legacy routes remain "
+            "active indefinitely). Example: 2026-07-01"
+        ),
+    )
+    orders_legacy_read_retention_days: int = Field(
+        default=30,
+        ge=1,
+        description=(
+            "Number of days to retain read access to legacy shipment/rider "
+            "indices after the sunset date. Must be >= 1. Default: 30"
+        ),
+    )
     
     # Note: model_config is set dynamically via create_settings_for_environment()
     model_config = SettingsConfigDict(

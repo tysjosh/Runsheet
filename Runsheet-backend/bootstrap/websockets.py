@@ -9,6 +9,7 @@ Endpoints registered:
 
 * ``/ws/ops``                — OpsWSManager (shipment updates)
 * ``/ws/scheduling``         — SchedulingWSManager (job lifecycle)
+* ``/ws/orders``             — OrdersWSManager (order + driver updates, Req 4.1)
 * ``/ws/notifications``      — NotificationWSManager
 * ``/ws/agent-activity``     — AgentActivityWSManager
 * ``/api/fleet/live``        — FleetWSManager
@@ -197,6 +198,18 @@ def register_websocket_routes(app: FastAPI) -> None:
         mgr = _container(websocket.app).scheduling_ws_manager
         await mgr.connect(websocket, subscriptions=subs_list, tenant_id=tenant_id)
         await _ws_loop(websocket, mgr, "/ws/scheduling", tenant_id)
+
+    @app.websocket("/ws/orders")
+    async def orders_live_websocket(websocket: WebSocket):
+        """Real-time order and driver updates. Req 4.1."""
+        tenant_id = _authenticate_tenant(websocket)
+        if not tenant_id:
+            return await _reject(websocket)
+        subs = websocket.query_params.get("subscriptions", "")
+        subs_list = [s.strip() for s in subs.split(",") if s.strip()] if subs else None
+        mgr = _container(websocket.app).orders_ws_manager
+        await mgr.connect(websocket, subscriptions=subs_list, tenant_id=tenant_id)
+        await _ws_loop(websocket, mgr, "/ws/orders", tenant_id)
 
     @app.websocket("/ws/notifications")
     async def notifications_live_websocket(websocket: WebSocket):

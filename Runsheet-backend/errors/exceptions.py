@@ -295,3 +295,181 @@ def backfill_in_progress(
         details=details
     )
 
+
+# --- Order Intake Pipeline factory functions ---
+
+
+def conflict(
+    message: str,
+    error_code: str = "INVALID_STATUS_TRANSITION",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a conflict exception (409) using a string error code lookup.
+
+    This is a convenience helper used by the order state machine and
+    other pipeline components that raise 409 conflicts with specific
+    error codes.
+    """
+    code = ErrorCode(error_code.upper()) if isinstance(error_code, str) else error_code
+    return AppException(
+        error_code=code,
+        message=message,
+        details=details
+    )
+
+
+def invalid_customer_tank_ref(
+    message: str = "Referenced customer tank does not exist or belongs to another tenant",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create an invalid customer tank reference exception."""
+    return AppException(
+        error_code=ErrorCode.INVALID_CUSTOMER_TANK_REF,
+        message=message,
+        details=details
+    )
+
+
+def missing_volume(
+    message: str = "Order must specify gallons_requested > 0 or fill_to_full = true",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a missing volume exception."""
+    return AppException(
+        error_code=ErrorCode.MISSING_VOLUME,
+        message=message,
+        details=details
+    )
+
+
+def invalid_delivery_window(
+    message: str = "Delivery window is invalid — end must be after start",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create an invalid delivery window exception."""
+    return AppException(
+        error_code=ErrorCode.INVALID_DELIVERY_WINDOW,
+        message=message,
+        details=details
+    )
+
+
+def missing_delivery_window(
+    message: str = "Order lacks a delivery window required for the target status",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a missing delivery window exception."""
+    return AppException(
+        error_code=ErrorCode.MISSING_DELIVERY_WINDOW,
+        message=message,
+        details=details
+    )
+
+
+def missing_product_code(
+    message: str = "Non-legacy intake channel order must carry a product code",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a missing product code exception."""
+    return AppException(
+        error_code=ErrorCode.MISSING_PRODUCT_CODE,
+        message=message,
+        details=details
+    )
+
+
+def missing_client_event_id(
+    message: str = "Dispatcher intake request must include a client_event_id",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a missing client event ID exception."""
+    return AppException(
+        error_code=ErrorCode.MISSING_CLIENT_EVENT_ID,
+        message=message,
+        details=details
+    )
+
+
+def missing_hold_reason(
+    message: str = "Order placed on hold must include a hold_reason",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a missing hold reason exception."""
+    return AppException(
+        error_code=ErrorCode.MISSING_HOLD_REASON,
+        message=message,
+        details=details
+    )
+
+
+def invalid_status_transition(
+    message: str = "Requested status transition is not allowed",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create an invalid status transition exception."""
+    return AppException(
+        error_code=ErrorCode.INVALID_STATUS_TRANSITION,
+        message=message,
+        details=details
+    )
+
+
+def channel_disabled(
+    message: str = "Intake channel is disabled and cannot accept orders",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a channel disabled exception."""
+    return AppException(
+        error_code=ErrorCode.CHANNEL_DISABLED,
+        message=message,
+        details=details
+    )
+
+
+def insufficient_role(
+    message: str = "Caller lacks the required role for this operation",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create an insufficient role exception."""
+    return AppException(
+        error_code=ErrorCode.INSUFFICIENT_ROLE,
+        message=message,
+        details=details
+    )
+
+
+def driver_unavailable(
+    message: str = "Driver is off_duty or inactive and cannot be assigned",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a driver unavailable exception."""
+    return AppException(
+        error_code=ErrorCode.DRIVER_UNAVAILABLE,
+        message=message,
+        details=details
+    )
+
+
+def legacy_route_sunset(
+    message: str = "This legacy route has been sunset — use the new order surface",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a legacy route sunset exception."""
+    return AppException(
+        error_code=ErrorCode.LEGACY_ROUTE_SUNSET,
+        message=message,
+        details=details
+    )
+
+
+def security_tenant_id_mismatch(
+    message: str = "Payload tenant_id does not match the channel's tenant_id",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a security tenant ID mismatch exception."""
+    return AppException(
+        error_code=ErrorCode.SECURITY_TENANT_ID_MISMATCH,
+        message=message,
+        details=details
+    )
+

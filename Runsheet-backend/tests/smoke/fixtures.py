@@ -109,7 +109,6 @@ ROUTE_FIXTURES: Dict[str, RouteFixture] = {
         json={"name": "Updated"},
     ),
     "GET /api/inventory": RouteFixture(),
-    "GET /api/orders": RouteFixture(),
     "GET /api/support/tickets": RouteFixture(),
 
     # ---- Analytics endpoints ----
@@ -197,11 +196,124 @@ ROUTE_FIXTURES: Dict[str, RouteFixture] = {
         json={"user_id": "smoke-user"},
     ),
 
-    # ---- Webhook endpoint ----
+    # ---- Webhook endpoints ----
     "POST /webhooks/dinee": RouteFixture(
         method="POST",
         json={"event_type": "test"},
         headers={"X-Dinee-Signature": "invalid-sig"},
+    ),
+    # POST /webhooks/orders/{channel_id} — skip (HMAC required, no JWT)
+
+    # ---- Order intake pipeline endpoints ----
+    "POST /api/orders": RouteFixture(
+        method="POST",
+        json={
+            "client_event_id": "smoke-evt-001",
+            "customer_id": "CUST-001",
+            "customer_name": "Smoke Customer",
+            "ship_to_address": "123 Main St",
+            "ship_to_lat": 32.7767,
+            "ship_to_lon": -96.7970,
+            "product_code": "DIESEL_2",
+            "gallons_requested": 500,
+            "call_type": "will_call",
+        },
+    ),
+    "POST /api/orders/bulk": RouteFixture(
+        method="POST",
+        json={
+            "orders": [
+                {
+                    "customer_id": "CUST-001",
+                    "customer_name": "Smoke Customer",
+                    "ship_to_address": "123 Main St",
+                    "ship_to_lat": 32.7767,
+                    "ship_to_lon": -96.7970,
+                    "product_code": "DIESEL_2",
+                    "gallons_requested": 500,
+                    "call_type": "will_call",
+                }
+            ],
+            "dry_run": True,
+        },
+    ),
+    "GET /api/orders": RouteFixture(),
+    "GET /api/orders/{order_id}": RouteFixture(
+        path_params={"order_id": "ord_00000000000000000000000000000001"},
+    ),
+    "GET /api/orders/{order_id}/events": RouteFixture(
+        path_params={"order_id": "ord_00000000000000000000000000000001"},
+    ),
+    "PATCH /api/orders/{order_id}/status": RouteFixture(
+        method="PATCH",
+        path_params={"order_id": "ord_00000000000000000000000000000001"},
+        json={"new_status": "confirmed"},
+    ),
+    "PATCH /api/orders/{order_id}/assign": RouteFixture(
+        method="PATCH",
+        path_params={"order_id": "ord_00000000000000000000000000000001"},
+        json={"driver_id": "DRV-001"},
+    ),
+    "POST /api/orders/{order_id}/cancel": RouteFixture(
+        method="POST",
+        path_params={"order_id": "ord_00000000000000000000000000000001"},
+        json={"reason": "smoke test cancellation"},
+    ),
+    "POST /api/orders/{order_id}/hold": RouteFixture(
+        method="POST",
+        path_params={"order_id": "ord_00000000000000000000000000000001"},
+        json={"hold_reason": "smoke test hold"},
+    ),
+    "POST /api/orders/{order_id}/release-hold": RouteFixture(
+        method="POST",
+        path_params={"order_id": "ord_00000000000000000000000000000001"},
+        json={},
+    ),
+
+    # ---- Driver endpoints (order-intake-pipeline) ----
+    "GET /api/ops/drivers": RouteFixture(),
+    "GET /api/ops/drivers/utilization": RouteFixture(),
+    "GET /api/ops/drivers/{driver_id}": RouteFixture(
+        path_params={"driver_id": "DRV-001"},
+    ),
+    "POST /api/ops/drivers": RouteFixture(
+        method="POST",
+        json={
+            "driver_name": "Smoke Driver",
+            "phone": "+15551234567",
+            "status": "active",
+            "availability": "on_duty",
+        },
+    ),
+    "PATCH /api/ops/drivers/{driver_id}": RouteFixture(
+        method="PATCH",
+        path_params={"driver_id": "DRV-001"},
+        json={"driver_name": "Updated Driver"},
+    ),
+
+    # ---- Intake channel admin endpoints ----
+    "POST /api/integrations/intake-channels": RouteFixture(
+        method="POST",
+        json={
+            "channel_id": "smoke-channel-01",
+            "channel_type": "api_partner",
+            "display_name": "Smoke Test Channel",
+            "supported_schema_versions": ["1.0"],
+        },
+    ),
+    "GET /api/integrations/intake-channels": RouteFixture(),
+    "PATCH /api/integrations/intake-channels/{channel_id}": RouteFixture(
+        method="PATCH",
+        path_params={"channel_id": "smoke-channel-01"},
+        json={"display_name": "Updated Channel"},
+    ),
+    "DELETE /api/integrations/intake-channels/{channel_id}": RouteFixture(
+        method="DELETE",
+        path_params={"channel_id": "smoke-channel-01"},
+    ),
+    "POST /api/integrations/intake-channels/{channel_id}/rotate-secret": RouteFixture(
+        method="POST",
+        path_params={"channel_id": "smoke-channel-01"},
     ),
 
     # ---- Fuel endpoints ----
@@ -349,6 +461,10 @@ WS_FIXTURES: Dict[str, WSFixture] = {
     "/ws/notifications": WSFixture(
         expects_confirmation=True,
     ),
+    "/ws/orders": WSFixture(
+        params={"token": ""},
+        expects_confirmation=True,
+    ),
     "/ws/driver": WSFixture(
         params={"token": ""},
         expects_confirmation=False,
@@ -391,6 +507,9 @@ DEFAULT_PATH_PARAMS: Dict[str, str] = {
     "memory_id": "MEM-001",
     "tenant_id": "smoke-tenant",
     "item_id": "ITEM-001",
+    "order_id": "ord_00000000000000000000000000000001",
+    "driver_id": "DRV-001",
+    "channel_id": "smoke-channel-01",
 }
 
 

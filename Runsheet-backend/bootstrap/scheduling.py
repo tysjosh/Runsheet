@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 # Module-level reference so shutdown can cancel the task.
 _delay_check_task = None
+_driver_daily_reset_task = None
 
 
 async def initialize(app, container: ServiceContainer) -> None:
@@ -162,10 +163,68 @@ async def initialize(app, container: ServiceContainer) -> None:
     _delay_check_task = asyncio.create_task(_periodic_delay_check())
     logger.info("Periodic delay check started (interval: %ds)", interval)
 
+    # ---------------------------------------------------------------
+    # Driver daily reset cron — Requirement 3.2.4
+    # Fires at 00:00 in each tenant's configured timezone (default
+    # America/Chicago). Failures log logger.exception and increment
+    # fuelops_driver_daily_reset_errors_total{tenant_id}.
+    # ---------------------------------------------------------------
+    global _driver_daily_reset_task
+
+    try:
+        from fuel.services.driver_daily_reset import (
+            DriverDailyResetJob,
+            run_daily_reset_cycle,
+            RESET_CHECK_INTERVAL_SECONDS,
+        )
+
+        driver_repository = (
+            container.driver_repository
+            if container.has("driver_repository")
+            else None
+        )
+        tenant_settings_service = (
+            container.tenant_settings_service
+            if container.has("tenant_settings_service")
+            else None
+        )
+
+        if driver_repository is not None:
+            daily_reset_job = DriverDailyResetJob(
+                es_service=es_service,
+                driver_repository=driver_repository,
+                tenant_settings_service=tenant_settings_service,
+            )
+            container.driver_daily_reset_job = daily_reset_job
+
+            async def _periodic_driver_daily_reset() -> None:
+                """Background task that checks for midnight and resets counters."""
+                try:
+                    while True:
+                        await asyncio.sleep(RESET_CHECK_INTERVAL_SECONDS)
+                        await run_daily_reset_cycle(daily_reset_job)
+                except asyncio.CancelledError:
+                    logger.info("Driver daily reset task cancelled")
+
+            _driver_daily_reset_task = asyncio.create_task(
+                _periodic_driver_daily_reset()
+            )
+            logger.info(
+                "Driver daily reset cron started (check interval: %ds)",
+                RESET_CHECK_INTERVAL_SECONDS,
+            )
+        else:
+            logger.warning(
+                "Driver daily reset cron not started — "
+                "driver_repository unavailable"
+            )
+    except Exception as e:
+        logger.warning("Failed to start driver daily reset cron: %s", e)
+
 
 async def shutdown(app, container: ServiceContainer) -> None:
     """Cancel periodic task and shut down scheduling WS manager."""
-    global _delay_check_task
+    global _delay_check_task, _driver_daily_reset_task
 
     if _delay_check_task is not None and not _delay_check_task.done():
         _delay_check_task.cancel()
@@ -174,6 +233,14 @@ async def shutdown(app, container: ServiceContainer) -> None:
         except asyncio.CancelledError:
             pass
         logger.info("Periodic delay check task stopped")
+
+    if _driver_daily_reset_task is not None and not _driver_daily_reset_task.done():
+        _driver_daily_reset_task.cancel()
+        try:
+            await _driver_daily_reset_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("Driver daily reset task stopped")
 
     if container.has("scheduling_ws_manager"):
         try:

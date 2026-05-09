@@ -3,23 +3,20 @@ Unit tests for the DeliveryPrioritizationAgent overlay agent.
 
 Tests cover:
 - Constructor and agent_id configuration
-- Signal subscription setup (TankForecast messages)
-- evaluate() with empty forecasts
-- evaluate() computes weighted priority scores (Req 2.2)
-- evaluate() assigns priority buckets (Req 2.3)
-- evaluate() handles missing SLA tier (Req 2.7)
-- evaluate() persists to mvp_delivery_priorities (Req 2.4)
-- evaluate() publishes DeliveryPriorityList to SignalBus (Req 2.5)
-- _load_scoring_weights() from Redis (Req 2.6)
-- _assign_bucket() threshold logic (Req 2.3)
-- _compute_priority() weighted scoring (Req 2.2)
+- evaluate() discovers tenants with pending orders from fuel_orders_current
+- evaluate() scores keep_full/auto_fill orders via forecast
+- evaluate() scores will_call/one_off orders via delivery_window_end
+- evaluate() emits scoring_input_missing when inputs are absent
+- evaluate() applies storm mode boost for critical tanks
+- _assign_bucket() threshold logic
+- Tenant isolation via tenant_id filter in ES queries
 
-Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7
+Requirements: 5.1.1, 5.1.2, 5.1.3, 5.1.5
 """
-import json
+
 import pytest
-from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock
+from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from Agents.overlay.data_contracts import RiskSignal, Severity
 from Agents.overlay.delivery_prioritization_agent import (
@@ -28,17 +25,18 @@ from Agents.overlay.delivery_prioritization_agent import (
     DEFAULT_SLA_SCORE,
     DEFAULT_SLA_TIER,
     HIGH_THRESHOLD,
+    LOW_SCORE,
     MEDIUM_THRESHOLD,
     SCORING_WEIGHTS_REDIS_KEY,
     SLA_TIER_SCORES,
     DeliveryPrioritizationAgent,
+    _bucket_from_score,
 )
 from Agents.support.fuel_distribution_models import (
     DeliveryPriority,
     DeliveryPriorityList,
     FuelGrade,
     PriorityBucket,
-    TankForecast,
 )
 
 
@@ -47,30 +45,27 @@ from Agents.support.fuel_distribution_models import (
 # ---------------------------------------------------------------------------
 
 
-def _make_forecast(
-    station_id="station-1",
-    fuel_grade=FuelGrade.AGO,
-    runout_risk_24h=0.8,
-    confidence=0.7,
+def _make_order(
+    order_id="ord_001",
     tenant_id="tenant-1",
-    run_id="run-1",
-    hours_to_runout_p50=12.0,
-    hours_to_runout_p90=8.0,
-    customer_id=None,
+    call_type="will_call",
     customer_tank_id=None,
+    delivery_window_end=None,
+    product_code="DIESEL_2",
+    status="placed",
 ):
-    return TankForecast(
-        station_id=station_id,
-        fuel_grade=fuel_grade,
-        hours_to_runout_p50=hours_to_runout_p50,
-        hours_to_runout_p90=hours_to_runout_p90,
-        runout_risk_24h=runout_risk_24h,
-        confidence=confidence,
-        tenant_id=tenant_id,
-        run_id=run_id,
-        customer_id=customer_id,
-        customer_tank_id=customer_tank_id,
-    )
+    """Create a minimal fuel order dict."""
+    order = {
+        "order_id": order_id,
+        "tenant_id": tenant_id,
+        "call_type": call_type,
+        "customer_tank_id": customer_tank_id,
+        "product_code": product_code,
+        "status": status,
+    }
+    if delivery_window_end is not None:
+        order["delivery_window_end"] = delivery_window_end
+    return order
 
 
 def _make_deps():
@@ -84,7 +79,6 @@ def _make_deps():
     es_service.search_documents = AsyncMock(
         return_value={"hits": {"hits": []}}
     )
-    es_service.index_document = AsyncMock()
 
     activity_log = MagicMock()
     activity_log.log_monitoring_cycle = AsyncMock(return_value="log-id")
@@ -100,9 +94,6 @@ def _make_deps():
     feature_flags = MagicMock()
     feature_flags.is_enabled = AsyncMock(return_value=True)
 
-    redis_client = MagicMock()
-    redis_client.get = AsyncMock(return_value=None)
-
     return {
         "signal_bus": signal_bus,
         "es_service": es_service,
@@ -111,7 +102,6 @@ def _make_deps():
         "confirmation_protocol": confirmation_protocol,
         "autonomy_config_service": autonomy_config,
         "feature_flag_service": feature_flags,
-        "redis_client": redis_client,
     }
 
 
@@ -121,28 +111,59 @@ def _make_agent(**overrides):
     return DeliveryPrioritizationAgent(**deps), deps
 
 
+def _es_response_with_orders(orders):
+    """Build an ES search response containing the given order dicts."""
+    return {
+        "hits": {
+            "hits": [{"_source": o} for o in orders],
+        }
+    }
+
+
+def _es_response_with_tenants(tenant_ids):
+    """Build an ES aggregation response with tenant buckets."""
+    return {
+        "aggregations": {
+            "tenants": {
+                "buckets": [{"key": tid} for tid in tenant_ids]
+            }
+        }
+    }
+
+
+def _es_response_with_forecasts(forecasts_by_tank):
+    """Build an ES response with forecast hits keyed by station_id."""
+    hits = []
+    for tank_id, forecast in forecasts_by_tank.items():
+        hits.append({"_source": {"station_id": tank_id, **forecast}})
+    return {"hits": {"hits": hits}}
+
+
+def _es_response_with_tanks(tanks_by_id):
+    """Build an ES response with customer tank hits."""
+    hits = []
+    for tank_id, tank in tanks_by_id.items():
+        hits.append({"_source": {"tank_id": tank_id, **tank}})
+    return {"hits": {"hits": hits}}
+
+
 # ---------------------------------------------------------------------------
-# Tests: Module constants
+# Tests: Module constants (backward compat)
 # ---------------------------------------------------------------------------
 
 
 class TestModuleConstants:
-    def test_default_scoring_weights(self):
-        assert DEFAULT_SCORING_WEIGHTS == {
-            "runout_risk_24h": 0.4,
-            "sla_tier": 0.25,
-            "travel_time": 0.2,
-            "business_impact": 0.15,
-        }
+    def test_default_scoring_weights_exported(self):
+        """Legacy constant is still exported for backward compat."""
+        assert "runout_risk_24h" in DEFAULT_SCORING_WEIGHTS
 
-    def test_weights_sum_to_one(self):
-        total = sum(DEFAULT_SCORING_WEIGHTS.values())
-        assert abs(total - 1.0) < 0.001
+    def test_sla_tier_scores_exported(self):
+        assert SLA_TIER_SCORES["platinum"] == 1.0
 
     def test_bucket_thresholds(self):
-        assert CRITICAL_THRESHOLD == 0.8
-        assert HIGH_THRESHOLD == 0.6
-        assert MEDIUM_THRESHOLD == 0.3
+        assert CRITICAL_THRESHOLD == 0.85
+        assert HIGH_THRESHOLD == 0.65
+        assert MEDIUM_THRESHOLD == 0.40
 
 
 # ---------------------------------------------------------------------------
@@ -155,12 +176,6 @@ class TestConstructor:
         agent, _ = _make_agent()
         assert agent.agent_id == "delivery_prioritization"
 
-    def test_subscription_to_tank_forecast(self):
-        agent, _ = _make_agent()
-        assert len(agent._subscription_specs) == 1
-        spec = agent._subscription_specs[0]
-        assert spec["message_type"] is TankForecast
-
     def test_default_poll_interval(self):
         agent, _ = _make_agent()
         assert agent.poll_interval == 60
@@ -169,963 +184,618 @@ class TestConstructor:
         agent, _ = _make_agent(poll_interval=120)
         assert agent.poll_interval == 120
 
-    def test_forecast_buffer_initially_empty(self):
-        agent, _ = _make_agent()
-        assert agent._forecast_buffer == []
+    def test_accepts_legacy_kwargs(self):
+        """Constructor accepts legacy kwargs without error."""
+        agent, _ = _make_agent(
+            redis_client=MagicMock(),
+            combinable_group_repository=MagicMock(),
+            customer_profile_loader=None,
+            customer_tank_loader=None,
+            generator_priority_boost=0.3,
+        )
+        assert agent.agent_id == "delivery_prioritization"
 
 
 # ---------------------------------------------------------------------------
-# Tests: _on_signal() — TankForecast buffering
-# ---------------------------------------------------------------------------
-
-
-class TestOnSignal:
-    @pytest.mark.asyncio
-    async def test_buffers_tank_forecast(self):
-        agent, _ = _make_agent()
-        forecast = _make_forecast()
-        await agent._on_signal(forecast)
-        assert len(agent._forecast_buffer) == 1
-        assert agent._forecast_buffer[0] is forecast
-
-    @pytest.mark.asyncio
-    async def test_non_forecast_goes_to_parent(self):
-        """Non-TankForecast signals go to the parent signal buffer."""
-        agent, _ = _make_agent()
-        signal = RiskSignal(
-            source_agent="test",
-            entity_id="e1",
-            entity_type="test",
-            severity=Severity.LOW,
-            confidence=0.5,
-            ttl_seconds=300,
-            tenant_id="tenant-1",
-        )
-        await agent._on_signal(signal)
-        assert len(agent._forecast_buffer) == 0
-
-
-# ---------------------------------------------------------------------------
-# Tests: evaluate()
-# ---------------------------------------------------------------------------
-
-
-class TestEvaluate:
-    @pytest.mark.asyncio
-    async def test_empty_forecasts_returns_empty(self):
-        agent, _ = _make_agent()
-        # No forecasts buffered, signals list is irrelevant
-        result = await agent.evaluate([])
-        assert result == []
-
-    @pytest.mark.asyncio
-    async def test_produces_priority_list(self):
-        """Req 2.1: Produces ranked priority list from forecasts."""
-        agent, deps = _make_agent()
-
-        # Buffer a forecast
-        forecast = _make_forecast(station_id="station-1", runout_risk_24h=0.9)
-        agent._forecast_buffer.append(forecast)
-
-        # Station metadata query returns SLA info
-        deps["es_service"].search_documents = AsyncMock(
-            return_value={
-                "hits": {
-                    "hits": [
-                        {
-                            "_source": {
-                                "station_id": "station-1",
-                                "sla_tier": "gold",
-                                "travel_time_minutes": 30.0,
-                                "business_impact_score": 0.7,
-                            }
-                        }
-                    ]
-                }
-            }
-        )
-
-        result = await agent.evaluate([])
-        assert result == []  # Priorities published directly
-
-        # Verify SignalBus publish was called
-        assert deps["signal_bus"].publish.call_count == 1
-        published = deps["signal_bus"].publish.call_args[0][0]
-        assert isinstance(published, DeliveryPriorityList)
-        assert len(published.priorities) == 1
-        assert published.priorities[0].station_id == "station-1"
-
-    @pytest.mark.asyncio
-    async def test_persists_to_es(self):
-        """Req 2.4: Priority list persisted to mvp_delivery_priorities."""
-        agent, deps = _make_agent()
-        agent._forecast_buffer.append(_make_forecast())
-
-        deps["es_service"].search_documents = AsyncMock(
-            return_value={"hits": {"hits": []}}
-        )
-
-        await agent.evaluate([])
-
-        assert deps["es_service"].index_document.call_count == 1
-        call_args = deps["es_service"].index_document.call_args
-        assert call_args[0][0] == "mvp_delivery_priorities"
-
-    @pytest.mark.asyncio
-    async def test_priorities_sorted_descending(self):
-        """Priorities should be sorted by score descending (most urgent first)."""
-        agent, deps = _make_agent()
-
-        agent._forecast_buffer.extend([
-            _make_forecast(station_id="low-risk", runout_risk_24h=0.1),
-            _make_forecast(station_id="high-risk", runout_risk_24h=0.95),
-            _make_forecast(station_id="mid-risk", runout_risk_24h=0.5),
-        ])
-
-        deps["es_service"].search_documents = AsyncMock(
-            return_value={"hits": {"hits": []}}
-        )
-
-        await agent.evaluate([])
-
-        published = deps["signal_bus"].publish.call_args[0][0]
-        scores = [p.priority_score for p in published.priorities]
-        assert scores == sorted(scores, reverse=True)
-
-    @pytest.mark.asyncio
-    async def test_scoring_weights_included_in_output(self):
-        """Req 2.6: Scoring weights are included in the priority list."""
-        agent, deps = _make_agent()
-        agent._forecast_buffer.append(_make_forecast())
-
-        deps["es_service"].search_documents = AsyncMock(
-            return_value={"hits": {"hits": []}}
-        )
-
-        await agent.evaluate([])
-
-        published = deps["signal_bus"].publish.call_args[0][0]
-        assert published.scoring_weights == DEFAULT_SCORING_WEIGHTS
-
-
-# ---------------------------------------------------------------------------
-# Tests: _assign_bucket() (Req 2.3)
+# Tests: _assign_bucket() threshold logic
 # ---------------------------------------------------------------------------
 
 
 class TestAssignBucket:
     def test_critical_at_threshold(self):
-        assert DeliveryPrioritizationAgent._assign_bucket(0.8) == PriorityBucket.CRITICAL
+        assert DeliveryPrioritizationAgent._assign_bucket(0.85) == PriorityBucket.CRITICAL
 
     def test_critical_above_threshold(self):
         assert DeliveryPrioritizationAgent._assign_bucket(0.95) == PriorityBucket.CRITICAL
 
     def test_high_at_threshold(self):
-        assert DeliveryPrioritizationAgent._assign_bucket(0.6) == PriorityBucket.HIGH
+        assert DeliveryPrioritizationAgent._assign_bucket(0.65) == PriorityBucket.HIGH
 
     def test_high_below_critical(self):
-        assert DeliveryPrioritizationAgent._assign_bucket(0.79) == PriorityBucket.HIGH
+        assert DeliveryPrioritizationAgent._assign_bucket(0.84) == PriorityBucket.HIGH
 
     def test_medium_at_threshold(self):
-        assert DeliveryPrioritizationAgent._assign_bucket(0.3) == PriorityBucket.MEDIUM
+        assert DeliveryPrioritizationAgent._assign_bucket(0.40) == PriorityBucket.MEDIUM
 
     def test_medium_below_high(self):
-        assert DeliveryPrioritizationAgent._assign_bucket(0.59) == PriorityBucket.MEDIUM
+        assert DeliveryPrioritizationAgent._assign_bucket(0.64) == PriorityBucket.MEDIUM
 
     def test_low_below_medium(self):
-        assert DeliveryPrioritizationAgent._assign_bucket(0.29) == PriorityBucket.LOW
+        assert DeliveryPrioritizationAgent._assign_bucket(0.39) == PriorityBucket.LOW
 
     def test_low_at_zero(self):
         assert DeliveryPrioritizationAgent._assign_bucket(0.0) == PriorityBucket.LOW
 
 
 # ---------------------------------------------------------------------------
-# Tests: _compute_priority() (Req 2.2, 2.7)
+# Tests: evaluate() — reads from fuel_orders_current
 # ---------------------------------------------------------------------------
 
 
-class TestComputePriority:
-    def test_high_runout_risk_produces_high_score(self):
-        agent, _ = _make_agent()
-        forecast = _make_forecast(runout_risk_24h=0.95)
-        station_meta = {
-            "sla_tier": "platinum",
-            "travel_time_minutes": 10.0,
-            "business_impact_score": 0.9,
-        }
-        priority = agent._compute_priority(
-            forecast, station_meta, DEFAULT_SCORING_WEIGHTS
-        )
-        assert priority.priority_score >= 0.8
-        assert priority.priority_bucket == PriorityBucket.CRITICAL
-
-    def test_low_runout_risk_produces_low_score(self):
-        agent, _ = _make_agent()
-        forecast = _make_forecast(runout_risk_24h=0.05)
-        station_meta = {
-            "sla_tier": "basic",
-            "travel_time_minutes": 100.0,
-            "business_impact_score": 0.1,
-        }
-        priority = agent._compute_priority(
-            forecast, station_meta, DEFAULT_SCORING_WEIGHTS
-        )
-        assert priority.priority_score < 0.3
-        assert priority.priority_bucket == PriorityBucket.LOW
-
-    def test_missing_sla_tier_defaults_to_lowest(self):
-        """Req 2.7: Missing SLA tier defaults to lowest with reason."""
-        agent, _ = _make_agent()
-        forecast = _make_forecast(runout_risk_24h=0.5)
-        station_meta = {}  # No SLA tier
-        priority = agent._compute_priority(
-            forecast, station_meta, DEFAULT_SCORING_WEIGHTS
-        )
-        assert "no_sla_tier_configured" in priority.reasons
-
-    def test_unknown_sla_tier_defaults_to_lowest(self):
-        """Req 2.7: Unknown SLA tier also defaults to lowest."""
-        agent, _ = _make_agent()
-        forecast = _make_forecast(runout_risk_24h=0.5)
-        station_meta = {"sla_tier": "unknown_tier"}
-        priority = agent._compute_priority(
-            forecast, station_meta, DEFAULT_SCORING_WEIGHTS
-        )
-        assert "no_sla_tier_configured" in priority.reasons
-
-    def test_score_bounded_0_to_1(self):
-        agent, _ = _make_agent()
-        for risk in [0.0, 0.25, 0.5, 0.75, 1.0]:
-            forecast = _make_forecast(runout_risk_24h=risk)
-            priority = agent._compute_priority(
-                forecast, {}, DEFAULT_SCORING_WEIGHTS
-            )
-            assert 0.0 <= priority.priority_score <= 1.0
-
-    def test_premium_sla_adds_reason(self):
-        agent, _ = _make_agent()
-        forecast = _make_forecast(runout_risk_24h=0.5)
-        station_meta = {"sla_tier": "platinum"}
-        priority = agent._compute_priority(
-            forecast, station_meta, DEFAULT_SCORING_WEIGHTS
-        )
-        assert any("premium_sla_tier" in r for r in priority.reasons)
-
-    def test_high_business_impact_adds_reason(self):
-        agent, _ = _make_agent()
-        forecast = _make_forecast(runout_risk_24h=0.5)
-        station_meta = {"business_impact_score": 0.9}
-        priority = agent._compute_priority(
-            forecast, station_meta, DEFAULT_SCORING_WEIGHTS
-        )
-        assert any("high_business_impact" in r for r in priority.reasons)
-
-
-# ---------------------------------------------------------------------------
-# Tests: _load_scoring_weights() (Req 2.6)
-# ---------------------------------------------------------------------------
-
-
-class TestLoadScoringWeights:
+class TestEvaluate:
     @pytest.mark.asyncio
-    async def test_no_redis_returns_defaults(self):
-        agent, _ = _make_agent(redis_client=None)
-        weights = await agent._load_scoring_weights("tenant-1")
-        assert weights == DEFAULT_SCORING_WEIGHTS
-
-    @pytest.mark.asyncio
-    async def test_redis_returns_custom_weights(self):
+    async def test_no_pending_orders_returns_empty(self):
+        """No tenants with pending orders → empty result."""
         agent, deps = _make_agent()
-        custom_weights = {
-            "runout_risk_24h": 0.5,
-            "sla_tier": 0.2,
-            "travel_time": 0.15,
-            "business_impact": 0.15,
-        }
-        deps["redis_client"].get = AsyncMock(
-            return_value=json.dumps(custom_weights)
-        )
-        weights = await agent._load_scoring_weights("tenant-1")
-        assert weights == custom_weights
-
-    @pytest.mark.asyncio
-    async def test_redis_error_returns_defaults(self):
-        agent, deps = _make_agent()
-        deps["redis_client"].get = AsyncMock(side_effect=Exception("Redis down"))
-        weights = await agent._load_scoring_weights("tenant-1")
-        assert weights == DEFAULT_SCORING_WEIGHTS
-
-    @pytest.mark.asyncio
-    async def test_redis_invalid_json_returns_defaults(self):
-        agent, deps = _make_agent()
-        deps["redis_client"].get = AsyncMock(return_value="not-json")
-        weights = await agent._load_scoring_weights("tenant-1")
-        assert weights == DEFAULT_SCORING_WEIGHTS
-
-    @pytest.mark.asyncio
-    async def test_redis_incomplete_weights_returns_defaults(self):
-        """If Redis weights are missing required keys, fall back to defaults."""
-        agent, deps = _make_agent()
-        incomplete = {"runout_risk_24h": 0.5}  # Missing other keys
-        deps["redis_client"].get = AsyncMock(
-            return_value=json.dumps(incomplete)
-        )
-        weights = await agent._load_scoring_weights("tenant-1")
-        assert weights == DEFAULT_SCORING_WEIGHTS
-
-
-# ---------------------------------------------------------------------------
-# Tests: Phase 5 persistence fields (Req 3.1.3, 3.3.3, 3.3.4, 3.4.2)
-# ---------------------------------------------------------------------------
-
-
-class TestPersistNewFields:
-    """Verify the delivery priority entry carries the new Phase-5 fields.
-
-    Covers Task 5.5 persistence: ``safe_to_delay_days``,
-    ``safe_to_delay_bucket``, ``business_impact_score``,
-    ``business_impact_reasons``, ``cluster_id``, ``cluster_size``.
-    """
-
-    @pytest.mark.asyncio
-    async def test_priority_entry_carries_safe_to_delay(self):
-        """Req 3.1.3: safe_to_delay_days + safe_to_delay_bucket persisted."""
-        agent, deps = _make_agent()
-        # hours_to_runout_p90 = 48 → (48 - 6)/24 = 1.75 → floor = 1 → "short"
-        forecast = _make_forecast(station_id="s1")
-        forecast.hours_to_runout_p90 = 48.0
-        agent._forecast_buffer.append(forecast)
+        # Tenant discovery returns no buckets
         deps["es_service"].search_documents = AsyncMock(
-            return_value={"hits": {"hits": []}}
+            return_value={"aggregations": {"tenants": {"buckets": []}}}
         )
+        result = await agent.evaluate([])
+        assert result == []
 
+    @pytest.mark.asyncio
+    async def test_discovers_tenants_from_fuel_orders_current(self):
+        """Tenant discovery queries fuel_orders_current with pending statuses."""
+        agent, deps = _make_agent()
+        deps["es_service"].search_documents = AsyncMock(
+            return_value={"aggregations": {"tenants": {"buckets": []}}}
+        )
+        await agent.evaluate([])
+
+        call_args = deps["es_service"].search_documents.call_args
+        assert call_args[0][0] == "fuel_orders_current"
+        query = call_args[0][1]
+        filters = query["query"]["bool"]["filter"]
+        assert {"terms": {"status": ["placed", "confirmed", "scheduled"]}} in filters
+
+    @pytest.mark.asyncio
+    async def test_fetches_orders_with_tenant_filter(self):
+        """Order fetch includes tenant_id filter for isolation."""
+        agent, deps = _make_agent()
+
+        call_count = [0]
+
+        async def mock_search(index, query, *args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # Tenant discovery
+                return _es_response_with_tenants(["tenant-1"])
+            elif call_count[0] == 2:
+                # Order fetch — verify tenant filter
+                filters = query["query"]["bool"]["filter"]
+                assert {"term": {"tenant_id": "tenant-1"}} in filters
+                assert {"terms": {"status": ["placed", "confirmed", "scheduled"]}} in filters
+                return _es_response_with_orders([])
+            return {"hits": {"hits": []}}
+
+        deps["es_service"].search_documents = AsyncMock(side_effect=mock_search)
+        await agent.evaluate([])
+
+    @pytest.mark.asyncio
+    async def test_publishes_priority_list_to_signal_bus(self):
+        """Scored orders are published as a DeliveryPriorityList."""
+        agent, deps = _make_agent()
+
+        now = datetime.now(timezone.utc)
+        window_end = (now + timedelta(hours=2)).isoformat()
+        orders = [
+            _make_order(
+                order_id="ord_001",
+                call_type="will_call",
+                delivery_window_end=window_end,
+            )
+        ]
+
+        call_count = [0]
+
+        async def mock_search(index, query, *args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return _es_response_with_tenants(["tenant-1"])
+            elif call_count[0] == 2:
+                return _es_response_with_orders(orders)
+            return {"hits": {"hits": []}}
+
+        deps["es_service"].search_documents = AsyncMock(side_effect=mock_search)
+        await agent.evaluate([])
+
+        assert deps["signal_bus"].publish.call_count == 1
+        published = deps["signal_bus"].publish.call_args[0][0]
+        assert isinstance(published, DeliveryPriorityList)
+        assert len(published.priorities) == 1
+        assert published.tenant_id == "tenant-1"
+
+    @pytest.mark.asyncio
+    async def test_returns_intervention_proposal(self):
+        """evaluate() returns InterventionProposals for downstream agents."""
+        agent, deps = _make_agent()
+
+        now = datetime.now(timezone.utc)
+        window_end = (now + timedelta(hours=2)).isoformat()
+        orders = [
+            _make_order(call_type="one_off", delivery_window_end=window_end)
+        ]
+
+        call_count = [0]
+
+        async def mock_search(index, query, *args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return _es_response_with_tenants(["tenant-1"])
+            elif call_count[0] == 2:
+                return _es_response_with_orders(orders)
+            return {"hits": {"hits": []}}
+
+        deps["es_service"].search_documents = AsyncMock(side_effect=mock_search)
+        result = await agent.evaluate([])
+
+        assert len(result) == 1
+        assert result[0].source_agent == "delivery_prioritization"
+        assert result[0].tenant_id == "tenant-1"
+
+
+# ---------------------------------------------------------------------------
+# Tests: Scoring — keep_full / auto_fill via forecast
+# ---------------------------------------------------------------------------
+
+
+class TestForecastBasedScoring:
+    @pytest.mark.asyncio
+    async def test_keep_full_scores_via_forecast(self):
+        """keep_full orders score via linked customer_tank_id forecast."""
+        agent, deps = _make_agent()
+
+        orders = [
+            _make_order(
+                order_id="ord_kf",
+                call_type="keep_full",
+                customer_tank_id="tank-1",
+            )
+        ]
+
+        call_count = [0]
+
+        async def mock_search(index, query, *args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return _es_response_with_tenants(["tenant-1"])
+            elif call_count[0] == 2:
+                return _es_response_with_orders(orders)
+            elif index == "mvp_tank_forecasts":
+                return _es_response_with_forecasts(
+                    {"tank-1": {"hours_to_runout_p90": 6.0}}
+                )
+            return {"hits": {"hits": []}}
+
+        deps["es_service"].search_documents = AsyncMock(side_effect=mock_search)
         await agent.evaluate([])
 
         published = deps["signal_bus"].publish.call_args[0][0]
-        entry = published.priorities[0]
-        assert entry.safe_to_delay_days == 1
-        assert entry.safe_to_delay_bucket == "short"
+        priority = published.priorities[0]
+        # 6 hours → critical range (0.85-1.0)
+        assert priority.priority_score >= 0.85
+        assert priority.priority_bucket == PriorityBucket.CRITICAL
+        assert "scoring_input_missing" not in priority.reasons
 
     @pytest.mark.asyncio
-    async def test_priority_entry_carries_business_impact(self):
-        """Req 3.3.3/3.3.4: business_impact_score + reasons persisted."""
+    async def test_auto_fill_scores_via_forecast(self):
+        """auto_fill orders also score via forecast."""
         agent, deps = _make_agent()
-        forecast = _make_forecast(station_id="s1")
-        agent._forecast_buffer.append(forecast)
-        # Legacy station-level business_impact path (no customer profile).
-        deps["es_service"].search_documents = AsyncMock(
-            return_value={
-                "hits": {
-                    "hits": [
-                        {
-                            "_source": {
-                                "station_id": "s1",
-                                "sla_tier": "gold",
-                                "business_impact_score": 0.7,
-                            }
-                        }
-                    ]
-                }
-            }
-        )
 
+        orders = [
+            _make_order(
+                order_id="ord_af",
+                call_type="auto_fill",
+                customer_tank_id="tank-2",
+            )
+        ]
+
+        call_count = [0]
+
+        async def mock_search(index, query, *args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return _es_response_with_tenants(["tenant-1"])
+            elif call_count[0] == 2:
+                return _es_response_with_orders(orders)
+            elif index == "mvp_tank_forecasts":
+                return _es_response_with_forecasts(
+                    {"tank-2": {"hours_to_runout_p90": 36.0}}
+                )
+            return {"hits": {"hits": []}}
+
+        deps["es_service"].search_documents = AsyncMock(side_effect=mock_search)
         await agent.evaluate([])
 
-        entry = deps["signal_bus"].publish.call_args[0][0].priorities[0]
-        assert entry.business_impact_score == pytest.approx(0.7)
-        assert entry.business_impact_reasons == ["legacy_station_metadata"]
+        published = deps["signal_bus"].publish.call_args[0][0]
+        priority = published.priorities[0]
+        # 36 hours → medium range (0.40-0.65)
+        assert 0.40 <= priority.priority_score < 0.65
+        assert priority.priority_bucket == PriorityBucket.MEDIUM
 
     @pytest.mark.asyncio
-    async def test_cluster_fields_remain_none_without_coordinates(self):
-        """Req 3.4.2: without lat/lon the DBSCAN stamp stays None."""
+    async def test_missing_tank_id_scores_low_with_flag(self):
+        """keep_full without customer_tank_id → scoring_input_missing + LOW."""
         agent, deps = _make_agent()
-        agent._forecast_buffer.append(_make_forecast(station_id="s1"))
-        # No station metadata → no lat/lon resolvable.
-        deps["es_service"].search_documents = AsyncMock(
-            return_value={"hits": {"hits": []}}
-        )
 
+        orders = [
+            _make_order(
+                order_id="ord_no_tank",
+                call_type="keep_full",
+                customer_tank_id=None,
+            )
+        ]
+
+        call_count = [0]
+
+        async def mock_search(index, query, *args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return _es_response_with_tenants(["tenant-1"])
+            elif call_count[0] == 2:
+                return _es_response_with_orders(orders)
+            return {"hits": {"hits": []}}
+
+        deps["es_service"].search_documents = AsyncMock(side_effect=mock_search)
         await agent.evaluate([])
 
-        entry = deps["signal_bus"].publish.call_args[0][0].priorities[0]
-        assert entry.cluster_id is None
-        assert entry.cluster_size is None
+        published = deps["signal_bus"].publish.call_args[0][0]
+        priority = published.priorities[0]
+        assert priority.priority_score == LOW_SCORE
+        assert "scoring_input_missing" in priority.reasons
+        assert "no_customer_tank_id" in priority.reasons
 
     @pytest.mark.asyncio
-    async def test_cluster_fields_populated_from_dbscan(self):
-        """Req 3.4.1/3.4.2: cluster_id/cluster_size stamped from DBSCAN."""
+    async def test_missing_forecast_scores_low_with_flag(self):
+        """keep_full with tank_id but no forecast → scoring_input_missing."""
         agent, deps = _make_agent()
-        # Three stations: s1 & s2 within 3-mile DBSCAN eps, s3 isolated.
-        agent._forecast_buffer.append(_make_forecast(station_id="s1"))
-        agent._forecast_buffer.append(_make_forecast(station_id="s2"))
-        agent._forecast_buffer.append(_make_forecast(station_id="s3"))
-        deps["es_service"].search_documents = AsyncMock(
-            return_value={
-                "hits": {
-                    "hits": [
-                        {
-                            "_source": {
-                                "station_id": "s1",
-                                "latitude": 40.7128,
-                                "longitude": -74.0060,
-                            }
-                        },
-                        {
-                            "_source": {
-                                "station_id": "s2",
-                                "latitude": 40.7130,
-                                "longitude": -74.0062,
-                            }
-                        },
-                        {
-                            "_source": {
-                                "station_id": "s3",
-                                "latitude": 41.8781,
-                                "longitude": -87.6298,
-                            }
-                        },
-                    ]
-                }
-            }
-        )
 
+        orders = [
+            _make_order(
+                order_id="ord_no_fc",
+                call_type="keep_full",
+                customer_tank_id="tank-missing",
+            )
+        ]
+
+        call_count = [0]
+
+        async def mock_search(index, query, *args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return _es_response_with_tenants(["tenant-1"])
+            elif call_count[0] == 2:
+                return _es_response_with_orders(orders)
+            elif index == "mvp_tank_forecasts":
+                # No forecast for tank-missing
+                return {"hits": {"hits": []}}
+            return {"hits": {"hits": []}}
+
+        deps["es_service"].search_documents = AsyncMock(side_effect=mock_search)
         await agent.evaluate([])
 
-        entries = {
-            p.station_id: p
-            for p in deps["signal_bus"].publish.call_args[0][0].priorities
-        }
-        # s1/s2 should land in the same dense cluster.
-        assert entries["s1"].cluster_id == entries["s2"].cluster_id
-        assert entries["s1"].cluster_id is not None
-        assert entries["s1"].cluster_id != "noise"
-        assert entries["s1"].cluster_size == 2
-        assert entries["s2"].cluster_size == 2
-        # s3 is isolated → DBSCAN noise label, exposed as "noise".
-        assert entries["s3"].cluster_id == "noise"
-        assert entries["s3"].cluster_size == 1
-
-    @pytest.mark.asyncio
-    async def test_persisted_doc_includes_new_fields(self):
-        """The ES write payload mirrors the DeliveryPriority model fields."""
-        agent, deps = _make_agent()
-        forecast = _make_forecast(station_id="s1")
-        forecast.hours_to_runout_p90 = 120.0  # (120-6)/24 = 4.75 → floor = 4 → medium
-        agent._forecast_buffer.append(forecast)
-        deps["es_service"].search_documents = AsyncMock(
-            return_value={"hits": {"hits": []}}
-        )
-
-        await agent.evaluate([])
-
-        indexed_doc = deps["es_service"].index_document.call_args[0][2]
-        entry_doc = indexed_doc["priorities"][0]
-        assert entry_doc["safe_to_delay_days"] == 4
-        assert entry_doc["safe_to_delay_bucket"] == "medium"
-        assert "business_impact_score" in entry_doc
-        assert "business_impact_reasons" in entry_doc
-        assert entry_doc["cluster_id"] is None
-        assert entry_doc["cluster_size"] is None
+        published = deps["signal_bus"].publish.call_args[0][0]
+        priority = published.priorities[0]
+        assert priority.priority_score == LOW_SCORE
+        assert "scoring_input_missing" in priority.reasons
+        assert "no_forecast_available" in priority.reasons
 
 
 # ---------------------------------------------------------------------------
-# Tests: Business_impact replaces placeholder weight (Req 3.3.3)
+# Tests: Scoring — will_call / one_off via delivery_window_end
 # ---------------------------------------------------------------------------
 
 
-class TestBusinessImpactIntegration:
-    """Verify the real business-impact score replaces the placeholder
-    on the weighted ``priority_score`` with the 0.15 weight retained."""
-
+class TestWindowBasedScoring:
     @pytest.mark.asyncio
-    async def test_uses_customer_profile_when_available(self):
-        """When a customer profile is supplied, the helper-produced score
-        is used instead of the station-level placeholder (Req 3.3.3)."""
-        from fuel.storm_mode_models import CustomerProfile
-
-        profile = CustomerProfile(
-            customer_id="cust-1",
-            tenant_id="tenant-1",
-            annual_revenue_usd=100_000.0,
-            contract_penalty_usd_per_day=1_000.0,
-            missed_delivery_cost_usd=500.0,
-            sla_tier="platinum",
-        )
-
-        async def loader(tenant_id, customer_ids):
-            return {"cust-1": profile}
-
-        agent, deps = _make_agent(customer_profile_loader=loader)
-        forecast = _make_forecast(station_id="s1")
-        forecast.customer_id = "cust-1"
-        agent._forecast_buffer.append(forecast)
-        # Station metadata provides a *different* business_impact to make
-        # sure the profile-sourced score wins.
-        deps["es_service"].search_documents = AsyncMock(
-            return_value={
-                "hits": {
-                    "hits": [
-                        {
-                            "_source": {
-                                "station_id": "s1",
-                                "business_impact_score": 0.1,
-                            }
-                        }
-                    ]
-                }
-            }
-        )
-
-        await agent.evaluate([])
-
-        entry = deps["signal_bus"].publish.call_args[0][0].priorities[0]
-        # With maxima derived from the single profile, the monetary
-        # components each saturate (ratio=1.0 × weight=0.4/0.3/0.2) and
-        # the platinum SLA adds 0.1, giving a business_impact_score of
-        # 1.0 — far higher than the station-level 0.1.
-        assert entry.business_impact_score == pytest.approx(1.0)
-        assert "legacy_station_metadata" not in entry.business_impact_reasons
-
-    @pytest.mark.asyncio
-    async def test_business_impact_weight_retained(self):
-        """The 0.15 weight on ``business_impact`` remains intact."""
-        from Agents.overlay.delivery_prioritization_agent import (
-            DEFAULT_SCORING_WEIGHTS,
-        )
-
-        assert DEFAULT_SCORING_WEIGHTS["business_impact"] == 0.15
-
-
-# ---------------------------------------------------------------------------
-# Tests: Combinable_Group emission (Req 3.2.3)
-# ---------------------------------------------------------------------------
-
-
-class TestCombinableGroupEmission:
-    @pytest.mark.asyncio
-    async def test_emits_combinable_group_for_co_located_forecasts(self):
-        """Two close-by forecasts with compatible fuel grades produce a group."""
+    async def test_will_call_scores_via_window_end(self):
+        """will_call orders score via delivery_window_end proximity."""
         agent, deps = _make_agent()
-        f1 = _make_forecast(station_id="s1")
-        f2 = _make_forecast(station_id="s2")
-        agent._forecast_buffer.extend([f1, f2])
 
-        # Both stations within 2 miles of each other (0.005° ~ 350m).
-        deps["es_service"].search_documents = AsyncMock(
-            return_value={
-                "hits": {
-                    "hits": [
-                        {
-                            "_source": {
-                                "station_id": "s1",
-                                "latitude": 40.7128,
-                                "longitude": -74.0060,
-                            }
-                        },
-                        {
-                            "_source": {
-                                "station_id": "s2",
-                                "latitude": 40.7178,
-                                "longitude": -74.0110,
-                            }
-                        },
-                    ]
-                }
-            }
-        )
+        now = datetime.now(timezone.utc)
+        # Window ending in 2 hours → urgent
+        window_end = (now + timedelta(hours=2)).isoformat()
+        orders = [
+            _make_order(
+                order_id="ord_wc",
+                call_type="will_call",
+                delivery_window_end=window_end,
+            )
+        ]
 
-        # Intercept the repository persist to count emitted groups.
-        persist_mock = AsyncMock(return_value=[])
-        agent._combinable_group_repo = MagicMock()
-        agent._combinable_group_repo.persist_groups = persist_mock
+        call_count = [0]
 
+        async def mock_search(index, query, *args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return _es_response_with_tenants(["tenant-1"])
+            elif call_count[0] == 2:
+                return _es_response_with_orders(orders)
+            return {"hits": {"hits": []}}
+
+        deps["es_service"].search_documents = AsyncMock(side_effect=mock_search)
         await agent.evaluate([])
 
-        # One call with a single 2-member group.
-        assert persist_mock.await_count == 1
-        tenant_arg, groups_arg = persist_mock.call_args[0]
-        groups_list = list(groups_arg)
-        assert tenant_arg == "tenant-1"
-        assert len(groups_list) == 1
-        assert len(groups_list[0].members) == 2
+        published = deps["signal_bus"].publish.call_args[0][0]
+        priority = published.priorities[0]
+        # 2 hours until end → urgent range (0.85-1.0)
+        assert priority.priority_score >= 0.85
+        assert "scoring_input_missing" not in priority.reasons
 
     @pytest.mark.asyncio
-    async def test_no_groups_when_stations_far_apart(self):
-        """Forecasts whose stations are far apart yield no groups."""
+    async def test_one_off_overdue_scores_max(self):
+        """one_off with past-due window → score 1.0."""
         agent, deps = _make_agent()
-        agent._forecast_buffer.extend([
-            _make_forecast(station_id="s1"),
-            _make_forecast(station_id="s2"),
-        ])
 
-        deps["es_service"].search_documents = AsyncMock(
-            return_value={
-                "hits": {
-                    "hits": [
-                        {
-                            "_source": {
-                                "station_id": "s1",
-                                "latitude": 40.0,
-                                "longitude": -74.0,
-                            }
-                        },
-                        {
-                            "_source": {
-                                "station_id": "s2",
-                                "latitude": 41.0,  # ~70 miles apart
-                                "longitude": -74.0,
-                            }
-                        },
-                    ]
-                }
-            }
-        )
-        persist_mock = AsyncMock(return_value=[])
-        agent._combinable_group_repo = MagicMock()
-        agent._combinable_group_repo.persist_groups = persist_mock
+        now = datetime.now(timezone.utc)
+        window_end = (now - timedelta(hours=1)).isoformat()
+        orders = [
+            _make_order(
+                order_id="ord_overdue",
+                call_type="one_off",
+                delivery_window_end=window_end,
+            )
+        ]
 
+        call_count = [0]
+
+        async def mock_search(index, query, *args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return _es_response_with_tenants(["tenant-1"])
+            elif call_count[0] == 2:
+                return _es_response_with_orders(orders)
+            return {"hits": {"hits": []}}
+
+        deps["es_service"].search_documents = AsyncMock(side_effect=mock_search)
         await agent.evaluate([])
 
-        # The repository is never called — no ≥2-member components found.
-        assert persist_mock.await_count == 0
+        published = deps["signal_bus"].publish.call_args[0][0]
+        priority = published.priorities[0]
+        assert priority.priority_score == 1.0
+        assert "window_overdue" in priority.reasons
 
     @pytest.mark.asyncio
-    async def test_combinable_group_failure_does_not_block_priorities(self):
-        """A persist failure must never prevent priority-list publication."""
+    async def test_missing_window_end_scores_low_with_flag(self):
+        """will_call without delivery_window_end → scoring_input_missing."""
         agent, deps = _make_agent()
-        agent._forecast_buffer.append(_make_forecast(station_id="s1"))
-        deps["es_service"].search_documents = AsyncMock(
-            return_value={"hits": {"hits": []}}
-        )
 
-        broken_repo = MagicMock()
-        broken_repo.persist_groups = AsyncMock(
-            side_effect=RuntimeError("ES down")
-        )
-        agent._combinable_group_repo = broken_repo
+        orders = [
+            _make_order(
+                order_id="ord_no_window",
+                call_type="will_call",
+                # No delivery_window_end
+            )
+        ]
 
+        call_count = [0]
+
+        async def mock_search(index, query, *args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return _es_response_with_tenants(["tenant-1"])
+            elif call_count[0] == 2:
+                return _es_response_with_orders(orders)
+            return {"hits": {"hits": []}}
+
+        deps["es_service"].search_documents = AsyncMock(side_effect=mock_search)
         await agent.evaluate([])
 
-        # Priority signal still fan-ed out.
-        assert deps["signal_bus"].publish.call_count == 1
+        published = deps["signal_bus"].publish.call_args[0][0]
+        priority = published.priorities[0]
+        assert priority.priority_score == LOW_SCORE
+        assert "scoring_input_missing" in priority.reasons
+        assert "no_delivery_window_end" in priority.reasons
+
+    @pytest.mark.asyncio
+    async def test_far_future_window_scores_low(self):
+        """Window far in the future → low score."""
+        agent, deps = _make_agent()
+
+        now = datetime.now(timezone.utc)
+        window_end = (now + timedelta(hours=96)).isoformat()
+        orders = [
+            _make_order(
+                order_id="ord_far",
+                call_type="one_off",
+                delivery_window_end=window_end,
+            )
+        ]
+
+        call_count = [0]
+
+        async def mock_search(index, query, *args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return _es_response_with_tenants(["tenant-1"])
+            elif call_count[0] == 2:
+                return _es_response_with_orders(orders)
+            return {"hits": {"hits": []}}
+
+        deps["es_service"].search_documents = AsyncMock(side_effect=mock_search)
+        await agent.evaluate([])
+
+        published = deps["signal_bus"].publish.call_args[0][0]
+        priority = published.priorities[0]
+        assert priority.priority_score < MEDIUM_THRESHOLD
 
 
 # ---------------------------------------------------------------------------
-# Tests: Storm_Mode keep-full / generator boosts (Task 10.6, Req 9.2.3)
+# Tests: Storm mode boost
 # ---------------------------------------------------------------------------
-
-
-class _FakeStormModeEvaluator:
-    """Minimal StormModeEvaluator stub for unit tests.
-
-    Exposes the single coroutine :meth:`get_state` used by the
-    :class:`DeliveryPrioritizationAgent` to gate the Task 10.6 boosts.
-    Accepts either a plain ``state`` string or a pre-built
-    :class:`PersistedState` so tests can drive both the active and
-    inactive paths without pulling the full evaluator graph.
-    """
-
-    def __init__(self, state="active"):
-        self._state = state
-
-    async def get_state(self, tenant_id):
-        from fuel.services.storm_mode_evaluator import PersistedState
-
-        if isinstance(self._state, PersistedState):
-            return self._state
-        return PersistedState(
-            state=self._state,
-            updated_at=None,
-            triggering_alert_ids=[],
-            expected_end_at=None,
-        )
-
-
-def _make_customer_profile(
-    customer_id="cust-1",
-    tenant_id="tenant-1",
-    keep_full_enabled=False,
-    keep_full_priority_boost=0.25,
-    is_generator_fuel=False,
-):
-    """Build a fully-validated CustomerProfile for the storm-mode tests."""
-    from fuel.storm_mode_models import CustomerProfile, KeepFullCustomer
-
-    return CustomerProfile(
-        customer_id=customer_id,
-        tenant_id=tenant_id,
-        keep_full=KeepFullCustomer(
-            keep_full_enabled=keep_full_enabled,
-            keep_full_priority_boost=keep_full_priority_boost,
-        ),
-        is_generator_fuel=is_generator_fuel,
-    )
 
 
 class TestStormModeBoosts:
-    """Task 10.6 — keep-full + generator Storm_Mode priority boosts."""
+    @pytest.mark.asyncio
+    async def test_storm_boost_for_critical_tank(self):
+        """Storm mode boosts orders with critical criticality_tier."""
+        storm_eval = MagicMock()
+        storm_state = MagicMock()
+        storm_state.state = "active"
+        storm_eval.get_state = AsyncMock(return_value=storm_state)
+
+        agent, deps = _make_agent(storm_mode_evaluator=storm_eval)
+
+        now = datetime.now(timezone.utc)
+        window_end = (now + timedelta(hours=18)).isoformat()
+        orders = [
+            _make_order(
+                order_id="ord_storm",
+                call_type="will_call",
+                customer_tank_id="tank-crit",
+                delivery_window_end=window_end,
+            )
+        ]
+
+        call_count = [0]
+
+        async def mock_search(index, query, *args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return _es_response_with_tenants(["tenant-1"])
+            elif call_count[0] == 2:
+                return _es_response_with_orders(orders)
+            elif index == "customer_tanks":
+                return _es_response_with_tanks(
+                    {"tank-crit": {"criticality_tier": "critical"}}
+                )
+            return {"hits": {"hits": []}}
+
+        deps["es_service"].search_documents = AsyncMock(side_effect=mock_search)
+        await agent.evaluate([])
+
+        published = deps["signal_bus"].publish.call_args[0][0]
+        priority = published.priorities[0]
+        assert any("storm_boost" in r for r in priority.reasons)
 
     @pytest.mark.asyncio
-    async def test_no_storm_mode_means_no_boost(self):
-        """Without a wired evaluator, boosts must never be applied."""
+    async def test_no_boost_when_storm_inactive(self):
+        """No boost when storm mode is inactive."""
+        storm_eval = MagicMock()
+        storm_state = MagicMock()
+        storm_state.state = "inactive"
+        storm_eval.get_state = AsyncMock(return_value=storm_state)
+
+        agent, deps = _make_agent(storm_mode_evaluator=storm_eval)
+
+        now = datetime.now(timezone.utc)
+        window_end = (now + timedelta(hours=18)).isoformat()
+        orders = [
+            _make_order(
+                order_id="ord_no_storm",
+                call_type="will_call",
+                customer_tank_id="tank-crit",
+                delivery_window_end=window_end,
+            )
+        ]
+
+        call_count = [0]
+
+        async def mock_search(index, query, *args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return _es_response_with_tenants(["tenant-1"])
+            elif call_count[0] == 2:
+                return _es_response_with_orders(orders)
+            elif index == "customer_tanks":
+                return _es_response_with_tanks(
+                    {"tank-crit": {"criticality_tier": "critical"}}
+                )
+            return {"hits": {"hits": []}}
+
+        deps["es_service"].search_documents = AsyncMock(side_effect=mock_search)
+        await agent.evaluate([])
+
+        published = deps["signal_bus"].publish.call_args[0][0]
+        priority = published.priorities[0]
+        assert not any("storm_boost" in r for r in priority.reasons)
+
+
+# ---------------------------------------------------------------------------
+# Tests: Priority ordering
+# ---------------------------------------------------------------------------
+
+
+class TestPriorityOrdering:
+    @pytest.mark.asyncio
+    async def test_priorities_sorted_descending(self):
+        """Priorities are sorted by score descending (most urgent first)."""
         agent, deps = _make_agent()
-        forecast = _make_forecast(
-            station_id="s1",
-            runout_risk_24h=0.5,
-            customer_id="cust-1",
-        )
-        agent._forecast_buffer.append(forecast)
-        # Inject a profile that would normally qualify for both boosts.
-        agent._customer_profile_loader = lambda tid, cids: {
-            "cust-1": _make_customer_profile(
-                keep_full_enabled=True, is_generator_fuel=True
-            )
-        }
 
+        now = datetime.now(timezone.utc)
+        orders = [
+            _make_order(
+                order_id="ord_low",
+                call_type="one_off",
+                delivery_window_end=(now + timedelta(hours=48)).isoformat(),
+            ),
+            _make_order(
+                order_id="ord_high",
+                call_type="one_off",
+                delivery_window_end=(now + timedelta(hours=1)).isoformat(),
+            ),
+            _make_order(
+                order_id="ord_mid",
+                call_type="one_off",
+                delivery_window_end=(now + timedelta(hours=10)).isoformat(),
+            ),
+        ]
+
+        call_count = [0]
+
+        async def mock_search(index, query, *args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return _es_response_with_tenants(["tenant-1"])
+            elif call_count[0] == 2:
+                return _es_response_with_orders(orders)
+            return {"hits": {"hits": []}}
+
+        deps["es_service"].search_documents = AsyncMock(side_effect=mock_search)
         await agent.evaluate([])
 
         published = deps["signal_bus"].publish.call_args[0][0]
-        entry = published.priorities[0]
-        assert "keep_full_storm_mode" not in entry.reasons
-        assert "generator_storm_mode" not in entry.reasons
+        scores = [p.priority_score for p in published.priorities]
+        assert scores == sorted(scores, reverse=True)
 
-    @pytest.mark.asyncio
-    async def test_storm_mode_inactive_is_noop(self):
-        """An inactive evaluator must leave the priority scores alone."""
-        agent, deps = _make_agent(
-            storm_mode_evaluator=_FakeStormModeEvaluator(state="inactive"),
-        )
-        forecast = _make_forecast(
-            station_id="s1", runout_risk_24h=0.5, customer_id="cust-1"
-        )
-        agent._forecast_buffer.append(forecast)
-        agent._customer_profile_loader = lambda tid, cids: {
-            "cust-1": _make_customer_profile(keep_full_enabled=True)
-        }
 
-        await agent.evaluate([])
+# ---------------------------------------------------------------------------
+# Tests: Product code to FuelGrade mapping
+# ---------------------------------------------------------------------------
 
-        published = deps["signal_bus"].publish.call_args[0][0]
-        entry = published.priorities[0]
-        assert "keep_full_storm_mode" not in entry.reasons
-        assert "generator_storm_mode" not in entry.reasons
 
-    @pytest.mark.asyncio
-    async def test_keep_full_boost_applied_and_tagged(self):
-        """Keep-full customers get their per-profile boost + reason tag."""
-        agent, deps = _make_agent(
-            storm_mode_evaluator=_FakeStormModeEvaluator(state="active"),
-        )
-        # Start from a score that will clearly change bucket after +0.25.
-        forecast = _make_forecast(
-            station_id="s1",
-            runout_risk_24h=0.5,
-            customer_id="cust-1",
-        )
-        agent._forecast_buffer.append(forecast)
-        agent._customer_profile_loader = lambda tid, cids: {
-            "cust-1": _make_customer_profile(
-                keep_full_enabled=True, keep_full_priority_boost=0.25
-            )
-        }
+class TestFuelGradeMapping:
+    def test_diesel_2_maps_to_ago(self):
+        agent, _ = _make_agent()
+        assert agent._resolve_fuel_grade("DIESEL_2") == FuelGrade.AGO
 
-        # Pre-compute unboosted score via a clean agent run.
-        await agent.evaluate([])
-        published = deps["signal_bus"].publish.call_args[0][0]
-        entry = published.priorities[0]
+    def test_gasoline_reg_maps_to_pms(self):
+        agent, _ = _make_agent()
+        assert agent._resolve_fuel_grade("GASOLINE_REG") == FuelGrade.PMS
 
-        assert "keep_full_storm_mode" in entry.reasons
-        assert "generator_storm_mode" not in entry.reasons
-        # Score should be clamped to [0, 1] after boost applied.
-        assert 0.0 <= entry.priority_score <= 1.0
-        # Bucket must reflect the boosted score.
-        assert entry.priority_bucket == DeliveryPrioritizationAgent._assign_bucket(
-            entry.priority_score
-        )
+    def test_kerosene_maps_to_atk(self):
+        agent, _ = _make_agent()
+        assert agent._resolve_fuel_grade("KEROSENE") == FuelGrade.ATK
 
-    @pytest.mark.asyncio
-    async def test_generator_boost_via_customer_tank(self):
-        """Generator use_case on the Customer_Tank triggers the boost."""
-        agent, deps = _make_agent(
-            storm_mode_evaluator=_FakeStormModeEvaluator(state="active"),
-        )
-        forecast = _make_forecast(
-            station_id="s1",
-            runout_risk_24h=0.3,
-            customer_id="cust-1",
-            customer_tank_id="tank-1",
-        )
-        agent._forecast_buffer.append(forecast)
-        agent._customer_profile_loader = lambda tid, cids: {
-            "cust-1": _make_customer_profile()
-        }
-        agent._customer_tank_loader = lambda tid, tids: {
-            "tank-1": {
-                "customer_tank_id": "tank-1",
-                "tenant_id": tid,
-                "use_case": "generator",
-            }
-        }
+    def test_propane_maps_to_lpg(self):
+        agent, _ = _make_agent()
+        assert agent._resolve_fuel_grade("PROPANE") == FuelGrade.LPG
 
-        await agent.evaluate([])
+    def test_none_defaults_to_ago(self):
+        agent, _ = _make_agent()
+        assert agent._resolve_fuel_grade(None) == FuelGrade.AGO
 
-        published = deps["signal_bus"].publish.call_args[0][0]
-        entry = published.priorities[0]
-        assert "generator_storm_mode" in entry.reasons
-        assert "keep_full_storm_mode" not in entry.reasons
-
-    @pytest.mark.asyncio
-    async def test_generator_boost_via_profile_flag(self):
-        """is_generator_fuel on the profile also triggers the boost."""
-        agent, deps = _make_agent(
-            storm_mode_evaluator=_FakeStormModeEvaluator(state="active"),
-        )
-        forecast = _make_forecast(
-            station_id="s1",
-            runout_risk_24h=0.3,
-            customer_id="cust-1",
-        )
-        agent._forecast_buffer.append(forecast)
-        agent._customer_profile_loader = lambda tid, cids: {
-            "cust-1": _make_customer_profile(is_generator_fuel=True)
-        }
-
-        await agent.evaluate([])
-
-        published = deps["signal_bus"].publish.call_args[0][0]
-        entry = published.priorities[0]
-        assert "generator_storm_mode" in entry.reasons
-
-    @pytest.mark.asyncio
-    async def test_both_boosts_stack_and_rebucket(self):
-        """Both boosts applied together push the entry into a higher bucket."""
-        agent, deps = _make_agent(
-            storm_mode_evaluator=_FakeStormModeEvaluator(state="active"),
-        )
-        forecast = _make_forecast(
-            station_id="s1",
-            runout_risk_24h=0.6,
-            customer_id="cust-1",
-            customer_tank_id="tank-1",
-        )
-        agent._forecast_buffer.append(forecast)
-        agent._customer_profile_loader = lambda tid, cids: {
-            "cust-1": _make_customer_profile(
-                keep_full_enabled=True,
-                keep_full_priority_boost=0.25,
-                is_generator_fuel=True,
-            )
-        }
-        agent._customer_tank_loader = lambda tid, tids: {
-            "tank-1": {
-                "customer_tank_id": "tank-1",
-                "tenant_id": tid,
-                "use_case": "generator",
-            }
-        }
-
-        await agent.evaluate([])
-
-        published = deps["signal_bus"].publish.call_args[0][0]
-        entry = published.priorities[0]
-        assert "keep_full_storm_mode" in entry.reasons
-        assert "generator_storm_mode" in entry.reasons
-        # Score should land near the clamp ceiling (1.0) given 0.25 + 0.2 on
-        # top of a 0.6 runout-weighted baseline.
-        assert entry.priority_score >= 0.6
-        assert entry.priority_score <= 1.0
-
-    @pytest.mark.asyncio
-    async def test_boosted_score_clamped_to_one(self):
-        """Boosts cannot push a score above 1.0."""
-        agent, deps = _make_agent(
-            storm_mode_evaluator=_FakeStormModeEvaluator(state="active"),
-        )
-        forecast = _make_forecast(
-            station_id="s1",
-            runout_risk_24h=1.0,
-            customer_id="cust-1",
-            customer_tank_id="tank-1",
-        )
-        agent._forecast_buffer.append(forecast)
-        agent._customer_profile_loader = lambda tid, cids: {
-            "cust-1": _make_customer_profile(
-                keep_full_enabled=True, keep_full_priority_boost=1.0
-            )
-        }
-        agent._customer_tank_loader = lambda tid, tids: {
-            "tank-1": {
-                "customer_tank_id": "tank-1",
-                "tenant_id": tid,
-                "use_case": "generator",
-            }
-        }
-
-        await agent.evaluate([])
-
-        published = deps["signal_bus"].publish.call_args[0][0]
-        entry = published.priorities[0]
-        assert entry.priority_score <= 1.0
-
-    @pytest.mark.asyncio
-    async def test_non_generator_tank_gets_no_generator_boost(self):
-        """Tanks with non-generator use_case never trigger the boost."""
-        agent, deps = _make_agent(
-            storm_mode_evaluator=_FakeStormModeEvaluator(state="active"),
-        )
-        forecast = _make_forecast(
-            station_id="s1",
-            runout_risk_24h=0.3,
-            customer_id="cust-1",
-            customer_tank_id="tank-1",
-        )
-        agent._forecast_buffer.append(forecast)
-        agent._customer_profile_loader = lambda tid, cids: {
-            "cust-1": _make_customer_profile()
-        }
-        agent._customer_tank_loader = lambda tid, tids: {
-            "tank-1": {
-                "customer_tank_id": "tank-1",
-                "tenant_id": tid,
-                "use_case": "residential_heat",
-            }
-        }
-
-        await agent.evaluate([])
-
-        published = deps["signal_bus"].publish.call_args[0][0]
-        entry = published.priorities[0]
-        assert "generator_storm_mode" not in entry.reasons
-        assert "keep_full_storm_mode" not in entry.reasons
-
-    @pytest.mark.asyncio
-    async def test_keep_full_disabled_profile_no_boost(self):
-        """keep_full_enabled=False must short-circuit the keep-full boost."""
-        agent, deps = _make_agent(
-            storm_mode_evaluator=_FakeStormModeEvaluator(state="active"),
-        )
-        forecast = _make_forecast(
-            station_id="s1",
-            runout_risk_24h=0.3,
-            customer_id="cust-1",
-        )
-        agent._forecast_buffer.append(forecast)
-        agent._customer_profile_loader = lambda tid, cids: {
-            "cust-1": _make_customer_profile(keep_full_enabled=False)
-        }
-
-        await agent.evaluate([])
-
-        published = deps["signal_bus"].publish.call_args[0][0]
-        entry = published.priorities[0]
-        assert "keep_full_storm_mode" not in entry.reasons
-
-    def test_constructor_rejects_out_of_range_generator_boost(self):
-        with pytest.raises(ValueError):
-            _make_agent(generator_priority_boost=1.5)
-        with pytest.raises(ValueError):
-            _make_agent(generator_priority_boost=-0.1)
-
-    def test_constructor_accepts_custom_generator_boost(self):
-        agent, _ = _make_agent(generator_priority_boost=0.35)
-        assert agent._generator_priority_boost == 0.35
+    def test_unknown_defaults_to_ago(self):
+        agent, _ = _make_agent()
+        assert agent._resolve_fuel_grade("UNKNOWN_FUEL") == FuelGrade.AGO

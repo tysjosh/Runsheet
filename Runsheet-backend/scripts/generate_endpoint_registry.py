@@ -153,6 +153,7 @@ def _get_router_prefix(path: str) -> str:
         "/api/scheduling",
         "/api/ops/admin",
         "/api/ops",
+        "/api/orders",
         "/api/fuel",
         "/api/agent",
         "/api/fleet",

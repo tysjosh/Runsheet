@@ -92,12 +92,17 @@ from fuel.services.compatibility_matrix import (
     load_tenant_compatibility_rules,
 )
 from fuel.services.contract_lift_service import ContractLiftService
-from fuel.services.fuel_ops_es_mappings import CROSS_CONTAMINATION_EVENTS_INDEX
+from fuel.customer_tank_models import CustomerTankRepository
+from fuel.services.fuel_ops_es_mappings import (
+    CROSS_CONTAMINATION_EVENTS_INDEX,
+    CUSTOMER_TANKS_INDEX,
+)
 from fuel.services.fuel_product_catalog import (
     UnknownFuelProductError,
     canonicalize,
     canonicalize_or_warn,
 )
+from fuel.services.order_es_mappings import FUEL_ORDERS_CURRENT_INDEX
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +146,7 @@ class CompartmentLoadingAgent(OverlayAgentBase):
         compartment_state_repo: Optional[CompartmentStateRepository] = None,
         tenant_config: Optional[Any] = None,
         contract_lift_service: Optional[ContractLiftService] = None,
+        customer_tank_repo: Optional[CustomerTankRepository] = None,
     ):
         super().__init__(
             agent_id="compartment_loading",
@@ -184,6 +190,14 @@ class CompartmentLoadingAgent(OverlayAgentBase):
             contract_lift_service
             if contract_lift_service is not None
             else ContractLiftService(redis_client=None)
+        )
+        # Tenant-scoped customer tank repository for resolving
+        # fill_to_full orders (Task 11.3 / Req 5.3.2). When not
+        # injected, lazily constructed from the shared ES service.
+        self._customer_tank_repo: CustomerTankRepository = (
+            customer_tank_repo
+            if customer_tank_repo is not None
+            else CustomerTankRepository(es_service)
         )
 
     # ------------------------------------------------------------------
@@ -305,8 +319,14 @@ class CompartmentLoadingAgent(OverlayAgentBase):
         # Use pipeline run_id if available, otherwise fall back to priority list's run_id
         run_id = getattr(self, '_current_run_id', None) or priority_list.run_id
 
-        # Step 2: Build delivery requests from priorities (Req 3.1)
-        delivery_requests = self._build_delivery_requests(priority_list)
+        # Step 2: Build delivery requests from fuel orders (Req 5.3.1, 5.3.2).
+        # Read product_code and gallons_requested directly from each
+        # Fuel_Order in fuel_orders_current rather than relying on the
+        # DeliveryPriorityList's FuelGrade enum. For fill_to_full orders,
+        # resolve the linked customer_tank to compute target_volume.
+        delivery_requests = await self._build_delivery_requests_from_orders(
+            tenant_id, priority_list
+        )
         if not delivery_requests:
             return []
 
@@ -410,16 +430,21 @@ class CompartmentLoadingAgent(OverlayAgentBase):
         return proposals
 
     # ------------------------------------------------------------------
-    # Build delivery requests from priorities (Req 3.1)
+    # Build delivery requests from priorities (Req 3.1) — legacy path
     # ------------------------------------------------------------------
 
     def _build_delivery_requests(
         self, priority_list: DeliveryPriorityList
     ) -> List[DeliveryRequest]:
-        """Convert priority list into delivery requests.
+        """Convert priority list into delivery requests (legacy fallback).
 
         Includes priorities with CRITICAL, HIGH, or MEDIUM buckets.
         Assigns a default quantity based on priority score.
+
+        NOTE: This method is retained as a fallback for the legacy
+        DeliveryPriorityList path. The primary intake path now reads
+        product_code and gallons_requested directly from fuel_orders_current
+        via _build_delivery_requests_from_orders (Task 11.3 / Req 5.3.1).
         """
         requests: List[DeliveryRequest] = []
         for priority in priority_list.priorities:
@@ -445,6 +470,542 @@ class CompartmentLoadingAgent(OverlayAgentBase):
             )
 
         return requests
+
+    # ------------------------------------------------------------------
+    # Build delivery requests from Fuel_Orders (Task 11.3 / Req 5.3.1, 5.3.2)
+    # ------------------------------------------------------------------
+
+    async def _build_delivery_requests_from_orders(
+        self,
+        tenant_id: str,
+        priority_list: DeliveryPriorityList,
+    ) -> List[DeliveryRequest]:
+        """Build delivery requests by reading product_code and gallons_requested
+        directly from each Fuel_Order in fuel_orders_current.
+
+        Validates: Requirements 5.3.1, 5.3.2.
+
+        For each priority entry in the DeliveryPriorityList, looks up the
+        corresponding Fuel_Order to read:
+          - ``product_code``: used directly as the fuel_grade for the
+            DeliveryRequest (no FuelGrade.AGO/PMS/ATK/LPG fallback coercion).
+          - ``gallons_requested``: converted to liters for the request.
+          - ``fill_to_full``: when True, fetches the linked customer_tank
+            and computes target_volume = max(0, capacity_gallons -
+            current_level_gallons).
+
+        Orders that have neither ``gallons_requested`` nor a resolvable
+        tank level are failed with ``unresolved_fill_volume`` and excluded
+        from the loading plan.
+
+        Falls back to the legacy _build_delivery_requests path when no
+        fuel orders can be resolved (e.g. during the deprecation window
+        when orders are still in the legacy shipment shape).
+        """
+        # Query fuel orders for this tenant that are in loadable statuses
+        fuel_orders = await self._query_fuel_orders(tenant_id)
+
+        if not fuel_orders:
+            # Fallback to legacy priority-list path during deprecation window
+            logger.debug(
+                "CompartmentLoadingAgent: no fuel_orders_current docs found "
+                "for tenant %s; falling back to legacy priority-list path",
+                tenant_id,
+            )
+            return self._build_delivery_requests(priority_list)
+
+        # Build a lookup by station_id (customer_id) for matching priorities
+        # to orders. The priority list's station_id corresponds to the order's
+        # customer_id or station reference.
+        priority_station_ids = {
+            p.station_id
+            for p in priority_list.priorities
+            if p.priority_bucket in (
+                PriorityBucket.CRITICAL,
+                PriorityBucket.HIGH,
+                PriorityBucket.MEDIUM,
+            )
+        }
+
+        requests: List[DeliveryRequest] = []
+        # US gallons to liters conversion factor (NIST)
+        GALLONS_TO_LITERS = 3.785411784
+
+        for order in fuel_orders:
+            order_id = order.get("order_id", "")
+            station_id = order.get("customer_id", "")
+            product_code = order.get("product_code")
+            gallons_requested = order.get("gallons_requested")
+            fill_to_full = order.get("fill_to_full", False)
+            customer_tank_id = order.get("customer_tank_id")
+
+            # Skip orders whose station/customer is not in the priority set
+            if priority_station_ids and station_id not in priority_station_ids:
+                continue
+
+            # Resolve product_code — read directly, no FuelGrade enum coercion
+            if not product_code:
+                logger.warning(
+                    "CompartmentLoadingAgent: order %s has no product_code; "
+                    "skipping",
+                    order_id,
+                )
+                continue
+
+            # Map canonical product_code to FuelGrade for the solver.
+            # This reads product_code directly from the order — no legacy
+            # FuelGrade.AGO/PMS/ATK/LPG fallback coercion on the intake path.
+            fuel_grade = self._resolve_fuel_grade_from_product_code(product_code)
+            if fuel_grade is None:
+                logger.warning(
+                    "CompartmentLoadingAgent: order %s has unrecognized "
+                    "product_code %r; skipping",
+                    order_id,
+                    product_code,
+                )
+                continue
+
+            # Resolve volume
+            quantity_liters: Optional[float] = None
+
+            if fill_to_full and customer_tank_id:
+                # Fetch the linked customer_tank and compute target_volume
+                target_volume = await self._resolve_fill_to_full_volume(
+                    tenant_id=tenant_id,
+                    customer_tank_id=customer_tank_id,
+                    order_id=order_id,
+                )
+                if target_volume is not None:
+                    quantity_liters = target_volume * GALLONS_TO_LITERS
+                elif gallons_requested is not None and gallons_requested > 0:
+                    # Tank resolution failed but gallons_requested is available
+                    quantity_liters = gallons_requested * GALLONS_TO_LITERS
+                else:
+                    # Neither resolvable tank level nor gallons_requested
+                    logger.error(
+                        "CompartmentLoadingAgent: unresolved_fill_volume for "
+                        "order %s (fill_to_full=true, customer_tank_id=%s) — "
+                        "neither gallons_requested nor resolvable tank level "
+                        "available",
+                        order_id,
+                        customer_tank_id,
+                    )
+                    await self._fail_order_loading(
+                        order_id=order_id,
+                        tenant_id=tenant_id,
+                        reason="unresolved_fill_volume",
+                        details={
+                            "customer_tank_id": customer_tank_id,
+                            "fill_to_full": True,
+                        },
+                    )
+                    continue
+            elif fill_to_full and not customer_tank_id:
+                # fill_to_full but no linked tank — use gallons_requested
+                # if available, otherwise fail
+                if gallons_requested is not None and gallons_requested > 0:
+                    quantity_liters = gallons_requested * GALLONS_TO_LITERS
+                else:
+                    logger.error(
+                        "CompartmentLoadingAgent: unresolved_fill_volume for "
+                        "order %s (fill_to_full=true, no customer_tank_id) — "
+                        "gallons_requested not available",
+                        order_id,
+                    )
+                    await self._fail_order_loading(
+                        order_id=order_id,
+                        tenant_id=tenant_id,
+                        reason="unresolved_fill_volume",
+                        details={
+                            "customer_tank_id": None,
+                            "fill_to_full": True,
+                        },
+                    )
+                    continue
+            elif gallons_requested is not None and gallons_requested > 0:
+                quantity_liters = gallons_requested * GALLONS_TO_LITERS
+            else:
+                # No volume information available at all
+                logger.error(
+                    "CompartmentLoadingAgent: unresolved_fill_volume for "
+                    "order %s — neither gallons_requested nor fill_to_full "
+                    "with resolvable tank",
+                    order_id,
+                )
+                await self._fail_order_loading(
+                    order_id=order_id,
+                    tenant_id=tenant_id,
+                    reason="unresolved_fill_volume",
+                    details={
+                        "customer_tank_id": customer_tank_id,
+                        "fill_to_full": fill_to_full,
+                    },
+                )
+                continue
+
+            # Use product_code directly — no FuelGrade enum coercion
+            requests.append(
+                DeliveryRequest(
+                    station_id=station_id,
+                    fuel_grade=fuel_grade,
+                    quantity_liters=round(quantity_liters, 2),
+                    min_drop_liters=DEFAULT_MIN_DROP_LITERS,
+                )
+            )
+
+        if not requests:
+            # If no orders could be resolved, fall back to legacy path
+            logger.debug(
+                "CompartmentLoadingAgent: no delivery requests built from "
+                "fuel_orders_current for tenant %s; falling back to legacy "
+                "priority-list path",
+                tenant_id,
+            )
+            return self._build_delivery_requests(priority_list)
+
+        return requests
+
+    # ------------------------------------------------------------------
+    # Query fuel orders from fuel_orders_current (Task 11.3)
+    # ------------------------------------------------------------------
+
+    async def _query_fuel_orders(
+        self, tenant_id: str
+    ) -> List[Dict[str, Any]]:
+        """Query fuel_orders_current for orders in loadable statuses.
+
+        Returns orders with status IN {placed, confirmed, scheduled} that
+        are ready for compartment loading. Reads product_code and
+        gallons_requested directly from each order document.
+        """
+        query = {
+            "query": {
+                "bool": {
+                    "must": [
+                        {"term": {"tenant_id": tenant_id}},
+                        {"terms": {"status": ["placed", "confirmed", "scheduled"]}},
+                    ],
+                },
+            },
+            "size": 500,
+        }
+
+        try:
+            resp = await self._es.search_documents(
+                FUEL_ORDERS_CURRENT_INDEX, query, 500
+            )
+            orders: List[Dict[str, Any]] = []
+            for hit in resp.get("hits", {}).get("hits", []):
+                source = hit.get("_source")
+                if source:
+                    orders.append(source)
+            return orders
+        except Exception as e:
+            logger.error(
+                "CompartmentLoadingAgent: failed to query fuel_orders_current "
+                "for tenant %s: %s",
+                tenant_id,
+                e,
+            )
+            return []
+
+    # ------------------------------------------------------------------
+    # Fill-to-full volume resolution (Task 11.3 / Req 5.3.2)
+    # ------------------------------------------------------------------
+
+    async def _resolve_fill_to_full_volume(
+        self,
+        *,
+        tenant_id: str,
+        customer_tank_id: str,
+        order_id: str,
+    ) -> Optional[float]:
+        """Fetch the linked customer_tank and compute target_volume.
+
+        Returns:
+            target_volume in gallons = max(0, capacity_gallons - current_level_gallons),
+            or None if the tank cannot be resolved.
+        """
+        try:
+            tank = await self._customer_tank_repo.get(
+                tenant_id=tenant_id,
+                customer_tank_id=customer_tank_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "CompartmentLoadingAgent: failed to fetch customer_tank %s "
+                "for order %s (tenant=%s): %s",
+                customer_tank_id,
+                order_id,
+                tenant_id,
+                exc,
+            )
+            return None
+
+        if tank is None:
+            logger.warning(
+                "CompartmentLoadingAgent: customer_tank %s not found for "
+                "order %s (tenant=%s)",
+                customer_tank_id,
+                order_id,
+                tenant_id,
+            )
+            return None
+
+        capacity = tank.capacity_gallons
+        current_level = tank.current_level_gallons
+        target_volume = max(0.0, capacity - current_level)
+
+        if target_volume <= 0:
+            logger.info(
+                "CompartmentLoadingAgent: customer_tank %s is already full "
+                "(capacity=%.1f, level=%.1f) for order %s",
+                customer_tank_id,
+                capacity,
+                current_level,
+                order_id,
+            )
+            return None
+
+        return target_volume
+
+    # ------------------------------------------------------------------
+    # Fail loading with unresolved_fill_volume (Task 11.3)
+    # ------------------------------------------------------------------
+
+    async def _fail_order_loading(
+        self,
+        *,
+        order_id: str,
+        tenant_id: str,
+        reason: str,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Record a loading failure for an order that cannot be resolved.
+
+        Publishes a RiskSignal so downstream overlays (dispatch, exception
+        replanning) can react to the unresolvable order.
+        """
+        context: Dict[str, Any] = {
+            "order_id": order_id,
+            "reason": reason,
+        }
+        if details:
+            context.update(details)
+
+        try:
+            signal = RiskSignal(
+                source_agent=self.agent_id,
+                entity_id=order_id,
+                entity_type="fuel_order",
+                severity=Severity.HIGH,
+                confidence=1.0,
+                ttl_seconds=3600,
+                tenant_id=tenant_id,
+                context=context,
+            )
+            await self._signal_bus.publish(signal)
+        except Exception as exc:
+            logger.error(
+                "CompartmentLoadingAgent: failed to publish %s RiskSignal "
+                "for order %s (tenant=%s): %s",
+                reason,
+                order_id,
+                tenant_id,
+                exc,
+            )
+
+    # ------------------------------------------------------------------
+    # Build delivery requests from Fuel_Orders (Task 11.3)
+    # ------------------------------------------------------------------
+
+    async def build_delivery_requests_from_fuel_orders(
+        self, tenant_id: str, orders: List[Dict[str, Any]]
+    ) -> Tuple[List[DeliveryRequest], List[Dict[str, Any]]]:
+        """Build delivery requests directly from Fuel_Order documents.
+
+        Reads ``product_code`` and ``gallons_requested`` directly from
+        each order. For ``fill_to_full = true`` orders, fetches the linked
+        ``customer_tank`` and computes
+        ``target_volume = max(0, capacity_gallons - current_level_gallons)``.
+
+        Fails the loading with ``unresolved_fill_volume`` when neither
+        ``gallons_requested`` nor a resolvable tank level is available.
+
+        Args:
+            tenant_id: Tenant scope.
+            orders: List of Fuel_Order source documents.
+
+        Returns:
+            (requests, failures) where failures is a list of dicts with
+            order_id and reason for orders that could not be loaded.
+        """
+        requests: List[DeliveryRequest] = []
+        failures: List[Dict[str, Any]] = []
+
+        # Batch-fetch customer tanks for fill_to_full orders
+        tank_ids_needed = [
+            o["customer_tank_id"]
+            for o in orders
+            if o.get("fill_to_full") and o.get("customer_tank_id")
+        ]
+        customer_tanks: Dict[str, Dict[str, Any]] = {}
+        if tank_ids_needed:
+            customer_tanks = await self._fetch_customer_tanks_for_loading(
+                tenant_id, tank_ids_needed
+            )
+
+        for order in orders:
+            order_id = order.get("order_id", "unknown")
+            product_code = order.get("product_code")
+            gallons_requested = order.get("gallons_requested")
+            fill_to_full = order.get("fill_to_full", False)
+            customer_tank_id = order.get("customer_tank_id")
+
+            # Resolve fuel grade from product_code directly — no legacy
+            # FuelGrade.AGO/PMS/ATK/LPG fallback coercion on the intake path
+            if not product_code:
+                failures.append({
+                    "order_id": order_id,
+                    "reason": "missing_product_code",
+                })
+                continue
+
+            fuel_grade = self._resolve_fuel_grade_from_product_code(product_code)
+            if fuel_grade is None:
+                failures.append({
+                    "order_id": order_id,
+                    "reason": "unknown_product_code",
+                    "product_code": product_code,
+                })
+                continue
+
+            # Determine volume
+            target_gallons: Optional[float] = None
+
+            if fill_to_full:
+                # Compute target_volume from linked customer_tank
+                if customer_tank_id and customer_tank_id in customer_tanks:
+                    tank = customer_tanks[customer_tank_id]
+                    capacity = tank.get("capacity_gallons")
+                    current_level = tank.get("current_level_gallons")
+                    if capacity is not None and current_level is not None:
+                        try:
+                            target_gallons = max(
+                                0.0,
+                                float(capacity) - float(current_level),
+                            )
+                        except (TypeError, ValueError):
+                            target_gallons = None
+
+                # Fall back to gallons_requested if tank level unavailable
+                if target_gallons is None and gallons_requested:
+                    try:
+                        target_gallons = float(gallons_requested)
+                    except (TypeError, ValueError):
+                        target_gallons = None
+
+                if target_gallons is None:
+                    failures.append({
+                        "order_id": order_id,
+                        "reason": "unresolved_fill_volume",
+                        "detail": (
+                            "fill_to_full=true but neither gallons_requested "
+                            "nor a resolvable tank level is available"
+                        ),
+                    })
+                    continue
+            else:
+                # Use gallons_requested directly
+                if gallons_requested:
+                    try:
+                        target_gallons = float(gallons_requested)
+                    except (TypeError, ValueError):
+                        target_gallons = None
+
+                if target_gallons is None or target_gallons <= 0:
+                    failures.append({
+                        "order_id": order_id,
+                        "reason": "unresolved_fill_volume",
+                        "detail": "no valid gallons_requested",
+                    })
+                    continue
+
+            # Convert gallons to liters (1 gallon ≈ 3.785 liters)
+            quantity_liters = round(target_gallons * 3.785411784, 2)
+
+            requests.append(
+                DeliveryRequest(
+                    station_id=customer_tank_id or order_id,
+                    fuel_grade=fuel_grade,
+                    quantity_liters=quantity_liters,
+                    min_drop_liters=DEFAULT_MIN_DROP_LITERS,
+                )
+            )
+
+        return requests, failures
+
+    async def _fetch_customer_tanks_for_loading(
+        self, tenant_id: str, tank_ids: List[str]
+    ) -> Dict[str, Dict[str, Any]]:
+        """Fetch customer tank docs for fill_to_full volume computation."""
+        if not tank_ids:
+            return {}
+
+        unique_ids = list(set(tank_ids))
+        query = {
+            "query": {
+                "bool": {
+                    "filter": [
+                        {"term": {"tenant_id": tenant_id}},
+                        {"terms": {"tank_id": unique_ids}},
+                    ]
+                }
+            },
+            "size": len(unique_ids),
+        }
+        try:
+            resp = await self._es.search_documents(
+                CUSTOMER_TANKS_INDEX, query, len(unique_ids)
+            )
+            hits = (resp or {}).get("hits", {}).get("hits", [])
+            result: Dict[str, Dict[str, Any]] = {}
+            for hit in hits:
+                source = hit.get("_source", {})
+                tid = source.get("tank_id")
+                if tid:
+                    result[tid] = source
+            return result
+        except Exception as exc:
+            logger.warning(
+                "CompartmentLoadingAgent: customer_tanks fetch failed "
+                "for tenant=%s: %s",
+                tenant_id,
+                exc,
+            )
+            return {}
+
+    def _resolve_fuel_grade_from_product_code(
+        self, product_code: str
+    ) -> Optional[FuelGrade]:
+        """Map a product_code to a FuelGrade enum value.
+
+        Uses the canonical product codes directly — no legacy
+        FuelGrade.AGO/PMS/ATK/LPG fallback coercion on the intake path.
+        The enum is left in place for other consumers.
+        """
+        mapping = {
+            "DIESEL_2": FuelGrade.AGO,
+            "GASOLINE_REG": FuelGrade.PMS,
+            "KEROSENE": FuelGrade.ATK,
+            "PROPANE": FuelGrade.LPG,
+            # Direct enum values still accepted from other consumers
+            "AGO": FuelGrade.AGO,
+            "PMS": FuelGrade.PMS,
+            "ATK": FuelGrade.ATK,
+            "LPG": FuelGrade.LPG,
+        }
+        return mapping.get(product_code.upper()) if product_code else None
 
     # ------------------------------------------------------------------
     # Query trucks and compartments (Req 3.1)

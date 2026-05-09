@@ -6,11 +6,16 @@ enforces idempotency via Redis, validates schema versions, and delegates
 to the AdapterTransformer for normalization before upserting into
 Elasticsearch and broadcasting via WebSocket.
 
+During the deprecation window, POST /webhooks/dinee still responds but
+internally resolves the reserved channel_id="dinee-legacy" and routes
+through the new OrderIntakePipeline. Deprecation headers are emitted on
+every response.
+
 Canonical webhook auth policy: HMAC-SHA256 only. The dinee_webhook_secret
 is the sole credential for verifying inbound webhooks. The dinee_api_key
 is used exclusively for outbound REST API calls to Dinee (Replay Service).
 
-Requirements: 1.1-1.11
+Requirements: 1.1-1.11, 1.3.1, 1.3.3, 1.3.4, 2.2.8
 """
 
 import hashlib
@@ -19,9 +24,10 @@ import logging
 import re
 import time
 import uuid
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, Header, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from middleware.rate_limiter import limiter
@@ -32,6 +38,14 @@ from ops.services.ops_metrics import (
     ops_webhook_processed_total,
     ops_ingestion_latency_seconds,
     ops_transform_errors_total,
+)
+
+# ---------------------------------------------------------------------------
+# Legacy route Prometheus counter (Req 1.3.4)
+# ---------------------------------------------------------------------------
+
+from fuel.services.order_metrics import (
+    orders_legacy_route_hits_total,
 )
 
 logger = logging.getLogger(__name__)
@@ -75,6 +89,17 @@ _webhook_secret: str = ""
 _webhook_tenant_id: str = ""
 _idempotency_ttl_hours: int = 72
 
+# New pipeline references for deprecation-window routing (Task 7.2)
+_order_intake_pipeline: Optional[Any] = None
+_intake_channel_repo: Optional[Any] = None
+_credentials_vault: Optional[Any] = None
+
+# Reserved channel_id for the legacy dinee route
+DINEE_LEGACY_CHANNEL_ID = "dinee-legacy"
+
+# Track whether the dinee-legacy channel has been seeded for each tenant
+_dinee_legacy_seeded: dict = {}
+
 
 def configure_webhook_receiver(
     *,
@@ -87,6 +112,9 @@ def configure_webhook_receiver(
     webhook_secret: str,
     webhook_tenant_id: str = "",
     idempotency_ttl_hours: int = 72,
+    order_intake_pipeline=None,
+    intake_channel_repo=None,
+    credentials_vault=None,
 ) -> None:
     """
     Wire service dependencies into the webhook receiver module.
@@ -97,6 +125,7 @@ def configure_webhook_receiver(
     global _adapter, _idempotency_service, _poison_queue_service
     global _ops_es_service, _ws_manager, _feature_flag_service
     global _webhook_secret, _webhook_tenant_id, _idempotency_ttl_hours
+    global _order_intake_pipeline, _intake_channel_repo, _credentials_vault
 
     _adapter = adapter
     _idempotency_service = idempotency_service
@@ -107,6 +136,9 @@ def configure_webhook_receiver(
     _webhook_secret = webhook_secret
     _webhook_tenant_id = webhook_tenant_id
     _idempotency_ttl_hours = idempotency_ttl_hours
+    _order_intake_pipeline = order_intake_pipeline
+    _intake_channel_repo = intake_channel_repo
+    _credentials_vault = credentials_vault
 
 
 # ---------------------------------------------------------------------------
@@ -135,6 +167,101 @@ def _verify_signature(body: bytes, signature: str, secret: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _build_deprecation_headers(tenant_id: str) -> dict:
+    """Build the deprecation response headers per Req 1.3.3.
+
+    Returns a dict of headers:
+        Deprecation: true
+        Sunset: <ISO-8601 date from settings>
+        Link: </webhooks/orders/{channel_id}>; rel="successor-version"
+    """
+    settings = get_settings()
+    headers: dict = {"Deprecation": "true"}
+
+    sunset_date = settings.orders_legacy_sunset_date
+    if sunset_date:
+        headers["Sunset"] = sunset_date
+
+    headers["Link"] = (
+        f'</webhooks/orders/{DINEE_LEGACY_CHANNEL_ID}>; rel="successor-version"'
+    )
+    return headers
+
+
+async def _ensure_dinee_legacy_channel_seeded(tenant_id: str) -> None:
+    """Seed the reserved 'dinee-legacy' intake channel on first hit.
+
+    Creates the channel in the intake_channels index and stores the
+    existing webhook secret in the credentials vault so the
+    OrderIntakePipeline can resolve and verify it.
+
+    This is idempotent — subsequent calls for the same tenant are no-ops.
+    """
+    global _dinee_legacy_seeded
+
+    if tenant_id in _dinee_legacy_seeded:
+        return
+
+    if not _intake_channel_repo or not _credentials_vault:
+        # Pipeline services not wired — skip seeding
+        return
+
+    # Check if the channel already exists
+    existing = await _intake_channel_repo.get_by_channel_id(
+        DINEE_LEGACY_CHANNEL_ID
+    )
+    if existing is not None:
+        _dinee_legacy_seeded[tenant_id] = True
+        return
+
+    # Seed the channel — store the existing webhook secret in the vault
+    try:
+        vault_ref = await _credentials_vault.put(
+            tenant_id=tenant_id,
+            key=f"intake_channel_hmac:{DINEE_LEGACY_CHANNEL_ID}",
+            plaintext={"secret": _webhook_secret},
+            provider_name="intake_channel",
+        )
+
+        from fuel.services.order_es_mappings import INTAKE_CHANNELS_INDEX
+        from services.time_utils import utcnow
+
+        now = utcnow().isoformat()
+        channel_doc = {
+            "channel_id": DINEE_LEGACY_CHANNEL_ID,
+            "tenant_id": tenant_id,
+            "channel_type": "api_partner",
+            "display_name": "Legacy Dinee Webhook (deprecated)",
+            "hmac_secret_ref": vault_ref,
+            "supported_schema_versions": ["1.0"],
+            "rate_limit_per_minute": None,
+            "secret_version": 1,
+            "enabled": True,
+            "created_at": now,
+            "updated_at": now,
+        }
+
+        await _ops_es_service._es.index_document(
+            INTAKE_CHANNELS_INDEX, DINEE_LEGACY_CHANNEL_ID, channel_doc
+        )
+
+        _dinee_legacy_seeded[tenant_id] = True
+        logger.info(
+            "Seeded dinee-legacy intake channel for tenant=%s", tenant_id
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to seed dinee-legacy channel for tenant=%s: %s",
+            tenant_id,
+            exc,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Endpoint
 # ---------------------------------------------------------------------------
 
@@ -148,14 +275,17 @@ async def receive_dinee_webhook(
     """
     Receive and process a signed Dinee webhook event.
 
+    During the deprecation window, this endpoint still responds but
+    internally routes through the new OrderIntakePipeline with the
+    reserved channel_id="dinee-legacy". Deprecation headers are emitted
+    on every response (Req 1.3.3).
+
     Flow:
     1. Verify HMAC-SHA256 signature (Req 1.2, 1.3)
-    2. Validate schema_version is semver (Req 1.9)
-    3. Route unknown schema versions to poison queue (Req 1.10)
-    4. Check idempotency (Req 1.4, 1.5)
-    5. Transform via AdapterTransformer (Req 1.6)
-    6. Upsert into ES and broadcast via WebSocket (Req 1.8)
-    7. Mark event_id processed with TTL (Req 1.7)
+    2. If OrderIntakePipeline is available, route through it (Req 2.2.8)
+    3. Otherwise, fall back to the legacy processing path
+    4. Emit deprecation headers on every response (Req 1.3.3)
+    5. Increment orders_legacy_route_hits_total (Req 1.3.4)
     """
     # Generate a request_id for tracing (Req 20.1)
     request_id = getattr(request.state, "request_id", None) or str(uuid.uuid4())
@@ -172,8 +302,6 @@ async def receive_dinee_webhook(
             source_ip,
         )
         ops_webhook_processed_total.labels(tenant_id="unknown", status="rejected").inc()
-        from fastapi.responses import JSONResponse
-
         return JSONResponse(
             status_code=401,
             content={
@@ -182,14 +310,12 @@ async def receive_dinee_webhook(
             },
         )
 
-    # --- Parse payload ---
+    # --- Parse payload to extract tenant_id for metrics ---
     import json as _json
 
     try:
         raw = _json.loads(body)
     except Exception:
-        from fastapi.responses import JSONResponse
-
         return JSONResponse(
             status_code=400,
             content={
@@ -198,17 +324,83 @@ async def receive_dinee_webhook(
             },
         )
 
+    # Determine tenant_id from payload or configured value
+    payload_tenant_id = raw.get("tenant_id", _webhook_tenant_id or "unknown")
+
+    # --- Increment legacy route hits counter (Req 1.3.4) ---
+    orders_legacy_route_hits_total.labels(
+        route="/webhooks/dinee",
+        tenant_id=payload_tenant_id,
+    ).inc()
+
+    # --- Route through OrderIntakePipeline if available (Req 2.2.8) ---
+    if _order_intake_pipeline is not None:
+        try:
+            # Seed the dinee-legacy channel on first hit
+            await _ensure_dinee_legacy_channel_seeded(payload_tenant_id)
+
+            # Route through the new pipeline
+            result = await _order_intake_pipeline.ingest_webhook(
+                channel_id=DINEE_LEGACY_CHANNEL_ID,
+                body=body,
+                signature=x_dinee_signature,
+                request_id=request_id,
+            )
+
+            # Build response with deprecation headers
+            deprecation_headers = _build_deprecation_headers(payload_tenant_id)
+            response_content = {
+                "event_id": result.event_id,
+                "status": result.status,
+            }
+            if result.order_id:
+                response_content["order_id"] = result.order_id
+
+            return JSONResponse(
+                status_code=200,
+                content=response_content,
+                headers=deprecation_headers,
+            )
+        except Exception as exc:
+            # If the pipeline raises a known error, convert to response
+            # Check if it's a structured error from errors.exceptions
+            error_code = getattr(exc, "error_code", None)
+            status_code_val = getattr(exc, "status_code", None)
+            if error_code and status_code_val:
+                deprecation_headers = _build_deprecation_headers(
+                    payload_tenant_id
+                )
+                return JSONResponse(
+                    status_code=status_code_val,
+                    content={
+                        "error_code": error_code,
+                        "message": str(exc),
+                    },
+                    headers=deprecation_headers,
+                )
+
+            # For unexpected errors, log and fall through to legacy path
+            logger.warning(
+                "OrderIntakePipeline failed for legacy /webhooks/dinee, "
+                "falling back to legacy path: request_id=%s, error=%s",
+                request_id,
+                exc,
+            )
+
+    # --- Legacy processing path (fallback) ---
+    # This path is used when the OrderIntakePipeline is not wired or
+    # when the pipeline encounters an unexpected error.
     try:
         payload = WebhookPayload(**raw)
     except Exception as exc:
-        from fastapi.responses import JSONResponse
-
+        deprecation_headers = _build_deprecation_headers(payload_tenant_id)
         return JSONResponse(
             status_code=400,
             content={
                 "error_code": "VALIDATION_ERROR",
                 "message": f"Payload validation failed: {exc}",
             },
+            headers=deprecation_headers,
         )
 
     event_id = payload.event_id
@@ -220,10 +412,6 @@ async def receive_dinee_webhook(
     ).inc()
 
     # --- Tenant verification (Req 9.7) ---
-    # The tenant_id is derived exclusively from the HMAC-verified payload body,
-    # ensuring it cannot be spoofed. When a webhook_tenant_id is configured
-    # (associating the signing secret with a specific tenant), reject payloads
-    # whose tenant_id does not match.
     if _webhook_tenant_id and payload.tenant_id != _webhook_tenant_id:
         logger.warning(
             "Webhook tenant_id mismatch: payload tenant_id=%s does not match "
@@ -234,18 +422,17 @@ async def receive_dinee_webhook(
             source_ip,
         )
         ops_webhook_processed_total.labels(tenant_id=payload.tenant_id, status="rejected").inc()
-        from fastapi.responses import JSONResponse
-
+        deprecation_headers = _build_deprecation_headers(payload.tenant_id)
         return JSONResponse(
             status_code=403,
             content={
                 "error_code": "TENANT_NOT_FOUND",
                 "message": "Payload tenant_id does not match the tenant associated with the webhook signing secret",
             },
+            headers=deprecation_headers,
         )
 
     # --- Feature flag check (Req 27.2) ---
-    # Accept but skip processing for disabled tenants, return 200
     if _feature_flag_service:
         try:
             if not await _feature_flag_service.is_enabled(payload.tenant_id):
@@ -255,10 +442,13 @@ async def receive_dinee_webhook(
                     event_id,
                     request_id,
                 )
-                return WebhookResponse(event_id=event_id, status="processed")
+                deprecation_headers = _build_deprecation_headers(payload.tenant_id)
+                return JSONResponse(
+                    status_code=200,
+                    content={"event_id": event_id, "status": "processed"},
+                    headers=deprecation_headers,
+                )
         except Exception as exc:
-            # If feature flag check fails, log and continue processing
-            # (fail-open to avoid dropping events on Redis issues)
             logger.warning(
                 "Feature flag check failed for tenant_id=%s, proceeding with processing: %s, request_id=%s",
                 payload.tenant_id,
@@ -274,7 +464,6 @@ async def receive_dinee_webhook(
             event_id,
             request_id,
         )
-        # Route to poison queue as unknown version
         if _poison_queue_service:
             await _poison_queue_service.store_failed_event(
                 payload=raw,
@@ -284,7 +473,12 @@ async def receive_dinee_webhook(
                 trace_id=request_id,
             )
         ops_webhook_processed_total.labels(tenant_id=payload.tenant_id, status="queued").inc()
-        return WebhookResponse(event_id=event_id, status="queued_for_review")
+        deprecation_headers = _build_deprecation_headers(payload.tenant_id)
+        return JSONResponse(
+            status_code=200,
+            content={"event_id": event_id, "status": "queued_for_review"},
+            headers=deprecation_headers,
+        )
 
     # --- 3. Route unknown schema versions to poison queue (Req 1.10) ---
     if _adapter and not _adapter.is_version_supported(payload.schema_version):
@@ -303,12 +497,14 @@ async def receive_dinee_webhook(
                 trace_id=request_id,
             )
         ops_webhook_processed_total.labels(tenant_id=payload.tenant_id, status="queued").inc()
-        return WebhookResponse(event_id=event_id, status="queued_for_review")
+        deprecation_headers = _build_deprecation_headers(payload.tenant_id)
+        return JSONResponse(
+            status_code=200,
+            content={"event_id": event_id, "status": "queued_for_review"},
+            headers=deprecation_headers,
+        )
 
     # --- 4. Idempotency check (Req 1.4, 1.5) ---
-    # Tenant-scoped so two tenants with the same upstream event_id cannot
-    # collide (fairly common when upstream providers replay a known event
-    # id under each tenant's webhook secret).
     if _idempotency_service and await _idempotency_service.is_duplicate(
         event_id, tenant_id=payload.tenant_id
     ):
@@ -318,7 +514,12 @@ async def receive_dinee_webhook(
             request_id,
         )
         ops_webhook_processed_total.labels(tenant_id=payload.tenant_id, status="duplicate").inc()
-        return WebhookResponse(event_id=event_id, status="duplicate")
+        deprecation_headers = _build_deprecation_headers(payload.tenant_id)
+        return JSONResponse(
+            status_code=200,
+            content={"event_id": event_id, "status": "duplicate"},
+            headers=deprecation_headers,
+        )
 
     # --- 5. Transform via AdapterTransformer (Req 1.6) ---
     try:
@@ -343,22 +544,22 @@ async def receive_dinee_webhook(
                 tenant_id=payload.tenant_id,
                 trace_id=request_id,
             )
-        return WebhookResponse(event_id=event_id, status="queued_for_review")
+        deprecation_headers = _build_deprecation_headers(payload.tenant_id)
+        return JSONResponse(
+            status_code=200,
+            content={"event_id": event_id, "status": "queued_for_review"},
+            headers=deprecation_headers,
+        )
 
     # --- 6. Upsert into Elasticsearch (Req 1.6, 1.8) ---
     try:
         if _ops_es_service:
-            # Always append event doc (Req 6.3, 6.9)
             if result.event_doc:
                 await _ops_es_service.append_shipment_event(result.event_doc)
-
-            # Upsert shipment current state if present
             if result.shipment_current_doc:
                 await _ops_es_service.upsert_shipment_current(
                     result.shipment_current_doc
                 )
-
-            # Upsert rider current state if present
             if result.rider_current_doc:
                 await _ops_es_service.upsert_rider_current(
                     result.rider_current_doc
@@ -378,7 +579,12 @@ async def receive_dinee_webhook(
                 tenant_id=payload.tenant_id,
                 trace_id=request_id,
             )
-        return WebhookResponse(event_id=event_id, status="queued_for_review")
+        deprecation_headers = _build_deprecation_headers(payload.tenant_id)
+        return JSONResponse(
+            status_code=200,
+            content={"event_id": event_id, "status": "queued_for_review"},
+            headers=deprecation_headers,
+        )
 
     # --- Broadcast via WebSocket (Req 16.2, 16.3) ---
     if _ws_manager:
@@ -392,7 +598,6 @@ async def receive_dinee_webhook(
                     result.rider_current_doc
                 )
         except Exception as exc:
-            # WebSocket broadcast failure is non-fatal
             logger.warning(
                 "WebSocket broadcast failed for event_id=%s, request_id=%s: %s",
                 event_id,
@@ -406,7 +611,7 @@ async def receive_dinee_webhook(
             event_id, tenant_id=payload.tenant_id
         )
 
-    # --- 8. Return success (Req 1.8) ---
+    # --- 8. Return success with deprecation headers ---
     ingest_elapsed = time.monotonic() - ingest_start
     ops_ingestion_latency_seconds.labels(
         tenant_id=payload.tenant_id,
@@ -415,10 +620,16 @@ async def receive_dinee_webhook(
     ops_webhook_processed_total.labels(tenant_id=payload.tenant_id, status="processed").inc()
 
     logger.info(
-        "Webhook processed: event_id=%s, event_type=%s, tenant_id=%s, request_id=%s",
+        "Webhook processed (legacy path): event_id=%s, event_type=%s, tenant_id=%s, request_id=%s",
         event_id,
         payload.event_type,
         payload.tenant_id,
         request_id,
     )
-    return WebhookResponse(event_id=event_id, status="processed")
+
+    deprecation_headers = _build_deprecation_headers(payload.tenant_id)
+    return JSONResponse(
+        status_code=200,
+        content={"event_id": event_id, "status": "processed"},
+        headers=deprecation_headers,
+    )

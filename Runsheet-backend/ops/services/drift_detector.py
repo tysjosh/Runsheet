@@ -5,25 +5,82 @@ Compares Dinee source state against Runsheet read-model state (Elasticsearch)
 to detect data divergence. Supports shipment count/status comparison and rider
 status comparison for a given tenant and time range.
 
+Additionally supports per-channel order drift detection (design §11):
+- A ``DriftSourceRegistry`` maps ``channel_type → DriftSourceAdapter``
+- Channels without a registered adapter emit ``drift_api_unavailable``
+- Compares via ``_compare_orders(source, es, channel_id)`` and emits
+  ``DivergentRecord(entity_type="order", ...)``
+
 Logs divergent records with entity_id, expected state, and actual state.
 Emits WARN alert when drift exceeds a configurable threshold (default 1%).
 
-Validates: Requirements 25.1-25.6
+Validates: Requirements 25.1-25.6, 7.1.1-7.1.5
 """
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Protocol
 
 import httpx
 from pydantic import BaseModel
 
 from config.settings import Settings
+from fuel.services.order_metrics import orders_drift_alert_total
 from ops.middleware.tenant_guard import inject_tenant_filter
 from ops.services.ops_es_service import OpsElasticsearchService
-from ops.services.ops_metrics import ops_drift_percentage
+from ops.services.ops_metrics import ops_drift_percentage, REGISTRY
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# DriftSourceAdapter protocol + registry
+# ---------------------------------------------------------------------------
+
+class DriftSourceAdapter(Protocol):
+    """Protocol for upstream drift source adapters.
+
+    Each adapter knows how to fetch upstream orders for a specific
+    channel type within a time range.
+    """
+
+    async def fetch_upstream_orders(
+        self,
+        channel: Any,
+        start_time: Optional[datetime],
+        end_time: Optional[datetime],
+    ) -> List[Dict[str, Any]]:
+        """Return upstream orders for the given channel and time range.
+
+        Each returned dict MUST contain at minimum:
+        - ``order_id``: str
+        - ``status``: str
+        """
+        ...
+
+
+class DriftSourceRegistry:
+    """Maps channel_type → DriftSourceAdapter.
+
+    Channels without a registered adapter report ``drift_api_unavailable``
+    and the detector continues with other channels.
+    """
+
+    def __init__(self) -> None:
+        self._adapters: Dict[str, DriftSourceAdapter] = {}
+
+    def register(self, channel_type: str, adapter: DriftSourceAdapter) -> None:
+        """Register a drift source adapter for a channel type."""
+        self._adapters[channel_type] = adapter
+
+    def get_or_none(self, channel_type: str) -> Optional[DriftSourceAdapter]:
+        """Return the adapter for the channel type, or None if unavailable."""
+        return self._adapters.get(channel_type)
+
+    @property
+    def registered_types(self) -> List[str]:
+        """Return all registered channel types."""
+        return list(self._adapters.keys())
 
 
 # ---------------------------------------------------------------------------
@@ -49,6 +106,9 @@ class DriftResult(BaseModel):
     rider_count_runsheet: int = 0
     divergent_shipments: List[Dict[str, Any]] = []
     divergent_riders: List[Dict[str, Any]] = []
+    # Per-channel order drift (design §11)
+    channel_statuses: Dict[str, str] = {}
+    divergent_orders: List[Dict[str, Any]] = []
     drift_percentage: float = 0.0
     alert_triggered: bool = False
 
@@ -69,6 +129,8 @@ class DriftDetector:
     - Req 25.3: Log divergent records with entity_id, expected state, actual state.
     - Req 25.5: Support scheduled runs at configurable interval (default 6h).
     - Req 25.6: Emit WARN when drift exceeds configurable threshold (default 1%).
+    - Req 7.1.1-7.1.5: Per-channel order drift detection with
+      DriftSourceRegistry, _compare_orders, and entity_type buckets.
     """
 
     DEFAULT_THRESHOLD_PCT: float = 1.0
@@ -81,6 +143,8 @@ class DriftDetector:
         *,
         threshold_pct: Optional[float] = None,
         schedule_interval_hours: Optional[int] = None,
+        intake_channel_repo: Optional[Any] = None,
+        drift_source_registry: Optional[DriftSourceRegistry] = None,
     ):
         self._ops_es = ops_es
         self._settings = settings
@@ -93,6 +157,12 @@ class DriftDetector:
             schedule_interval_hours
             if schedule_interval_hours is not None
             else self.DEFAULT_SCHEDULE_INTERVAL_HOURS
+        )
+        self._intake_channel_repo = intake_channel_repo
+        self._drift_source_registry = (
+            drift_source_registry
+            if drift_source_registry is not None
+            else DriftSourceRegistry()
         )
 
     # ------------------------------------------------------------------
@@ -108,12 +178,12 @@ class DriftDetector:
         """
         Execute a full drift detection run for *tenant_id*.
 
-        Validates: Req 25.1-25.6
+        Validates: Req 25.1-25.6, 7.1.1-7.1.5
         """
         now = datetime.now(timezone.utc)
         result = DriftResult(tenant_id=tenant_id, checked_at=now)
 
-        # --- Shipment drift (Req 25.1) ---
+        # --- Shipment drift (Req 25.1) — preserved during deprecation ---
         dinee_shipments = await self._fetch_dinee_shipments(
             tenant_id, start_time, end_time,
         )
@@ -127,7 +197,7 @@ class DriftDetector:
             dinee_shipments, es_shipments,
         )
 
-        # --- Rider drift (Req 25.2) ---
+        # --- Rider drift (Req 25.2) — preserved during deprecation ---
         dinee_riders = await self._fetch_dinee_riders(tenant_id)
         es_riders = await self._fetch_es_riders(tenant_id)
 
@@ -137,7 +207,12 @@ class DriftDetector:
             dinee_riders, es_riders,
         )
 
+        # --- Per-channel order drift (Req 7.1.1-7.1.5, design §11) ---
+        await self._run_order_drift(tenant_id, start_time, end_time, result)
+
         # --- Calculate drift percentage ---
+        # Include all entity types: shipments (legacy), riders (legacy/driver),
+        # and orders (new)
         total_entities = max(
             result.shipment_count_dinee + result.rider_count_dinee, 1,
         )
@@ -172,6 +247,17 @@ class DriftDetector:
                 rec.get("actual"),
                 tenant_id,
             )
+        for rec in result.divergent_orders:
+            logger.info(
+                "Drift detected — order divergence: entity_id=%s "
+                "field=%s expected=%s actual=%s tenant=%s channel_id=%s",
+                rec.get("entity_id"),
+                rec.get("field"),
+                rec.get("expected"),
+                rec.get("actual"),
+                tenant_id,
+                rec.get("channel_id"),
+            )
 
         # --- Emit WARN alert if threshold exceeded (Req 25.6) ---
         if result.drift_percentage > self.threshold_pct:
@@ -187,6 +273,207 @@ class DriftDetector:
             )
 
         return result
+
+    # ------------------------------------------------------------------
+    # Per-channel order drift (design §11)
+    # ------------------------------------------------------------------
+
+    async def _run_order_drift(
+        self,
+        tenant_id: str,
+        start_time: Optional[datetime],
+        end_time: Optional[datetime],
+        result: DriftResult,
+    ) -> None:
+        """Execute per-channel order drift detection.
+
+        For each enabled intake channel:
+        - If no DriftSourceAdapter is registered for the channel_type,
+          emit ``drift_api_unavailable`` on channel_statuses and continue.
+        - Otherwise, fetch upstream orders and ES orders, compare, and
+          emit DivergentRecord entries with entity_type="order".
+        - When drift_percentage for a channel exceeds the configured
+          threshold, emit the ``orders_drift_alert_total`` metric and
+          log a WARN.
+
+        Validates: Req 7.1.1, 7.1.2, 7.1.3, 7.1.4, 7.1.5
+        """
+        if self._intake_channel_repo is None:
+            return
+
+        try:
+            channels = await self._intake_channel_repo.list_for_tenant(tenant_id)
+        except Exception as exc:
+            logger.warning(
+                "Order drift: failed to list channels for tenant=%s: %s",
+                tenant_id, exc,
+            )
+            return
+
+        for channel in channels:
+            channel_id = channel.channel_id if hasattr(channel, "channel_id") else channel.get("channel_id", "")
+            channel_type = channel.channel_type if hasattr(channel, "channel_type") else channel.get("channel_type", "")
+
+            adapter = self._drift_source_registry.get_or_none(channel_type)
+            if adapter is None:
+                result.channel_statuses[channel_id] = "drift_api_unavailable"
+                continue
+
+            try:
+                source_orders = await adapter.fetch_upstream_orders(
+                    channel, start_time, end_time,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Order drift: adapter fetch failed for channel=%s "
+                    "tenant=%s: %s",
+                    channel_id, tenant_id, exc,
+                )
+                result.channel_statuses[channel_id] = "drift_api_unavailable"
+                continue
+
+            es_orders = await self._fetch_es_orders(
+                tenant_id, channel_id, start_time, end_time,
+            )
+
+            divergences = self._compare_orders(
+                source_orders, es_orders, channel_id,
+            )
+            result.divergent_orders.extend(divergences)
+
+            # Per-channel drift percentage check (Req 7.1.4)
+            total_channel = max(len(source_orders), 1)
+            channel_drift_pct = (len(divergences) / total_channel) * 100
+
+            if channel_drift_pct > self.threshold_pct:
+                orders_drift_alert_total.labels(
+                    tenant_id=tenant_id, channel_id=channel_id,
+                ).inc()
+                logger.warning(
+                    "ORDER DRIFT THRESHOLD EXCEEDED: tenant=%s channel=%s "
+                    "drift=%.2f%% threshold=%.2f%% divergent_orders=%d",
+                    tenant_id,
+                    channel_id,
+                    channel_drift_pct,
+                    self.threshold_pct,
+                    len(divergences),
+                )
+                result.channel_statuses[channel_id] = "drift_alert"
+            else:
+                result.channel_statuses[channel_id] = "ok"
+
+    # ------------------------------------------------------------------
+    # Order comparison (Req 7.1.2, 7.1.3)
+    # ------------------------------------------------------------------
+
+    def _compare_orders(
+        self,
+        source_orders: List[Dict[str, Any]],
+        es_orders: List[Dict[str, Any]],
+        channel_id: str,
+    ) -> List[Dict[str, Any]]:
+        """
+        Compare order records between upstream source and Runsheet ES.
+
+        Catches three divergence shapes:
+        - missing-upstream: order exists in ES but not in the upstream source
+        - missing-runsheet: order exists upstream but not in ES
+        - status-mismatch: order exists in both but status differs
+
+        Validates: Req 7.1.2, 7.1.3
+        """
+        divergent: List[Dict[str, Any]] = []
+
+        source_by_id: Dict[str, Dict[str, Any]] = {
+            o.get("order_id", ""): o for o in source_orders
+        }
+        es_by_id: Dict[str, Dict[str, Any]] = {
+            o.get("order_id", o.get("_id", "")): o for o in es_orders
+        }
+
+        # Orders in upstream source but missing in Runsheet (missing-runsheet)
+        for oid, source_rec in source_by_id.items():
+            if oid not in es_by_id:
+                divergent.append(
+                    DivergentRecord(
+                        entity_id=oid,
+                        entity_type="order",
+                        field="presence",
+                        expected="exists",
+                        actual="missing",
+                    ).model_dump()
+                )
+                continue
+
+            # Status mismatch
+            es_rec = es_by_id[oid]
+            source_status = source_rec.get("status")
+            es_status = es_rec.get("status")
+            if source_status and es_status and source_status != es_status:
+                divergent.append(
+                    DivergentRecord(
+                        entity_id=oid,
+                        entity_type="order",
+                        field="status",
+                        expected=str(source_status),
+                        actual=str(es_status),
+                    ).model_dump()
+                )
+
+        # Orders in Runsheet but missing in upstream (missing-upstream)
+        for oid in es_by_id:
+            if oid not in source_by_id:
+                divergent.append(
+                    DivergentRecord(
+                        entity_id=oid,
+                        entity_type="order",
+                        field="presence",
+                        expected="missing",
+                        actual="exists",
+                    ).model_dump()
+                )
+
+        return divergent
+
+    # ------------------------------------------------------------------
+    # ES fetcher for orders (per-channel)
+    # ------------------------------------------------------------------
+
+    async def _fetch_es_orders(
+        self,
+        tenant_id: str,
+        channel_id: str,
+        start_time: Optional[datetime],
+        end_time: Optional[datetime],
+    ) -> List[Dict[str, Any]]:
+        """Fetch orders from fuel_orders_current for a specific channel."""
+        from fuel.services.order_es_mappings import FUEL_ORDERS_CURRENT_INDEX
+
+        query: Dict[str, Any] = {
+            "query": {
+                "bool": {
+                    "filter": [
+                        {"term": {"intake_channel_id": channel_id}},
+                    ]
+                }
+            }
+        }
+
+        # Apply tenant filter
+        query = inject_tenant_filter(query, tenant_id)
+
+        # Add optional time-range filter
+        if start_time or end_time:
+            range_filter: Dict[str, Any] = {}
+            if start_time:
+                range_filter["gte"] = start_time.isoformat()
+            if end_time:
+                range_filter["lte"] = end_time.isoformat()
+            query["query"]["bool"]["filter"].append(
+                {"range": {"updated_at": range_filter}}
+            )
+
+        return await self._scroll_es_index(FUEL_ORDERS_CURRENT_INDEX, query)
 
     # ------------------------------------------------------------------
     # Dinee API fetchers
@@ -533,6 +820,8 @@ def configure_drift_detector(
     settings: Settings,
     threshold_pct: Optional[float] = None,
     schedule_interval_hours: Optional[int] = None,
+    intake_channel_repo: Optional[Any] = None,
+    drift_source_registry: Optional[DriftSourceRegistry] = None,
 ) -> DriftDetector:
     """
     Wire the module-level DriftDetector instance.
@@ -546,6 +835,8 @@ def configure_drift_detector(
         settings=settings,
         threshold_pct=threshold_pct,
         schedule_interval_hours=schedule_interval_hours,
+        intake_channel_repo=intake_channel_repo,
+        drift_source_registry=drift_source_registry,
     )
     return _drift_detector
 

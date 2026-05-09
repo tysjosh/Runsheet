@@ -1,15 +1,21 @@
 """
 Fuel domain bootstrap module.
 
-Initializes: FuelService, fuel Elasticsearch indices.
+Initializes: FuelService, fuel Elasticsearch indices, order intake
+pipeline repositories, order/webhook endpoint routers, and the
+legacy mirror backfill worker (60-second cadence).
 
-Requirements: 1.1, 1.2
+Requirements: 1.1, 1.2, 2.4, 2.5
 """
+import asyncio
 import logging
 
 from bootstrap.container import ServiceContainer
 
 logger = logging.getLogger(__name__)
+
+# Module-level reference so shutdown can cancel the task.
+_legacy_mirror_backfill_task = None
 
 
 async def initialize(app, container: ServiceContainer) -> None:
@@ -28,6 +34,18 @@ async def initialize(app, container: ServiceContainer) -> None:
     except Exception as e:
         logger.warning("Failed to set up fuel monitoring indices: %s", e)
 
+    # Set up order intake pipeline indices (fuel_orders_current,
+    # fuel_order_events, drivers_current, intake_channels,
+    # pending_legacy_mirrors)
+    try:
+        from fuel.services.order_es_mappings import setup_order_intake_indices
+
+        logger.info("Setting up order intake pipeline indices...")
+        setup_order_intake_indices(es_service)
+        logger.info("Order intake pipeline indices ready")
+    except Exception as e:
+        logger.warning("Failed to set up order intake pipeline indices: %s", e)
+
     # Fuel service
     fuel_service = FuelService(es_service)
     container.fuel_service = fuel_service
@@ -35,3 +53,275 @@ async def initialize(app, container: ServiceContainer) -> None:
     # Wire fuel API
     configure_fuel_api(fuel_service=fuel_service)
     logger.info("Fuel API configured")
+
+    # ---------------------------------------------------------------
+    # Orders WebSocket manager — Requirement 4.1
+    # ---------------------------------------------------------------
+    try:
+        from fuel.websocket.orders_ws import (
+            OrdersWSManager,
+            bind_container as bind_orders_ws,
+        )
+
+        orders_ws_manager = OrdersWSManager()
+        container.orders_ws_manager = orders_ws_manager
+        bind_orders_ws(container)
+        logger.info("Orders WebSocket manager registered")
+    except Exception as e:
+        logger.warning("Failed to register Orders WebSocket manager: %s", e)
+
+    # ---------------------------------------------------------------
+    # Order intake pipeline — repositories + endpoint wiring
+    # ---------------------------------------------------------------
+
+    # Create repositories (only need es_service)
+    try:
+        from fuel.order_repository import FuelOrderRepository
+        from fuel.driver_repository import DriverRepository
+
+        order_repository = FuelOrderRepository(es_service)
+        container.order_repository = order_repository
+
+        driver_repository = DriverRepository(es_service)
+        container.driver_repository = driver_repository
+
+        logger.info("Order and driver repositories registered")
+    except Exception as e:
+        logger.warning("Failed to create order/driver repositories: %s", e)
+        order_repository = None
+        driver_repository = None
+
+    # Build the OrderIntakePipeline with available dependencies.
+    # Some dependencies (credentials_vault, intake_channel_repo) are
+    # registered by later bootstrap modules (agents, integrations).
+    # We use container.has() to gracefully degrade — the pipeline will
+    # still function for dispatcher/bulk paths that don't require HMAC.
+    order_intake_pipeline = None
+    try:
+        from fuel.services.order_intake_pipeline import OrderIntakePipeline
+        from fuel.intake.adapter_base import IntakeAdapterRegistry
+
+        adapter_registry = IntakeAdapterRegistry()
+
+        # Register known adapters
+        try:
+            from fuel.intake.dispatcher_adapter import DispatcherIntakeAdapter
+            adapter_registry.register("dispatcher", "1.0", DispatcherIntakeAdapter())
+        except Exception as exc:
+            logger.warning("Failed to register dispatcher adapter: %s", exc)
+
+        try:
+            from fuel.intake.csv_adapter import CsvIntakeAdapter
+            adapter_registry.register("csv", "1.0", CsvIntakeAdapter())
+        except Exception as exc:
+            logger.warning("Failed to register csv adapter: %s", exc)
+
+        try:
+            from fuel.intake.legacy_dinee_adapter import LegacyDineeShipmentAdapter
+            adapter_registry.register("legacy", "1.0", LegacyDineeShipmentAdapter())
+        except Exception as exc:
+            logger.warning("Failed to register legacy dinee adapter: %s", exc)
+
+        try:
+            from fuel.intake.api_partner_adapter import ApiPartnerGenericAdapter
+            adapter_registry.register("api_partner", "1.0", ApiPartnerGenericAdapter())
+        except Exception as exc:
+            logger.warning("Failed to register api_partner adapter: %s", exc)
+
+        # Gather optional dependencies from the container
+        idempotency_service = (
+            container.ops_idempotency if container.has("ops_idempotency") else None
+        )
+        feature_flag_service = (
+            container.ops_feature_flags if container.has("ops_feature_flags") else None
+        )
+        poison_queue_service = (
+            container.ops_poison_queue if container.has("ops_poison_queue") else None
+        )
+        credentials_vault = (
+            container.credentials_vault if container.has("credentials_vault") else None
+        )
+        intake_channel_repo = (
+            container.intake_channel_repository
+            if container.has("intake_channel_repository")
+            else None
+        )
+        ws_manager = (
+            container.orders_ws_manager if container.has("orders_ws_manager") else None
+        )
+
+        # Legacy OpsWebSocketManager for dual-broadcast during
+        # the deprecation window (Req 4.1.3, 9.3).
+        legacy_ws_manager = (
+            container.ops_ws_manager if container.has("ops_ws_manager") else None
+        )
+
+        # customer_tank_repo — optional, used for tank-ref validation
+        customer_tank_repo = (
+            container.customer_tank_repository
+            if container.has("customer_tank_repository")
+            else None
+        )
+
+        order_intake_pipeline = OrderIntakePipeline(
+            es_service=es_service,
+            intake_channel_repo=intake_channel_repo,
+            adapter_registry=adapter_registry,
+            idempotency_service=idempotency_service,
+            feature_flag_service=feature_flag_service,
+            poison_queue_service=poison_queue_service,
+            ws_manager=ws_manager,
+            credentials_vault=credentials_vault,
+            customer_tank_repo=customer_tank_repo,
+            legacy_ws_manager=legacy_ws_manager,
+        )
+        container.order_intake_pipeline = order_intake_pipeline
+        logger.info("OrderIntakePipeline registered")
+    except Exception as e:
+        logger.warning("Failed to create OrderIntakePipeline: %s", e)
+
+    # Wire order webhook endpoints router
+    try:
+        from fuel.api.order_webhook_endpoints import configure_order_webhook_endpoints
+
+        if order_intake_pipeline is not None:
+            configure_order_webhook_endpoints(
+                order_intake_pipeline=order_intake_pipeline,
+            )
+            logger.info("Order webhook endpoints configured")
+        else:
+            logger.warning(
+                "Order webhook endpoints not configured — "
+                "OrderIntakePipeline unavailable"
+            )
+    except Exception as e:
+        logger.warning("Failed to configure order webhook endpoints: %s", e)
+
+    # Wire order REST endpoints router
+    try:
+        from fuel.api.order_endpoints import configure_order_endpoints
+        from fuel.services.driver_counter_service import DriverCounterService
+
+        driver_counter_service = None
+        if driver_repository is not None:
+            driver_counter_service = DriverCounterService(driver_repo=driver_repository)
+            container.driver_counter_service = driver_counter_service
+
+        if order_intake_pipeline is not None and order_repository is not None:
+            configure_order_endpoints(
+                order_intake_pipeline=order_intake_pipeline,
+                order_repository=order_repository,
+                driver_repository=driver_repository,
+                driver_counter_service=driver_counter_service,
+            )
+            logger.info("Order REST endpoints configured")
+        else:
+            logger.warning(
+                "Order REST endpoints not configured — "
+                "pipeline or repository unavailable"
+            )
+    except Exception as e:
+        logger.warning("Failed to configure order REST endpoints: %s", e)
+
+    # Wire driver REST endpoints router
+    try:
+        from fuel.api.driver_endpoints import configure_driver_endpoints
+
+        if driver_repository is not None:
+            configure_driver_endpoints(driver_repository=driver_repository)
+            logger.info("Driver REST endpoints configured")
+        else:
+            logger.warning(
+                "Driver REST endpoints not configured — "
+                "driver_repository unavailable"
+            )
+    except Exception as e:
+        logger.warning("Failed to configure driver REST endpoints: %s", e)
+
+    # ---------------------------------------------------------------
+    # Legacy mirror backfill worker (60-second cadence)
+    # Validates: Requirements 1.3.2, 9.2
+    # ---------------------------------------------------------------
+    global _legacy_mirror_backfill_task
+
+    try:
+        from fuel.services.legacy_mirror_backfill_worker import (
+            LegacyMirrorBackfillWorker,
+            run_backfill_cycle,
+            WORKER_CADENCE_SECONDS,
+        )
+        from fuel.services.legacy_dual_writer import LegacyDualWriter
+
+        # Build the LegacyDualWriter if not already on the container
+        ops_es_service = (
+            container.ops_es_service if container.has("ops_es_service") else None
+        )
+        poison_queue_service_for_worker = (
+            container.ops_poison_queue if container.has("ops_poison_queue") else None
+        )
+
+        if ops_es_service is not None and poison_queue_service_for_worker is not None:
+            legacy_dual_writer = LegacyDualWriter(
+                ops_es_service=ops_es_service,
+                es_service=es_service,
+            )
+
+            backfill_worker = LegacyMirrorBackfillWorker(
+                es_service=es_service,
+                legacy_dual_writer=legacy_dual_writer,
+                order_repository=order_repository,
+                driver_repository=driver_repository,
+                poison_queue_service=poison_queue_service_for_worker,
+            )
+            container.legacy_mirror_backfill_worker = backfill_worker
+
+            async def _periodic_legacy_mirror_backfill() -> None:
+                """Background task that drains pending_legacy_mirrors."""
+                try:
+                    while True:
+                        await asyncio.sleep(WORKER_CADENCE_SECONDS)
+                        await run_backfill_cycle(backfill_worker)
+                except asyncio.CancelledError:
+                    logger.info("Legacy mirror backfill task cancelled")
+
+            _legacy_mirror_backfill_task = asyncio.create_task(
+                _periodic_legacy_mirror_backfill()
+            )
+            logger.info(
+                "Legacy mirror backfill worker started "
+                "(cadence: %ds)",
+                WORKER_CADENCE_SECONDS,
+            )
+        else:
+            logger.warning(
+                "Legacy mirror backfill worker not started — "
+                "ops_es_service or poison_queue unavailable"
+            )
+    except Exception as e:
+        logger.warning("Failed to start legacy mirror backfill worker: %s", e)
+
+    # ---------------------------------------------------------------
+    # Driver daily reset cron — Requirement 3.2.4
+    # Now registered in bootstrap/scheduling.py where it runs after
+    # the fuel module has placed driver_repository on the container.
+    # ---------------------------------------------------------------
+
+
+async def shutdown(app, container: ServiceContainer) -> None:
+    """Cancel the legacy mirror backfill background task and shut down WS manager."""
+    global _legacy_mirror_backfill_task
+
+    if _legacy_mirror_backfill_task is not None and not _legacy_mirror_backfill_task.done():
+        _legacy_mirror_backfill_task.cancel()
+        try:
+            await _legacy_mirror_backfill_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("Legacy mirror backfill task stopped")
+
+    if container.has("orders_ws_manager"):
+        try:
+            await container.orders_ws_manager.shutdown()
+        except Exception as exc:
+            logger.exception("Orders WS manager shutdown failed: %s", exc)
+
