@@ -23,6 +23,8 @@ from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any, Callable, Optional, TypeVar
 
+from services.time_utils import utcnow
+
 T = TypeVar("T")
 
 
@@ -173,7 +175,7 @@ class CircuitBreaker:
         if self._last_failure_time is None:
             return True
         
-        elapsed = datetime.utcnow() - self._last_failure_time
+        elapsed = utcnow() - self._last_failure_time
         return elapsed >= self.config.recovery_timeout
     
     def _get_time_until_retry(self) -> Optional[timedelta]:
@@ -186,7 +188,7 @@ class CircuitBreaker:
         if self._last_failure_time is None:
             return None
         
-        elapsed = datetime.utcnow() - self._last_failure_time
+        elapsed = utcnow() - self._last_failure_time
         remaining = self.config.recovery_timeout - elapsed
         
         if remaining.total_seconds() <= 0:
@@ -217,7 +219,7 @@ class CircuitBreaker:
         In CLOSED state: Increment failure count, open if threshold reached
         In HALF_OPEN state: Transition back to OPEN
         """
-        self._last_failure_time = datetime.utcnow()
+        self._last_failure_time = utcnow()
         
         if self._state == CircuitState.HALF_OPEN:
             # Failed test call - reopen the circuit

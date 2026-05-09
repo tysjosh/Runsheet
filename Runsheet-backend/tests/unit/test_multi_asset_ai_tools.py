@@ -21,6 +21,10 @@ sys.modules.setdefault("services.elasticsearch_service", _mock_es_module)
 from Agents.tools.search_tools import search_fleet_data  # noqa: E402
 from Agents.tools.summary_tools import get_fleet_summary  # noqa: E402
 from Agents.tools.lookup_tools import find_truck_by_id  # noqa: E402
+from Agents.tools._tenant_context import set_current_tenant  # noqa: E402
+
+
+_TENANT_ID = "tenant-multi-asset-test"
 
 
 # ---------------------------------------------------------------------------
@@ -90,34 +94,54 @@ class TestSearchFleetDataAssetType:
         truck = _make_asset_doc("T-001", "vehicle", "truck", plate_number="GI-58A")
         mock_response = _es_search_response([truck])
 
-        with patch("Agents.tools.search_tools.elasticsearch_service") as mock_es:
+        with patch("Agents.tools.search_tools.elasticsearch_service") as mock_es, \
+                set_current_tenant(_TENANT_ID):
             mock_es.search_documents = AsyncMock(return_value=mock_response)
 
             await search_fleet_data(query="delayed", asset_type="vehicle")
 
             call_args = mock_es.search_documents.call_args
             es_query = call_args[0][1]  # second positional arg is the query body
-            # Should have a bool query with a filter containing asset_type term
-            assert "bool" in es_query["query"]
-            filters = es_query["query"]["bool"]["filter"]
-            asset_type_filter = filters[0]
+            # The tenant filter wraps the query, and the asset_type filter lives
+            # inside the inner bool query that forms the must clause.
+            outer_bool = es_query["query"]["bool"]
+            assert {"term": {"tenant_id": _TENANT_ID}} in outer_bool["filter"]
+            inner_query = outer_bool["must"][0]
+            assert "bool" in inner_query
+            asset_type_filter = inner_query["bool"]["filter"][0]
             assert asset_type_filter == {"term": {"asset_type": "vehicle"}}
 
     @pytest.mark.asyncio
     async def test_no_asset_type_omits_filter(self):
-        """When asset_type is None, no filter is applied — query is a plain multi_match."""
+        """When asset_type is None, the inner query is a plain multi_match (under the tenant wrapper)."""
         mock_response = _es_search_response([])
 
-        with patch("Agents.tools.search_tools.elasticsearch_service") as mock_es:
+        with patch("Agents.tools.search_tools.elasticsearch_service") as mock_es, \
+                set_current_tenant(_TENANT_ID):
             mock_es.search_documents = AsyncMock(return_value=mock_response)
 
             await search_fleet_data(query="delayed", asset_type=None)
 
             call_args = mock_es.search_documents.call_args
             es_query = call_args[0][1]
-            # Should be a plain multi_match, no bool wrapper
-            assert "multi_match" in es_query["query"]
-            assert "bool" not in es_query["query"]
+            outer_bool = es_query["query"]["bool"]
+            assert {"term": {"tenant_id": _TENANT_ID}} in outer_bool["filter"]
+            # Inner must clause is a plain multi_match, no extra asset_type filter
+            assert outer_bool["must"][0] == {
+                "multi_match": {
+                    "query": "delayed",
+                    "fields": [
+                        "cargo.description",
+                        "driver_name",
+                        "status",
+                        "asset_name",
+                        "vessel_name",
+                        "equipment_model",
+                        "container_number",
+                    ],
+                    "type": "best_fields",
+                }
+            }
 
     @pytest.mark.asyncio
     async def test_response_includes_asset_type_labels(self):
@@ -128,7 +152,8 @@ class TestSearchFleetDataAssetType:
         )
         mock_response = _es_search_response([vessel])
 
-        with patch("Agents.tools.search_tools.elasticsearch_service") as mock_es:
+        with patch("Agents.tools.search_tools.elasticsearch_service") as mock_es, \
+                set_current_tenant(_TENANT_ID):
             mock_es.search_documents = AsyncMock(return_value=mock_response)
 
             result = await search_fleet_data(query="Sea Falcon", asset_type="vessel")
@@ -150,6 +175,7 @@ class TestGetFleetSummaryTypeBreakdowns:
         trucks = [
             _make_asset_doc("T-001", "vehicle", "truck", status="on_time"),
         ]
+        trucks_response = _es_search_response(trucks)
         agg_response = _es_agg_response(
             by_type_buckets=[
                 {"key": "vehicle", "doc_count": 5},
@@ -158,9 +184,12 @@ class TestGetFleetSummaryTypeBreakdowns:
             by_subtype_buckets=[],
         )
 
-        with patch("Agents.tools.summary_tools.elasticsearch_service") as mock_es:
-            mock_es.get_all_documents = AsyncMock(return_value=trucks)
-            mock_es.search_documents = AsyncMock(return_value=agg_response)
+        # Two search_documents calls happen: the tenant-scoped trucks fetch
+        # and the aggregation query. Use ``side_effect`` to return each
+        # response in order.
+        with patch("Agents.tools.summary_tools.elasticsearch_service") as mock_es, \
+                set_current_tenant(_TENANT_ID):
+            mock_es.search_documents = AsyncMock(side_effect=[trucks_response, agg_response])
 
             result = await get_fleet_summary()
 
@@ -174,6 +203,7 @@ class TestGetFleetSummaryTypeBreakdowns:
         trucks = [
             _make_asset_doc("T-001", "vehicle", "truck", status="on_time"),
         ]
+        trucks_response = _es_search_response(trucks)
         agg_response = _es_agg_response(
             by_type_buckets=[],
             by_subtype_buckets=[
@@ -183,9 +213,9 @@ class TestGetFleetSummaryTypeBreakdowns:
             ],
         )
 
-        with patch("Agents.tools.summary_tools.elasticsearch_service") as mock_es:
-            mock_es.get_all_documents = AsyncMock(return_value=trucks)
-            mock_es.search_documents = AsyncMock(return_value=agg_response)
+        with patch("Agents.tools.summary_tools.elasticsearch_service") as mock_es, \
+                set_current_tenant(_TENANT_ID):
+            mock_es.search_documents = AsyncMock(side_effect=[trucks_response, agg_response])
 
             result = await get_fleet_summary()
 
@@ -201,10 +231,14 @@ class TestGetFleetSummaryTypeBreakdowns:
             _make_asset_doc("T-001", "vehicle", "truck", status="on_time"),
             _make_asset_doc("T-002", "vehicle", "truck", status="delayed"),
         ]
+        trucks_response = _es_search_response(trucks)
 
-        with patch("Agents.tools.summary_tools.elasticsearch_service") as mock_es:
-            mock_es.get_all_documents = AsyncMock(return_value=trucks)
-            mock_es.search_documents = AsyncMock(side_effect=Exception("ES agg error"))
+        with patch("Agents.tools.summary_tools.elasticsearch_service") as mock_es, \
+                set_current_tenant(_TENANT_ID):
+            # First call (trucks fetch) succeeds; second call (aggregation) blows up.
+            mock_es.search_documents = AsyncMock(
+                side_effect=[trucks_response, Exception("ES agg error")]
+            )
 
             result = await get_fleet_summary()
 
@@ -232,8 +266,9 @@ class TestFindTruckByIdMultiAsset:
             draft_meters=5.2, vessel_capacity_tonnes=1200.0,
         )
 
-        with patch("Agents.tools.lookup_tools.elasticsearch_service") as mock_es:
-            mock_es.get_all_documents = AsyncMock(return_value=[vessel])
+        with patch("Agents.tools.lookup_tools.elasticsearch_service") as mock_es, \
+                set_current_tenant(_TENANT_ID):
+            mock_es.search_documents = AsyncMock(return_value=_es_search_response([vessel]))
 
             result = await find_truck_by_id(truck_identifier="Sea Falcon")
 
@@ -250,8 +285,9 @@ class TestFindTruckByIdMultiAsset:
             lifting_capacity_tonnes=50.0, operational_radius_meters=30.0,
         )
 
-        with patch("Agents.tools.lookup_tools.elasticsearch_service") as mock_es:
-            mock_es.get_all_documents = AsyncMock(return_value=[crane])
+        with patch("Agents.tools.lookup_tools.elasticsearch_service") as mock_es, \
+                set_current_tenant(_TENANT_ID):
+            mock_es.search_documents = AsyncMock(return_value=_es_search_response([crane]))
 
             result = await find_truck_by_id(truck_identifier="Crane 7")
 
@@ -269,8 +305,9 @@ class TestFindTruckByIdMultiAsset:
             contents_description="Electronics", weight_tonnes=18.5,
         )
 
-        with patch("Agents.tools.lookup_tools.elasticsearch_service") as mock_es:
-            mock_es.get_all_documents = AsyncMock(return_value=[container])
+        with patch("Agents.tools.lookup_tools.elasticsearch_service") as mock_es, \
+                set_current_tenant(_TENANT_ID):
+            mock_es.search_documents = AsyncMock(return_value=_es_search_response([container]))
 
             result = await find_truck_by_id(truck_identifier="CONT-123")
 
@@ -286,8 +323,9 @@ class TestFindTruckByIdMultiAsset:
             asset_name="River Barge 3", vessel_name="River Barge 3",
         )
 
-        with patch("Agents.tools.lookup_tools.elasticsearch_service") as mock_es:
-            mock_es.get_all_documents = AsyncMock(return_value=[vessel])
+        with patch("Agents.tools.lookup_tools.elasticsearch_service") as mock_es, \
+                set_current_tenant(_TENANT_ID):
+            mock_es.search_documents = AsyncMock(return_value=_es_search_response([vessel]))
 
             result = await find_truck_by_id(truck_identifier="River Barge 3")
 
@@ -306,8 +344,9 @@ class TestFindTruckByIdMultiAsset:
             draft_meters=5.2, vessel_capacity_tonnes=1200.0,
         )
 
-        with patch("Agents.tools.lookup_tools.elasticsearch_service") as mock_es:
-            mock_es.get_all_documents = AsyncMock(return_value=[vessel])
+        with patch("Agents.tools.lookup_tools.elasticsearch_service") as mock_es, \
+                set_current_tenant(_TENANT_ID):
+            mock_es.search_documents = AsyncMock(return_value=_es_search_response([vessel]))
 
             result = await find_truck_by_id(truck_identifier="Sea Falcon")
 
@@ -325,8 +364,9 @@ class TestFindTruckByIdMultiAsset:
             lifting_capacity_tonnes=50.0, operational_radius_meters=30.0,
         )
 
-        with patch("Agents.tools.lookup_tools.elasticsearch_service") as mock_es:
-            mock_es.get_all_documents = AsyncMock(return_value=[crane])
+        with patch("Agents.tools.lookup_tools.elasticsearch_service") as mock_es, \
+                set_current_tenant(_TENANT_ID):
+            mock_es.search_documents = AsyncMock(return_value=_es_search_response([crane]))
 
             result = await find_truck_by_id(truck_identifier="Crane 7")
 
@@ -344,8 +384,9 @@ class TestFindTruckByIdMultiAsset:
             contents_description="Electronics", weight_tonnes=18.5,
         )
 
-        with patch("Agents.tools.lookup_tools.elasticsearch_service") as mock_es:
-            mock_es.get_all_documents = AsyncMock(return_value=[container])
+        with patch("Agents.tools.lookup_tools.elasticsearch_service") as mock_es, \
+                set_current_tenant(_TENANT_ID):
+            mock_es.search_documents = AsyncMock(return_value=_es_search_response([container]))
 
             result = await find_truck_by_id(truck_identifier="CONT-123")
 

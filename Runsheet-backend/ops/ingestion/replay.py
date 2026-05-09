@@ -346,8 +346,12 @@ class ReplayService:
         event_id = record.get("event_id", "")
 
         # --- Idempotency check (same as webhook receiver, Req 3.4) ---
+        # Tenant-scoped so replaying the same event_id under a different
+        # tenant is not silently discarded as a duplicate.
         try:
-            if event_id and await self._idempotency.is_duplicate(event_id):
+            if event_id and await self._idempotency.is_duplicate(
+                event_id, tenant_id=tenant_id
+            ):
                 job.skipped_count += 1
                 return
         except Exception as exc:
@@ -424,7 +428,9 @@ class ReplayService:
         # --- Mark as processed in idempotency store ---
         try:
             if event_id:
-                await self._idempotency.mark_processed(event_id)
+                await self._idempotency.mark_processed(
+                    event_id, tenant_id=tenant_id
+                )
         except Exception as exc:
             logger.warning(
                 "Failed to mark replay event_id=%s as processed: %s",

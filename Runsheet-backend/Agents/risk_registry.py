@@ -127,7 +127,9 @@ class RiskRegistry:
                 if tenant_id
                 else f"risk_override:{tool_name}"
             )
-            await self._redis.set(key, level.value)
+            # 30-day TTL refreshed on every write so active overrides
+            # survive restarts but deleted tenants don't leak keys.
+            await self._redis.set(key, level.value, ex=30 * 24 * 60 * 60)
         else:
             logger.warning(
                 "Cannot set risk override for %s: no Redis client configured",

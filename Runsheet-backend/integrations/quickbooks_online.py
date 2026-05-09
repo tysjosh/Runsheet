@@ -1159,7 +1159,13 @@ class QuickBooksOnlineConnector(IntegrationConnector):
             if incr is None:  # pragma: no cover - alternative client
                 raw = await self._redis.get(key)
                 current = (int(raw) if raw else 0) + 1
-                await self._redis.set(key, str(current))
+                # Fallback path has no INCR, so we must set the TTL
+                # inline with the SET to avoid a counter that never
+                # rolls over. Mirrors the primary-path ``expire()`` call
+                # below so the minute-bucket semantics are identical.
+                await self._redis.set(
+                    key, str(current), ex=RATE_LIMIT_KEY_TTL_SECONDS
+                )
             else:
                 current = await incr(key)
             expire = getattr(self._redis, "expire", None)

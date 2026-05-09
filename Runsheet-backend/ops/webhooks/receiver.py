@@ -306,7 +306,12 @@ async def receive_dinee_webhook(
         return WebhookResponse(event_id=event_id, status="queued_for_review")
 
     # --- 4. Idempotency check (Req 1.4, 1.5) ---
-    if _idempotency_service and await _idempotency_service.is_duplicate(event_id):
+    # Tenant-scoped so two tenants with the same upstream event_id cannot
+    # collide (fairly common when upstream providers replay a known event
+    # id under each tenant's webhook secret).
+    if _idempotency_service and await _idempotency_service.is_duplicate(
+        event_id, tenant_id=payload.tenant_id
+    ):
         logger.debug(
             "Duplicate event_id=%s, returning 200 without reprocessing, request_id=%s",
             event_id,
@@ -397,7 +402,9 @@ async def receive_dinee_webhook(
 
     # --- 7. Mark event_id as processed (Req 1.7) ---
     if _idempotency_service:
-        await _idempotency_service.mark_processed(event_id)
+        await _idempotency_service.mark_processed(
+            event_id, tenant_id=payload.tenant_id
+        )
 
     # --- 8. Return success (Req 1.8) ---
     ingest_elapsed = time.monotonic() - ingest_start

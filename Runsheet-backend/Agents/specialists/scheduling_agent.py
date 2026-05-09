@@ -27,6 +27,7 @@ from Agents.tools import (
     cancel_job,
     create_job,
 )
+from Agents.tools._tenant_context import set_current_tenant
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +94,10 @@ class SchedulingAgent:
     async def handle(self, task: str, context: dict = None) -> str:
         """Process a scheduling-related subtask.
 
+        Binds the tenant id from ``context`` to the tool ContextVar before
+        dispatching the Strands agent so every ES-reading tool runs
+        tenant-scoped.
+
         Args:
             task: The natural language task to process.
             context: Optional context dict (e.g. tenant_id, session_id).
@@ -101,12 +106,14 @@ class SchedulingAgent:
             The agent's response as a string.
         """
         prompt = task
+        tenant_id = (context or {}).get("tenant_id")
         if context:
             ctx_parts = []
-            if context.get("tenant_id"):
-                ctx_parts.append(f"Tenant: {context['tenant_id']}")
+            if tenant_id:
+                ctx_parts.append(f"Tenant: {tenant_id}")
             if ctx_parts:
                 prompt = f"[Context: {', '.join(ctx_parts)}]\n{task}"
 
-        result = await self.agent.invoke_async(prompt)
+        with set_current_tenant(tenant_id):
+            result = await self.agent.invoke_async(prompt)
         return str(result)

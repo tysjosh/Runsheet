@@ -245,13 +245,18 @@ async def shutdown(app, container: ServiceContainer) -> None:
     if container.has("retry_pipeline"):
         try:
             container.retry_pipeline.stop()
-        except Exception:
-            pass
+        except Exception as exc:
+            # Shutdown path: log loudly, don't propagate. Without this
+            # log operators couldn't tell a clean shutdown from one that
+            # leaked the retry loop.
+            logger.exception("Retry pipeline stop failed: %s", exc)
 
     if container.has("notification_ws_manager"):
         try:
             await container.notification_ws_manager.shutdown()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.exception(
+                "Notification WS manager shutdown failed: %s", exc
+            )
 
     logger.info("Notifications domain shut down")

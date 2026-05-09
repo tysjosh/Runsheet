@@ -184,6 +184,45 @@ class Settings(BaseSettings):
         description="Algorithm used for JWT signing (default: HS256)"
     )
 
+    # Dev-tenant JWT bypass — intentionally off by default.
+    #
+    # The tenant guard in ``ops/middleware/tenant_guard.py`` has historically
+    # granted unauthenticated requests a super-admin ``dev-tenant`` context
+    # whenever ``ENVIRONMENT=development``. That single-flag posture means a
+    # shared preview/staging deployment with the wrong env var hands out
+    # anonymous super-admin access. This second flag MUST also be true for
+    # the bypass to activate, so misconfiguring one knob is no longer enough
+    # to open the door. Default False. Set to True only in local developer
+    # loops where no real tenant data is reachable.
+    allow_dev_tenant_bypass: bool = Field(
+        default=False,
+        description=(
+            "Allow the ops/middleware/tenant_guard to fall back to a "
+            "dev-tenant super-admin context when no Authorization header is "
+            "present. Only honoured when environment=='development' AND "
+            "this flag is True. Default False."
+        ),
+    )
+
+    # Demo data seeding at startup.
+    #
+    # Historically ``bootstrap/core.py`` called
+    # ``data_seeder.seed_baseline_data`` unconditionally at every boot,
+    # which rewrote synthetic data into the live Elasticsearch cluster
+    # and contaminated any real tenant's indices. The seeding is now
+    # gated behind this flag AND stamps ``tenant_id="demo"`` on every
+    # seeded document so even when enabled it cannot leak into real
+    # tenant reads (which all require a specific ``tenant_id`` filter).
+    # Default False. Flip on only in local developer loops.
+    seed_demo_data: bool = Field(
+        default=False,
+        description=(
+            "When True, bootstrap/core.py calls data_seeder.seed_baseline_data "
+            "at startup. Seeded docs are stamped with tenant_id='demo' so they "
+            "cannot leak into real tenant queries. Default False."
+        ),
+    )
+
     # Circuit Breaker Configuration
     circuit_breaker_failure_threshold: int = Field(
         default=3,

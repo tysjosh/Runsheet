@@ -23,6 +23,8 @@ except ImportError:
     # Fallback if middleware not available (e.g., during testing)
     request_id_var: ContextVar[str] = ContextVar("request_id", default="")
 
+from services.time_utils import utcnow
+
 
 class JSONFormatter(logging.Formatter):
     """
@@ -54,7 +56,7 @@ class JSONFormatter(logging.Formatter):
         """
         # Build the base log data structure
         log_data: Dict[str, Any] = {
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": utcnow().isoformat(),
             "level": record.levelname,
             "message": record.getMessage(),
             "logger": record.name,

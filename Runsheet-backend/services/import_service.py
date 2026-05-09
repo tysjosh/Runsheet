@@ -26,6 +26,7 @@ from services.import_models import (
     ValidationResult,
 )
 from services.schema_templates import SchemaTemplates
+from services.time_utils import utcnow
 from services.validation_engine import ValidationEngine
 
 logger = logging.getLogger(__name__)
@@ -74,7 +75,7 @@ class _ActiveSession:
         self.field_mapping: dict[str, str] = {}
         self.validation_result: Optional[ValidationResult] = None
         self.status: ImportStatus = ImportStatus.PARSING
-        self.created_at: str = datetime.utcnow().isoformat() + "Z"
+        self.created_at: str = utcnow().isoformat()
 
 
 class ImportService:
@@ -544,7 +545,7 @@ class ImportService:
             errors=result.errors,
             field_mapping=session.field_mapping,
             created_at=session.created_at,
-            completed_at=datetime.utcnow().isoformat() + "Z",
+            completed_at=utcnow().isoformat(),
             duration_seconds=round(duration, 3),
         )
 

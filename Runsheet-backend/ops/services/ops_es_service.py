@@ -19,6 +19,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from services.elasticsearch_service import ElasticsearchService
+from services.time_utils import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -295,7 +296,7 @@ class OpsElasticsearchService:
         Validates: Req 5.6
         """
         alias_name = self.SHIPMENT_EVENTS
-        current_month = datetime.utcnow().strftime("%Y-%m")
+        current_month = utcnow().strftime("%Y-%m")
         concrete_index = f"{alias_name}-{current_month}"
 
         try:

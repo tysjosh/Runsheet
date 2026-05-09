@@ -97,7 +97,10 @@ class AutonomyConfigService:
         if self._redis:
             try:
                 key = f"tenant:{tenant_id}:autonomy_level"
-                await self._redis.set(key, level)
+                # 30-day TTL refreshed on every write so an active
+                # tenant's autonomy level never expires but deleted
+                # tenants don't leak keys indefinitely.
+                await self._redis.set(key, level, ex=30 * 24 * 60 * 60)
             except Exception as e:
                 logger.error(
                     "Failed to set autonomy level for tenant %s: %s",

@@ -364,8 +364,14 @@ class OpsWebSocketManager(BaseWSManager):
                     for ws in stale:
                         try:
                             await ws.close(code=1000, reason="stale")
-                        except Exception:
-                            pass
+                        except Exception as close_exc:
+                            # Stale WS: the other end often hung up
+                            # already. Debug-log so we can still see the
+                            # pattern in noisy environments.
+                            logger.debug(
+                                "Stale ops WS close failed (already gone?): %s",
+                                close_exc,
+                            )
                     logger.info(
                         "Disconnected %d stale ops WS clients",
                         len(stale),
@@ -448,8 +454,11 @@ class OpsWebSocketManager(BaseWSManager):
             for ws in list(self._clients.keys()):
                 try:
                     await ws.close(code=1000, reason="shutdown")
-                except Exception:
-                    pass
+                except Exception as close_exc:
+                    logger.debug(
+                        "Ops WS shutdown close failed for client: %s",
+                        close_exc,
+                    )
             self._clients.clear()
 
         logger.info("%s WS manager shut down", self.manager_name)

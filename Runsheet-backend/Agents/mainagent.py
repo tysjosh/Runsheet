@@ -22,6 +22,7 @@ from strands import Agent
 from strands.models.litellm import LiteLLMModel
 from dotenv import load_dotenv
 from .tools import ALL_TOOLS
+from .tools._tenant_context import set_current_tenant
 from config.settings import get_settings
 from resilience.circuit_breaker import CircuitBreaker, CircuitBreakerConfig, CircuitOpenException
 from errors.codes import ErrorCode
@@ -534,11 +535,18 @@ class LogisticsAgent:
         except Exception as e:
             logger.error(f"Failed to clear agent memory: {e}")
 
-    async def chat_streaming(self, message: str, mode: str = "chat", session_id: Optional[str] = None) -> AsyncGenerator[dict, None]:
+    async def chat_streaming(
+        self,
+        message: str,
+        mode: str = "chat",
+        session_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+    ) -> AsyncGenerator[dict, None]:
         """
-        Asynchronous streaming chat method with circuit breaker protection, 
-        retry logic, session persistence, and orchestrator routing.
-        
+        Asynchronous streaming chat method with circuit breaker protection,
+        retry logic, session persistence, tenant scoping, and orchestrator
+        routing.
+
         When an ``AgentOrchestrator`` has been configured via
         ``configure_orchestrator``, requests are routed through the
         multi-agent orchestrator which delegates to specialist agents.
@@ -547,7 +555,9 @@ class LogisticsAgent:
 
         When no orchestrator is available the method falls back to the
         legacy direct Strands agent invocation with full circuit breaker
-        and retry support.
+        and retry support. In that fallback, the tenant ContextVar is
+        bound for the duration of the streaming generator so every
+        ES-reading tool runs tenant-scoped.
         
         Validates:
         - Requirement 3.5: Implement circuit breakers for Gemini API
@@ -559,11 +569,16 @@ class LogisticsAgent:
         - Requirement 8.2: Load conversation history from Session_Store
         - Requirement 8.3: Persist updated conversation history to Session_Store
         - Requirement 8.6: Gracefully degrade when Session_Store is unavailable
-        
+        - Requirements 9.2, 9.4: Enforce tenant scoping on every ES read
+
         Args:
             message: The user's message to process.
             mode: Chat mode - "chat" or "agent".
             session_id: Optional session identifier for conversation persistence.
+            tenant_id: Optional tenant identifier for data scoping. When provided
+                it is bound to the tool ContextVar so every ES-reading tool in
+                the legacy fallback runs tenant-scoped. The orchestrator path
+                passes tenant_id through its own API.
         """
         max_retries = 3
         retry_count = 0
@@ -592,10 +607,14 @@ class LogisticsAgent:
         if _orchestrator is not None:
             try:
                 logger.info("🔀 Routing request through AgentOrchestrator")
-                tenant_id = "dev-tenant"
+                # Tenant id comes from the caller (injected by the /api/chat
+                # handler from the authenticated ``TenantContext``). Fall back
+                # to the legacy ``dev-tenant`` if the caller did not provide
+                # one — defence-in-depth rather than a blanket accept.
+                effective_tenant_id = tenant_id or "dev-tenant"
                 orchestrator_response = await _orchestrator.route(
                     user_message=message,
-                    tenant_id=tenant_id,
+                    tenant_id=effective_tenant_id,
                     session_id=session_id,
                 )
 
@@ -632,7 +651,9 @@ class LogisticsAgent:
         # ------------------------------------------------------------------
         # Direct agent invocation (legacy fallback)
         # Used when no orchestrator is configured or when orchestrator
-        # routing fails.
+        # routing fails. Bind the tenant ContextVar for the duration of
+        # the streaming generator so any ES-reading tool the LLM invokes
+        # is tenant-scoped.
         # ------------------------------------------------------------------
 
         # Check circuit breaker state before attempting
@@ -657,14 +678,20 @@ class LogisticsAgent:
                 got_response = False
                 first_token_time = None
                 
-                # Wrap the streaming call with circuit breaker tracking
+                # Wrap the streaming call with circuit breaker tracking and
+                # with the tenant ContextVar bound so tools see the caller's
+                # tenant. Fall back to dev-tenant only when the caller did
+                # not provide one (legacy path).
+                effective_tenant_id = tenant_id or "dev-tenant"
+
                 async def _stream_with_tracking():
                     nonlocal got_response, first_token_time
-                    async for event in self.agent.stream_async(message_to_send):
-                        if not got_response:
-                            first_token_time = time.time()
-                        got_response = True
-                        yield event
+                    with set_current_tenant(effective_tenant_id):
+                        async for event in self.agent.stream_async(message_to_send):
+                            if not got_response:
+                                first_token_time = time.time()
+                            got_response = True
+                            yield event
                 
                 async for event in _stream_with_tracking():
                     yield event
@@ -779,10 +806,17 @@ class LogisticsAgent:
                     yield self._handle_gemini_api_error(e)
                     return
 
-    async def chat_fallback(self, message: str, mode: str = "chat", session_id: Optional[str] = None) -> str:
+    async def chat_fallback(
+        self,
+        message: str,
+        mode: str = "chat",
+        session_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+    ) -> str:
         """
-        Non-streaming fallback method with circuit breaker protection and session persistence.
-        
+        Non-streaming fallback method with circuit breaker protection, session
+        persistence, and tenant scoping.
+
         Validates:
         - Requirement 3.5: Implement circuit breakers for Gemini API
         - Requirement 2.5: Return specific error code indicating AI service unavailability
@@ -790,11 +824,14 @@ class LogisticsAgent:
         - Requirement 8.2: Load conversation history from Session_Store
         - Requirement 8.3: Persist updated conversation history to Session_Store
         - Requirement 8.6: Gracefully degrade when Session_Store is unavailable
+        - Requirements 9.2, 9.4: Enforce tenant scoping on every ES read
         
         Args:
             message: The user's message to process.
             mode: Chat mode - "chat" or "agent".
             session_id: Optional session identifier for conversation persistence.
+            tenant_id: Optional tenant identifier for data scoping. Bound to the
+                tool ContextVar for the duration of the run.
         """
         start_time = time.time()
         
@@ -824,8 +861,11 @@ class LogisticsAgent:
             
             logger.info("🔄 Using non-streaming fallback mode")
             
-            # Use non-streaming completion
-            response = await self.agent.run_async(message)
+            # Use non-streaming completion. Bind the tenant ContextVar for the
+            # duration of the call so ES-reading tools are tenant-scoped.
+            effective_tenant_id = tenant_id or "dev-tenant"
+            with set_current_tenant(effective_tenant_id):
+                response = await self.agent.run_async(message)
             
             # Record success in circuit breaker
             self._circuit_breaker._on_success()

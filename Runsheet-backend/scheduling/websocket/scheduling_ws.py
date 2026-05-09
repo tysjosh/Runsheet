@@ -276,8 +276,11 @@ class SchedulingWebSocketManager(BaseWSManager):
                     for ws in stale:
                         try:
                             await ws.close(code=1000, reason="stale")
-                        except Exception:
-                            pass
+                        except Exception as close_exc:
+                            logger.debug(
+                                "Stale scheduling WS close failed (already gone?): %s",
+                                close_exc,
+                            )
                     logger.info(
                         "Disconnected %d stale scheduling WS clients",
                         len(stale),
@@ -359,8 +362,11 @@ class SchedulingWebSocketManager(BaseWSManager):
             for ws in list(self._clients.keys()):
                 try:
                     await ws.close(code=1000, reason="shutdown")
-                except Exception:
-                    pass
+                except Exception as close_exc:
+                    logger.debug(
+                        "Scheduling WS shutdown close failed for client: %s",
+                        close_exc,
+                    )
             self._clients.clear()
 
         logger.info("%s WS manager shut down", self.manager_name)

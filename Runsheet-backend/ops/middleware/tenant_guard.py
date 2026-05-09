@@ -138,10 +138,22 @@ async def get_tenant_context(request: Request) -> TenantContext:
     auth_header: str | None = request.headers.get("Authorization")
 
     # In development mode, allow unauthenticated access with a default tenant
-    if (not auth_header or not auth_header.startswith("Bearer ")) and settings_obj.environment.value == "development":
+    # ONLY when the operator has also set ``allow_dev_tenant_bypass=True``.
+    # Two-key posture: flipping ``ENVIRONMENT=development`` alone is no
+    # longer enough to hand out anonymous super-admin access in a shared
+    # preview / staging deployment that was misconfigured, closing the
+    # single-env-var misconfiguration blast radius. Log a loud warning
+    # every time the bypass actually fires so operators can spot it in
+    # logs if it somehow leaks into a non-dev environment.
+    dev_bypass_enabled = (
+        settings_obj.environment.value == "development"
+        and getattr(settings_obj, "allow_dev_tenant_bypass", False)
+    )
+    if (not auth_header or not auth_header.startswith("Bearer ")) and dev_bypass_enabled:
         logger.warning(
-            "Dev mode: returning default tenant context for %s %s "
-            "(dev-tenant fallback should only be active in development)",
+            "Dev-tenant bypass active: returning super-admin dev-tenant context for %s %s "
+            "(ENVIRONMENT=development AND ALLOW_DEV_TENANT_BYPASS=true). "
+            "Disable ALLOW_DEV_TENANT_BYPASS for anything other than local dev.",
             request.method,
             request.url.path,
         )

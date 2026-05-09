@@ -242,11 +242,13 @@ class TestProcessLocationUpdateUsesAssetId:
         result = await service.process_location_update(update)
 
         assert result.success is True
-        # validate_asset_exists should have searched for the asset_id
+        # validate_asset_exists should have searched for the asset_id via a
+        # bool.filter term clause.
         es.search_documents.assert_called()
         search_call = es.search_documents.call_args
         query = search_call[0][1]
-        assert query["query"]["term"]["truck_id"] == "VESSEL-001"
+        filters = query["query"]["bool"]["filter"]
+        assert {"term": {"truck_id": "VESSEL-001"}} in filters
 
     @pytest.mark.asyncio
     async def test_uses_asset_id_for_document_index(self):
@@ -279,4 +281,5 @@ class TestProcessLocationUpdateUsesAssetId:
         # The model_validator copies truck_id → asset_id, so ES lookup uses "T-LEGACY"
         search_call = es.search_documents.call_args
         query = search_call[0][1]
-        assert query["query"]["term"]["truck_id"] == "T-LEGACY"
+        filters = query["query"]["bool"]["filter"]
+        assert {"term": {"truck_id": "T-LEGACY"}} in filters

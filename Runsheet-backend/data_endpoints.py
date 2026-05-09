@@ -7,18 +7,18 @@ Validates:
   per minute per IP address for API endpoints
 """
 
-from fastapi import APIRouter, Depends, UploadFile, File, Form, Request
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, model_validator
 from typing import List, Optional
 from enum import Enum
 from datetime import datetime
-import random
 import logging
 from services.elasticsearch_service import elasticsearch_service
+from services.time_utils import utcnow
 from middleware.rate_limiter import limiter
-from config.settings import get_settings
+from config.settings import Environment, get_settings
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context, inject_tenant_filter
-from errors.exceptions import AppException, internal_error, resource_not_found, validation_error
+from errors.exceptions import AppException, forbidden, internal_error, resource_not_found, validation_error
 
 logger = logging.getLogger(__name__)
 
@@ -320,7 +320,7 @@ async def get_fleet_summary(request: Request, tenant: TenantContext = Depends(ge
         return {
             "data": data,
             "success": True,
-            "timestamp": datetime.now().isoformat()
+            "timestamp": utcnow().isoformat()
         }
     except Exception as e:
         logger.error(f"Error getting fleet summary: {e}")
@@ -385,7 +385,7 @@ async def get_trucks(request: Request, tenant: TenantContext = Depends(get_tenan
         return {
             "data": formatted_trucks,
             "success": True,
-            "timestamp": datetime.now().isoformat()
+            "timestamp": utcnow().isoformat()
         }
     except Exception as e:
         logger.error(f"Error getting trucks: {e}")
@@ -440,7 +440,7 @@ async def get_truck_by_id(truck_id: str, request: Request, tenant: TenantContext
         return {
             "data": formatted_truck,
             "success": True,
-            "timestamp": datetime.now().isoformat()
+            "timestamp": utcnow().isoformat()
         }
     except AppException:
         raise
@@ -551,7 +551,7 @@ async def get_fleet_assets(
         return {
             "data": formatted_assets,
             "success": True,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": utcnow().isoformat(),
         }
     except Exception as e:
         logger.error(f"Error getting fleet assets: {e}")
@@ -577,7 +577,7 @@ async def get_asset_by_id(asset_id: str, request: Request, tenant: TenantContext
         return {
             "data": _format_asset(doc),
             "success": True,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": utcnow().isoformat(),
         }
     except AppException:
         raise
@@ -626,7 +626,7 @@ async def create_fleet_asset(body: CreateAsset, request: Request, tenant: Tenant
                 doc[field] = value
 
         # Set timestamps
-        now = datetime.now().isoformat()
+        now = utcnow().isoformat()
         doc["last_update"] = now
 
         # Index into the trucks index using asset_id as the document ID
@@ -685,7 +685,7 @@ async def update_fleet_asset(asset_id: str, body: UpdateAsset, request: Request,
         if not partial_doc:
             raise validation_error(message="No fields provided for update")
 
-        partial_doc["last_update"] = datetime.now().isoformat()
+        partial_doc["last_update"] = utcnow().isoformat()
 
         # Verify the asset belongs to this tenant before updating
         verify_query = inject_tenant_filter(
@@ -711,7 +711,7 @@ async def update_fleet_asset(asset_id: str, body: UpdateAsset, request: Request,
         return {
             "data": _format_asset(updated_doc),
             "success": True,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": utcnow().isoformat(),
         }
     except AppException:
         raise
@@ -753,7 +753,7 @@ async def get_support_tickets(request: Request, tenant: TenantContext = Depends(
         return {
             "data": formatted_tickets,
             "success": True,
-            "timestamp": datetime.now().isoformat()
+            "timestamp": utcnow().isoformat()
         }
     except Exception as e:
         logger.error(f"Error getting support tickets: {e}")
@@ -763,41 +763,41 @@ async def get_support_tickets(request: Request, tenant: TenantContext = Depends(
 @router.get("/analytics/metrics")
 @limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
 async def get_analytics_metrics(request: Request, tenant: TenantContext = Depends(get_tenant_context), timeRange: str = "7d"):
-    metrics = await elasticsearch_service.get_current_metrics()
+    metrics = await elasticsearch_service.get_current_metrics(tenant.tenant_id)
     return {
         "data": metrics,
         "success": True,
-        "timestamp": datetime.now().isoformat()
+        "timestamp": utcnow().isoformat()
     }
 
 @router.get("/analytics/routes")
 @limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
 async def get_route_performance(request: Request, tenant: TenantContext = Depends(get_tenant_context)):
-    routes = await elasticsearch_service.get_route_performance_data()
+    routes = await elasticsearch_service.get_route_performance_data(tenant.tenant_id)
     return {
         "data": routes,
         "success": True,
-        "timestamp": datetime.now().isoformat()
+        "timestamp": utcnow().isoformat()
     }
 
 @router.get("/analytics/delay-causes")
 @limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
 async def get_delay_causes(request: Request, tenant: TenantContext = Depends(get_tenant_context)):
-    causes = await elasticsearch_service.get_delay_causes_data()
+    causes = await elasticsearch_service.get_delay_causes_data(tenant.tenant_id)
     return {
         "data": causes,
         "success": True,
-        "timestamp": datetime.now().isoformat()
+        "timestamp": utcnow().isoformat()
     }
 
 @router.get("/analytics/regional")
 @limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
 async def get_regional_performance(request: Request, tenant: TenantContext = Depends(get_tenant_context)):
-    regions = await elasticsearch_service.get_regional_performance_data()
+    regions = await elasticsearch_service.get_regional_performance_data(tenant.tenant_id)
     return {
         "data": regions,
         "success": True,
-        "timestamp": datetime.now().isoformat()
+        "timestamp": utcnow().isoformat()
     }
 
 @router.get("/analytics/time-series")
@@ -805,14 +805,14 @@ async def get_regional_performance(request: Request, tenant: TenantContext = Dep
 async def get_time_series_data(request: Request, tenant: TenantContext = Depends(get_tenant_context), metric: str = "delivery_performance_pct", timeRange: str = "7d"):
     """Get time-series data for trending charts"""
     event_type = "hourly_metrics" if timeRange == "24h" else "daily_performance"
-    data = await elasticsearch_service.get_time_series_data(event_type, metric, timeRange)
+    data = await elasticsearch_service.get_time_series_data(tenant.tenant_id, event_type, metric, timeRange)
     
     return {
         "data": data,
         "metric": metric,
         "timeRange": timeRange,
         "success": True,
-        "timestamp": datetime.now().isoformat()
+        "timestamp": utcnow().isoformat()
     }
 
 # Semantic Search
@@ -825,7 +825,7 @@ async def semantic_search(request: Request, q: str, tenant: TenantContext = Depe
     try:
         if index == "trucks":
             results = await elasticsearch_service.semantic_search(
-                "trucks", q, ["cargo.description", "driver_name"], limit
+                tenant.tenant_id, "trucks", q, ["cargo.description", "driver_name"], limit
             )
             formatted_results = []
             for result in results:
@@ -840,7 +840,7 @@ async def semantic_search(request: Request, q: str, tenant: TenantContext = Depe
                 
         elif index == "support_tickets":
             results = await elasticsearch_service.semantic_search(
-                "support_tickets", q, ["issue", "description"], limit
+                tenant.tenant_id, "support_tickets", q, ["issue", "description"], limit
             )
             formatted_results = []
             for result in results:
@@ -861,7 +861,7 @@ async def semantic_search(request: Request, q: str, tenant: TenantContext = Depe
             "query": q,
             "index": index,
             "success": True,
-            "timestamp": datetime.now().isoformat()
+            "timestamp": utcnow().isoformat()
         }
     except AppException as exc:
         # Handle missing index gracefully — return empty results
@@ -873,7 +873,7 @@ async def semantic_search(request: Request, q: str, tenant: TenantContext = Depe
                 "query": q,
                 "index": index,
                 "success": True,
-                "timestamp": datetime.now().isoformat()
+                "timestamp": utcnow().isoformat()
             }
         raise
     except Exception as e:
@@ -885,55 +885,77 @@ async def semantic_search(request: Request, q: str, tenant: TenantContext = Depe
                 "query": q,
                 "index": index,
                 "success": True,
-                "timestamp": datetime.now().isoformat()
+                "timestamp": utcnow().isoformat()
             }
         logger.error(f"Error in semantic search: {e}")
         raise internal_error(message="Failed to perform semantic search", details={"error": str(e)})
 
 # Data Management
+#
+# ``POST /api/data/cleanup`` is the highest blast-radius endpoint in the
+# file: ``data_seeder.clear_all_data`` runs ``delete_by_query {"match_all":{}}``
+# across every shared index (``trucks`` / ``locations`` / ``inventory`` /
+# ``support_tickets`` / ``analytics_events``) with no tenant filter, then
+# ``seed_all_data(force=True)`` re-seeds demo content. Left open to any
+# authenticated caller this is a single-POST platform wipe. We gate it
+# with defence in depth:
+#
+#   1. Refuse outright in production — the endpoint has no legitimate
+#      production use, it exists for local-dev demo recycling only.
+#   2. Require the caller carry the ``admin`` role so regular dispatcher
+#      / driver JWTs cannot trigger a wipe even in staging.
+#   3. Keep the existing tenant dependency so requests without a valid
+#      JWT never reach the handler at all.
+#
+# The data_seeder helpers themselves are untouched — scoping the cleanup
+# to a single tenant is tracked under the broader demo-seeding effort
+# (sprint item 5) and the data_seeder refactor that follows.
 @router.post("/data/cleanup")
 @limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
 async def cleanup_duplicate_data(request: Request, tenant: TenantContext = Depends(get_tenant_context)):
-    """Clean up duplicate data in Elasticsearch"""
+    """Clean up duplicate data in Elasticsearch. Admin-only; disabled in production."""
+    if settings.environment == Environment.PRODUCTION:
+        # Refuse outright in production — there is no legitimate
+        # production use for a platform-wide wipe + reseed endpoint.
+        raise forbidden(
+            message="Data cleanup is not available in production",
+            details={"environment": settings.environment.value},
+        )
+    if "admin" not in (tenant.roles or []):
+        raise forbidden(
+            message="Data cleanup requires the admin role",
+            details={"required_role": "admin"},
+        )
     try:
         from services.data_seeder import data_seeder
-        
+
         # Clear all existing data
         await data_seeder.clear_all_data()
-        
+
         # Reseed with fresh data
         await data_seeder.seed_all_data(force=True)
-        
+
         return {
             "message": "Data cleanup and reseed completed successfully",
             "success": True,
-            "timestamp": datetime.now().isoformat()
+            "timestamp": utcnow().isoformat()
         }
+    except AppException:
+        # forbidden / validation errors must propagate with their original
+        # status code instead of being re-wrapped as 500.
+        raise
     except Exception as e:
         logger.error(f"Error during data cleanup: {e}")
         raise internal_error(message="Failed to clean up data", details={"error": str(e)})
 
-# Data Upload
-@router.post("/data/upload/sheets")
-@limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
-async def upload_from_sheets(request: Request, body: dict, tenant: TenantContext = Depends(get_tenant_context)):
-    # Simulate processing
-    record_count = random.randint(50, 150)
-    
-    return {
-        "data": {"recordCount": record_count},
-        "success": True,
-        "timestamp": datetime.now().isoformat()
-    }
-
-@router.post("/data/upload/csv")
-@limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
-async def upload_csv(request: Request, file: UploadFile = File(...), dataType: str = Form(...), tenant: TenantContext = Depends(get_tenant_context)):
-    # Simulate processing
-    record_count = random.randint(100, 300)
-    
-    return {
-        "data": {"recordCount": record_count},
-        "success": True,
-        "timestamp": datetime.now().isoformat()
-    }
+# The legacy ``/api/data/upload/csv`` and ``/api/data/upload/sheets`` handlers
+# were demo stubs that ignored the payload entirely and returned a
+# ``random.randint`` count as the "recordCount". Customers hitting those
+# URLs got a success envelope back while nothing was ingested. The real
+# import pipeline lives under ``/api/import/*`` (``import_endpoints.py``)
+# and the demo-data ingestion path is ``/api/upload/*``
+# (``inline_endpoints.py``), both of which write real documents. The fake
+# handlers have been removed; the frontend helpers that still reference
+# them (``runsheet/src/services/api.ts::uploadFromSheets`` / ``uploadCSV``)
+# are legacy compat shims and their callers should be redirected at
+# ``/api/import/upload/*`` as part of the import-flow consolidation.

@@ -147,7 +147,9 @@ class TenantInventoryConfigService:
 
         key = self._get_key(tenant_id)
         value = json.dumps(asdict(settings))
-        await self._redis.set(key, value)
+        # 30-day TTL refreshed on every write so active tenants never
+        # expire but deleted tenants don't leak keys indefinitely.
+        await self._redis.set(key, value, ex=30 * 24 * 60 * 60)
         logger.info(
             "Inventory settings updated for tenant %s: %s",
             tenant_id,

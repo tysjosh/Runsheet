@@ -156,7 +156,9 @@ class TestRiskRegistrySetOverride:
     async def test_set_override_writes_to_redis(self, mock_redis):
         registry = RiskRegistry(redis_client=mock_redis)
         await registry.set_override("cancel_job", RiskLevel.LOW)
-        mock_redis.set.assert_called_once_with("risk_override:cancel_job", "low")
+        mock_redis.set.assert_called_once_with(
+            "risk_override:cancel_job", "low", ex=30 * 24 * 60 * 60,
+        )
 
     async def test_set_override_without_redis_does_not_raise(self):
         registry = RiskRegistry(redis_client=None)

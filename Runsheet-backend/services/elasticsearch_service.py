@@ -18,6 +18,7 @@ from config.settings import get_settings
 from resilience.circuit_breaker import CircuitBreaker, CircuitBreakerConfig, CircuitOpenException
 from errors.codes import ErrorCode
 from errors.exceptions import AppException, elasticsearch_unavailable, circuit_open
+from services.time_utils import utcnow
 
 # Load environment variables
 load_dotenv()
@@ -1193,9 +1194,9 @@ class ElasticsearchService:
                 # Strict-mapped indices like job_events will reject unknown fields.
                 _TIMESTAMP_SKIP_INDICES = {"job_events", "shipment_events"}
                 if index not in _TIMESTAMP_SKIP_INDICES:
-                    document["updated_at"] = datetime.now().isoformat()
+                    document["updated_at"] = utcnow().isoformat()
                     if "created_at" not in document:
-                        document["created_at"] = datetime.now().isoformat()
+                        document["created_at"] = utcnow().isoformat()
                 
                 response = self.client.index(
                     index=index,
@@ -1219,7 +1220,7 @@ class ElasticsearchService:
         """
         try:
             async def _do_update():
-                partial_doc["updated_at"] = datetime.now().isoformat()
+                partial_doc["updated_at"] = utcnow().isoformat()
                 response = self.client.update(
                     index=index,
                     id=doc_id,
@@ -1270,9 +1271,9 @@ class ElasticsearchService:
                 doc_id_map = {}  # Map action index to document info for error reporting
                 
                 for idx, doc in enumerate(documents):
-                    doc["updated_at"] = datetime.now().isoformat()
+                    doc["updated_at"] = utcnow().isoformat()
                     if "created_at" not in doc:
-                        doc["created_at"] = datetime.now().isoformat()
+                        doc["created_at"] = utcnow().isoformat()
                     
                     # Map index names to correct ID fields
                     id_field_map = {
@@ -1532,21 +1533,38 @@ class ElasticsearchService:
         except Exception as e:
             self._handle_elasticsearch_error(f"get_all_documents({index})", e)
     
-    async def semantic_search(self, index: str, text: str, fields: List[str], size: int = 10):
+    async def semantic_search(self, tenant_id: str, index: str, text: str, fields: List[str], size: int = 10):
         """
         Perform semantic search using semantic_text fields with circuit breaker protection.
-        
+
+        The query is scoped to the supplied tenant: every request is wrapped
+        with a ``{"term": {"tenant_id": tenant_id}}`` filter so a caller
+        cannot see documents from another tenant even if the index is shared.
+        This is required because ``/api/search`` and every AI tool that calls
+        ``semantic_search`` runs on behalf of an authenticated tenant and
+        must not leak cross-tenant rows.
+
         Validates:
         - Requirement 3.5: Implement circuit breakers for Elasticsearch
         - Requirement 2.4: Return specific error code indicating database unavailability
+        - Requirements 9.2, 9.4: Enforce tenant scoping on ES reads
         """
+        if not tenant_id:
+            raise ValueError("semantic_search requires a tenant_id")
         try:
             query = {
                 "query": {
-                    "multi_match": {
-                        "query": text,
-                        "fields": fields,
-                        "type": "best_fields"
+                    "bool": {
+                        "must": [
+                            {
+                                "multi_match": {
+                                    "query": text,
+                                    "fields": fields,
+                                    "type": "best_fields",
+                                }
+                            }
+                        ],
+                        "filter": [{"term": {"tenant_id": tenant_id}}],
                     }
                 }
             }
@@ -1559,19 +1577,22 @@ class ElasticsearchService:
             self._handle_elasticsearch_error(f"semantic_search({index})", e)
     
     # Analytics-specific methods
-    async def get_time_series_data(self, event_type: str, metric_field: str, time_range: str = "7d"):
+    async def get_time_series_data(self, tenant_id: str, event_type: str, metric_field: str, time_range: str = "7d"):
         """
         Get time-series data for analytics charts with circuit breaker protection.
-        
+
         Validates:
         - Requirement 3.5: Implement circuit breakers for Elasticsearch
         - Requirement 2.4: Return specific error code indicating database unavailability
+        - Requirements 9.2, 9.4: Enforce tenant scoping on ES reads
         """
+        if not tenant_id:
+            raise ValueError("get_time_series_data requires a tenant_id")
         try:
             # Calculate date range
             from datetime import datetime, timedelta
             now = datetime.now()
-            
+
             if time_range == "24h":
                 start_time = now - timedelta(hours=24)
                 interval = "1h"
@@ -1584,14 +1605,17 @@ class ElasticsearchService:
             else:  # 90d
                 start_time = now - timedelta(days=90)
                 interval = "1d"
-            
+
             query = {
                 "query": {
                     "bool": {
                         "must": [
                             {"term": {"event_type": event_type}},
                             {"range": {"timestamp": {"gte": start_time.isoformat()}}}
-                        ]
+                        ],
+                        "filter": [
+                            {"term": {"tenant_id": tenant_id}},
+                        ],
                     }
                 },
                 "aggs": {
@@ -1627,17 +1651,25 @@ class ElasticsearchService:
         except Exception as e:
             self._handle_elasticsearch_error("get_time_series_data", e)
     
-    async def get_route_performance_data(self):
+    async def get_route_performance_data(self, tenant_id: str):
         """
         Get route performance aggregation with circuit breaker protection.
-        
+
         Validates:
         - Requirement 3.5: Implement circuit breakers for Elasticsearch
         - Requirement 2.4: Return specific error code indicating database unavailability
+        - Requirements 9.2, 9.4: Enforce tenant scoping on ES reads
         """
+        if not tenant_id:
+            raise ValueError("get_route_performance_data requires a tenant_id")
         try:
             query = {
-                "query": {"term": {"event_type": "route_performance"}},
+                "query": {
+                    "bool": {
+                        "must": [{"term": {"event_type": "route_performance"}}],
+                        "filter": [{"term": {"tenant_id": tenant_id}}],
+                    }
+                },
                 "aggs": {
                     "routes": {
                         "terms": {"field": "route_name.keyword", "size": 10},
@@ -1667,17 +1699,25 @@ class ElasticsearchService:
         except Exception as e:
             self._handle_elasticsearch_error("get_route_performance_data", e)
     
-    async def get_delay_causes_data(self):
+    async def get_delay_causes_data(self, tenant_id: str):
         """
         Get delay causes aggregation with circuit breaker protection.
-        
+
         Validates:
         - Requirement 3.5: Implement circuit breakers for Elasticsearch
         - Requirement 2.4: Return specific error code indicating database unavailability
+        - Requirements 9.2, 9.4: Enforce tenant scoping on ES reads
         """
+        if not tenant_id:
+            raise ValueError("get_delay_causes_data requires a tenant_id")
         try:
             query = {
-                "query": {"term": {"event_type": "delay_cause_analysis"}},
+                "query": {
+                    "bool": {
+                        "must": [{"term": {"event_type": "delay_cause_analysis"}}],
+                        "filter": [{"term": {"tenant_id": tenant_id}}],
+                    }
+                },
                 "aggs": {
                     "causes": {
                         "terms": {"field": "delay_cause", "size": 10},
@@ -1707,17 +1747,25 @@ class ElasticsearchService:
         except Exception as e:
             self._handle_elasticsearch_error("get_delay_causes_data", e)
     
-    async def get_regional_performance_data(self):
+    async def get_regional_performance_data(self, tenant_id: str):
         """
         Get regional performance aggregation with circuit breaker protection.
-        
+
         Validates:
         - Requirement 3.5: Implement circuit breakers for Elasticsearch
         - Requirement 2.4: Return specific error code indicating database unavailability
+        - Requirements 9.2, 9.4: Enforce tenant scoping on ES reads
         """
+        if not tenant_id:
+            raise ValueError("get_regional_performance_data requires a tenant_id")
         try:
             query = {
-                "query": {"term": {"event_type": "regional_performance"}},
+                "query": {
+                    "bool": {
+                        "must": [{"term": {"event_type": "regional_performance"}}],
+                        "filter": [{"term": {"tenant_id": tenant_id}}],
+                    }
+                },
                 "aggs": {
                     "regions": {
                         "terms": {"field": "region", "size": 10},
@@ -1747,17 +1795,25 @@ class ElasticsearchService:
         except Exception as e:
             self._handle_elasticsearch_error("get_regional_performance_data", e)
     
-    async def get_current_metrics(self):
+    async def get_current_metrics(self, tenant_id: str):
         """
         Get current performance metrics with circuit breaker protection.
-        
+
         Validates:
         - Requirement 3.5: Implement circuit breakers for Elasticsearch
         - Requirement 2.4: Return specific error code indicating database unavailability
+        - Requirements 9.2, 9.4: Enforce tenant scoping on ES reads
         """
+        if not tenant_id:
+            raise ValueError("get_current_metrics requires a tenant_id")
         try:
             query = {
-                "query": {"term": {"event_type": "daily_performance"}},
+                "query": {
+                    "bool": {
+                        "must": [{"term": {"event_type": "daily_performance"}}],
+                        "filter": [{"term": {"tenant_id": tenant_id}}],
+                    }
+                },
                 "sort": [{"timestamp": {"order": "desc"}}],
                 "size": 1
             }

@@ -4,13 +4,16 @@ Search tools for the logistics agent.
 Validates:
 - Requirement 5.5: WHEN an AI tool is invoked, THE Telemetry_Service SHALL log
   the tool name, input parameters, execution duration, and success/failure status
+- Requirements 9.2, 9.4: Enforce tenant scoping on every ES read
 """
 
 import logging
 import time
 from strands import tool
 from services.elasticsearch_service import elasticsearch_service
+from ops.middleware.tenant_guard import inject_tenant_filter
 from .logging_wrapper import get_telemetry_service
+from ._tenant_context import get_current_tenant
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +51,9 @@ async def search_fleet_data(query: str, asset_type: str = None) -> str:
     Search fleet and asset data using natural language. Supports all asset types
     including vehicles, vessels, equipment, and containers.
 
+    The search is scoped to the current tenant (bound by the orchestrator
+    when the chat request is received) so cross-tenant assets never leak.
+
     Args:
         query: Natural language search query (e.g., "trucks carrying perishables",
                "delayed vehicles", "search for all vessels", "find idle equipment",
@@ -62,6 +68,7 @@ async def search_fleet_data(query: str, asset_type: str = None) -> str:
     start_time = time.time()
     success = False
     error_msg = None
+    tenant_id = get_current_tenant()
 
     try:
         logger.info(f"🔍 Searching fleet data for: {query}" + (f" (asset_type={asset_type})" if asset_type else ""))
@@ -77,7 +84,7 @@ async def search_fleet_data(query: str, asset_type: str = None) -> str:
 
         # When asset_type is provided, wrap in a bool query with a term filter
         if asset_type:
-            es_query = {
+            inner_es_query = {
                 "query": {
                     "bool": {
                         "must": [must_clause],
@@ -88,9 +95,11 @@ async def search_fleet_data(query: str, asset_type: str = None) -> str:
                 }
             }
         else:
-            es_query = {
+            inner_es_query = {
                 "query": must_clause
             }
+
+        es_query = inject_tenant_filter(inner_es_query, tenant_id)
 
         response = await elasticsearch_service.search_documents("trucks", es_query, 5)
         results = [hit["_source"] for hit in response["hits"]["hits"]]
@@ -128,7 +137,9 @@ async def search_fleet_data(query: str, asset_type: str = None) -> str:
 async def search_orders(query: str) -> str:
     """
     Search order data using natural language.
-    
+
+    The search is scoped to the current tenant so cross-tenant orders never leak.
+
     Args:
         query: Natural language search query (e.g., "network equipment orders", "high priority deliveries")
     
@@ -138,10 +149,11 @@ async def search_orders(query: str) -> str:
     start_time = time.time()
     success = False
     error_msg = None
-    
+    tenant_id = get_current_tenant()
+
     try:
         logger.info(f"🔍 Searching orders for: {query}")
-        results = await elasticsearch_service.semantic_search("orders", query, ["items", "customer"], 5)
+        results = await elasticsearch_service.semantic_search(tenant_id, "orders", query, ["items", "customer"], 5)
         
         if not results:
             success = True
@@ -168,7 +180,9 @@ async def search_orders(query: str) -> str:
 async def search_support_tickets(query: str) -> str:
     """
     Search support tickets using natural language.
-    
+
+    The search is scoped to the current tenant so cross-tenant tickets never leak.
+
     Args:
         query: Natural language search query (e.g., "delivery delays", "damaged goods")
     
@@ -178,17 +192,24 @@ async def search_support_tickets(query: str) -> str:
     start_time = time.time()
     success = False
     error_msg = None
-    
+    tenant_id = get_current_tenant()
+
     try:
         logger.info(f"🔍 Searching support tickets for: {query}")
         
         # First try semantic search
         try:
-            results = await elasticsearch_service.semantic_search("support_tickets", query, ["issue", "description"], 5)
+            results = await elasticsearch_service.semantic_search(tenant_id, "support_tickets", query, ["issue", "description"], 5)
         except Exception as search_error:
-            logger.warning(f"Semantic search failed, trying get_all_documents: {search_error}")
-            # Fallback to get all and filter
-            all_tickets = await elasticsearch_service.get_all_documents("support_tickets")
+            logger.warning(f"Semantic search failed, trying tenant-scoped fallback: {search_error}")
+            # Fallback: run a tenant-scoped match_all and filter in Python so we
+            # still avoid leaking data from other tenants if semantic search is
+            # unavailable (missing index / circuit open).
+            fallback_query = inject_tenant_filter({"query": {"match_all": {}}}, tenant_id)
+            fallback_resp = await elasticsearch_service.search_documents(
+                "support_tickets", fallback_query, size=100
+            )
+            all_tickets = [hit["_source"] for hit in fallback_resp.get("hits", {}).get("hits", [])]
             if query.lower() in ["all", "all support tickets", "support tickets"]:
                 results = all_tickets
             else:
@@ -222,7 +243,9 @@ async def search_support_tickets(query: str) -> str:
 async def search_inventory(query: str) -> str:
     """
     Search inventory items using semantic search.
-    
+
+    The search is scoped to the current tenant so cross-tenant inventory never leaks.
+
     Args:
         query: Natural language query (e.g., "diesel fuel", "brake parts", "low stock items")
     
@@ -232,17 +255,23 @@ async def search_inventory(query: str) -> str:
     start_time = time.time()
     success = False
     error_msg = None
-    
+    tenant_id = get_current_tenant()
+
     try:
         logger.info(f"📦 Searching inventory for: {query}")
         
         # First try semantic search
         try:
-            results = await elasticsearch_service.semantic_search("inventory", query, ["name"], 10)
+            results = await elasticsearch_service.semantic_search(tenant_id, "inventory", query, ["name"], 10)
         except Exception as search_error:
-            logger.warning(f"Semantic search failed, trying get_all_documents: {search_error}")
-            # Fallback to get all and filter
-            all_items = await elasticsearch_service.get_all_documents("inventory")
+            logger.warning(f"Semantic search failed, trying tenant-scoped fallback: {search_error}")
+            # Fallback: run a tenant-scoped match_all and filter in Python so
+            # results are still tenant-isolated when semantic search is down.
+            fallback_query = inject_tenant_filter({"query": {"match_all": {}}}, tenant_id)
+            fallback_resp = await elasticsearch_service.search_documents(
+                "inventory", fallback_query, size=200
+            )
+            all_items = [hit["_source"] for hit in fallback_resp.get("hits", {}).get("hits", [])]
             results = [item for item in all_items if query.lower() in item.get('name', '').lower()]
         
         if not results:

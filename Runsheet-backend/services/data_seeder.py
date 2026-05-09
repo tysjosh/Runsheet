@@ -7,6 +7,7 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 from services.elasticsearch_service import elasticsearch_service
+from services.time_utils import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -27,34 +28,73 @@ class DataSeeder:
                 logger.warning(f"Could not clear {index}: {e}")
     
     async def seed_all_data(self, force=False):
-        """Seed all indices with mock data (only if empty unless forced)"""
+        """Seed all indices with mock data (only if empty unless forced).
+
+        All seeded documents are stamped with ``tenant_id=DEMO_TENANT_ID``
+        so the dataset lives under a dedicated demo tenant. The per-index
+        seeders (``seed_locations``, ``seed_trucks``, ``seed_inventory``,
+        ``seed_support_tickets``, ``seed_analytics_events``) do not take a
+        ``batch_metadata`` arg in this code path, so we stamp the tenant
+        id by monkey-patching ``bulk_index_documents`` for the duration
+        of the seed call. This keeps the fixture bodies untouched while
+        still guaranteeing every written doc carries the tenant id.
+        """
         try:
             logger.info("🌱 Starting data seeding process...")
-            
+
             # Check if data already exists (unless forced)
             if not force:
                 existing_trucks = await self.es_service.get_all_documents("trucks")
                 if len(existing_trucks) > 0:
                     logger.info("📋 Data already exists, skipping seeding")
                     return
-            
-            # Seed locations first (referenced by other entities)
-            await self.seed_locations()
-            
-            # Seed other entities
-            await self.seed_trucks()
-            await self.seed_inventory()
-            await self.seed_support_tickets()
-            await self.seed_analytics_events()
-            
+
+            demo_tenant_id = self.DEMO_TENANT_ID
+            original_bulk = self.es_service.bulk_index_documents
+
+            async def _bulk_with_demo_tenant(index: str, documents: list):
+                for doc in documents:
+                    if isinstance(doc, dict):
+                        doc.setdefault("tenant_id", demo_tenant_id)
+                return await original_bulk(index, documents)
+
+            # Swap in the tenant-stamping wrapper for the duration of the seed.
+            self.es_service.bulk_index_documents = _bulk_with_demo_tenant
+            try:
+                # Seed locations first (referenced by other entities)
+                await self.seed_locations()
+
+                # Seed other entities
+                await self.seed_trucks()
+                await self.seed_inventory()
+                await self.seed_support_tickets()
+                await self.seed_analytics_events()
+            finally:
+                self.es_service.bulk_index_documents = original_bulk
+
             logger.info("✅ Data seeding completed successfully!")
-            
+
         except Exception as e:
             logger.error(f"❌ Data seeding failed: {e}")
             raise
     
+    # Tenant id stamped on every document produced by ``seed_baseline_data``
+    # / ``seed_all_data``. Kept as a module-level constant so the demo
+    # dataset lives under a dedicated tenant ("demo") that real tenant
+    # queries — which always filter on a specific ``tenant_id`` — cannot
+    # resolve. Operators who want to reuse the demo data under a
+    # different tenant can override it by subclassing ``DataSeeder`` or
+    # passing an explicit tenant_id via ``upsert_batch_data``.
+    DEMO_TENANT_ID = "demo"
+
     async def seed_baseline_data(self, operational_time="09:00"):
-        """Seed baseline morning operations data for demo"""
+        """Seed baseline morning operations data for demo.
+
+        Every document produced here is stamped with
+        ``tenant_id=DEMO_TENANT_ID`` so it cannot leak into real tenants'
+        reads — all production query paths filter on a specific tenant
+        id via ``inject_tenant_filter``.
+        """
         try:
             logger.info(f"🌅 Seeding baseline data for {operational_time}...")
             
@@ -64,13 +104,17 @@ class DataSeeder:
                 logger.info("📋 Baseline data already exists, skipping seeding")
                 return
             
-            # Add temporal metadata to all documents
-            base_timestamp = datetime.now().replace(hour=9, minute=0, second=0, microsecond=0)
+            # Add temporal metadata to all documents. ``tenant_id`` is
+            # embedded here so every downstream ``.update(batch_metadata)``
+            # call in ``seed_baseline_*`` stamps the demo tenant on its
+            # docs without having to touch every fixture individually.
+            base_timestamp = utcnow().replace(hour=9, minute=0, second=0, microsecond=0)
             batch_metadata = {
                 "batch_id": "morning_baseline",
                 "operational_time": operational_time,
-                "ingestion_timestamp": datetime.now().isoformat(),
-                "data_version": "v1"
+                "ingestion_timestamp": utcnow().isoformat(),
+                "data_version": "v1",
+                "tenant_id": self.DEMO_TENANT_ID,
             }
             
             # Seed locations first
@@ -88,8 +132,14 @@ class DataSeeder:
             logger.error(f"❌ Baseline data seeding failed: {e}")
             raise
     
-    async def upsert_batch_data(self, data_type: str, documents: list, batch_id: str, operational_time: str):
-        """Upsert batch data with temporal metadata"""
+    async def upsert_batch_data(self, data_type: str, documents: list, batch_id: str, operational_time: str, tenant_id: str = None):
+        """Upsert batch data with temporal metadata.
+
+        When ``tenant_id`` is provided every document is stamped with it so
+        the resulting ES rows are tenant-scoped end-to-end. Existing callers
+        (bootstrap seeding, tests) that don't pass the arg see the legacy
+        behaviour and no tenant_id is written.
+        """
         try:
             logger.info(f"📊 Upserting {len(documents)} {data_type} documents for batch {batch_id}")
             
@@ -97,19 +147,21 @@ class DataSeeder:
             batch_metadata = {
                 "batch_id": batch_id,
                 "operational_time": operational_time,
-                "ingestion_timestamp": datetime.now().isoformat(),
+                "ingestion_timestamp": utcnow().isoformat(),
                 "data_version": f"v{len(batch_id.split('_')) + 1}"
             }
             
             # Add metadata to each document
             for doc in documents:
                 doc.update(batch_metadata)
-                doc["operational_timestamp"] = datetime.now().replace(
+                doc["operational_timestamp"] = utcnow().replace(
                     hour=int(operational_time.split(':')[0]),
                     minute=int(operational_time.split(':')[1]),
                     second=0,
                     microsecond=0
                 ).isoformat()
+                if tenant_id:
+                    doc["tenant_id"] = tenant_id
             
             # Map data types to correct indices
             index_name = data_type
@@ -538,7 +590,7 @@ class DataSeeder:
         from datetime import datetime, timedelta
         
         events_data = []
-        base_time = datetime.now()
+        base_time = utcnow()
         
         # Generate time-series data for the last 30 days
         for days_back in range(30, 0, -1):
@@ -548,7 +600,7 @@ class DataSeeder:
             events_data.append({
                 "event_id": f"PERF-{days_back:03d}",
                 "event_type": "daily_performance",
-                "timestamp": event_time.isoformat() + "Z",
+                "timestamp": event_time.isoformat(),
                 "region": "All",
                 "metrics": {
                     "delivery_performance_pct": round(85 + random.uniform(-10, 10), 1),
@@ -572,7 +624,7 @@ class DataSeeder:
                 events_data.append({
                     "event_id": f"ROUTE-{route_id}-{days_back:03d}",
                     "event_type": "route_performance",
-                    "timestamp": event_time.isoformat() + "Z",
+                    "timestamp": event_time.isoformat(),
                     "route_name": route_name,
                     "route_id": route_id,
                     "metrics": {
@@ -590,7 +642,7 @@ class DataSeeder:
             events_data.append({
                 "event_id": f"HOURLY-{hours_back:03d}",
                 "event_type": "hourly_metrics",
-                "timestamp": event_time.isoformat() + "Z",
+                "timestamp": event_time.isoformat(),
                 "region": "All",
                 "metrics": {
                     "active_trucks": random.randint(4, 8),
@@ -612,7 +664,7 @@ class DataSeeder:
             events_data.append({
                 "event_id": f"DELAY-{cause.replace(' ', '-').lower()}",
                 "event_type": "delay_cause_analysis",
-                "timestamp": base_time.isoformat() + "Z",
+                "timestamp": base_time.isoformat(),
                 "delay_cause": cause,
                 "metrics": {
                     "percentage": round(base_pct + random.uniform(-5, 5), 1),
@@ -627,7 +679,7 @@ class DataSeeder:
             events_data.append({
                 "event_id": f"REGIONAL-{region.lower()}",
                 "event_type": "regional_performance",
-                "timestamp": base_time.isoformat() + "Z",
+                "timestamp": base_time.isoformat(),
                 "region": region,
                 "metrics": {
                     "on_time_percentage": round(80 + random.uniform(-15, 15), 1),
@@ -719,8 +771,8 @@ class DataSeeder:
                     "actual_duration": None
                 },
                 "status": "on_time",
-                "estimated_arrival": (base_timestamp + timedelta(hours=7)).isoformat() + "Z",
-                "last_update": base_timestamp.isoformat() + "Z",
+                "estimated_arrival": (base_timestamp + timedelta(hours=7)).isoformat(),
+                "last_update": base_timestamp.isoformat(),
                 "cargo": {
                     "type": "General Cargo",
                     "weight": 15000.0,
@@ -755,8 +807,8 @@ class DataSeeder:
                     "actual_duration": None
                 },
                 "status": "on_time",
-                "estimated_arrival": (base_timestamp + timedelta(hours=3)).isoformat() + "Z",
-                "last_update": base_timestamp.isoformat() + "Z",
+                "estimated_arrival": (base_timestamp + timedelta(hours=3)).isoformat(),
+                "last_update": base_timestamp.isoformat(),
                 "cargo": {
                     "type": "Perishables",
                     "weight": 8000.0,
@@ -791,8 +843,8 @@ class DataSeeder:
                     "actual_duration": None
                 },
                 "status": "on_time",
-                "estimated_arrival": (base_timestamp + timedelta(hours=2, minutes=30)).isoformat() + "Z",
-                "last_update": base_timestamp.isoformat() + "Z",
+                "estimated_arrival": (base_timestamp + timedelta(hours=2, minutes=30)).isoformat(),
+                "last_update": base_timestamp.isoformat(),
                 "cargo": {
                     "type": "Construction Materials",
                     "weight": 20000.0,
@@ -821,7 +873,7 @@ class DataSeeder:
                 "unit": "liters",
                 "location": "Nairobi Depot",
                 "status": "in_stock",
-                "last_updated": base_timestamp.isoformat() + "Z"
+                "last_updated": base_timestamp.isoformat()
             },
             {
                 "item_id": "INV-002",
@@ -831,7 +883,7 @@ class DataSeeder:
                 "unit": "pieces",
                 "location": "Mombasa Warehouse",
                 "status": "in_stock",
-                "last_updated": base_timestamp.isoformat() + "Z"
+                "last_updated": base_timestamp.isoformat()
             },
             {
                 "item_id": "INV-003",
@@ -841,7 +893,7 @@ class DataSeeder:
                 "unit": "bottles",
                 "location": "Kisumu Station",
                 "status": "in_stock",
-                "last_updated": base_timestamp.isoformat() + "Z"
+                "last_updated": base_timestamp.isoformat()
             },
             {
                 "item_id": "INV-004",
@@ -851,7 +903,7 @@ class DataSeeder:
                 "unit": "sets",
                 "location": "Nairobi Depot",
                 "status": "in_stock",
-                "last_updated": base_timestamp.isoformat() + "Z"
+                "last_updated": base_timestamp.isoformat()
             }
         ]
         
@@ -873,7 +925,7 @@ class DataSeeder:
                 "description": "Customer requesting information about optimal delivery routes for regular shipments",
                 "priority": "low",
                 "status": "open",
-                "created_at": (base_timestamp - timedelta(minutes=15)).isoformat() + "Z"
+                "created_at": (base_timestamp - timedelta(minutes=15)).isoformat()
             }
         ]
         

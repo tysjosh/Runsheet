@@ -22,6 +22,7 @@ from pydantic import BaseModel, field_validator, model_validator
 
 from errors.exceptions import validation_error, resource_not_found
 from telemetry.service import TelemetryService, get_telemetry_service
+from services.time_utils import utcnow
 
 # Import ConnectionManager for WebSocket broadcasting
 # Use TYPE_CHECKING to avoid circular imports
@@ -84,6 +85,13 @@ class LocationUpdate(BaseModel):
     truck_id: Optional[str] = None       # Legacy field, kept for backward compat
     asset_id: Optional[str] = None       # New preferred field
     asset_type: Optional[str] = None     # Optional classification
+    tenant_id: Optional[str] = None      # Required for tenant scoping — stamped
+                                         # by ``/api/locations/*`` handlers from
+                                         # the authenticated JWT claim before
+                                         # the ingestion service processes the
+                                         # update. Optional here so existing
+                                         # unit tests that construct a bare
+                                         # LocationUpdate keep working.
     latitude: float
     longitude: float
     timestamp: datetime
@@ -396,6 +404,8 @@ def sanitize_location_update(update: LocationUpdate) -> dict:
         data["asset_id"] = sanitize_string(data["asset_id"])
     if data.get("asset_type"):
         data["asset_type"] = sanitize_string(data["asset_type"])
+    if data.get("tenant_id"):
+        data["tenant_id"] = sanitize_string(data["tenant_id"])
     
     # Convert timestamp to ISO format string for Elasticsearch
     if isinstance(data.get("timestamp"), datetime):
@@ -532,9 +542,16 @@ class DataIngestionService:
                 }}
             )
     
-    async def validate_asset_exists(self, asset_id: str) -> bool:
+    async def validate_asset_exists(self, asset_id: str, tenant_id: Optional[str] = None) -> bool:
         """
         Verify that an asset with the given ID exists in the system.
+
+        When ``tenant_id`` is supplied the lookup is tenant-scoped so a
+        caller for tenant A cannot resolve (and subsequently update) an
+        asset that belongs to tenant B. When ``tenant_id`` is omitted the
+        behaviour falls back to the historical "exists anywhere" check to
+        preserve compatibility with internal callers and existing unit
+        tests.
 
         Validates:
         - Requirement 6.6: IF a location update references a non-existent asset_id,
@@ -542,19 +559,23 @@ class DataIngestionService:
 
         Args:
             asset_id: The asset ID to verify
+            tenant_id: Optional tenant scoping. When provided, the asset must
+                belong to this tenant for the check to succeed.
 
         Returns:
-            True if the asset exists, False otherwise
+            True if the asset exists (and matches the tenant when provided),
+            False otherwise.
         """
         try:
-            # Search for the asset in Elasticsearch using the assets alias
+            # Search for the asset in Elasticsearch using the assets alias,
+            # optionally scoping to the caller's tenant.
+            filters = [{"term": {"truck_id": asset_id}}]
+            if tenant_id:
+                filters.append({"term": {"tenant_id": tenant_id}})
+
             query = {
-                "query": {
-                    "term": {
-                        "truck_id": asset_id
-                    }
-                },
-                "size": 1
+                "query": {"bool": {"filter": filters}},
+                "size": 1,
             }
 
             result = await self.es_service.search_documents("assets", query, size=1)
@@ -597,23 +618,28 @@ class DataIngestionService:
         Raises:
             AppException: If validation fails or asset doesn't exist
         """
-        start_time = datetime.utcnow()
+        start_time = utcnow()
 
         try:
             # Sanitize the input data
             sanitized_data = sanitize_location_update(update)
             asset_id = sanitized_data["asset_id"]
+            tenant_id = sanitized_data.get("tenant_id")
 
-            # Verify asset exists
-            asset_exists = await self.validate_asset_exists(asset_id)
+            # Verify asset exists, tenant-scoped when the caller provided a
+            # tenant. Rejecting cross-tenant asset ids prevents a caller for
+            # tenant A from writing location history against an asset that
+            # belongs to tenant B just by guessing its ID.
+            asset_exists = await self.validate_asset_exists(asset_id, tenant_id=tenant_id)
             if not asset_exists:
                 self._logger.warning(
-                    f"Location update rejected: asset_id '{asset_id}' not found",
-                    extra={"extra_data": {"asset_id": asset_id}}
+                    f"Location update rejected: asset_id '{asset_id}' not found"
+                    + (f" for tenant '{tenant_id}'" if tenant_id else ""),
+                    extra={"extra_data": {"asset_id": asset_id, "tenant_id": tenant_id}}
                 )
                 raise resource_not_found(
                     message=f"Asset with ID '{asset_id}' not found",
-                    details={"asset_id": asset_id}
+                    details={"asset_id": asset_id, "tenant_id": tenant_id}
                 )
 
             # Update the asset's current location in Elasticsearch
@@ -626,6 +652,11 @@ class DataIngestionService:
                 },
                 "last_update": sanitized_data["timestamp"],
             }
+            if tenant_id:
+                # Keep the tenant_id on the asset doc stable — if the asset
+                # is already scoped this is a no-op; if the asset is a
+                # legacy doc with no tenant_id, this brings it in scope.
+                location_data["tenant_id"] = tenant_id
 
             # Add optional fields if present
             if sanitized_data.get("speed_kmh") is not None:
@@ -652,6 +683,8 @@ class DataIngestionService:
                 "heading": sanitized_data.get("heading"),
                 "accuracy_meters": sanitized_data.get("accuracy_meters"),
             }
+            if tenant_id:
+                location_history["tenant_id"] = tenant_id
 
             # Generate a unique ID for the location history entry
             history_id = f"{asset_id}_{sanitized_data['timestamp']}"
@@ -662,7 +695,7 @@ class DataIngestionService:
             )
 
             # Log success with telemetry
-            duration_ms = (datetime.utcnow() - start_time).total_seconds() * 1000
+            duration_ms = (utcnow() - start_time).total_seconds() * 1000
             if self.telemetry:
                 self.telemetry.record_metric(
                     "location_update_duration_ms",
@@ -691,7 +724,7 @@ class DataIngestionService:
             )
 
         except Exception as e:
-            duration_ms = (datetime.utcnow() - start_time).total_seconds() * 1000
+            duration_ms = (utcnow() - start_time).total_seconds() * 1000
 
             # Re-raise AppExceptions
             from errors.exceptions import AppException

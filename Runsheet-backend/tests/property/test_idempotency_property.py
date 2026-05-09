@@ -122,10 +122,10 @@ def _build_test_app():
     seen: set[str] = set()
     idempotency_service = AsyncMock()
 
-    async def _is_duplicate(event_id: str) -> bool:
+    async def _is_duplicate(event_id: str, tenant_id: str = None) -> bool:
         return event_id in seen
 
-    async def _mark_processed(event_id: str) -> None:
+    async def _mark_processed(event_id: str, tenant_id: str = None) -> None:
         seen.add(event_id)
 
     idempotency_service.is_duplicate = AsyncMock(side_effect=_is_duplicate)

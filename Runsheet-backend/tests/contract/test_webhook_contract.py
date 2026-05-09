@@ -79,10 +79,10 @@ def _build_contract_app():
     _processed_ids: set[str] = set()
     idempotency = AsyncMock()
 
-    async def _is_duplicate(event_id: str) -> bool:
+    async def _is_duplicate(event_id: str, tenant_id: str = None) -> bool:
         return event_id in _processed_ids
 
-    async def _mark_processed(event_id: str) -> None:
+    async def _mark_processed(event_id: str, tenant_id: str = None) -> None:
         _processed_ids.add(event_id)
 
     idempotency.is_duplicate = AsyncMock(side_effect=_is_duplicate)

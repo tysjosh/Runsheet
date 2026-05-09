@@ -237,8 +237,14 @@ class BaseWSManager(ABC):
             for ws in list(self._clients.keys()):
                 try:
                     await ws.close(code=1000, reason="shutdown")
-                except Exception:
-                    pass
+                except Exception as close_exc:
+                    # Already-gone clients are the common case on
+                    # shutdown — debug-level so the log isn't spammy
+                    # but the signal is still preserved.
+                    logger.debug(
+                        "WS shutdown close failed for client: %s",
+                        close_exc,
+                    )
             self._clients.clear()
 
         logger.info("%s WS manager shut down", self.manager_name)

@@ -4,6 +4,7 @@ Report generation tools for comprehensive analysis.
 Validates:
 - Requirement 5.5: WHEN an AI tool is invoked, THE Telemetry_Service SHALL log
   the tool name, input parameters, execution duration, and success/failure status
+- Requirements 9.2, 9.4: Enforce tenant scoping on every ES read
 """
 
 import logging
@@ -11,6 +12,8 @@ import time
 from datetime import datetime
 from strands import tool
 from services.elasticsearch_service import elasticsearch_service
+from ops.middleware.tenant_guard import inject_tenant_filter
+from ._tenant_context import get_current_tenant
 
 logger = logging.getLogger(__name__)
 
@@ -54,21 +57,32 @@ def _log_tool_invocation(tool_name: str, input_params: dict, start_time: float,
 async def generate_operations_report() -> str:
     """
     Generate a comprehensive operations report combining fleet, inventory, and support data.
-    
+
+    The report is scoped to the current tenant so cross-tenant data never leaks.
+
     Returns:
         Structured operations report with current status and recommendations
     """
     start_time = time.time()
     success = False
     error_msg = None
-    
+    tenant_id = get_current_tenant()
+
     try:
         logger.info("📋 Generating operations report")
         
-        # Gather data from multiple sources
-        fleet_data = await elasticsearch_service.get_all_documents("trucks")
-        inventory_data = await elasticsearch_service.get_all_documents("inventory")
-        tickets_data = await elasticsearch_service.get_all_documents("support_tickets")
+        # Gather data from multiple sources (all tenant-scoped)
+        fleet_query = inject_tenant_filter({"query": {"match_all": {}}}, tenant_id)
+        fleet_resp = await elasticsearch_service.search_documents("trucks", fleet_query, size=1000)
+        fleet_data = [hit["_source"] for hit in fleet_resp.get("hits", {}).get("hits", [])]
+
+        inv_query = inject_tenant_filter({"query": {"match_all": {}}}, tenant_id)
+        inv_resp = await elasticsearch_service.search_documents("inventory", inv_query, size=1000)
+        inventory_data = [hit["_source"] for hit in inv_resp.get("hits", {}).get("hits", [])]
+
+        tix_query = inject_tenant_filter({"query": {"match_all": {}}}, tenant_id)
+        tix_resp = await elasticsearch_service.search_documents("support_tickets", tix_query, size=1000)
+        tickets_data = [hit["_source"] for hit in tix_resp.get("hits", {}).get("hits", [])]
         
         # Calculate metrics
         total_trucks = len(fleet_data)
@@ -131,22 +145,25 @@ async def generate_operations_report() -> str:
 async def generate_performance_report() -> str:
     """
     Generate a performance analysis report with metrics and trends.
-    
+
+    The report is scoped to the current tenant so cross-tenant analytics never leak.
+
     Returns:
         Detailed performance report with analytics and insights
     """
     start_time = time.time()
     success = False
     error_msg = None
-    
+    tenant_id = get_current_tenant()
+
     try:
         logger.info("📊 Generating performance report")
         
         # Get analytics data
-        metrics = await elasticsearch_service.get_current_metrics()
-        routes = await elasticsearch_service.get_route_performance_data()
-        delays = await elasticsearch_service.get_delay_causes_data()
-        regions = await elasticsearch_service.get_regional_performance_data()
+        metrics = await elasticsearch_service.get_current_metrics(tenant_id)
+        routes = await elasticsearch_service.get_route_performance_data(tenant_id)
+        delays = await elasticsearch_service.get_delay_causes_data(tenant_id)
+        regions = await elasticsearch_service.get_regional_performance_data(tenant_id)
         
         report = f"""# 📊 Performance Analysis Report
 *Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}*
@@ -214,7 +231,9 @@ async def generate_performance_report() -> str:
 async def generate_incident_analysis(issue_description: str = "") -> str:
     """
     Generate an incident analysis report by examining related data across systems.
-    
+
+    The analysis is scoped to the current tenant so cross-tenant data never leaks.
+
     Args:
         issue_description: Description of the incident to analyze
     
@@ -224,7 +243,8 @@ async def generate_incident_analysis(issue_description: str = "") -> str:
     start_time = time.time()
     success = False
     error_msg = None
-    
+    tenant_id = get_current_tenant()
+
     try:
         logger.info(f"🔍 Generating incident analysis for: {issue_description}")
         
@@ -234,11 +254,15 @@ async def generate_incident_analysis(issue_description: str = "") -> str:
 
 """
         
-        # Get related support tickets
+        # Get related support tickets (tenant-scoped)
         if issue_description:
-            tickets = await elasticsearch_service.semantic_search("support_tickets", issue_description, ["issue", "description"], 5)
+            tickets = await elasticsearch_service.semantic_search(
+                tenant_id, "support_tickets", issue_description, ["issue", "description"], 5
+            )
         else:
-            tickets = await elasticsearch_service.get_all_documents("support_tickets")
+            tix_query = inject_tenant_filter({"query": {"match_all": {}}}, tenant_id)
+            tix_resp = await elasticsearch_service.search_documents("support_tickets", tix_query, size=1000)
+            tickets = [hit["_source"] for hit in tix_resp.get("hits", {}).get("hits", [])]
             tickets = [t for t in tickets if t.get('status') in ['open', 'in_progress']][:5]
         
         if tickets:
@@ -247,8 +271,10 @@ async def generate_incident_analysis(issue_description: str = "") -> str:
                 priority_emoji = "🚨" if ticket.get('priority') == 'urgent' else "🔴" if ticket.get('priority') == 'high' else "🟡"
                 report += f"- {priority_emoji} **{ticket.get('ticket_id')}**: {ticket.get('issue')} ({ticket.get('status')})\n"
         
-        # Check for delayed trucks
-        trucks = await elasticsearch_service.get_all_documents("trucks")
+        # Check for delayed trucks (tenant-scoped)
+        trucks_query = inject_tenant_filter({"query": {"match_all": {}}}, tenant_id)
+        trucks_resp = await elasticsearch_service.search_documents("trucks", trucks_query, size=1000)
+        trucks = [hit["_source"] for hit in trucks_resp.get("hits", {}).get("hits", [])]
         delayed_trucks = [t for t in trucks if t.get('status') == 'delayed']
         
         if delayed_trucks:
@@ -256,8 +282,10 @@ async def generate_incident_analysis(issue_description: str = "") -> str:
             for truck in delayed_trucks[:5]:
                 report += f"- **{truck.get('plate_number')}** - {truck.get('driver_name')} (ETA: {truck.get('estimated_arrival', 'Unknown')})\n"
         
-        # Check inventory issues
-        inventory = await elasticsearch_service.get_all_documents("inventory")
+        # Check inventory issues (tenant-scoped)
+        inv_query = inject_tenant_filter({"query": {"match_all": {}}}, tenant_id)
+        inv_resp = await elasticsearch_service.search_documents("inventory", inv_query, size=1000)
+        inventory = [hit["_source"] for hit in inv_resp.get("hits", {}).get("hits", [])]
         critical_items = [i for i in inventory if i.get('status') in ['low_stock', 'out_of_stock']]
         
         if critical_items:

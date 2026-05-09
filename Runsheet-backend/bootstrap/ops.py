@@ -136,19 +136,21 @@ async def shutdown(app, container: ServiceContainer) -> None:
     if container.has("ops_ws_manager"):
         try:
             await container.ops_ws_manager.shutdown()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.exception("Ops WS manager shutdown failed: %s", exc)
 
     if container.has("ops_idempotency"):
         try:
             await container.ops_idempotency.disconnect()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.exception("Ops idempotency disconnect failed: %s", exc)
 
     if container.has("ops_feature_flags"):
         try:
             await container.ops_feature_flags.disconnect()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.exception(
+                "Ops feature-flags disconnect failed: %s", exc
+            )
 
     logger.info("Ops domain shut down")

@@ -4,12 +4,15 @@ Summary and overview tools for the logistics agent.
 Validates:
 - Requirement 5.5: WHEN an AI tool is invoked, THE Telemetry_Service SHALL log
   the tool name, input parameters, execution duration, and success/failure status
+- Requirements 9.2, 9.4: Enforce tenant scoping on every ES read
 """
 
 import logging
 import time
 from strands import tool
 from services.elasticsearch_service import elasticsearch_service
+from ops.middleware.tenant_guard import inject_tenant_filter
+from ._tenant_context import get_current_tenant
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +58,8 @@ async def get_fleet_summary() -> str:
     """
     Get current fleet status summary including breakdowns by asset type and subtype.
 
+    The summary is scoped to the current tenant so cross-tenant assets never leak.
+
     Returns:
         Summary of fleet status including total trucks, delays, and counts
         broken down by asset type (vehicle, vessel, equipment, container) and
@@ -63,10 +68,13 @@ async def get_fleet_summary() -> str:
     start_time = time.time()
     success = False
     error_msg = None
+    tenant_id = get_current_tenant()
 
     try:
         logger.info("📊 Getting fleet summary")
-        trucks = await elasticsearch_service.get_all_documents("trucks")
+        trucks_query = inject_tenant_filter({"query": {"match_all": {}}}, tenant_id)
+        trucks_resp = await elasticsearch_service.search_documents("trucks", trucks_query, size=1000)
+        trucks = [hit["_source"] for hit in trucks_resp.get("hits", {}).get("hits", [])]
 
         total = len(trucks)
         on_time = len([t for t in trucks if t.get("status") == "on_time"])
@@ -88,15 +96,18 @@ async def get_fleet_summary() -> str:
 
         # Fetch asset type and subtype breakdowns via ES aggregations
         try:
-            agg_query = {
-                "size": 0,
-                "aggs": {
-                    "by_type": {
-                        "terms": {"field": "asset_type", "size": 20}
-                    },
-                    "by_subtype": {
-                        "terms": {"field": "asset_subtype", "size": 50}
-                    }
+            # Scope the aggregation query to the current tenant. The tenant
+            # filter sits on the top-level query, so it narrows the document
+            # set BEFORE bucket counting — it does not alter the aggregation
+            # cardinality beyond the documents the caller can legitimately see.
+            agg_query = inject_tenant_filter({"query": {"match_all": {}}}, tenant_id)
+            agg_query["size"] = 0
+            agg_query["aggs"] = {
+                "by_type": {
+                    "terms": {"field": "asset_type", "size": 20}
+                },
+                "by_subtype": {
+                    "terms": {"field": "asset_subtype", "size": 50}
                 }
             }
             agg_response = await elasticsearch_service.search_documents("trucks", agg_query, size=0)
@@ -132,17 +143,22 @@ async def get_fleet_summary() -> str:
 async def get_inventory_summary() -> str:
     """
     Get complete inventory summary with all items and stock levels.
-    
+
+    The summary is scoped to the current tenant so cross-tenant inventory never leaks.
+
     Returns:
         All inventory items organized by status
     """
     start_time = time.time()
     success = False
     error_msg = None
-    
+    tenant_id = get_current_tenant()
+
     try:
         logger.info("📦 Getting inventory summary")
-        inventory = await elasticsearch_service.get_all_documents("inventory")
+        inv_query = inject_tenant_filter({"query": {"match_all": {}}}, tenant_id)
+        inv_resp = await elasticsearch_service.search_documents("inventory", inv_query, size=1000)
+        inventory = [hit["_source"] for hit in inv_resp.get("hits", {}).get("hits", [])]
         
         if not inventory:
             success = True
@@ -185,21 +201,24 @@ async def get_inventory_summary() -> str:
 async def get_analytics_overview() -> str:
     """
     Get current analytics and performance metrics overview.
-    
+
+    The overview is scoped to the current tenant so cross-tenant analytics never leak.
+
     Returns:
         Current KPIs, route performance, and delay analysis
     """
     start_time = time.time()
     success = False
     error_msg = None
-    
+    tenant_id = get_current_tenant()
+
     try:
         logger.info("📊 Getting analytics overview")
         
         # Get current metrics
-        metrics = await elasticsearch_service.get_current_metrics()
-        routes = await elasticsearch_service.get_route_performance_data()
-        delays = await elasticsearch_service.get_delay_causes_data()
+        metrics = await elasticsearch_service.get_current_metrics(tenant_id)
+        routes = await elasticsearch_service.get_route_performance_data(tenant_id)
+        delays = await elasticsearch_service.get_delay_causes_data(tenant_id)
         
         response = f"📊 **Analytics Overview**\n\n"
         
@@ -232,20 +251,23 @@ async def get_analytics_overview() -> str:
 async def get_performance_insights() -> str:
     """
     Get performance insights and recommendations.
-    
+
+    The insights are scoped to the current tenant so cross-tenant analytics never leak.
+
     Returns:
         Analysis of performance issues and improvement suggestions
     """
     start_time = time.time()
     success = False
     error_msg = None
-    
+    tenant_id = get_current_tenant()
+
     try:
         logger.info("🎯 Getting performance insights")
         
-        routes = await elasticsearch_service.get_route_performance_data()
-        delays = await elasticsearch_service.get_delay_causes_data()
-        regions = await elasticsearch_service.get_regional_performance_data()
+        routes = await elasticsearch_service.get_route_performance_data(tenant_id)
+        delays = await elasticsearch_service.get_delay_causes_data(tenant_id)
+        regions = await elasticsearch_service.get_regional_performance_data(tenant_id)
         
         response = f"🎯 **Performance Insights**\n\n"
         

@@ -178,13 +178,20 @@ async def shutdown(app, container: ServiceContainer) -> None:
     if container.has("scheduling_ws_manager"):
         try:
             await container.scheduling_ws_manager.shutdown()
-        except Exception:
-            pass
+        except Exception as exc:
+            # Don't propagate — shutdown continues for the other
+            # components — but surface the failure so we can see stuck
+            # shutdown paths in logs.
+            logger.exception(
+                "Scheduling WS manager shutdown failed: %s", exc
+            )
 
     if container.has("driver_ws_manager"):
         try:
             await container.driver_ws_manager.shutdown()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.exception(
+                "Driver WS manager shutdown failed: %s", exc
+            )
 
     logger.info("Scheduling domain shut down")

@@ -1390,37 +1390,48 @@ async def shutdown(app, container: ServiceContainer) -> None:
             # Fallback: stop all agents at once
             try:
                 await _agent_scheduler.stop_all()
-            except Exception:
-                pass
+            except Exception as fallback_exc:
+                logger.exception(
+                    "AgentScheduler fallback stop_all failed: %s",
+                    fallback_exc,
+                )
     else:
         # Fallback if scheduler was never created
         for agent in _autonomous_agents:
             try:
                 await agent.stop()
                 logger.info("Stopped autonomous agent: %s", agent.agent_id)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.exception(
+                    "Autonomous agent %s stop failed: %s",
+                    getattr(agent, "agent_id", "<unknown>"),
+                    exc,
+                )
 
     # Shut down agent WS manager
     if container.has("agent_ws_manager"):
         try:
             await container.agent_ws_manager.shutdown()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.exception(
+                "Agent WS manager shutdown failed: %s", exc
+            )
 
     # Close Redis client
     if _agent_redis_client is not None:
         try:
             await _agent_redis_client.close()
             logger.info("Agent Redis client closed")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.exception("Agent Redis client close failed: %s", exc)
 
     # Reset tenant guard wiring so the next boot cycle starts clean
     try:
         from ops.middleware.tenant_guard import configure_tenant_guard
         configure_tenant_guard(None)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.exception(
+            "Tenant guard reset failed during shutdown: %s", exc
+        )
 
     logger.info("Agentic AI domain shut down")

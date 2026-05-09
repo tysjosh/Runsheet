@@ -48,6 +48,12 @@ VALID_DISTANCE_UNITS: Final[frozenset[str]] = frozenset({"mi", "km"})
 #: Redis key pattern for a tenant's settings document.
 TENANT_SETTINGS_KEY_PATTERN: Final[str] = "tenant:{tenant_id}:settings"
 
+#: TTL applied to every tenant-settings Redis write. 30 days balances
+#: "tenant config must survive long idle periods" against "deleted
+#: tenants must not leak keys indefinitely". Every write refreshes the
+#: TTL, so an actively-used tenant's config never expires.
+_TENANT_SETTINGS_TTL_SECONDS: Final[int] = 30 * 24 * 60 * 60
+
 
 @dataclass
 class MeasurementUnits:
@@ -223,7 +229,13 @@ class TenantSettingsService:
             )
         self._validate(settings)
         payload = json.dumps(settings.to_dict(), sort_keys=True)
-        await self._redis.set(self._key(tenant_id), payload)
+        # Every write refreshes the TTL so active tenants never expire.
+        # Deleted tenants' keys roll off after ~30 days of idleness.
+        await self._redis.set(
+            self._key(tenant_id),
+            payload,
+            ex=_TENANT_SETTINGS_TTL_SECONDS,
+        )
         logger.info(
             "Tenant settings updated: tenant=%s region=%s units=%s default_depot_id=%s",
             tenant_id,

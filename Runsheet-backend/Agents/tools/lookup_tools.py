@@ -4,12 +4,15 @@ Lookup and specific data retrieval tools.
 Validates:
 - Requirement 5.5: WHEN an AI tool is invoked, THE Telemetry_Service SHALL log
   the tool name, input parameters, execution duration, and success/failure status
+- Requirements 9.2, 9.4: Enforce tenant scoping on every ES read
 """
 
 import logging
 import time
 from strands import tool
 from services.elasticsearch_service import elasticsearch_service
+from ops.middleware.tenant_guard import inject_tenant_filter
+from ._tenant_context import get_current_tenant
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +59,8 @@ async def find_truck_by_id(truck_identifier: str) -> str:
     Find a specific asset by ID, name, or identifier. Works for all asset types
     including vehicles (trucks), vessels (boats), equipment (cranes), and containers.
 
+    The lookup is scoped to the current tenant so cross-tenant assets never leak.
+
     Args:
         truck_identifier: Asset identifier to search for. Can be a truck_id, plate_number,
             asset_id, vessel_name, container_number, or equipment_model
@@ -67,10 +72,13 @@ async def find_truck_by_id(truck_identifier: str) -> str:
     start_time = time.time()
     success = False
     error_msg = None
+    tenant_id = get_current_tenant()
 
     try:
         logger.info(f"🔍 Finding asset: {truck_identifier}")
-        assets = await elasticsearch_service.get_all_documents("trucks")
+        assets_query = inject_tenant_filter({"query": {"match_all": {}}}, tenant_id)
+        assets_resp = await elasticsearch_service.search_documents("trucks", assets_query, size=1000)
+        assets = [hit["_source"] for hit in assets_resp.get("hits", {}).get("hits", [])]
 
         identifier_lower = truck_identifier.lower()
 
@@ -179,17 +187,22 @@ async def find_truck_by_id(truck_identifier: str) -> str:
 async def get_all_locations() -> str:
     """
     Get all locations (depots, warehouses, stations) in the system.
-    
+
+    The listing is scoped to the current tenant so cross-tenant locations never leak.
+
     Returns:
         List of all locations organized by type
     """
     start_time = time.time()
     success = False
     error_msg = None
-    
+    tenant_id = get_current_tenant()
+
     try:
         logger.info("📍 Getting all locations")
-        locations = await elasticsearch_service.get_all_documents("locations")
+        loc_query = inject_tenant_filter({"query": {"match_all": {}}}, tenant_id)
+        loc_resp = await elasticsearch_service.search_documents("locations", loc_query, size=1000)
+        locations = [hit["_source"] for hit in loc_resp.get("hits", {}).get("hits", [])]
         
         response = f"📍 **All Locations** ({len(locations)} total)\n\n"
         

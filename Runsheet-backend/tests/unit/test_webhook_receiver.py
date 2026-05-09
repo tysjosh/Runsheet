@@ -248,8 +248,8 @@ class TestIdempotency:
 
         assert resp.status_code == 200
         assert resp.json()["status"] == "processed"
-        idemp.is_duplicate.assert_called_once_with("evt-001")
-        idemp.mark_processed.assert_called_once_with("evt-001")
+        idemp.is_duplicate.assert_called_once_with("evt-001", tenant_id="tenant-1")
+        idemp.mark_processed.assert_called_once_with("evt-001", tenant_id="tenant-1")
         adapter.transform.assert_called_once()
 
 

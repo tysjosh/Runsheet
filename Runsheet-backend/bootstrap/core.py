@@ -35,13 +35,27 @@ async def initialize(app, container: ServiceContainer) -> None:
     # Elasticsearch (module-level singleton)
     container.es_service = elasticsearch_service
 
-    # Seed baseline data
-    try:
-        logger.info("Seeding Elasticsearch with baseline morning data...")
-        await data_seeder.seed_baseline_data(operational_time="09:00")
-        logger.info("Baseline data seeding completed.")
-    except Exception as e:
-        logger.error("Failed to seed Elasticsearch data: %s", e)
+    # Seed baseline data (development / demo only).
+    #
+    # Historically this ran unconditionally at every boot, which meant a
+    # production deployment cold-booted with synthetic trucks, drivers,
+    # and support tickets written into the live Elasticsearch cluster.
+    # It is now gated behind ``settings.seed_demo_data`` (default False)
+    # so production boots are inert and the seeded docs (tenant-stamped
+    # with ``tenant_id="demo"`` in the seeder layer) cannot bleed into
+    # any real tenant's reads.
+    if getattr(settings, "seed_demo_data", False):
+        try:
+            logger.info("Seeding Elasticsearch with baseline morning data (seed_demo_data=true)...")
+            await data_seeder.seed_baseline_data(operational_time="09:00")
+            logger.info("Baseline data seeding completed.")
+        except Exception as e:
+            logger.error("Failed to seed Elasticsearch data: %s", e)
+    else:
+        logger.info(
+            "Skipping baseline data seeding: seed_demo_data flag is False. "
+            "Set SEED_DEMO_DATA=true in .env to enable for local dev."
+        )
 
     # Health check service
     health_check_service = HealthCheckService(

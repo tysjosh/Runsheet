@@ -114,7 +114,7 @@ class TestSetLevel:
     async def test_set_valid_level_writes_to_redis(self, service, mock_redis):
         await service.set_level("tenant-123", "auto-low")
         mock_redis.set.assert_called_once_with(
-            "tenant:tenant-123:autonomy_level", "auto-low"
+            "tenant:tenant-123:autonomy_level", "auto-low", ex=30 * 24 * 60 * 60,
         )
 
     async def test_set_returns_previous_level(self, service, mock_redis):
@@ -132,7 +132,7 @@ class TestSetLevel:
             mock_redis.set.reset_mock()
             await service.set_level("tenant-123", level)
             mock_redis.set.assert_called_once_with(
-                "tenant:tenant-123:autonomy_level", level
+                "tenant:tenant-123:autonomy_level", level, ex=30 * 24 * 60 * 60,
             )
 
     async def test_set_invalid_level_raises_value_error(self, service):
@@ -157,7 +157,7 @@ class TestSetLevel:
     async def test_set_uses_correct_key_pattern(self, service, mock_redis):
         await service.set_level("my-tenant", "full-auto")
         mock_redis.set.assert_called_once_with(
-            "tenant:my-tenant:autonomy_level", "full-auto"
+            "tenant:my-tenant:autonomy_level", "full-auto", ex=30 * 24 * 60 * 60,
         )
 
 
@@ -173,7 +173,7 @@ class TestSetThenGet:
         async def mock_get(key):
             return store.get(key)
 
-        async def mock_set(key, value):
+        async def mock_set(key, value, **kwargs):
             store[key] = value
             return True
 

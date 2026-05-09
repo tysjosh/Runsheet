@@ -134,11 +134,9 @@ ROUTE_FIXTURES: Dict[str, RouteFixture] = {
         json={"data_type": "trucks", "records": []},
     ),
     # POST /api/upload/csv — multipart, skip (will get 422)
-    # POST /api/data/upload/csv — multipart, skip
-    "POST /api/data/upload/sheets": RouteFixture(
-        method="POST",
-        json={"data_type": "trucks", "records": []},
-    ),
+    # Legacy ``/api/data/upload/*`` handlers were removed — they ignored
+    # the payload and returned random counts. Real ingestion is
+    # ``/api/import/upload/*``.
     "POST /api/data/cleanup": RouteFixture(method="POST"),
 
     # ---- Location endpoints ----

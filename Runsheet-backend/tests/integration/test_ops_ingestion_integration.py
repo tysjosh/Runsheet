@@ -100,10 +100,10 @@ def _build_integration_app(store: _InMemoryStore, *, feature_flag_service=None):
     _processed_ids: set[str] = set()
     idempotency = AsyncMock()
 
-    async def _is_dup(event_id: str) -> bool:
+    async def _is_dup(event_id: str, tenant_id: str = None) -> bool:
         return event_id in _processed_ids
 
-    async def _mark(event_id: str) -> None:
+    async def _mark(event_id: str, tenant_id: str = None) -> None:
         _processed_ids.add(event_id)
 
     idempotency.is_duplicate = AsyncMock(side_effect=_is_dup)
