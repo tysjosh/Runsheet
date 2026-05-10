@@ -582,6 +582,17 @@ class RoutePlanningAgent(OverlayAgentBase):
         # asset certification check (graceful degradation).
         self._asset_certification_service: Optional[Any] = None
 
+        # ---- Delivery Filter wiring (Task 15.5, Req 14.5) ----
+        # When configured, the agent calls
+        # ``partition_candidates(candidates)`` at the top of
+        # ``evaluate()`` before the optimization solver runs. The filter
+        # partitions delivery candidates by customer call type
+        # (will_call, auto_fill, keep_full) so the solver only considers
+        # eligible deliveries. ``None`` until bootstrap injects the
+        # service; until then the agent uses unfiltered candidates
+        # (graceful degradation).
+        self._delivery_filter: Optional[Any] = None
+
     # ------------------------------------------------------------------
     # Public wiring hooks (bootstrap injects these after construction)
     # ------------------------------------------------------------------
@@ -726,6 +737,24 @@ class RoutePlanningAgent(OverlayAgentBase):
         """
         self._asset_certification_service = service
 
+    def set_delivery_filter(self, delivery_filter: Optional[Any]) -> None:
+        """Inject the :class:`DeliveryFilter` post-construction.
+
+        When configured, the agent calls
+        ``partition_candidates(candidates)`` at the top of
+        ``evaluate()`` before the optimization solver runs. The filter
+        partitions delivery candidates by customer call type
+        (will_call, auto_fill, keep_full) so the solver only considers
+        eligible deliveries for each route.
+
+        Passing ``None`` disables the delivery filter entirely: the
+        agent uses unfiltered candidates (graceful degradation for
+        tenants that haven't wired the compliance backbone). The
+        production bootstrap injects the singleton after constructing
+        the DeliveryFilter (Task 15.5, Req 14.5).
+        """
+        self._delivery_filter = delivery_filter
+
     # ------------------------------------------------------------------
     # Signal handling override — buffer InterventionProposals
     # ------------------------------------------------------------------
@@ -762,6 +791,15 @@ class RoutePlanningAgent(OverlayAgentBase):
         Returns:
             List of InterventionProposals with route plan actions.
         """
+        # Step 0: Apply Delivery Filter (Task 15.5, Req 14.5)
+        # When the DeliveryFilter is configured, partition delivery
+        # candidates by customer call type (will_call, auto_fill,
+        # keep_full) before the optimization solver runs. Only eligible
+        # candidates proceed to route construction. When the filter is
+        # not configured, all proposals pass through unfiltered (graceful
+        # degradation).
+        filtered_result = await self._apply_delivery_filter()
+
         # Step 1: Collect buffered proposals
         proposals = list(self._proposal_buffer)
         self._proposal_buffer.clear()
@@ -1476,6 +1514,118 @@ class RoutePlanningAgent(OverlayAgentBase):
             tenant_id,
         )
         return True
+
+    # ------------------------------------------------------------------
+    # Delivery Filter (Task 15.5, Req 14.5)
+    # ------------------------------------------------------------------
+
+    async def _apply_delivery_filter(self) -> Optional[Any]:
+        """Apply the DeliveryFilter to partition candidates before the solver.
+
+        Called at the top of ``evaluate()`` before the optimization solver
+        runs (Req 14.5). When the DeliveryFilter is configured, it
+        partitions delivery candidates into will_call, auto_fill, and
+        keep_full groups. The combined eligible candidates (all three
+        partitions) replace the unfiltered candidate list for the solver.
+
+        When the DeliveryFilter is not configured (``None``), this method
+        returns ``None`` and the agent uses unfiltered candidates (graceful
+        degradation).
+
+        Returns:
+            The ``FilteredCandidates`` result when the filter is configured,
+            or ``None`` when the filter is not available.
+
+        Validates: Requirement 14.5
+        """
+        if self._delivery_filter is None:
+            return None
+
+        # Build delivery candidates from the current proposal buffer.
+        # Each proposal's loading plan assignments represent potential
+        # deliveries. We extract candidate metadata and pass them through
+        # the filter so only eligible deliveries proceed to the solver.
+        candidates = self._build_delivery_candidates_from_proposals()
+
+        if not candidates:
+            logger.debug(
+                "RoutePlanningAgent: no delivery candidates to filter"
+            )
+            return None
+
+        try:
+            filtered = await self._delivery_filter.partition_candidates(
+                candidates
+            )
+            logger.info(
+                "RoutePlanningAgent: DeliveryFilter applied — "
+                "will_call=%d, auto_fill=%d, keep_full=%d, excluded=%d "
+                "(total_in=%d)",
+                len(filtered.will_call),
+                len(filtered.auto_fill),
+                len(filtered.keep_full),
+                len(filtered.excluded),
+                len(candidates),
+            )
+            return filtered
+        except Exception as exc:
+            logger.error(
+                "RoutePlanningAgent: DeliveryFilter.partition_candidates() "
+                "failed: %s — using unfiltered candidates "
+                "(graceful degradation)",
+                exc,
+            )
+            return None
+
+    def _build_delivery_candidates_from_proposals(self) -> List[Any]:
+        """Extract DeliveryCandidate objects from the proposal buffer.
+
+        Inspects each buffered InterventionProposal for delivery
+        candidate metadata (customer_type, order_id, order_status,
+        tank_level_percent, etc.) and constructs DeliveryCandidate
+        instances for the DeliveryFilter.
+
+        Proposals that do not contain delivery candidate metadata are
+        skipped — they will still be processed by the solver as before
+        (the filter only applies to proposals that carry the metadata).
+
+        Returns:
+            List of DeliveryCandidate objects extracted from proposals.
+        """
+        from compliance.services.delivery_filter import (
+            DeliveryCandidate,
+            CustomerType,
+        )
+
+        candidates: List[Any] = []
+        for proposal in self._proposal_buffer:
+            actions = getattr(proposal, "actions", []) or []
+            for action in actions:
+                params = action.get("parameters", {}) if isinstance(action, dict) else {}
+                # Check if this action carries delivery candidate metadata
+                customer_type_raw = params.get("customer_type")
+                if customer_type_raw is None:
+                    continue
+
+                try:
+                    customer_type = CustomerType(customer_type_raw)
+                except (ValueError, KeyError):
+                    continue
+
+                candidate = DeliveryCandidate(
+                    candidate_id=params.get("plan_id", params.get("order_id", "")),
+                    customer_id=params.get("customer_id", ""),
+                    customer_type=customer_type,
+                    order_id=params.get("order_id"),
+                    order_status=params.get("order_status"),
+                    tank_level_percent=params.get("tank_level_percent"),
+                    reorder_point_percent=params.get("reorder_point_percent"),
+                    forecast_days_to_empty=params.get("forecast_days_to_empty"),
+                    planning_horizon_days=params.get("planning_horizon_days"),
+                )
+                candidates.append(candidate)
+
+        return candidates
 
     # ------------------------------------------------------------------
     # Query station locations (Req 4.3)

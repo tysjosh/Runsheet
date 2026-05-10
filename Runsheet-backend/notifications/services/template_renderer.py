@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 
 from errors.exceptions import resource_not_found, validation_error
 from notifications.services.notification_es_mappings import NOTIFICATION_TEMPLATES_INDEX
+from notifications.templates.fuel_templates import FUEL_NOTIFICATION_TEMPLATES
 from services.elasticsearch_service import ElasticsearchService
 
 logger = logging.getLogger(__name__)
@@ -408,6 +409,13 @@ DEFAULT_TEMPLATES: list[dict] = [
         ],
     },
 ]
+
+# ---------------------------------------------------------------------------
+# Extend DEFAULT_TEMPLATES with fuel-specific notification templates
+# (low_tank_autofill_alert, past_due_invoice, delivery_completed, e_bol_delivery)
+# Validates: Requirements 12.1, 12.2, 12.3, 12.4
+# ---------------------------------------------------------------------------
+DEFAULT_TEMPLATES.extend(FUEL_NOTIFICATION_TEMPLATES)
 
 
 class TemplateRenderer:

@@ -149,6 +149,16 @@ ehthumbs.db
 Thumbs.db
 
 # =============================================================================
+# Geospatial Data (binary shapefiles — use scripts/download_shapefile.py)
+# =============================================================================
+Runsheet-backend/data/*.shp
+Runsheet-backend/data/*.shx
+Runsheet-backend/data/*.dbf
+Runsheet-backend/data/*.prj
+Runsheet-backend/data/*.cpg
+Runsheet-backend/data/*.shp.xml
+
+# =============================================================================
 # Build Artifacts
 # =============================================================================
 # Logs

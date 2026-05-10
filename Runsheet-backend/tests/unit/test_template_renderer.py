@@ -359,7 +359,8 @@ class TestInitializeDefaultTemplates:
 
     async def test_creates_all_default_templates(self):
         """Covers the 12 base templates + 12 severe-weather variants
-        introduced by Task 10.9 (Req 9.2.6)."""
+        introduced by Task 10.9 (Req 9.2.6) + 6 fuel notification
+        templates (Task 14.1/14.2, Req 12.1-12.4)."""
         es = _make_es_mock()
         es.search_documents = AsyncMock(return_value=_es_response([]))
         renderer = _make_renderer(es)
@@ -367,7 +368,9 @@ class TestInitializeDefaultTemplates:
         await renderer.initialize_default_templates("tenant-1")
 
         # 4 base event types × 3 channels + 4 _storm variants × 3 channels
-        assert es.index_document.call_count == 24
+        # + 6 fuel templates (low_tank_autofill_alert×2, past_due_invoice×1,
+        #   delivery_completed×2, e_bol_delivery×1)
+        assert es.index_document.call_count == 30
 
         indexed_keys = set()
         for call in es.index_document.call_args_list:
@@ -381,7 +384,7 @@ class TestInitializeDefaultTemplates:
             assert doc["body_template"]  # non-empty
             indexed_keys.add((doc["event_type"], doc["channel"]))
 
-        # Verify all 24 combinations
+        # Verify all 30 combinations
         base_event_types = {
             "delivery_confirmation",
             "delay_alert",
@@ -394,6 +397,13 @@ class TestInitializeDefaultTemplates:
         expected_keys = {
             (et, ch) for et in expected_event_types for ch in expected_channels
         }
+        # Fuel notification templates (Req 12.1-12.4)
+        expected_keys.add(("low_tank_autofill_alert", "email"))
+        expected_keys.add(("low_tank_autofill_alert", "sms"))
+        expected_keys.add(("past_due_invoice", "email"))
+        expected_keys.add(("delivery_completed", "email"))
+        expected_keys.add(("delivery_completed", "sms"))
+        expected_keys.add(("e_bol_delivery", "email"))
         assert indexed_keys == expected_keys
 
     async def test_skips_existing_templates(self):
@@ -408,8 +418,8 @@ class TestInitializeDefaultTemplates:
 
         await renderer.initialize_default_templates("tenant-1")
 
-        # 24 total - 3 existing = 21 new
-        assert es.index_document.call_count == 21
+        # 30 total - 3 existing = 27 new
+        assert es.index_document.call_count == 27
         created_keys = {
             (call[0][2]["event_type"], call[0][2]["channel"])
             for call in es.index_document.call_args_list
@@ -434,6 +444,16 @@ class TestInitializeDefaultTemplates:
             for et in all_event_types
             for ch in ["sms", "email", "whatsapp"]
         ]
+        # Include fuel notification templates (Task 14.1/14.2)
+        fuel_templates = [
+            _template_doc(event_type="low_tank_autofill_alert", channel="email"),
+            _template_doc(event_type="low_tank_autofill_alert", channel="sms"),
+            _template_doc(event_type="past_due_invoice", channel="email"),
+            _template_doc(event_type="delivery_completed", channel="email"),
+            _template_doc(event_type="delivery_completed", channel="sms"),
+            _template_doc(event_type="e_bol_delivery", channel="email"),
+        ]
+        existing.extend(fuel_templates)
         es = _make_es_mock()
         es.search_documents = AsyncMock(return_value=_es_response(existing))
         renderer = _make_renderer(es)

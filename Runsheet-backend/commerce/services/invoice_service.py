@@ -102,6 +102,16 @@ class InvoiceService:
         # tax (Req 6.5) and logs the sale for IRS audit (Req 6.7).
         # Injected via set_dyed_diesel_enforcer() from bootstrap.
         self._dyed_diesel_enforcer: Optional[Any] = None
+        # Optional NotificationService for firing past_due_invoice
+        # notifications when an invoice transitions to overdue status
+        # (Req 12.6). Injected via set_notification_service() from
+        # bootstrap. When None, overdue transitions proceed without
+        # notification — backwards compatible.
+        self._notification_service: Optional[Any] = None
+        # Track invoices that have already had a past_due_invoice
+        # notification sent to prevent duplicate notifications on
+        # repeated overdue scans (idempotency).
+        self._notified_overdue_invoices: set = set()
 
     # ------------------------------------------------------------------
     # Dependency injection setters
@@ -121,6 +131,18 @@ class InvoiceService:
         Validates: Requirements 6.5, 6.7
         """
         self._dyed_diesel_enforcer = enforcer
+
+    def set_notification_service(self, notification_service) -> None:
+        """Inject the NotificationService for past_due_invoice notifications.
+
+        When set, mark_overdue() will fire a ``past_due_invoice``
+        notification to the account billing contact each time an invoice
+        transitions to overdue status. The notification fires at most
+        once per invoice (deduplication via _notified_overdue_invoices).
+
+        Validates: Requirement 12.6
+        """
+        self._notification_service = notification_service
 
     # ------------------------------------------------------------------
     # Event helpers
@@ -1108,7 +1130,105 @@ class InvoiceService:
         # Broadcast updated projection on WS channel (Design §6)
         await self._broadcast_invoice_ws(merged)
 
+        # Fire past_due_invoice notification (Req 12.6)
+        await self._fire_past_due_invoice_notification(
+            tenant_id=tenant_id,
+            invoice=merged,
+        )
+
         return merged
+
+    # ------------------------------------------------------------------
+    # Past-due invoice notification (Task 14.5 / Req 12.6)
+    # ------------------------------------------------------------------
+
+    async def _fire_past_due_invoice_notification(
+        self,
+        *,
+        tenant_id: str,
+        invoice: Dict[str, Any],
+    ) -> None:
+        """Fire ``past_due_invoice`` notification on overdue transition.
+
+        Called by mark_overdue() after the invoice status has been
+        transitioned. This is non-blocking: notification failures are
+        logged as warnings but never propagate to the caller.
+
+        Deduplication: each invoice_id is tracked in
+        ``_notified_overdue_invoices`` so the notification fires at most
+        once per invoice per service lifetime. The overdue job's hourly
+        scan is idempotent (mark_overdue returns early for already-overdue
+        invoices), but this provides an additional safety net.
+
+        Validates: Requirement 12.6
+        """
+        if self._notification_service is None:
+            return
+
+        invoice_id = invoice.get("invoice_id", "")
+
+        # Deduplication: only fire once per invoice
+        if invoice_id in self._notified_overdue_invoices:
+            return
+
+        # Compute days_past_due from due_date
+        due_date_str = invoice.get("due_date")
+        days_past_due = 0
+        if due_date_str:
+            try:
+                from datetime import date as date_type
+
+                due_date_val = date_type.fromisoformat(str(due_date_str)[:10])
+                today = utcnow().date()
+                days_past_due = max(0, (today - due_date_val).days)
+            except (ValueError, TypeError):
+                days_past_due = 0
+
+        # Compute amount_due_dollars from remaining_cents
+        remaining_cents = invoice.get("remaining_cents", 0) or 0
+        amount_due_dollars = f"{remaining_cents / 100:.2f}"
+
+        # Build the event_data payload matching the template placeholders
+        # (customer_name, invoice_number, amount_due_dollars,
+        # days_past_due, payment_link)
+        customer_id = invoice.get("customer_id", "")
+        invoice_number = invoice.get("invoice_number") or invoice_id
+
+        event_data = {
+            "customer_id": customer_id,
+            "customer_name": customer_id,  # Best available; real name resolved by preference_resolver
+            "invoice_number": invoice_number,
+            "amount_due_dollars": amount_due_dollars,
+            "days_past_due": days_past_due,
+            "payment_link": f"/invoices/{invoice_id}/pay",
+            "invoice_id": invoice_id,
+            "account_id": invoice.get("account_id", ""),
+        }
+
+        try:
+            await self._notification_service.notify_event(
+                event_type="past_due_invoice",
+                event_data=event_data,
+                tenant_id=tenant_id,
+            )
+            self._notified_overdue_invoices.add(invoice_id)
+            logger.info(
+                "InvoiceService: fired past_due_invoice notification for "
+                "invoice=%s customer=%s days_past_due=%d tenant=%s",
+                invoice_id,
+                customer_id,
+                days_past_due,
+                tenant_id,
+            )
+        except Exception as exc:
+            # Non-blocking: notification failure must never break the
+            # overdue transition pipeline.
+            logger.warning(
+                "InvoiceService: past_due_invoice notification failed for "
+                "invoice=%s: %s",
+                invoice_id,
+                exc,
+            )
 
     # ------------------------------------------------------------------
     # Get

@@ -207,6 +207,22 @@ class PODBOLFinalizer:
         self._es = es_service
         self._feature_flags = feature_flag_service
         self._context_loader = context_loader
+        # Subscribers called after successful BOL generation (e.g.,
+        # e_bol_delivery notification). Each subscriber is an async
+        # callable accepting a BOL document dict.
+        self._bol_subscribers: list = []
+
+    def add_bol_subscriber(self, subscriber: Any) -> None:
+        """Register a subscriber to be called after successful BOL generation.
+
+        Subscribers are async callables that accept a BOL document dict.
+        They are called non-blocking — failures are logged but never
+        propagate to the caller.
+
+        Args:
+            subscriber: An async callable accepting a dict (BOL document).
+        """
+        self._bol_subscribers.append(subscriber)
 
     # ------------------------------------------------------------------
 
@@ -272,6 +288,9 @@ class PODBOLFinalizer:
                 pod_id,
                 doc.bol_id,
             )
+            # Notify subscribers (e.g., e_bol_delivery notification).
+            # Non-blocking: failures are logged but never propagate.
+            await self._notify_subscribers(doc, pod)
             return doc
         except Exception as exc:
             # Never propagate — POD persistence must not be blocked by a
@@ -293,6 +312,50 @@ class PODBOLFinalizer:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    async def _notify_subscribers(
+        self, doc: BOLDocument, pod: Mapping[str, Any]
+    ) -> None:
+        """Call registered subscribers after successful BOL generation.
+
+        Each subscriber receives a dict representation of the BOL document
+        enriched with POD context (customer_id, order_id). Failures are
+        logged but never propagate — the BOL generation result is already
+        committed and must not be affected by downstream notification
+        failures.
+        """
+        if not self._bol_subscribers:
+            return
+
+        # Build a dict representation for subscribers
+        bol_dict = {
+            "bol_id": doc.bol_id,
+            "tenant_id": doc.tenant_id,
+            "pod_id": doc.pod_id,
+            "order_id": doc.order_id,
+            "file_ref": doc.file_ref,
+            "hash": doc.hash,
+            "status": doc.status,
+            "generated_at": doc.generated_at.isoformat()
+            if doc.generated_at
+            else None,
+            "fields": doc.fields.dict()
+            if hasattr(doc.fields, "dict")
+            else (doc.fields.model_dump() if hasattr(doc.fields, "model_dump") else doc.fields),
+            # Enrich with POD context for customer resolution
+            "customer_id": pod.get("customer_id", ""),
+        }
+
+        for subscriber in self._bol_subscribers:
+            try:
+                await subscriber(bol_dict)
+            except Exception as exc:
+                logger.warning(
+                    "PODBOLFinalizer: subscriber %s failed for bol=%s: %s",
+                    getattr(subscriber, "__class__", type(subscriber)).__name__,
+                    doc.bol_id,
+                    exc,
+                )
 
     async def _is_enabled(self, tenant_id: str) -> bool:
         """Return ``True`` when ``overlay.bol_generation`` is active.

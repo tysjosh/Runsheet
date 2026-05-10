@@ -145,10 +145,17 @@ class TestConstructor:
 
     def test_subscription_to_risk_signals(self):
         agent, _ = _make_agent()
-        assert len(agent._subscription_specs) == 1
+        assert len(agent._subscription_specs) == 2
         spec = agent._subscription_specs[0]
         assert spec["message_type"] is RiskSignal
         assert spec["filters"]["source_agent"] == "fuel_management_agent"
+
+    def test_subscription_to_kfactor_changed_signals(self):
+        """TankForecastingAgent subscribes to kfactor_changed signals. Validates: 9.5"""
+        agent, _ = _make_agent()
+        spec = agent._subscription_specs[1]
+        assert spec["message_type"] is RiskSignal
+        assert spec["filters"]["source_agent"] == "kfactor_calibration_service"
 
     def test_default_poll_interval(self):
         agent, _ = _make_agent()
@@ -989,3 +996,105 @@ class TestPersistenceWithExtendedFields:
         assert "customer_type_multiplier" in doc
         assert "weather_fallback" in doc
         assert "scheduled_deliveries" in doc
+
+
+# ---------------------------------------------------------------------------
+# Tests: _process_kfactor_changed_signals() (Req 9.5)
+# ---------------------------------------------------------------------------
+
+
+class TestProcessKfactorChangedSignals:
+    """Tests for TankForecastingAgent._process_kfactor_changed_signals.
+
+    Validates: Requirement 9.5 — TankForecastingAgent is notified via
+    signal bus when a K-factor is adjusted.
+    """
+
+    def test_processes_kfactor_changed_signal(self):
+        """Processes kfactor_changed signal without error. Validates: 9.5"""
+        agent, _ = _make_agent()
+        signal = RiskSignal(
+            source_agent="kfactor_calibration_service",
+            entity_id="tank_abc",
+            entity_type="customer_tank",
+            severity=Severity.LOW,
+            confidence=1.0,
+            ttl_seconds=3600,
+            tenant_id="tenant-1",
+            context={
+                "event": "kfactor_changed",
+                "tank_id": "tank_abc",
+                "old_kfactor": 1.35,
+                "new_kfactor": 1.50,
+                "operator_id": "op_smith",
+                "adjustment_id": "kfa_123",
+            },
+        )
+        # Should not raise
+        agent._process_kfactor_changed_signals([signal])
+
+    def test_ignores_non_kfactor_signals(self):
+        """Non-kfactor signals are ignored without error. Validates: 9.5"""
+        agent, _ = _make_agent()
+        signal = _make_signal(context={"sensor_drift": True})
+        # Should not raise
+        agent._process_kfactor_changed_signals([signal])
+
+    def test_handles_mixed_signals(self):
+        """Handles a mix of kfactor_changed and other signals. Validates: 9.5"""
+        agent, _ = _make_agent()
+        kfactor_signal = RiskSignal(
+            source_agent="kfactor_calibration_service",
+            entity_id="tank_xyz",
+            entity_type="customer_tank",
+            severity=Severity.LOW,
+            confidence=1.0,
+            ttl_seconds=3600,
+            tenant_id="tenant-1",
+            context={
+                "event": "kfactor_changed",
+                "tank_id": "tank_xyz",
+                "old_kfactor": 2.0,
+                "new_kfactor": 1.8,
+                "operator_id": "op_jones",
+            },
+        )
+        anomaly_signal = _make_signal(context={"demand_spike": True})
+        # Should not raise
+        agent._process_kfactor_changed_signals([kfactor_signal, anomaly_signal])
+
+    @pytest.mark.asyncio
+    async def test_evaluate_processes_kfactor_signal_and_triggers_reforecast(self):
+        """evaluate() processes kfactor_changed signal and re-forecasts. Validates: 9.5"""
+        tank = _make_customer_tank(
+            customer_tank_id="tank_abc",
+            fuel_type="propane",
+            fuel_product_code="PROPANE",
+        )
+        agent, deps = _make_extended_agent(tanks=[tank])
+
+        kfactor_signal = RiskSignal(
+            source_agent="kfactor_calibration_service",
+            entity_id="tank_abc",
+            entity_type="customer_tank",
+            severity=Severity.LOW,
+            confidence=1.0,
+            ttl_seconds=3600,
+            tenant_id="tenant-1",
+            context={
+                "event": "kfactor_changed",
+                "tank_id": "tank_abc",
+                "old_kfactor": 1.35,
+                "new_kfactor": 1.50,
+                "operator_id": "op_smith",
+            },
+        )
+
+        await agent.evaluate([kfactor_signal])
+
+        # A forecast should be produced for the tank (re-forecast triggered)
+        published = [c.args[0] for c in deps["signal_bus"].publish.call_args_list]
+        tank_forecasts = [
+            f for f in published if getattr(f, "customer_tank_id", None) == "tank_abc"
+        ]
+        assert len(tank_forecasts) == 1

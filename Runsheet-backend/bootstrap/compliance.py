@@ -677,6 +677,82 @@ async def initialize(app, container: ServiceContainer) -> None:
             exc,
         )
 
+    # ── IFTA Reporter → GeotabConnector wiring (Task 12.3 / Req 7.1) ──
+    # Inject the IFTAReporter and StateBoundaryDetector into the
+    # GeotabConnector so that sync_pull automatically detects state
+    # boundary crossings from GPS telemetry and records trip segments.
+    # This hook is optional — if the GeotabConnector is not available
+    # (e.g., no Geotab integration configured), the IFTA reporter
+    # still functions for manual mileage adjustments.
+    try:
+        from compliance.services.ifta_reporter import IFTAReporter
+        from compliance.services.state_boundary_detector import (
+            StateBoundaryDetector,
+        )
+
+        state_boundary_detector = StateBoundaryDetector()
+        ifta_reporter = IFTAReporter(
+            es_service=es_service,
+            state_boundary_detector=state_boundary_detector,
+        )
+        container.ifta_reporter = ifta_reporter
+        container.state_boundary_detector = state_boundary_detector
+
+        # Wire into GeotabConnector if available
+        geotab_connector = (
+            container.get("geotab_connector")
+            if container.has("geotab_connector")
+            else None
+        )
+        if geotab_connector is not None:
+            geotab_connector.set_ifta_reporter(
+                ifta_reporter, state_boundary_detector
+            )
+            logger.info(
+                "IFTAReporter wired into GeotabConnector (task 12.3)"
+            )
+        else:
+            logger.warning(
+                "GeotabConnector not present in container — "
+                "IFTAReporter hook not injected (task 12.3). "
+                "IFTAReporter is available on container.ifta_reporter "
+                "for deferred wiring when a Geotab integration is "
+                "configured."
+            )
+    except Exception as exc:
+        logger.warning(
+            "IFTAReporter → GeotabConnector wiring failed (task 12.3): %s",
+            exc,
+        )
+
+    # ── IFTA Reporter REST endpoints (Task 12.10 / Req 7.4–7.7) ──
+    # Wire the IFTAReporter into ``compliance.api.ifta_endpoints`` so
+    # the GET /report, GET /fleet-mpg, POST /adjustments,
+    # GET /adjustments, and GET /completeness handlers can delegate
+    # to the service. Router inclusion is performed by ``main.py``.
+    try:
+        from compliance.api.ifta_endpoints import configure_ifta_api
+
+        ifta_reporter_for_api = (
+            container.get("ifta_reporter")
+            if container.has("ifta_reporter")
+            else None
+        )
+        if ifta_reporter_for_api is not None:
+            configure_ifta_api(ifta_reporter=ifta_reporter_for_api)
+            logger.info("IFTA Reporter API configured (task 12.10)")
+        else:
+            logger.warning(
+                "IFTAReporter not present in container — "
+                "IFTA API not configured (task 12.10). "
+                "The IFTA endpoints will return a runtime error until "
+                "the IFTAReporter is wired."
+            )
+    except Exception as exc:
+        logger.warning(
+            "IFTA Reporter API wiring failed (task 12.10): %s", exc
+        )
+
     # ── Terminal BOL Ingestion REST endpoints (Task 11.11) ────────
     # Wire the TerminalBOLIngestionService and ES service into
     # ``compliance.api.terminal_bol_endpoints`` so the POST (EDI),
@@ -730,6 +806,259 @@ async def initialize(app, container: ServiceContainer) -> None:
     except Exception as exc:
         logger.warning(
             "Terminal BOL ingestion API wiring failed (task 11.11): %s", exc
+        )
+
+    # ── KFactor Calibration → order.delivered subscriber (Task 13.8 / Req 9.1) ──
+    # Subscribe the KFactorDeliverySubscriber to the OrderService's
+    # order.delivered event so that K-factor variance is computed
+    # automatically when a delivery is completed for an auto-fill or
+    # keep-full customer. Follows the same subscriber pattern as the
+    # commerce invoice generation subscriber (bootstrap/core.py).
+    # The handler is fault-tolerant: errors are logged but never block
+    # the delivery pipeline.
+    try:
+        from compliance.hooks.kfactor_delivery_subscriber import (
+            KFactorDeliverySubscriber,
+        )
+        from compliance.services.kfactor_calibration_service import (
+            KFactorCalibrationService,
+        )
+
+        # Resolve optional dependencies for the KFactor service
+        weather_provider = (
+            container.get("weather_provider")
+            if container.has("weather_provider")
+            else None
+        )
+        signal_bus = (
+            container.get("signal_bus")
+            if container.has("signal_bus")
+            else None
+        )
+        notification_service = (
+            container.get("notification_service")
+            if container.has("notification_service")
+            else None
+        )
+
+        kfactor_service = KFactorCalibrationService(
+            es_service=es_service,
+            weather_provider=weather_provider,
+            signal_bus=signal_bus,
+            notification_service=notification_service,
+        )
+        container.kfactor_calibration_service = kfactor_service
+
+        # Create the subscriber handler
+        kfactor_subscriber = KFactorDeliverySubscriber(
+            kfactor_service=kfactor_service,
+            notification_service=notification_service,
+        )
+
+        # Register on the OrderService's public subscription helper
+        if container.has("order_service"):
+            order_service = container.order_service
+            order_service.subscribe("order.delivered", kfactor_subscriber)
+            logger.info(
+                "KFactorDeliverySubscriber registered on order.delivered "
+                "event (task 13.8)"
+            )
+        else:
+            logger.warning(
+                "KFactorDeliverySubscriber not registered — "
+                "order_service not available in container (task 13.8). "
+                "KFactorCalibrationService is available on "
+                "container.kfactor_calibration_service for deferred wiring."
+            )
+    except Exception as exc:
+        logger.warning(
+            "KFactorDeliverySubscriber wiring failed (task 13.8): %s", exc
+        )
+
+    # ── K-Factor Calibration REST endpoints (Task 13.9 / Req 9.1–9.6) ──
+    # Wire the KFactorCalibrationService into
+    # ``compliance.api.kfactor_endpoints`` so the GET /dashboard,
+    # POST /{tank_id}/approve, GET /{tank_id}/variance, and
+    # GET /{tank_id}/suggest handlers can delegate to the service.
+    # Router inclusion is performed by ``main.py``.
+    try:
+        from compliance.api.kfactor_endpoints import configure_kfactor_api
+
+        kfactor_service_for_api = (
+            container.get("kfactor_calibration_service")
+            if container.has("kfactor_calibration_service")
+            else None
+        )
+        if kfactor_service_for_api is not None:
+            configure_kfactor_api(kfactor_service=kfactor_service_for_api)
+            logger.info("K-Factor Calibration API configured (task 13.9)")
+        else:
+            logger.warning(
+                "KFactorCalibrationService not present in container — "
+                "K-Factor API not configured (task 13.9). "
+                "The K-Factor endpoints will return a runtime error until "
+                "the KFactorCalibrationService is wired."
+            )
+    except Exception as exc:
+        logger.warning(
+            "K-Factor Calibration API wiring failed (task 13.9): %s", exc
+        )
+
+    # ── InvoiceService NotificationService wiring (Task 14.5 / Req 12.6) ──
+    # Inject the NotificationService into the InvoiceService so that
+    # mark_overdue() fires a ``past_due_invoice`` notification to the
+    # account billing contact when an invoice transitions to overdue.
+    # Non-blocking: notification failures are logged but never break
+    # the overdue transition pipeline.
+    try:
+        if container.has("commerce_invoice_service") and container.has(
+            "notification_service"
+        ):
+            inv_svc = container.commerce_invoice_service
+            notif_svc = container.notification_service
+            inv_svc.set_notification_service(notif_svc)
+            logger.info(
+                "NotificationService wired into InvoiceService for "
+                "past_due_invoice notifications (task 14.5)"
+            )
+        else:
+            missing = []
+            if not container.has("commerce_invoice_service"):
+                missing.append("commerce_invoice_service")
+            if not container.has("notification_service"):
+                missing.append("notification_service")
+            logger.warning(
+                "past_due_invoice notification wiring skipped — missing "
+                "container services: %s (task 14.5)",
+                ", ".join(missing),
+            )
+    except Exception as exc:
+        logger.warning(
+            "past_due_invoice notification wiring failed (task 14.5): %s",
+            exc,
+        )
+
+    # ── DeliveryCompletedSubscriber → order.delivered (Task 14.6 / Req 12.7) ──
+    # Subscribe the DeliveryCompletedSubscriber to the OrderService's
+    # order.delivered event so that a ``delivery_completed`` notification
+    # is sent to the customer's delivery contact when POD is confirmed.
+    # The handler is fault-tolerant: notification failures are logged but
+    # never block the delivery pipeline.
+    try:
+        from compliance.hooks.delivery_completed_subscriber import (
+            DeliveryCompletedSubscriber,
+        )
+
+        notif_svc_for_delivery = (
+            container.get("notification_service")
+            if container.has("notification_service")
+            else None
+        )
+
+        if notif_svc_for_delivery is not None:
+            delivery_completed_subscriber = DeliveryCompletedSubscriber(
+                notification_service=notif_svc_for_delivery,
+            )
+
+            if container.has("order_service"):
+                order_service = container.order_service
+                order_service.subscribe(
+                    "order.delivered", delivery_completed_subscriber
+                )
+                logger.info(
+                    "DeliveryCompletedSubscriber registered on "
+                    "order.delivered event (task 14.6)"
+                )
+            else:
+                logger.warning(
+                    "DeliveryCompletedSubscriber not registered — "
+                    "order_service not available in container (task 14.6)"
+                )
+        else:
+            logger.warning(
+                "DeliveryCompletedSubscriber not registered — "
+                "notification_service not available in container (task 14.6)"
+            )
+    except Exception as exc:
+        logger.warning(
+            "DeliveryCompletedSubscriber wiring failed (task 14.6): %s", exc
+        )
+
+    # ── BOLSignedSubscriber → PODBOLFinalizer (Task 14.7 / Req 12.8) ──
+    # Register the BOLSignedSubscriber on the PODBOLFinalizer so that
+    # an ``e_bol_delivery`` notification is sent to the customer's
+    # designated BOL recipient email when a signed BOL PDF is generated.
+    # The handler is fault-tolerant: notification failures are logged but
+    # never block the BOL generation pipeline.
+    try:
+        from compliance.hooks.bol_signed_subscriber import (
+            BOLSignedSubscriber,
+        )
+
+        notif_svc_for_bol = (
+            container.get("notification_service")
+            if container.has("notification_service")
+            else None
+        )
+
+        if notif_svc_for_bol is not None:
+            bol_signed_subscriber = BOLSignedSubscriber(
+                notification_service=notif_svc_for_bol,
+            )
+
+            if container.has("pod_bol_finalizer"):
+                pod_bol_finalizer = container.pod_bol_finalizer
+                pod_bol_finalizer.add_bol_subscriber(bol_signed_subscriber)
+                logger.info(
+                    "BOLSignedSubscriber registered on "
+                    "PODBOLFinalizer (task 14.7)"
+                )
+            else:
+                logger.warning(
+                    "BOLSignedSubscriber not registered — "
+                    "pod_bol_finalizer not available in container (task 14.7). "
+                    "The subscriber will be available for deferred wiring "
+                    "when the PODBOLFinalizer is initialized."
+                )
+        else:
+            logger.warning(
+                "BOLSignedSubscriber not registered — "
+                "notification_service not available in container (task 14.7)"
+            )
+    except Exception as exc:
+        logger.warning(
+            "BOLSignedSubscriber wiring failed (task 14.7): %s", exc
+        )
+
+    # ── DeliveryFilter → Route_Planning_Agent wiring (Task 15.5 / Req 14.5) ──
+    # Inject the DeliveryFilter into the Route_Planning_Agent so it
+    # partitions delivery candidates by customer call type (will_call,
+    # auto_fill, keep_full) at the top of evaluate() before the
+    # optimization solver runs. Follows the same optional-service
+    # injection pattern (setter + graceful degradation).
+    try:
+        from compliance.services.delivery_filter import DeliveryFilter
+
+        delivery_filter = DeliveryFilter()
+        container.delivery_filter = delivery_filter
+
+        # Inject into Route_Planning_Agent if available
+        if container.has("route_planning_agent"):
+            route_agent = container.route_planning_agent
+            route_agent.set_delivery_filter(delivery_filter)
+            logger.info(
+                "DeliveryFilter wired into Route_Planning_Agent (task 15.5)"
+            )
+        else:
+            logger.warning(
+                "Route_Planning_Agent not present in container — "
+                "DeliveryFilter not injected (task 15.5). Agent bootstrap "
+                "may run later; DeliveryFilter will be available on "
+                "container.delivery_filter for deferred wiring."
+            )
+    except Exception as exc:
+        logger.warning(
+            "DeliveryFilter wiring failed (task 15.5): %s", exc
         )
 
     logger.info("Compliance domain initialized")

@@ -189,12 +189,18 @@ class DriverUtilizationItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     driver_id: str
+    driver_name: Optional[str] = None
+    status: Optional[str] = None
     active_order_count: int = 0
     completed_today: int = 0
     last_seen: Optional[str] = None
     current_location: Optional[Dict[str, float]] = None
     on_duty_minutes_today: int = 0
     qualification_warnings: List[str] = Field(default_factory=list)
+    medical_card_expiry: Optional[str] = None
+    assigned_truck_id: Optional[str] = None
+    cdl_class: Optional[str] = None
+    hazmat_endorsement: Optional[bool] = None
 
 
 class DriverUtilizationResponse(BaseModel):
@@ -333,12 +339,18 @@ async def get_driver_utilization(
         items.append(
             DriverUtilizationItem(
                 driver_id=driver.driver_id,
+                driver_name=driver.driver_name,
+                status=driver.status,
                 active_order_count=driver.active_order_count,
                 completed_today=driver.completed_today,
                 last_seen=dumped.get("last_seen"),
                 current_location=dumped.get("current_location"),
                 on_duty_minutes_today=on_duty,
                 qualification_warnings=warnings,
+                medical_card_expiry=dumped.get("medical_card_expiry"),
+                assigned_truck_id=driver.assigned_truck_id,
+                cdl_class=driver.cdl_class,
+                hazmat_endorsement=driver.hazmat_endorsement,
             )
         )
 

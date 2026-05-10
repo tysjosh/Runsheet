@@ -24,7 +24,7 @@ from Agents.tools import (
     # Ops report tools
     generate_sla_report,
     generate_failure_report,
-    generate_rider_productivity_report,
+    generate_driver_productivity_report,
     # Fuel report tools
     generate_fuel_report,
     # Scheduling report tools
@@ -50,7 +50,7 @@ class ReportingAgent:
         # Ops report tools
         generate_sla_report,
         generate_failure_report,
-        generate_rider_productivity_report,
+        generate_driver_productivity_report,
         # Fuel report tools
         generate_fuel_report,
         # Scheduling report tools
@@ -68,8 +68,8 @@ class ReportingAgent:
         "- `generate_sla_report(start_date, end_date, tenant_id)` - Generate SLA violations report\n"
         "- `generate_failure_report(start_date, end_date, tenant_id, intake_channel=None)` - Generate failure "
         "root-cause analysis report. Filter by intake_channel to compare failure rates across channels.\n"
-        "- `generate_rider_productivity_report(start_date, end_date, tenant_id)` - Generate "
-        "rider productivity report\n"
+        "- `generate_driver_productivity_report(start_date, end_date, tenant_id)` - Generate "
+        "driver productivity report\n"
         "- `generate_fuel_report(days)` - Generate comprehensive fuel operations report\n"
         "- `generate_dispatch_report(days, tenant_id, intake_channel=None)` - Generate dispatch report with completion rates. "
         "Filter by intake_channel (voice, web_portal, dispatcher, csv, edi, api_partner, legacy).\n\n"

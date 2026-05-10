@@ -1,8 +1,7 @@
 "use client";
 
 import { lazy, Suspense, useState } from "react";
-import { DollarSign, Users, Building2, FileText, CreditCard, BookOpen, TrendingUp } from "lucide-react";
-import CustomersListPage from "../../components/commerce/CustomersListPage";
+import { DollarSign, Building2, FileText, CreditCard, BookOpen, TrendingUp } from "lucide-react";
 import AccountsListPage from "../../components/commerce/AccountsListPage";
 import InvoicesListPage from "../../components/commerce/InvoicesListPage";
 import PriceBookEditor from "../../components/commerce/PriceBookEditor";
@@ -11,7 +10,6 @@ import LoadingSpinner from "../../components/LoadingSpinner";
 const ARAgingDashboard = lazy(() => import("../../components/commerce/ARAgingDashboard"));
 
 const TABS = [
-  { id: "customers", label: "Customers", icon: Users },
   { id: "accounts", label: "Accounts", icon: Building2 },
   { id: "invoices", label: "Invoices", icon: FileText },
   { id: "price-books", label: "Price Books", icon: BookOpen },
@@ -22,7 +20,7 @@ const TABS = [
 type TabId = (typeof TABS)[number]["id"];
 
 export default function CommercePage() {
-  const [activeTab, setActiveTab] = useState<TabId>("customers");
+  const [activeTab, setActiveTab] = useState<TabId>("accounts");
 
   return (
     <div className="flex flex-col h-full">
@@ -58,7 +56,6 @@ export default function CommercePage() {
 
       {/* Tab Content */}
       <div className="flex-1 overflow-auto">
-        {activeTab === "customers" && <CustomersListPage />}
         {activeTab === "accounts" && <AccountsListPage />}
         {activeTab === "invoices" && <InvoicesListPage />}
         {activeTab === "price-books" && <PriceBookEditor />}

@@ -115,7 +115,7 @@ class EventPreference(BaseModel):
 class NotificationPreference(BaseModel):
     """Model for the ``notification_preferences`` Elasticsearch index.
 
-    Validates: Requirement 4.1
+    Validates: Requirement 4.1, 12.9
     """
 
     preference_id: str
@@ -124,6 +124,7 @@ class NotificationPreference(BaseModel):
     customer_name: str
     channels: dict[str, str]  # {"sms": "+254...", "email": "user@example.com", ...}
     event_preferences: list[EventPreference]
+    template_opt_outs: list[str] = []  # template_keys the customer has opted out of
     created_at: str
     updated_at: str
 

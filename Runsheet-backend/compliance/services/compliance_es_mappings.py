@@ -56,6 +56,8 @@ PRICING_RULES_INDEX = "pricing_rules"
 
 # IFTA Reporter (Req 7)
 IFTA_MILEAGE_INDEX = "ifta_mileage"
+# Fuel card transactions — placeholder for future integration (Req 7.3).
+FUEL_CARD_TRANSACTIONS_INDEX = "fuel_card_transactions"
 
 # K-Factor Calibration (Req 9)
 KFACTOR_HISTORY_INDEX = "kfactor_history"
@@ -313,6 +315,9 @@ TERMINAL_BOLS_MAPPING = {
             "truck_id":           {"type": "keyword"},
             "load_plan_id":       {"type": "keyword"},
             "compartment_id":     {"type": "keyword"},
+            # 2-letter US state code where the terminal is located.
+            # Used by IFTA fuel gallons aggregation (Req 7.3).
+            "fuel_purchase_jurisdiction": {"type": "keyword"},
             # edi | manual
             "source":             {"type": "keyword"},
             # x12_856 | pipe_delimited | pdf | image

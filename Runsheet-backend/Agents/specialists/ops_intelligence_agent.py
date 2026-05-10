@@ -22,7 +22,7 @@ from Agents.tools import (
     # Ops report tools
     generate_sla_report,
     generate_failure_report,
-    generate_rider_productivity_report as generate_driver_productivity_report,
+    generate_driver_productivity_report,
 )
 from Agents.tools.order_tools import (
     search_orders,

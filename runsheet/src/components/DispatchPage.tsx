@@ -1,16 +1,14 @@
 "use client";
 import { useState, lazy, Suspense } from "react";
-import { CalendarClock, Droplets, Users } from "lucide-react";
+import { CalendarClock, Droplets } from "lucide-react";
 import LoadingSpinner from "./LoadingSpinner";
 
 const SchedulingJobBoard = lazy(() => import("../app/ops/scheduling/page"));
 const FuelDistributionPage = lazy(() => import("./ops/FuelDistributionPage"));
-const DriverUtilizationList = lazy(() => import("./ops/DriverUtilizationList"));
 
 const TABS = [
   { id: "scheduling", label: "Scheduling", icon: CalendarClock },
   { id: "distribution", label: "Fuel Distribution", icon: Droplets },
-  { id: "drivers", label: "Drivers", icon: Users },
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"];
@@ -47,7 +45,6 @@ export default function DispatchPage() {
         <Suspense fallback={<LoadingSpinner message="Loading..." />}>
           {activeTab === "scheduling" && <SchedulingJobBoard />}
           {activeTab === "distribution" && <FuelDistributionPage />}
-          {activeTab === "drivers" && <DriverUtilizationList drivers={[]} statusFilter="" onStatusFilterChange={() => {}} />}
         </Suspense>
       </div>
     </div>

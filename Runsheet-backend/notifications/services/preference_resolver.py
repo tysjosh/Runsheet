@@ -6,7 +6,11 @@ and contact details to use when dispatching notifications. Provides
 CRUD operations for managing notification preferences stored in the
 ``notification_preferences`` Elasticsearch index.
 
-Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 4.6
+Also enforces per-template opt-out preferences (Req 12.9): customers
+may opt out of specific template types, but mandatory regulatory
+notifications are always delivered regardless of opt-out settings.
+
+Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 12.9
 """
 
 import logging
@@ -19,6 +23,22 @@ from services.elasticsearch_service import ElasticsearchService
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Mandatory template keys — cannot be opted out of (regulatory/compliance)
+# Validates: Requirement 12.9
+# ---------------------------------------------------------------------------
+
+MANDATORY_TEMPLATE_KEYS: set[str] = frozenset({
+    "past_due_invoice",
+    "e_bol_delivery",
+})
+"""Template keys that are mandatory and cannot be opted out of.
+
+These represent regulatory or legally-required notifications:
+- past_due_invoice: Required for billing compliance
+- e_bol_delivery: Required for chain-of-custody documentation
+"""
+
 
 class PreferenceResolver:
     """Resolve and manage customer notification preferences stored in Elasticsearch.
@@ -26,7 +46,11 @@ class PreferenceResolver:
     Each preference maps a customer to their channel contact details and
     per-event-type channel selections, scoped to a tenant.
 
-    Validates: Requirements 4.1, 4.2, 4.3, 4.4, 4.5, 4.6
+    Also supports per-template opt-out flags (Req 12.9): customers can
+    opt out of specific template types, but mandatory regulatory
+    notifications are always delivered.
+
+    Validates: Requirements 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 12.9
     """
 
     def __init__(self, es_service: ElasticsearchService):
@@ -255,6 +279,7 @@ class PreferenceResolver:
                 "customer_name": data.get("customer_name", ""),
                 "channels": data.get("channels", {}),
                 "event_preferences": data.get("event_preferences", []),
+                "template_opt_outs": data.get("template_opt_outs", []),
                 "created_at": now,
                 "updated_at": now,
             }
@@ -304,3 +329,102 @@ class PreferenceResolver:
             return None
 
         return hits[0]["_source"]
+
+    # ------------------------------------------------------------------
+    # Per-template opt-out management (Req 12.9)
+    # ------------------------------------------------------------------
+
+    async def is_template_opted_out(
+        self, customer_id: str, template_key: str, tenant_id: str
+    ) -> bool:
+        """Check if a customer has opted out of a specific template.
+
+        Mandatory templates (defined in MANDATORY_TEMPLATE_KEYS) can never
+        be opted out of — this method always returns False for them.
+
+        If no preference exists for the customer, returns False (default
+        is all templates enabled).
+
+        Validates: Requirement 12.9
+
+        Args:
+            customer_id: The customer identifier.
+            template_key: The template key (e.g. ``low_tank_autofill_alert``).
+            tenant_id: Tenant scope from JWT.
+
+        Returns:
+            True if the customer has opted out and the template is not mandatory.
+        """
+        # Mandatory templates cannot be opted out of
+        if template_key in MANDATORY_TEMPLATE_KEYS:
+            return False
+
+        preference = await self._find_preference(customer_id, tenant_id)
+
+        if preference is None:
+            return False
+
+        opt_outs: list[str] = preference.get("template_opt_outs", [])
+        return template_key in opt_outs
+
+    async def update_template_opt_outs(
+        self, customer_id: str, tenant_id: str, template_opt_outs: list[str]
+    ) -> dict:
+        """Update the per-template opt-out list for a customer.
+
+        Filters out any mandatory template keys from the provided list —
+        mandatory notifications cannot be opted out of.
+
+        If no preference document exists for the customer, raises 404.
+
+        Validates: Requirement 12.9
+
+        Args:
+            customer_id: The customer identifier.
+            tenant_id: Tenant scope from JWT.
+            template_opt_outs: List of template_keys the customer wants to
+                opt out of. Mandatory keys are silently removed.
+
+        Returns:
+            The updated preference document dict.
+
+        Raises:
+            AppException: 404 if no preference exists for this customer.
+            AppException: 400 if attempting to opt out of mandatory templates
+                (returns which keys were rejected).
+        """
+        preference = await self._find_preference(customer_id, tenant_id)
+
+        if preference is None:
+            raise resource_not_found(
+                f"Notification preference not found for customer '{customer_id}'",
+                details={"customer_id": customer_id},
+            )
+
+        # Filter out mandatory template keys
+        rejected_keys = [k for k in template_opt_outs if k in MANDATORY_TEMPLATE_KEYS]
+        if rejected_keys:
+            raise validation_error(
+                "Cannot opt out of mandatory regulatory notifications",
+                details={
+                    "rejected_template_keys": rejected_keys,
+                    "mandatory_templates": list(MANDATORY_TEMPLATE_KEYS),
+                },
+            )
+
+        # Deduplicate
+        filtered_opt_outs = list(set(template_opt_outs))
+
+        now = datetime.now(timezone.utc).isoformat()
+        partial_doc = {
+            "template_opt_outs": filtered_opt_outs,
+            "updated_at": now,
+        }
+
+        preference_id = preference["preference_id"]
+        await self._es.update_document(
+            NOTIFICATION_PREFERENCES_INDEX, preference_id, partial_doc
+        )
+
+        preference.update(partial_doc)
+        return preference

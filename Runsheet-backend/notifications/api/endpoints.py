@@ -85,6 +85,19 @@ class PreferenceUpsertRequest(BaseModel):
     )
 
 
+class TemplateOptOutRequest(BaseModel):
+    """Body for the PUT template opt-out endpoint.
+
+    Validates: Requirement 12.9
+    """
+
+    template_opt_outs: list[str] = Field(
+        ...,
+        description="List of template_keys the customer wants to opt out of. "
+        "Mandatory regulatory templates cannot be opted out of.",
+    )
+
+
 class TemplateUpdateRequest(BaseModel):
     """Body for the PUT template endpoint."""
 
@@ -409,6 +422,75 @@ async def upsert_preference(
         logger.error(f"Failed to upsert preference for customer {customer_id}: {e}")
         raise internal_error(
             message="Failed to upsert notification preference",
+            details={"customer_id": customer_id, "error": str(e)},
+        )
+
+
+@router.put("/preferences/{customer_id}/template-opt-outs")
+@limiter.limit(_notification_rate)
+async def update_template_opt_outs(
+    customer_id: str,
+    body: TemplateOptOutRequest,
+    request: Request,
+    tenant: TenantContext = Depends(get_tenant_context),
+):
+    """
+    Update per-template opt-out preferences for a customer.
+
+    Customers can opt out of specific notification template types.
+    Mandatory regulatory notifications (e.g. past_due_invoice, e_bol_delivery)
+    cannot be opted out of and will be rejected with a 400 error.
+
+    Validates: Requirement 12.9
+    """
+    svc = _get_preference_resolver()
+    try:
+        result = await svc.update_template_opt_outs(
+            customer_id, tenant.tenant_id, body.template_opt_outs
+        )
+        return result
+    except AppException:
+        raise
+    except Exception as e:
+        logger.error(
+            f"Failed to update template opt-outs for customer {customer_id}: {e}"
+        )
+        raise internal_error(
+            message="Failed to update template opt-out preferences",
+            details={"customer_id": customer_id, "error": str(e)},
+        )
+
+
+@router.get("/preferences/{customer_id}/template-opt-outs")
+@limiter.limit(_notification_rate)
+async def get_template_opt_outs(
+    customer_id: str,
+    request: Request,
+    tenant: TenantContext = Depends(get_tenant_context),
+):
+    """
+    Get the current per-template opt-out list for a customer.
+
+    Returns the list of template_keys the customer has opted out of.
+    An empty list means all templates are enabled (default).
+
+    Validates: Requirement 12.9
+    """
+    svc = _get_preference_resolver()
+    try:
+        preference = await svc.get_preference(customer_id, tenant.tenant_id)
+        return {
+            "customer_id": customer_id,
+            "template_opt_outs": preference.get("template_opt_outs", []),
+        }
+    except AppException:
+        raise
+    except Exception as e:
+        logger.error(
+            f"Failed to get template opt-outs for customer {customer_id}: {e}"
+        )
+        raise internal_error(
+            message="Failed to get template opt-out preferences",
             details={"customer_id": customer_id, "error": str(e)},
         )
 

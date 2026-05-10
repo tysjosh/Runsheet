@@ -25,11 +25,12 @@ export default function DriversPage() {
         process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
       const params = new URLSearchParams();
       if (statusFilter) params.set("status", statusFilter);
-      const url = `${baseUrl}/drivers/utilization${params.toString() ? `?${params}` : ""}`;
+      const url = `${baseUrl}/ops/drivers/utilization${params.toString() ? `?${params}` : ""}`;
       const res = await fetch(url);
       if (res.ok) {
         const json = await res.json();
-        setDrivers(json.data ?? json ?? []);
+        const data = json.items ?? json.data ?? json;
+        setDrivers(Array.isArray(data) ? data : []);
       }
     } catch (error) {
       console.error("Failed to load driver utilization data:", error);

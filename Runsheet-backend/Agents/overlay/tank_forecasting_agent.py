@@ -120,6 +120,11 @@ DEFAULT_CUSTOMER_TYPE_MULTIPLIERS: Dict[str, float] = {
 #: treated as "history"-backed rather than "default" (Req 1.3.2, 1.3.3).
 MIN_HISTORY_EVENTS_FOR_TANK_BASELINE = 3
 
+#: Default reorder point as a percentage of tank capacity. When the
+#: predicted tank level drops below this threshold, the
+#: ``low_tank_autofill_alert`` notification fires (Req 12.5).
+DEFAULT_REORDER_POINT_PERCENT = 25.0
+
 
 # ---------------------------------------------------------------------------
 # Injected helper protocols
@@ -237,6 +242,12 @@ class TankForecastingAgent(OverlayAgentBase):
                         "source_agent": "fuel_management_agent",
                     },
                 },
+                {
+                    "message_type": RiskSignal,
+                    "filters": {
+                        "source_agent": "kfactor_calibration_service",
+                    },
+                },
             ],
             activity_log_service=activity_log_service,
             ws_manager=ws_manager,
@@ -280,6 +291,15 @@ class TankForecastingAgent(OverlayAgentBase):
             fuel_planning_ws_manager
         )
 
+        #: Optional NotificationService for firing low_tank_autofill_alert
+        #: when a customer tank's predicted level drops below the reorder
+        #: point (Req 12.5). Wired post-construction by bootstrap.
+        self._notification_service: Optional[Any] = None
+
+        #: Track tanks that have already been alerted in this cycle to
+        #: avoid duplicate notifications within a single forecast run.
+        self._alerted_tanks: set = set()
+
     # ------------------------------------------------------------------
     # Public wiring hooks (bootstrap injects these after construction)
     # ------------------------------------------------------------------
@@ -318,6 +338,17 @@ class TankForecastingAgent(OverlayAgentBase):
         """
         self._fuel_planning_ws = manager
 
+    def set_notification_service(self, notification_service) -> None:
+        """Inject the NotificationService post-construction.
+
+        When wired, the agent fires ``low_tank_autofill_alert``
+        notifications for auto_fill customer tanks whose predicted level
+        drops below the configured reorder point (Req 12.5).
+
+        Passing ``None`` disables the notification hook.
+        """
+        self._notification_service = notification_service
+
     # ------------------------------------------------------------------
     # Core evaluation (Req 1.1–1.7 + Capability 1 extensions)
     # ------------------------------------------------------------------
@@ -349,6 +380,15 @@ class TankForecastingAgent(OverlayAgentBase):
             return []
 
         tenant_id = signals[0].tenant_id
+
+        # Reset per-cycle deduplication for low_tank_autofill_alert (Req 12.5).
+        self._alerted_tanks.clear()
+
+        # Step 0: Process kfactor_changed signals (Req 9.5) — log that a
+        # re-forecast will be triggered for affected tanks. The K-factor
+        # has already been updated in ES by KFactorCalibrationService, so
+        # the full forecast pass below will pick up the new value.
+        self._process_kfactor_changed_signals(signals)
 
         # Step 1: Extract anomaly flags from RiskSignals (Req 1.3)
         self._process_anomaly_signals(signals)
@@ -454,6 +494,13 @@ class TankForecastingAgent(OverlayAgentBase):
             if getattr(forecast, "customer_tank_id", None):
                 await self._broadcast_customer_tank_forecast_ready(forecast)
 
+        # Step 12 (Req 12.5): Fire low_tank_autofill_alert notifications
+        # for auto_fill customer tanks whose current level is below the
+        # configured reorder point. Uses the forecast data to populate
+        # the notification template placeholders.
+        for forecast, tank in zip(forecasts[len(stations):], customer_tanks):
+            await self._check_low_tank_autofill_alert(tank, forecast)
+
         logger.info(
             "TankForecastingAgent: published %d forecasts for tenant %s "
             "(stations=%d, customer_tanks=%d, run_id=%s)",
@@ -494,6 +541,43 @@ class TankForecastingAgent(OverlayAgentBase):
                 # Merge without duplicates
                 merged = list(set(existing + anomaly_flags))
                 self._anomaly_cache[station_id] = merged
+
+    # ------------------------------------------------------------------
+    # K-factor change processing (Req 9.5)
+    # ------------------------------------------------------------------
+
+    def _process_kfactor_changed_signals(self, signals: List[RiskSignal]) -> None:
+        """Process kfactor_changed signals from KFactorCalibrationService.
+
+        When a K-factor is adjusted by an operator, the
+        KFactorCalibrationService publishes a RiskSignal with
+        source_agent='kfactor_calibration_service' and
+        context.event='kfactor_changed'. This method logs the affected
+        tanks so the subsequent full forecast pass (which reads the
+        updated K-factor from ES) produces an accurate re-forecast.
+
+        Validates: Requirement 9.5
+        """
+        for signal in signals:
+            context = signal.context or {}
+            if (
+                signal.source_agent == "kfactor_calibration_service"
+                and context.get("event") == "kfactor_changed"
+            ):
+                tank_id = context.get("tank_id", signal.entity_id)
+                old_kfactor = context.get("old_kfactor")
+                new_kfactor = context.get("new_kfactor")
+                operator_id = context.get("operator_id")
+                logger.info(
+                    "TankForecastingAgent: received kfactor_changed signal "
+                    "for tank=%s (old=%.4f new=%.4f operator=%s tenant=%s) "
+                    "— will re-forecast with updated K-factor",
+                    tank_id,
+                    old_kfactor or 0.0,
+                    new_kfactor or 0.0,
+                    operator_id,
+                    signal.tenant_id,
+                )
 
     # ------------------------------------------------------------------
     # ES queries (Req 1.2 + 1.1.2)
@@ -1382,6 +1466,124 @@ class TankForecastingAgent(OverlayAgentBase):
                 forecast.forecast_id,
                 e,
             )
+
+    # ------------------------------------------------------------------
+    # Low tank autofill alert (Req 12.5)
+    # ------------------------------------------------------------------
+
+    async def _check_low_tank_autofill_alert(
+        self, tank: CustomerTank, forecast: TankForecast
+    ) -> None:
+        """Fire ``low_tank_autofill_alert`` when predicted level < reorder_point.
+
+        Only fires for auto_fill customer tanks (will_call customers manage
+        their own orders). The reorder point is configurable per tenant via
+        the Redis key ``reorder_point_config:{tenant_id}`` (JSON with a
+        ``reorder_point_percent`` field); defaults to
+        :data:`DEFAULT_REORDER_POINT_PERCENT` (25%).
+
+        Deduplication: the alert fires at most once per tank per forecast
+        cycle (tracked via ``_alerted_tanks``). The set is cleared at the
+        start of each ``evaluate()`` call.
+
+        Validates: Requirement 12.5
+        """
+        if self._notification_service is None:
+            return
+
+        # Only fire for auto_fill customers — will_call customers order
+        # explicitly and don't need proactive alerts.
+        if tank.customer_type not in ("auto_fill", "keep_full"):
+            return
+
+        # Deduplicate within a single forecast run.
+        if tank.customer_tank_id in self._alerted_tanks:
+            return
+
+        # Compute current level as a percentage of capacity.
+        if tank.capacity_gallons <= 0:
+            return
+        current_level_percent = (
+            tank.current_level_gallons / tank.capacity_gallons
+        ) * 100.0
+
+        # Load the reorder point threshold (default 25%).
+        reorder_point = await self._get_reorder_point_percent(tank.tenant_id)
+
+        if current_level_percent >= reorder_point:
+            return
+
+        # Tank is below reorder point — fire the notification.
+        self._alerted_tanks.add(tank.customer_tank_id)
+
+        # Compute estimated days to empty from the forecast.
+        hours_to_empty = forecast.hours_to_runout_p50
+        estimated_days_to_empty = round(hours_to_empty / 24.0, 1) if hours_to_empty > 0 else 0.0
+
+        # Determine scheduled delivery date from the forecast metadata.
+        scheduled_delivery_date = "TBD"
+        scheduled_deliveries = getattr(forecast, "scheduled_deliveries", [])
+        if scheduled_deliveries:
+            first_delivery = scheduled_deliveries[0]
+            eta = first_delivery.get("scheduled_eta")
+            if eta:
+                scheduled_delivery_date = str(eta)[:10]  # ISO date portion
+
+        # Build the event_data payload matching the template placeholders.
+        event_data = {
+            "customer_id": tank.customer_id,
+            "customer_name": tank.customer_id,  # Best available; real name resolved by preference_resolver
+            "tank_location": f"{tank.zip_code}",
+            "current_level_percent": round(current_level_percent, 1),
+            "estimated_days_to_empty": estimated_days_to_empty,
+            "scheduled_delivery_date": scheduled_delivery_date,
+            "customer_tank_id": tank.customer_tank_id,
+        }
+
+        try:
+            await self._notification_service.notify_event(
+                event_type="low_tank_autofill_alert",
+                event_data=event_data,
+                tenant_id=tank.tenant_id,
+            )
+            logger.info(
+                "TankForecastingAgent: fired low_tank_autofill_alert for "
+                "tank=%s customer=%s level=%.1f%% (reorder_point=%.1f%%) "
+                "tenant=%s",
+                tank.customer_tank_id,
+                tank.customer_id,
+                current_level_percent,
+                reorder_point,
+                tank.tenant_id,
+            )
+        except Exception as exc:
+            # Never let a notification failure break the forecast cycle.
+            logger.warning(
+                "TankForecastingAgent: low_tank_autofill_alert failed for "
+                "tank=%s: %s",
+                tank.customer_tank_id,
+                exc,
+            )
+
+    async def _get_reorder_point_percent(self, tenant_id: str) -> float:
+        """Return the reorder point percentage for the tenant.
+
+        Reads from the Redis key ``reorder_point_config:{tenant_id}``
+        (JSON with ``reorder_point_percent`` field). Falls back to
+        :data:`DEFAULT_REORDER_POINT_PERCENT` when the key is missing,
+        unparseable, or the tenant config backend is unwired.
+        """
+        payload = await self._load_tenant_config_json(
+            f"reorder_point_config:{tenant_id}"
+        )
+        if isinstance(payload, Mapping):
+            try:
+                value = float(payload.get("reorder_point_percent", DEFAULT_REORDER_POINT_PERCENT))
+                if 0 < value <= 100:
+                    return value
+            except (TypeError, ValueError):
+                pass
+        return DEFAULT_REORDER_POINT_PERCENT
 
     # ------------------------------------------------------------------
     # WebSocket broadcast (Req 1.6.4)

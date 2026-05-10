@@ -84,6 +84,7 @@ NOTIFICATION_PREFERENCES_MAPPING = {
                     "enabled_channels": {"type": "keyword"},
                 }
             },
+            "template_opt_outs": {"type": "keyword"},
             "created_at":        {"type": "date"},
             "updated_at":        {"type": "date"},
         }

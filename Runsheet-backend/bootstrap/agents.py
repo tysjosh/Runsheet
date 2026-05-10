@@ -738,6 +738,18 @@ async def initialize(app, container: ServiceContainer) -> None:
         " and Exception_Replanning_Agent"
     )
 
+    # Task 14.4 (Req 12.5): Wire NotificationService into the
+    # TankForecastingAgent so it fires ``low_tank_autofill_alert`` when a
+    # customer tank's predicted level drops below the reorder point.
+    if container.has("notification_service"):
+        tank_forecasting_agent.set_notification_service(
+            container.notification_service
+        )
+        logger.info(
+            "NotificationService wired into Tank_Forecasting_Agent for "
+            "low_tank_autofill_alert (Req 12.5)"
+        )
+
     # Task 4.9: re-wire fuel-ops endpoints with ConfirmationProtocol and
     # the fuel-planning WS manager now that both are constructed; the
     # POST /api/fuel/mvp/routes/{route_id}/emergency-stop handler needs

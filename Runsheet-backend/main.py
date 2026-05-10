@@ -82,11 +82,22 @@ from compliance.api.tax_endpoints import (
 from compliance.api.terminal_bol_endpoints import (
     router as compliance_terminal_bol_router,
 )
+from compliance.api.ifta_endpoints import (
+    router as compliance_ifta_router,
+)
+from compliance.api.kfactor_endpoints import (
+    router as compliance_kfactor_router,
+)
 from commerce.api.price_protection_endpoints import (
     router as commerce_price_protection_router,
 )
 from commerce.api.pricing_endpoints import (
     router as commerce_pricing_rules_router,
+)
+from Agents.support.mvp_endpoints import router as mvp_fuel_router
+from fuel.api.fuel_ops_endpoints import (
+    router as fuel_ops_router,
+    mvp_router as fuel_ops_mvp_router,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -152,8 +163,13 @@ for _router in (
     stripe_router, stripe_webhook_router,
     compliance_tax_router,
     compliance_terminal_bol_router,
+    compliance_ifta_router,
+    compliance_kfactor_router,
     commerce_price_protection_router,
     commerce_pricing_rules_router,
+    mvp_fuel_router,
+    fuel_ops_router,
+    fuel_ops_mvp_router,
 ):
     app.include_router(_router)
 
