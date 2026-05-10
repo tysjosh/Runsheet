@@ -103,7 +103,6 @@ const COMMON_TIMEZONES: string[] = [
   "Pacific/Honolulu",
   "Europe/London",
   "Europe/Paris",
-  "Africa/Lagos",
 ];
 
 // Sentinel value used in filter <select> elements so "Any" maps to

@@ -32,23 +32,18 @@ ES = elasticsearch_service.client
 TENANT = "dev-tenant"
 SCHEMA_VERSION = "1.0"
 
-NIGERIAN_CITIES = {
-    # Lagos seed coordinates point at the Apapa port area. We avoid
-    # the historical Lagos coordinate pair removed by Requirement 2.2.6
-    # so the fuel-ops-hardening final-checkpoint grep stays clean.
-    "Lagos":          {"lat": 6.4474, "lon": 3.3903},
-    "Abuja":          {"lat": 9.0579, "lon": 7.4951},
-    "Kano":           {"lat": 12.0022, "lon": 8.5920},
-    "Port Harcourt":  {"lat": 4.8156, "lon": 7.0498},
-    "Ibadan":         {"lat": 7.3775, "lon": 3.9470},
-    "Enugu":          {"lat": 6.4584, "lon": 7.5464},
-    "Kaduna":         {"lat": 10.5105, "lon": 7.4165},
-    "Benin City":     {"lat": 6.3350, "lon": 5.6037},
-    "Warri":          {"lat": 5.5167, "lon": 5.7500},
-    "Jos":            {"lat": 9.8965, "lon": 8.8583},
+US_CITIES = {
+    "Houston":   {"lat": 29.7604, "lon": -95.3698},
+    "Dallas":    {"lat": 32.7767, "lon": -96.7970},
+    "Chicago":   {"lat": 41.8781, "lon": -87.6298},
+    "Denver":    {"lat": 39.7392, "lon": -104.9903},
+    "Atlanta":   {"lat": 33.7490, "lon": -84.3880},
+    "Phoenix":   {"lat": 33.4484, "lon": -112.0740},
+    "Detroit":   {"lat": 42.3314, "lon": -83.0458},
+    "Charlotte": {"lat": 35.2271, "lon": -80.8431},
 }
 
-CITY_NAMES = list(NIGERIAN_CITIES.keys())
+CITY_NAMES = list(US_CITIES.keys())
 
 
 def _now() -> str:
@@ -68,7 +63,7 @@ def _uid() -> str:
 
 
 def _geo(city: str) -> dict:
-    c = NIGERIAN_CITIES[city]
+    c = US_CITIES[city]
     return {"lat": c["lat"] + random.uniform(-0.02, 0.02),
             "lon": c["lon"] + random.uniform(-0.02, 0.02)}
 
@@ -110,16 +105,16 @@ def seed_trucks(force: bool = False):
         return
 
     trucks = [
-        ("TRK-001", "ABC-123-LG", "vehicle", "truck",    "Volvo FH16",   "DRV-001", "Chinedu Okafor",  "Lagos",         "on_time"),
-        ("TRK-002", "DEF-456-AB", "vehicle", "truck",    "MAN TGX",      "DRV-002", "Amina Bello",     "Abuja",         "on_time"),
-        ("TRK-003", "GHI-789-KN", "vehicle", "truck",    "Scania R500",  "DRV-003", "Emeka Nwosu",     "Kano",          "delayed"),
-        ("TRK-004", "JKL-012-PH", "vehicle", "truck",    "DAF XF",       "DRV-004", "Fatima Yusuf",    "Port Harcourt", "on_time"),
-        ("TRK-005", "MNO-345-IB", "vehicle", "truck",    "Mercedes Actros", "DRV-005", "Oluwaseun Ade", "Ibadan",        "on_time"),
-        ("TRK-006", "PQR-678-EN", "vehicle", "truck",    "Iveco Stralis", "DRV-006", "Ibrahim Musa",   "Enugu",         "delayed"),
-        ("TRK-007", "STU-901-KD", "vehicle", "van",      "Toyota HiAce",  "DRV-007", "Grace Obi",      "Kaduna",        "on_time"),
-        ("TRK-008", "VWX-234-BC", "vehicle", "van",      "Ford Transit",  "DRV-008", "Yusuf Abdullahi", "Benin City",   "on_time"),
-        ("TRF-001", "YZA-567-LG", "vehicle", "tanker",   "Howo Tanker",   "DRV-009", "Bola Tinubu Jr", "Lagos",         "on_time"),
-        ("TRF-002", "BCD-890-PH", "vehicle", "tanker",   "Sinotruk Tanker", "DRV-010", "Ngozi Okonkwo", "Port Harcourt", "on_time"),
+        ("TRK-001", "TRK-001", "vehicle", "truck",    "Peterbilt 579",     "DRV-001", "Mike Johnson",     "Houston",   "on_time"),
+        ("TRK-002", "TRK-002", "vehicle", "truck",    "Kenworth T680",     "DRV-002", "Sarah Williams",   "Dallas",    "on_time"),
+        ("TRK-003", "TRK-003", "vehicle", "truck",    "Freightliner Cascadia", "DRV-003", "James Rodriguez", "Chicago",   "delayed"),
+        ("TRK-004", "TRK-004", "vehicle", "truck",    "Mack Anthem",       "DRV-004", "Emily Chen",       "Denver",    "on_time"),
+        ("TRK-005", "TRK-005", "vehicle", "truck",    "Volvo VNL 860",     "DRV-005", "David Thompson",   "Atlanta",   "on_time"),
+        ("TRK-006", "TRK-006", "vehicle", "truck",    "International LT",  "DRV-006", "Maria Garcia",     "Phoenix",   "delayed"),
+        ("TRK-007", "TRK-007", "vehicle", "van",      "Ford F-750",        "DRV-007", "Robert Kim",       "Detroit",   "on_time"),
+        ("TRK-008", "TRK-008", "vehicle", "van",      "RAM 5500",          "DRV-008", "Jennifer Davis",   "Charlotte", "on_time"),
+        ("TNK-001", "TNK-001", "vehicle", "tanker",   "Peterbilt 567 Tanker", "DRV-009", "Mike Johnson",  "Houston",   "on_time"),
+        ("TNK-002", "TNK-002", "vehicle", "tanker",   "Kenworth T880 Tanker", "DRV-010", "Emily Chen",    "Denver",    "on_time"),
     ]
 
     actions = []
@@ -140,14 +135,14 @@ def seed_trucks(force: bool = False):
                 "name": city,
                 "type": "city",
                 "coordinates": _geo(city),
-                "address": f"{random.randint(1,200)} Main Road, {city}",
+                "address": f"{random.randint(1,200)} Industrial Blvd, {city}",
             },
             "destination": {
                 "id": f"LOC-{dest_city[:3].upper()}",
                 "name": dest_city,
                 "type": "city",
                 "coordinates": _geo(dest_city),
-                "address": f"{random.randint(1,200)} Delivery Ave, {dest_city}",
+                "address": f"{random.randint(1,200)} Terminal Dr, {dest_city}",
             },
             "route": {
                 "id": f"RT-{city[:3]}-{dest_city[:3]}".upper(),
@@ -184,14 +179,14 @@ def seed_riders(force: bool = False):
         return
 
     rider_names = [
-        ("RDR-001", "Chinedu Okafor",   "active",  "Lagos",          3, 7),
-        ("RDR-002", "Amina Bello",       "active",  "Abuja",          2, 5),
-        ("RDR-003", "Emeka Nwosu",       "active",  "Kano",           1, 4),
-        ("RDR-004", "Fatima Abdullahi",  "active",  "Port Harcourt",  2, 6),
-        ("RDR-005", "Tunde Adeyemi",     "idle",    "Ibadan",         0, 3),
-        ("RDR-006", "Ngozi Eze",         "idle",    "Enugu",          0, 2),
-        ("RDR-007", "Ibrahim Musa",      "offline", "Kaduna",         0, 0),
-        ("RDR-008", "Blessing Okonkwo",  "offline", "Benin City",     0, 1),
+        ("RDR-001", "Mike Johnson",     "active",  "Houston",   3, 7),
+        ("RDR-002", "Sarah Williams",   "active",  "Dallas",    2, 5),
+        ("RDR-003", "James Rodriguez",  "active",  "Chicago",   1, 4),
+        ("RDR-004", "Emily Chen",       "active",  "Denver",    2, 6),
+        ("RDR-005", "David Thompson",   "idle",    "Atlanta",   0, 3),
+        ("RDR-006", "Maria Garcia",     "idle",    "Phoenix",   0, 2),
+        ("RDR-007", "Robert Kim",       "offline", "Detroit",   0, 0),
+        ("RDR-008", "Jennifer Davis",   "offline", "Charlotte", 0, 1),
     ]
 
     actions = []
@@ -217,6 +212,7 @@ def seed_riders(force: bool = False):
 
     _bulk(actions)
     logger.info(f"✅ Seeded {len(rider_names)} docs → {index}")
+
 
 
 # ---------------------------------------------------------------------------
@@ -381,9 +377,9 @@ def seed_jobs(force: bool = False):
             cargo_manifest.append({
                 "item_id": f"CARGO-{jid}-{ci + 1:02d}",
                 "description": random.choice([
-                    "Diesel fuel drums", "PMS fuel barrels", "Industrial lubricants",
-                    "Cement bags", "Steel rods", "Electronics crate",
-                    "Agricultural produce", "Medical supplies",
+                    "Diesel #2 drums", "Regular gasoline barrels", "Industrial lubricants",
+                    "Heating oil containers", "Propane cylinders", "DEF totes",
+                    "Off-road diesel drums", "Kerosene barrels",
                 ]),
                 "weight_kg": round(random.uniform(500, 5000), 1),
                 "container_number": f"CONT-{_uid()[:6].upper()}",
@@ -396,7 +392,7 @@ def seed_jobs(force: bool = False):
             "job_type": jtype,
             "status": status,
             "tenant_id": TENANT,
-            "asset_assigned": f"TRUCK-{random.randint(100, 999)}" if status != "scheduled" else None,
+            "asset_assigned": f"TRK-{random.randint(100, 999)}" if status != "scheduled" else None,
             "origin": origin_city,
             "destination": dest_city,
             "origin_location": _geo(origin_city),
@@ -422,6 +418,7 @@ def seed_jobs(force: bool = False):
     logger.info(f"✅ Seeded {len(status_list)} docs → {index}")
 
 
+
 # ---------------------------------------------------------------------------
 # 5. fuel_stations
 # ---------------------------------------------------------------------------
@@ -431,33 +428,33 @@ def seed_fuel_stations(force: bool = False):
         logger.info(f"⏭️  {index} already has data — skipping")
         return
 
-    # 14 stations across 10 Nigerian cities with diverse fuel grades and stock levels
+    # 14 stations across 8 US cities with diverse fuel grades and stock levels
     # Tuple: (id, name, fuel_type, city, capacity, current_stock, daily_consumption, status)
     stations = [
-        # --- Lagos (major hub, 2 stations) ---
-        ("FS-001", "Lagos Apapa Main Depot",        "AGO", "Lagos",          80000, 62000, 3200, "normal"),
-        ("FS-002", "Lagos Ijegun PMS Terminal",     "PMS", "Lagos",          60000, 45000, 2800, "normal"),
-        # --- Abuja (capital, 2 stations) ---
-        ("FS-003", "Abuja Central Fuel Station",    "PMS", "Abuja",          45000, 5400,  2200, "critical"),
-        ("FS-004", "Abuja Airport ATK Depot",       "ATK", "Abuja",          35000, 28000, 1200, "normal"),
-        # --- Kano (north, 1 station) ---
-        ("FS-005", "Kano Bompai AGO Terminal",      "AGO", "Kano",           40000, 3600,  1800, "critical"),
-        # --- Port Harcourt (refinery city, 2 stations) ---
-        ("FS-006", "Port Harcourt Refinery Depot",  "AGO", "Port Harcourt",  70000, 58000, 3500, "normal"),
-        ("FS-007", "PH Eleme LPG Plant",            "LPG", "Port Harcourt",  30000, 18000, 1000, "normal"),
-        # --- Ibadan (southwest, 1 station) ---
-        ("FS-008", "Ibadan Oluyole PMS Hub",        "PMS", "Ibadan",         35000, 4200,  1900, "critical"),
-        # --- Enugu (southeast, 1 station) ---
-        ("FS-009", "Enugu Coal City LPG Depot",     "LPG", "Enugu",          25000, 6000,  800,  "low"),
-        # --- Warri (delta, 2 stations) ---
-        ("FS-010", "Warri Refinery AGO Terminal",   "AGO", "Warri",          55000, 42000, 2600, "normal"),
-        ("FS-011", "Warri Effurun PMS Station",     "PMS", "Warri",          30000, 7200,  1500, "low"),
-        # --- Benin City (midwest, 1 station) ---
-        ("FS-012", "Benin City Sapele Road Depot",  "PMS", "Benin City",     40000, 32000, 2000, "normal"),
-        # --- Kaduna (north-central, 1 station) ---
-        ("FS-013", "Kaduna Refinery AGO Depot",     "AGO", "Kaduna",         50000, 11000, 2200, "low"),
-        # --- Jos (plateau, 1 station) ---
-        ("FS-014", "Jos Bukuru LPG Terminal",       "LPG", "Jos",            20000, 1800,  600,  "critical"),
+        # --- Houston (major hub, 2 stations) ---
+        ("FS-001", "Houston Ship Channel Terminal",     "DIESEL_2",      "Houston",   80000, 62000, 3200, "normal"),
+        ("FS-002", "Houston Pasadena Gasoline Rack",    "GASOLINE_REG",  "Houston",   60000, 45000, 2800, "normal"),
+        # --- Dallas (2 stations) ---
+        ("FS-003", "Dallas Fort Worth Fuel Depot",      "GASOLINE_REG",  "Dallas",    45000, 5400,  2200, "critical"),
+        ("FS-004", "Dallas Love Field Kerosene Depot",  "KEROSENE",      "Dallas",    35000, 28000, 1200, "normal"),
+        # --- Chicago (1 station) ---
+        ("FS-005", "Chicago Lemont Diesel Terminal",    "DIESEL_2",      "Chicago",   40000, 3600,  1800, "critical"),
+        # --- Denver (2 stations) ---
+        ("FS-006", "Denver Commerce City Terminal",     "DIESEL_2",      "Denver",    70000, 58000, 3500, "normal"),
+        ("FS-007", "Denver Propane Distribution Hub",   "PROPANE",       "Denver",    30000, 18000, 1000, "normal"),
+        # --- Atlanta (1 station) ---
+        ("FS-008", "Atlanta Doraville Gasoline Hub",    "GASOLINE_PREM", "Atlanta",   35000, 4200,  1900, "critical"),
+        # --- Phoenix (1 station) ---
+        ("FS-009", "Phoenix West Propane Depot",        "PROPANE",       "Phoenix",   25000, 6000,  800,  "low"),
+        # --- Detroit (2 stations) ---
+        ("FS-010", "Detroit River Rouge Terminal",      "DIESEL_2",      "Detroit",   55000, 42000, 2600, "normal"),
+        ("FS-011", "Detroit Zug Island Gasoline Rack",  "GASOLINE_REG",  "Detroit",   30000, 7200,  1500, "low"),
+        # --- Charlotte (1 station) ---
+        ("FS-012", "Charlotte Airport Rd Depot",        "GASOLINE_REG",  "Charlotte", 40000, 32000, 2000, "normal"),
+        # --- Houston (heating oil) ---
+        ("FS-013", "Houston Baytown Heating Oil Depot", "HEATING_OIL",   "Houston",   50000, 11000, 2200, "low"),
+        # --- Chicago (DEF) ---
+        ("FS-014", "Chicago Joliet DEF Terminal",       "DEF",           "Chicago",   20000, 1800,  600,  "critical"),
     ]
 
     actions = []
@@ -503,25 +500,25 @@ def seed_truck_compartments(force: bool = False):
     # 4 fuel tankers with varied compartment configurations
     # Tuple: (truck_id, comp_id, capacity, allowed_grades, position, depot_city)
     compartments = [
-        # Truck FT-001: 4 compartments, 40,000L total, AGO/PMS compatible, Lagos depot
-        ("FT-001", "C1", 12000, ["AGO", "PMS"], 1, "Lagos"),
-        ("FT-001", "C2", 12000, ["AGO", "PMS"], 2, "Lagos"),
-        ("FT-001", "C3", 10000, ["AGO", "PMS"], 3, "Lagos"),
-        ("FT-001", "C4", 6000,  ["AGO", "PMS"], 4, "Lagos"),
-        # Truck FT-002: 3 compartments, 25,000L total, PMS/ATK compatible, Abuja depot
-        ("FT-002", "C1", 10000, ["PMS", "ATK"], 1, "Abuja"),
-        ("FT-002", "C2", 9000,  ["PMS", "ATK"], 2, "Abuja"),
-        ("FT-002", "C3", 6000,  ["PMS", "ATK"], 3, "Abuja"),
-        # Truck FT-003: 5 compartments, 50,000L total, all grades, Port Harcourt depot
-        ("FT-003", "C1", 14000, ["AGO", "PMS", "ATK", "LPG"], 1, "Port Harcourt"),
-        ("FT-003", "C2", 12000, ["AGO", "PMS", "ATK", "LPG"], 2, "Port Harcourt"),
-        ("FT-003", "C3", 10000, ["AGO", "PMS", "ATK", "LPG"], 3, "Port Harcourt"),
-        ("FT-003", "C4", 8000,  ["AGO", "PMS", "ATK", "LPG"], 4, "Port Harcourt"),
-        ("FT-003", "C5", 6000,  ["AGO", "PMS", "ATK", "LPG"], 5, "Port Harcourt"),
-        # Truck FT-004: 3 compartments, 20,000L total, AGO only, Kano depot
-        ("FT-004", "C1", 8000,  ["AGO"], 1, "Kano"),
-        ("FT-004", "C2", 7000,  ["AGO"], 2, "Kano"),
-        ("FT-004", "C3", 5000,  ["AGO"], 3, "Kano"),
+        # Truck FT-001: 4 compartments, 40,000L total, Diesel/Gasoline compatible, Houston depot
+        ("FT-001", "C1", 12000, ["DIESEL_2", "GASOLINE_REG"], 1, "Houston"),
+        ("FT-001", "C2", 12000, ["DIESEL_2", "GASOLINE_REG"], 2, "Houston"),
+        ("FT-001", "C3", 10000, ["DIESEL_2", "GASOLINE_REG"], 3, "Houston"),
+        ("FT-001", "C4", 6000,  ["DIESEL_2", "GASOLINE_REG"], 4, "Houston"),
+        # Truck FT-002: 3 compartments, 25,000L total, Gasoline/Kerosene compatible, Dallas depot
+        ("FT-002", "C1", 10000, ["GASOLINE_REG", "KEROSENE"], 1, "Dallas"),
+        ("FT-002", "C2", 9000,  ["GASOLINE_REG", "KEROSENE"], 2, "Dallas"),
+        ("FT-002", "C3", 6000,  ["GASOLINE_REG", "KEROSENE"], 3, "Dallas"),
+        # Truck FT-003: 5 compartments, 50,000L total, all grades, Denver depot
+        ("FT-003", "C1", 14000, ["DIESEL_2", "GASOLINE_REG", "KEROSENE", "PROPANE"], 1, "Denver"),
+        ("FT-003", "C2", 12000, ["DIESEL_2", "GASOLINE_REG", "KEROSENE", "PROPANE"], 2, "Denver"),
+        ("FT-003", "C3", 10000, ["DIESEL_2", "GASOLINE_REG", "KEROSENE", "PROPANE"], 3, "Denver"),
+        ("FT-003", "C4", 8000,  ["DIESEL_2", "GASOLINE_REG", "KEROSENE", "PROPANE"], 4, "Denver"),
+        ("FT-003", "C5", 6000,  ["DIESEL_2", "GASOLINE_REG", "KEROSENE", "PROPANE"], 5, "Denver"),
+        # Truck FT-004: 3 compartments, 20,000L total, Diesel only, Chicago depot
+        ("FT-004", "C1", 8000,  ["DIESEL_2"], 1, "Chicago"),
+        ("FT-004", "C2", 7000,  ["DIESEL_2"], 2, "Chicago"),
+        ("FT-004", "C3", 5000,  ["DIESEL_2"], 3, "Chicago"),
     ]
 
     actions = []
@@ -559,8 +556,8 @@ def seed_fuel_events(force: bool = False):
         return
 
     station_ids = [f"FS-{i:03d}" for i in range(1, 7)]
-    fuel_types = {"FS-001": "AGO", "FS-002": "PMS", "FS-003": "AGO",
-                  "FS-004": "ATK", "FS-005": "PMS", "FS-006": "LPG"}
+    fuel_types = {"FS-001": "DIESEL_2", "FS-002": "GASOLINE_REG", "FS-003": "GASOLINE_REG",
+                  "FS-004": "KEROSENE", "FS-005": "DIESEL_2", "FS-006": "DIESEL_2"}
 
     actions = []
 
@@ -574,7 +571,7 @@ def seed_fuel_events(force: bool = False):
             "event_type": "consumption",
             "fuel_type": fuel_types[sid],
             "quantity_liters": round(random.uniform(200, 2000), 1),
-            "asset_id": f"TRUCK-{random.randint(100, 999)}",
+            "asset_id": f"TRK-{random.randint(100, 999)}",
             "operator_id": f"OP-{random.randint(1, 20):03d}",
             "odometer_reading": round(random.uniform(50000, 200000), 1),
             "tenant_id": TENANT,
@@ -594,9 +591,9 @@ def seed_fuel_events(force: bool = False):
             "event_type": "refill",
             "fuel_type": fuel_types[sid],
             "quantity_liters": round(random.uniform(5000, 20000), 1),
-            "asset_id": f"TANKER-{random.randint(1, 10):03d}",
+            "asset_id": f"TNK-{random.randint(1, 10):03d}",
             "operator_id": f"OP-{random.randint(1, 20):03d}",
-            "supplier": random.choice(["NNPC", "Total Energies", "Oando", "Conoil"]),
+            "supplier": random.choice(["Marathon Petroleum", "Valero Energy", "Phillips 66", "ExxonMobil"]),
             "delivery_reference": f"DEL-{_uid()[:8].upper()}",
             "tenant_id": TENANT,
             "event_timestamp": _ago(days=random.uniform(0, 7)),
@@ -609,6 +606,7 @@ def seed_fuel_events(force: bool = False):
     logger.info(f"✅ Seeded 20 docs → {index}")
 
 
+
 # ---------------------------------------------------------------------------
 # 7. agent_memory
 # ---------------------------------------------------------------------------
@@ -619,22 +617,22 @@ def seed_agent_memory(force: bool = False):
         return
 
     memories = [
-        ("MEM-001", "pattern",    "sla-guardian",   "Riders in Lagos zone tend to have higher delivery success rates during morning hours (6-10 AM).",
-         0.92, ["delivery", "lagos", "timing"]),
-        ("MEM-002", "preference", "fuel-agent",     "Dispatcher prefers AGO refills to be scheduled before 8 AM to avoid peak traffic.",
+        ("MEM-001", "pattern",    "sla-guardian",   "Drivers in Houston zone tend to have higher delivery success rates during morning hours (6-10 AM).",
+         0.92, ["delivery", "houston", "timing"]),
+        ("MEM-002", "preference", "fuel-agent",     "Dispatcher prefers diesel refills to be scheduled before 8 AM to avoid peak traffic.",
          0.85, ["fuel", "scheduling", "preference"]),
-        ("MEM-003", "pattern",    "ops-intel",      "Shipments to Kano frequently experience delays on Fridays due to market congestion.",
-         0.88, ["shipment", "kano", "delay", "pattern"]),
+        ("MEM-003", "pattern",    "ops-intel",      "Shipments to Chicago frequently experience delays on Fridays due to expressway congestion.",
+         0.88, ["shipment", "chicago", "delay", "pattern"]),
         ("MEM-004", "preference", "sla-guardian",   "SLA breach threshold for priority customers is 30 minutes, not the default 60.",
          0.95, ["sla", "threshold", "priority"]),
-        ("MEM-005", "pattern",    "fleet-agent",    "Trucks returning from Port Harcourt route need maintenance check after 3 consecutive trips.",
-         0.78, ["fleet", "maintenance", "port-harcourt"]),
-        ("MEM-006", "preference", "scheduling-agent", "Night shifts should not be assigned to riders with less than 30 days experience.",
+        ("MEM-005", "pattern",    "fleet-agent",    "Trucks returning from Denver route need maintenance check after 3 consecutive trips.",
+         0.78, ["fleet", "maintenance", "denver"]),
+        ("MEM-006", "preference", "scheduling-agent", "Night shifts should not be assigned to drivers with less than 30 days experience.",
          0.90, ["scheduling", "night-shift", "experience"]),
-        ("MEM-007", "pattern",    "ops-intel",      "Address-not-found failures cluster in newly developed areas of Abuja.",
-         0.82, ["failure", "address", "abuja"]),
-        ("MEM-008", "preference", "fuel-agent",     "LPG deliveries require hazmat-certified drivers only.",
-         0.97, ["fuel", "lpg", "safety", "certification"]),
+        ("MEM-007", "pattern",    "ops-intel",      "Address-not-found failures cluster in newly developed areas of Charlotte.",
+         0.82, ["failure", "address", "charlotte"]),
+        ("MEM-008", "preference", "fuel-agent",     "Propane deliveries require hazmat-certified drivers only.",
+         0.97, ["fuel", "propane", "safety", "certification"]),
     ]
 
     actions = []
@@ -681,7 +679,7 @@ def seed_approval_queue(force: bool = False):
             "reviewed_by": None,
             "reviewed_at": None,
             "expiry_time": _future(hours=4),
-            "impact_summary": "Reassign failed shipment SHP-010 from offline rider to active rider in Abuja.",
+            "impact_summary": "Reassign failed shipment SHP-010 from offline driver to active driver in Dallas.",
             "execution_result": {},
             "tenant_id": TENANT,
             "created_at": _ago(hours=2),
@@ -691,7 +689,7 @@ def seed_approval_queue(force: bool = False):
             "action_id": "APR-002",
             "action_type": "emergency_refuel",
             "tool_name": "schedule_refuel",
-            "parameters": {"station_id": "FS-005", "quantity_liters": 15000, "supplier": "NNPC"},
+            "parameters": {"station_id": "FS-005", "quantity_liters": 15000, "supplier": "Marathon Petroleum"},
             "risk_level": "high",
             "proposed_by": "fuel-agent",
             "proposed_at": _ago(hours=5),
@@ -699,7 +697,7 @@ def seed_approval_queue(force: bool = False):
             "reviewed_by": "admin-user-01",
             "reviewed_at": _ago(hours=4),
             "expiry_time": _future(hours=12),
-            "impact_summary": "Emergency refuel for critically low Ibadan station. Stock at 10% capacity.",
+            "impact_summary": "Emergency refuel for critically low Chicago station. Stock at 10% capacity.",
             "execution_result": {"status": "scheduled", "eta": _future(hours=6)},
             "tenant_id": TENANT,
             "created_at": _ago(hours=5),
@@ -727,7 +725,7 @@ def seed_approval_queue(force: bool = False):
             "action_id": "APR-004",
             "action_type": "reroute_shipment",
             "tool_name": "update_route",
-            "parameters": {"shipment_id": "SHP-007", "new_route": "Lagos-Ibadan-Abuja", "reason": "road_closure"},
+            "parameters": {"shipment_id": "SHP-007", "new_route": "Houston-Dallas-Denver", "reason": "road_closure"},
             "risk_level": "medium",
             "proposed_by": "ops-intel",
             "proposed_at": _ago(minutes=45),
@@ -735,7 +733,7 @@ def seed_approval_queue(force: bool = False):
             "reviewed_by": None,
             "reviewed_at": None,
             "expiry_time": _future(hours=2),
-            "impact_summary": "Reroute in-transit shipment via Ibadan due to reported road closure on direct Lagos-Abuja route.",
+            "impact_summary": "Reroute in-transit shipment via Dallas due to reported road closure on direct Houston-Denver route.",
             "execution_result": {},
             "tenant_id": TENANT,
             "created_at": _ago(minutes=45),

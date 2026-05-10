@@ -32,11 +32,20 @@ const STATUS_BAR_COLORS: Record<StationStatus, string> = {
   empty: "bg-gray-400",
 };
 
-const FUEL_TYPE_LABELS: Record<FuelType, string> = {
-  AGO: "AGO (Diesel)",
-  PMS: "PMS (Petrol)",
-  ATK: "ATK (Aviation)",
-  LPG: "LPG (Gas)",
+const FUEL_TYPE_LABELS: Record<string, string> = {
+  DIESEL_2: "Diesel #2 (ULSD)",
+  GASOLINE_REG: "Regular Unleaded",
+  GASOLINE_PREM: "Premium Unleaded",
+  HEATING_OIL: "Heating Oil",
+  PROPANE: "Propane",
+  KEROSENE: "Kerosene",
+  OFF_ROAD_DIESEL: "Off-Road Diesel",
+  DEF: "DEF",
+  // Legacy aliases (canonicalized on backend)
+  AGO: "Diesel #2 (ULSD)",
+  PMS: "Regular Unleaded",
+  ATK: "Kerosene",
+  LPG: "Propane",
 };
 
 function formatLiters(liters: number): string {

@@ -1011,7 +1011,7 @@ function CreateInventoryModal({ onClose, onCreated }: CreateInventoryModalProps)
               type="text"
               value={form.location}
               onChange={(e) => setForm({ ...form, location: e.target.value })}
-              placeholder="e.g. Depot A, Warehouse Lagos"
+              placeholder="e.g. Houston Terminal, Dallas Depot"
               className={inputClass}
               required
             />

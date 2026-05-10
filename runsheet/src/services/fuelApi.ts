@@ -27,7 +27,7 @@ export interface PaginatedResponse<T> {
 
 // ─── Fuel Station Types ──────────────────────────────────────────────────────
 
-export type FuelType = "AGO" | "PMS" | "ATK" | "LPG";
+export type FuelType = "DIESEL_2" | "GASOLINE_REG" | "GASOLINE_PREM" | "HEATING_OIL" | "PROPANE" | "KEROSENE" | "OFF_ROAD_DIESEL" | "DEF";
 export type StationStatus = "normal" | "low" | "critical" | "empty";
 
 export interface FuelStation {

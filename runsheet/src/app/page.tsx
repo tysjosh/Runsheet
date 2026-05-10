@@ -784,10 +784,10 @@ export default function LandingPage() {
                     </div>
                     <div className="flex gap-0.5 h-8">
                       {[
-                        { w: "30%", color: "#0D9373", label: "PMS" },
-                        { w: "25%", color: "#3B82F6", label: "AGO" },
-                        { w: "20%", color: "#6E56CF", label: "DPK" },
-                        { w: "23%", color: "#10B981", label: "LPG" },
+                        { w: "30%", color: "#0D9373", label: "Diesel" },
+                        { w: "25%", color: "#3B82F6", label: "Gasoline" },
+                        { w: "20%", color: "#6E56CF", label: "Heating Oil" },
+                        { w: "23%", color: "#10B981", label: "Propane" },
                       ].map((c) => (
                         <div key={c.label} className="rounded flex items-center justify-center" style={{ width: c.w, backgroundColor: `${c.color}20` }}>
                           <span className="text-[7px] font-bold" style={{ color: c.color }}>{c.label}</span>
