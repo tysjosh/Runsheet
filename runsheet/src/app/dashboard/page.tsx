@@ -15,56 +15,19 @@ const MapView = dynamic(() => import("../../components/MapView"), {
   ssr: false,
 });
 
-// Lazy-load all content components
+// Lazy-load content components
 const FleetDashboard = lazy(() => import("../../components/FleetDashboard"));
 const AIChat = lazy(() => import("../../components/AIChat"));
-const DataImport = lazy(() => import("../../components/DataImport"));
-const Inventory = lazy(() => import("../../components/Inventory"));
-const AnalyticsDashboard = lazy(
-  () => import("../../components/AnalyticsDashboard"),
-);
-const Support = lazy(() => import("../../components/Support"));
+const CommerceBillingPage = lazy(() => import("../commerce/page"));
 
-// Ops components (previously on /ops/* routes)
-const SchedulingJobBoard = lazy(() => import("../ops/scheduling/page"));
-const FuelDashboard = lazy(() => import("../ops/fuel/page"));
-const DriverUtilizationList = lazy(
-  () => import("../../components/ops/DriverUtilizationList"),
-);
-const OperationsControl = lazy(() => import("../ops/control/page"));
-
-// New feature pages
-const FuelDistributionPage = lazy(
-  () => import("../../components/ops/FuelDistributionPage"),
-);
-const AgentSettingsPage = lazy(
-  () => import("../../components/ops/AgentSettingsPage"),
-);
-const OpsMonitoringDashboard = lazy(
-  () => import("../../components/ops/OpsMonitoringDashboard"),
-);
-const SchedulingMetricsPage = lazy(
-  () => import("../../components/ops/SchedulingMetricsPage"),
-);
-const ReconciliationPage = lazy(
-  () => import("../../components/ops/ReconciliationPage"),
-);
-const SourcingPage = lazy(() => import("../../components/ops/SourcingPage"));
-const TruckCompartmentsPage = lazy(
-  () => import("../../components/ops/TruckCompartmentsPage"),
-);
-// Fuel-Ops Hardening Phase 11 — customer tanks (Task 3.6 / Req 1.6.2) and
-// depots admin (Task 4.3 / Req 2.2.2). These components shipped in Phase 11
-// but were never mounted in the dashboard switch, so their corresponding
-// sidebar entries appeared to lead nowhere. Mount them here so the full
-// fuel-ops surface is navigable from the main shell.
-const CustomerTankPage = lazy(
-  () => import("../../components/ops/CustomerTankPage"),
-);
-const DepotsPage = lazy(() => import("../../components/admin/DepotsPage"));
-const RoadRestrictionsPanel = lazy(
-  () => import("../../components/admin/RoadRestrictionsPanel"),
-);
+// New grouped hub pages
+const DispatchPage = lazy(() => import("../../components/DispatchPage"));
+const FuelOpsPage = lazy(() => import("../../components/FuelOpsPage"));
+const ReconciliationHub = lazy(() => import("../../components/ReconciliationHub"));
+const AnalyticsHub = lazy(() => import("../../components/AnalyticsHub"));
+const SettingsPage = lazy(() => import("../../components/SettingsPage"));
+const CustomersPage = lazy(() => import("../../components/commerce/CustomersListPage"));
+const DriversPage = lazy(() => import("../ops/drivers/page"));
 
 function MapLoadingPlaceholder() {
   return (
@@ -126,17 +89,6 @@ export default function Home() {
 
   const renderMainContent = () => {
     switch (activeMenuItem) {
-      case "upload-data":
-        return (
-          <div className="flex-1 p-6 bg-gray-50">
-            <div className="bg-white rounded-xl shadow-sm border border-gray-200 h-full overflow-hidden">
-              <Suspense fallback={<ComponentLoadingPlaceholder />}>
-                <DataImport />
-              </Suspense>
-            </div>
-          </div>
-        );
-
       case "fleet":
         return (
           <Suspense fallback={<ComponentLoadingPlaceholder />}>
@@ -148,36 +100,23 @@ export default function Home() {
           </Suspense>
         );
 
-      case "scheduling":
+      case "dispatch":
         return (
           <div className="flex-1 bg-gray-50">
-            <ErrorBoundary componentName="Scheduling">
+            <ErrorBoundary componentName="Dispatch">
               <Suspense fallback={<ComponentLoadingPlaceholder />}>
-                <SchedulingJobBoard />
+                <DispatchPage />
               </Suspense>
             </ErrorBoundary>
           </div>
         );
 
-      case "inventory":
-        return (
-          <div className="flex-1 p-6 bg-gray-50">
-            <div className="bg-white rounded-xl shadow-sm border border-gray-200 h-full overflow-hidden">
-              <ErrorBoundary componentName="Inventory">
-                <Suspense fallback={<ComponentLoadingPlaceholder />}>
-                  <Inventory />
-                </Suspense>
-              </ErrorBoundary>
-            </div>
-          </div>
-        );
-
-      case "fuel":
+      case "customers":
         return (
           <div className="flex-1 bg-gray-50">
-            <ErrorBoundary componentName="Fuel">
+            <ErrorBoundary componentName="Customers">
               <Suspense fallback={<ComponentLoadingPlaceholder />}>
-                <FuelDashboard />
+                <CustomersPage />
               </Suspense>
             </ErrorBoundary>
           </div>
@@ -188,36 +127,29 @@ export default function Home() {
           <div className="flex-1 bg-gray-50">
             <ErrorBoundary componentName="Drivers">
               <Suspense fallback={<ComponentLoadingPlaceholder />}>
-                <DriverUtilizationList drivers={[]} statusFilter="" onStatusFilterChange={() => {}} />
+                <DriversPage />
               </Suspense>
             </ErrorBoundary>
           </div>
         );
 
-      case "analytics":
-        return (
-          <Suspense fallback={<ComponentLoadingPlaceholder />}>
-            <AnalyticsDashboard />
-          </Suspense>
-        );
-
-      case "control-center":
+      case "fuel-ops":
         return (
           <div className="flex-1 bg-gray-50">
-            <ErrorBoundary componentName="Control Center">
+            <ErrorBoundary componentName="Fuel Ops">
               <Suspense fallback={<ComponentLoadingPlaceholder />}>
-                <OperationsControl />
+                <FuelOpsPage />
               </Suspense>
             </ErrorBoundary>
           </div>
         );
 
-      case "fuel-distribution":
+      case "billing":
         return (
           <div className="flex-1 bg-gray-50">
-            <ErrorBoundary componentName="Fuel Distribution">
+            <ErrorBoundary componentName="Billing">
               <Suspense fallback={<ComponentLoadingPlaceholder />}>
-                <FuelDistributionPage />
+                <CommerceBillingPage />
               </Suspense>
             </ErrorBoundary>
           </div>
@@ -228,110 +160,31 @@ export default function Home() {
           <div className="flex-1 bg-gray-50">
             <ErrorBoundary componentName="Reconciliation">
               <Suspense fallback={<ComponentLoadingPlaceholder />}>
-                <ReconciliationPage />
+                <ReconciliationHub />
               </Suspense>
             </ErrorBoundary>
           </div>
         );
 
-      case "sourcing":
+      case "analytics":
         return (
           <div className="flex-1 bg-gray-50">
-            <ErrorBoundary componentName="Sourcing">
+            <ErrorBoundary componentName="Analytics">
               <Suspense fallback={<ComponentLoadingPlaceholder />}>
-                <SourcingPage />
+                <AnalyticsHub />
               </Suspense>
             </ErrorBoundary>
           </div>
         );
 
-      case "truck-compartments":
+      case "settings":
         return (
           <div className="flex-1 bg-gray-50">
-            <ErrorBoundary componentName="Truck Compartments">
+            <ErrorBoundary componentName="Settings">
               <Suspense fallback={<ComponentLoadingPlaceholder />}>
-                <TruckCompartmentsPage />
+                <SettingsPage />
               </Suspense>
             </ErrorBoundary>
-          </div>
-        );
-
-      case "customer-tanks":
-        return (
-          <div className="flex-1 bg-gray-50">
-            <ErrorBoundary componentName="Customer Tanks">
-              <Suspense fallback={<ComponentLoadingPlaceholder />}>
-                <CustomerTankPage />
-              </Suspense>
-            </ErrorBoundary>
-          </div>
-        );
-
-      case "depots":
-        return (
-          <div className="flex-1 bg-gray-50">
-            <ErrorBoundary componentName="Depots">
-              <Suspense fallback={<ComponentLoadingPlaceholder />}>
-                <DepotsPage />
-              </Suspense>
-            </ErrorBoundary>
-          </div>
-        );
-
-      case "road-restrictions":
-        return (
-          <div className="flex-1 bg-gray-50">
-            <ErrorBoundary componentName="Road Restrictions">
-              <Suspense fallback={<ComponentLoadingPlaceholder />}>
-                <RoadRestrictionsPanel />
-              </Suspense>
-            </ErrorBoundary>
-          </div>
-        );
-
-      case "agent-settings":
-        return (
-          <div className="flex-1 bg-gray-50">
-            <ErrorBoundary componentName="Agent Settings">
-              <Suspense fallback={<ComponentLoadingPlaceholder />}>
-                <AgentSettingsPage />
-              </Suspense>
-            </ErrorBoundary>
-          </div>
-        );
-
-      case "ops-monitoring":
-        return (
-          <div className="flex-1 bg-gray-50">
-            <ErrorBoundary componentName="Ops Monitoring">
-              <Suspense fallback={<ComponentLoadingPlaceholder />}>
-                <OpsMonitoringDashboard />
-              </Suspense>
-            </ErrorBoundary>
-          </div>
-        );
-
-      case "scheduling-metrics":
-        return (
-          <div className="flex-1 bg-gray-50">
-            <ErrorBoundary componentName="Scheduling Metrics">
-              <Suspense fallback={<ComponentLoadingPlaceholder />}>
-                <SchedulingMetricsPage />
-              </Suspense>
-            </ErrorBoundary>
-          </div>
-        );
-
-      case "support":
-        return (
-          <div className="flex-1 p-6 bg-gray-50">
-            <div className="bg-white rounded-xl shadow-sm border border-gray-200 h-full overflow-hidden">
-              <ErrorBoundary componentName="Support">
-                <Suspense fallback={<ComponentLoadingPlaceholder />}>
-                  <Support />
-                </Suspense>
-              </ErrorBoundary>
-            </div>
           </div>
         );
 

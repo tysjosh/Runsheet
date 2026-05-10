@@ -763,7 +763,10 @@ async def get_support_tickets(request: Request, tenant: TenantContext = Depends(
 @router.get("/analytics/metrics")
 @limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
 async def get_analytics_metrics(request: Request, tenant: TenantContext = Depends(get_tenant_context), timeRange: str = "7d"):
-    metrics = await elasticsearch_service.get_current_metrics(tenant.tenant_id)
+    try:
+        metrics = await elasticsearch_service.get_current_metrics(tenant.tenant_id)
+    except Exception:
+        metrics = {}
     return {
         "data": metrics,
         "success": True,
@@ -773,7 +776,10 @@ async def get_analytics_metrics(request: Request, tenant: TenantContext = Depend
 @router.get("/analytics/routes")
 @limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
 async def get_route_performance(request: Request, tenant: TenantContext = Depends(get_tenant_context)):
-    routes = await elasticsearch_service.get_route_performance_data(tenant.tenant_id)
+    try:
+        routes = await elasticsearch_service.get_route_performance_data(tenant.tenant_id)
+    except Exception:
+        routes = []
     return {
         "data": routes,
         "success": True,
@@ -783,7 +789,10 @@ async def get_route_performance(request: Request, tenant: TenantContext = Depend
 @router.get("/analytics/delay-causes")
 @limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
 async def get_delay_causes(request: Request, tenant: TenantContext = Depends(get_tenant_context)):
-    causes = await elasticsearch_service.get_delay_causes_data(tenant.tenant_id)
+    try:
+        causes = await elasticsearch_service.get_delay_causes_data(tenant.tenant_id)
+    except Exception:
+        causes = []
     return {
         "data": causes,
         "success": True,
@@ -793,7 +802,10 @@ async def get_delay_causes(request: Request, tenant: TenantContext = Depends(get
 @router.get("/analytics/regional")
 @limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
 async def get_regional_performance(request: Request, tenant: TenantContext = Depends(get_tenant_context)):
-    regions = await elasticsearch_service.get_regional_performance_data(tenant.tenant_id)
+    try:
+        regions = await elasticsearch_service.get_regional_performance_data(tenant.tenant_id)
+    except Exception:
+        regions = []
     return {
         "data": regions,
         "success": True,

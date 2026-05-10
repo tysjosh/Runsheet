@@ -1,25 +1,12 @@
 import {
-  Activity,
   BarChart3,
-  Building2,
   CalendarClock,
   ChevronLeft,
-  ClipboardList,
-  Database,
   DollarSign,
-  Droplets,
-  FileInput,
   Fuel,
-  Gauge,
-  HelpCircle,
   ListChecks,
   LogOut,
-  Map as MapIcon,
-  Package,
-  Radio,
   Settings,
-  SprayCan,
-  TrendingUp,
   Truck,
   User,
   Users,
@@ -48,35 +35,17 @@ export default function Sidebar({
 
   const menuItems = [
     { id: "fleet", label: "Fleet", icon: Truck },
-    { id: "orders", label: "Orders", icon: ClipboardList },
-    { id: "drivers", label: "Drivers", icon: Users },
-    { id: "scheduling", label: "Scheduling", icon: CalendarClock },
-    { id: "fuel", label: "Fuel Stations", icon: Fuel },
-    { id: "customer-tanks", label: "Customer Tanks", icon: Gauge },
-    { id: "fuel-distribution", label: "Fuel Distribution", icon: Droplets },
-    { id: "truck-compartments", label: "Truck Compartments", icon: SprayCan },
-    { id: "sourcing", label: "Terminal Sourcing", icon: Building2 },
-    { id: "depots", label: "Depots", icon: Database },
-    { id: "road-restrictions", label: "Road Restrictions", icon: MapIcon },
-    { id: "reconciliation", label: "Reconciliation", icon: ListChecks },
+    { id: "customers", label: "Customers", icon: Users },
+    { id: "drivers", label: "Drivers", icon: User },
+    { id: "dispatch", label: "Dispatch", icon: CalendarClock },
+    { id: "fuel-ops", label: "Fuel Ops", icon: Fuel },
     { id: "billing", label: "Billing", icon: DollarSign },
-    { id: "ar-aging", label: "AR Aging", icon: TrendingUp },
-    { id: "inventory", label: "Inventory", icon: Package },
+    { id: "reconciliation", label: "Reconciliation", icon: ListChecks },
     { id: "analytics", label: "Analytics", icon: BarChart3 },
-    { id: "ops-monitoring", label: "Ops Monitoring", icon: Activity },
-    { id: "control-center", label: "Control Center", icon: Radio },
-    { id: "agent-settings", label: "Agent Settings", icon: Settings },
-    { id: "upload-data", label: "Data Import", icon: FileInput },
-    { id: "support", label: "Support", icon: HelpCircle },
+    { id: "settings", label: "Settings", icon: Settings },
   ];
 
-  /** Commerce items route to /commerce paths */
   const handleItemClick = (id: string) => {
-    if (id === "billing") {
-      router.push("/commerce");
-    } else if (id === "ar-aging") {
-      router.push("/commerce/ar-aging");
-    }
     onNavigate(id);
   };
 

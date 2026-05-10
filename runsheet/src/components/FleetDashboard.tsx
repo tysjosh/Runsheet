@@ -1,13 +1,14 @@
 "use client";
 
 import { lazy, Suspense, useState } from "react";
-import { Package, Truck } from "lucide-react";
+import { Package, Truck, Package as PackageIcon } from "lucide-react";
 import ErrorBoundary from "./ErrorBoundary";
 import LoadingSpinner from "./LoadingSpinner";
 import type { Truck as TruckType } from "../types/api";
 
 const FleetTracking = lazy(() => import("./FleetTracking"));
 const ShipmentBoardView = lazy(() => import("../app/ops/page"));
+const Inventory = lazy(() => import("./Inventory"));
 
 interface FleetDashboardProps {
   selectedTruck: TruckType | null;
@@ -17,7 +18,8 @@ interface FleetDashboardProps {
 
 const TABS = [
   { id: "assets", label: "Asset Tracking", icon: Truck },
-  { id: "shipments", label: "Shipments", icon: Package },
+  { id: "shipments", label: "Orders", icon: Package },
+  { id: "inventory", label: "Inventory", icon: PackageIcon },
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"];
@@ -71,9 +73,19 @@ export default function FleetDashboard({
 
         {activeTab === "shipments" && (
           <div className="h-full bg-white border-t border-gray-200">
-            <ErrorBoundary componentName="Shipments">
-              <Suspense fallback={<LoadingSpinner message="Loading shipments..." />}>
+            <ErrorBoundary componentName="Orders">
+              <Suspense fallback={<LoadingSpinner message="Loading orders..." />}>
                 <ShipmentBoardView />
+              </Suspense>
+            </ErrorBoundary>
+          </div>
+        )}
+
+        {activeTab === "inventory" && (
+          <div className="h-full bg-white border-t border-gray-200 overflow-auto">
+            <ErrorBoundary componentName="Inventory">
+              <Suspense fallback={<LoadingSpinner message="Loading inventory..." />}>
+                <Inventory />
               </Suspense>
             </ErrorBoundary>
           </div>

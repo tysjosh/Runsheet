@@ -342,14 +342,14 @@ export default function Analytics() {
         )}
 
         {/* Interactive Charts */}
-        {!loading && metrics && chartData && (
+        {!loading && metrics && Object.keys(metrics).length > 0 && chartData && (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
             {/* Time Series Chart */}
             <div className="bg-white rounded-2xl p-6 border border-gray-200 hover:border-gray-300 transition-colors">
               <div className="flex items-center gap-3 mb-6">
                 <div className="w-2 h-2 bg-[#232323] rounded-full"></div>
                 <h3 className="text-lg font-semibold text-[#232323]">
-                  {metrics[selectedMetric as keyof typeof metrics].title} Trend
+                  {metrics[selectedMetric as keyof typeof metrics]?.title ?? "Analytics"} Trend
                 </h3>
                 <span className="text-sm text-gray-500 bg-gray-100 px-3 py-1 rounded-lg">
                   {timeRange}

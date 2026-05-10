@@ -27,7 +27,6 @@ const DATA_TYPE_CONFIG: Record<
   { label: string; icon: React.ElementType }
 > = {
   fleet: { label: "Fleet", icon: Truck },
-  riders: { label: "Riders", icon: Users },
   fuel_stations: { label: "Fuel Stations", icon: Fuel },
   inventory: { label: "Inventory", icon: Boxes },
   support_tickets: { label: "Support Tickets", icon: HeadsetIcon },
@@ -36,7 +35,6 @@ const DATA_TYPE_CONFIG: Record<
 
 const ALL_DATA_TYPES: DataType[] = [
   "fleet",
-  "riders",
   "fuel_stations",
   "inventory",
   "support_tickets",

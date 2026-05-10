@@ -1,12 +1,14 @@
 "use client";
 
-import { useState } from "react";
-import { DollarSign, Users, Building2, FileText, CreditCard, BookOpen } from "lucide-react";
+import { lazy, Suspense, useState } from "react";
+import { DollarSign, Users, Building2, FileText, CreditCard, BookOpen, TrendingUp } from "lucide-react";
 import CustomersListPage from "../../components/commerce/CustomersListPage";
 import AccountsListPage from "../../components/commerce/AccountsListPage";
 import InvoicesListPage from "../../components/commerce/InvoicesListPage";
 import PriceBookEditor from "../../components/commerce/PriceBookEditor";
-// Payments tab uses InvoicesListPage filtered or a simple payments list
+import LoadingSpinner from "../../components/LoadingSpinner";
+
+const ARAgingDashboard = lazy(() => import("../../components/commerce/ARAgingDashboard"));
 
 const TABS = [
   { id: "customers", label: "Customers", icon: Users },
@@ -14,6 +16,7 @@ const TABS = [
   { id: "invoices", label: "Invoices", icon: FileText },
   { id: "price-books", label: "Price Books", icon: BookOpen },
   { id: "payments", label: "Payments", icon: CreditCard },
+  { id: "ar-aging", label: "AR Aging", icon: TrendingUp },
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"];
@@ -65,6 +68,11 @@ export default function CommercePage() {
               Payments are shown on each invoice detail. Use the Invoices tab to view payment history per invoice.
             </p>
           </div>
+        )}
+        {activeTab === "ar-aging" && (
+          <Suspense fallback={<LoadingSpinner message="Loading AR Aging..." />}>
+            <ARAgingDashboard />
+          </Suspense>
         )}
       </div>
     </div>

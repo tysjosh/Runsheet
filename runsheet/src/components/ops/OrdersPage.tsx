@@ -185,9 +185,9 @@ export default function OrdersPage({
     setError(null);
     try {
       const response: PaginatedResponse<FuelOrder> = await listOrders(filters);
-      setOrders(response.data);
-      setTotalPages(response.pagination.total_pages);
-      setTotal(response.pagination.total);
+      setOrders(response.data ?? []);
+      setTotalPages(response.pagination?.total_pages ?? 1);
+      setTotal(response.pagination?.total ?? 0);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load orders");
     } finally {

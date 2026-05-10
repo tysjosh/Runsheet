@@ -29,8 +29,8 @@ export default function CustomersListPage({
 
       const response: PaginatedResponse<Customer> =
         await getCustomers(filters);
-      setCustomers(response.data);
-      setTotalPages(response.pagination.total_pages);
+      setCustomers(response.data ?? []);
+      setTotalPages(response.pagination?.total_pages ?? 1);
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "Failed to load customers",

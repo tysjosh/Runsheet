@@ -30,8 +30,8 @@ export default function AccountsListPage({
       if (creditStateFilter) filters.credit_state = creditStateFilter;
 
       const response: PaginatedResponse<Account> = await getAccounts(filters);
-      setAccounts(response.data);
-      setTotalPages(response.pagination.total_pages);
+      setAccounts(response.data ?? []);
+      setTotalPages(response.pagination?.total_pages ?? 1);
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "Failed to load accounts",
