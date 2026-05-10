@@ -1,5 +1,9 @@
 """
-Agent tools package
+Agent tools package.
+
+Exports all tools available to the AI agent system. Legacy ops tools
+(search_shipments, search_riders, reassign_rider, escalate_shipment)
+have been removed — use order_tools for fuel order operations.
 """
 
 from .search_tools import (
@@ -28,16 +32,20 @@ from .report_tools import (
 )
 
 from .ops_search_tools import (
-    search_shipments,
-    search_riders,
-    get_shipment_events,
-    get_ops_metrics
+    get_ops_metrics,
 )
 
 from .ops_report_tools import (
     generate_sla_report,
     generate_failure_report,
-    generate_rider_productivity_report
+    generate_rider_productivity_report as generate_driver_productivity_report,
+)
+
+from .order_tools import (
+    search_orders as search_fuel_orders,
+    search_drivers,
+    get_order_events,
+    get_orders_metrics,
 )
 
 from .fuel_tools import (
@@ -60,46 +68,47 @@ from .mutation_tools import (
     update_job_status,
     cancel_job,
     create_job,
-    reassign_rider,
-    escalate_shipment,
     request_fuel_refill,
     update_fuel_threshold,
     configure_mutation_tools,
 )
 
-# All available tools
+# All available tools for the main agent fallback path
 ALL_TOOLS = [
     # Search tools
     search_fleet_data,
     search_orders,
     search_support_tickets,
     search_inventory,
-    
+
     # Summary tools
     get_fleet_summary,
     get_inventory_summary,
     get_analytics_overview,
     get_performance_insights,
-    
+
     # Lookup tools
     find_truck_by_id,
     get_all_locations,
-    
+
     # Report tools
     generate_operations_report,
     generate_performance_report,
     generate_incident_analysis,
 
-    # Ops search tools
-    search_shipments,
-    search_riders,
-    get_shipment_events,
+    # Ops metrics
     get_ops_metrics,
 
     # Ops report tools
     generate_sla_report,
     generate_failure_report,
-    generate_rider_productivity_report,
+    generate_driver_productivity_report,
+
+    # Order/driver tools (fuel order pipeline)
+    search_fuel_orders,
+    search_drivers,
+    get_order_events,
+    get_orders_metrics,
 
     # Fuel tools
     search_fuel_stations,
@@ -119,10 +128,6 @@ ALL_TOOLS = [
     update_job_status,
     cancel_job,
     create_job,
-
-    # Mutation tools - ops
-    reassign_rider,
-    escalate_shipment,
 
     # Mutation tools - fuel
     request_fuel_refill,
