@@ -217,14 +217,11 @@ class LogisticsAgent:
             - `generate_performance_report()` - Generate detailed performance analysis report
             - `generate_incident_analysis(issue)` - Analyze incidents across multiple data sources
 
-            **Legacy Ops Tools (deprecated — prefer search_orders / search_drivers):**
-            - `search_shipments(tenant_id, status, rider_id, start_date, end_date, query)` (deprecated — prefer search_orders / search_drivers)
-            - `search_riders(tenant_id, status, availability)` (deprecated — prefer search_orders / search_drivers)
-            - `get_shipment_events(shipment_id, tenant_id)` (deprecated — prefer search_orders / search_drivers)
+            **Legacy Ops Tools:**
             - `get_ops_metrics(metric_type, bucket, start_date, end_date, tenant_id)` - Get aggregated operational metrics
             - `generate_sla_report(start_date, end_date, tenant_id)` - Generate SLA violations report
             - `generate_failure_report(start_date, end_date, tenant_id, intake_channel=None)` - Generate failure root-cause analysis report. Filter by intake_channel (voice, web_portal, dispatcher, csv, edi, api_partner, legacy) to compare failure rates across channels.
-            - `generate_rider_productivity_report(start_date, end_date, tenant_id)` - Generate driver productivity report
+            - `generate_driver_productivity_report(start_date, end_date, tenant_id)` - Generate driver productivity report
 
             **IMPORTANT - Read-Only Guardrail:**
             All ops intelligence tools are strictly read-only. You must NEVER modify order, driver, or event data.

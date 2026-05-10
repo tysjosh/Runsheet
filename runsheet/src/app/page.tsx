@@ -164,9 +164,9 @@ function DashboardMockup() {
         </div>
         <div className="space-y-1.5">
           {[
-            { id: "TRK-042", route: "Lagos → Ibadan", status: "In Transit", color: "#3B82F6" },
-            { id: "TRK-018", route: "Abuja → Kano", status: "Loading", color: "#6E56CF" },
-            { id: "TRK-091", route: "PH → Enugu", status: "Delivered", color: "#10B981" },
+            { id: "TRK-042", route: "Houston → Dallas", status: "In Transit", color: "#3B82F6" },
+            { id: "TRK-018", route: "Chicago → Detroit", status: "Loading", color: "#6E56CF" },
+            { id: "TRK-091", route: "Atlanta → Charlotte", status: "Delivered", color: "#10B981" },
           ].map((t) => (
             <div key={t.id} className="flex items-center justify-between py-1.5 px-2.5 rounded-md bg-gray-50/80">
               <div className="flex items-center gap-2">
@@ -306,8 +306,8 @@ function AnalyticsMockup() {
       <div className="p-4">
         <div className="grid grid-cols-2 gap-2 mb-3">
           {[
-            { label: "Revenue", value: "₦12.4M", change: "+18%", color: "#10B981" },
-            { label: "Cost/km", value: "₦42.3", change: "-12%", color: "#3B82F6" },
+            { label: "Revenue", value: "$12.4M", change: "+18%", color: "#10B981" },
+            { label: "Cost/mi", value: "$42.30", change: "-12%", color: "#3B82F6" },
             { label: "Utilization", value: "87%", change: "+5%", color: "#0D9373" },
             { label: "SLA Score", value: "96.8%", change: "+2.1%", color: "#6E56CF" },
           ].map((m) => (
@@ -622,12 +622,12 @@ export default function LandingPage() {
       <section className="py-12 border-y border-gray-100 bg-gray-50/50">
         <div className="max-w-7xl mx-auto px-6 lg:px-8">
           <p className="text-center text-xs font-medium text-gray-400 uppercase tracking-widest mb-8">
-            Trusted by logistics leaders across Africa
+            Trusted by fuel distributors across America
           </p>
           <div className="flex flex-wrap items-center justify-center gap-x-12 gap-y-6 mb-6">
             {[
-              "DanCom", "PetroCorp", "SwiftHaul", "NaijaFleet",
-              "TransAfrica", "FuelNet", "LogiPrime", "AfriHaul",
+              "PetroCorp", "FuelNet", "SwiftFuel", "TankPro",
+              "FleetEnergy", "RouteMax", "LogiPrime", "TransHaul",
             ].map((name) => (
               <span
                 key={name}
@@ -757,7 +757,7 @@ export default function LandingPage() {
                     <div className="space-y-1.5">
                       {[
                         { text: "Route TRK-042 delay predicted — rerouting", type: "warning" },
-                        { text: "Fuel savings opportunity: ₦240K/week", type: "success" },
+                        { text: "Fuel savings opportunity: $240K/week", type: "success" },
                         { text: "Driver fatigue alert: shift limit in 45min", type: "info" },
                       ].map((alert) => (
                         <div key={alert.text} className="flex items-center gap-2 py-1.5 px-2 rounded-md bg-gray-50/80">
@@ -806,9 +806,9 @@ export default function LandingPage() {
                   <div className="rounded-lg border border-gray-100 p-3 bg-white mt-4">
                     <div className="space-y-1">
                       {[
-                        { job: "JOB-101", driver: "Adebayo O.", time: "08:00", status: "Assigned" },
-                        { job: "JOB-102", driver: "Chioma N.", time: "09:30", status: "En Route" },
-                        { job: "JOB-103", driver: "Ibrahim M.", time: "11:00", status: "Pending" },
+                        { job: "JOB-101", driver: "Mike J.", time: "08:00", status: "Assigned" },
+                        { job: "JOB-102", driver: "Sarah W.", time: "09:30", status: "En Route" },
+                        { job: "JOB-103", driver: "James R.", time: "11:00", status: "Pending" },
                       ].map((j) => (
                         <div key={j.job} className="flex items-center justify-between py-1.5 px-2 rounded-md bg-gray-50/80">
                           <div className="flex items-center gap-2">
@@ -940,7 +940,7 @@ export default function LandingPage() {
                     <Target className="w-8 h-8 text-white" />
                   </div>
                   <p className="text-[10px] font-bold text-white/60 uppercase tracking-widest">2024 Leader</p>
-                  <p className="text-[9px] text-white/40">African Logistics Tech</p>
+                  <p className="text-[9px] text-white/40">Fuel Distribution Tech</p>
                 </div>
               </div>
 
@@ -950,10 +950,10 @@ export default function LandingPage() {
                   Recognition
                 </p>
                 <h2 className="text-3xl lg:text-4xl font-bold tracking-tight text-white mb-4">
-                  Recognized as a leader in African logistics technology
+                  Recognized as a leader in fuel distribution technology
                 </h2>
                 <p className="text-white/50 text-lg leading-relaxed max-w-xl">
-                  Runsheet was named a top logistics platform in the 2024 African Technology Awards for operational innovation, AI-driven fleet management, and measurable customer impact.
+                  Runsheet was named a top logistics platform in the 2024 Fuel Distribution Technology Awards for operational innovation, AI-driven fleet management, and measurable customer impact.
                 </p>
               </div>
             </div>
@@ -988,21 +988,21 @@ export default function LandingPage() {
                   color: "#0D9373",
                 },
                 {
-                  company: "SwiftHaul",
+                  company: "SwiftFuel",
                   industry: "Last-Mile Delivery",
-                  title: "SwiftHaul hit 98% on-time delivery with AI scheduling",
+                  title: "SwiftFuel hit 98% on-time delivery with AI scheduling",
                   color: "#6E56CF",
                 },
                 {
-                  company: "TransAfrica",
-                  industry: "Cross-Border Logistics",
-                  title: "TransAfrica replans 3x faster with autonomous agents",
+                  company: "RouteMax",
+                  industry: "Cross-Country Logistics",
+                  title: "RouteMax replans 3x faster with autonomous agents",
                   color: "#3B82F6",
                 },
                 {
-                  company: "NaijaFleet",
+                  company: "TankPro",
                   industry: "Fleet Management",
-                  title: "NaijaFleet gained full visibility across 200+ vehicles",
+                  title: "TankPro gained full visibility across 200+ vehicles",
                   color: "#10B981",
                 },
                 {
@@ -1121,7 +1121,7 @@ export default function LandingPage() {
             {[...Array(2)].map((_, setIdx) => (
               <div key={setIdx} className="flex gap-6 px-3">
                 {[
-                  "African Tech Awards 2024",
+                  "Fuel Tech Awards 2024",
                   "Best Fleet Platform",
                   "AI Innovation Award",
                   "Logistics Leader",
@@ -1176,7 +1176,7 @@ export default function LandingPage() {
                 {[
                   "SAP ERP", "Oracle TMS", "Google Maps", "Fleetio",
                   "QuickBooks", "Xero", "Slack", "Microsoft Teams",
-                  "Twilio", "SendGrid", "Stripe", "PayStack",
+                  "Twilio", "SendGrid", "Stripe", "Square",
                 ].map((tool) => (
                   <div
                     key={`${setIdx}-${tool}`}

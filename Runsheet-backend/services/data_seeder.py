@@ -184,60 +184,60 @@ class DataSeeder:
         """Seed locations data"""
         locations_data = [
             {
-                "location_id": "nairobi-station",
-                "name": "Nairobi Station",
-                "type": "station",
-                "coordinates": {"lat": -1.2921, "lon": 36.8219},
-                "address": "Nairobi, Kenya",
-                "region": "Central"
+                "location_id": "houston-terminal",
+                "name": "Houston Terminal",
+                "type": "terminal",
+                "coordinates": {"lat": 29.7604, "lon": -95.3698},
+                "address": "1200 Industrial Blvd, Houston, TX 77001",
+                "region": "Southeast"
             },
             {
-                "location_id": "mombasa-port",
-                "name": "Mombasa Port",
-                "type": "port",
-                "coordinates": {"lat": -4.0435, "lon": 39.6682},
-                "address": "Mombasa, Kenya",
-                "region": "Coast"
-            },
-            {
-                "location_id": "kisumu-depot",
-                "name": "Kisumu Depot",
+                "location_id": "dallas-depot",
+                "name": "Dallas Depot",
                 "type": "depot",
-                "coordinates": {"lat": -0.0917, "lon": 34.7680},
-                "address": "Kisumu, Kenya",
-                "region": "Nyanza"
+                "coordinates": {"lat": 32.7767, "lon": -96.7970},
+                "address": "800 Commerce St, Dallas, TX 75201",
+                "region": "Southeast"
             },
             {
-                "location_id": "kinara-warehouse",
-                "name": "Kinara Warehouse",
-                "type": "warehouse",
-                "coordinates": {"lat": -1.3733, "lon": 36.7516},
-                "address": "Kinara, Kenya",
-                "region": "Central"
-            },
-            {
-                "location_id": "nakuru-station",
-                "name": "Nakuru Station",
-                "type": "station",
-                "coordinates": {"lat": -0.3031, "lon": 36.0800},
-                "address": "Nakuru, Kenya",
-                "region": "Rift Valley"
-            },
-            {
-                "location_id": "eldoret-depot",
-                "name": "Eldoret Depot",
+                "location_id": "chicago-yard",
+                "name": "Chicago Yard",
                 "type": "depot",
-                "coordinates": {"lat": 0.5143, "lon": 35.2698},
-                "address": "Eldoret, Kenya",
-                "region": "Rift Valley"
+                "coordinates": {"lat": 41.8781, "lon": -87.6298},
+                "address": "2400 S Ashland Ave, Chicago, IL 60608",
+                "region": "Midwest"
             },
             {
-                "location_id": "thika-warehouse",
-                "name": "Thika Warehouse",
+                "location_id": "denver-hub",
+                "name": "Denver Hub",
                 "type": "warehouse",
-                "coordinates": {"lat": -1.0332, "lon": 37.0692},
-                "address": "Thika, Kenya",
-                "region": "Central"
+                "coordinates": {"lat": 39.7392, "lon": -104.9903},
+                "address": "5500 Quebec St, Denver, CO 80216",
+                "region": "Southwest"
+            },
+            {
+                "location_id": "atlanta-terminal",
+                "name": "Atlanta Terminal",
+                "type": "terminal",
+                "coordinates": {"lat": 33.7490, "lon": -84.3880},
+                "address": "1500 Fulton Industrial Blvd, Atlanta, GA 30336",
+                "region": "Southeast"
+            },
+            {
+                "location_id": "phoenix-depot",
+                "name": "Phoenix Depot",
+                "type": "depot",
+                "coordinates": {"lat": 33.4484, "lon": -112.0740},
+                "address": "3200 W Buckeye Rd, Phoenix, AZ 85009",
+                "region": "Southwest"
+            },
+            {
+                "location_id": "detroit-terminal",
+                "name": "Detroit Terminal",
+                "type": "terminal",
+                "coordinates": {"lat": 42.3314, "lon": -83.0458},
+                "address": "900 Clark Ave, Detroit, MI 48209",
+                "region": "Midwest"
             }
         ]
         
@@ -253,218 +253,218 @@ class DataSeeder:
         """Seed trucks data"""
         trucks_data = [
             {
-                "truck_id": "GI-58A",
-                "plate_number": "GI-58A",
+                "truck_id": "TRK-001",
+                "plate_number": "TRK-001",
                 "driver_id": "driver-001",
-                "driver_name": "John Kamau",
+                "driver_name": "Mike Johnson",
                 "current_location": {
-                    "id": "kisumu-depot",
-                    "name": "Kisumu Depot",
+                    "id": "chicago-yard",
+                    "name": "Chicago Yard",
                     "type": "depot",
-                    "coordinates": {"lat": -0.0917, "lon": 34.7680},
-                    "address": "Kisumu, Kenya"
+                    "coordinates": {"lat": 41.8781, "lon": -87.6298},
+                    "address": "2400 S Ashland Ave, Chicago, IL 60608"
                 },
                 "destination": {
-                    "id": "mombasa-port",
-                    "name": "Mombasa Port",
-                    "type": "port",
-                    "coordinates": {"lat": -4.0435, "lon": 39.6682},
-                    "address": "Mombasa, Kenya"
+                    "id": "detroit-terminal",
+                    "name": "Detroit Terminal",
+                    "type": "terminal",
+                    "coordinates": {"lat": 42.3314, "lon": -83.0458},
+                    "address": "900 Clark Ave, Detroit, MI 48209"
                 },
                 "route": {
-                    "id": "kisumu-mombasa",
-                    "distance": 580.0,
-                    "estimated_duration": 480,
+                    "id": "chicago-detroit",
+                    "distance": 450.0,
+                    "estimated_duration": 300,
                     "actual_duration": None
                 },
                 "status": "on_time",
                 "estimated_arrival": "2024-01-15T14:15:00Z",
                 "last_update": "2024-01-15T12:00:00Z",
                 "cargo": {
-                    "type": "General Cargo",
+                    "type": "Diesel Fuel",
                     "weight": 15000.0,
                     "volume": 45.0,
-                    "description": "Mixed goods including electronics and household items",
+                    "description": "ULSD diesel delivery to Detroit terminal",
                     "priority": "medium"
                 }
             },
             {
-                "truck_id": "MO-84A",
-                "plate_number": "MO-84A",
+                "truck_id": "TRK-002",
+                "plate_number": "TRK-002",
                 "driver_id": "driver-002",
-                "driver_name": "Mary Wanjiku",
+                "driver_name": "Sarah Williams",
                 "current_location": {
-                    "id": "nairobi-station",
-                    "name": "Nairobi Station",
-                    "type": "station",
-                    "coordinates": {"lat": -1.2921, "lon": 36.8219},
-                    "address": "Nairobi, Kenya"
+                    "id": "houston-terminal",
+                    "name": "Houston Terminal",
+                    "type": "terminal",
+                    "coordinates": {"lat": 29.7604, "lon": -95.3698},
+                    "address": "1200 Industrial Blvd, Houston, TX 77001"
                 },
                 "destination": {
-                    "id": "kinara-warehouse",
-                    "name": "Kinara Warehouse",
-                    "type": "warehouse",
-                    "coordinates": {"lat": -1.3733, "lon": 36.7516},
-                    "address": "Kinara, Kenya"
+                    "id": "dallas-depot",
+                    "name": "Dallas Depot",
+                    "type": "depot",
+                    "coordinates": {"lat": 32.7767, "lon": -96.7970},
+                    "address": "800 Commerce St, Dallas, TX 75201"
                 },
                 "route": {
-                    "id": "nairobi-kinara",
-                    "distance": 25.0,
-                    "estimated_duration": 45,
+                    "id": "houston-dallas",
+                    "distance": 385.0,
+                    "estimated_duration": 240,
                     "actual_duration": None
                 },
                 "status": "delayed",
                 "estimated_arrival": "2024-01-15T16:25:00Z",
                 "last_update": "2024-01-15T12:05:00Z",
                 "cargo": {
-                    "type": "Perishables",
+                    "type": "Gasoline",
                     "weight": 8000.0,
                     "volume": 25.0,
-                    "description": "Fresh produce including vegetables and fruits for local markets",
+                    "description": "Regular unleaded gasoline for Dallas depot stations",
                     "priority": "high"
                 }
             },
             {
-                "truck_id": "CE-57A",
-                "plate_number": "CE-57A",
+                "truck_id": "TRK-003",
+                "plate_number": "TRK-003",
                 "driver_id": "driver-003",
-                "driver_name": "Peter Ochieng",
+                "driver_name": "James Rodriguez",
                 "current_location": {
-                    "id": "kisumu-depot",
-                    "name": "Kisumu Depot",
+                    "id": "chicago-yard",
+                    "name": "Chicago Yard",
                     "type": "depot",
-                    "coordinates": {"lat": -0.0917, "lon": 34.7680},
-                    "address": "Kisumu, Kenya"
+                    "coordinates": {"lat": 41.8781, "lon": -87.6298},
+                    "address": "2400 S Ashland Ave, Chicago, IL 60608"
                 },
                 "destination": {
-                    "id": "mombasa-port",
-                    "name": "Mombasa Port",
-                    "type": "port",
-                    "coordinates": {"lat": -4.0435, "lon": 39.6682},
-                    "address": "Mombasa, Kenya"
+                    "id": "detroit-terminal",
+                    "name": "Detroit Terminal",
+                    "type": "terminal",
+                    "coordinates": {"lat": 42.3314, "lon": -83.0458},
+                    "address": "900 Clark Ave, Detroit, MI 48209"
                 },
                 "route": {
-                    "id": "kisumu-mombasa-2",
-                    "distance": 580.0,
-                    "estimated_duration": 480,
+                    "id": "chicago-detroit-2",
+                    "distance": 450.0,
+                    "estimated_duration": 300,
                     "actual_duration": None
                 },
                 "status": "delayed",
                 "estimated_arrival": "2024-01-15T12:25:00Z",
                 "last_update": "2024-01-15T12:10:00Z",
                 "cargo": {
-                    "type": "Construction Materials",
+                    "type": "Heating Oil",
                     "weight": 20000.0,
                     "volume": 60.0,
-                    "description": "Cement bags and steel rods for construction projects",
+                    "description": "Heating oil delivery for residential distribution",
                     "priority": "medium"
                 }
             },
             {
-                "truck_id": "KA-123B",
-                "plate_number": "KA-123B",
+                "truck_id": "TRK-004",
+                "plate_number": "TRK-004",
                 "driver_id": "driver-004",
-                "driver_name": "Sarah Njeri",
+                "driver_name": "Emily Chen",
                 "current_location": {
-                    "id": "nakuru-station",
-                    "name": "Nakuru Station",
-                    "type": "station",
-                    "coordinates": {"lat": -0.3031, "lon": 36.0800},
-                    "address": "Nakuru, Kenya"
+                    "id": "atlanta-terminal",
+                    "name": "Atlanta Terminal",
+                    "type": "terminal",
+                    "coordinates": {"lat": 33.7490, "lon": -84.3880},
+                    "address": "1500 Fulton Industrial Blvd, Atlanta, GA 30336"
                 },
                 "destination": {
-                    "id": "nairobi-station",
-                    "name": "Nairobi Station",
-                    "type": "station",
-                    "coordinates": {"lat": -1.2921, "lon": 36.8219},
-                    "address": "Nairobi, Kenya"
+                    "id": "houston-terminal",
+                    "name": "Houston Terminal",
+                    "type": "terminal",
+                    "coordinates": {"lat": 29.7604, "lon": -95.3698},
+                    "address": "1200 Industrial Blvd, Houston, TX 77001"
                 },
                 "route": {
-                    "id": "nakuru-nairobi",
-                    "distance": 160.0,
-                    "estimated_duration": 180,
+                    "id": "atlanta-houston",
+                    "distance": 1260.0,
+                    "estimated_duration": 720,
                     "actual_duration": None
                 },
                 "status": "on_time",
                 "estimated_arrival": "2024-01-15T15:30:00Z",
                 "last_update": "2024-01-15T12:30:00Z",
                 "cargo": {
-                    "type": "Electronics",
+                    "type": "Propane",
                     "weight": 5000.0,
                     "volume": 20.0,
-                    "description": "Computer equipment and mobile phones for retail stores",
+                    "description": "Propane delivery for commercial accounts",
                     "priority": "high"
                 }
             },
             {
-                "truck_id": "KBZ-456C",
-                "plate_number": "KBZ-456C",
+                "truck_id": "TRK-005",
+                "plate_number": "TRK-005",
                 "driver_id": "driver-005",
-                "driver_name": "David Mwangi",
+                "driver_name": "David Thompson",
                 "current_location": {
-                    "id": "eldoret-depot",
-                    "name": "Eldoret Depot",
-                    "type": "depot",
-                    "coordinates": {"lat": 0.5143, "lon": 35.2698},
-                    "address": "Eldoret, Kenya"
+                    "id": "denver-hub",
+                    "name": "Denver Hub",
+                    "type": "warehouse",
+                    "coordinates": {"lat": 39.7392, "lon": -104.9903},
+                    "address": "5500 Quebec St, Denver, CO 80216"
                 },
                 "destination": {
-                    "id": "kisumu-depot",
-                    "name": "Kisumu Depot",
+                    "id": "phoenix-depot",
+                    "name": "Phoenix Depot",
                     "type": "depot",
-                    "coordinates": {"lat": -0.0917, "lon": 34.7680},
-                    "address": "Kisumu, Kenya"
+                    "coordinates": {"lat": 33.4484, "lon": -112.0740},
+                    "address": "3200 W Buckeye Rd, Phoenix, AZ 85009"
                 },
                 "route": {
-                    "id": "eldoret-kisumu",
-                    "distance": 120.0,
-                    "estimated_duration": 150,
+                    "id": "denver-phoenix",
+                    "distance": 960.0,
+                    "estimated_duration": 600,
                     "actual_duration": None
                 },
                 "status": "on_time",
                 "estimated_arrival": "2024-01-15T17:00:00Z",
                 "last_update": "2024-01-15T12:45:00Z",
                 "cargo": {
-                    "type": "Agricultural Products",
+                    "type": "DEF (Diesel Exhaust Fluid)",
                     "weight": 12000.0,
                     "volume": 35.0,
-                    "description": "Maize and wheat grain for distribution centers",
+                    "description": "DEF delivery for fleet fueling stations",
                     "priority": "medium"
                 }
             },
             {
-                "truck_id": "KCD-789D",
-                "plate_number": "KCD-789D",
+                "truck_id": "TRK-006",
+                "plate_number": "TRK-006",
                 "driver_id": "driver-006",
-                "driver_name": "Grace Akinyi",
+                "driver_name": "Maria Garcia",
                 "current_location": {
-                    "id": "thika-warehouse",
-                    "name": "Thika Warehouse",
-                    "type": "warehouse",
-                    "coordinates": {"lat": -1.0332, "lon": 37.0692},
-                    "address": "Thika, Kenya"
+                    "id": "dallas-depot",
+                    "name": "Dallas Depot",
+                    "type": "depot",
+                    "coordinates": {"lat": 32.7767, "lon": -96.7970},
+                    "address": "800 Commerce St, Dallas, TX 75201"
                 },
                 "destination": {
-                    "id": "mombasa-port",
-                    "name": "Mombasa Port",
-                    "type": "port",
-                    "coordinates": {"lat": -4.0435, "lon": 39.6682},
-                    "address": "Mombasa, Kenya"
+                    "id": "atlanta-terminal",
+                    "name": "Atlanta Terminal",
+                    "type": "terminal",
+                    "coordinates": {"lat": 33.7490, "lon": -84.3880},
+                    "address": "1500 Fulton Industrial Blvd, Atlanta, GA 30336"
                 },
                 "route": {
-                    "id": "thika-mombasa",
-                    "distance": 520.0,
-                    "estimated_duration": 420,
+                    "id": "dallas-atlanta",
+                    "distance": 1250.0,
+                    "estimated_duration": 720,
                     "actual_duration": None
                 },
                 "status": "delayed",
                 "estimated_arrival": "2024-01-15T19:45:00Z",
                 "last_update": "2024-01-15T13:00:00Z",
                 "cargo": {
-                    "type": "Textiles",
+                    "type": "Kerosene",
                     "weight": 8500.0,
                     "volume": 40.0,
-                    "description": "Clothing and fabric materials for export",
+                    "description": "Kerosene delivery for aviation fuel blending",
                     "priority": "low"
                 }
             }
@@ -481,8 +481,8 @@ class DataSeeder:
                 "name": "Diesel Fuel Premium Grade",
                 "category": "Fuel",
                 "quantity": 15000,
-                "unit": "liters",
-                "location": "Nairobi Depot",
+                "unit": "gallons",
+                "location": "Houston Terminal",
                 "status": "in_stock",
                 "last_updated": "2024-01-15T10:30:00Z"
             },
@@ -492,7 +492,7 @@ class DataSeeder:
                 "category": "Parts",
                 "quantity": 25,
                 "unit": "pieces",
-                "location": "Mombasa Warehouse",
+                "location": "Dallas Depot",
                 "status": "low_stock",
                 "last_updated": "2024-01-15T09:15:00Z"
             },
@@ -502,7 +502,7 @@ class DataSeeder:
                 "category": "Maintenance",
                 "quantity": 0,
                 "unit": "bottles",
-                "location": "Kisumu Station",
+                "location": "Chicago Yard",
                 "status": "out_of_stock",
                 "last_updated": "2024-01-14T16:45:00Z"
             },
@@ -512,7 +512,7 @@ class DataSeeder:
                 "category": "Parts",
                 "quantity": 120,
                 "unit": "sets",
-                "location": "Nairobi Depot",
+                "location": "Houston Terminal",
                 "status": "in_stock",
                 "last_updated": "2024-01-15T08:20:00Z"
             },
@@ -522,7 +522,7 @@ class DataSeeder:
                 "category": "Maintenance",
                 "quantity": 8,
                 "unit": "bottles",
-                "location": "Mombasa Warehouse",
+                "location": "Dallas Depot",
                 "status": "low_stock",
                 "last_updated": "2024-01-15T11:00:00Z"
             }
@@ -536,10 +536,10 @@ class DataSeeder:
         tickets_data = [
             {
                 "ticket_id": "TKT-001",
-                "customer": "Safaricom Ltd",
+                "customer": "PetroCorp",
                 "customer_id": "CUST-001",
                 "issue": "Delivery delay notification and customer communication",
-                "description": "Order ORD-001 is running 3 hours behind schedule due to traffic congestion on Nairobi-Mombasa highway. Customer needs urgent update on revised ETA and compensation options.",
+                "description": "Order ORD-001 is running 3 hours behind schedule due to traffic congestion on I-10. Customer needs urgent update on revised ETA and compensation options.",
                 "priority": "high",
                 "status": "open",
                 "related_order": "ORD-001",
@@ -547,34 +547,34 @@ class DataSeeder:
             },
             {
                 "ticket_id": "TKT-002",
-                "customer": "Kenya Power",
+                "customer": "FuelNet",
                 "customer_id": "CUST-002",
                 "issue": "Damaged goods inspection and replacement request",
-                "description": "Electrical transformer arrived with visible damage to outer casing and oil leak detected. Customer requesting immediate replacement and investigation into handling procedures.",
+                "description": "Fuel tanker arrived with visible damage to valve assembly and minor leak detected. Customer requesting immediate replacement and investigation into handling procedures.",
                 "priority": "urgent",
                 "status": "in_progress",
-                "assigned_to": "John Kamau",
+                "assigned_to": "Mike Johnson",
                 "related_order": "ORD-002",
                 "created_at": "2024-01-15T11:15:00Z"
             },
             {
                 "ticket_id": "TKT-003",
-                "customer": "Equity Bank",
+                "customer": "TankPro",
                 "customer_id": "CUST-003",
                 "issue": "Invoice discrepancy and billing inquiry",
                 "description": "Customer questioning additional fuel surcharge and handling fees on delivery invoice. Requesting detailed breakdown of all charges and justification for extra costs.",
                 "priority": "medium",
                 "status": "resolved",
-                "assigned_to": "Mary Wanjiku",
+                "assigned_to": "Sarah Williams",
                 "created_at": "2024-01-14T14:20:00Z",
                 "resolved_at": "2024-01-15T10:30:00Z"
             },
             {
                 "ticket_id": "TKT-004",
-                "customer": "Nakumatt Holdings",
+                "customer": "FleetEnergy",
                 "customer_id": "CUST-005",
                 "issue": "Missing items from shipment manifest",
-                "description": "Partial delivery received with 5 items missing from the original shipment manifest. Customer needs immediate investigation and delivery of missing items.",
+                "description": "Partial delivery received with 500 gallons short from the original order manifest. Customer needs immediate investigation and delivery of remaining volume.",
                 "priority": "high",
                 "status": "open",
                 "created_at": "2024-01-15T13:45:00Z"
@@ -614,10 +614,10 @@ class DataSeeder:
             
             # Route performance events
             routes = [
-                ("Nairobi → Mombasa", "nairobi-mombasa"),
-                ("Kisumu → Nakuru", "kisumu-nakuru"), 
-                ("Eldoret → Nairobi", "eldoret-nairobi"),
-                ("Mombasa → Kisumu", "mombasa-kisumu")
+                ("Houston → Dallas", "houston-dallas"),
+                ("Chicago → Detroit", "chicago-detroit"), 
+                ("Atlanta → Charlotte", "atlanta-charlotte"),
+                ("Denver → Phoenix", "denver-phoenix")
             ]
             
             for route_name, route_id in routes:
@@ -674,7 +674,7 @@ class DataSeeder:
             })
         
         # Regional performance
-        regions = ["Nairobi", "Mombasa", "Kisumu", "Eldoret"]
+        regions = ["Houston", "Dallas", "Chicago", "Atlanta"]
         for region in regions:
             events_data.append({
                 "event_id": f"REGIONAL-{region.lower()}",
@@ -695,9 +695,9 @@ class DataSeeder:
                 "event_id": "DEL-001",
                 "event_type": "delivery_completed",
                 "timestamp": "2024-01-14T11:45:00Z",
-                "truck_id": "MO-84A",
+                "truck_id": "TRK-002",
                 "order_id": "ORD-003",
-                "region": "Kisumu",
+                "region": "Southeast",
                 "metrics": {
                     "delivery_time_minutes": 385,
                     "delay_minutes": -15,
@@ -710,9 +710,9 @@ class DataSeeder:
                 "event_id": "DEL-002", 
                 "event_type": "delivery_started",
                 "timestamp": "2024-01-15T08:00:00Z",
-                "truck_id": "GI-58A",
+                "truck_id": "TRK-001",
                 "order_id": "ORD-001",
-                "region": "Central",
+                "region": "Midwest",
                 "metrics": {
                     "planned_distance_km": 580.0,
                     "estimated_duration_minutes": 480
@@ -722,8 +722,8 @@ class DataSeeder:
                 "event_id": "DEL-003",
                 "event_type": "delay_reported",
                 "timestamp": "2024-01-15T12:00:00Z",
-                "truck_id": "CE-57A",
-                "region": "Nyanza",
+                "truck_id": "TRK-003",
+                "region": "Midwest",
                 "delay_cause": "Traffic Congestion",
                 "metrics": {
                     "delay_minutes": 180,
@@ -746,110 +746,110 @@ class DataSeeder:
         """Seed baseline morning truck data - all on time"""
         trucks_data = [
             {
-                "truck_id": "GI-58A",
-                "plate_number": "GI-58A",
+                "truck_id": "TRK-001",
+                "plate_number": "TRK-001",
                 "driver_id": "driver-001",
-                "driver_name": "John Kamau",
+                "driver_name": "Mike Johnson",
                 "current_location": {
-                    "id": "nairobi-station",
-                    "name": "Nairobi Station",
-                    "type": "station",
-                    "coordinates": {"lat": -1.2921, "lon": 36.8219},
-                    "address": "Nairobi, Kenya"
+                    "id": "houston-terminal",
+                    "name": "Houston Terminal",
+                    "type": "terminal",
+                    "coordinates": {"lat": 29.7604, "lon": -95.3698},
+                    "address": "1200 Industrial Blvd, Houston, TX 77001"
                 },
                 "destination": {
-                    "id": "mombasa-port",
-                    "name": "Mombasa Port",
-                    "type": "port",
-                    "coordinates": {"lat": -4.0435, "lon": 39.6682},
-                    "address": "Mombasa, Kenya"
+                    "id": "dallas-depot",
+                    "name": "Dallas Depot",
+                    "type": "depot",
+                    "coordinates": {"lat": 32.7767, "lon": -96.7970},
+                    "address": "800 Commerce St, Dallas, TX 75201"
                 },
                 "route": {
-                    "id": "nairobi-mombasa",
-                    "distance": 480.0,
-                    "estimated_duration": 420,
+                    "id": "houston-dallas",
+                    "distance": 385.0,
+                    "estimated_duration": 240,
                     "actual_duration": None
                 },
                 "status": "on_time",
                 "estimated_arrival": (base_timestamp + timedelta(hours=7)).isoformat(),
                 "last_update": base_timestamp.isoformat(),
                 "cargo": {
-                    "type": "General Cargo",
+                    "type": "Diesel Fuel",
                     "weight": 15000.0,
                     "volume": 45.0,
-                    "description": "Mixed goods including electronics and household items",
+                    "description": "ULSD diesel delivery to Dallas depot",
                     "priority": "medium"
                 }
             },
             {
-                "truck_id": "MO-84A",
-                "plate_number": "MO-84A",
+                "truck_id": "TRK-002",
+                "plate_number": "TRK-002",
                 "driver_id": "driver-002",
-                "driver_name": "Mary Wanjiku",
+                "driver_name": "Sarah Williams",
                 "current_location": {
-                    "id": "nakuru-station",
-                    "name": "Nakuru Station",
-                    "type": "station",
-                    "coordinates": {"lat": -0.3031, "lon": 36.0800},
-                    "address": "Nakuru, Kenya"
+                    "id": "atlanta-terminal",
+                    "name": "Atlanta Terminal",
+                    "type": "terminal",
+                    "coordinates": {"lat": 33.7490, "lon": -84.3880},
+                    "address": "1500 Fulton Industrial Blvd, Atlanta, GA 30336"
                 },
                 "destination": {
-                    "id": "nairobi-station",
-                    "name": "Nairobi Station",
-                    "type": "station",
-                    "coordinates": {"lat": -1.2921, "lon": 36.8219},
-                    "address": "Nairobi, Kenya"
+                    "id": "houston-terminal",
+                    "name": "Houston Terminal",
+                    "type": "terminal",
+                    "coordinates": {"lat": 29.7604, "lon": -95.3698},
+                    "address": "1200 Industrial Blvd, Houston, TX 77001"
                 },
                 "route": {
-                    "id": "nakuru-nairobi",
-                    "distance": 160.0,
-                    "estimated_duration": 180,
+                    "id": "atlanta-houston",
+                    "distance": 1260.0,
+                    "estimated_duration": 720,
                     "actual_duration": None
                 },
                 "status": "on_time",
                 "estimated_arrival": (base_timestamp + timedelta(hours=3)).isoformat(),
                 "last_update": base_timestamp.isoformat(),
                 "cargo": {
-                    "type": "Perishables",
+                    "type": "Gasoline",
                     "weight": 8000.0,
                     "volume": 25.0,
-                    "description": "Fresh produce including vegetables and fruits",
+                    "description": "Regular unleaded gasoline for Houston terminal",
                     "priority": "high"
                 }
             },
             {
-                "truck_id": "CE-57A",
-                "plate_number": "CE-57A",
+                "truck_id": "TRK-003",
+                "plate_number": "TRK-003",
                 "driver_id": "driver-003",
-                "driver_name": "Peter Ochieng",
+                "driver_name": "James Rodriguez",
                 "current_location": {
-                    "id": "kisumu-depot",
-                    "name": "Kisumu Depot",
+                    "id": "chicago-yard",
+                    "name": "Chicago Yard",
                     "type": "depot",
-                    "coordinates": {"lat": -0.0917, "lon": 34.7680},
-                    "address": "Kisumu, Kenya"
+                    "coordinates": {"lat": 41.8781, "lon": -87.6298},
+                    "address": "2400 S Ashland Ave, Chicago, IL 60608"
                 },
                 "destination": {
-                    "id": "eldoret-depot",
-                    "name": "Eldoret Depot",
-                    "type": "depot",
-                    "coordinates": {"lat": 0.5143, "lon": 35.2698},
-                    "address": "Eldoret, Kenya"
+                    "id": "denver-hub",
+                    "name": "Denver Hub",
+                    "type": "warehouse",
+                    "coordinates": {"lat": 39.7392, "lon": -104.9903},
+                    "address": "5500 Quebec St, Denver, CO 80216"
                 },
                 "route": {
-                    "id": "kisumu-eldoret",
-                    "distance": 120.0,
-                    "estimated_duration": 150,
+                    "id": "chicago-denver",
+                    "distance": 1600.0,
+                    "estimated_duration": 900,
                     "actual_duration": None
                 },
                 "status": "on_time",
                 "estimated_arrival": (base_timestamp + timedelta(hours=2, minutes=30)).isoformat(),
                 "last_update": base_timestamp.isoformat(),
                 "cargo": {
-                    "type": "Construction Materials",
+                    "type": "Heating Oil",
                     "weight": 20000.0,
                     "volume": 60.0,
-                    "description": "Cement bags and steel rods",
+                    "description": "Heating oil for Denver distribution",
                     "priority": "medium"
                 }
             }
@@ -870,8 +870,8 @@ class DataSeeder:
                 "name": "Diesel Fuel Premium Grade",
                 "category": "Fuel",
                 "quantity": 15000,
-                "unit": "liters",
-                "location": "Nairobi Depot",
+                "unit": "gallons",
+                "location": "Houston Terminal",
                 "status": "in_stock",
                 "last_updated": base_timestamp.isoformat()
             },
@@ -881,7 +881,7 @@ class DataSeeder:
                 "category": "Parts",
                 "quantity": 50,
                 "unit": "pieces",
-                "location": "Mombasa Warehouse",
+                "location": "Dallas Depot",
                 "status": "in_stock",
                 "last_updated": base_timestamp.isoformat()
             },
@@ -891,7 +891,7 @@ class DataSeeder:
                 "category": "Maintenance",
                 "quantity": 25,
                 "unit": "bottles",
-                "location": "Kisumu Station",
+                "location": "Chicago Yard",
                 "status": "in_stock",
                 "last_updated": base_timestamp.isoformat()
             },
@@ -901,7 +901,7 @@ class DataSeeder:
                 "category": "Parts",
                 "quantity": 120,
                 "unit": "sets",
-                "location": "Nairobi Depot",
+                "location": "Houston Terminal",
                 "status": "in_stock",
                 "last_updated": base_timestamp.isoformat()
             }

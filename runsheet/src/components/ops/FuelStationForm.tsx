@@ -39,10 +39,14 @@ import {
 const TENANT_ID = "default";
 
 const FUEL_TYPES: { value: FuelType; label: string }[] = [
-  { value: "AGO", label: "AGO (Diesel)" },
-  { value: "PMS", label: "PMS (Petrol)" },
-  { value: "ATK", label: "ATK (Aviation)" },
-  { value: "LPG", label: "LPG (Gas)" },
+  { value: "DIESEL_2", label: "DIESEL_2 (Ultra Low Sulfur Diesel)" },
+  { value: "GASOLINE_REG", label: "GASOLINE_REG (Regular Unleaded)" },
+  { value: "GASOLINE_PREM", label: "GASOLINE_PREM (Premium Unleaded)" },
+  { value: "HEATING_OIL", label: "HEATING_OIL (No. 2 Heating Oil)" },
+  { value: "PROPANE", label: "PROPANE (LPG)" },
+  { value: "KEROSENE", label: "KEROSENE (K-1)" },
+  { value: "OFF_ROAD_DIESEL", label: "OFF_ROAD_DIESEL (Dyed Diesel)" },
+  { value: "DEF", label: "DEF (Diesel Exhaust Fluid)" },
 ];
 
 // ─── Validation ──────────────────────────────────────────────────────────────
@@ -50,15 +54,15 @@ const FUEL_TYPES: { value: FuelType; label: string }[] = [
 export interface StationFormValues {
   name: string;
   fuel_type: FuelType;
-  capacity_liters: number;
-  initial_stock_liters: number;
+  capacity_gallons: number;
+  initial_stock_gallons: number;
   location_name: string;
   alert_threshold_pct: number;
 }
 
 export interface ValidationErrors {
   name?: string;
-  capacity_liters?: string;
+  capacity_gallons?: string;
   alert_threshold_pct?: string;
 }
 
@@ -68,7 +72,7 @@ export interface ValidationErrors {
  *
  * Rules:
  * - name must be non-empty
- * - capacity_liters must be a positive number (> 0)
+ * - capacity_gallons must be a positive number (> 0)
  * - alert_threshold_pct must be between 0 and 100 (inclusive)
  */
 export function validateStationForm(values: StationFormValues): ValidationErrors {
@@ -79,12 +83,12 @@ export function validateStationForm(values: StationFormValues): ValidationErrors
   }
 
   if (
-    values.capacity_liters === null ||
-    values.capacity_liters === undefined ||
-    isNaN(values.capacity_liters) ||
-    values.capacity_liters <= 0
+    values.capacity_gallons === null ||
+    values.capacity_gallons === undefined ||
+    isNaN(values.capacity_gallons) ||
+    values.capacity_gallons <= 0
   ) {
-    errors.capacity_liters = "Capacity must be a positive number.";
+    errors.capacity_gallons = "Capacity must be a positive number.";
   }
 
   if (
@@ -122,9 +126,9 @@ export default function FuelStationForm({
 
   const [form, setForm] = useState<StationFormValues>({
     name: station?.name ?? "",
-    fuel_type: station?.fuel_type ?? "AGO",
-    capacity_liters: station?.capacity_liters ?? 0,
-    initial_stock_liters: 0,
+    fuel_type: station?.fuel_type ?? "DIESEL_2",
+    capacity_gallons: station?.capacity_liters ?? 0,
+    initial_stock_gallons: 0,
     location_name: station?.location_name ?? "",
     alert_threshold_pct: station?.alert_threshold_pct ?? 20,
   });
@@ -138,7 +142,7 @@ export default function FuelStationForm({
     return (
       form.name === station.name &&
       form.fuel_type === station.fuel_type &&
-      form.capacity_liters === station.capacity_liters &&
+      form.capacity_gallons === station.capacity_liters &&
       form.location_name === (station.location_name ?? "") &&
       form.alert_threshold_pct !== station.alert_threshold_pct
     );
@@ -165,8 +169,8 @@ export default function FuelStationForm({
           station_id: `FS-${Date.now().toString(36).toUpperCase()}`,
           name: form.name.trim(),
           fuel_type: form.fuel_type,
-          capacity_liters: form.capacity_liters,
-          initial_stock_liters: form.initial_stock_liters,
+          capacity_liters: form.capacity_gallons,
+          initial_stock_liters: form.initial_stock_gallons,
           alert_threshold_pct: form.alert_threshold_pct,
         };
         if (form.location_name.trim()) {
@@ -185,7 +189,7 @@ export default function FuelStationForm({
         const payload: UpdateStationPayload = {
           name: form.name.trim(),
           fuel_type: form.fuel_type,
-          capacity_liters: form.capacity_liters,
+          capacity_liters: form.capacity_gallons,
           alert_threshold_pct: form.alert_threshold_pct,
         };
         if (form.location_name.trim()) {
@@ -258,7 +262,7 @@ export default function FuelStationForm({
                   setFieldErrors({ ...fieldErrors, name: undefined });
                 }
               }}
-              placeholder="e.g. Lagos Main Depot"
+              placeholder="e.g. Houston Main Terminal"
               className={fieldErrors.name ? errorInputClass : inputClass}
               required
             />
@@ -297,19 +301,19 @@ export default function FuelStationForm({
                 htmlFor="capacity-liters"
                 className="block text-xs font-medium text-gray-600 mb-1"
               >
-                Capacity (Liters)
+                Capacity (Gallons)
               </label>
               <input
                 id="capacity-liters"
                 type="number"
-                value={form.capacity_liters || ""}
+                value={form.capacity_gallons || ""}
                 onChange={(e) => {
                   const val = e.target.value === "" ? 0 : Number(e.target.value);
-                  setForm({ ...form, capacity_liters: val });
-                  if (fieldErrors.capacity_liters) {
+                  setForm({ ...form, capacity_gallons: val });
+                  if (fieldErrors.capacity_gallons) {
                     setFieldErrors({
                       ...fieldErrors,
-                      capacity_liters: undefined,
+                      capacity_gallons: undefined,
                     });
                   }
                 }}
@@ -317,13 +321,13 @@ export default function FuelStationForm({
                 min="1"
                 step="any"
                 className={
-                  fieldErrors.capacity_liters ? errorInputClass : inputClass
+                  fieldErrors.capacity_gallons ? errorInputClass : inputClass
                 }
                 required
               />
-              {fieldErrors.capacity_liters && (
+              {fieldErrors.capacity_gallons && (
                 <p className="text-xs text-red-600 mt-1">
-                  {fieldErrors.capacity_liters}
+                  {fieldErrors.capacity_gallons}
                 </p>
               )}
             </div>
@@ -334,15 +338,15 @@ export default function FuelStationForm({
                   htmlFor="initial-stock"
                   className="block text-xs font-medium text-gray-600 mb-1"
                 >
-                  Initial Stock (Liters)
+                  Initial Stock (Gallons)
                 </label>
                 <input
                   id="initial-stock"
                   type="number"
-                  value={form.initial_stock_liters || ""}
+                  value={form.initial_stock_gallons || ""}
                   onChange={(e) => {
                     const val = e.target.value === "" ? 0 : Number(e.target.value);
-                    setForm({ ...form, initial_stock_liters: val });
+                    setForm({ ...form, initial_stock_gallons: val });
                   }}
                   placeholder="e.g. 30000"
                   min="0"
@@ -369,7 +373,7 @@ export default function FuelStationForm({
               onChange={(e) =>
                 setForm({ ...form, location_name: e.target.value })
               }
-              placeholder="e.g. Apapa Industrial Zone"
+              placeholder="e.g. Industrial District"
               className={inputClass}
             />
           </div>

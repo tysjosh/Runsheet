@@ -18,17 +18,11 @@ from strands import Agent
 from strands.models.litellm import LiteLLMModel
 
 from Agents.tools import (
-    search_shipments,
-    search_riders,
-    get_shipment_events,
     get_ops_metrics,
     # Ops report tools
     generate_sla_report,
     generate_failure_report,
-    generate_rider_productivity_report,
-    # Ops mutation tools
-    reassign_rider,
-    escalate_shipment,
+    generate_rider_productivity_report as generate_driver_productivity_report,
 )
 from Agents.tools.order_tools import (
     search_orders,
@@ -54,18 +48,11 @@ class OpsIntelligenceAgent:
         search_drivers,
         get_order_events,
         get_orders_metrics,
-        # Legacy tools (retained during deprecation window)
-        search_shipments,
-        search_riders,
-        get_shipment_events,
         get_ops_metrics,
         # Ops report tools
         generate_sla_report,
         generate_failure_report,
-        generate_rider_productivity_report,
-        # Ops mutation tools (legacy — retained during deprecation window)
-        reassign_rider,
-        escalate_shipment,
+        generate_driver_productivity_report,
     ]
 
     SYSTEM_PROMPT = (
@@ -77,7 +64,7 @@ class OpsIntelligenceAgent:
         "**Driver Statuses:** active, inactive, on_break, off_duty\n"
         "**Call Types:** will_call, auto_fill, keep_full, one_off\n"
         "**Intake Channels:** voice, web_portal, dispatcher, csv, edi, api_partner, legacy\n\n"
-        "**Your Tools (preferred — fuel order domain):**\n"
+        "**Your Tools:**\n"
         "- `search_orders(status, customer_id, driver_id, call_type, product_code, "
         "start_date, end_date, intake_channel)` - Search fuel orders by various filters\n"
         "- `search_drivers(status, availability, min_active_orders, max_active_orders, "
@@ -85,28 +72,17 @@ class OpsIntelligenceAgent:
         "- `get_order_events(order_id)` - Get full event timeline for a fuel order\n"
         "- `get_orders_metrics(metric_type, bucket, start_date, end_date, intake_channel)` "
         "- Get aggregated operational metrics (orders, drivers, sla, failures)\n"
+        "- `get_ops_metrics(metric_type, bucket, start_date, end_date, tenant_id)` "
+        "- Get aggregated operational metrics\n"
         "- `generate_sla_report(start_date, end_date, tenant_id)` - Generate SLA "
         "violations report\n"
         "- `generate_failure_report(start_date, end_date, tenant_id, intake_channel=None)` - Generate "
         "failure root-cause analysis report. Filter by intake_channel to compare failure rates across channels.\n"
-        "- `generate_rider_productivity_report(start_date, end_date, tenant_id)` "
+        "- `generate_driver_productivity_report(start_date, end_date, tenant_id)` "
         "- Generate driver productivity report\n\n"
-        "**Legacy Tools (deprecated — prefer search_orders / search_drivers):**\n"
-        "- `search_shipments(tenant_id, status, rider_id, start_date, end_date, query)` "
-        "(deprecated — prefer search_orders / search_drivers)\n"
-        "- `search_riders(tenant_id, status, availability)` "
-        "(deprecated — prefer search_orders / search_drivers)\n"
-        "- `get_shipment_events(shipment_id, tenant_id)` "
-        "(deprecated — prefer search_orders / search_drivers)\n"
-        "- `reassign_rider(shipment_id, new_rider_id, reason)` "
-        "(deprecated — prefer search_orders / search_drivers)\n"
-        "- `escalate_shipment(shipment_id, priority, reason)` "
-        "(deprecated — prefer search_orders / search_drivers)\n\n"
         "**Guidelines:**\n"
-        "- Always prefer the new order/driver tools over the legacy shipment/rider tools\n"
         "- Always announce what you are searching for before using tools\n"
         "- Highlight SLA breaches and at-risk orders\n"
-        "- For mutations, explain the impact and risk level before executing\n"
         "- If you cannot fulfill a request with your tools, say so clearly"
     )
 

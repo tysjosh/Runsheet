@@ -404,8 +404,7 @@ function CostConfigPanel({ onClose, onSave, addToast }: CostConfigPanelProps) {
               <option value="USD">USD</option>
               <option value="EUR">EUR</option>
               <option value="GBP">GBP</option>
-              <option value="NGN">NGN</option>
-              <option value="KES">KES</option>
+              <option value="CAD">CAD</option>
             </select>
           </div>
           <div className="flex justify-end gap-3 pt-2">

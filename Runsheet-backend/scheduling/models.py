@@ -16,6 +16,7 @@ class JobType(str, Enum):
     VESSEL_MOVEMENT = "vessel_movement"
     AIRPORT_TRANSFER = "airport_transfer"
     CRANE_BOOKING = "crane_booking"
+    FUEL_DELIVERY = "fuel_delivery"
 
 
 class JobStatus(str, Enum):
@@ -62,6 +63,7 @@ JOB_ASSET_COMPATIBILITY: dict[JobType, list[str]] = {
     JobType.VESSEL_MOVEMENT: ["vessel"],
     JobType.AIRPORT_TRANSFER: ["vehicle"],
     JobType.CRANE_BOOKING: ["equipment"],
+    JobType.FUEL_DELIVERY: ["vehicle"],
 }
 
 

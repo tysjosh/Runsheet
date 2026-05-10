@@ -3,7 +3,8 @@
 import { Users } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import LoadingSpinner from "../../../components/LoadingSpinner";
-import RiderUtilizationList from "../../../components/ops/RiderUtilizationList";
+import DriverUtilizationList from "../../../components/ops/DriverUtilizationList";
+import type { DriverUtilization } from "../../../components/ops/DriverUtilizationList";
 import { useOpsWebSocket } from "../../../hooks/useOpsWebSocket";
 import type {
   RiderStatus,
@@ -93,10 +94,25 @@ export default function OpsRiderUtilizationPage() {
 
       {/* Rider List */}
       <div className="flex-1 overflow-y-auto">
-        <RiderUtilizationList
-          riders={riders}
-          statusFilter={statusFilter}
-          onStatusFilterChange={setStatusFilter}
+        <DriverUtilizationList
+          drivers={riders.map((rider) => ({
+            driver_id: rider.rider_id,
+            driver_name: rider.rider_name ?? null,
+            status: rider.status === "idle" ? "on_break" : rider.status === "offline" ? "off_duty" : "active",
+            active_order_count: rider.active_shipment_count,
+            completed_today: rider.completed_today,
+            last_seen: rider.last_seen ?? null,
+            medical_card_expiry: null,
+            assigned_truck_id: null,
+            cdl_class: null,
+            hazmat_endorsement: null,
+            utilization_percentage: rider.utilization_percentage ?? null,
+          } as DriverUtilization))}
+          statusFilter={statusFilter === "idle" ? "on_break" : statusFilter === "offline" ? "off_duty" : statusFilter === "active" ? "active" : ""}
+          onStatusFilterChange={(s) => {
+            const mapped = s === "on_break" ? "idle" : s === "off_duty" ? "offline" : s === "active" ? "active" : "";
+            setStatusFilter(mapped as RiderStatus | "");
+          }}
         />
       </div>
     </div>

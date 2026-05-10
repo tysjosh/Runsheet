@@ -349,7 +349,7 @@ def convert_csv_row_to_document(row: dict, data_type: str, tenant_id: Optional[s
     it so downstream ``upsert_batch_data`` / ``bulk_index_documents`` calls
     write tenant-scoped records. Rows that fail conversion (e.g. missing
     geocoding for a fleet row) return ``None`` so the caller can filter
-    them out instead of silently falling back to a hard-coded Nairobi
+    them out instead of silently falling back to a hard-coded default
     location that would pollute every tenant's data.
     """
     def _loc(name, lat=None, lon=None):
@@ -366,9 +366,9 @@ def convert_csv_row_to_document(row: dict, data_type: str, tenant_id: Optional[s
         if name in m: return m[name]
         if lat is not None and lon is not None:
             return {"id": name.lower().replace(" ", "-").replace(",", ""), "name": name, "type": "location",
-                    "coordinates": {"lat": lat, "lon": lon}, "address": f"{name}, Kenya"}
+                    "coordinates": {"lat": lat, "lon": lon}, "address": name}
         # No known location and no coordinates supplied — return None so the
-        # caller drops the row instead of inheriting a hard-coded Nairobi
+        # caller drops the row instead of inheriting a hard-coded default
         # fallback (which previously leaked a shared synthetic location into
         # every tenant's CSV uploads).
         return None
@@ -377,8 +377,8 @@ def convert_csv_row_to_document(row: dict, data_type: str, tenant_id: Optional[s
         if data_type in ("trucks", "fleet"):
             lat = float(row.get("lat", 0)) if row.get("lat") else None
             lon = float(row.get("lon", 0)) if row.get("lon") else None
-            current_location = _loc(row.get("current_location", row.get("location", "Nairobi Station")), lat, lon)
-            destination = _loc(row.get("destination", "Mombasa Port"))
+            current_location = _loc(row.get("current_location", row.get("location", "Houston Terminal")), lat, lon)
+            destination = _loc(row.get("destination", "Dallas Depot"))
             if current_location is None or destination is None:
                 # Skip the row rather than fabricate a station.
                 return None

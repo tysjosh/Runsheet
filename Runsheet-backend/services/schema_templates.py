@@ -86,23 +86,7 @@ class SchemaTemplates:
                 FieldDef(name="delivered_at", type=FieldType.DATE, required=False, description="Actual delivery timestamp", date_format="ISO8601"),
             ],
         ),
-        "riders": SchemaTemplate(
-            data_type="riders",
-            description="Delivery rider profiles including contact details, vehicle info, and availability",
-            es_index="riders",
-            fields=[
-                FieldDef(name="rider_id", type=FieldType.STRING, required=True, description="Unique rider identifier"),
-                FieldDef(name="name", type=FieldType.STRING, required=True, description="Rider full name"),
-                FieldDef(name="phone", type=FieldType.STRING, required=False, description="Contact phone number"),
-                FieldDef(name="email", type=FieldType.STRING, required=False, description="Contact email address"),
-                FieldDef(name="vehicle_type", type=FieldType.ENUM, required=False, description="Type of delivery vehicle", enum_values=["motorcycle", "bicycle", "van", "car"]),
-                FieldDef(name="license_number", type=FieldType.STRING, required=False, description="Driver license number"),
-                FieldDef(name="status", type=FieldType.ENUM, required=True, description="Rider availability status", enum_values=["available", "on_delivery", "offline", "suspended"]),
-                FieldDef(name="region", type=FieldType.STRING, required=False, description="Operating region"),
-                FieldDef(name="rating", type=FieldType.NUMBER, required=False, description="Average rider rating (1-5)"),
-                FieldDef(name="joined_at", type=FieldType.DATE, required=False, description="Date rider joined the platform", date_format="ISO8601"),
-            ],
-        ),
+
         "fuel_stations": SchemaTemplate(
             data_type="fuel_stations",
             description="Fuel station locations including capacity, pricing, and operational status",
@@ -179,7 +163,6 @@ class SchemaTemplates:
         "orders": "orders",
         "inventory": "inventory",
         "support_tickets": "support_tickets",
-        "riders": "riders",
         "fuel_stations": "fuel_stations",
         "jobs": "jobs",
     }
@@ -196,15 +179,11 @@ class SchemaTemplates:
             {"order_id": "ORD-002", "customer": "Global Logistics", "customer_id": "CUST-200", "status": "delivered", "value": "800.50", "items": "Office supplies x5", "truck_id": "TRK-002", "region": "South", "priority": "low", "created_at": "2024-03-08T10:00:00Z", "delivery_eta": "2024-03-12T12:00:00Z", "delivered_at": "2024-03-12T11:30:00Z"},
             {"order_id": "ORD-003", "customer": "Fresh Foods Ltd", "customer_id": "CUST-300", "status": "pending", "value": "15000.00", "items": "Refrigerated goods x50", "truck_id": "", "region": "East", "priority": "critical", "created_at": "2024-03-14T14:00:00Z", "delivery_eta": "2024-03-16T08:00:00Z", "delivered_at": ""},
         ],
-        "riders": [
-            {"rider_id": "RDR-001", "name": "Ali Hassan", "phone": "+254700100200", "email": "ali@example.com", "vehicle_type": "motorcycle", "license_number": "DL-12345", "status": "available", "region": "Central", "rating": "4.8", "joined_at": "2023-06-15T00:00:00Z"},
-            {"rider_id": "RDR-002", "name": "Mary Wanjiku", "phone": "+254711200300", "email": "mary@example.com", "vehicle_type": "bicycle", "license_number": "", "status": "on_delivery", "region": "West", "rating": "4.5", "joined_at": "2023-09-01T00:00:00Z"},
-            {"rider_id": "RDR-003", "name": "James Ochieng", "phone": "+254722300400", "email": "james@example.com", "vehicle_type": "van", "license_number": "DL-67890", "status": "offline", "region": "North", "rating": "4.2", "joined_at": "2024-01-10T00:00:00Z"},
-        ],
+
         "fuel_stations": [
-            {"station_id": "FS-001", "name": "Central Depot Fuel Station", "location": "123 Main Road, Nairobi", "coordinates": "-1.2921,36.8219", "fuel_types": "diesel,petrol", "capacity_liters": "50000", "current_stock_liters": "35000", "price_per_liter": "1.45", "status": "open", "operating_hours": "06:00-22:00", "last_restocked": "2024-03-14T06:00:00Z"},
-            {"station_id": "FS-002", "name": "Highway Rest Stop", "location": "KM 45, Mombasa Highway", "coordinates": "-1.5000,37.0000", "fuel_types": "diesel", "capacity_liters": "30000", "current_stock_liters": "8000", "price_per_liter": "1.50", "status": "open", "operating_hours": "00:00-23:59", "last_restocked": "2024-03-10T08:00:00Z"},
-            {"station_id": "FS-003", "name": "Port Area Station", "location": "Dock Road, Mombasa", "coordinates": "-4.0435,39.6682", "fuel_types": "diesel,petrol,lpg", "capacity_liters": "75000", "current_stock_liters": "60000", "price_per_liter": "1.42", "status": "maintenance", "operating_hours": "06:00-20:00", "last_restocked": "2024-03-12T10:00:00Z"},
+            {"station_id": "FS-001", "name": "Central Depot Fuel Station", "location": "4500 Industrial Blvd, Houston, TX 77001", "coordinates": "29.7604,-95.3698", "fuel_types": "diesel,gasoline", "capacity_liters": "50000", "current_stock_liters": "35000", "price_per_liter": "1.45", "status": "open", "operating_hours": "06:00-22:00", "last_restocked": "2024-03-14T06:00:00Z"},
+            {"station_id": "FS-002", "name": "I-10 Corridor Stop", "location": "Mile 45, I-10 Corridor, TX", "coordinates": "29.8500,-95.8000", "fuel_types": "diesel", "capacity_liters": "30000", "current_stock_liters": "8000", "price_per_liter": "1.50", "status": "open", "operating_hours": "00:00-23:59", "last_restocked": "2024-03-10T08:00:00Z"},
+            {"station_id": "FS-003", "name": "Port Area Station", "location": "1200 Dock Rd, Houston, TX 77015", "coordinates": "29.7350,-95.2800", "fuel_types": "diesel,gasoline,propane", "capacity_liters": "75000", "current_stock_liters": "60000", "price_per_liter": "1.42", "status": "maintenance", "operating_hours": "06:00-20:00", "last_restocked": "2024-03-12T10:00:00Z"},
         ],
         "inventory": [
             {"item_id": "INV-001", "name": "Brake Pads Set", "category": "spare_parts", "quantity": "150", "unit": "sets", "location": "Warehouse A, Shelf 3", "status": "in_stock", "last_updated": "2024-03-15T08:00:00Z"},
@@ -217,8 +196,8 @@ class SchemaTemplates:
             {"ticket_id": "TKT-003", "customer": "Fresh Foods Ltd", "customer_id": "CUST-300", "issue": "Invoice discrepancy", "description": "Billed amount does not match the agreed price", "priority": "low", "status": "resolved", "assigned_to": "agent-sarah", "related_order": "ORD-003", "created_at": "2024-03-10T11:00:00Z"},
         ],
         "jobs": [
-            {"job_id": "JOB-001", "title": "Pickup from Warehouse A", "job_type": "pickup", "assigned_truck": "TRK-001", "assigned_driver": "DRV-010", "origin": "Warehouse A, Nairobi", "destination": "Distribution Center, Thika", "scheduled_at": "2024-03-15T07:00:00Z", "completed_at": "", "status": "in_progress", "priority": "high", "notes": "Fragile items, handle with care"},
-            {"job_id": "JOB-002", "title": "Delivery to Mombasa Port", "job_type": "delivery", "assigned_truck": "TRK-003", "assigned_driver": "DRV-030", "origin": "Central Depot", "destination": "Mombasa Port", "scheduled_at": "2024-03-16T05:00:00Z", "completed_at": "", "status": "scheduled", "priority": "critical", "notes": "Time-sensitive shipment"},
+            {"job_id": "JOB-001", "title": "Fuel pickup from Houston Terminal", "job_type": "pickup", "assigned_truck": "TRK-001", "assigned_driver": "DRV-010", "origin": "Houston Terminal", "destination": "Dallas Depot", "scheduled_at": "2024-03-15T07:00:00Z", "completed_at": "", "status": "in_progress", "priority": "high", "notes": "HAZMAT load, handle with care"},
+            {"job_id": "JOB-002", "title": "Delivery to Atlanta Terminal", "job_type": "delivery", "assigned_truck": "TRK-003", "assigned_driver": "DRV-030", "origin": "Chicago Yard", "destination": "Atlanta Terminal", "scheduled_at": "2024-03-16T05:00:00Z", "completed_at": "", "status": "scheduled", "priority": "critical", "notes": "Time-sensitive shipment"},
             {"job_id": "JOB-003", "title": "Vehicle inspection TRK-002", "job_type": "inspection", "assigned_truck": "TRK-002", "assigned_driver": "", "origin": "Maintenance Bay", "destination": "Maintenance Bay", "scheduled_at": "2024-03-15T14:00:00Z", "completed_at": "2024-03-15T15:30:00Z", "status": "completed", "priority": "medium", "notes": "Routine quarterly inspection"},
         ],
     }
