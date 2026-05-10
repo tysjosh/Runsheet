@@ -201,7 +201,7 @@ class TestAutoMapAllDataTypes:
     """Verify auto_map works for all supported data types."""
 
     @pytest.mark.parametrize("data_type", [
-        "fleet", "orders", "riders", "fuel_stations",
+        "fleet", "orders", "fuel_stations",
         "inventory", "support_tickets", "jobs",
     ])
     def test_identity_mapping(self, mapper: FieldMapper, data_type: str):
