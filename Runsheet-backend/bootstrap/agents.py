@@ -109,7 +109,7 @@ async def _seed_fuel_ops_feature_flag_defaults(
             # SET NX so we never clobber an existing default.
             existing = await redis_client.get(redis_key)
             if existing is None:
-                await redis_client.set(redis_key, "disabled")
+                await redis_client.set(redis_key, "disabled", ex=90 * 24 * 60 * 60)
                 seeded.append(flag_key)
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning(

@@ -465,6 +465,10 @@ class WeatherProvider(ABC):
             return self._http_client
         # Lazy per-call client. Callers that want connection pooling should
         # inject a long-lived client via the constructor.
+        logger.warning(
+            "WeatherProvider: creating per-call httpx client (no pooling). "
+            "Inject a shared client at construction for production use."
+        )
         return httpx.AsyncClient(timeout=self._timeout)
 
     async def _cache_get(

@@ -204,7 +204,7 @@ class InvoiceNumberingService:
         if self._redis is not None:
             key = _redis_key(tenant_id)
             try:
-                await self._redis.set(key, str(seed_value))
+                await self._redis.set(key, str(seed_value), ex=90 * 24 * 60 * 60)
                 logger.info(
                     "Re-seeded invoice counter for tenant %s to %d",
                     tenant_id,

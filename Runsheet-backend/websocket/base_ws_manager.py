@@ -241,6 +241,7 @@ class BaseWSManager(ABC):
                     # Already-gone clients are the common case on
                     # shutdown — debug-level so the log isn't spammy
                     # but the signal is still preserved.
+                    self._metrics["send_failures_total"] += 1
                     logger.debug(
                         "WS shutdown close failed for client: %s",
                         close_exc,

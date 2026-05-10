@@ -2,7 +2,7 @@
 Unit tests for the ops AI tools feature guard.
 
 Validates: Requirement 27.3 — AI tools return structured disabled response
-for disabled tenants, never raise exceptions, and fail-open on errors.
+for disabled tenants, never raise exceptions, and fail-closed on errors.
 """
 
 import json
@@ -19,8 +19,10 @@ sys.modules.setdefault("services.elasticsearch_service", _mock_es_module)
 
 from Agents.tools.ops_feature_guard import (  # noqa: E402
     DISABLED_RESPONSE,
+    SERVICE_UNAVAILABLE_RESPONSE,
     check_ops_feature_flag,
     configure_ops_feature_guard,
+    get_feature_flag_errors_total,
 )
 
 
@@ -30,8 +32,10 @@ def _reset_module_state():
     import Agents.tools.ops_feature_guard as mod
 
     original = mod._feature_flag_service
+    original_errors = mod._feature_flag_errors_total
     yield
     mod._feature_flag_service = original
+    mod._feature_flag_errors_total = original_errors
 
 
 @pytest.fixture()
@@ -101,28 +105,44 @@ async def test_none_tenant_id_returns_none(mock_ff_service):
     mock_ff_service.is_enabled.assert_not_awaited()
 
 
-# --- check_ops_feature_flag: service not configured (fail-open) ---
+# --- check_ops_feature_flag: service not configured (fail-closed) ---
 
 
 @pytest.mark.asyncio
-async def test_service_not_configured_returns_none():
-    """When FeatureFlagService is not wired, fail-open."""
+async def test_service_not_configured_returns_disabled():
+    """When FeatureFlagService is not wired, fail-closed."""
     import Agents.tools.ops_feature_guard as mod
 
     mod._feature_flag_service = None
+    errors_before = mod._feature_flag_errors_total
 
     result = await check_ops_feature_flag("tenant-1")
-    assert result is None
+    assert result == SERVICE_UNAVAILABLE_RESPONSE
+    assert mod._feature_flag_errors_total == errors_before + 1
 
 
-# --- check_ops_feature_flag: service raises (fail-open) ---
+# --- check_ops_feature_flag: service raises (fail-closed) ---
 
 
 @pytest.mark.asyncio
-async def test_service_exception_returns_none(mock_ff_service):
-    """If Redis is down or any error occurs, fail-open."""
+async def test_service_exception_returns_disabled(mock_ff_service):
+    """If Redis is down or any error occurs, fail-closed."""
+    import Agents.tools.ops_feature_guard as mod
+
     configure_ops_feature_guard(mock_ff_service)
     mock_ff_service.is_enabled.side_effect = RuntimeError("Redis connection lost")
+    errors_before = mod._feature_flag_errors_total
 
     result = await check_ops_feature_flag("tenant-1")
-    assert result is None
+    assert result == SERVICE_UNAVAILABLE_RESPONSE
+    assert mod._feature_flag_errors_total == errors_before + 1
+
+
+# --- get_feature_flag_errors_total ---
+
+
+@pytest.mark.asyncio
+async def test_error_counter_accessible():
+    """The error counter is exposed for observability."""
+    count = get_feature_flag_errors_total()
+    assert isinstance(count, int)

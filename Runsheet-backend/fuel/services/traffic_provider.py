@@ -567,10 +567,19 @@ class TrafficProvider(ABC):
         When the adapter was constructed with an injected ``http_client`` we
         reuse it and do *not* close it. Otherwise we create a short-lived
         client per call and the caller-side ``finally`` closes it.
+
+        Creating a per-call client is a fallback for non-injected usage.
+        In production, prefer injecting a shared client at construction
+        time for connection pooling and warm TLS.
         """
 
         if self._http_client is not None:
             return self._http_client, False
+        logger.warning(
+            "TrafficProvider[%s]: creating per-call httpx client (no pooling). "
+            "Inject a shared client at construction for production use.",
+            self.name,
+        )
         return httpx.AsyncClient(timeout=self._timeout), True
 
     # ---------- cache ----------

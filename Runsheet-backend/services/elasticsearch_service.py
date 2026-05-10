@@ -1447,9 +1447,17 @@ class ElasticsearchService:
         
         return error_info
     
-    async def search_documents(self, index: str, query: Dict[Any, Any], size: int = 100):
+    async def search_documents(self, index: str, query: Dict[Any, Any], size: int = 100, request_timeout: int = 10):
         """
         Search documents in an index with circuit breaker protection.
+        
+        Args:
+            index: The Elasticsearch index to search.
+            query: The query body.
+            size: Maximum number of results to return.
+            request_timeout: Per-call timeout in seconds (default 10s).
+                Prevents a single slow aggregation from blocking the
+                ASGI event loop for the full connection-level 30s.
         
         Validates:
         - Requirement 3.5: Implement circuit breakers for Elasticsearch
@@ -1463,7 +1471,8 @@ class ElasticsearchService:
                 
                 response = self.client.search(
                     index=index,
-                    body=query
+                    body=query,
+                    request_timeout=request_timeout,
                 )
                 return response
             

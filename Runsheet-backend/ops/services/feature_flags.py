@@ -91,15 +91,15 @@ class FeatureFlagService:
         """
         Enable the Ops Intelligence Layer for a tenant.
 
-        Sets the Redis flag key to ``"1"`` (no TTL — persists until explicitly
-        disabled or rolled back).
+        Sets the Redis flag key to ``"1"`` with a 90-day TTL. Active tenants
+        refresh this on every enable call; deleted tenants expire naturally.
 
         Validates: Req 27.1, 27.6
         """
         if not self.client:
             raise RuntimeError("Redis client not connected. Call connect() first.")
         key = self._get_key(tenant_id)
-        await self.client.set(key, "1")
+        await self.client.set(key, "1", ex=90 * 24 * 60 * 60)
         ops_feature_flag_changes_total.labels(tenant_id=tenant_id, action="enable").inc()
         logger.info(
             "Feature flag change: tenant_id=%s, action=enable, user_id=%s",
@@ -277,7 +277,7 @@ class FeatureFlagService:
         previous = await self.get_overlay_state(flag_key, tenant_id)
 
         key = f"{OVERLAY_PREFIX}{flag_key}:{tenant_id}"
-        await self.client.set(key, state)
+        await self.client.set(key, state, ex=90 * 24 * 60 * 60)
 
         logger.info(
             "Overlay flag transition: flag_key=%s, tenant_id=%s, "

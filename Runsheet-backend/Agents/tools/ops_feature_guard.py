@@ -3,12 +3,13 @@ Feature flag guard for ops AI tools.
 
 Provides a utility function that ops AI tools call before executing queries.
 If the tenant's ops intelligence feature is disabled, returns a structured
-disabled response. If enabled (or on any error), returns None to allow the
-tool to proceed.
+disabled response. If the feature flag service is unavailable or raises an
+exception, the guard **fails closed** (returns the disabled response) to
+prevent unscoped queries from leaking data.
 
-Design principle: fail-open. If the feature flag service is unavailable or
-raises an exception, the tool is allowed to proceed rather than blocking
-the user.
+Design principle: fail-closed. If the feature flag service is unavailable or
+raises an exception, the tool is blocked rather than allowed to proceed
+without proper tenant validation.
 
 Validates: Requirement 27.3 — disabled tenants receive a structured disabled
 response from AI tools (no exceptions raised).
@@ -23,12 +24,28 @@ logger = logging.getLogger(__name__)
 # Module-level reference, wired at startup via ``configure_ops_feature_guard``.
 _feature_flag_service = None
 
+# Counter for observability — incremented on every flag-check error so
+# operators can alert on sustained failures.
+_feature_flag_errors_total = 0
+
 DISABLED_RESPONSE = json.dumps(
     {
         "status": "disabled",
         "message": "Ops intelligence is not enabled for this tenant",
     }
 )
+
+SERVICE_UNAVAILABLE_RESPONSE = json.dumps(
+    {
+        "status": "disabled",
+        "message": "Feature flag service unavailable — request blocked (fail-closed)",
+    }
+)
+
+
+def get_feature_flag_errors_total() -> int:
+    """Return the cumulative count of feature-flag check errors."""
+    return _feature_flag_errors_total
 
 
 def configure_ops_feature_guard(feature_flag_service) -> None:
@@ -48,25 +65,29 @@ async def check_ops_feature_flag(tenant_id: Optional[str]) -> Optional[str]:
     Check whether the ops intelligence layer is enabled for *tenant_id*.
 
     Returns:
-        ``None`` if the tenant is enabled (tool should proceed).
+        ``None`` if the tenant is explicitly enabled (tool should proceed).
         A JSON string with ``{"status": "disabled", "message": "..."}``
-        if the tenant is disabled.
+        if the tenant is disabled OR if the check cannot be performed
+        (fail-closed).
 
     This function **never raises**. On any error (missing service, Redis
-    down, etc.) it logs a warning and returns ``None`` (fail-open) so the
-    tool can still attempt to serve the user.
+    down, etc.) it logs a warning and returns the disabled response
+    (fail-closed) so the tool cannot proceed without proper validation.
     """
+    global _feature_flag_errors_total
+
     if tenant_id is None:
         # No tenant context — let the tool handle auth separately.
         return None
 
     if _feature_flag_service is None:
+        _feature_flag_errors_total += 1
         logger.warning(
             "FeatureFlagService not configured for AI tools; "
-            "allowing request for tenant_id=%s (fail-open)",
+            "blocking request for tenant_id=%s (fail-closed)",
             tenant_id,
         )
-        return None
+        return SERVICE_UNAVAILABLE_RESPONSE
 
     try:
         enabled = await _feature_flag_service.is_enabled(tenant_id)
@@ -79,10 +100,11 @@ async def check_ops_feature_flag(tenant_id: Optional[str]) -> Optional[str]:
             return DISABLED_RESPONSE
         return None
     except Exception:
+        _feature_flag_errors_total += 1
         logger.warning(
             "Error checking feature flag for tenant_id=%s; "
-            "allowing request (fail-open)",
+            "blocking request (fail-closed)",
             tenant_id,
             exc_info=True,
         )
-        return None
+        return SERVICE_UNAVAILABLE_RESPONSE

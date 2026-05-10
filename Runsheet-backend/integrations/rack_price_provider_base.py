@@ -580,10 +580,19 @@ class RackPriceProvider(ABC):
             return []
 
     async def _get_http_client(self) -> httpx.AsyncClient:
-        """Return the injected client or lazily create a new one."""
+        """Return the injected client or lazily create a new one.
+
+        Creating a per-call client is a fallback for non-injected usage.
+        In production, prefer injecting a shared client at construction
+        time for connection pooling and warm TLS.
+        """
 
         if self._http_client is not None:
             return self._http_client
+        logger.warning(
+            "RackPriceProvider: creating per-call httpx client (no pooling). "
+            "Inject a shared client at construction for production use."
+        )
         return httpx.AsyncClient(timeout=self._timeout)
 
     async def _cache_get(

@@ -282,6 +282,7 @@ class SchedulingWebSocketManager(BaseWSManager):
                         try:
                             await ws.close(code=1000, reason="stale")
                         except Exception as close_exc:
+                            self._metrics["send_failures_total"] += 1
                             logger.debug(
                                 "Stale scheduling WS close failed (already gone?): %s",
                                 close_exc,
@@ -307,7 +308,8 @@ class SchedulingWebSocketManager(BaseWSManager):
         except asyncio.CancelledError:
             pass
         except Exception as exc:
-            logger.error("Scheduling WS heartbeat loop error: %s", exc)
+            self._metrics["send_failures_total"] += 1
+            logger.error("Scheduling WS heartbeat loop error: %s", exc, exc_info=True)
 
     # ------------------------------------------------------------------
     # Client message handling
@@ -368,6 +370,7 @@ class SchedulingWebSocketManager(BaseWSManager):
                 try:
                     await ws.close(code=1000, reason="shutdown")
                 except Exception as close_exc:
+                    self._metrics["send_failures_total"] += 1
                     logger.debug(
                         "Scheduling WS shutdown close failed for client: %s",
                         close_exc,

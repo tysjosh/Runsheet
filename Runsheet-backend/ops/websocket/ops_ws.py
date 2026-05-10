@@ -372,6 +372,7 @@ class OpsWebSocketManager(BaseWSManager):
                             # Stale WS: the other end often hung up
                             # already. Debug-log so we can still see the
                             # pattern in noisy environments.
+                            self._metrics["send_failures_total"] += 1
                             logger.debug(
                                 "Stale ops WS close failed (already gone?): %s",
                                 close_exc,
@@ -397,7 +398,8 @@ class OpsWebSocketManager(BaseWSManager):
         except asyncio.CancelledError:
             pass
         except Exception as exc:
-            logger.error("Ops WS heartbeat loop error: %s", exc)
+            self._metrics["send_failures_total"] += 1
+            logger.error("Ops WS heartbeat loop error: %s", exc, exc_info=True)
 
     # ------------------------------------------------------------------
     # Client message handling
@@ -459,6 +461,7 @@ class OpsWebSocketManager(BaseWSManager):
                 try:
                     await ws.close(code=1000, reason="shutdown")
                 except Exception as close_exc:
+                    self._metrics["send_failures_total"] += 1
                     logger.debug(
                         "Ops WS shutdown close failed for client: %s",
                         close_exc,

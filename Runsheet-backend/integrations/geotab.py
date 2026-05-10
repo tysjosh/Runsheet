@@ -1304,6 +1304,10 @@ class GeotabConnector(IntegrationConnector):
 
         if self._http_client is not None:
             return self._http_client, False
+        logger.warning(
+            "Geotab: creating per-call httpx client (no pooling). "
+            "Inject a shared client at construction for production use."
+        )
         return httpx.AsyncClient(timeout=self._http_timeout), True
 
     @staticmethod
