@@ -555,6 +555,33 @@ class RoutePlanningAgent(OverlayAgentBase):
             StormModeRouteSettingsLoader
         ] = storm_mode_settings_loader
 
+        # ---- Driver Qualification wiring (Task 6.9, Req 5.5, 5.6, 5.7) ----
+        # When configured, the agent checks driver dispatch eligibility
+        # before building a route. Suspended drivers are excluded from
+        # all routes; drivers lacking HAZMAT or tanker endorsements are
+        # excluded from routes requiring those endorsements. ``None``
+        # until bootstrap injects the service; until then the agent
+        # skips the eligibility check (graceful degradation).
+        self._driver_qualification_service: Optional[Any] = None
+
+        # ---- HOS Checker wiring (Task 7.8, Req 4.1–4.7) ----
+        # When configured, the agent checks driver Hours-of-Service
+        # compliance AFTER the DriverQualificationService check and
+        # BEFORE building a route. Drivers without sufficient remaining
+        # hours are excluded from the route with an ``hos_blocked`` flag.
+        # ``None`` until bootstrap injects the service; until then the
+        # agent skips the HOS check (graceful degradation).
+        self._hos_checker: Optional[Any] = None
+
+        # ---- Asset Certification wiring (Task 8.10, Req 13.5) ----
+        # When configured, the agent checks asset (truck) dispatch
+        # eligibility AFTER the HOS check and BEFORE building a route.
+        # Assets with expired DOT cargo tank certifications (V/K/I/P/UT)
+        # are excluded from all fuel delivery routes. ``None`` until
+        # bootstrap injects the service; until then the agent skips the
+        # asset certification check (graceful degradation).
+        self._asset_certification_service: Optional[Any] = None
+
     # ------------------------------------------------------------------
     # Public wiring hooks (bootstrap injects these after construction)
     # ------------------------------------------------------------------
@@ -642,6 +669,63 @@ class RoutePlanningAgent(OverlayAgentBase):
         """
         self._storm_mode_settings_loader = loader
 
+    def set_driver_qualification_service(
+        self, service: Optional[Any]
+    ) -> None:
+        """Inject the :class:`DriverQualificationService` post-construction.
+
+        When configured, the agent calls
+        ``is_dispatch_eligible(tenant_id, driver_id, route_requirements)``
+        before building a route for a loading plan. Ineligible drivers
+        cause the loading plan to be skipped with a warning log.
+
+        Passing ``None`` disables the eligibility check entirely: the
+        agent builds routes without driver qualification validation
+        (graceful degradation for tenants that haven't wired the
+        compliance backbone). The production bootstrap injects the
+        singleton after constructing the DriverQualificationService
+        (Task 6.9, Req 5.5, 5.6, 5.7).
+        """
+        self._driver_qualification_service = service
+
+    def set_hos_checker(self, checker: Optional[Any]) -> None:
+        """Inject the :class:`HOSChecker` post-construction.
+
+        When configured, the agent calls
+        ``is_eligible(driver_id, estimated_drive_hours, estimated_total_hours)``
+        AFTER the DriverQualificationService check and BEFORE building
+        a route. Drivers without sufficient remaining HOS hours cause
+        the loading plan to be skipped with an ``hos_blocked`` flag and
+        a warning log including the earliest_eligible_time.
+
+        Passing ``None`` disables the HOS check entirely: the agent
+        builds routes without HOS validation (graceful degradation for
+        tenants that haven't wired the compliance backbone). The
+        production bootstrap injects the singleton after constructing
+        the HOSChecker (Task 7.8, Req 4.1–4.7).
+        """
+        self._hos_checker = checker
+
+    def set_asset_certification_service(
+        self, service: Optional[Any]
+    ) -> None:
+        """Inject the :class:`AssetCertificationService` post-construction.
+
+        When configured, the agent calls
+        ``is_dispatch_eligible(tenant_id, truck_id)`` AFTER the HOS
+        check and BEFORE building a route. Assets with expired DOT
+        cargo tank certifications (V/K/I/P/UT) are excluded from all
+        fuel delivery routes.
+
+        Passing ``None`` disables the asset certification check
+        entirely: the agent builds routes without asset certification
+        validation (graceful degradation for tenants that haven't wired
+        the compliance backbone). The production bootstrap injects the
+        singleton after constructing the AssetCertificationService
+        (Task 8.10, Req 13.5).
+        """
+        self._asset_certification_service = service
+
     # ------------------------------------------------------------------
     # Signal handling override — buffer InterventionProposals
     # ------------------------------------------------------------------
@@ -698,6 +782,39 @@ class RoutePlanningAgent(OverlayAgentBase):
             truck_id = loading_plan.get("truck_id", "")
             plan_id = loading_plan.get("plan_id", "")
             assignments = loading_plan.get("assignments", [])
+
+            # Step 2b: Check driver eligibility (Task 6.9, Req 5.5, 5.6, 5.7)
+            # Before building a route, verify the truck's assigned driver
+            # is dispatch-eligible. Suspended drivers are excluded from
+            # all routes; drivers lacking HAZMAT or tanker endorsements
+            # are excluded from routes requiring those endorsements.
+            driver_eligible = await self._find_available_asset(
+                tenant_id, truck_id, assignments
+            )
+            if not driver_eligible:
+                continue
+
+            # Step 2c: HOS compliance check (Task 7.8, Req 4.1–4.7)
+            # After the driver qualification check passes, verify the
+            # driver has sufficient Hours-of-Service hours remaining to
+            # complete the proposed route. Estimate drive/total hours
+            # from the number of stops and a simple heuristic.
+            hos_eligible = await self._check_hos_eligibility(
+                tenant_id, truck_id, assignments
+            )
+            if not hos_eligible:
+                continue
+
+            # Step 2d: Asset certification check (Task 8.10, Req 13.5)
+            # After the HOS check passes, verify the truck (asset) has
+            # valid DOT cargo tank certifications. Assets with expired
+            # V/K/I/P/UT certifications are excluded from all fuel
+            # delivery routes.
+            asset_eligible = await self._check_asset_certification(
+                tenant_id, truck_id
+            )
+            if not asset_eligible:
+                continue
 
             # Collect unique station IDs from assignments
             station_ids = list(
@@ -932,6 +1049,433 @@ class RoutePlanningAgent(OverlayAgentBase):
             if action.get("tool_name") == "apply_loading_plan":
                 return action.get("parameters", {})
         return None
+
+    # ------------------------------------------------------------------
+    # Driver eligibility check (Task 6.9, Req 5.5, 5.6, 5.7)
+    # ------------------------------------------------------------------
+
+    #: Product categories that require a HAZMAT endorsement per DOT/FMCSA
+    #: regulations when transported in bulk. All petroleum fuels and LPG
+    #: are Class 3 (flammable liquids) or Class 2.1 (flammable gas).
+    _HAZMAT_CATEGORIES: Tuple[str, ...] = (
+        "diesel",
+        "gasoline",
+        "propane",
+        "kerosene",
+        "heating_oil",
+        "off_road",
+        "ethanol",
+    )
+
+    async def _find_available_asset(
+        self,
+        tenant_id: str,
+        truck_id: str,
+        assignments: List[Dict[str, Any]],
+    ) -> bool:
+        """Check whether the driver assigned to a truck is eligible for dispatch.
+
+        Looks up the truck's assigned driver from the ``trucks`` ES index,
+        builds route requirements from the loading plan's product codes
+        (HAZMAT classification, cargo tank vehicle usage), and calls
+        :meth:`DriverQualificationService.is_dispatch_eligible`.
+
+        When the ``_driver_qualification_service`` is not configured
+        (graceful degradation), this method returns ``True`` with a
+        warning log so routes are not blocked during early bootstrap or
+        for tenants that haven't wired the compliance backbone.
+
+        Args:
+            tenant_id: Tenant scope for the query.
+            truck_id: The truck assigned to the loading plan.
+            assignments: The loading plan's assignment list, used to
+                derive product codes and determine HAZMAT/tanker
+                requirements.
+
+        Returns:
+            ``True`` if the driver is eligible (or if the service is not
+            configured); ``False`` if the driver is ineligible and the
+            loading plan should be skipped.
+
+        Validates: Requirements 5.5, 5.6, 5.7
+        """
+        if self._driver_qualification_service is None:
+            logger.debug(
+                "RoutePlanningAgent: driver_qualification_service not "
+                "configured — skipping eligibility check for tenant=%s "
+                "truck=%s",
+                tenant_id,
+                truck_id,
+            )
+            return True
+
+        # Step 1: Look up the truck's assigned driver_id from ES
+        driver_id = await self._get_driver_for_truck(tenant_id, truck_id)
+        if not driver_id:
+            logger.warning(
+                "RoutePlanningAgent: no driver_id found for truck=%s "
+                "tenant=%s — skipping eligibility check",
+                truck_id,
+                tenant_id,
+            )
+            return True
+
+        # Step 2: Build route_requirements from the loading plan
+        route_requirements = self._build_route_requirements(assignments)
+
+        # Step 3: Call is_dispatch_eligible
+        try:
+            eligibility = await self._driver_qualification_service.is_dispatch_eligible(
+                tenant_id, driver_id, route_requirements
+            )
+        except Exception as exc:
+            logger.error(
+                "RoutePlanningAgent: driver eligibility check failed for "
+                "driver=%s truck=%s tenant=%s: %s — allowing route "
+                "(graceful degradation)",
+                driver_id,
+                truck_id,
+                tenant_id,
+                exc,
+            )
+            return True
+
+        if not eligibility.eligible:
+            logger.warning(
+                "RoutePlanningAgent: driver %s ineligible for truck=%s "
+                "tenant=%s — skipping loading plan. Reasons: %s",
+                driver_id,
+                truck_id,
+                tenant_id,
+                "; ".join(eligibility.reasons),
+            )
+            return False
+
+        logger.debug(
+            "RoutePlanningAgent: driver %s eligible for truck=%s tenant=%s",
+            driver_id,
+            truck_id,
+            tenant_id,
+        )
+        return True
+
+    async def _get_driver_for_truck(
+        self, tenant_id: str, truck_id: str
+    ) -> Optional[str]:
+        """Look up the driver_id assigned to a truck from the trucks index.
+
+        Returns ``None`` if the truck is not found or has no driver assigned.
+        """
+        query: Dict[str, Any] = {
+            "query": {
+                "bool": {
+                    "must": [
+                        {"term": {"tenant_id": tenant_id}},
+                        {"term": {"truck_id": truck_id}},
+                    ]
+                }
+            },
+            "_source": ["driver_id"],
+            "size": 1,
+        }
+        try:
+            response = await self._es.search_documents("trucks", query, size=1)
+            hits = response.get("hits", {}).get("hits", [])
+            if hits:
+                return hits[0]["_source"].get("driver_id") or None
+        except Exception as exc:
+            logger.error(
+                "RoutePlanningAgent: failed to look up driver for truck=%s "
+                "tenant=%s: %s",
+                truck_id,
+                tenant_id,
+                exc,
+            )
+        return None
+
+    def _build_route_requirements(
+        self, assignments: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Derive route requirements from loading plan assignments.
+
+        Inspects the fuel grades/product codes in the assignments to
+        determine:
+        - ``requires_hazmat``: True if any assignment carries a
+          HAZMAT-classified product (all bulk petroleum fuels).
+        - ``requires_tanker``: True if any assignment is present
+          (all fuel deliveries use cargo tank vehicles).
+        - ``min_cdl_class``: "A" for cargo tank vehicles (standard
+          for fuel tanker trucks in the US).
+
+        Returns:
+            Dict with keys ``requires_hazmat``, ``requires_tanker``,
+            and ``min_cdl_class``.
+        """
+        requires_hazmat = False
+        requires_tanker = bool(assignments)  # All fuel deliveries use tankers
+
+        for assignment in assignments:
+            fuel_grade = assignment.get("fuel_grade", "")
+            if not fuel_grade:
+                continue
+            # Check if the product is HAZMAT-classified
+            # Try to canonicalize the fuel grade to get the product code
+            try:
+                product_code = canonicalize(fuel_grade)
+                product = self._lookup_product(product_code)
+                if product and product.category in self._HAZMAT_CATEGORIES:
+                    requires_hazmat = True
+                    break
+            except (UnknownFuelProductError, Exception):
+                # If we can't identify the product, assume HAZMAT for
+                # safety (conservative approach for unknown fuels)
+                requires_hazmat = True
+                break
+
+        return {
+            "requires_hazmat": requires_hazmat,
+            "requires_tanker": requires_tanker,
+            "min_cdl_class": "A" if requires_tanker else None,
+        }
+
+    @staticmethod
+    def _lookup_product(product_code: str) -> Optional[Any]:
+        """Look up a FuelProduct from the catalog by product_code."""
+        from fuel.services.fuel_product_catalog import (
+            FUEL_PRODUCT_CATALOG,
+        )
+        for product in FUEL_PRODUCT_CATALOG:
+            if product.product_code == product_code:
+                return product
+        return None
+
+    # ------------------------------------------------------------------
+    # HOS eligibility check (Task 7.8, Req 4.1–4.7)
+    # ------------------------------------------------------------------
+
+    #: Average speed in mph used to estimate drive hours from route
+    #: distance. Fuel delivery trucks in urban/suburban areas average
+    #: roughly 25 mph including stops and traffic.
+    _AVERAGE_SPEED_MPH: float = 25.0
+
+    #: Average time per delivery stop in hours (loading, unloading,
+    #: paperwork, safety checks). Used to estimate total on-duty hours.
+    _HOURS_PER_STOP: float = 0.5
+
+    #: Average distance between stops in miles (used when actual route
+    #: distance is not yet computed). Conservative estimate for fuel
+    #: delivery routes.
+    _AVG_MILES_BETWEEN_STOPS: float = 15.0
+
+    def _estimate_route_hours(
+        self, assignments: List[Dict[str, Any]]
+    ) -> tuple:
+        """Estimate drive hours and total on-duty hours for a route.
+
+        Uses a simple heuristic based on the number of stops:
+        - Drive hours = (num_stops * avg_miles_between_stops) / avg_speed_mph
+        - Total hours = drive_hours + (num_stops * hours_per_stop)
+
+        Args:
+            assignments: The loading plan's assignment list.
+
+        Returns:
+            Tuple of (estimated_drive_hours, estimated_total_hours).
+        """
+        num_stops = len(assignments)
+        if num_stops == 0:
+            return (0.0, 0.0)
+
+        # Estimate total route distance (depot → stops → depot)
+        # Each stop adds avg distance; add one more leg for return to depot
+        total_miles = (num_stops + 1) * self._AVG_MILES_BETWEEN_STOPS
+        estimated_drive_hours = total_miles / self._AVERAGE_SPEED_MPH
+
+        # Total on-duty includes drive time + time at each stop
+        estimated_total_hours = estimated_drive_hours + (
+            num_stops * self._HOURS_PER_STOP
+        )
+
+        return (estimated_drive_hours, estimated_total_hours)
+
+    async def _check_hos_eligibility(
+        self,
+        tenant_id: str,
+        truck_id: str,
+        assignments: List[Dict[str, Any]],
+    ) -> bool:
+        """Check whether the driver has sufficient HOS hours for the route.
+
+        Called AFTER the DriverQualificationService check passes. Looks
+        up the truck's assigned driver and calls
+        ``HOSChecker.is_eligible()`` with estimated drive/total hours.
+
+        When the ``_hos_checker`` is not configured (graceful degradation),
+        this method returns ``True`` so routes are not blocked during
+        early bootstrap or for tenants that haven't wired the compliance
+        backbone.
+
+        Args:
+            tenant_id: Tenant scope for the query.
+            truck_id: The truck assigned to the loading plan.
+            assignments: The loading plan's assignment list, used to
+                estimate route duration.
+
+        Returns:
+            ``True`` if the driver has sufficient HOS hours (or if the
+            checker is not configured); ``False`` if the driver is
+            HOS-ineligible and the loading plan should be skipped.
+
+        Validates: Requirements 4.1, 4.2, 4.3, 4.4, 4.5
+        """
+        if self._hos_checker is None:
+            logger.debug(
+                "RoutePlanningAgent: hos_checker not configured — "
+                "skipping HOS check for tenant=%s truck=%s",
+                tenant_id,
+                truck_id,
+            )
+            return True
+
+        # Look up the truck's assigned driver_id
+        driver_id = await self._get_driver_for_truck(tenant_id, truck_id)
+        if not driver_id:
+            logger.warning(
+                "RoutePlanningAgent: no driver_id found for truck=%s "
+                "tenant=%s — skipping HOS check",
+                truck_id,
+                tenant_id,
+            )
+            return True
+
+        # Estimate drive and total hours from the route
+        estimated_drive_hours, estimated_total_hours = (
+            self._estimate_route_hours(assignments)
+        )
+
+        # Call HOSChecker.is_eligible with graceful degradation
+        try:
+            eligibility = await self._hos_checker.is_eligible(
+                driver_id=driver_id,
+                estimated_drive_hours=estimated_drive_hours,
+                estimated_total_hours=estimated_total_hours,
+            )
+        except Exception as exc:
+            logger.error(
+                "RoutePlanningAgent: HOS eligibility check failed for "
+                "driver=%s truck=%s tenant=%s: %s — allowing route "
+                "(graceful degradation)",
+                driver_id,
+                truck_id,
+                tenant_id,
+                exc,
+            )
+            return True
+
+        if not eligibility.eligible:
+            earliest = (
+                eligibility.earliest_eligible_time.isoformat()
+                if eligibility.earliest_eligible_time
+                else "unknown"
+            )
+            logger.warning(
+                "RoutePlanningAgent: driver %s HOS-ineligible for "
+                "truck=%s tenant=%s — skipping loading plan "
+                "(hos_blocked). Reasons: %s | "
+                "earliest_eligible_time: %s",
+                driver_id,
+                truck_id,
+                tenant_id,
+                "; ".join(eligibility.reasons),
+                earliest,
+            )
+            return False
+
+        logger.debug(
+            "RoutePlanningAgent: driver %s HOS-eligible for truck=%s "
+            "tenant=%s (drive=%.1fh, total=%.1fh)",
+            driver_id,
+            truck_id,
+            tenant_id,
+            estimated_drive_hours,
+            estimated_total_hours,
+        )
+        return True
+
+    # ------------------------------------------------------------------
+    # Asset certification check (Task 8.10, Req 13.5)
+    # ------------------------------------------------------------------
+
+    async def _check_asset_certification(
+        self,
+        tenant_id: str,
+        truck_id: str,
+    ) -> bool:
+        """Check whether the truck (asset) has valid DOT cargo tank certifications.
+
+        Calls :meth:`AssetCertificationService.is_dispatch_eligible` to
+        verify the asset does not have any expired DOT cargo tank
+        certifications (V/K/I/P/UT).
+
+        When the ``_asset_certification_service`` is not configured
+        (graceful degradation), this method returns ``True`` so routes
+        are not blocked during early bootstrap or for tenants that
+        haven't wired the compliance backbone.
+
+        Args:
+            tenant_id: Tenant scope for the query.
+            truck_id: The truck (asset) assigned to the loading plan.
+
+        Returns:
+            ``True`` if the asset is eligible (or if the service is not
+            configured); ``False`` if the asset has expired certifications
+            and the loading plan should be skipped.
+
+        Validates: Requirement 13.5
+        """
+        if self._asset_certification_service is None:
+            logger.debug(
+                "RoutePlanningAgent: asset_certification_service not "
+                "configured — skipping asset certification check for "
+                "tenant=%s truck=%s",
+                tenant_id,
+                truck_id,
+            )
+            return True
+
+        # Call is_dispatch_eligible with graceful degradation
+        try:
+            eligibility = await self._asset_certification_service.is_dispatch_eligible(
+                tenant_id, truck_id
+            )
+        except Exception as exc:
+            logger.error(
+                "RoutePlanningAgent: asset certification check failed for "
+                "truck=%s tenant=%s: %s — allowing route "
+                "(graceful degradation)",
+                truck_id,
+                tenant_id,
+                exc,
+            )
+            return True
+
+        if not eligibility.eligible:
+            logger.warning(
+                "RoutePlanningAgent: asset %s ineligible for dispatch "
+                "tenant=%s — skipping loading plan. Reasons: %s",
+                truck_id,
+                tenant_id,
+                "; ".join(eligibility.reasons),
+            )
+            return False
+
+        logger.debug(
+            "RoutePlanningAgent: asset %s certification-eligible for "
+            "tenant=%s",
+            truck_id,
+            tenant_id,
+        )
+        return True
 
     # ------------------------------------------------------------------
     # Query station locations (Req 4.3)

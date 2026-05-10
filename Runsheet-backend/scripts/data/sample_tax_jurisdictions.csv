@@ -1,0 +1,13 @@
+fips_code,jurisdiction_level,jurisdiction_name,tax_type,product_codes,rate_cents_per_gallon,effective_date,expiry_date,source
+00,federal,United States,excise,GASOLINE_REG|GASOLINE_PREM|ETHANOL_E85,184,2024-01-01,,irs_form_720
+00,federal,United States,excise,DIESEL_2|OFF_ROAD_DIESEL|HEATING_OIL|KEROSENE,244,2024-01-01,,irs_form_720
+06,state,California,excise,DIESEL_2,400,2024-01-01,,ca_cdtfa
+06,state,California,excise,GASOLINE_REG|GASOLINE_PREM,537,2024-01-01,,ca_cdtfa
+48,state,Texas,excise,DIESEL_2,200,2024-01-01,,tx_comptroller
+48,state,Texas,excise,GASOLINE_REG|GASOLINE_PREM,200,2024-01-01,,tx_comptroller
+36,state,New York,excise,DIESEL_2,454,2024-01-01,,ny_dtf
+36,state,New York,excise,GASOLINE_REG|GASOLINE_PREM,454,2024-01-01,,ny_dtf
+12,state,Florida,excise,DIESEL_2,360,2024-01-01,,fl_dor
+12,state,Florida,excise,GASOLINE_REG|GASOLINE_PREM,360,2024-01-01,,fl_dor
+17,state,Illinois,excise,DIESEL_2,472,2024-01-01,,il_dor
+17,state,Illinois,excise,GASOLINE_REG|GASOLINE_PREM,472,2024-01-01,,il_dor

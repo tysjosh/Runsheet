@@ -285,6 +285,41 @@ def _is_invalid_user_exception(payload: Any) -> bool:
     return False
 
 
+def _haversine_miles(
+    lat1: float, lon1: float, lat2: float, lon2: float
+) -> float:
+    """Compute the great-circle distance between two GPS points in miles.
+
+    Uses the haversine formula. This is a fallback for computing segment
+    miles when odometer data is unavailable.
+
+    Args:
+        lat1: Latitude of point 1 in decimal degrees.
+        lon1: Longitude of point 1 in decimal degrees.
+        lat2: Latitude of point 2 in decimal degrees.
+        lon2: Longitude of point 2 in decimal degrees.
+
+    Returns:
+        Distance in miles.
+    """
+    import math as _math
+
+    R_MILES = 3958.8  # Earth radius in miles
+
+    lat1_rad = _math.radians(lat1)
+    lat2_rad = _math.radians(lat2)
+    dlat = _math.radians(lat2 - lat1)
+    dlon = _math.radians(lon2 - lon1)
+
+    a = (
+        _math.sin(dlat / 2) ** 2
+        + _math.cos(lat1_rad) * _math.cos(lat2_rad) * _math.sin(dlon / 2) ** 2
+    )
+    c = 2 * _math.atan2(_math.sqrt(a), _math.sqrt(1 - a))
+
+    return R_MILES * c
+
+
 # ---------------------------------------------------------------------------
 # Provider-catalog entry (Task 9.10 convenience)
 # ---------------------------------------------------------------------------
@@ -540,6 +575,218 @@ class GeotabConnector(IntegrationConnector):
         # every successful re-auth.
         self._cached_credentials: Optional[Dict[str, Any]] = None
 
+        # IFTA boundary detection hook (Task 12.3 / Req 7.1).
+        # When set, sync_pull processes GPS readings through the
+        # StateBoundaryDetector and calls IFTAReporter.record_trip_segment()
+        # on detected state boundary crossings. Optional — when None,
+        # sync_pull operates normally without IFTA processing.
+        self._ifta_reporter: Optional[Any] = None
+        self._state_boundary_detector: Optional[Any] = None
+
+        # Per-truck state tracking for IFTA boundary detection.
+        # Maps truck_id → {"last_state": str, "last_odometer_km": float,
+        #                   "last_lat": float, "last_lon": float}
+        self._ifta_truck_state: Dict[str, Dict[str, Any]] = {}
+
+
+    # ------------------------------------------------------------------
+    # IFTA Boundary Detection Hook (Task 12.3 / Req 7.1)
+    # ------------------------------------------------------------------
+
+    def set_ifta_reporter(
+        self,
+        ifta_reporter: Any,
+        state_boundary_detector: Any,
+    ) -> None:
+        """Inject the IFTA reporter and state boundary detector.
+
+        When both are set, ``sync_pull`` will process GPS readings
+        through the StateBoundaryDetector and call
+        ``IFTAReporter.record_trip_segment()`` on detected state
+        boundary crossings.
+
+        This hook is optional — if not configured, sync_pull operates
+        normally without IFTA processing.
+
+        Args:
+            ifta_reporter: An :class:`IFTAReporter` instance with an
+                async ``record_trip_segment()`` method.
+            state_boundary_detector: A :class:`StateBoundaryDetector`
+                instance with a ``get_state(lat, lon)`` method.
+
+        Validates: Requirement 7.1
+        """
+        self._ifta_reporter = ifta_reporter
+        self._state_boundary_detector = state_boundary_detector
+        logger.info(
+            "GeotabConnector: IFTA reporter hook configured for "
+            "tenant=%s instance=%s",
+            self._tenant_id,
+            self._instance_id,
+        )
+
+    async def _process_ifta_boundary_check(
+        self,
+        reading: Mapping[str, Any],
+        truck_id: str,
+        recorded_at: datetime,
+    ) -> None:
+        """Check for state boundary crossings and record IFTA trip segments.
+
+        Called from ``_process_reading`` for each GPS reading that has a
+        mapped truck_id. Compares the current GPS state against the last
+        known state for this truck. When a crossing is detected, computes
+        the miles driven in the exited state using odometer data (preferred)
+        or haversine distance between GPS points (fallback), then calls
+        ``IFTAReporter.record_trip_segment()``.
+
+        Per-truck state is tracked in ``_ifta_truck_state`` which maps
+        truck_id to the last known state, odometer, and coordinates.
+
+        Args:
+            reading: Normalized telemetry reading dict with latitude,
+                longitude, odometer_km, and recorded_at fields.
+            truck_id: The mapped truck identifier.
+            recorded_at: Timestamp of the GPS reading.
+
+        Validates: Requirement 7.1
+        """
+        if self._ifta_reporter is None or self._state_boundary_detector is None:
+            return
+
+        lat = _safe_float(reading.get("latitude"))
+        lon = _safe_float(reading.get("longitude"))
+        if lat is None or lon is None:
+            return
+
+        # Determine current state from GPS coordinates
+        current_state = self._state_boundary_detector.get_state(lat, lon)
+        if current_state is None:
+            return
+
+        odometer_km = _safe_float(reading.get("odometer_km"))
+
+        # Get or initialize per-truck state
+        truck_state = self._ifta_truck_state.get(truck_id)
+
+        if truck_state is None:
+            # First reading for this truck — initialize state tracking
+            self._ifta_truck_state[truck_id] = {
+                "last_state": current_state,
+                "last_odometer_km": odometer_km,
+                "last_lat": lat,
+                "last_lon": lon,
+                "last_timestamp": recorded_at,
+            }
+            return
+
+        prev_state = truck_state.get("last_state")
+
+        if prev_state is None or current_state == prev_state:
+            # No crossing — update tracking state
+            self._ifta_truck_state[truck_id] = {
+                "last_state": current_state,
+                "last_odometer_km": odometer_km,
+                "last_lat": lat,
+                "last_lon": lon,
+                "last_timestamp": recorded_at,
+            }
+            return
+
+        # State boundary crossing detected!
+        # Compute miles driven in the exited state (from_state = prev_state)
+        miles = self._compute_segment_miles(
+            truck_state=truck_state,
+            current_odometer_km=odometer_km,
+            current_lat=lat,
+            current_lon=lon,
+        )
+
+        # Record the trip segment via IFTAReporter
+        try:
+            await self._ifta_reporter.record_trip_segment(
+                tenant_id=self._tenant_id,
+                truck_id=truck_id,
+                from_state=prev_state,
+                to_state=current_state,
+                miles=miles,
+                timestamp=recorded_at,
+                source="geotab",
+            )
+            logger.info(
+                "GeotabConnector: IFTA boundary crossing recorded "
+                "truck=%s %s→%s %.1f miles tenant=%s",
+                truck_id,
+                prev_state,
+                current_state,
+                miles,
+                self._tenant_id,
+            )
+        except Exception as exc:
+            # IFTA recording failures are non-fatal — log and continue
+            logger.warning(
+                "GeotabConnector: IFTA record_trip_segment failed "
+                "truck=%s %s→%s tenant=%s: %s",
+                truck_id,
+                prev_state,
+                current_state,
+                self._tenant_id,
+                exc,
+            )
+
+        # Update tracking state to the new state
+        self._ifta_truck_state[truck_id] = {
+            "last_state": current_state,
+            "last_odometer_km": odometer_km,
+            "last_lat": lat,
+            "last_lon": lon,
+            "last_timestamp": recorded_at,
+        }
+
+    def _compute_segment_miles(
+        self,
+        truck_state: Dict[str, Any],
+        current_odometer_km: Optional[float],
+        current_lat: float,
+        current_lon: float,
+    ) -> float:
+        """Compute miles driven in a segment using odometer or haversine.
+
+        Prefers odometer-based computation when both the previous and
+        current odometer readings are available. Falls back to haversine
+        distance between the last known GPS point and the current point.
+
+        Args:
+            truck_state: Previous tracking state for the truck.
+            current_odometer_km: Current odometer reading in km (may be None).
+            current_lat: Current latitude.
+            current_lon: Current longitude.
+
+        Returns:
+            Miles driven in the segment. Returns 0.0 if computation
+            is not possible.
+        """
+        prev_odometer_km = truck_state.get("last_odometer_km")
+
+        # Prefer odometer-based distance
+        if (
+            prev_odometer_km is not None
+            and current_odometer_km is not None
+            and current_odometer_km >= prev_odometer_km
+        ):
+            distance_km = current_odometer_km - prev_odometer_km
+            return round(distance_km * 0.621371, 1)  # km → miles
+
+        # Fallback: haversine distance between GPS points
+        prev_lat = truck_state.get("last_lat")
+        prev_lon = truck_state.get("last_lon")
+        if prev_lat is not None and prev_lon is not None:
+            return round(
+                _haversine_miles(prev_lat, prev_lon, current_lat, current_lon),
+                1,
+            )
+
+        return 0.0
 
     # ------------------------------------------------------------------
     # IntegrationConnector API
@@ -1367,6 +1614,27 @@ class GeotabConnector(IntegrationConnector):
         )
         if persisted:
             counts["readings_persisted"] += 1
+
+        # IFTA boundary detection hook (Task 12.3 / Req 7.1).
+        # Process GPS readings through the StateBoundaryDetector when
+        # the IFTA reporter is configured and the reading has a mapped
+        # truck_id. Non-fatal — errors are logged but never abort the
+        # sync_pull run.
+        if truck_id is not None and self._ifta_reporter is not None:
+            try:
+                await self._process_ifta_boundary_check(
+                    reading=reading,
+                    truck_id=truck_id,
+                    recorded_at=recorded_at,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "GeotabConnector: IFTA boundary check failed "
+                    "truck=%s tenant=%s: %s",
+                    truck_id,
+                    self._tenant_id,
+                    exc,
+                )
 
         # Freshness-gated truck update.
         if truck_id is None:

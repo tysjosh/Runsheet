@@ -100,9 +100,23 @@ _TEXTRACT_FEATURES: Tuple[str, ...] = ("FORMS",)
 #: more specific ``GAL`` token when both are present.
 _GALLON_KEY_TOKENS: Tuple[str, ...] = ("GALLONS", "GAL", "GROSS")
 
+#: KV-pair key tokens for meter number extraction (Requirement 8.1).
+#: US meter tickets typically label this field as "METER NO", "METER #",
+#: "METER NUMBER", or just "METER" followed by a serial-like value.
+_METER_NUMBER_KEY_TOKENS: Tuple[str, ...] = ("METER NUMBER", "METER NO", "METER #", "METER")
+
+#: KV-pair key tokens for ticket number extraction (Requirement 8.1).
+#: US meter tickets label this as "TICKET NO", "TICKET #", "TICKET NUMBER",
+#: or "TICKET" followed by a sequential number.
+_TICKET_NUMBER_KEY_TOKENS: Tuple[str, ...] = ("TICKET NUMBER", "TICKET NO", "TICKET #", "TICKET")
+
 #: Regex extracting the first positive float from a free-text value cell.
 #: Handles e.g. ``"GALLONS: 1,234.56"`` → ``1234.56`` and ``"GAL 780"`` → 780.
 _NUMERIC_RE: re.Pattern[str] = re.compile(r"(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d+))?")
+
+#: Regex extracting an alphanumeric identifier (meter number or ticket number).
+#: Handles values like "M-12345", "SN 98765", "12345678", "MT-2024-001".
+_IDENTIFIER_RE: re.Pattern[str] = re.compile(r"[A-Za-z0-9][\w\-./]*[A-Za-z0-9]|[A-Za-z0-9]+")
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +153,22 @@ class OCRResult(BaseModel):
         description=(
             "Tenant-prefixed S3 key of the meter-ticket image this result was "
             "derived from. Must pass FileStorageService.validate_ref."
+        ),
+    )
+    meter_number: Optional[str] = Field(
+        default=None,
+        description=(
+            "Physical meter serial/identification number extracted from the "
+            "ticket. ``None`` when no KV pair matching the meter number key "
+            "tokens was found. (Requirement 8.1)"
+        ),
+    )
+    ticket_number: Optional[str] = Field(
+        default=None,
+        description=(
+            "Sequential meter ticket number extracted from the ticket. "
+            "``None`` when no KV pair matching the ticket number key tokens "
+            "was found. (Requirement 8.1)"
         ),
     )
     extracted_gallons: Optional[float] = Field(
@@ -313,10 +343,14 @@ class MeterTicketOCRService:
         extracted_gallons: Optional[float] = None
         confidence: float = 0.0
         raw_text: str = ""
+        meter_number: Optional[str] = None
+        ticket_number: Optional[str] = None
 
         try:
-            response, extracted_gallons, confidence, raw_text = await self._wrapped_call_textract(
-                tenant_id=tenant_id, image_bytes=image_bytes, threshold=threshold
+            response, extracted_gallons, confidence, raw_text, meter_number, ticket_number = (
+                await self._wrapped_call_textract(
+                    tenant_id=tenant_id, image_bytes=image_bytes, threshold=threshold
+                )
             )
         except CircuitOpenError:
             # Breaker is open for this tenant's Textract — skip the call
@@ -353,6 +387,8 @@ class MeterTicketOCRService:
             tenant_id=tenant_id,
             pod_id=pod_id,
             file_ref=file_ref,
+            meter_number=meter_number,
+            ticket_number=ticket_number,
             extracted_gallons=extracted_gallons,
             confidence=confidence,
             raw_text=raw_text,
@@ -472,7 +508,7 @@ class MeterTicketOCRService:
         tenant_id: str,
         image_bytes: bytes,
         threshold: float,
-    ) -> Tuple[Dict[str, Any], Optional[float], float, str]:
+    ) -> Tuple[Dict[str, Any], Optional[float], float, str, Optional[str], Optional[str]]:
         """Run Textract under the structured-log + circuit-breaker wrapper.
 
         The wrapper emits ``external_call_started`` /
@@ -492,6 +528,10 @@ class MeterTicketOCRService:
         tripped — the caller catches :class:`CircuitOpenError` and maps
         it to the canonical ``textract_circuit_open`` error_details so
         the POD flow falls back to manual entry.
+
+        Returns:
+            Tuple of (response, extracted_gallons, confidence, raw_text,
+            meter_number, ticket_number).
         """
 
         async with trace_external_call(
@@ -502,8 +542,8 @@ class MeterTicketOCRService:
             metric=fuelops_ocr_calls_total,
         ) as call:
             response = await self._call_textract(image_bytes)
-            extracted_gallons, confidence, raw_text = self._parse_textract_response(
-                response
+            extracted_gallons, confidence, raw_text, meter_number, ticket_number = (
+                self._parse_textract_response(response)
             )
             # A low-confidence response is not an upstream error — the
             # call itself succeeded — but the metric surface reserves a
@@ -512,7 +552,7 @@ class MeterTicketOCRService:
             # network faults from low-confidence extractions.
             if extracted_gallons is None or confidence < threshold:
                 call.set_status("requires_manual_review")
-            return response, extracted_gallons, confidence, raw_text
+            return response, extracted_gallons, confidence, raw_text, meter_number, ticket_number
 
     async def _call_textract(self, image_bytes: bytes) -> Dict[str, Any]:
         """Invoke ``AnalyzeDocument`` with a hard timeout.
@@ -542,8 +582,8 @@ class MeterTicketOCRService:
     @staticmethod
     def _parse_textract_response(
         response: Dict[str, Any],
-    ) -> Tuple[Optional[float], float, str]:
-        """Pull ``(extracted_gallons, confidence, raw_text)`` from a response.
+    ) -> Tuple[Optional[float], float, str, Optional[str], Optional[str]]:
+        """Pull ``(extracted_gallons, confidence, raw_text, meter_number, ticket_number)`` from a response.
 
         * ``extracted_gallons`` — the first positive numeric value on a KV
           pair whose key contains one of ``_GALLON_KEY_TOKENS`` (preferring
@@ -553,6 +593,12 @@ class MeterTicketOCRService:
           Returns ``0.0`` when no blocks were returned.
         * ``raw_text`` — the concatenation of every ``LINE`` block's text
           joined by newlines. Used for dispatcher review on manual fallback.
+        * ``meter_number`` — the meter serial/identification number extracted
+          from a KV pair whose key matches ``_METER_NUMBER_KEY_TOKENS``.
+          ``None`` when not found. (Requirement 8.1)
+        * ``ticket_number`` — the sequential ticket number extracted from a
+          KV pair whose key matches ``_TICKET_NUMBER_KEY_TOKENS``. ``None``
+          when not found. (Requirement 8.1)
         """
         blocks = response.get("Blocks") or []
         if not isinstance(blocks, list):
@@ -605,7 +651,9 @@ class MeterTicketOCRService:
             resolved_pairs.append((key_text, value_text))
 
         extracted_gallons = _pick_gallons(resolved_pairs)
-        return extracted_gallons, confidence, raw_text
+        meter_number = _pick_identifier(resolved_pairs, _METER_NUMBER_KEY_TOKENS)
+        ticket_number = _pick_identifier(resolved_pairs, _TICKET_NUMBER_KEY_TOKENS)
+        return extracted_gallons, confidence, raw_text, meter_number, ticket_number
 
     # ------------------------------------------------------------------
     # Internals: persistence
@@ -748,6 +796,51 @@ def _parse_gallon_value(text: str) -> Optional[float]:
     except ValueError:
         return None
     return value if value > 0 else None
+
+
+def _pick_identifier(
+    pairs: Iterable[Tuple[str, str]], key_tokens: Tuple[str, ...]
+) -> Optional[str]:
+    """Select the best identifier value from resolved KV pairs for the given key tokens.
+
+    Scans the KV pairs in token-preference order (more specific tokens first).
+    For each matching key, extracts the first alphanumeric identifier from the
+    value text. Returns ``None`` when no matching key is found or when the
+    value does not contain a parseable identifier.
+
+    Used for extracting ``meter_number`` and ``ticket_number`` from US meter
+    tickets (Requirement 8.1).
+    """
+    pair_list = [(str(k), str(v)) for k, v in pairs]
+    for token in key_tokens:
+        for key_text, value_text in pair_list:
+            normalized_key = _normalize_key(key_text)
+            if token not in normalized_key:
+                continue
+            parsed = _parse_identifier_value(value_text)
+            if parsed is not None:
+                return parsed
+    return None
+
+
+def _parse_identifier_value(text: str) -> Optional[str]:
+    """Extract an alphanumeric identifier from free-text.
+
+    Handles values like ``"M-12345"``, ``"SN 98765"``, ``"12345678"``,
+    ``"MT-2024-001"``. Returns the longest matching identifier substring,
+    or ``None`` when no valid identifier is found.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return None
+    # Find all identifier-like substrings and return the longest one
+    # (most likely to be the actual serial/ticket number rather than a
+    # short prefix or label fragment).
+    matches = _IDENTIFIER_RE.findall(text.strip())
+    if not matches:
+        return None
+    # Return the longest match — on US meter tickets the identifier is
+    # typically the longest token in the value cell.
+    return max(matches, key=len)
 
 
 __all__ = [

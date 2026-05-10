@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import date, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from uuid import uuid4
 
 from commerce.models.events import InvoiceEvent, InvoiceEventType
@@ -70,6 +70,8 @@ class InvoiceService:
         external_sync=None,
         dunning_service=None,
         invoice_ws_manager=None,
+        tax_engine_factory: Optional[Callable[[str], Any]] = None,
+        sales_pricing_engine_factory: Optional[Callable[[str], Any]] = None,
     ) -> None:
         self._es = es_service
         self._idempotency = idempotency_service
@@ -78,6 +80,47 @@ class InvoiceService:
         self._external_sync = external_sync
         self._dunning_service = dunning_service
         self._invoice_ws_manager = invoice_ws_manager
+        # Optional TaxEngine factory (tenant_id) -> TaxEngine. When
+        # supplied, generate_from_order() computes a tax breakdown via
+        # the engine and appends it to the invoice projection. When
+        # None, InvoiceService falls back to the legacy behaviour of
+        # honoring the caller-provided ``tax_cents`` value — this
+        # preserves backwards compatibility for the commerce-backbone
+        # tests and any caller that has not yet opted into the
+        # fuel-compliance-backbone tax wiring (task 3.10).
+        self._tax_engine_factory = tax_engine_factory
+        # Optional SalesPricingEngine factory (tenant_id) ->
+        # SalesPricingEngine. When supplied, generate_from_order()
+        # resolves the sell price for each line item before tax
+        # computation and updates unit_price_cents on the line.
+        # When None, existing line item prices are used as-is —
+        # backwards compatible (task 5.11).
+        self._sales_pricing_engine_factory = sales_pricing_engine_factory
+        # Optional DyedDieselEnforcer instance. When supplied,
+        # generate_from_order() performs a post-generation validation
+        # to confirm that dyed-diesel invoices exclude road-use excise
+        # tax (Req 6.5) and logs the sale for IRS audit (Req 6.7).
+        # Injected via set_dyed_diesel_enforcer() from bootstrap.
+        self._dyed_diesel_enforcer: Optional[Any] = None
+
+    # ------------------------------------------------------------------
+    # Dependency injection setters
+    # ------------------------------------------------------------------
+
+    def set_dyed_diesel_enforcer(self, enforcer) -> None:
+        """Inject the DyedDieselEnforcer for post-generation invoice validation.
+
+        When set, generate_from_order() will:
+        1. Call validate_invoice() to confirm tax exemption was applied (Req 6.5)
+        2. If validation passes and the invoice contains dyed diesel,
+           call log_dyed_sale() to persist the audit record (Req 6.7)
+
+        This is a post-generation check — validation failures are logged
+        as warnings but do not block the invoice.
+
+        Validates: Requirements 6.5, 6.7
+        """
+        self._dyed_diesel_enforcer = enforcer
 
     # ------------------------------------------------------------------
     # Event helpers
@@ -232,6 +275,113 @@ class InvoiceService:
             )
 
     # ------------------------------------------------------------------
+    # Dyed diesel post-generation check (Task 9.9 / Req 6.5, 6.7)
+    # ------------------------------------------------------------------
+
+    async def _run_dyed_diesel_post_check(
+        self,
+        *,
+        tenant_id: str,
+        invoice_id: str,
+        customer_id: str,
+        line_items: List[Dict[str, Any]],
+        doc: Dict[str, Any],
+    ) -> None:
+        """Post-generation dyed diesel validation and audit logging.
+
+        Called after the invoice is persisted. This is a non-blocking
+        check — failures are logged as warnings but never block the
+        invoice generation pipeline.
+
+        Steps:
+        1. Call validate_invoice() to confirm tax exemption was applied.
+        2. If validation fails, log a warning (don't block the invoice).
+        3. If the invoice contains dyed diesel and passes validation,
+           call log_dyed_sale() to persist the IRS audit record.
+
+        Validates: Requirements 6.5, 6.7
+        """
+        from compliance.services.dyed_diesel_enforcer import DyedDieselEnforcer
+
+        enforcer = self._dyed_diesel_enforcer
+
+        try:
+            # Step 1: Validate that dyed-diesel invoices exclude
+            # road-use excise tax (Req 6.5)
+            result = await enforcer.validate_invoice(
+                tenant_id=tenant_id,
+                invoice_id=invoice_id,
+            )
+
+            if not result.valid:
+                # Step 2: Validation failed — log warning but don't block
+                logger.warning(
+                    "InvoiceService: dyed diesel validation failed for "
+                    "invoice %s (tenant %s): [%s] %s",
+                    invoice_id,
+                    tenant_id,
+                    result.error_code,
+                    result.message,
+                )
+                return
+
+            # Step 3: Check if the invoice contains dyed diesel and
+            # log the sale for IRS audit readiness (Req 6.7)
+            dyed_items = [
+                item for item in line_items
+                if DyedDieselEnforcer.is_dyed_diesel(
+                    item.get("product_code", "")
+                )
+            ]
+
+            if not dyed_items:
+                # No dyed diesel on this invoice — nothing to log
+                return
+
+            # Sum gallons across all dyed-diesel line items
+            total_dyed_gallons = sum(
+                item.get("quantity_gallons", item.get("quantity", 0))
+                for item in dyed_items
+            )
+
+            # Retrieve certificate info from the invoice's
+            # exemptions_applied or query the enforcer's ES index.
+            # For the audit log, we use the first dyed product code
+            # and attempt to extract certificate details from the
+            # tax_breakdown exemptions if available.
+            product_code = dyed_items[0].get("product_code", "DYED_DIESEL")
+            certificate_id = "unknown"
+            certificate_expiry = "unknown"
+
+            # Try to extract certificate info from exemptions_applied
+            exemptions = doc.get("exemptions_applied", [])
+            if exemptions:
+                # The exemption id may encode the certificate number
+                certificate_id = exemptions[0]
+
+            await enforcer.log_dyed_sale(
+                tenant_id=tenant_id,
+                customer_id=customer_id,
+                certificate_id=certificate_id,
+                certificate_expiry=certificate_expiry,
+                gallons=total_dyed_gallons,
+                invoice_id=invoice_id,
+                product_code=product_code,
+            )
+
+        except Exception as exc:
+            # Non-blocking: log the failure but never raise.
+            # The invoice generation must not be blocked by a
+            # dyed-diesel validation or audit log failure.
+            logger.warning(
+                "InvoiceService: dyed diesel post-check failed for "
+                "invoice %s (tenant %s): %s",
+                invoice_id,
+                tenant_id,
+                exc,
+            )
+
+    # ------------------------------------------------------------------
     # Generate from order (Req 5.1)
     # ------------------------------------------------------------------
 
@@ -246,6 +396,8 @@ class InvoiceService:
         tax_cents: int = 0,
         net_terms_days: int = 30,
         actor: str = "system",
+        destination_fips: Optional[str] = None,
+        effective_date: Optional[date] = None,
     ) -> Dict[str, Any]:
         """Generate an Invoice from a delivered order.
 
@@ -255,7 +407,48 @@ class InvoiceService:
         Creates the invoice in draft status. Line items are carried from
         the source order. total_cents = sum of line subtotals + tax_cents.
 
-        Validates: Requirements 5.1, 5.2, C1, C4, C7
+        When a ``TaxEngine`` factory is wired via the constructor
+        (fuel-compliance-backbone task 3.10) AND ``destination_fips`` is
+        provided, the TaxEngine computes a per-invoice
+        :class:`TaxBreakdown` that supersedes the caller-provided
+        ``tax_cents`` value. The breakdown is persisted on the invoice
+        as ``tax_breakdown`` and the honored exemption ids on
+        ``exemptions_applied`` for IRS / operator audit (Req 6.7).
+
+        The wiring is strictly opt-in — when no TaxEngine factory is
+        configured, or when ``destination_fips`` is missing, the method
+        falls back to the legacy behaviour (trust the caller's
+        ``tax_cents``) so commerce-backbone tests and callers that have
+        not yet adopted the compliance backbone continue to pass.
+
+        Args:
+            tenant_id: Tenant scope.
+            order_id: Delivered order the invoice is generated from.
+                Used as the idempotency key.
+            customer_id: Parent customer of the invoice.
+            account_id: Billing account the invoice is posted against.
+            line_items: Per-product line items (already priced).
+            tax_cents: Fallback tax total when no TaxEngine is wired or
+                when ``destination_fips`` is missing. Ignored when the
+                TaxEngine computes a breakdown.
+            net_terms_days: Days until the invoice due date.
+            actor: Audit actor for the event log.
+            destination_fips: Delivery destination FIPS code used by
+                the TaxEngine to resolve jurisdictional rates. When
+                ``None``, tax computation is skipped (a warning is
+                logged) and ``tax_cents`` is honored as-is.
+            effective_date: Invoice / delivery date used by the
+                TaxEngine for jurisdiction + exemption lookups.
+                Defaults to today when not provided.
+
+        Raises:
+            TaxJurisdictionNotFoundError: Propagated from
+                :meth:`TaxEngine.compute_tax` when a required
+                jurisdiction row is missing from the
+                ``tax_jurisdictions`` index (Req 1.9). Operators must
+                add the missing row before the invoice finalizes.
+
+        Validates: Requirements 5.1, 5.2, C1, C4, C7, 1.9, 1.10
         """
         # Idempotency check
         idemp_key = f"invoice_from_order:{order_id}"
@@ -277,9 +470,122 @@ class InvoiceService:
         now = utcnow()
         invoice_id = f"inv_{uuid4()}"
 
+        # --- Pricing resolution (optional, via injected SalesPricingEngine) ---
+        # When a SalesPricingEngine factory is wired (task 5.11),
+        # resolve the sell price for each line item before tax
+        # computation and update unit_price_cents on the line.
+        # Backwards compatible — if no factory, use existing prices.
+        if self._sales_pricing_engine_factory is not None:
+            try:
+                pricing_engine = self._sales_pricing_engine_factory(tenant_id)
+            except Exception as exc:
+                logger.warning(
+                    "InvoiceService: SalesPricingEngine factory raised "
+                    "for tenant %s order %s: %s — using existing prices",
+                    tenant_id,
+                    order_id,
+                    exc,
+                )
+                pricing_engine = None
+
+            if pricing_engine is not None:
+                _eff_date = effective_date or now.date()
+                for item in line_items:
+                    try:
+                        resolution = await pricing_engine.resolve_price(
+                            customer_id=customer_id,
+                            product_code=item.get("product_code", ""),
+                            gallons=item.get("quantity", 0),
+                            terminal_id=item.get("terminal_id", ""),
+                            route_miles=item.get("route_miles", 0.0),
+                            effective_date=_eff_date,
+                            market_price_cents=item.get(
+                                "market_price_cents"
+                            ),
+                            account_id=account_id,
+                        )
+                        item["unit_price_cents"] = (
+                            resolution.effective_price_cents
+                        )
+                        # Recompute subtotal for the line
+                        qty = item.get("quantity", 0)
+                        item["subtotal_cents"] = round(
+                            resolution.effective_price_cents * qty
+                        )
+                    except Exception as exc:
+                        # Pricing failure for a single line item should
+                        # not block the entire invoice — log and keep
+                        # the existing price.
+                        logger.warning(
+                            "InvoiceService: pricing resolution failed "
+                            "for line item product=%s tenant=%s order=%s: "
+                            "%s — using existing unit_price_cents",
+                            item.get("product_code"),
+                            tenant_id,
+                            order_id,
+                            exc,
+                        )
+
         # Compute totals from line items (integer cents only, C1)
         subtotal_cents = sum(item.get("subtotal_cents", 0) for item in line_items)
-        total_cents = subtotal_cents + tax_cents
+
+        # --- Tax computation (optional, via injected TaxEngine) ------
+        # When a TaxEngine factory is wired AND the caller supplied a
+        # destination_fips, compute a per-invoice TaxBreakdown via
+        # TaxEngine.compute_tax and persist it on the invoice. When
+        # either is missing, fall back to the legacy behaviour: trust
+        # the caller's ``tax_cents`` value.
+        tax_breakdown_doc: Optional[Dict[str, Any]] = None
+        exemptions_applied: List[str] = []
+        computed_tax_cents: Optional[int] = None
+        if self._tax_engine_factory is not None and destination_fips:
+            try:
+                tax_engine = self._tax_engine_factory(tenant_id)
+            except Exception as exc:
+                # Factory construction failure should not block invoice
+                # generation — degrade to legacy tax_cents and log.
+                logger.warning(
+                    "InvoiceService: TaxEngine factory raised for tenant "
+                    "%s order %s: %s — falling back to tax_cents=%s",
+                    tenant_id,
+                    order_id,
+                    exc,
+                    tax_cents,
+                )
+                tax_engine = None
+
+            if tax_engine is not None:
+                tax_breakdown_doc, exemptions_applied, computed_tax_cents = (
+                    await self._compute_tax_for_line_items(
+                        tax_engine=tax_engine,
+                        tenant_id=tenant_id,
+                        order_id=order_id,
+                        customer_id=customer_id,
+                        line_items=line_items,
+                        destination_fips=destination_fips,
+                        effective_date=effective_date,
+                    )
+                )
+        elif self._tax_engine_factory is not None and not destination_fips:
+            # Graceful-miss path: TaxEngine is wired but the caller did
+            # not supply a destination_fips — log a warning and skip
+            # tax computation rather than raising. The caller's
+            # ``tax_cents`` (if any) is honored as-is.
+            logger.warning(
+                "InvoiceService: TaxEngine wired but destination_fips is "
+                "missing for tenant=%s order=%s — skipping tax "
+                "computation; honoring tax_cents=%d",
+                tenant_id,
+                order_id,
+                tax_cents,
+            )
+
+        # When the TaxEngine produced a breakdown, the computed total
+        # supersedes the caller-provided tax_cents.
+        effective_tax_cents = (
+            computed_tax_cents if computed_tax_cents is not None else tax_cents
+        )
+        total_cents = subtotal_cents + effective_tax_cents
         remaining_cents = total_cents
 
         # Compute due_date from net_terms_days
@@ -297,7 +603,7 @@ class InvoiceService:
             "total_cents": total_cents,
             "amount_paid_cents": 0,
             "remaining_cents": remaining_cents,
-            "tax_cents": tax_cents,
+            "tax_cents": effective_tax_cents,
             "subtotal_cents": subtotal_cents,
             "line_items": line_items,
             "issued_at": None,
@@ -313,21 +619,38 @@ class InvoiceService:
             "updated_at": now.isoformat(),
             "_last_applied_seq": 1,
         }
+        # Only attach tax_breakdown / exemptions_applied when the
+        # TaxEngine actually produced a breakdown — otherwise omit the
+        # fields so the legacy invoice shape is preserved for callers
+        # that don't compute tax here.
+        if tax_breakdown_doc is not None:
+            doc["tax_breakdown"] = tax_breakdown_doc
+            doc["exemptions_applied"] = exemptions_applied
 
         # Write event FIRST (Constraint C7)
+        event_payload: Dict[str, Any] = {
+            "order_id": order_id,
+            "customer_id": customer_id,
+            "account_id": account_id,
+            "total_cents": total_cents,
+            "subtotal_cents": subtotal_cents,
+            "tax_cents": effective_tax_cents,
+            "line_item_count": len(line_items),
+        }
+        if tax_breakdown_doc is not None:
+            # Record the tax-engine computation on the event so the
+            # event log captures the breakdown at the moment of
+            # invoice creation (audit-ready).
+            event_payload["tax_source"] = "tax_engine"
+            event_payload["exemptions_applied"] = exemptions_applied
+        else:
+            event_payload["tax_source"] = "tax_cents_param"
+
         event_doc = await self._write_invoice_event(
             tenant_id=tenant_id,
             invoice_id=invoice_id,
             event_type=InvoiceEventType.CREATED,
-            payload={
-                "order_id": order_id,
-                "customer_id": customer_id,
-                "account_id": account_id,
-                "total_cents": total_cents,
-                "subtotal_cents": subtotal_cents,
-                "tax_cents": tax_cents,
-                "line_item_count": len(line_items),
-            },
+            payload=event_payload,
             actor=actor,
         )
 
@@ -337,6 +660,21 @@ class InvoiceService:
         # Mark as processed for idempotency
         if self._idempotency:
             await self._idempotency.mark_processed(idemp_key, tenant_id)
+
+        # --- Dyed diesel post-generation validation (task 9.9) --------
+        # When a DyedDieselEnforcer is wired, perform a post-generation
+        # check to confirm that dyed-diesel invoices exclude road-use
+        # excise tax (Req 6.5) and log the sale for IRS audit (Req 6.7).
+        # This is non-blocking: failures are logged as warnings but do
+        # not block the invoice generation.
+        if self._dyed_diesel_enforcer is not None:
+            await self._run_dyed_diesel_post_check(
+                tenant_id=tenant_id,
+                invoice_id=invoice_id,
+                customer_id=customer_id,
+                line_items=line_items,
+                doc=doc,
+            )
 
         logger.info(
             "Generated invoice %s from order %s for tenant %s (total: %d cents)",
@@ -927,6 +1265,169 @@ class InvoiceService:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    async def _compute_tax_for_line_items(
+        self,
+        *,
+        tax_engine: Any,
+        tenant_id: str,
+        order_id: str,
+        customer_id: str,
+        line_items: List[Dict[str, Any]],
+        destination_fips: str,
+        effective_date: Optional[date],
+    ) -> "tuple[Optional[Dict[str, Any]], List[str], Optional[int]]":
+        """Compute the aggregate :class:`TaxBreakdown` for an invoice.
+
+        Iterates the invoice's line items and invokes
+        :meth:`TaxEngine.compute_tax` once per ``(product_code,
+        quantity_gallons)`` so the computed tax matches the delivered
+        volume of each line (fuel-compliance-backbone task 3.10).
+
+        The per-line breakdowns are aggregated into a single invoice-
+        level breakdown — component cents are summed, detail line items
+        are concatenated, and exemption ids are de-duplicated. The
+        resulting dict is persisted as ``tax_breakdown`` on the invoice
+        projection and the exemption id list as ``exemptions_applied``
+        (Req 1.10, Req 6.7).
+
+        Args:
+            tax_engine: Tenant-scoped TaxEngine instance already built
+                via the factory.
+            tenant_id / order_id / customer_id: Invoice context for
+                logging and exemption lookup.
+            line_items: Line items on the invoice, each expected to
+                carry ``product_code`` and ``quantity_gallons``.
+            destination_fips: Delivery destination FIPS code.
+            effective_date: Invoice / delivery date; defaulted to
+                today by the TaxEngine when ``None``.
+
+        Returns:
+            ``(breakdown_doc, exemptions_applied, total_tax_cents)``.
+            ``breakdown_doc`` is the serialized :class:`TaxBreakdown`
+            aggregate, or ``None`` when no taxable line items were
+            present. ``total_tax_cents`` is the computed tax total that
+            supersedes the caller-provided ``tax_cents``, or ``None``
+            when no computation ran.
+
+        Raises:
+            TaxJurisdictionNotFoundError: Propagated unchanged from
+                :meth:`TaxEngine.compute_tax` when a required
+                jurisdiction row is missing. The caller (invoice
+                generation pipeline) surfaces this as a structured
+                rejection so operators can fix the tax_jurisdictions
+                index before the invoice finalizes (Req 1.9).
+        """
+        # Aggregated component buckets (integer cents, Constraint C1).
+        federal_cents = 0
+        state_cents = 0
+        county_cents = 0
+        city_cents = 0
+        ust_cents = 0
+        spcc_cents = 0
+        environmental_cents = 0
+        aggregated_line_items: List[Dict[str, Any]] = []
+        exemption_ids_seen: List[str] = []
+
+        any_computed = False
+        for item in line_items:
+            product_code = item.get("product_code")
+            quantity_gallons = item.get("quantity_gallons")
+
+            # Skip rows that lack the inputs TaxEngine requires. The
+            # commerce line item schema allows both fields to be
+            # present; we guard defensively because some callers
+            # (e.g. flat-fee lines) may omit them.
+            if not isinstance(product_code, str) or not product_code:
+                logger.debug(
+                    "InvoiceService: skipping tax computation for line "
+                    "without product_code (order=%s tenant=%s)",
+                    order_id,
+                    tenant_id,
+                )
+                continue
+            if (
+                quantity_gallons is None
+                or not isinstance(quantity_gallons, (int, float))
+                or quantity_gallons <= 0
+            ):
+                logger.debug(
+                    "InvoiceService: skipping tax computation for line "
+                    "with non-positive quantity_gallons (product=%s "
+                    "order=%s tenant=%s)",
+                    product_code,
+                    order_id,
+                    tenant_id,
+                )
+                continue
+
+            # TaxJurisdictionNotFoundError is propagated — the invoice
+            # generation pipeline is expected to surface it as a
+            # structured rejection (Req 1.9).
+            breakdown = await tax_engine.compute_tax(
+                product_code=product_code,
+                net_gallons=float(quantity_gallons),
+                destination_fips=destination_fips,
+                customer_id=customer_id,
+                effective_date=effective_date,
+            )
+            any_computed = True
+
+            federal_cents += breakdown.federal_cents
+            state_cents += breakdown.state_cents
+            county_cents += breakdown.county_cents
+            city_cents += breakdown.city_cents
+            ust_cents += breakdown.ust_cents
+            spcc_cents += breakdown.spcc_cents
+            environmental_cents += breakdown.environmental_cents
+
+            # Serialize line items to plain dicts for ES storage.
+            for tli in breakdown.line_items:
+                aggregated_line_items.append(tli.model_dump())
+
+            for exemption_id in breakdown.exemptions_applied:
+                if exemption_id and exemption_id not in exemption_ids_seen:
+                    exemption_ids_seen.append(exemption_id)
+
+        if not any_computed:
+            return None, [], None
+
+        total_tax_cents = (
+            federal_cents
+            + state_cents
+            + county_cents
+            + city_cents
+            + ust_cents
+            + spcc_cents
+            + environmental_cents
+        )
+
+        breakdown_doc: Dict[str, Any] = {
+            "federal_cents": federal_cents,
+            "state_cents": state_cents,
+            "county_cents": county_cents,
+            "city_cents": city_cents,
+            "ust_cents": ust_cents,
+            "spcc_cents": spcc_cents,
+            "environmental_cents": environmental_cents,
+            "total_tax_cents": total_tax_cents,
+            "exemptions_applied": list(exemption_ids_seen),
+            "line_items": aggregated_line_items,
+            "destination_fips": destination_fips,
+        }
+
+        logger.info(
+            "InvoiceService: computed tax breakdown for tenant=%s order=%s "
+            "customer=%s destination_fips=%s total_tax_cents=%d "
+            "exemptions=%s",
+            tenant_id,
+            order_id,
+            customer_id,
+            destination_fips,
+            total_tax_cents,
+            exemption_ids_seen,
+        )
+        return breakdown_doc, list(exemption_ids_seen), total_tax_cents
 
     async def _drain_credit_balance(
         self,

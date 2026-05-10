@@ -76,6 +76,18 @@ from commerce.api.ar_aging_endpoints import (
     router as commerce_ar_aging_router,
     configure_ar_aging_api,
 )
+from compliance.api.tax_endpoints import (
+    router as compliance_tax_router,
+)
+from compliance.api.terminal_bol_endpoints import (
+    router as compliance_terminal_bol_router,
+)
+from commerce.api.price_protection_endpoints import (
+    router as commerce_price_protection_router,
+)
+from commerce.api.pricing_endpoints import (
+    router as commerce_pricing_rules_router,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -138,6 +150,10 @@ for _router in (
     intake_channel_router, order_router, order_webhook_router,
     driver_ops_router,
     stripe_router, stripe_webhook_router,
+    compliance_tax_router,
+    compliance_terminal_bol_router,
+    commerce_price_protection_router,
+    commerce_pricing_rules_router,
 ):
     app.include_router(_router)
 

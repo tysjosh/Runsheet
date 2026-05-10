@@ -752,6 +752,8 @@ class TestPersistenceShape:
             "tenant_id",
             "pod_id",
             "file_ref",
+            "meter_number",
+            "ticket_number",
             "extracted_gallons",
             "confidence",
             "raw_text",
@@ -838,3 +840,238 @@ class TestConfidenceAggregation:
         # bounds rather than an exact value because the pair builder
         # creates multiple word blocks per KV at matching confidences.
         assert 0.80 <= result.confidence <= 1.00
+
+
+
+# ---------------------------------------------------------------------------
+# extract — meter_number and ticket_number extraction (Req 8.1)
+# ---------------------------------------------------------------------------
+
+
+class TestMeterNumberExtraction:
+    """Validates: Requirement 8.1 — meter_number extraction from OCR output."""
+
+    @pytest.mark.asyncio
+    async def test_extracts_meter_number_from_meter_number_key(
+        self,
+        service: MeterTicketOCRService,
+        textract: _FakeTextract,
+    ):
+        textract.next_response = _build_response(
+            pairs=[("METER NUMBER", "M-12345"), ("GALLONS", "780")],
+        )
+        result = await service.extract(
+            tenant_id="tenant-A",
+            file_ref="tenants/tenant-A/meter_ticket/2024/01/01/abc.jpg",
+        )
+        assert result.meter_number == "M-12345"
+
+    @pytest.mark.asyncio
+    async def test_extracts_meter_number_from_meter_no_key(
+        self,
+        service: MeterTicketOCRService,
+        textract: _FakeTextract,
+    ):
+        textract.next_response = _build_response(
+            pairs=[("METER NO", "98765"), ("GALLONS", "500")],
+        )
+        result = await service.extract(
+            tenant_id="tenant-A",
+            file_ref="tenants/tenant-A/meter_ticket/2024/01/01/abc.jpg",
+        )
+        assert result.meter_number == "98765"
+
+    @pytest.mark.asyncio
+    async def test_extracts_meter_number_from_meter_hash_key(
+        self,
+        service: MeterTicketOCRService,
+        textract: _FakeTextract,
+    ):
+        textract.next_response = _build_response(
+            pairs=[("METER #", "SN-2024-001"), ("GALLONS", "300")],
+        )
+        result = await service.extract(
+            tenant_id="tenant-A",
+            file_ref="tenants/tenant-A/meter_ticket/2024/01/01/abc.jpg",
+        )
+        assert result.meter_number == "SN-2024-001"
+
+    @pytest.mark.asyncio
+    async def test_meter_number_none_when_not_present(
+        self,
+        service: MeterTicketOCRService,
+        textract: _FakeTextract,
+    ):
+        textract.next_response = _build_response(
+            pairs=[("GALLONS", "780"), ("DRIVER", "JANE DOE")],
+        )
+        result = await service.extract(
+            tenant_id="tenant-A",
+            file_ref="tenants/tenant-A/meter_ticket/2024/01/01/abc.jpg",
+        )
+        assert result.meter_number is None
+
+    @pytest.mark.asyncio
+    async def test_prefers_meter_number_over_meter_no(
+        self,
+        service: MeterTicketOCRService,
+        textract: _FakeTextract,
+    ):
+        # "METER NUMBER" is more specific and should be preferred.
+        textract.next_response = _build_response(
+            pairs=[
+                ("METER NO", "11111"),
+                ("METER NUMBER", "22222"),
+                ("GALLONS", "500"),
+            ],
+        )
+        result = await service.extract(
+            tenant_id="tenant-A",
+            file_ref="tenants/tenant-A/meter_ticket/2024/01/01/abc.jpg",
+        )
+        assert result.meter_number == "22222"
+
+
+class TestTicketNumberExtraction:
+    """Validates: Requirement 8.1 — ticket_number extraction from OCR output."""
+
+    @pytest.mark.asyncio
+    async def test_extracts_ticket_number_from_ticket_number_key(
+        self,
+        service: MeterTicketOCRService,
+        textract: _FakeTextract,
+    ):
+        textract.next_response = _build_response(
+            pairs=[("TICKET NUMBER", "TK-2024-0042"), ("GALLONS", "780")],
+        )
+        result = await service.extract(
+            tenant_id="tenant-A",
+            file_ref="tenants/tenant-A/meter_ticket/2024/01/01/abc.jpg",
+        )
+        assert result.ticket_number == "TK-2024-0042"
+
+    @pytest.mark.asyncio
+    async def test_extracts_ticket_number_from_ticket_no_key(
+        self,
+        service: MeterTicketOCRService,
+        textract: _FakeTextract,
+    ):
+        textract.next_response = _build_response(
+            pairs=[("TICKET NO", "56789"), ("GALLONS", "500")],
+        )
+        result = await service.extract(
+            tenant_id="tenant-A",
+            file_ref="tenants/tenant-A/meter_ticket/2024/01/01/abc.jpg",
+        )
+        assert result.ticket_number == "56789"
+
+    @pytest.mark.asyncio
+    async def test_extracts_ticket_number_from_ticket_hash_key(
+        self,
+        service: MeterTicketOCRService,
+        textract: _FakeTextract,
+    ):
+        textract.next_response = _build_response(
+            pairs=[("TICKET #", "00123"), ("GALLONS", "300")],
+        )
+        result = await service.extract(
+            tenant_id="tenant-A",
+            file_ref="tenants/tenant-A/meter_ticket/2024/01/01/abc.jpg",
+        )
+        assert result.ticket_number == "00123"
+
+    @pytest.mark.asyncio
+    async def test_ticket_number_none_when_not_present(
+        self,
+        service: MeterTicketOCRService,
+        textract: _FakeTextract,
+    ):
+        textract.next_response = _build_response(
+            pairs=[("GALLONS", "780"), ("DRIVER", "JANE DOE")],
+        )
+        result = await service.extract(
+            tenant_id="tenant-A",
+            file_ref="tenants/tenant-A/meter_ticket/2024/01/01/abc.jpg",
+        )
+        assert result.ticket_number is None
+
+    @pytest.mark.asyncio
+    async def test_prefers_ticket_number_over_ticket_no(
+        self,
+        service: MeterTicketOCRService,
+        textract: _FakeTextract,
+    ):
+        # "TICKET NUMBER" is more specific and should be preferred.
+        textract.next_response = _build_response(
+            pairs=[
+                ("TICKET NO", "AAA"),
+                ("TICKET NUMBER", "BBB"),
+                ("GALLONS", "500"),
+            ],
+        )
+        result = await service.extract(
+            tenant_id="tenant-A",
+            file_ref="tenants/tenant-A/meter_ticket/2024/01/01/abc.jpg",
+        )
+        assert result.ticket_number == "BBB"
+
+
+class TestMeterAndTicketNumberCombined:
+    """Validates: Requirement 8.1 — both fields extracted together."""
+
+    @pytest.mark.asyncio
+    async def test_extracts_both_meter_and_ticket_number(
+        self,
+        service: MeterTicketOCRService,
+        textract: _FakeTextract,
+    ):
+        textract.next_response = _build_response(
+            pairs=[
+                ("METER NUMBER", "M-99887"),
+                ("TICKET NUMBER", "TK-0042"),
+                ("GALLONS", "1,234.56"),
+            ],
+            lines=["METER TICKET", "DELIVERY 12345"],
+        )
+        result = await service.extract(
+            tenant_id="tenant-A",
+            file_ref="tenants/tenant-A/meter_ticket/2024/01/01/abc.jpg",
+        )
+        assert result.meter_number == "M-99887"
+        assert result.ticket_number == "TK-0042"
+        assert result.extracted_gallons == 1234.56
+
+    @pytest.mark.asyncio
+    async def test_error_result_has_none_for_meter_and_ticket(
+        self,
+        service: MeterTicketOCRService,
+        textract: _FakeTextract,
+    ):
+        textract.raise_on_call = RuntimeError("throttled")
+        result = await service.extract(
+            tenant_id="tenant-A",
+            file_ref="tenants/tenant-A/meter_ticket/2024/01/01/abc.jpg",
+        )
+        assert result.meter_number is None
+        assert result.ticket_number is None
+        assert result.error_details is not None
+
+    @pytest.mark.asyncio
+    async def test_backwards_compatible_no_meter_ticket_fields(
+        self,
+        service: MeterTicketOCRService,
+        textract: _FakeTextract,
+    ):
+        """Existing callers that only use extracted_gallons still work."""
+        textract.next_response = _build_response(
+            pairs=[("GALLONS", "780")],
+        )
+        result = await service.extract(
+            tenant_id="tenant-A",
+            file_ref="tenants/tenant-A/meter_ticket/2024/01/01/abc.jpg",
+        )
+        # Gallons still extracted correctly.
+        assert result.extracted_gallons == 780.0
+        # New fields default to None when not present in OCR output.
+        assert result.meter_number is None
+        assert result.ticket_number is None

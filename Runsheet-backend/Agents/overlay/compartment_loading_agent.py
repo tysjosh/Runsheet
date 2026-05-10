@@ -214,6 +214,20 @@ class CompartmentLoadingAgent(OverlayAgentBase):
 
         self._tenant_config = tenant_config
 
+    def set_dyed_diesel_enforcer(self, enforcer: Optional[Any]) -> None:
+        """Inject the :class:`DyedDieselEnforcer` post-construction.
+
+        Validates: Requirements 6.3, 6.4.
+
+        Bootstrap injects the DyedDieselEnforcer into the agent so that
+        every proposed compartment assignment involving dyed diesel is
+        validated against the compartment's dyed-compatible flag before
+        the plan is committed to ``mvp_load_plans``. When the enforcer
+        is ``None`` (legacy path, test environments) the dyed-diesel
+        check is skipped and all assignments pass through unchanged.
+        """
+        self._dyed_diesel_enforcer = enforcer
+
     def set_contract_lift_service(
         self, contract_lift_service: Optional[ContractLiftService]
     ) -> None:
@@ -404,6 +418,21 @@ class CompartmentLoadingAgent(OverlayAgentBase):
             if not loading_plan.assignments:
                 # Every assignment was blocked — skip the plan to avoid
                 # writing an empty Loading_Plan to mvp_load_plans.
+                continue
+
+            # Task 9.8 / Req 6.3, 6.4: before persisting the plan,
+            # validate that any dyed-diesel assignments target
+            # dyed-compatible compartments. Rejected assignments are
+            # stripped from the plan and their volume is charged to
+            # unserved_demand_liters.
+            loading_plan = await self._enforce_dyed_diesel_compliance(
+                loading_plan=loading_plan,
+                tenant_id=tenant_id,
+            )
+
+            if not loading_plan.assignments:
+                # Every assignment was blocked by dyed-diesel rules —
+                # skip the plan.
                 continue
 
             # Step 5: Persist loading plan to ES (Req 3.9)
@@ -1677,6 +1706,136 @@ class CompartmentLoadingAgent(OverlayAgentBase):
             contract_id,
             gallons,
             new_total,
+        )
+
+    # ------------------------------------------------------------------
+    # Dyed diesel compliance enforcement (Task 9.8 / Req 6.3, 6.4)
+    # ------------------------------------------------------------------
+
+    async def _enforce_dyed_diesel_compliance(
+        self,
+        *,
+        loading_plan: LoadingPlan,
+        tenant_id: str,
+    ) -> LoadingPlan:
+        """Reject assignments that load dyed diesel into clear-only compartments.
+
+        Validates: Requirements 6.3, 6.4.
+
+        For each assignment in ``loading_plan``, if the product is a
+        dyed-diesel code, calls
+        :meth:`DyedDieselEnforcer.validate_load_plan` to verify the
+        compartment is dyed-compatible. If validation fails (error code
+        ``dyed.compartment_incompatible`` or ``dyed.compartment_not_found``),
+        the assignment is stripped from the plan and its volume is charged
+        to ``unserved_demand_liters``.
+
+        When no enforcer is configured (``_dyed_diesel_enforcer is None``),
+        all assignments pass through unchanged (graceful degradation).
+
+        Returns the (possibly filtered) LoadingPlan.
+        """
+        enforcer = getattr(self, "_dyed_diesel_enforcer", None)
+        if enforcer is None:
+            return loading_plan
+
+        # Import here to avoid circular dependency at module level
+        from compliance.services.dyed_diesel_enforcer import DyedDieselEnforcer
+
+        if not isinstance(enforcer, DyedDieselEnforcer):
+            return loading_plan
+
+        original_assignments = loading_plan.assignments
+        kept_assignments: List[CompartmentAssignment] = []
+        rejected_volume = 0.0
+
+        for assignment in original_assignments:
+            product_code = assignment.fuel_grade
+
+            # Only check dyed-diesel products
+            if not enforcer.is_dyed_diesel(product_code):
+                kept_assignments.append(assignment)
+                continue
+
+            # Validate the compartment is dyed-compatible
+            try:
+                result = await enforcer.validate_load_plan(
+                    tenant_id=tenant_id,
+                    compartment_id=assignment.compartment_id,
+                    product_code=product_code,
+                )
+            except Exception as exc:
+                # Fail-open: if the enforcer raises, allow the assignment
+                # so a transient ES issue does not block all dyed-diesel
+                # loads. The enforcer itself logs the error.
+                logger.warning(
+                    "CompartmentLoadingAgent: dyed diesel validation failed "
+                    "for compartment %s (plan=%s, tenant=%s): %s — "
+                    "allowing assignment (fail-open)",
+                    assignment.compartment_id,
+                    loading_plan.plan_id,
+                    tenant_id,
+                    exc,
+                )
+                kept_assignments.append(assignment)
+                continue
+
+            if result.valid:
+                kept_assignments.append(assignment)
+            else:
+                # Rejected — log and strip from the plan
+                logger.warning(
+                    "CompartmentLoadingAgent: dyed diesel assignment rejected "
+                    "for compartment %s (plan=%s, tenant=%s): %s [%s]",
+                    assignment.compartment_id,
+                    loading_plan.plan_id,
+                    tenant_id,
+                    result.error_code,
+                    result.message,
+                )
+                rejected_volume += float(assignment.quantity_liters)
+
+        if not rejected_volume:
+            return loading_plan
+
+        # Recompute plan metrics with the filtered assignments
+        retained_volume = sum(a.quantity_liters for a in kept_assignments)
+        total_capacity = sum(
+            a.compartment_capacity_liters for a in original_assignments
+        )
+        new_utilization = (
+            round((retained_volume / total_capacity) * 100, 2)
+            if total_capacity > 0
+            else 0.0
+        )
+        new_weight = round(
+            sum(
+                _fuel_density_kg_per_liter(a.fuel_grade) * a.quantity_liters
+                for a in kept_assignments
+            ),
+            2,
+        )
+        new_unserved = round(
+            float(loading_plan.unserved_demand_liters) + rejected_volume, 2
+        )
+
+        logger.warning(
+            "CompartmentLoadingAgent: stripped %d dyed-diesel assignment(s) "
+            "totalling %.0fL from plan %s (tenant=%s) due to "
+            "compartment incompatibility (Req 6.3/6.4)",
+            len(original_assignments) - len(kept_assignments),
+            rejected_volume,
+            loading_plan.plan_id,
+            tenant_id,
+        )
+
+        return loading_plan.model_copy(
+            update={
+                "assignments": kept_assignments,
+                "total_utilization_pct": new_utilization,
+                "total_weight_kg": new_weight,
+                "unserved_demand_liters": new_unserved,
+            }
         )
 
     # ------------------------------------------------------------------

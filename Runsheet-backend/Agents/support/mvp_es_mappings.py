@@ -399,6 +399,12 @@ TRUCK_COMPARTMENTS_MAPPING = {
             "last_loaded_at":      {"type": "date"},
             "last_cleaned_at":     {"type": "date"},
             "state":               {"type": "keyword"},
+            # --- fuel-compliance-backbone Requirement 6.3 / 6.4 ---
+            # Dyed-diesel compatibility flag. When False the compartment is
+            # designated clear-only and the Dyed_Diesel_Enforcer will reject
+            # load plans that assign dyed diesel to it. Nullable so legacy
+            # documents without the field default to True (dyed-compatible).
+            "dyed_compatible":     {"type": "boolean"},
         },
     },
     "settings": {

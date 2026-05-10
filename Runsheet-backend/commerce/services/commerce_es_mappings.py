@@ -180,6 +180,20 @@ INVOICES_CURRENT_MAPPING = {
                     "subtotal_cents":   {"type": "long"},
                 },
             },
+            # Tax breakdown appended by InvoiceService.generate_from_order
+            # when a TaxEngine is wired in (fuel-compliance-backbone
+            # task 3.10). Stores the per-component cents bucket rollup
+            # from TaxEngine.compute_tax() so Form 720 reporting has
+            # a stable projection to read from. ``enabled: False``
+            # keeps the object payload (including nested line_items)
+            # but skips indexing to avoid exploding the field set on
+            # the strict mapping — we never query into tax_breakdown,
+            # only render it on the invoice.
+            "tax_breakdown":       {"type": "object", "enabled": False},
+            # Exemption ids honored by the TaxEngine when computing
+            # the breakdown for this invoice. Persisted for IRS /
+            # operator audit (Req 6.7).
+            "exemptions_applied":  {"type": "keyword"},
             "issued_at":           {"type": "date"},
             "due_date":            {"type": "date"},
             "finalized_at":        {"type": "date"},
