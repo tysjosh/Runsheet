@@ -223,10 +223,13 @@ class OpsWebSocketManager(BaseWSManager):
 
     async def _broadcast_event(self, event_type: str, data: dict) -> int:
         """
-        Send *data* to every client whose subscriptions include *event_type*.
+        Send *data* to every client whose subscriptions include *event_type*
+        and whose tenant matches the data's tenant_id.
 
         Excludes clients belonging to disabled tenants (Req 27.3).
         Applies backpressure from BaseWSManager.
+        Enforces tenant isolation: only clients with matching tenant_id
+        receive the broadcast.
         """
         data_tenant_id = data.get("tenant_id", "")
 
@@ -256,7 +259,8 @@ class OpsWebSocketManager(BaseWSManager):
         async with self._lock:
             targets = [
                 (ws, meta) for ws, meta in self._clients.items()
-                if not meta.get("subscriptions") or event_type in meta.get("subscriptions", set())
+                if (not meta.get("subscriptions") or event_type in meta.get("subscriptions", set()))
+                and (not data_tenant_id or meta.get("tenant_id") == data_tenant_id)
             ]
 
         if not targets:

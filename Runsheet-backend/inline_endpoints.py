@@ -12,10 +12,16 @@ import time
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Request
+from fastapi import APIRouter, Depends, UploadFile, File, Form, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from errors.exceptions import (
+    AppException,
+    internal_error,
+    resource_not_found,
+    validation_error,
+)
 from ops.middleware.tenant_guard import (
     TenantContext,
     get_tenant_context,
@@ -206,13 +212,19 @@ async def upload_csv_temporal(
     tenant: TenantContext = Depends(get_tenant_context),
 ):
     if data_type not in VALID_DATA_TYPES:
-        raise HTTPException(status_code=400, detail=f"Invalid data_type '{data_type}'. Must be one of: {sorted(VALID_DATA_TYPES)}")
+        raise validation_error(
+            message=f"Invalid data_type '{data_type}'. Must be one of: {sorted(VALID_DATA_TYPES)}",
+            details={"data_type": data_type, "valid_types": sorted(VALID_DATA_TYPES)},
+        )
     from services.data_seeder import data_seeder
     content = await file.read()
     documents = [d for d in (convert_csv_row_to_document(row, data_type, tenant.tenant_id)
                              for row in csv.DictReader(io.StringIO(content.decode("utf-8")))) if d]
     if not documents:
-        raise HTTPException(status_code=400, detail="No valid data found in CSV")
+        raise validation_error(
+            message="No valid data found in CSV",
+            details={"data_type": data_type},
+        )
     await data_seeder.upsert_batch_data(
         data_type=data_type,
         documents=documents,
@@ -278,7 +290,10 @@ async def upload_sheets_temporal(
     from services.data_seeder import data_seeder
     documents = generate_demo_sheets_data(request.data_type, request.batch_id, tenant.tenant_id)
     if not documents:
-        raise HTTPException(status_code=400, detail="No data generated from sheets")
+        raise validation_error(
+            message="No data generated from sheets",
+            details={"data_type": request.data_type},
+        )
     await data_seeder.upsert_batch_data(
         data_type=request.data_type,
         documents=documents,
@@ -315,7 +330,10 @@ async def location_webhook(
     if result.success:
         return {"success": True, "truck_id": result.truck_id, "message": result.message,
                 "timestamp": utcnow().isoformat()}
-    raise HTTPException(status_code=500, detail=result.message)
+    raise internal_error(
+        message=result.message,
+        details={"truck_id": result.truck_id},
+    )
 
 @router.post("/api/locations/batch")
 async def batch_location_updates(

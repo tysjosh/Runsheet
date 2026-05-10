@@ -61,7 +61,6 @@ class CommunicationMetricsService:
             latency in seconds, and doc_count.
         """
         must_clauses = [
-            {"term": {"tenant_id": tenant_id}},
             {"terms": {"event_type": ["assignment", "ack"]}},
         ]
 
@@ -74,7 +73,12 @@ class CommunicationMetricsService:
             must_clauses.append({"range": {"event_timestamp": time_range}})
 
         query = {
-            "query": {"bool": {"must": must_clauses}},
+            "query": {
+                "bool": {
+                    "must": must_clauses,
+                    "filter": [{"term": {"tenant_id": tenant_id}}],
+                }
+            },
             "size": 0,
             "aggs": {
                 "by_job": {
@@ -206,7 +210,6 @@ class CommunicationMetricsService:
             Dict with 'by_channel' and 'buckets' containing latency stats.
         """
         must_clauses = [
-            {"term": {"tenant_id": tenant_id}},
             {"exists": {"field": "sent_at"}},
             {"exists": {"field": "created_at"}},
         ]
@@ -220,7 +223,12 @@ class CommunicationMetricsService:
             must_clauses.append({"range": {"created_at": time_range}})
 
         query = {
-            "query": {"bool": {"must": must_clauses}},
+            "query": {
+                "bool": {
+                    "must": must_clauses,
+                    "filter": [{"term": {"tenant_id": tenant_id}}],
+                }
+            },
             "size": 0,
             "runtime_mappings": {
                 "send_latency_ms": {
@@ -328,7 +336,6 @@ class CommunicationMetricsService:
             Dict with 'buckets' list and 'overall' stats.
         """
         must_clauses = [
-            {"term": {"tenant_id": tenant_id}},
             {"terms": {"event_type": ["assignment", "accept", "reject"]}},
         ]
 
@@ -341,7 +348,12 @@ class CommunicationMetricsService:
             must_clauses.append({"range": {"event_timestamp": time_range}})
 
         query = {
-            "query": {"bool": {"must": must_clauses}},
+            "query": {
+                "bool": {
+                    "must": must_clauses,
+                    "filter": [{"term": {"tenant_id": tenant_id}}],
+                }
+            },
             "size": 0,
             "aggs": {
                 "by_job": {
@@ -475,9 +487,7 @@ class CommunicationMetricsService:
         Returns:
             Dict with 'by_channel' failure rates and 'buckets' over time.
         """
-        must_clauses = [
-            {"term": {"tenant_id": tenant_id}},
-        ]
+        must_clauses = []
 
         if start_date or end_date:
             time_range: dict = {}
@@ -488,7 +498,12 @@ class CommunicationMetricsService:
             must_clauses.append({"range": {"created_at": time_range}})
 
         query = {
-            "query": {"bool": {"must": must_clauses}},
+            "query": {
+                "bool": {
+                    "must": must_clauses,
+                    "filter": [{"term": {"tenant_id": tenant_id}}],
+                }
+            },
             "size": 0,
             "aggs": {
                 "by_channel": {

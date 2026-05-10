@@ -13,12 +13,19 @@ Validates: Requirements 1.1–1.5, 2.1–2.6, 3.1–3.9, 4.1–4.7, 5.1–5.6, 6
 """
 
 import logging
-from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel, Field
 
+from errors.exceptions import (
+    AppException,
+    internal_error,
+    resource_not_found,
+    validation_error,
+)
+from errors.codes import ErrorCode
+from services.time_utils import utcnow
 from fuel.services.fuel_product_catalog import (
     UnknownFuelProductError,
     canonicalize,
@@ -213,7 +220,7 @@ async def generate_plan(
         )
     except Exception as e:
         logger.error("Failed to generate plan: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(message=str(e), details={"tenant_id": tenant_id})
 
 
 # ---------------------------------------------------------------------------
@@ -323,9 +330,11 @@ async def replan(
         body = ReplanRequest()
 
     if _exception_replanning_agent is None:
-        raise HTTPException(
+        raise AppException(
+            error_code=ErrorCode.AI_SERVICE_UNAVAILABLE,
+            message="Exception replanning agent not available",
             status_code=503,
-            detail="Exception replanning agent not available",
+            details={"service": "exception_replanning_agent"},
         )
 
     try:
@@ -358,7 +367,7 @@ async def replan(
         }
     except Exception as e:
         logger.error("Failed to trigger replan for %s: %s", plan_id, e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(message=str(e), details={"plan_id": plan_id})
 
 
 # ---------------------------------------------------------------------------
@@ -465,7 +474,7 @@ async def get_forecasts(
         )
     except Exception as e:
         logger.error("Failed to query forecasts: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(message=str(e), details={"tenant_id": tenant_id})
 
 
 # ---------------------------------------------------------------------------
@@ -518,15 +527,11 @@ async def configure_compartments(
                 try:
                     canonical_grades.append(canonicalize(grade))
                 except UnknownFuelProductError as exc:
-                    raise HTTPException(
-                        status_code=400,
-                        detail={
-                            "error_code": "unknown_product_code",
-                            "message": "Unknown fuel product in allowed_grades",
-                            "details": {
-                                "compartment_id": compartment.compartment_id,
-                                "fuel_grade": exc.code_or_alias,
-                            },
+                    raise validation_error(
+                        message="Unknown fuel product in allowed_grades",
+                        details={
+                            "compartment_id": compartment.compartment_id,
+                            "fuel_grade": exc.code_or_alias,
                         },
                     ) from exc
 
@@ -576,13 +581,13 @@ async def configure_compartments(
             "compartments_configured": len(written_compartments),
             "status": "success",
         }
-    except HTTPException:
+    except AppException:
         # Surface the original status code (e.g. 400 for unknown_product_code)
         # rather than hiding it behind a generic 500.
         raise
     except Exception as e:
         logger.error("Failed to configure compartments for %s: %s", truck_id, e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(message=str(e), details={"truck_id": truck_id})
 
 
 # ---------------------------------------------------------------------------
@@ -635,7 +640,7 @@ async def list_plans(
         )
     except Exception as e:
         logger.error("Failed to list plans: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(message=str(e), details={"tenant_id": tenant_id})
 
 
 # ---------------------------------------------------------------------------
@@ -680,20 +685,25 @@ async def approve_plan(
         resp = await es.search_documents("mvp_load_plans", plan_query, 1)
         hits = resp.get("hits", {}).get("hits", [])
         if not hits:
-            raise HTTPException(status_code=404, detail=f"Plan {plan_id} not found")
+            raise resource_not_found(
+                message=f"Plan {plan_id} not found",
+                details={"plan_id": plan_id},
+            )
 
         plan_doc = hits[0]["_source"]
         plan_status = plan_doc.get("status", "")
 
         if plan_status != "draft" and plan_status != "proposed":
-            raise HTTPException(
-                status_code=409,
-                detail=f"Plan {plan_id} is not in 'draft' or 'proposed' status (current: {plan_status}). "
+            raise AppException(
+                error_code=ErrorCode.INVALID_STATUS_TRANSITION,
+                message=f"Plan {plan_id} is not in 'draft' or 'proposed' status (current: {plan_status}). "
                        "Only draft/proposed plans can be approved.",
+                status_code=409,
+                details={"plan_id": plan_id, "current_status": plan_status},
             )
 
         # Update plan status to dispatched
-        now = datetime.now(timezone.utc).isoformat()
+        now = utcnow().isoformat()
         update_doc = {
             "status": "dispatched",
             "approved_by": dispatcher_id,
@@ -746,11 +756,11 @@ async def approve_plan(
             "executions_created": len(executions_created),
         }
 
-    except HTTPException:
+    except AppException:
         raise
     except Exception as e:
         logger.error("Failed to approve plan %s: %s", plan_id, e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(message=str(e), details={"plan_id": plan_id})
 
 
 # ---------------------------------------------------------------------------
@@ -794,20 +804,25 @@ async def reject_plan(
         resp = await es.search_documents("mvp_load_plans", plan_query, 1)
         hits = resp.get("hits", {}).get("hits", [])
         if not hits:
-            raise HTTPException(status_code=404, detail=f"Plan {plan_id} not found")
+            raise resource_not_found(
+                message=f"Plan {plan_id} not found",
+                details={"plan_id": plan_id},
+            )
 
         plan_doc = hits[0]["_source"]
         plan_status = plan_doc.get("status", "")
 
         if plan_status != "draft" and plan_status != "proposed":
-            raise HTTPException(
-                status_code=409,
-                detail=f"Plan {plan_id} is not in 'draft' or 'proposed' status (current: {plan_status}). "
+            raise AppException(
+                error_code=ErrorCode.INVALID_STATUS_TRANSITION,
+                message=f"Plan {plan_id} is not in 'draft' or 'proposed' status (current: {plan_status}). "
                        "Only draft/proposed plans can be rejected.",
+                status_code=409,
+                details={"plan_id": plan_id, "current_status": plan_status},
             )
 
         # Update plan status to rejected
-        now = datetime.now(timezone.utc).isoformat()
+        now = utcnow().isoformat()
         reason = body.reason if body else None
 
         update_doc = {
@@ -836,11 +851,11 @@ async def reject_plan(
             "rejection_reason": reason,
         }
 
-    except HTTPException:
+    except AppException:
         raise
     except Exception as e:
         logger.error("Failed to reject plan %s: %s", plan_id, e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(message=str(e), details={"plan_id": plan_id})
 
 
 # ---------------------------------------------------------------------------
@@ -898,7 +913,7 @@ async def driver_checkin(
         # trigger outcome computation and actual cost calculation
         if result.get("all_complete"):
             es = _get_es()
-            now = datetime.now(timezone.utc).isoformat()
+            now = utcnow().isoformat()
             await es.update_document(
                 "mvp_load_plans", plan_id, {"status": "completed"}
             )
@@ -939,16 +954,26 @@ async def driver_checkin(
         # PlanExecutionService raises ValueError for state conflicts
         error_msg = str(e)
         if "not in 'dispatched' status" in error_msg:
-            raise HTTPException(status_code=409, detail=error_msg)
+            raise AppException(
+                error_code=ErrorCode.INVALID_STATUS_TRANSITION,
+                message=error_msg,
+                status_code=409,
+                details={"plan_id": plan_id},
+            )
         elif "already completed" in error_msg:
-            raise HTTPException(status_code=409, detail=error_msg)
+            raise AppException(
+                error_code=ErrorCode.INVALID_STATUS_TRANSITION,
+                message=error_msg,
+                status_code=409,
+                details={"plan_id": plan_id},
+            )
         else:
-            raise HTTPException(status_code=400, detail=error_msg)
-    except HTTPException:
+            raise validation_error(message=error_msg, details={"plan_id": plan_id})
+    except AppException:
         raise
     except Exception as e:
         logger.error("Failed to record check-in for plan %s: %s", plan_id, e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(message=str(e), details={"plan_id": plan_id})
 
 
 # ---------------------------------------------------------------------------
@@ -988,16 +1013,19 @@ async def get_plan_outcomes(
         resp = await es.search_documents("mvp_load_plans", plan_query, 1)
         hits = resp.get("hits", {}).get("hits", [])
         if not hits:
-            raise HTTPException(status_code=404, detail=f"Plan {plan_id} not found")
+            raise resource_not_found(
+                message=f"Plan {plan_id} not found",
+                details={"plan_id": plan_id},
+            )
 
         plan_doc = hits[0]["_source"]
         plan_status = plan_doc.get("status", "")
 
         if plan_status != "completed":
-            raise HTTPException(
-                status_code=400,
-                detail=f"Plan {plan_id} is not completed (current status: {plan_status}). "
+            raise validation_error(
+                message=f"Plan {plan_id} is not completed (current status: {plan_status}). "
                        "Outcome data is only available for completed plans.",
+                details={"plan_id": plan_id, "current_status": plan_status},
             )
 
         # Fetch outcome data from mvp_plan_outcomes
@@ -1019,18 +1047,18 @@ async def get_plan_outcomes(
         outcome_hits = outcome_resp.get("hits", {}).get("hits", [])
 
         if not outcome_hits:
-            raise HTTPException(
-                status_code=404,
-                detail=f"No outcome data found for plan {plan_id}",
+            raise resource_not_found(
+                message=f"No outcome data found for plan {plan_id}",
+                details={"plan_id": plan_id},
             )
 
         return outcome_hits[0]["_source"]
 
-    except HTTPException:
+    except AppException:
         raise
     except Exception as e:
         logger.error("Failed to get outcomes for plan %s: %s", plan_id, e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(message=str(e), details={"plan_id": plan_id})
 
 
 # ---------------------------------------------------------------------------
@@ -1058,10 +1086,10 @@ async def get_plan_costs(
     # Check cost config exists for tenant
     cost_config = await execution_service.get_cost_config(tenant_id)
     if cost_config is None:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Cost configuration not found for tenant {tenant_id}. "
+        raise validation_error(
+            message=f"Cost configuration not found for tenant {tenant_id}. "
                    "Please configure cost parameters first.",
+            details={"tenant_id": tenant_id},
         )
 
     # Fetch the plan
@@ -1081,7 +1109,10 @@ async def get_plan_costs(
         resp = await es.search_documents("mvp_load_plans", plan_query, 1)
         hits = resp.get("hits", {}).get("hits", [])
         if not hits:
-            raise HTTPException(status_code=404, detail=f"Plan {plan_id} not found")
+            raise resource_not_found(
+                message=f"Plan {plan_id} not found",
+                details={"plan_id": plan_id},
+            )
 
         plan_doc = hits[0]["_source"]
         plan_status = plan_doc.get("status", "")
@@ -1101,11 +1132,11 @@ async def get_plan_costs(
 
         return result
 
-    except HTTPException:
+    except AppException:
         raise
     except Exception as e:
         logger.error("Failed to get costs for plan %s: %s", plan_id, e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(message=str(e), details={"plan_id": plan_id})
 
 
 # ---------------------------------------------------------------------------
@@ -1148,4 +1179,4 @@ async def update_cost_config(
 
     except Exception as e:
         logger.error("Failed to update cost config for tenant %s: %s", tenant_id, e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(message=str(e), details={"tenant_id": tenant_id})

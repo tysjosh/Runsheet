@@ -124,8 +124,12 @@ class SchedulingWebSocketManager(BaseWSManager):
     # Broadcasting
     # ------------------------------------------------------------------
 
-    async def broadcast(self, event_type: str, data: dict) -> int:
-        """Send data to every client whose subscriptions include event_type.
+    async def broadcast(self, event_type: str, data: dict, tenant_id: str = "") -> int:
+        """Send data to clients whose subscriptions include event_type.
+
+        When *tenant_id* is provided, only clients whose
+        ``meta.tenant_id == tenant_id`` receive the message. This prevents
+        cross-tenant data leakage over WebSocket broadcasts.
 
         Applies backpressure from BaseWSManager.
 
@@ -143,7 +147,8 @@ class SchedulingWebSocketManager(BaseWSManager):
         async with self._lock:
             targets = [
                 (ws, meta) for ws, meta in self._clients.items()
-                if not meta.get("subscriptions") or event_type in meta.get("subscriptions", set())
+                if (not meta.get("subscriptions") or event_type in meta.get("subscriptions", set()))
+                and (not tenant_id or meta.get("tenant_id") == tenant_id)
             ]
 
         if not targets:
@@ -194,14 +199,14 @@ class SchedulingWebSocketManager(BaseWSManager):
 
     async def broadcast_job_created(self, job_data: dict) -> int:
         """Broadcast a job_created event. Validates: Req 9.2"""
-        return await self.broadcast("job_created", job_data)
+        return await self.broadcast("job_created", job_data, tenant_id=job_data.get("tenant_id", ""))
 
     async def broadcast_status_changed(
         self, job_data: dict, old_status: str, new_status: str
     ) -> int:
         """Broadcast a status_changed event. Validates: Req 9.2"""
         payload = {**job_data, "old_status": old_status, "new_status": new_status}
-        return await self.broadcast("status_changed", payload)
+        return await self.broadcast("status_changed", payload, tenant_id=job_data.get("tenant_id", ""))
 
     async def broadcast_delay_alert(
         self, job_data: dict, delay_minutes: int
@@ -217,17 +222,17 @@ class SchedulingWebSocketManager(BaseWSManager):
             "delay_duration_minutes": delay_minutes,
             "tenant_id": job_data.get("tenant_id"),
         }
-        return await self.broadcast("delay_alert", payload)
+        return await self.broadcast("delay_alert", payload, tenant_id=job_data.get("tenant_id", ""))
 
     async def broadcast_cargo_update(
-        self, job_id: str, item_id: str, new_status: str
+        self, job_id: str, item_id: str, new_status: str, tenant_id: str = ""
     ) -> int:
         """Broadcast a cargo_update event. Validates: Req 9.3"""
         return await self.broadcast("cargo_update", {
             "job_id": job_id,
             "item_id": item_id,
             "item_status": new_status,
-        })
+        }, tenant_id=tenant_id)
 
     async def broadcast_cargo_complete(
         self, job_id: str, job_data: dict
@@ -239,7 +244,7 @@ class SchedulingWebSocketManager(BaseWSManager):
             "origin": job_data.get("origin"),
             "destination": job_data.get("destination"),
             "asset_assigned": job_data.get("asset_assigned"),
-        })
+        }, tenant_id=job_data.get("tenant_id", ""))
 
     # ------------------------------------------------------------------
     # Heartbeat & stale detection  (Req 9.6)

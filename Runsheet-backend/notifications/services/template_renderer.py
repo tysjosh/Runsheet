@@ -487,9 +487,7 @@ class TemplateRenderer:
         Returns:
             List of template dicts sorted by ``event_type`` then ``channel``.
         """
-        must_clauses: list[dict] = [
-            {"term": {"tenant_id": tenant_id}},
-        ]
+        must_clauses: list[dict] = []
 
         if event_type:
             must_clauses.append({"term": {"event_type": event_type}})
@@ -501,6 +499,7 @@ class TemplateRenderer:
             "query": {
                 "bool": {
                     "must": must_clauses,
+                    "filter": [{"term": {"tenant_id": tenant_id}}],
                 }
             },
             "sort": [
@@ -644,8 +643,8 @@ class TemplateRenderer:
                 "bool": {
                     "must": [
                         {"term": {"template_id": template_id}},
-                        {"term": {"tenant_id": tenant_id}},
-                    ]
+                    ],
+                    "filter": [{"term": {"tenant_id": tenant_id}}],
                 }
             },
             "size": 1,

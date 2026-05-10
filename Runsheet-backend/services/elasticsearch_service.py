@@ -1590,8 +1590,8 @@ class ElasticsearchService:
             raise ValueError("get_time_series_data requires a tenant_id")
         try:
             # Calculate date range
-            from datetime import datetime, timedelta
-            now = datetime.now()
+            from datetime import timedelta
+            now = utcnow()
 
             if time_range == "24h":
                 start_time = now - timedelta(hours=24)

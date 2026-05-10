@@ -669,19 +669,22 @@ class TestMonitorCycleTenantId:
 
     @pytest.mark.asyncio
     async def test_defaults_to_default_tenant(self):
+        """Jobs without tenant_id are skipped (no 'default' fallback)."""
         agent = _make_agent(feature_flags=False)
         job = _delayed_job()
-        del job["tenant_id"]  # Remove tenant_id to test default
+        del job["tenant_id"]  # Remove tenant_id — should be skipped
         asset = _available_asset()
 
         agent._es.search_documents = AsyncMock(
             side_effect=[_es_response([job]), _es_response([asset])]
         )
 
-        await agent.monitor_cycle()
+        detections, actions = await agent.monitor_cycle()
 
-        request = agent._confirmation_protocol.process_mutation.call_args[0][0]
-        assert request.tenant_id == "default"
+        # Job without tenant_id is skipped entirely
+        assert detections == []
+        assert actions == []
+        agent._confirmation_protocol.process_mutation.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

@@ -70,8 +70,8 @@ class RuleEngine:
                 "bool": {
                     "must": [
                         {"term": {"event_type": event_type}},
-                        {"term": {"tenant_id": tenant_id}},
-                    ]
+                    ],
+                    "filter": [{"term": {"tenant_id": tenant_id}}],
                 }
             },
             "size": 1,
@@ -120,9 +120,8 @@ class RuleEngine:
         query = {
             "query": {
                 "bool": {
-                    "must": [
-                        {"term": {"tenant_id": tenant_id}},
-                    ]
+                    "must": [],
+                    "filter": [{"term": {"tenant_id": tenant_id}}],
                 }
             },
             "sort": [{"event_type": {"order": "asc"}}],
@@ -262,8 +261,8 @@ class RuleEngine:
                 "bool": {
                     "must": [
                         {"term": {"rule_id": rule_id}},
-                        {"term": {"tenant_id": tenant_id}},
-                    ]
+                    ],
+                    "filter": [{"term": {"tenant_id": tenant_id}}],
                 }
             },
             "size": 1,

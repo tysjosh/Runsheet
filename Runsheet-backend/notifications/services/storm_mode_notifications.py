@@ -331,9 +331,9 @@ class StormModeNotificationResolver:
             "query": {
                 "bool": {
                     "must": [
-                        {"term": {"tenant_id": tenant_id}},
                         {"term": {"customer_id": customer_id}},
-                    ]
+                    ],
+                    "filter": [{"term": {"tenant_id": tenant_id}}],
                 }
             },
             "size": 1,

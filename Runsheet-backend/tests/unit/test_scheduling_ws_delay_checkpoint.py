@@ -99,7 +99,7 @@ class TestWebSocketReceivesJobCreated:
         mgr = SchedulingWebSocketManager()
         ws = FakeWebSocket()
 
-        await mgr.connect(ws, subscriptions=["job_created"])
+        await mgr.connect(ws, subscriptions=["job_created"], tenant_id="tenant_a")
 
         # The connect sends a "connection" message first
         assert len(ws.messages) == 1
@@ -258,7 +258,7 @@ class TestWebSocketReceivesDelayAlert:
         mgr = SchedulingWebSocketManager()
         ws = FakeWebSocket()
 
-        await mgr.connect(ws, subscriptions=["delay_alert"])
+        await mgr.connect(ws, subscriptions=["delay_alert"], tenant_id="tenant_a")
 
         sent = await mgr.broadcast_delay_alert(
             job_data={

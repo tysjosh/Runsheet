@@ -128,7 +128,6 @@ class AuditTimelineService:
         """
         must_clauses: list[dict] = [
             {"term": {"job_id": job_id}},
-            {"term": {"tenant_id": tenant_id}},
         ]
 
         if event_type is not None:
@@ -146,7 +145,12 @@ class AuditTimelineService:
             must_clauses.append({"range": {"timestamp": time_range}})
 
         query = {
-            "query": {"bool": {"must": must_clauses}},
+            "query": {
+                "bool": {
+                    "must": must_clauses,
+                    "filter": [{"term": {"tenant_id": tenant_id}}],
+                }
+            },
             "sort": [{"timestamp": {"order": "asc"}}],
             "size": 10000,
         }

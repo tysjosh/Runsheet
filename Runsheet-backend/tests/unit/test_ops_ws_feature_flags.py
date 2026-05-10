@@ -175,7 +175,7 @@ class TestBroadcastExcludesDisabledTenants:
         mgr.set_feature_flag_service(_make_ff_service(enabled=True))
 
         ws = _make_ws()
-        mgr._clients[ws] = _make_client_meta(tenant_id="tenant-x")
+        mgr._clients[ws] = _make_client_meta(tenant_id="enabled-tenant")
 
         sent = await mgr.broadcast_shipment_update({"tenant_id": "enabled-tenant", "status": "delivered"})
 
@@ -210,7 +210,7 @@ class TestBroadcastExcludesDisabledTenants:
         mgr.set_feature_flag_service(ff)
 
         ws = _make_ws()
-        mgr._clients[ws] = _make_client_meta(tenant_id="tenant-x")
+        mgr._clients[ws] = _make_client_meta(tenant_id="some-tenant")
 
         sent = await mgr.broadcast_shipment_update({"tenant_id": "some-tenant", "status": "delivered"})
 

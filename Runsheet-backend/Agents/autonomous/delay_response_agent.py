@@ -107,13 +107,17 @@ class DelayResponseAgent(AutonomousAgentBase):
 
         now = datetime.now(timezone.utc).isoformat()
 
-        # Query for in-progress jobs past estimated_arrival
+        # Query for in-progress jobs past estimated_arrival, scoped per
+        # tenant. Only process documents that carry a tenant_id — legacy
+        # docs without one are skipped rather than falling back to a
+        # hard-coded "default" tenant which would bypass isolation.
         query = {
             "query": {
                 "bool": {
                     "filter": [
                         {"term": {"status": "in_progress"}},
                         {"range": {"estimated_arrival": {"lt": now}}},
+                        {"exists": {"field": "tenant_id"}},
                     ]
                 }
             },
@@ -125,7 +129,11 @@ class DelayResponseAgent(AutonomousAgentBase):
 
         for job in delayed_jobs:
             job_id = job.get("job_id")
-            tenant_id = job.get("tenant_id", "default")
+            tenant_id = job.get("tenant_id")
+
+            # Skip documents that somehow lack a tenant_id (defensive)
+            if not tenant_id:
+                continue
 
             # Respect tenant feature flags (Req 3.8)
             if self._feature_flags:

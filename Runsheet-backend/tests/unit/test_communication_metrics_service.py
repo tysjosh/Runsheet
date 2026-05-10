@@ -59,7 +59,8 @@ class TestComputeAckLatency:
         call_args = es.search_documents.call_args
         query = call_args[0][1]
         must = query["query"]["bool"]["must"]
-        assert {"term": {"tenant_id": "tenant-1"}} in must
+        filter_clause = query["query"]["bool"]["filter"]
+        assert {"term": {"tenant_id": "tenant-1"}} in filter_clause
         assert {"terms": {"event_type": ["assignment", "ack"]}} in must
 
     async def test_applies_date_range_filter(self):
@@ -200,7 +201,8 @@ class TestComputeNotificationSendLatency:
         call_args = es.search_documents.call_args
         query = call_args[0][1]
         must = query["query"]["bool"]["must"]
-        assert {"term": {"tenant_id": "tenant-1"}} in must
+        filter_clause = query["query"]["bool"]["filter"]
+        assert {"term": {"tenant_id": "tenant-1"}} in filter_clause
         assert {"exists": {"field": "sent_at"}} in must
         assert {"exists": {"field": "created_at"}} in must
 
@@ -352,7 +354,8 @@ class TestComputeDriverResponseLatency:
         call_args = es.search_documents.call_args
         query = call_args[0][1]
         must = query["query"]["bool"]["must"]
-        assert {"term": {"tenant_id": "tenant-1"}} in must
+        filter_clause = query["query"]["bool"]["filter"]
+        assert {"term": {"tenant_id": "tenant-1"}} in filter_clause
         assert {"terms": {"event_type": ["assignment", "accept", "reject"]}} in must
 
     async def test_returns_overall_stats(self):
@@ -442,8 +445,8 @@ class TestComputeFailedNotificationRate:
 
         call_args = es.search_documents.call_args
         query = call_args[0][1]
-        must = query["query"]["bool"]["must"]
-        assert {"term": {"tenant_id": "tenant-1"}} in must
+        filter_clause = query["query"]["bool"]["filter"]
+        assert {"term": {"tenant_id": "tenant-1"}} in filter_clause
 
     async def test_returns_by_channel_failure_rates(self):
         """compute_failed_notification_rate returns per-channel failure rates."""

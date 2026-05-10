@@ -69,7 +69,10 @@ def _make_mock_replanning_agent():
 
 def _create_test_app(pipeline=None, es_service=None, replanning_agent=None):
     """Create a FastAPI test app with MVP endpoints configured."""
+    from errors.handlers import register_exception_handlers
+
     app = FastAPI()
+    register_exception_handlers(app)
     app.include_router(router)
 
     if pipeline is None:

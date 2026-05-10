@@ -323,9 +323,7 @@ class NotificationService:
         Returns:
             Dict with ``items``, ``total``, ``page``, ``size`` keys.
         """
-        must_clauses: list[dict] = [
-            {"term": {"tenant_id": tenant_id}},
-        ]
+        must_clauses: list[dict] = []
 
         # Apply optional filters
         for field in (
@@ -354,7 +352,12 @@ class NotificationService:
         from_offset = (page - 1) * size
 
         query = {
-            "query": {"bool": {"must": must_clauses}},
+            "query": {
+                "bool": {
+                    "must": must_clauses,
+                    "filter": [{"term": {"tenant_id": tenant_id}}],
+                }
+            },
             "sort": [{"created_at": {"order": "desc"}}],
             "from": from_offset,
             "size": size,
@@ -401,8 +404,8 @@ class NotificationService:
                 "bool": {
                     "must": [
                         {"term": {"notification_id": notification_id}},
-                        {"term": {"tenant_id": tenant_id}},
-                    ]
+                    ],
+                    "filter": [{"term": {"tenant_id": tenant_id}}],
                 }
             },
             "size": 1,
@@ -537,9 +540,7 @@ class NotificationService:
         Returns:
             Dict with ``by_type``, ``by_channel``, ``by_status``, ``total``.
         """
-        must_clauses: list[dict] = [
-            {"term": {"tenant_id": tenant_id}},
-        ]
+        must_clauses: list[dict] = []
 
         if start_date or end_date:
             date_range: dict = {}
@@ -550,7 +551,12 @@ class NotificationService:
             must_clauses.append({"range": {"created_at": date_range}})
 
         query = {
-            "query": {"bool": {"must": must_clauses}},
+            "query": {
+                "bool": {
+                    "must": must_clauses,
+                    "filter": [{"term": {"tenant_id": tenant_id}}],
+                }
+            },
             "size": 0,
             "aggs": {
                 "by_type": {

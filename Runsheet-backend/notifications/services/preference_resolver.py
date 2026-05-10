@@ -137,9 +137,7 @@ class PreferenceResolver:
         Returns:
             Dict with ``items``, ``total``, ``page``, ``size`` keys.
         """
-        must_clauses: list[dict] = [
-            {"term": {"tenant_id": tenant_id}},
-        ]
+        must_clauses: list[dict] = []
 
         if search:
             must_clauses.append({
@@ -152,6 +150,7 @@ class PreferenceResolver:
             "query": {
                 "bool": {
                     "must": must_clauses,
+                    "filter": [{"term": {"tenant_id": tenant_id}}],
                 }
             },
             "sort": [{"created_at": {"order": "desc"}}],
@@ -289,8 +288,8 @@ class PreferenceResolver:
                 "bool": {
                     "must": [
                         {"term": {"customer_id": customer_id}},
-                        {"term": {"tenant_id": tenant_id}},
-                    ]
+                    ],
+                    "filter": [{"term": {"tenant_id": tenant_id}}],
                 }
             },
             "size": 1,
