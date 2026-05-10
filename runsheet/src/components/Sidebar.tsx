@@ -6,6 +6,7 @@ import {
   ChevronLeft,
   ClipboardList,
   Database,
+  DollarSign,
   Droplets,
   FileInput,
   Fuel,
@@ -18,30 +19,18 @@ import {
   Radio,
   Settings,
   SprayCan,
+  TrendingUp,
   Truck,
   User,
   Users,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 
-/**
- * Determines whether legacy ops surface links (Shipments, Riders) should
- * be visible. They are hidden when the tenant's overlay.order_intake_pipeline
- * state is `active_auto`.
- */
-export function showLegacyOpsSurface(
-  overlayState?: string | null,
-): boolean {
-  return overlayState !== "active_auto";
-}
-
 interface SidebarProps {
   activeItem?: string;
   isCollapsed: boolean;
   onToggle: () => void;
   onNavigate: (item: string) => void;
-  /** Tenant's overlay.order_intake_pipeline state for legacy link visibility */
-  overlayOrderIntakePipelineState?: string | null;
 }
 
 export default function Sidebar({
@@ -49,7 +38,6 @@ export default function Sidebar({
   isCollapsed,
   onToggle,
   onNavigate,
-  overlayOrderIntakePipelineState,
 }: SidebarProps) {
   const router = useRouter();
 
@@ -57,8 +45,6 @@ export default function Sidebar({
     sessionStorage.removeItem("isAuthenticated");
     router.push("/signin");
   };
-
-  const legacyVisible = showLegacyOpsSurface(overlayOrderIntakePipelineState);
 
   const menuItems = [
     { id: "fleet", label: "Fleet", icon: Truck },
@@ -73,10 +59,9 @@ export default function Sidebar({
     { id: "depots", label: "Depots", icon: Database },
     { id: "road-restrictions", label: "Road Restrictions", icon: MapIcon },
     { id: "reconciliation", label: "Reconciliation", icon: ListChecks },
+    { id: "billing", label: "Billing", icon: DollarSign },
+    { id: "ar-aging", label: "AR Aging", icon: TrendingUp },
     { id: "inventory", label: "Inventory", icon: Package },
-    ...(legacyVisible
-      ? [{ id: "riders", label: "Riders", icon: Users }]
-      : []),
     { id: "analytics", label: "Analytics", icon: BarChart3 },
     { id: "ops-monitoring", label: "Ops Monitoring", icon: Activity },
     { id: "control-center", label: "Control Center", icon: Radio },
@@ -84,6 +69,16 @@ export default function Sidebar({
     { id: "upload-data", label: "Data Import", icon: FileInput },
     { id: "support", label: "Support", icon: HelpCircle },
   ];
+
+  /** Commerce items route to /commerce paths */
+  const handleItemClick = (id: string) => {
+    if (id === "billing") {
+      router.push("/commerce");
+    } else if (id === "ar-aging") {
+      router.push("/commerce/ar-aging");
+    }
+    onNavigate(id);
+  };
 
   return (
     <aside
@@ -153,7 +148,7 @@ export default function Sidebar({
                     e.currentTarget.style.backgroundColor = "#232323";
                   }
                 }}
-                onClick={() => onNavigate(item.id)}
+                onClick={() => handleItemClick(item.id)}
                 title={isCollapsed ? item.label : ""}
               >
                 <div

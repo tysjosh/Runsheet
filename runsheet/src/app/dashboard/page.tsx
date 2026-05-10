@@ -28,7 +28,9 @@ const Support = lazy(() => import("../../components/Support"));
 // Ops components (previously on /ops/* routes)
 const SchedulingJobBoard = lazy(() => import("../ops/scheduling/page"));
 const FuelDashboard = lazy(() => import("../ops/fuel/page"));
-const RiderUtilization = lazy(() => import("../ops/riders/page"));
+const DriverUtilizationList = lazy(
+  () => import("../../components/ops/DriverUtilizationList"),
+);
 const OperationsControl = lazy(() => import("../ops/control/page"));
 
 // New feature pages
@@ -181,12 +183,12 @@ export default function Home() {
           </div>
         );
 
-      case "riders":
+      case "drivers":
         return (
           <div className="flex-1 bg-gray-50">
-            <ErrorBoundary componentName="Riders">
+            <ErrorBoundary componentName="Drivers">
               <Suspense fallback={<ComponentLoadingPlaceholder />}>
-                <RiderUtilization />
+                <DriverUtilizationList drivers={[]} statusFilter="" onStatusFilterChange={() => {}} />
               </Suspense>
             </ErrorBoundary>
           </div>
