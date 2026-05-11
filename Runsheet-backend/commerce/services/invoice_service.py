@@ -537,7 +537,9 @@ class InvoiceService:
                     except Exception as exc:
                         # Pricing failure for a single line item should
                         # not block the entire invoice — log and keep
-                        # the existing price.
+                        # the existing price. If market_price_cents is
+                        # available and unit_price_cents is 0, fall back
+                        # to market price.
                         logger.warning(
                             "InvoiceService: pricing resolution failed "
                             "for line item product=%s tenant=%s order=%s: "
@@ -547,6 +549,17 @@ class InvoiceService:
                             order_id,
                             exc,
                         )
+                        # Fallback: if unit_price_cents is 0 and we have
+                        # market_price_cents, use that instead
+                        if (
+                            item.get("unit_price_cents", 0) == 0
+                            and item.get("market_price_cents")
+                        ):
+                            item["unit_price_cents"] = item["market_price_cents"]
+                            qty = item.get("quantity", 0)
+                            item["subtotal_cents"] = round(
+                                item["market_price_cents"] * qty
+                            )
 
         # Compute totals from line items (integer cents only, C1)
         subtotal_cents = sum(item.get("subtotal_cents", 0) for item in line_items)

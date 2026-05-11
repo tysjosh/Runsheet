@@ -136,7 +136,7 @@ Runsheet-backend/
 │   ├── middleware.py              # Middleware registration
 │   ├── agents.py                  # Agent subsystem bootstrap
 │   ├── ops.py                     # Ops domain bootstrap
-│   ├── compliance.py              # Compliance domain bootstrap
+│   ├── compliance.py              # Compliance domain bootstrap (see Compliance Backbone section)
 │   ├── commerce.py                # Commerce domain bootstrap
 │   ├── fuel.py                    # Fuel domain bootstrap
 │   ├── scheduling.py              # Scheduling domain bootstrap
@@ -226,8 +226,455 @@ Runsheet-backend/
 │   ├── generate_endpoint_registry.py
 │   └── backfill_asset_type.py
 ├── tests/                         # Test suite
-└── demo-data/                     # Sample CSV files
+├── demo-data/                     # Sample CSV files
+└── compliance/                    # Fuel compliance backbone (see Compliance Backbone section)
+    ├── api/                       # Compliance REST endpoints
+    ├── services/                  # Compliance business logic
+    ├── models/                    # Compliance data models
+    └── hooks/                     # Compliance pipeline hooks
 ```
+
+## Compliance Backbone
+
+The **Fuel Compliance Backbone** provides regulatory and operational compliance features for US fuel distribution, including federal/state/local tax computation, temperature-corrected volume measurement (API 2540), price-protection contracts, DOT/FMCSA driver and vehicle safety, dyed-diesel enforcement, IFTA reporting, meter-to-invoice traceability, K-factor recalibration, terminal BOL ingestion, sales pricing, and vehicle certification tracking.
+
+### Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        Invoice Pipeline                          │
+│  Order → Load → Deliver → POD → Tax_Engine → Pricing → Invoice  │
+└──────┬──────────┬──────────┬─────────┬──────────┬───────────────┘
+       │          │          │         │          │
+  ┌────▼────┐ ┌──▼───┐ ┌───▼────┐ ┌──▼───┐ ┌───▼────────┐
+  │Terminal  │ │VCF   │ │Meter   │ │Tax   │ │Sales       │
+  │BOL      │ │Calc  │ │Audit   │ │Engine│ │Pricing     │
+  │Ingestion│ │      │ │Service │ │      │ │Engine      │
+  └─────────┘ └──────┘ └────────┘ └──────┘ └────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│                    Route Planning Agent                          │
+│  Candidates → Delivery_Filter → HOS_Checker → Solver → Assign  │
+└──────┬──────────────┬──────────────┬────────────────────────────┘
+       │              │              │
+  ┌────▼─────┐  ┌────▼─────┐  ┌────▼──────────┐
+  │Dyed      │  │Driver    │  │Asset          │
+  │Diesel    │  │Qualif.   │  │Certification  │
+  │Enforcer  │  │Service   │  │Service        │
+  └──────────┘  └──────────┘  └───────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│                    Background Services                           │
+│  IFTA_Reporter │ KFactor_Calibration │ Price_Protection         │
+│  Notification_Templates                                         │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Bootstrap Process
+
+The compliance backbone is initialized by `bootstrap/compliance.py` during application startup:
+
+1. **Index Creation**: Creates 11 Elasticsearch indices for compliance data (tax jurisdictions, exemptions, price-protection contracts, driver qualifications, asset certifications, meter registry, terminal BOLs, pricing rules, IFTA mileage, K-factor history)
+
+2. **Service Wiring**: Instantiates and registers compliance services on the `ServiceContainer`:
+   - `TaxEngine` → wired into `InvoiceService` for automatic tax computation
+   - `VCFCalculator` → used by BOL ingestion and POD finalization
+   - `PriceProtectionService` → wired into `SalesPricingEngine` for contract pricing
+   - `SalesPricingEngine` → wired into `InvoiceService` for price resolution
+   - `DriverQualificationService` → wired into `Route_Planning_Agent` for driver eligibility
+   - `HOSChecker` → wired into `Route_Planning_Agent` for Hours-of-Service compliance
+   - `AssetCertificationService` → wired into `Route_Planning_Agent` for vehicle certification checks
+   - `DyedDieselEnforcer` → wired into `OrderIntakePipeline`, `CompartmentLoadingAgent`, and `InvoiceService`
+   - `MeterAuditService` → wired into `MeterTicketOCRService` and `InvoiceService`
+   - `IFTAReporter` → wired into `GeotabConnector` for automatic mileage tracking
+   - `KFactorCalibrationService` → triggered by delivery completion events
+   - `TerminalBOLIngestionService` → REST endpoint for EDI/manual BOL ingestion
+   - `DeliveryFilter` → wired into `Route_Planning_Agent` for call-type filtering
+
+3. **Background Jobs**: Starts autonomous agents and cron tasks:
+   - **Price Protection Expiry Job**: Daily task that transitions exhausted/expired contracts
+   - **Rack Price Refresh Job**: Daily task that updates OPIS rack prices with 90-day retention
+   - **Driver Expiry Cron Agent**: Daily autonomous agent that checks CDL/medical card/endorsement expirations and auto-suspends expired drivers
+   - **Asset Certification Expiry Cron Agent**: Daily autonomous agent that checks DOT cargo tank certifications and generates expiry alerts
+   - **Meter Calibration Cron Agent**: Daily autonomous agent that checks meter calibration expirations and generates alerts
+
+4. **API Endpoint Registration**: Mounts compliance REST endpoints (see API Endpoints section below)
+
+### Core Services
+
+#### Tax Engine
+Computes federal, state, county, city, UST, SPCC, and environmental fuel excise taxes for each delivery based on destination jurisdiction (FIPS code). Supports customer exemption certificates (dyed-diesel, farm/agricultural) and produces per-invoice tax breakdowns for Form 720 reporting.
+
+**Key Features:**
+- Multi-jurisdiction rate tables with effective/expiry dates
+- IRS 637 registration tracking for suppliers
+- Exemption certificate management
+- Automatic tax computation on invoice generation
+
+#### VCF Calculator
+Calculates net gallons at 60°F from gross gallons using API 2540 / ASTM D1250 Volume Correction Factors. Ensures BOL compliance and terminal-to-meter reconciliation accuracy.
+
+**Key Features:**
+- API 2540 table lookup algorithm
+- Temperature and API gravity validation
+- Round-trip property verification (gross → net → gross)
+- Default API gravity per product code
+
+#### Price Protection Service
+Manages sell-side price-protection contracts (fixed-price, cap-price, collar) for heating-oil and commercial-diesel customers. Tracks contracted gallons, resolves effective prices, and computes settlement variance against market prices.
+
+**Key Features:**
+- Three contract types: fixed_price, cap_price, collar
+- Automatic gallons decrement on delivery
+- Contract exhaustion/expiration tracking
+- Settlement variance reporting
+
+#### Sales Pricing Engine
+Resolves sell prices using posted-price, rack-plus-margin, tiered-volume, and cost-plus rules connected to OPIS rack prices. Supports customer-specific, account-tier, and product-default pricing rules with priority-based resolution.
+
+**Key Features:**
+- Four pricing strategies with priority-based resolution
+- OPIS rack price integration (daily refresh)
+- Tiered volume pricing with cumulative gallons tracking
+- 90-day price history for audit and dispute resolution
+
+#### Driver Qualification Service
+Tracks CDL, DOT medical card, HAZMAT endorsement, tanker endorsement, drug testing, and MVR records with expiry alerting. Ensures no unqualified driver is dispatched and FMCSA DQF audits pass.
+
+**Key Features:**
+- Multi-level expiry alerts (60/30/7 days)
+- Automatic driver suspension on expiration
+- HAZMAT/tanker endorsement enforcement
+- DQF compliance dashboard
+
+#### HOS Checker
+Evaluates driver Hours-of-Service compliance status from Geotab telemetry before route assignment. Enforces FMCSA 11-hour drive / 14-hour window / 70-hour/8-day rules.
+
+**Key Features:**
+- Real-time HOS data from Geotab (15-minute cache)
+- Drive hours, window hours, and cycle hours validation
+- Route eligibility determination
+- HOS-blocked route flagging with earliest eligible time
+
+#### Asset Certification Service
+Tracks DOT cargo tank inspections (V/K/I/P/UT), 3-year retests, meter seal certifications, and fire extinguisher recertification dates with expiry alerting. Ensures no non-compliant vehicle is dispatched.
+
+**Key Features:**
+- Multi-certification tracking per vehicle/trailer
+- Multi-level expiry alerts (60/30/7 days)
+- Automatic dispatch restriction on expiration
+- Fleet certification dashboard
+
+#### Dyed Diesel Enforcer
+Validates that dyed (off-road) diesel is sold only to exempt customers with valid IRS 637M registration. Prevents loading dyed fuel into clear-designated compartments and ensures tax exemption compliance.
+
+**Key Features:**
+- IRS 637M certificate validation
+- Compartment compatibility checks
+- Invoice tax exemption verification
+- Audit log for IRS readiness
+
+#### IFTA Reporter
+Aggregates per-state miles driven and fuel consumed from Geotab telemetry for quarterly IFTA returns. Detects state boundary crossings and computes fleet average MPG.
+
+**Key Features:**
+- Automatic state boundary detection from GPS
+- Quarterly aggregation (Jan-Mar, Apr-Jun, Jul-Sep, Oct-Dec)
+- Per-truck IFTA summary with tax due calculation
+- Manual mileage adjustment support
+
+#### Meter Audit Service
+Links meter tickets (after OCR extraction) to invoices with meter number, calibration certificate status, and per-meter audit trail. Maintains weights-and-measures compliance and billing dispute traceability.
+
+**Key Features:**
+- Meter registry with calibration tracking
+- Immutable meter ticket → invoice linkage
+- Calibration expiry alerts (30 days)
+- Meter-POD variance flagging (>1%)
+
+#### K-Factor Calibration Service
+Compares actual delivered gallons against HDD-predicted consumption for auto-fill customers. Provides back-office interface to retune K-factors for more accurate forecasting.
+
+**Key Features:**
+- Predicted vs actual variance computation
+- Suggested K-factor calculation
+- Operator approval workflow
+- K-factor adjustment history
+
+#### Terminal BOL Ingestion Service
+Ingests terminal-issued Bills of Lading via EDI or manual upload. Captures loaded product, gross/net gallons, supplier, and driver at point of origin for chain-of-custody traceability.
+
+**Key Features:**
+- EDI parsing (ANSI X12 856, pipe-delimited)
+- Manual upload with OCR extraction
+- VCF cross-reference validation
+- Load plan linkage for full traceability
+
+#### Delivery Filter
+Partitions delivery candidates by customer call type (will_call, auto_fill, keep_full) before route construction. Ensures only eligible deliveries are scheduled and auto-fill customers are served proactively.
+
+**Key Features:**
+- Three call-type groups: will_call, auto_fill, keep_full
+- Tank forecast integration for auto-fill
+- Keep-full urgency threshold (30%)
+- Route planning integration
+
+### API Endpoints
+
+#### Compliance Endpoints (`/api/compliance/*`)
+
+```
+GET   /api/compliance/tax/breakdown             # Compute multi-jurisdiction tax breakdown
+GET   /api/compliance/tax-jurisdictions         # List tax jurisdiction rates
+POST  /api/compliance/tax-jurisdictions         # Create tax jurisdiction rate
+GET   /api/compliance/exemptions                # List customer exemption certificates
+POST  /api/compliance/exemptions                # Create exemption certificate
+POST  /api/compliance/vcf/compute               # Compute VCF and net gallons
+GET   /api/compliance/drivers                   # List drivers with qualification status
+GET   /api/compliance/drivers/{id}              # Single driver qualification file
+POST  /api/compliance/drivers                   # Create driver record
+PUT   /api/compliance/drivers/{id}              # Update driver qualifications
+GET   /api/compliance/drivers/dashboard         # DQF compliance dashboard
+GET   /api/compliance/asset-certifications      # List asset certifications
+POST  /api/compliance/asset-certifications      # Create certification record
+GET   /api/compliance/asset-certifications/dashboard  # Fleet certification dashboard
+GET   /api/compliance/meters                    # List meter registry
+POST  /api/compliance/meters                    # Register new meter
+GET   /api/compliance/meters/{id}/audit-trail   # Per-meter delivery history
+POST  /api/compliance/terminal-bols             # Ingest terminal BOL (EDI)
+POST  /api/compliance/terminal-bols/upload      # Ingest terminal BOL (manual)
+GET   /api/compliance/ifta/report               # Quarterly IFTA report
+GET   /api/compliance/kfactor/dashboard         # K-factor calibration dashboard
+POST  /api/compliance/kfactor/{tank_id}/approve # Approve K-factor adjustment
+```
+
+#### Commerce Endpoints (`/api/commerce/*`)
+
+```
+GET   /api/commerce/price-protection-contracts  # List price protection contracts
+POST  /api/commerce/price-protection-contracts  # Create contract
+GET   /api/commerce/price-protection-contracts/{id}  # Single contract
+PUT   /api/commerce/price-protection-contracts/{id}  # Update contract
+GET   /api/commerce/pricing-rules               # List pricing rules
+POST  /api/commerce/pricing-rules               # Create pricing rule
+POST  /api/commerce/pricing/resolve             # Resolve effective price per delivery
+```
+
+### CSV Import Scripts
+
+The compliance backbone includes CSV import scripts for seeding jurisdictional tax rates and other compliance data.
+
+#### Tax Jurisdictions Import
+
+**Script:** `scripts/import_tax_jurisdictions.py`
+
+Loads federal, state, county, and city fuel excise tax rates from CSV into the `tax_jurisdictions` Elasticsearch index.
+
+**CSV Schema:**
+```
+fips_code, jurisdiction_level, jurisdiction_name, tax_type,
+product_codes, rate_cents_per_gallon, effective_date,
+expiry_date, source
+```
+
+**Fields:**
+- `fips_code`: 2-digit (state), 5-digit (county), or 7-digit (city) FIPS code
+- `jurisdiction_level`: "federal" | "state" | "county" | "city"
+- `jurisdiction_name`: Human-readable jurisdiction name (optional)
+- `tax_type`: "excise" | "ust" | "spcc" | "environmental"
+- `product_codes`: Pipe-separated list (e.g., `GASOLINE_REG|GASOLINE_PREM|ETHANOL_E85`)
+- `rate_cents_per_gallon`: Integer in tenths of a cent (e.g., 184 for 18.4¢/gal)
+- `effective_date`: ISO-8601 date (YYYY-MM-DD)
+- `expiry_date`: ISO-8601 date or blank (optional)
+- `source`: Source identifier (e.g., `irs_form_720`, `manual_csv_import`) (optional)
+
+**Usage Examples:**
+
+```bash
+# Seed demo tenant with sample US federal + 5 state rates
+python scripts/import_tax_jurisdictions.py \
+    --csv-file scripts/data/sample_tax_jurisdictions.csv \
+    --tenant-id tenant-demo
+
+# Dry run (validate only, no writes)
+python scripts/import_tax_jurisdictions.py \
+    --csv-file scripts/data/sample_tax_jurisdictions.csv \
+    --tenant-id tenant-demo \
+    --dry-run
+
+# Override ES endpoint for specific cluster
+python scripts/import_tax_jurisdictions.py \
+    --csv-file scripts/data/sample_tax_jurisdictions.csv \
+    --tenant-id tenant-demo \
+    --elastic-url https://es.internal.example.com:9243
+```
+
+**Sample CSV:**
+```csv
+fips_code,jurisdiction_level,jurisdiction_name,tax_type,product_codes,rate_cents_per_gallon,effective_date,expiry_date,source
+00,federal,United States,excise,GASOLINE_REG|GASOLINE_PREM|ETHANOL_E85,184,2024-01-01,,irs_form_720
+00,federal,United States,excise,DIESEL_CLEAR|DIESEL_DYED|BIODIESEL_B20,244,2024-01-01,,irs_form_720
+06,state,California,excise,GASOLINE_REG|GASOLINE_PREM,539,2024-01-01,,ca_cdtfa
+06,state,California,excise,DIESEL_CLEAR,380,2024-01-01,,ca_cdtfa
+36,state,New York,excise,GASOLINE_REG|GASOLINE_PREM,425,2024-01-01,,ny_dtf
+```
+
+### Environment Variables
+
+The compliance backbone uses the following environment variables (add to `.env.development`):
+
+```bash
+# =============================================================================
+# COMPLIANCE BACKBONE CONFIGURATION
+# =============================================================================
+
+# Master flag — when off, all compliance endpoints return 404
+# Format: boolean (true / false)
+# Required: no (default: false)
+COMPLIANCE_BACKBONE_ENABLED=true
+
+# Tax Engine feature flag
+# Format: boolean (true / false)
+# Required: no (default: false)
+COMPLIANCE_TAX_ENGINE_ENABLED=true
+
+# Price Protection feature flag
+# Format: boolean (true / false)
+# Required: no (default: false)
+COMPLIANCE_PRICE_PROTECTION_ENABLED=true
+
+# Driver Qualification feature flag
+# Format: boolean (true / false)
+# Required: no (default: false)
+COMPLIANCE_DRIVER_QUALIFICATION_ENABLED=true
+
+# HOS Checker feature flag (requires Geotab integration)
+# Format: boolean (true / false)
+# Required: no (default: false)
+COMPLIANCE_HOS_CHECKER_ENABLED=true
+
+# Asset Certification feature flag
+# Format: boolean (true / false)
+# Required: no (default: false)
+COMPLIANCE_ASSET_CERTIFICATION_ENABLED=true
+
+# Dyed Diesel Enforcer feature flag
+# Format: boolean (true / false)
+# Required: no (default: false)
+COMPLIANCE_DYED_DIESEL_ENABLED=true
+
+# IFTA Reporter feature flag (requires Geotab integration)
+# Format: boolean (true / false)
+# Required: no (default: false)
+COMPLIANCE_IFTA_ENABLED=true
+
+# Meter Audit feature flag
+# Format: boolean (true / false)
+# Required: no (default: false)
+COMPLIANCE_METER_AUDIT_ENABLED=true
+
+# K-Factor Calibration feature flag
+# Format: boolean (true / false)
+# Required: no (default: false)
+COMPLIANCE_KFACTOR_ENABLED=true
+
+# Terminal BOL Ingestion feature flag
+# Format: boolean (true / false)
+# Required: no (default: false)
+COMPLIANCE_TERMINAL_BOL_ENABLED=true
+
+# Sales Pricing Engine feature flag
+# Format: boolean (true / false)
+# Required: no (default: false)
+COMPLIANCE_SALES_PRICING_ENABLED=true
+
+# =============================================================================
+# GEOTAB INTEGRATION (Required for HOS Checker and IFTA Reporter)
+# =============================================================================
+
+# Geotab API credentials
+# Format: string
+# Required: only if COMPLIANCE_HOS_CHECKER_ENABLED=true or COMPLIANCE_IFTA_ENABLED=true
+# GEOTAB_USERNAME=your-geotab-username
+# GEOTAB_PASSWORD=your-geotab-password
+# GEOTAB_DATABASE=your-geotab-database
+
+# Geotab API server
+# Format: URL
+# Required: no (default: https://my.geotab.com)
+# GEOTAB_SERVER=https://my.geotab.com
+
+# HOS data cache TTL in seconds
+# Format: integer
+# Required: no (default: 900 = 15 minutes)
+# COMPLIANCE_HOS_CACHE_TTL_SECONDS=900
+
+# =============================================================================
+# OPIS RACK PRICE INTEGRATION (Required for Sales Pricing Engine)
+# =============================================================================
+
+# OPIS API credentials
+# Format: string
+# Required: only if COMPLIANCE_SALES_PRICING_ENABLED=true
+# OPIS_API_KEY=your-opis-api-key
+# OPIS_API_SECRET=your-opis-api-secret
+
+# Rack price refresh interval in seconds
+# Format: integer
+# Required: no (default: 86400 = 24 hours)
+# COMPLIANCE_RACK_PRICE_REFRESH_INTERVAL_SECONDS=86400
+
+# Rack price history retention days
+# Format: integer
+# Required: no (default: 90)
+# COMPLIANCE_RACK_PRICE_RETENTION_DAYS=90
+
+# =============================================================================
+# COMPLIANCE CRON JOB INTERVALS
+# =============================================================================
+
+# Price protection expiry check interval in seconds
+# Format: integer
+# Required: no (default: 86400 = 24 hours)
+COMPLIANCE_PRICE_PROTECTION_EXPIRY_INTERVAL_SECONDS=86400
+
+# Driver expiry check interval in seconds
+# Format: integer
+# Required: no (default: 86400 = 24 hours)
+COMPLIANCE_DRIVER_EXPIRY_INTERVAL_SECONDS=86400
+
+# Asset certification expiry check interval in seconds
+# Format: integer
+# Required: no (default: 86400 = 24 hours)
+COMPLIANCE_ASSET_CERT_EXPIRY_INTERVAL_SECONDS=86400
+
+# Meter calibration expiry check interval in seconds
+# Format: integer
+# Required: no (default: 86400 = 24 hours)
+COMPLIANCE_METER_CALIBRATION_INTERVAL_SECONDS=86400
+```
+
+**Note:** Most compliance features are disabled by default. Enable them individually as needed for your deployment. HOS Checker and IFTA Reporter require Geotab integration. Sales Pricing Engine requires OPIS API integration.
+
+### Integration Points
+
+The compliance backbone integrates with existing services:
+
+| Compliance Service | Integrates With | Integration Point |
+|-------------------|-----------------|-------------------|
+| Tax_Engine | InvoiceService | `generate_from_order()` appends tax breakdown |
+| VCF_Calculator | Terminal_BOL_Ingestion, POD, ReconciliationService | Called on BOL ingest, POD finalization, variance computation |
+| Price_Protection | Sales_Pricing_Engine, InvoiceService | First-priority price resolution, gallons decrement |
+| Sales_Pricing_Engine | InvoiceService | Resolves sell price before tax computation |
+| Driver_Qualification | Route_Planning_Agent | Validates driver eligibility before route assignment |
+| HOS_Checker | Route_Planning_Agent | Checks HOS compliance after driver qualification |
+| Asset_Certification | Route_Planning_Agent | Validates vehicle certification after HOS check |
+| Dyed_Diesel_Enforcer | OrderIntakePipeline, CompartmentLoadingAgent, InvoiceService | Validates orders, load plans, and invoices |
+| Meter_Audit | MeterTicketOCRService, InvoiceService | Links tickets to invoices, tracks calibration |
+| IFTA_Reporter | GeotabConnector | Records trip segments on state boundary crossings |
+| KFactor_Calibration | TankForecastingAgent | Updates K-factors after delivery completion |
+| Terminal_BOL_Ingestion | VCF_Calculator, Driver_Qualification, FileStorageService | Validates BOLs, links to load plans |
+| Delivery_Filter | Route_Planning_Agent, TankForecastingAgent | Filters candidates by call type before routing |
 
 ### AI Agent Flow
 
