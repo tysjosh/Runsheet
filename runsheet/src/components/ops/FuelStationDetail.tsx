@@ -35,16 +35,24 @@ const STATUS_CONFIG: Record<
   StationStatus,
   { label: string; color: string; bg: string }
 > = {
-  normal: { label: "Normal", color: "text-green-700", bg: "bg-green-100" },
-  low: { label: "Low", color: "text-yellow-700", bg: "bg-yellow-100" },
-  critical: { label: "Critical", color: "text-red-700", bg: "bg-red-100" },
+  normal: {
+    label: "Normal",
+    color: "text-success-dark",
+    bg: "bg-success-light",
+  },
+  low: { label: "Low", color: "text-warning-dark", bg: "bg-warning-light" },
+  critical: {
+    label: "Critical",
+    color: "text-error-dark",
+    bg: "bg-error-light",
+  },
   empty: { label: "Empty", color: "text-gray-700", bg: "bg-gray-100" },
 };
 
 const STATUS_BAR_COLORS: Record<StationStatus, string> = {
-  normal: "bg-green-500",
-  low: "bg-yellow-500",
-  critical: "bg-red-500",
+  normal: "bg-success-light0",
+  low: "bg-warning-light0",
+  critical: "bg-error-light0",
   empty: "bg-gray-400",
 };
 
@@ -104,9 +112,7 @@ export default function FuelStationDetail({
       {/* Header */}
       <div className="flex items-start justify-between p-4 border-b border-gray-100">
         <div>
-          <h3 className="text-lg font-semibold text-[#232323]">
-            {station.name}
-          </h3>
+          <h3 className="text-lg font-semibold text-primary">{station.name}</h3>
           <div className="flex items-center gap-3 mt-1 text-sm text-gray-500">
             <span className="flex items-center gap-1">
               <Fuel className="w-3.5 h-3.5" aria-hidden="true" />
@@ -171,7 +177,7 @@ export default function FuelStationDetail({
                 className="w-3.5 h-3.5 text-gray-400"
                 aria-hidden="true"
               />
-              <span className="text-lg font-semibold text-[#232323]">
+              <span className="text-lg font-semibold text-primary">
                 {station.daily_consumption_rate > 0
                   ? formatGallons(
                       getFuelStationDailyConsumptionGallons(station),
@@ -184,7 +190,7 @@ export default function FuelStationDetail({
           <div className="text-center">
             <div className="flex items-center justify-center gap-1">
               <Clock className="w-3.5 h-3.5 text-gray-400" aria-hidden="true" />
-              <span className="text-lg font-semibold text-[#232323]">
+              <span className="text-lg font-semibold text-primary">
                 {station.days_until_empty > 0
                   ? `${station.days_until_empty.toFixed(1)}d`
                   : "—"}
@@ -198,7 +204,7 @@ export default function FuelStationDetail({
                 className="w-3.5 h-3.5 text-gray-400"
                 aria-hidden="true"
               />
-              <span className="text-lg font-semibold text-[#232323]">
+              <span className="text-lg font-semibold text-primary">
                 {station.alert_threshold_pct}%
               </span>
             </div>
@@ -216,8 +222,8 @@ export default function FuelStationDetail({
           }
           className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg transition-colors ${
             activeForm === "consumption"
-              ? "bg-red-600 text-white"
-              : "bg-red-50 text-red-700 hover:bg-red-100"
+              ? "bg-error text-white"
+              : "bg-error-light text-error-dark hover:bg-error-light"
           }`}
         >
           <ArrowDown className="w-3.5 h-3.5" aria-hidden="true" />
@@ -230,8 +236,8 @@ export default function FuelStationDetail({
           }
           className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg transition-colors ${
             activeForm === "refill"
-              ? "bg-green-600 text-white"
-              : "bg-green-50 text-green-700 hover:bg-green-100"
+              ? "bg-success text-white"
+              : "bg-success-light text-success-dark hover:bg-success-light"
           }`}
         >
           <ArrowUp className="w-3.5 h-3.5" aria-hidden="true" />
@@ -271,10 +277,10 @@ export default function FuelStationDetail({
             {recent_consumption_events.map((evt, i) => (
               <div
                 key={`consumption-${evt.asset_id}-${i}`}
-                className="flex items-center gap-3 p-2 rounded-lg bg-red-50"
+                className="flex items-center gap-3 p-2 rounded-lg bg-error-light"
               >
                 <ArrowDown
-                  className="w-4 h-4 text-red-500 flex-shrink-0"
+                  className="w-4 h-4 text-error flex-shrink-0"
                   aria-hidden="true"
                 />
                 <div className="flex-1 min-w-0">
@@ -295,10 +301,10 @@ export default function FuelStationDetail({
             {recent_refill_events.map((evt, i) => (
               <div
                 key={`refill-${evt.supplier}-${i}`}
-                className="flex items-center gap-3 p-2 rounded-lg bg-green-50"
+                className="flex items-center gap-3 p-2 rounded-lg bg-success-light"
               >
                 <ArrowUp
-                  className="w-4 h-4 text-green-500 flex-shrink-0"
+                  className="w-4 h-4 text-success flex-shrink-0"
                   aria-hidden="true"
                 />
                 <div className="flex-1 min-w-0">

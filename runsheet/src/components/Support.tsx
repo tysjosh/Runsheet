@@ -1,16 +1,37 @@
-import { Bell, Filter, MessageSquare, Plus, Search, Settings, X } from "lucide-react";
+import { Bell, Filter, MessageSquare, Plus, Settings, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { apiService, type SupportTicket } from "../services/api";
 import LoadingSpinner from "./LoadingSpinner";
 import NotificationHistoryTab from "./NotificationHistoryTab";
 import NotificationSettingsTab from "./NotificationSettingsTab";
+import {
+  Badge,
+  type BadgeVariant,
+  Button,
+  EmptyState,
+  FilterBar,
+  PageHeader,
+  Pagination,
+  StatsBar,
+  type Tab,
+  Table,
+  TabNavigation,
+} from "./ui";
 
 type SupportTab = "tickets" | "notifications" | "settings";
 
-const TABS: { key: SupportTab; label: string; icon: React.ReactNode }[] = [
-  { key: "tickets", label: "Tickets", icon: <MessageSquare className="w-4 h-4" /> },
-  { key: "notifications", label: "Notifications", icon: <Bell className="w-4 h-4" /> },
-  { key: "settings", label: "Settings", icon: <Settings className="w-4 h-4" /> },
+const TABS: Tab[] = [
+  {
+    id: "tickets",
+    label: "Tickets",
+    icon: <MessageSquare className="w-4 h-4" />,
+  },
+  {
+    id: "notifications",
+    label: "Notifications",
+    icon: <Bell className="w-4 h-4" />,
+  },
+  { id: "settings", label: "Settings", icon: <Settings className="w-4 h-4" /> },
 ];
 
 const TICKET_STATUSES: { value: string; label: string }[] = [
@@ -113,33 +134,33 @@ export default function Support() {
     }
   };
 
-  const getPriorityColor = (priority: string) => {
+  const getPriorityVariant = (priority: string): BadgeVariant => {
     switch (priority) {
       case "urgent":
-        return "text-red-700 bg-red-50";
+        return "error";
       case "high":
-        return "text-orange-700 bg-orange-50";
+        return "warning";
       case "medium":
-        return "text-yellow-700 bg-yellow-50";
+        return "info";
       case "low":
-        return "text-gray-700 bg-gray-50";
+        return "neutral";
       default:
-        return "text-gray-700 bg-gray-50";
+        return "neutral";
     }
   };
 
-  const getStatusColor = (status: string) => {
+  const getStatusVariant = (status: string): BadgeVariant => {
     switch (status) {
       case "open":
-        return "text-red-700 bg-red-50";
+        return "error";
       case "in_progress":
-        return "text-blue-700 bg-blue-50";
+        return "info";
       case "resolved":
-        return "text-green-700 bg-green-50";
+        return "success";
       case "closed":
-        return "text-gray-700 bg-gray-50";
+        return "neutral";
       default:
-        return "text-gray-700 bg-gray-50";
+        return "neutral";
     }
   };
 
@@ -165,7 +186,120 @@ export default function Support() {
 
   const PAGE_SIZE = 20;
   const totalPages = Math.max(1, Math.ceil(filteredTickets.length / PAGE_SIZE));
-  const paginatedTickets = filteredTickets.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  const paginatedTickets = filteredTickets.slice(
+    (page - 1) * PAGE_SIZE,
+    page * PAGE_SIZE,
+  );
+  const ticketColumns = [
+    {
+      key: "ticket",
+      label: "Ticket",
+      render: (ticket: SupportTicket) => (
+        <div>
+          <div className="font-medium text-primary">{ticket.id}</div>
+          {ticket.relatedOrder && (
+            <div className="text-sm text-gray-500">
+              Order: {ticket.relatedOrder}
+            </div>
+          )}
+        </div>
+      ),
+    },
+    {
+      key: "customer",
+      label: "Customer",
+      render: (ticket: SupportTicket) => (
+        <span className="text-sm text-primary">{ticket.customer}</span>
+      ),
+    },
+    {
+      key: "issue",
+      label: "Issue",
+      render: (ticket: SupportTicket) => (
+        <div>
+          <div className="text-sm text-primary">{ticket.issue}</div>
+          <div className="text-sm text-gray-500 line-clamp-1">
+            {ticket.description}
+          </div>
+        </div>
+      ),
+    },
+    {
+      key: "priority",
+      label: "Priority",
+      render: (ticket: SupportTicket) => (
+        <Badge variant={getPriorityVariant(ticket.priority)} size="sm">
+          {ticket.priority.charAt(0).toUpperCase() + ticket.priority.slice(1)}
+        </Badge>
+      ),
+    },
+    {
+      key: "status",
+      label: "Status",
+      render: (ticket: SupportTicket) => (
+        <Badge variant={getStatusVariant(ticket.status)} size="sm">
+          {getStatusText(ticket.status)}
+        </Badge>
+      ),
+    },
+    {
+      key: "assigned",
+      label: "Assigned",
+      render: (ticket: SupportTicket) => (
+        <span className="text-sm text-gray-700">
+          {ticket.assignedTo || (
+            <span className="text-gray-400">Unassigned</span>
+          )}
+        </span>
+      ),
+    },
+    {
+      key: "created",
+      label: "Created",
+      render: (ticket: SupportTicket) => (
+        <span className="text-sm text-gray-600">
+          {new Date(ticket.createdAt).toLocaleDateString("en-US", {
+            month: "short",
+            day: "numeric",
+            hour: "2-digit",
+            minute: "2-digit",
+          })}
+        </span>
+      ),
+    },
+    {
+      key: "actions",
+      label: "Actions",
+      render: (ticket: SupportTicket) => (
+        <div
+          onClick={(e) => e.stopPropagation()}
+          className="flex flex-col gap-1"
+        >
+          {(STATUS_TRANSITIONS[ticket.status] || []).length > 0 ? (
+            <div className="flex gap-1 flex-wrap">
+              {STATUS_TRANSITIONS[ticket.status].map((targetStatus) => (
+                <Button
+                  key={targetStatus}
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  className="whitespace-nowrap"
+                  onClick={() => handleStatusUpdate(ticket.id, targetStatus)}
+                >
+                  {getStatusText(targetStatus)}
+                </Button>
+              ))}
+            </div>
+          ) : (
+            <span className="text-xs text-gray-400">-</span>
+          )}
+          {actionError[ticket.id] && (
+            <p className="text-xs text-error">{actionError[ticket.id]}</p>
+          )}
+        </div>
+      ),
+    },
+  ];
 
   if (loading && activeTab === "tickets") {
     return <LoadingSpinner message="Loading support tickets..." />;
@@ -175,17 +309,13 @@ export default function Support() {
     return (
       <div className="h-full flex items-center justify-center bg-white">
         <div className="text-center">
-          <div className="bg-red-50 text-red-700 px-6 py-4 rounded-xl mb-4 max-w-md">
-            <p className="text-sm font-medium">Failed to load support tickets</p>
+          <div className="bg-error-light text-error-dark px-6 py-4 rounded-xl mb-4 max-w-md">
+            <p className="text-sm font-medium">
+              Failed to load support tickets
+            </p>
             <p className="text-sm mt-1">{error}</p>
           </div>
-          <button
-            onClick={loadSupportData}
-            className="px-4 py-2 text-sm text-white rounded-lg hover:opacity-90"
-            style={{ backgroundColor: "#232323" }}
-          >
-            Retry
-          </button>
+          <Button onClick={loadSupportData}>Retry</Button>
         </div>
       </div>
     );
@@ -193,436 +323,294 @@ export default function Support() {
 
   return (
     <div className="h-full flex flex-col bg-white">
-      {/* Tab Bar */}
-      <div className="border-b border-gray-200 px-8">
-        <nav className="flex gap-6" aria-label="Support tabs">
-          {TABS.map((tab) => (
-            <button
-              key={tab.key}
-              onClick={() => setActiveTab(tab.key)}
-              className={`flex items-center gap-2 py-3 px-1 text-sm font-medium border-b-2 transition-colors ${
-                activeTab === tab.key
-                  ? "border-[#232323] text-[#232323]"
-                  : "border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"
-              }`}
-              aria-selected={activeTab === tab.key}
-              role="tab"
-            >
-              {tab.icon}
-              {tab.label}
-            </button>
-          ))}
-        </nav>
-      </div>
+      {/* Tab Navigation */}
+      <TabNavigation
+        tabs={TABS}
+        activeTab={activeTab}
+        onChange={(id) => setActiveTab(id as SupportTab)}
+      />
 
       {/* Tab Content */}
       {activeTab === "tickets" && (
-    <div className="flex-1 flex bg-white overflow-hidden">
-      {/* Tickets List */}
-      <div className="flex-1 flex flex-col">
-        {/* Header */}
-        <div className="border-b border-gray-100 px-8 py-6">
-          <div className="flex items-center justify-between mb-6">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 bg-[#232323] rounded-xl flex items-center justify-center">
-                <MessageSquare className="w-5 h-5 text-white" />
-              </div>
-              <div>
-                <h1 className="text-2xl font-semibold text-[#232323]">
-                  Support Tickets
-                </h1>
-                <p className="text-gray-500">
-                  Manage customer support requests
-                </p>
-              </div>
-            </div>
-            <button
-              onClick={() => setShowCreateModal(true)}
-              className="flex items-center gap-2 px-4 py-2 text-sm text-white rounded-lg transition-colors hover:opacity-90"
-              style={{ backgroundColor: "#232323" }}
-            >
-              <Plus className="w-4 h-4" />
-              Create Ticket
-            </button>
-          </div>
+        <div className="flex-1 flex bg-white overflow-hidden">
+          {/* Tickets List */}
+          <div className="flex-1 flex flex-col">
+            {/* Header */}
+            <PageHeader
+              title="Support Tickets"
+              subtitle="Manage customer support requests"
+              icon={<MessageSquare className="w-5 h-5" />}
+              actions={
+                <Button
+                  variant="primary"
+                  size="md"
+                  icon={<Plus className="w-4 h-4" />}
+                  onClick={() => setShowCreateModal(true)}
+                >
+                  Create Ticket
+                </Button>
+              }
+            />
 
-          {/* Search and Filters */}
-          <div className="flex gap-4">
-            <div className="flex-1 relative">
-              <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
-              <input
-                type="text"
-                placeholder="Search tickets, customers, issues..."
-                value={searchTerm}
-                onChange={(e) => { setSearchTerm(e.target.value); setPage(1); }}
-                className="w-full pl-10 pr-4 py-3 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-gray-200 focus:border-gray-300"
+            {/* Search and Filters */}
+            <FilterBar
+              searchPlaceholder="Search tickets, customers, issues..."
+              searchValue={searchTerm}
+              onSearchChange={(value) => {
+                setSearchTerm(value);
+                setPage(1);
+              }}
+              filters={
+                <>
+                  <div className="relative">
+                    <Filter className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
+                    <select
+                      value={filterPriority}
+                      onChange={(e) => {
+                        setFilterPriority(e.target.value);
+                        setPage(1);
+                      }}
+                      className="pl-10 pr-8 py-3 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-gray-200 focus:border-gray-300 focus:outline-none bg-white min-w-[140px]"
+                      aria-label="Priority"
+                    >
+                      {TICKET_PRIORITIES.map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <select
+                    value={filterStatus}
+                    onChange={(e) => {
+                      setFilterStatus(e.target.value);
+                      setPage(1);
+                    }}
+                    className="px-4 py-3 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-gray-200 focus:border-gray-300 focus:outline-none bg-white min-w-[140px]"
+                    aria-label="Status"
+                  >
+                    {TICKET_STATUSES.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                </>
+              }
+            />
+
+            {/* Stats */}
+            <StatsBar
+              variant="grid"
+              stats={[
+                { label: "Total Tickets", value: tickets.length },
+                {
+                  label: "Open",
+                  value: tickets.filter((t) => t.status === "open").length,
+                  color: "error",
+                },
+                {
+                  label: "In Progress",
+                  value: tickets.filter((t) => t.status === "in_progress")
+                    .length,
+                  color: "info",
+                },
+                {
+                  label: "Urgent",
+                  value: tickets.filter((t) => t.priority === "urgent").length,
+                  color: "warning",
+                },
+              ]}
+            />
+
+            <div className="flex-1 overflow-y-auto">
+              <Table
+                columns={ticketColumns}
+                data={paginatedTickets}
+                getRowId={(ticket) => ticket.id}
+                selectedId={selectedTicket?.id}
+                onRowClick={setSelectedTicket}
+                emptyState={
+                  <EmptyState
+                    icon={<MessageSquare />}
+                    title="No support tickets found"
+                    description="Try adjusting your search or filter criteria"
+                  />
+                }
+              />
+              <Pagination
+                currentPage={page}
+                totalPages={totalPages}
+                totalItems={filteredTickets.length}
+                onPageChange={setPage}
               />
             </div>
-            <div className="relative">
-              <Filter className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
-              <select
-                value={filterPriority}
-                onChange={(e) => { setFilterPriority(e.target.value); setPage(1); }}
-                className="pl-10 pr-8 py-3 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white min-w-[140px]"
-              >
-                {TICKET_PRIORITIES.map((p) => (
-                  <option key={p.value} value={p.value}>
-                    {p.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <select
-              value={filterStatus}
-              onChange={(e) => { setFilterStatus(e.target.value); setPage(1); }}
-              className="px-4 py-3 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white min-w-[120px]"
-            >
-              {TICKET_STATUSES.map((s) => (
-                <option key={s.value} value={s.value}>
-                  {s.label}
-                </option>
-              ))}
-            </select>
           </div>
-        </div>
 
-        {/* Stats */}
-        <div className="border-b border-gray-100 px-8 py-4">
-          <div className="grid grid-cols-4 gap-6">
-            <div className="text-center">
-              <div className="text-2xl font-semibold text-[#232323]">
-                {tickets.length}
+          {/* Ticket Details Panel */}
+          {selectedTicket && (
+            <div className="w-96 border-l border-gray-100 bg-gray-50 flex flex-col">
+              <div className="px-6 py-4 border-b border-gray-100">
+                <div className="flex items-center justify-between">
+                  <h3 className="font-semibold text-primary">Ticket Details</h3>
+                  <button
+                    onClick={() => setSelectedTicket(null)}
+                    className="text-gray-400 hover:text-primary p-2 rounded-lg hover:bg-white transition-colors"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
               </div>
-              <div className="text-sm text-gray-500">Total Tickets</div>
-            </div>
-            <div className="text-center">
-              <div className="text-2xl font-semibold text-red-600">
-                {tickets.filter((t) => t.status === "open").length}
-              </div>
-              <div className="text-sm text-gray-500">Open</div>
-            </div>
-            <div className="text-center">
-              <div className="text-2xl font-semibold text-blue-600">
-                {tickets.filter((t) => t.status === "in_progress").length}
-              </div>
-              <div className="text-sm text-gray-500">In Progress</div>
-            </div>
-            <div className="text-center">
-              <div className="text-2xl font-semibold text-orange-600">
-                {tickets.filter((t) => t.priority === "urgent").length}
-              </div>
-              <div className="text-sm text-gray-500">Urgent</div>
-            </div>
-          </div>
-        </div>
 
-        {/* Table View */}
-        <div className="flex-1 overflow-y-auto">
-          <table className="w-full">
-            <thead className="bg-gray-50 sticky top-0 border-b border-gray-100">
-              <tr>
-                <th className="px-8 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                  Ticket
-                </th>
-                <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                  Customer
-                </th>
-                <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                  Issue
-                </th>
-                <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                  Priority
-                </th>
-                <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                  Status
-                </th>
-                <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                  Assigned
-                </th>
-                <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                  Created
-                </th>
-                <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                  Actions
-                </th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {paginatedTickets.map((ticket) => (
-                <tr
-                  key={ticket.id}
-                  className={`cursor-pointer transition-colors ${
-                    selectedTicket?.id === ticket.id
-                      ? "bg-gray-50"
-                      : "hover:bg-gray-50"
-                  }`}
-                  onClick={() => setSelectedTicket(ticket)}
-                >
-                  <td className="px-8 py-4">
-                    <div className="font-medium text-[#232323]">
-                      {ticket.id}
-                    </div>
-                    {ticket.relatedOrder && (
-                      <div className="text-sm text-gray-500">
-                        Order: {ticket.relatedOrder}
-                      </div>
-                    )}
-                  </td>
-                  <td className="px-6 py-4">
-                    <span className="text-sm text-[#232323]">
-                      {ticket.customer}
-                    </span>
-                  </td>
-                  <td className="px-6 py-4">
-                    <div className="text-sm text-[#232323]">{ticket.issue}</div>
-                    <div className="text-sm text-gray-500 line-clamp-1">
-                      {ticket.description}
-                    </div>
-                  </td>
-                  <td className="px-6 py-4">
-                    <span
-                      className={`inline-flex items-center px-3 py-1 rounded-lg text-xs font-medium ${getPriorityColor(ticket.priority)}`}
+              <div className="flex-1 overflow-y-auto p-6 space-y-6">
+                <div>
+                  <label className="block text-sm font-medium text-gray-500 mb-2">
+                    Ticket ID
+                  </label>
+                  <p className="text-sm text-primary font-medium">
+                    {selectedTicket.id}
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-500 mb-2">
+                    Customer
+                  </label>
+                  <p className="text-sm text-primary">
+                    {selectedTicket.customer}
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-500 mb-2">
+                    Issue
+                  </label>
+                  <p className="text-sm text-primary">{selectedTicket.issue}</p>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-500 mb-2">
+                    Description
+                  </label>
+                  <p className="text-sm text-primary leading-relaxed">
+                    {selectedTicket.description}
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-500 mb-2">
+                      Priority
+                    </label>
+                    <Badge
+                      variant={getPriorityVariant(selectedTicket.priority)}
+                      size="sm"
                     >
-                      {ticket.priority.charAt(0).toUpperCase() +
-                        ticket.priority.slice(1)}
-                    </span>
-                  </td>
-                  <td className="px-6 py-4">
-                    <span
-                      className={`inline-flex items-center px-3 py-1 rounded-lg text-xs font-medium ${getStatusColor(ticket.status)}`}
+                      {selectedTicket.priority.charAt(0).toUpperCase() +
+                        selectedTicket.priority.slice(1)}
+                    </Badge>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-500 mb-2">
+                      Status
+                    </label>
+                    <Badge
+                      variant={getStatusVariant(selectedTicket.status)}
+                      size="sm"
                     >
-                      {getStatusText(ticket.status)}
-                    </span>
-                  </td>
-                  <td className="px-6 py-4">
-                    <span className="text-sm text-gray-700">
-                      {ticket.assignedTo || (
-                        <span className="text-gray-400">Unassigned</span>
-                      )}
-                    </span>
-                  </td>
-                  <td className="px-6 py-4">
-                    <span className="text-sm text-gray-600">
-                      {new Date(ticket.createdAt).toLocaleDateString("en-US", {
+                      {getStatusText(selectedTicket.status)}
+                    </Badge>
+                  </div>
+                </div>
+
+                {selectedTicket.assignedTo && (
+                  <div>
+                    <label className="block text-sm font-medium text-gray-500 mb-2">
+                      Assigned To
+                    </label>
+                    <p className="text-sm text-primary">
+                      {selectedTicket.assignedTo}
+                    </p>
+                  </div>
+                )}
+
+                {selectedTicket.relatedOrder && (
+                  <div>
+                    <label className="block text-sm font-medium text-gray-500 mb-2">
+                      Related Order
+                    </label>
+                    <p className="text-sm text-primary hover:text-gray-600 cursor-pointer font-medium">
+                      {selectedTicket.relatedOrder}
+                    </p>
+                  </div>
+                )}
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-500 mb-2">
+                    Created
+                  </label>
+                  <p className="text-sm text-primary">
+                    {new Date(selectedTicket.createdAt).toLocaleString(
+                      "en-US",
+                      {
                         month: "short",
                         day: "numeric",
+                        year: "numeric",
                         hour: "2-digit",
                         minute: "2-digit",
-                      })}
-                    </span>
-                  </td>
-                  <td className="px-6 py-4" onClick={(e) => e.stopPropagation()}>
-                    <div className="flex flex-col gap-1">
-                      {(STATUS_TRANSITIONS[ticket.status] || []).length > 0 ? (
-                        <div className="flex gap-1 flex-wrap">
-                          {STATUS_TRANSITIONS[ticket.status].map(
-                            (targetStatus) => (
-                              <button
-                                key={targetStatus}
-                                onClick={() =>
-                                  handleStatusUpdate(ticket.id, targetStatus)
-                                }
-                                className="px-2 py-1 text-xs rounded-md border border-gray-200 text-gray-600 hover:bg-gray-100 transition-colors whitespace-nowrap"
-                              >
-                                {getStatusText(targetStatus)}
-                              </button>
-                            ),
-                          )}
-                        </div>
-                      ) : (
-                        <span className="text-xs text-gray-400">—</span>
-                      )}
-                      {actionError[ticket.id] && (
-                        <p className="text-xs text-red-600">
-                          {actionError[ticket.id]}
-                        </p>
+                      },
+                    )}
+                  </p>
+                </div>
+
+                {/* Status Update Actions in Detail Panel */}
+                {(STATUS_TRANSITIONS[selectedTicket.status] || []).length >
+                  0 && (
+                  <div>
+                    <label className="block text-sm font-medium text-gray-500 mb-2">
+                      Update Status
+                    </label>
+                    <div className="flex gap-2 flex-wrap">
+                      {STATUS_TRANSITIONS[selectedTicket.status].map(
+                        (targetStatus) => (
+                          <Button
+                            key={targetStatus}
+                            type="button"
+                            variant="secondary"
+                            size="sm"
+                            onClick={() =>
+                              handleStatusUpdate(
+                                selectedTicket.id,
+                                targetStatus,
+                              )
+                            }
+                            className="whitespace-nowrap"
+                          >
+                            {getStatusText(targetStatus)}
+                          </Button>
+                        ),
                       )}
                     </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-
-          {/* Pagination */}
-          {totalPages > 1 && (
-            <div className="flex items-center justify-between px-8 py-3 border-t border-gray-100">
-              <span className="text-xs text-gray-500">
-                Page {page} of {totalPages} ({filteredTickets.length} items)
-              </span>
-              <div className="flex items-center gap-2">
-                <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page <= 1} className="px-3 py-1 text-xs border border-gray-200 rounded-lg disabled:opacity-30">Prev</button>
-                <button onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page >= totalPages} className="px-3 py-1 text-xs border border-gray-200 rounded-lg disabled:opacity-30">Next</button>
-              </div>
-            </div>
-          )}
-
-          {filteredTickets.length === 0 && (
-            <div className="text-center py-16 text-gray-500">
-              <MessageSquare className="w-16 h-16 mx-auto mb-4 text-gray-300" />
-              <p className="text-lg font-medium text-gray-400">
-                No support tickets found
-              </p>
-              <p className="text-sm text-gray-400 mt-1">
-                Try adjusting your search or filter criteria
-              </p>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Ticket Details Panel */}
-      {selectedTicket && (
-        <div className="w-96 border-l border-gray-100 bg-gray-50 flex flex-col">
-          <div className="px-6 py-4 border-b border-gray-100">
-            <div className="flex items-center justify-between">
-              <h3 className="font-semibold text-[#232323]">Ticket Details</h3>
-              <button
-                onClick={() => setSelectedTicket(null)}
-                className="text-gray-400 hover:text-[#232323] p-2 rounded-lg hover:bg-white transition-colors"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-          </div>
-
-          <div className="flex-1 overflow-y-auto p-6 space-y-6">
-            <div>
-              <label className="block text-sm font-medium text-gray-500 mb-2">
-                Ticket ID
-              </label>
-              <p className="text-sm text-[#232323] font-medium">
-                {selectedTicket.id}
-              </p>
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-500 mb-2">
-                Customer
-              </label>
-              <p className="text-sm text-[#232323]">
-                {selectedTicket.customer}
-              </p>
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-500 mb-2">
-                Issue
-              </label>
-              <p className="text-sm text-[#232323]">{selectedTicket.issue}</p>
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-500 mb-2">
-                Description
-              </label>
-              <p className="text-sm text-[#232323] leading-relaxed">
-                {selectedTicket.description}
-              </p>
-            </div>
-
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-500 mb-2">
-                  Priority
-                </label>
-                <span
-                  className={`inline-block px-3 py-1 rounded-lg text-xs font-medium ${getPriorityColor(selectedTicket.priority)}`}
-                >
-                  {selectedTicket.priority.charAt(0).toUpperCase() +
-                    selectedTicket.priority.slice(1)}
-                </span>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-500 mb-2">
-                  Status
-                </label>
-                <span
-                  className={`inline-block px-3 py-1 rounded-lg text-xs font-medium ${getStatusColor(selectedTicket.status)}`}
-                >
-                  {getStatusText(selectedTicket.status)}
-                </span>
-              </div>
-            </div>
-
-            {selectedTicket.assignedTo && (
-              <div>
-                <label className="block text-sm font-medium text-gray-500 mb-2">
-                  Assigned To
-                </label>
-                <p className="text-sm text-[#232323]">
-                  {selectedTicket.assignedTo}
-                </p>
-              </div>
-            )}
-
-            {selectedTicket.relatedOrder && (
-              <div>
-                <label className="block text-sm font-medium text-gray-500 mb-2">
-                  Related Order
-                </label>
-                <p className="text-sm text-[#232323] hover:text-gray-600 cursor-pointer font-medium">
-                  {selectedTicket.relatedOrder}
-                </p>
-              </div>
-            )}
-
-            <div>
-              <label className="block text-sm font-medium text-gray-500 mb-2">
-                Created
-              </label>
-              <p className="text-sm text-[#232323]">
-                {new Date(selectedTicket.createdAt).toLocaleString("en-US", {
-                  month: "short",
-                  day: "numeric",
-                  year: "numeric",
-                  hour: "2-digit",
-                  minute: "2-digit",
-                })}
-              </p>
-            </div>
-
-            {/* Status Update Actions in Detail Panel */}
-            {(STATUS_TRANSITIONS[selectedTicket.status] || []).length > 0 && (
-              <div>
-                <label className="block text-sm font-medium text-gray-500 mb-2">
-                  Update Status
-                </label>
-                <div className="flex gap-2 flex-wrap">
-                  {STATUS_TRANSITIONS[selectedTicket.status].map(
-                    (targetStatus) => (
-                      <button
-                        key={targetStatus}
-                        onClick={() =>
-                          handleStatusUpdate(selectedTicket.id, targetStatus)
-                        }
-                        className="px-3 py-1.5 text-xs rounded-lg border border-gray-200 text-gray-600 hover:bg-white transition-colors whitespace-nowrap"
-                      >
-                        {getStatusText(targetStatus)}
-                      </button>
-                    ),
-                  )}
-                </div>
-                {actionError[selectedTicket.id] && (
-                  <p className="text-xs text-red-600 mt-2">
-                    {actionError[selectedTicket.id]}
-                  </p>
+                    {actionError[selectedTicket.id] && (
+                      <p className="text-xs text-error mt-2">
+                        {actionError[selectedTicket.id]}
+                      </p>
+                    )}
+                  </div>
                 )}
               </div>
-            )}
-          </div>
-        </div>
-      )}
+            </div>
+          )}
 
-      {/* Create Ticket Modal */}
-      {showCreateModal && (
-        <CreateTicketModal
-          onClose={() => setShowCreateModal(false)}
-          onCreated={(ticket) => setTickets((prev) => [ticket, ...prev])}
-        />
-      )}
-    </div>
+          {/* Create Ticket Modal */}
+          {showCreateModal && (
+            <CreateTicketModal
+              onClose={() => setShowCreateModal(false)}
+              onCreated={(ticket) => setTickets((prev) => [ticket, ...prev])}
+            />
+          )}
+        </div>
       )}
 
       {activeTab === "notifications" && <NotificationHistoryTab />}
@@ -654,7 +642,11 @@ function CreateTicketModal({ onClose, onCreated }: CreateTicketModalProps) {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!form.customer.trim() || !form.issue.trim() || !form.description.trim()) {
+    if (
+      !form.customer.trim() ||
+      !form.issue.trim() ||
+      !form.description.trim()
+    ) {
       setError("Customer, issue, and description are required.");
       return;
     }
@@ -672,9 +664,7 @@ function CreateTicketModal({ onClose, onCreated }: CreateTicketModalProps) {
       onCreated(response.data);
       onClose();
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to create ticket",
-      );
+      setError(err instanceof Error ? err.message : "Failed to create ticket");
     } finally {
       setSubmitting(false);
     }
@@ -687,7 +677,7 @@ function CreateTicketModal({ onClose, onCreated }: CreateTicketModalProps) {
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
       <div className="bg-white rounded-xl shadow-xl w-full max-w-lg mx-4">
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-          <h2 className="text-lg font-semibold text-[#232323]">
+          <h2 className="text-lg font-semibold text-primary">
             Create Support Ticket
           </h2>
           <button
@@ -700,7 +690,7 @@ function CreateTicketModal({ onClose, onCreated }: CreateTicketModalProps) {
 
         <form onSubmit={handleSubmit} className="px-6 py-4 space-y-4">
           {error && (
-            <p className="text-sm text-red-600 bg-red-50 px-3 py-2 rounded-lg">
+            <p className="text-sm text-error bg-error-light px-3 py-2 rounded-lg">
               {error}
             </p>
           )}
@@ -787,21 +777,12 @@ function CreateTicketModal({ onClose, onCreated }: CreateTicketModalProps) {
           </div>
 
           <div className="flex justify-end gap-3 pt-2">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800 rounded-lg hover:bg-gray-50"
-            >
+            <Button type="button" onClick={onClose} variant="ghost">
               Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={submitting}
-              className="px-4 py-2 text-sm text-white rounded-lg disabled:opacity-50"
-              style={{ backgroundColor: "#232323" }}
-            >
+            </Button>
+            <Button type="submit" disabled={submitting} loading={submitting}>
               {submitting ? "Creating..." : "Create Ticket"}
-            </button>
+            </Button>
           </div>
         </form>
       </div>

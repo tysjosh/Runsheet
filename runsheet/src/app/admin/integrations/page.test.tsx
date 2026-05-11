@@ -20,7 +20,12 @@ import type {
   IntegrationInstance,
   ProviderCatalogEntry,
 } from "../../../services/integrationsApi";
-import { filterProviders, groupProvidersByCategory } from "./page";
+
+jest.mock("../../../utils/auth", () => ({
+  getAuthToken: jest.fn(),
+}));
+
+import { filterProviders, groupProvidersByCategory } from "./helpers";
 
 function providerFixture(
   overrides: Partial<ProviderCatalogEntry> = {},

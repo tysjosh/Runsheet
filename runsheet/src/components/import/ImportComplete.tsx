@@ -41,19 +41,19 @@ export default function ImportComplete({
         <div className="flex justify-center mb-6">
           <div
             className={`w-16 h-16 rounded-full flex items-center justify-center ${
-              isPartial ? "bg-amber-50" : "bg-green-50"
+              isPartial ? "bg-warning-light" : "bg-success-light"
             }`}
           >
             {isPartial ? (
-              <AlertTriangle className="w-8 h-8 text-amber-500" />
+              <AlertTriangle className="w-8 h-8 text-warning" />
             ) : (
-              <CheckCircle2 className="w-8 h-8 text-green-500" />
+              <CheckCircle2 className="w-8 h-8 text-success" />
             )}
           </div>
         </div>
 
         {/* Heading */}
-        <h2 className="text-lg font-semibold text-[#232323] text-center mb-1">
+        <h2 className="text-lg font-semibold text-primary text-center mb-1">
           {isPartial ? "Import Completed with Warnings" : "Import Complete"}
         </h2>
         <p className="text-sm text-gray-500 text-center mb-6">
@@ -64,10 +64,10 @@ export default function ImportComplete({
 
         {/* Partial warning banner */}
         {isPartial && (
-          <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 mb-6">
+          <div className="rounded-xl border border-warning-light bg-warning-light p-4 mb-6">
             <div className="flex items-center gap-3">
-              <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0" />
-              <p className="text-sm text-amber-800">
+              <AlertTriangle className="w-5 h-5 text-warning flex-shrink-0" />
+              <p className="text-sm text-warning-dark">
                 <span className="font-medium">
                   {result.skipped_records} record
                   {result.skipped_records !== 1 ? "s" : ""}
@@ -88,12 +88,12 @@ export default function ImportComplete({
           <div className="grid grid-cols-2 gap-4">
             {/* Records imported */}
             <div className="flex items-start gap-3">
-              <div className="w-9 h-9 rounded-lg bg-green-50 flex items-center justify-center flex-shrink-0">
-                <CheckCircle2 className="w-4.5 h-4.5 text-green-600" />
+              <div className="w-9 h-9 rounded-lg bg-success-light flex items-center justify-center flex-shrink-0">
+                <CheckCircle2 className="w-4.5 h-4.5 text-success" />
               </div>
               <div>
                 <p className="text-xs text-gray-400">Imported</p>
-                <p className="text-lg font-semibold text-[#232323]">
+                <p className="text-lg font-semibold text-primary">
                   {result.imported_records}
                 </p>
               </div>
@@ -106,7 +106,7 @@ export default function ImportComplete({
               </div>
               <div>
                 <p className="text-xs text-gray-400">Skipped</p>
-                <p className="text-lg font-semibold text-[#232323]">
+                <p className="text-lg font-semibold text-primary">
                   {result.skipped_records}
                 </p>
               </div>
@@ -114,12 +114,12 @@ export default function ImportComplete({
 
             {/* Data type */}
             <div className="flex items-start gap-3">
-              <div className="w-9 h-9 rounded-lg bg-blue-50 flex items-center justify-center flex-shrink-0">
-                <FileSpreadsheet className="w-4.5 h-4.5 text-blue-600" />
+              <div className="w-9 h-9 rounded-lg bg-info-light flex items-center justify-center flex-shrink-0">
+                <FileSpreadsheet className="w-4.5 h-4.5 text-info" />
               </div>
               <div>
                 <p className="text-xs text-gray-400">Data Type</p>
-                <p className="text-sm font-medium text-[#232323]">
+                <p className="text-sm font-medium text-primary">
                   {dataTypeLabel}
                 </p>
               </div>
@@ -127,12 +127,12 @@ export default function ImportComplete({
 
             {/* ES Index */}
             <div className="flex items-start gap-3">
-              <div className="w-9 h-9 rounded-lg bg-purple-50 flex items-center justify-center flex-shrink-0">
-                <Database className="w-4.5 h-4.5 text-purple-600" />
+              <div className="w-9 h-9 rounded-lg bg-brand-secondary-soft flex items-center justify-center flex-shrink-0">
+                <Database className="w-4.5 h-4.5 text-brand-secondary" />
               </div>
               <div>
                 <p className="text-xs text-gray-400">ES Index</p>
-                <p className="text-sm font-medium text-[#232323] font-mono">
+                <p className="text-sm font-medium text-primary font-mono">
                   {result.es_index}
                 </p>
               </div>
@@ -145,7 +145,7 @@ export default function ImportComplete({
               </div>
               <div>
                 <p className="text-xs text-gray-400">Duration</p>
-                <p className="text-sm font-medium text-[#232323]">
+                <p className="text-sm font-medium text-primary">
                   {result.duration_seconds.toFixed(1)}s
                 </p>
               </div>
@@ -158,7 +158,7 @@ export default function ImportComplete({
           <button
             type="button"
             onClick={onStartNew}
-            className="flex items-center gap-2 px-6 py-2.5 text-sm font-medium rounded-xl bg-[#232323] text-white hover:bg-black transition-colors"
+            className="flex items-center gap-2 px-6 py-2.5 text-sm font-medium rounded-xl bg-primary text-white hover:bg-primary-hover transition-colors"
           >
             <Plus className="w-4 h-4" />
             Start New Import

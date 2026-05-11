@@ -1,5 +1,6 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { colors } from "@/styles/design-tokens";
 
 interface ReportViewerProps {
   content: string;
@@ -43,13 +44,13 @@ export default function ReportViewer({ content, onClose }: ReportViewerProps) {
               result.push(
                 "<tr>" +
                   cleanCells.map((c) => `<th>${c}</th>`).join("") +
-                  "</tr>"
+                  "</tr>",
               );
             } else {
               result.push(
                 "<tr>" +
                   cleanCells.map((c) => `<td>${c}</td>`).join("") +
-                  "</tr>"
+                  "</tr>",
               );
             }
           } else {
@@ -81,25 +82,35 @@ export default function ReportViewer({ content, onClose }: ReportViewerProps) {
         <head>
           <title>Logistics Report</title>
           <style>
+            :root {
+              --report-color-primary: ${colors.primary.DEFAULT};
+              --report-color-text: ${colors.gray[800]};
+              --report-color-muted: ${colors.gray[500]};
+              --report-color-heading-muted: ${colors.gray[600]};
+              --report-color-border: ${colors.gray[200]};
+              --report-color-border-strong: ${colors.gray[300]};
+              --report-color-surface-subtle: ${colors.gray[100]};
+              --report-color-surface-muted: ${colors.gray[50]};
+            }
             body {
               font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
               line-height: 1.6;
-              color: #333;
+              color: var(--report-color-text);
               max-width: 800px;
               margin: 0 auto;
               padding: 20px;
             }
-            h1 { color: #232323; border-bottom: 2px solid #232323; padding-bottom: 10px; }
-            h2 { color: #232323; margin-top: 30px; }
-            h3 { color: #4b5563; }
+            h1 { color: var(--report-color-primary); border-bottom: 2px solid var(--report-color-primary); padding-bottom: 10px; }
+            h2 { color: var(--report-color-primary); margin-top: 30px; }
+            h3 { color: var(--report-color-heading-muted); }
             ul { padding-left: 20px; list-style-type: disc; }
             li { margin: 5px 0; }
-            strong { color: #232323; }
-            em { color: #6b7280; }
+            strong { color: var(--report-color-primary); }
+            em { color: var(--report-color-muted); }
             table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 13px; }
-            th { background: #f3f4f6; text-align: left; padding: 8px 12px; border: 1px solid #d1d5db; font-weight: 600; color: #374151; }
-            td { padding: 6px 12px; border: 1px solid #e5e7eb; color: #4b5563; }
-            tr:nth-child(even) { background: #f9fafb; }
+            th { background: var(--report-color-surface-subtle); text-align: left; padding: 8px 12px; border: 1px solid var(--report-color-border-strong); font-weight: 600; color: var(--report-color-heading-muted); }
+            td { padding: 6px 12px; border: 1px solid var(--report-color-border); color: var(--report-color-heading-muted); }
+            tr:nth-child(even) { background: var(--report-color-surface-muted); }
             @media print {
               body { margin: 0; padding: 15px; }
               .no-print { display: none; }
@@ -124,7 +135,7 @@ export default function ReportViewer({ content, onClose }: ReportViewerProps) {
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
       <div className="bg-white rounded-lg shadow-xl max-w-4xl w-full max-h-[90vh] flex flex-col">
         <div className="flex items-center justify-between p-4 border-b border-gray-200">
-          <h2 className="text-xl font-bold text-[#232323]">Report Viewer</h2>
+          <h2 className="text-xl font-bold text-primary">Report Viewer</h2>
           <div className="flex gap-2">
             <button
               onClick={handleCopyToClipboard}
@@ -134,7 +145,7 @@ export default function ReportViewer({ content, onClose }: ReportViewerProps) {
             </button>
             <button
               onClick={handleDownloadPDF}
-              className="px-3 py-2 text-sm bg-[#232323] hover:bg-[#333333] text-white rounded-lg transition-colors"
+              className="px-3 py-2 text-sm bg-primary hover:bg-primary-hover text-white rounded-lg transition-colors"
             >
               Print/PDF
             </button>
@@ -153,7 +164,7 @@ export default function ReportViewer({ content, onClose }: ReportViewerProps) {
               remarkPlugins={[remarkGfm]}
               components={{
                 h1: ({ children }) => (
-                  <h1 className="text-2xl font-bold text-[#232323] border-b-2 border-[#232323] pb-2 mb-4">
+                  <h1 className="text-2xl font-bold text-primary border-b-2 border-primary pb-2 mb-4">
                     {children}
                   </h1>
                 ),
@@ -179,7 +190,7 @@ export default function ReportViewer({ content, onClose }: ReportViewerProps) {
                   <p className="text-gray-700 mb-3">{children}</p>
                 ),
                 strong: ({ children }) => (
-                  <strong className="font-semibold text-[#232323]">
+                  <strong className="font-semibold text-primary">
                     {children}
                   </strong>
                 ),

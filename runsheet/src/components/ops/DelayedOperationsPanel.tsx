@@ -34,31 +34,31 @@ export default function DelayedOperationsPanel({
   return (
     <div className="bg-white rounded-xl border border-gray-100">
       <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-100">
-        <Clock className="w-4 h-4 text-red-600" />
-        <h3 className="text-sm font-semibold text-[#232323]">
+        <Clock className="w-4 h-4 text-error" />
+        <h3 className="text-sm font-semibold text-primary">
           Delayed Operations
         </h3>
-        <span className="ml-auto text-xs text-red-500 font-medium">
+        <span className="ml-auto text-xs text-error font-medium">
           {delayedJobs.length}
         </span>
       </div>
 
       <div className="max-h-48 overflow-y-auto divide-y divide-gray-50">
         {delayedJobs.length === 0 ? (
-          <div className="px-4 py-6 text-center text-sm text-green-600">
+          <div className="px-4 py-6 text-center text-sm text-success">
             No delayed operations
           </div>
         ) : (
           delayedJobs.map((job) => (
             <div
               key={job.job_id}
-              className="px-4 py-2.5 hover:bg-red-50/50"
+              className="px-4 py-2.5 hover:bg-error-light/50"
             >
               <div className="flex items-center justify-between">
-                <span className="text-xs font-medium text-[#232323]">
+                <span className="text-xs font-medium text-primary">
                   {job.job_id}
                 </span>
-                <span className="px-2 py-0.5 rounded bg-red-100 text-red-700 text-xs font-medium">
+                <span className="px-2 py-0.5 rounded bg-error-light text-error-dark text-xs font-medium">
                   +{formatDelay(job.delay_duration_minutes)}
                 </span>
               </div>

@@ -1,16 +1,18 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import type React from "react";
+import { useCallback, useEffect, useState } from "react";
+import { Badge, Button } from "@/components/ui";
 import type {
   Account,
   AgingBuckets,
   CreditOverridePayload,
 } from "../../services/commerceApi";
 import {
-  getAccount,
-  getAccountAging,
   applyCreditOverride,
   deleteCreditOverride,
+  getAccount,
+  getAccountAging,
 } from "../../services/commerceApi";
 
 interface AccountDetailPageProps {
@@ -64,7 +66,8 @@ export default function AccountDetailPage({
       const payload: CreditOverridePayload = {
         reason: overrideReason,
         authorized_by: "current_user",
-        expires_at: overrideExpiry || new Date(Date.now() + 7 * 86400000).toISOString(),
+        expires_at:
+          overrideExpiry || new Date(Date.now() + 7 * 86400000).toISOString(),
       };
       const res = await applyCreditOverride(accountId, payload);
       setAccount(res.data);
@@ -91,11 +94,19 @@ export default function AccountDetailPage({
     }
   };
 
+  const getCreditStateVariant = (
+    state: string,
+  ): "success" | "error" | "info" => {
+    if (state === "ok") return "success";
+    if (state === "hold") return "error";
+    return "info";
+  };
+
   if (loading) {
     return (
       <div role="status" className="flex justify-center py-12">
         <span className="sr-only">Loading account details...</span>
-        <div className="animate-spin h-8 w-8 border-4 border-blue-600 border-t-transparent rounded-full" />
+        <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
       </div>
     );
   }
@@ -103,7 +114,7 @@ export default function AccountDetailPage({
   if (error) {
     return (
       <div role="alert" className="p-6">
-        <div className="bg-red-50 border border-red-200 text-red-700 p-4 rounded">
+        <div className="bg-error-light border border-error-light text-error-dark p-4 rounded">
           {error}
         </div>
       </div>
@@ -121,13 +132,9 @@ export default function AccountDetailPage({
       <header className="mb-6">
         <div className="flex items-center gap-4 mb-2">
           {onBack && (
-            <button
-              type="button"
-              onClick={onBack}
-              className="text-blue-600 hover:underline"
-            >
+            <Button variant="ghost" onClick={onBack}>
               ← Back to Accounts
-            </button>
+            </Button>
           )}
         </div>
         <div className="flex items-center justify-between">
@@ -138,24 +145,10 @@ export default function AccountDetailPage({
             </p>
           </div>
           <div className="flex items-center gap-3">
-            <span
-              className={`px-3 py-1 rounded text-sm font-medium ${
-                account.credit_state === "ok"
-                  ? "bg-green-100 text-green-800"
-                  : account.credit_state === "hold"
-                    ? "bg-red-100 text-red-800"
-                    : "bg-blue-100 text-blue-800"
-              }`}
-            >
+            <Badge variant={getCreditStateVariant(account.credit_state)}>
               {account.credit_state}
-            </span>
-            <button
-              type="button"
-              onClick={() => setDrawerOpen(true)}
-              className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700"
-            >
-              Credit Override
-            </button>
+            </Badge>
+            <Button onClick={() => setDrawerOpen(true)}>Credit Override</Button>
           </div>
         </div>
       </header>
@@ -190,18 +183,16 @@ export default function AccountDetailPage({
           </div>
         </div>
         {account.credit_override_expires_at && (
-          <div className="mt-3 p-3 bg-blue-50 border border-blue-200 rounded flex items-center justify-between">
-            <span className="text-sm text-blue-800">
+          <div className="mt-3 p-3 bg-info-light border border-info rounded flex items-center justify-between">
+            <span className="text-sm text-info-dark">
               Credit override active until{" "}
-              {new Date(account.credit_override_expires_at).toLocaleDateString()}
+              {new Date(
+                account.credit_override_expires_at,
+              ).toLocaleDateString()}
             </span>
-            <button
-              type="button"
-              onClick={handleExpireOverride}
-              className="text-sm text-red-600 hover:underline"
-            >
+            <Button variant="danger" size="sm" onClick={handleExpireOverride}>
               Expire Now
-            </button>
+            </Button>
           </div>
         )}
       </section>
@@ -231,9 +222,9 @@ export default function AccountDetailPage({
                 {formatCents(aging.bucket_61_90_cents)}
               </p>
             </div>
-            <div className="border rounded p-4 bg-red-50">
+            <div className="border rounded p-4 bg-error-light">
               <p className="text-sm text-gray-600">90+ Days</p>
-              <p className="text-xl font-bold text-red-700">
+              <p className="text-xl font-bold text-error-dark">
                 {formatCents(aging.bucket_90_plus_cents)}
               </p>
             </div>
@@ -249,13 +240,12 @@ export default function AccountDetailPage({
 
       {/* Customer link */}
       <section className="mb-8">
-        <button
-          type="button"
+        <Button
+          variant="ghost"
           onClick={() => onViewCustomer?.(account.customer_id)}
-          className="text-blue-600 hover:underline"
         >
           View Parent Customer →
-        </button>
+        </Button>
       </section>
 
       {/* Credit Override Drawer */}
@@ -309,20 +299,20 @@ export default function AccountDetailPage({
                 />
               </div>
               <div className="flex gap-3">
-                <button
+                <Button
                   type="submit"
                   disabled={overrideSubmitting || !overrideReason.trim()}
-                  className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 disabled:opacity-50"
+                  loading={overrideSubmitting}
                 >
-                  {overrideSubmitting ? "Applying..." : "Apply Override"}
-                </button>
-                <button
+                  Apply Override
+                </Button>
+                <Button
                   type="button"
+                  variant="secondary"
                   onClick={() => setDrawerOpen(false)}
-                  className="border px-4 py-2 rounded hover:bg-gray-50"
                 >
                   Cancel
-                </button>
+                </Button>
               </div>
             </form>
           </div>

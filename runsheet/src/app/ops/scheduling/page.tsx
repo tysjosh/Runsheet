@@ -1,6 +1,12 @@
 "use client";
 
-import { CalendarClock, ChevronDown, ChevronUp, Plus, Search } from "lucide-react";
+import {
+  CalendarClock,
+  ChevronDown,
+  ChevronUp,
+  Plus,
+  Search,
+} from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import LoadingSpinner from "../../../components/LoadingSpinner";
 import CreateJobModal from "../../../components/ops/CreateJobModal";
@@ -11,12 +17,12 @@ import JobFilters, {
 } from "../../../components/ops/JobFilters";
 import JobSummaryBar from "../../../components/ops/JobSummaryBar";
 import { useSchedulingWebSocket } from "../../../hooks/useSchedulingWebSocket";
-import type { Job, JobStatus } from "../../../types/api";
 import {
+  type JobFilters as ApiJobFilters,
   getJobs,
   transitionStatus,
-  type JobFilters as ApiJobFilters,
 } from "../../../services/schedulingApi";
+import type { Job, JobStatus } from "../../../types/api";
 
 const CargoSearchSection = lazy(
   () => import("../../../components/ops/CargoSearchSection"),
@@ -53,7 +59,8 @@ export default function SchedulingJobBoardPage() {
       const apiFilters: ApiJobFilters = {};
       if (filters.job_type) apiFilters.job_type = filters.job_type;
       if (filters.status) apiFilters.status = filters.status;
-      if (filters.asset_assigned) apiFilters.asset_assigned = filters.asset_assigned;
+      if (filters.asset_assigned)
+        apiFilters.asset_assigned = filters.asset_assigned;
       if (filters.start_date) apiFilters.start_date = filters.start_date;
       if (filters.end_date) apiFilters.end_date = filters.end_date;
 
@@ -95,7 +102,8 @@ export default function SchedulingJobBoardPage() {
                 ...j,
                 status: event.new_status as JobStatus,
                 asset_assigned: event.asset_assigned ?? j.asset_assigned,
-                estimated_arrival: event.estimated_arrival ?? j.estimated_arrival,
+                estimated_arrival:
+                  event.estimated_arrival ?? j.estimated_arrival,
                 updated_at: new Date().toISOString(),
               }
             : j,
@@ -141,9 +149,7 @@ export default function SchedulingJobBoardPage() {
           status: targetStatus,
           failure_reason: failureReason,
         });
-        setJobs((prev) =>
-          prev.map((j) => (j.job_id === jobId ? res.data : j)),
-        );
+        setJobs((prev) => prev.map((j) => (j.job_id === jobId ? res.data : j)));
       } catch (error) {
         console.error("Failed to transition job status:", error);
       }
@@ -172,13 +178,11 @@ export default function SchedulingJobBoardPage() {
       <div className="border-b border-gray-100 px-8 py-6">
         <div className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-[#232323] rounded-xl flex items-center justify-center">
+            <div className="w-10 h-10 bg-primary rounded-xl flex items-center justify-center">
               <CalendarClock className="w-5 h-5 text-white" />
             </div>
             <div>
-              <h1 className="text-2xl font-semibold text-[#232323]">
-                Job Board
-              </h1>
+              <h1 className="text-2xl font-semibold text-primary">Job Board</h1>
               <p className="text-gray-500">
                 Manage and track all logistics jobs in real time
               </p>
@@ -201,8 +205,7 @@ export default function SchedulingJobBoardPage() {
             </button>
             <button
               onClick={() => setShowCreateModal(true)}
-              className="flex items-center gap-2 px-4 py-2 text-sm text-white rounded-lg transition-colors hover:opacity-90"
-              style={{ backgroundColor: "#232323" }}
+              className="flex items-center gap-2 px-4 py-2 text-sm text-white rounded-lg transition-colors bg-primary hover:bg-primary-hover"
             >
               <Plus className="w-4 h-4" />
               Create Job
@@ -220,12 +223,19 @@ export default function SchedulingJobBoardPage() {
 
       {/* Board */}
       <div className="flex-1 overflow-y-auto">
-        <JobBoard jobs={jobs} onTransition={handleTransition} onSelectJob={setSelectedJobId} />
+        <JobBoard
+          jobs={jobs}
+          onTransition={handleTransition}
+          onSelectJob={setSelectedJobId}
+        />
       </div>
 
       {/* Cargo Search — collapsible section */}
       {showCargoSearch && (
-        <div id="cargo-search-section" className="border-t border-gray-200 px-8 py-6">
+        <div
+          id="cargo-search-section"
+          className="border-t border-gray-200 px-8 py-6"
+        >
           <Suspense
             fallback={
               <div className="flex items-center justify-center py-8 text-gray-400 text-sm">

@@ -10,14 +10,14 @@ interface FuelConsumptionChartProps {
 const LITERS_PER_GALLON = 3.785411784;
 
 const FUEL_TYPE_COLORS: Record<FuelType, { bar: string; label: string }> = {
-  DIESEL_2: { bar: "bg-blue-500", label: "Diesel #2" },
-  GASOLINE_REG: { bar: "bg-amber-500", label: "Regular Unleaded" },
-  GASOLINE_PREM: { bar: "bg-red-500", label: "Premium Unleaded" },
-  HEATING_OIL: { bar: "bg-orange-500", label: "Heating Oil" },
-  PROPANE: { bar: "bg-emerald-500", label: "Propane" },
-  KEROSENE: { bar: "bg-purple-500", label: "Kerosene" },
+  DIESEL_2: { bar: "bg-info-light0", label: "Diesel #2" },
+  GASOLINE_REG: { bar: "bg-warning-light0", label: "Regular Unleaded" },
+  GASOLINE_PREM: { bar: "bg-error-light0", label: "Premium Unleaded" },
+  HEATING_OIL: { bar: "bg-warning-light0", label: "Heating Oil" },
+  PROPANE: { bar: "bg-success-light0", label: "Propane" },
+  KEROSENE: { bar: "bg-brand-secondary-soft0", label: "Kerosene" },
   OFF_ROAD_DIESEL: { bar: "bg-slate-500", label: "Off-Road Diesel" },
-  DEF: { bar: "bg-cyan-500", label: "DEF" },
+  DEF: { bar: "bg-info-light0", label: "DEF" },
 };
 
 const DEFAULT_COLOR = { bar: "bg-gray-400", label: "Other" };
@@ -68,7 +68,9 @@ function formatGallons(gallons: number): string {
  *
  * Validates: Requirements 6.3
  */
-export default function FuelConsumptionChart({ data }: FuelConsumptionChartProps) {
+export default function FuelConsumptionChart({
+  data,
+}: FuelConsumptionChartProps) {
   const buckets = groupByDay(data);
 
   if (buckets.length === 0) {
@@ -97,8 +99,14 @@ export default function FuelConsumptionChart({ data }: FuelConsumptionChartProps
         {fuelTypes.map((ft) => {
           const cfg = FUEL_TYPE_COLORS[ft as FuelType] ?? DEFAULT_COLOR;
           return (
-            <div key={ft} className="flex items-center gap-1.5 text-xs text-gray-600">
-              <span className={`w-3 h-3 rounded-sm ${cfg.bar}`} aria-hidden="true" />
+            <div
+              key={ft}
+              className="flex items-center gap-1.5 text-xs text-gray-600"
+            >
+              <span
+                className={`w-3 h-3 rounded-sm ${cfg.bar}`}
+                aria-hidden="true"
+              />
               {cfg.label}
             </div>
           );

@@ -117,11 +117,11 @@ export default function FuelEventForm({
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-2">
           {isConsumption ? (
-            <ArrowDown className="w-4 h-4 text-red-500" aria-hidden="true" />
+            <ArrowDown className="w-4 h-4 text-error" aria-hidden="true" />
           ) : (
-            <ArrowUp className="w-4 h-4 text-green-500" aria-hidden="true" />
+            <ArrowUp className="w-4 h-4 text-success" aria-hidden="true" />
           )}
-          <h4 className="text-sm font-semibold text-[#232323]">
+          <h4 className="text-sm font-semibold text-primary">
             {isConsumption ? "Record Consumption" : "Record Refill"}
           </h4>
         </div>
@@ -259,7 +259,7 @@ export default function FuelEventForm({
 
         {/* Error */}
         {error && (
-          <p className="text-xs text-red-600" role="alert">
+          <p className="text-xs text-error" role="alert">
             {error}
           </p>
         )}
@@ -270,8 +270,8 @@ export default function FuelEventForm({
           disabled={!canSubmit || submitting}
           className={`w-full flex items-center justify-center gap-2 px-4 py-2 text-sm font-medium rounded-lg transition-colors ${
             isConsumption
-              ? "bg-red-600 hover:bg-red-700 text-white"
-              : "bg-green-600 hover:bg-green-700 text-white"
+              ? "bg-error hover:bg-error-dark text-white"
+              : "bg-success hover:bg-success-dark text-white"
           } disabled:opacity-50 disabled:cursor-not-allowed`}
         >
           {submitting && <Loader2 className="w-4 h-4 animate-spin" />}

@@ -1,7 +1,7 @@
 import { AlertCircle, CheckCircle2, Loader2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import type { ImportResult } from "../../types/import";
 import { importApi } from "../../services/importApi";
+import type { ImportResult } from "../../types/import";
 
 // ─── Props ───────────────────────────────────────────────────────────────────
 
@@ -104,13 +104,13 @@ export default function ImportProgress({
         <div className="w-full max-w-md">
           {/* Error icon */}
           <div className="flex justify-center mb-6">
-            <div className="w-16 h-16 rounded-full bg-red-50 flex items-center justify-center">
-              <AlertCircle className="w-8 h-8 text-red-500" />
+            <div className="w-16 h-16 rounded-full bg-error-light flex items-center justify-center">
+              <AlertCircle className="w-8 h-8 text-error" />
             </div>
           </div>
 
           {/* Error heading */}
-          <h2 className="text-lg font-semibold text-[#232323] text-center mb-2">
+          <h2 className="text-lg font-semibold text-primary text-center mb-2">
             Import Failed
           </h2>
 
@@ -119,10 +119,10 @@ export default function ImportProgress({
 
           {/* Records imported before failure */}
           {importedBeforeFailure !== null && importedBeforeFailure > 0 && (
-            <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 mb-6">
+            <div className="rounded-xl border border-warning-light bg-warning-light p-4 mb-6">
               <div className="flex items-center gap-3">
-                <CheckCircle2 className="w-5 h-5 text-amber-600 flex-shrink-0" />
-                <p className="text-sm text-amber-800">
+                <CheckCircle2 className="w-5 h-5 text-warning flex-shrink-0" />
+                <p className="text-sm text-warning-dark">
                   <span className="font-medium">
                     {importedBeforeFailure} records
                   </span>{" "}
@@ -160,12 +160,12 @@ export default function ImportProgress({
         {/* Spinner */}
         <div className="flex justify-center mb-6">
           <div className="w-16 h-16 rounded-full bg-gray-50 flex items-center justify-center">
-            <Loader2 className="w-8 h-8 text-[#232323] animate-spin" />
+            <Loader2 className="w-8 h-8 text-primary animate-spin" />
           </div>
         </div>
 
         {/* Status label */}
-        <h2 className="text-lg font-semibold text-[#232323] text-center mb-2">
+        <h2 className="text-lg font-semibold text-primary text-center mb-2">
           Importing Data
         </h2>
         <p className="text-sm text-gray-500 text-center mb-6">
@@ -176,7 +176,7 @@ export default function ImportProgress({
         <div className="mb-4">
           <div className="w-full h-2.5 bg-gray-100 rounded-full overflow-hidden">
             <div
-              className="h-full bg-[#232323] rounded-full transition-all duration-700 ease-out"
+              className="h-full bg-primary rounded-full transition-all duration-700 ease-out"
               style={{ width: `${progressPercent}%` }}
             />
           </div>
@@ -186,15 +186,13 @@ export default function ImportProgress({
         <div className="text-center">
           {totalRecords !== null && importedRecords !== null ? (
             <p className="text-sm text-gray-500">
-              <span className="font-medium text-[#232323]">
+              <span className="font-medium text-primary">
                 {importedRecords}
               </span>{" "}
               / {totalRecords} records processed
             </p>
           ) : (
-            <p className="text-sm text-gray-400">
-              Waiting for results…
-            </p>
+            <p className="text-sm text-gray-400">Waiting for results…</p>
           )}
         </div>
       </div>

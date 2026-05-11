@@ -1,19 +1,30 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import type React from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
-  getDrivers,
-  getDriver,
-  getDriversDashboard,
+  Badge,
+  Button,
+  EmptyState,
+  FilterBar,
+  PageHeader,
+  Pagination,
+  StatsBar,
+  Table,
+} from "@/components/ui";
+import {
+  type CreateDriverPayload,
   createDriver,
-  updateDriver,
-  type Driver,
-  type DriverStatus,
   type DQFDashboard,
   type DQFDashboardEntry,
+  type Driver,
   type DriverQualificationStatus,
-  type CreateDriverPayload,
+  type DriverStatus,
+  getDriver,
+  getDrivers,
+  getDriversDashboard,
   type UpdateDriverPayload,
+  updateDriver,
 } from "../../services/complianceApi";
 
 // ─── Sub-view types ──────────────────────────────────────────────────────────
@@ -22,31 +33,31 @@ type ViewMode = "list" | "detail" | "dashboard" | "add" | "edit";
 
 // ─── Alert level color mapping ───────────────────────────────────────────────
 
-function alertLevelBadge(level: DriverQualificationStatus["alert_level"]) {
+function _alertLevelBadge(level: DriverQualificationStatus["alert_level"]) {
   switch (level) {
     case "ok":
-      return "bg-green-100 text-green-800";
+      return "bg-success-light text-success-dark";
     case "warning":
-      return "bg-yellow-100 text-yellow-800";
+      return "bg-warning-light text-warning-dark";
     case "urgent":
-      return "bg-orange-100 text-orange-800";
+      return "bg-warning-light text-warning-dark";
     case "critical":
-      return "bg-red-100 text-red-800";
+      return "bg-error-light text-error-dark";
     case "expired":
-      return "bg-red-200 text-red-900";
+      return "bg-error-light text-error-dark";
     default:
       return "bg-gray-100 text-gray-800";
   }
 }
 
-function statusBadge(status: DriverStatus) {
+function _statusBadge(status: DriverStatus) {
   switch (status) {
     case "active":
-      return "bg-green-100 text-green-800";
+      return "bg-success-light text-success-dark";
     case "suspended":
-      return "bg-yellow-100 text-yellow-800";
+      return "bg-warning-light text-warning-dark";
     case "expired":
-      return "bg-red-100 text-red-800";
+      return "bg-error-light text-error-dark";
     default:
       return "bg-gray-100 text-gray-800";
   }
@@ -159,26 +170,26 @@ export default function DriversPage() {
   function renderDashboardSummary() {
     if (!dashboard) return null;
     return (
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-        <div className="bg-white border border-gray-200 rounded-lg p-4 shadow-sm">
-          <p className="text-sm text-gray-500">Active Drivers</p>
-          <p className="text-2xl font-bold text-green-700">
-            {dashboard.total_active}
-          </p>
-        </div>
-        <div className="bg-white border border-gray-200 rounded-lg p-4 shadow-sm">
-          <p className="text-sm text-gray-500">Suspended</p>
-          <p className="text-2xl font-bold text-yellow-700">
-            {dashboard.total_suspended}
-          </p>
-        </div>
-        <div className="bg-white border border-gray-200 rounded-lg p-4 shadow-sm">
-          <p className="text-sm text-gray-500">Expiring Soon</p>
-          <p className="text-2xl font-bold text-red-700">
-            {dashboard.total_expiring_soon}
-          </p>
-        </div>
-      </div>
+      <StatsBar
+        stats={[
+          {
+            label: "Active Drivers",
+            value: dashboard.total_active.toString(),
+            variant: "success",
+          },
+          {
+            label: "Suspended",
+            value: dashboard.total_suspended.toString(),
+            variant: "warning",
+          },
+          {
+            label: "Expiring Soon",
+            value: dashboard.total_expiring_soon.toString(),
+            variant: "error",
+          },
+        ]}
+        className="mb-6"
+      />
     );
   }
 
@@ -189,7 +200,7 @@ export default function DriversPage() {
       return (
         <div role="status" className="flex justify-center py-12">
           <span className="sr-only">Loading DQF dashboard...</span>
-          <div className="animate-spin h-8 w-8 border-4 border-blue-600 border-t-transparent rounded-full" />
+          <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
         </div>
       );
     }
@@ -200,53 +211,64 @@ export default function DriversPage() {
       <div>
         {renderDashboardSummary()}
 
-        <table className="w-full border-collapse" role="table">
-          <thead>
-            <tr className="border-b bg-gray-50">
-              <th className="text-left p-3 font-medium">Driver</th>
-              <th className="text-left p-3 font-medium">Status</th>
-              <th className="text-left p-3 font-medium">Qualifications</th>
-            </tr>
-          </thead>
-          <tbody>
-            {dashboard.drivers.map((entry: DQFDashboardEntry) => (
-              <tr
-                key={entry.driver_id}
-                className="border-b hover:bg-gray-50 cursor-pointer"
-                onClick={() => handleViewDetail(entry.driver_id)}
-              >
-                <td className="p-3 font-medium">{entry.full_name}</td>
-                <td className="p-3">
-                  <span
-                    className={`inline-block px-2 py-1 rounded text-xs font-medium ${statusBadge(entry.status)}`}
-                  >
-                    {entry.status}
-                  </span>
-                </td>
-                <td className="p-3">
-                  <div className="flex flex-wrap gap-1">
-                    {entry.qualifications.map((qual) => (
-                      <span
-                        key={qual.field}
-                        className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${alertLevelBadge(qual.alert_level)}`}
-                        title={`${qual.field}: expires ${formatDate(qual.expiry_date)} (${qual.days_until_expiry} days)`}
-                      >
-                        {qual.field.replace(/_/g, " ")}
-                      </span>
-                    ))}
-                  </div>
-                </td>
-              </tr>
-            ))}
-            {dashboard.drivers.length === 0 && (
-              <tr>
-                <td colSpan={3} className="p-6 text-center text-gray-500">
-                  No drivers found.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
+        <Table
+          columns={[
+            { key: "full_name", label: "Driver" },
+            {
+              key: "status",
+              label: "Status",
+              render: (entry: DQFDashboardEntry) => (
+                <Badge
+                  variant={
+                    entry.status === "active"
+                      ? "success"
+                      : entry.status === "suspended"
+                        ? "warning"
+                        : "error"
+                  }
+                >
+                  {entry.status}
+                </Badge>
+              ),
+            },
+            {
+              key: "qualifications",
+              label: "Qualifications",
+              render: (entry: DQFDashboardEntry) => (
+                <div className="flex flex-wrap gap-1">
+                  {entry.qualifications.map((qual) => (
+                    <Badge
+                      key={qual.field}
+                      variant={
+                        qual.alert_level === "ok"
+                          ? "success"
+                          : qual.alert_level === "warning"
+                            ? "warning"
+                            : qual.alert_level === "urgent" ||
+                                qual.alert_level === "critical" ||
+                                qual.alert_level === "expired"
+                              ? "error"
+                              : "default"
+                      }
+                      size="sm"
+                    >
+                      {qual.field.replace(/_/g, " ")}
+                    </Badge>
+                  ))}
+                </div>
+              ),
+            },
+          ]}
+          data={dashboard.drivers}
+          getRowId={(entry) => entry.driver_id}
+          onRowClick={(entry) => handleViewDetail(entry.driver_id)}
+          emptyState={
+            <EmptyState
+              icon={<span className="text-4xl">👤</span>}
+              title="No drivers found"
+            />
+          }
+        />
       </div>
     );
   }
@@ -285,18 +307,24 @@ export default function DriversPage() {
             </p>
           </div>
           <div className="flex gap-2">
-            <span
-              className={`inline-block px-3 py-1 rounded text-sm font-medium ${statusBadge(selectedDriver.status)}`}
+            <Badge
+              variant={
+                selectedDriver.status === "active"
+                  ? "success"
+                  : selectedDriver.status === "suspended"
+                    ? "warning"
+                    : "error"
+              }
             >
               {selectedDriver.status}
-            </span>
-            <button
-              type="button"
+            </Badge>
+            <Button
+              variant="primary"
+              size="sm"
               onClick={() => handleEditDriver(selectedDriver)}
-              className="bg-blue-600 text-white px-3 py-1 rounded text-sm hover:bg-blue-700"
             >
               Edit
-            </button>
+            </Button>
           </div>
         </div>
 
@@ -327,7 +355,10 @@ export default function DriversPage() {
           setError(null);
           try {
             if (isEdit && editingDriver) {
-              await updateDriver(editingDriver.driver_id, data as UpdateDriverPayload);
+              await updateDriver(
+                editingDriver.driver_id,
+                data as UpdateDriverPayload,
+              );
             } else {
               await createDriver(data as CreateDriverPayload);
             }
@@ -352,14 +383,8 @@ export default function DriversPage() {
     return (
       <>
         {/* Filters */}
-        <div className="flex gap-4 mb-6 items-end">
-          <div>
-            <label
-              htmlFor="driver-status-filter"
-              className="block text-sm font-medium mb-1"
-            >
-              Status
-            </label>
+        <FilterBar
+          filters={
             <select
               id="driver-status-filter"
               value={statusFilter}
@@ -367,119 +392,99 @@ export default function DriversPage() {
                 setStatusFilter(e.target.value);
                 setPage(1);
               }}
-              className="border rounded px-3 py-2"
+              className="px-4 py-3 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-gray-200 focus:border-gray-300 focus:outline-none bg-white min-w-[140px]"
+              aria-label="Status"
             >
               <option value="">All</option>
               <option value="active">Active</option>
               <option value="suspended">Suspended</option>
               <option value="expired">Expired</option>
             </select>
-          </div>
-        </div>
+          }
+        />
 
         {/* Loading state */}
         {loading && (
           <div role="status" className="flex justify-center py-12">
             <span className="sr-only">Loading drivers...</span>
-            <div className="animate-spin h-8 w-8 border-4 border-blue-600 border-t-transparent rounded-full" />
+            <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
           </div>
         )}
 
         {/* Driver table */}
         {!loading && !error && (
           <>
-            <table className="w-full border-collapse" role="table">
-              <thead>
-                <tr className="border-b bg-gray-50">
-                  <th className="text-left p-3 font-medium">Name</th>
-                  <th className="text-left p-3 font-medium">CDL Number</th>
-                  <th className="text-left p-3 font-medium">CDL Class</th>
-                  <th className="text-left p-3 font-medium">Status</th>
-                  <th className="text-left p-3 font-medium">CDL Expiry</th>
-                  <th className="text-left p-3 font-medium">
-                    Medical Card Expiry
-                  </th>
-                  <th className="text-left p-3 font-medium">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {drivers.map((driver) => (
-                  <tr
-                    key={driver.driver_id}
-                    className="border-b hover:bg-gray-50"
-                  >
-                    <td className="p-3 font-medium">{driver.full_name}</td>
-                    <td className="p-3">{driver.cdl_number}</td>
-                    <td className="p-3">{driver.cdl_class}</td>
-                    <td className="p-3">
-                      <span
-                        className={`inline-block px-2 py-1 rounded text-xs font-medium ${statusBadge(driver.status)}`}
-                      >
-                        {driver.status}
-                      </span>
-                    </td>
-                    <td className="p-3">{formatDate(driver.cdl_expiry_date)}</td>
-                    <td className="p-3">
-                      {formatDate(driver.medical_card_expiry_date)}
-                    </td>
-                    <td className="p-3">
-                      <div className="flex gap-2">
-                        <button
-                          type="button"
-                          onClick={() => handleViewDetail(driver.driver_id)}
-                          className="text-blue-600 hover:underline text-sm"
-                        >
-                          View
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleEditDriver(driver)}
-                          className="text-gray-600 hover:underline text-sm"
-                        >
-                          Edit
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-                {drivers.length === 0 && (
-                  <tr>
-                    <td
-                      colSpan={7}
-                      className="p-6 text-center text-gray-500"
+            <Table
+              columns={[
+                { key: "full_name", label: "Name" },
+                { key: "cdl_number", label: "CDL Number" },
+                { key: "cdl_class", label: "CDL Class" },
+                {
+                  key: "status",
+                  label: "Status",
+                  render: (driver) => (
+                    <Badge
+                      variant={
+                        driver.status === "active"
+                          ? "success"
+                          : driver.status === "suspended"
+                            ? "warning"
+                            : "error"
+                      }
                     >
-                      No drivers found.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
+                      {driver.status}
+                    </Badge>
+                  ),
+                },
+                {
+                  key: "cdl_expiry_date",
+                  label: "CDL Expiry",
+                  render: (driver) => formatDate(driver.cdl_expiry_date),
+                },
+                {
+                  key: "medical_card_expiry_date",
+                  label: "Medical Card Expiry",
+                  render: (driver) =>
+                    formatDate(driver.medical_card_expiry_date),
+                },
+                {
+                  key: "actions",
+                  label: "Actions",
+                  render: (driver) => (
+                    <div className="flex gap-2">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => handleViewDetail(driver.driver_id)}
+                      >
+                        View
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => handleEditDriver(driver)}
+                      >
+                        Edit
+                      </Button>
+                    </div>
+                  ),
+                },
+              ]}
+              data={drivers}
+              getRowId={(driver) => driver.driver_id}
+              emptyState={
+                <EmptyState
+                  icon={<span className="text-4xl">👤</span>}
+                  title="No drivers found"
+                />
+              }
+            />
 
-            {/* Pagination */}
-            <nav
-              aria-label="Pagination"
-              className="flex justify-between items-center mt-4"
-            >
-              <button
-                type="button"
-                disabled={page <= 1}
-                onClick={() => setPage((p) => p - 1)}
-                className="px-3 py-1 border rounded disabled:opacity-50"
-              >
-                Previous
-              </button>
-              <span className="text-sm text-gray-600">
-                Page {page} of {totalPages}
-              </span>
-              <button
-                type="button"
-                disabled={page >= totalPages}
-                onClick={() => setPage((p) => p + 1)}
-                className="px-3 py-1 border rounded disabled:opacity-50"
-              >
-                Next
-              </button>
-            </nav>
+            <Pagination
+              currentPage={page}
+              totalPages={totalPages}
+              onPageChange={setPage}
+            />
           </>
         )}
       </>
@@ -490,69 +495,50 @@ export default function DriversPage() {
 
   return (
     <div className="p-6">
-      <header className="mb-6">
-        <div className="flex justify-between items-center">
-          <div>
-            <h1 className="text-2xl font-bold">Driver Qualification Files</h1>
-            <p className="text-gray-600 mt-1">
-              Manage driver qualifications, certifications, and DQF compliance.
-            </p>
-          </div>
+      <PageHeader
+        title="Driver Qualification Files"
+        subtitle="Manage driver qualifications, certifications, and DQF compliance."
+        actions={
           <div className="flex gap-2">
-            {viewMode !== "list" && viewMode !== "add" && viewMode !== "edit" && (
-              <button
-                type="button"
-                onClick={() => setViewMode("list")}
-                className="px-4 py-2 border rounded text-sm hover:bg-gray-50"
-              >
-                Back to List
-              </button>
-            )}
+            {viewMode !== "list" &&
+              viewMode !== "add" &&
+              viewMode !== "edit" && (
+                <Button variant="secondary" onClick={() => setViewMode("list")}>
+                  Back to List
+                </Button>
+              )}
             {viewMode === "list" && (
               <>
-                <button
-                  type="button"
+                <Button
+                  variant="secondary"
                   onClick={() => setViewMode("dashboard")}
-                  className="px-4 py-2 border rounded text-sm hover:bg-gray-50"
                 >
                   DQF Dashboard
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setViewMode("add")}
-                  className="bg-blue-600 text-white px-4 py-2 rounded text-sm hover:bg-blue-700"
-                >
+                </Button>
+                <Button variant="primary" onClick={() => setViewMode("add")}>
                   Add Driver
-                </button>
+                </Button>
               </>
             )}
             {viewMode === "dashboard" && (
-              <button
-                type="button"
-                onClick={() => setViewMode("list")}
-                className="px-4 py-2 border rounded text-sm hover:bg-gray-50"
-              >
+              <Button variant="secondary" onClick={() => setViewMode("list")}>
                 Back to List
-              </button>
+              </Button>
             )}
             {viewMode === "detail" && (
-              <button
-                type="button"
-                onClick={() => setViewMode("list")}
-                className="px-4 py-2 border rounded text-sm hover:bg-gray-50"
-              >
+              <Button variant="secondary" onClick={() => setViewMode("list")}>
                 Back to List
-              </button>
+              </Button>
             )}
           </div>
-        </div>
-      </header>
+        }
+      />
 
       {/* Error state */}
       {error && (
         <div
           role="alert"
-          className="bg-red-50 border border-red-200 text-red-700 p-4 rounded mb-4"
+          className="bg-error-light border border-error-light text-error-dark p-4 rounded mb-4"
         >
           {error}
         </div>
@@ -576,7 +562,12 @@ interface DriverFormProps {
   loading: boolean;
 }
 
-function DriverForm({ initialData, onSubmit, onCancel, loading }: DriverFormProps) {
+function DriverForm({
+  initialData,
+  onSubmit,
+  onCancel,
+  loading,
+}: DriverFormProps) {
   const [fullName, setFullName] = useState(initialData?.full_name ?? "");
   const [cdlNumber, setCdlNumber] = useState(initialData?.cdl_number ?? "");
   const [cdlState, setCdlState] = useState(initialData?.cdl_state ?? "");
@@ -635,7 +626,10 @@ function DriverForm({ initialData, onSubmit, onCancel, loading }: DriverFormProp
           />
         </div>
         <div>
-          <label htmlFor="cdl-number" className="block text-sm font-medium mb-1">
+          <label
+            htmlFor="cdl-number"
+            className="block text-sm font-medium mb-1"
+          >
             CDL Number
           </label>
           <input
@@ -678,7 +672,10 @@ function DriverForm({ initialData, onSubmit, onCancel, loading }: DriverFormProp
           </select>
         </div>
         <div>
-          <label htmlFor="cdl-expiry" className="block text-sm font-medium mb-1">
+          <label
+            htmlFor="cdl-expiry"
+            className="block text-sm font-medium mb-1"
+          >
             CDL Expiry Date
           </label>
           <input
@@ -739,20 +736,12 @@ function DriverForm({ initialData, onSubmit, onCancel, loading }: DriverFormProp
       </div>
 
       <div className="flex gap-3 mt-6">
-        <button
-          type="submit"
-          disabled={loading}
-          className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 disabled:opacity-50"
-        >
-          {loading ? "Saving..." : initialData ? "Update Driver" : "Add Driver"}
-        </button>
-        <button
-          type="button"
-          onClick={onCancel}
-          className="px-4 py-2 border rounded hover:bg-gray-50"
-        >
+        <Button type="submit" variant="primary" loading={loading}>
+          {initialData ? "Update Driver" : "Add Driver"}
+        </Button>
+        <Button type="button" variant="secondary" onClick={onCancel}>
           Cancel
-        </button>
+        </Button>
       </div>
     </form>
   );

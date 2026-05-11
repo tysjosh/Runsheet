@@ -1,6 +1,10 @@
 "use client";
 
-import { AdvancedMarker, APIProvider, Map } from "@vis.gl/react-google-maps";
+import {
+  AdvancedMarker,
+  APIProvider,
+  Map as GoogleMap,
+} from "@vis.gl/react-google-maps";
 import { useCallback, useEffect, useState } from "react";
 import { type LocationUpdateData, useFleetWebSocket } from "../hooks";
 import { apiService } from "../services/api";
@@ -22,7 +26,14 @@ function getAssetIcon(truck: Truck): string {
 
 /** Get a display name for the asset (plate number, vessel name, container number, or fallback) */
 function getAssetLabel(truck: Truck): string {
-  return truck.name || truck.plateNumber || truck.vesselName || truck.containerNumber || truck.equipmentModel || truck.id;
+  return (
+    truck.name ||
+    truck.plateNumber ||
+    truck.vesselName ||
+    truck.containerNumber ||
+    truck.equipmentModel ||
+    truck.id
+  );
 }
 
 interface MapViewProps {
@@ -70,28 +81,33 @@ export default function MapView({
     );
   }, []);
 
-  const handleBatchLocationUpdate = useCallback((updates: LocationUpdateData[]) => {
-    setTrucks((prev) => {
-      const updateMap = new Map(updates.map((u) => [u.truck_id, u]));
-      return prev.map((truck) => {
-        const update = updateMap.get(truck.id);
-        if (update) {
-          return {
-            ...truck,
-            currentLocation: {
-              ...truck.currentLocation,
-              coordinates: {
-                lat: update.coordinates.lat,
-                lon: update.coordinates.lon,
+  const handleBatchLocationUpdate = useCallback(
+    (updates: LocationUpdateData[]) => {
+      setTrucks((prev) => {
+        const updateMap = new globalThis.Map(
+          updates.map((u) => [u.truck_id, u]),
+        );
+        return prev.map((truck) => {
+          const update = updateMap.get(truck.id);
+          if (update) {
+            return {
+              ...truck,
+              currentLocation: {
+                ...truck.currentLocation,
+                coordinates: {
+                  lat: update.coordinates.lat,
+                  lon: update.coordinates.lon,
+                },
               },
-            },
-            lastUpdate: update.timestamp,
-          };
-        }
-        return truck;
+              lastUpdate: update.timestamp,
+            };
+          }
+          return truck;
+        });
       });
-    });
-  }, []);
+    },
+    [],
+  );
 
   useFleetWebSocket({
     autoConnect: true,
@@ -123,10 +139,13 @@ export default function MapView({
             lng <= 180;
 
           if (!isValid) {
-            console.warn(`Invalid coordinates for truck ${truck.plateNumber}:`, {
-              lat,
-              lng,
-            });
+            console.warn(
+              `Invalid coordinates for truck ${truck.plateNumber}:`,
+              {
+                lat,
+                lng,
+              },
+            );
           }
 
           return isValid;
@@ -135,7 +154,9 @@ export default function MapView({
       } catch (err) {
         if (cancelled) return;
         console.error("Failed to load trucks:", err);
-        setError("Unable to connect to the fleet API. Make sure the backend is running.");
+        setError(
+          "Unable to connect to the fleet API. Make sure the backend is running.",
+        );
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -169,18 +190,26 @@ export default function MapView({
       };
     }
     if (filteredAssets.length > 0) {
-      const avgLat = filteredAssets.reduce((sum, t) => sum + t.currentLocation.coordinates.lat, 0) / filteredAssets.length;
-      const avgLng = filteredAssets.reduce((sum, t) => sum + t.currentLocation.coordinates.lon, 0) / filteredAssets.length;
+      const avgLat =
+        filteredAssets.reduce(
+          (sum, t) => sum + t.currentLocation.coordinates.lat,
+          0,
+        ) / filteredAssets.length;
+      const avgLng =
+        filteredAssets.reduce(
+          (sum, t) => sum + t.currentLocation.coordinates.lon,
+          0,
+        ) / filteredAssets.length;
       return { lat: avgLat, lng: avgLng };
     }
-    return { lat: 9.0820, lng: 8.6753 }; // Nigeria center
+    return { lat: 9.082, lng: 8.6753 }; // Nigeria center
   })();
 
   if (!apiKey) {
     return (
       <div className="h-full flex items-center justify-center bg-gray-50">
         <div className="text-center">
-          <p className="text-red-600 font-medium">
+          <p className="text-error font-medium">
             Google Maps API key not found
           </p>
           <p className="text-gray-500 text-sm">
@@ -195,7 +224,7 @@ export default function MapView({
     return (
       <div className="h-full flex items-center justify-center bg-gray-50">
         <div className="text-center">
-          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900 mx-auto"></div>
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary mx-auto"></div>
           <p className="mt-2 text-gray-600">Loading map...</p>
         </div>
       </div>
@@ -206,7 +235,7 @@ export default function MapView({
     return (
       <div className="h-full flex items-center justify-center bg-gray-50">
         <div className="text-center max-w-md">
-          <p className="text-red-600 font-medium mb-2">Connection Error</p>
+          <p className="text-error font-medium mb-2">Connection Error</p>
           <p className="text-gray-500 text-sm">{error}</p>
         </div>
       </div>
@@ -225,7 +254,7 @@ export default function MapView({
                 onClick={() => setMapMode(mode)}
                 className={`px-4 py-2 text-sm font-medium rounded-md transition-all capitalize ${
                   mapMode === mode
-                    ? "bg-[#232323] text-white shadow-sm"
+                    ? "bg-primary text-white shadow-sm"
                     : "text-gray-600 hover:text-gray-900"
                 }`}
               >
@@ -240,7 +269,7 @@ export default function MapView({
               onClick={() => setActiveTypeFilter("all")}
               className={`px-3 py-2 text-sm font-medium rounded-md transition-all ${
                 activeTypeFilter === "all"
-                  ? "bg-[#232323] text-white shadow-sm"
+                  ? "bg-primary text-white shadow-sm"
                   : "text-gray-600 hover:text-gray-900"
               }`}
             >
@@ -257,7 +286,7 @@ export default function MapView({
                 onClick={() => setActiveTypeFilter(type)}
                 className={`px-3 py-2 text-sm font-medium rounded-md transition-all ${
                   activeTypeFilter === type
-                    ? "bg-[#232323] text-white shadow-sm"
+                    ? "bg-primary text-white shadow-sm"
                     : "text-gray-600 hover:text-gray-900"
                 }`}
                 title={config.label}
@@ -291,7 +320,7 @@ export default function MapView({
       {/* Google Maps */}
       <div className="flex-1 relative">
         <APIProvider apiKey={apiKey}>
-          <Map
+          <GoogleMap
             mapId="ff5c9f40e270515093c1c77f"
             defaultCenter={mapCenter}
             defaultZoom={6}
@@ -325,8 +354,9 @@ export default function MapView({
                 >
                   <div
                     className={`px-3 py-1.5 rounded-lg text-xs font-medium flex items-center space-x-1.5 shadow-sm transition-all ${
-                      selectedTruck?.id === truck.id || clickedTruck?.id === truck.id
-                        ? "bg-[#232323] text-white ring-2 ring-gray-400 scale-110"
+                      selectedTruck?.id === truck.id ||
+                      clickedTruck?.id === truck.id
+                        ? "bg-primary text-white ring-2 ring-gray-400 scale-110"
                         : "bg-white text-gray-900 hover:shadow-md border border-gray-200"
                     }`}
                   >
@@ -336,105 +366,111 @@ export default function MapView({
                 </AdvancedMarker>
               );
             })}
-          </Map>
+          </GoogleMap>
         </APIProvider>
 
         {/* Asset info panel */}
-        {(selectedTruck || clickedTruck) && showInfo && (() => {
-          const displayTruck = selectedTruck || clickedTruck;
-          if (!displayTruck) return null;
-          return (
-          <div className="absolute top-4 right-4 bg-white rounded-xl shadow-lg p-4 w-72 border border-gray-100 z-10">
-            <div className="flex items-start justify-between mb-3">
-              <div className="flex items-center space-x-2">
-                <h3 className="font-semibold text-gray-900 text-base">
-                  {getAssetLabel(displayTruck)}
-                </h3>
-                <span
-                  className={`px-2.5 py-0.5 rounded-full text-xs font-medium ${
-                    displayTruck.status === "on_time"
-                      ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
-                      : "bg-red-50 text-red-700 border border-red-200"
-                  }`}
-                >
-                  {displayTruck.status.replace("_", " ")}
-                </span>
+        {(selectedTruck || clickedTruck) &&
+          showInfo &&
+          (() => {
+            const displayTruck = selectedTruck || clickedTruck;
+            if (!displayTruck) return null;
+            return (
+              <div className="absolute top-4 right-4 bg-white rounded-xl shadow-lg p-4 w-72 border border-gray-100 z-10">
+                <div className="flex items-start justify-between mb-3">
+                  <div className="flex items-center space-x-2">
+                    <h3 className="font-semibold text-gray-900 text-base">
+                      {getAssetLabel(displayTruck)}
+                    </h3>
+                    <span
+                      className={`px-2.5 py-0.5 rounded-full text-xs font-medium ${
+                        displayTruck.status === "on_time"
+                          ? "bg-success-light text-success-dark border border-success-light"
+                          : "bg-error-light text-error-dark border border-error-light"
+                      }`}
+                    >
+                      {displayTruck.status.replace("_", " ")}
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => {
+                      setShowInfo(false);
+                      setClickedTruck(null);
+                    }}
+                    className="text-gray-400 hover:text-gray-600 transition-colors"
+                  >
+                    <svg
+                      className="w-5 h-5"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M6 18L18 6M6 6l12 12"
+                      />
+                    </svg>
+                  </button>
+                </div>
+
+                <div className="space-y-2.5 text-sm">
+                  <div className="flex justify-between py-1.5 border-b border-gray-50">
+                    <span className="text-gray-500">Type</span>
+                    <span className="text-gray-900 font-medium">
+                      {getAssetIcon(displayTruck)}{" "}
+                      {displayTruck.assetSubtype?.replace("_", " ") ?? "truck"}
+                    </span>
+                  </div>
+
+                  {displayTruck.driverName && (
+                    <div className="flex justify-between py-1.5 border-b border-gray-50">
+                      <span className="text-gray-500">Driver</span>
+                      <span className="text-gray-900 font-medium">
+                        {displayTruck.driverName}
+                      </span>
+                    </div>
+                  )}
+
+                  {displayTruck.route?.origin?.name && (
+                    <div className="flex justify-between py-1.5 border-b border-gray-50">
+                      <span className="text-gray-500">Route</span>
+                      <span className="text-gray-900 text-right">
+                        {displayTruck.route.origin.name} →{" "}
+                        {displayTruck.route?.destination?.name ?? "—"}
+                      </span>
+                    </div>
+                  )}
+
+                  {displayTruck.route?.distance != null && (
+                    <div className="flex justify-between py-1.5 border-b border-gray-50">
+                      <span className="text-gray-500">Distance</span>
+                      <span className="text-gray-900 font-medium">
+                        {displayTruck.route.distance} km
+                      </span>
+                    </div>
+                  )}
+
+                  {displayTruck.cargo && (
+                    <div className="flex justify-between py-1.5 border-b border-gray-50">
+                      <span className="text-gray-500">Cargo</span>
+                      <span className="text-gray-900">
+                        {displayTruck.cargo.type}
+                      </span>
+                    </div>
+                  )}
+
+                  <div className="flex justify-between py-1.5">
+                    <span className="text-gray-500">Location</span>
+                    <span className="text-gray-900 text-right">
+                      {displayTruck.currentLocation?.name ?? "Unknown"}
+                    </span>
+                  </div>
+                </div>
               </div>
-              <button
-                onClick={() => { setShowInfo(false); setClickedTruck(null); }}
-                className="text-gray-400 hover:text-gray-600 transition-colors"
-              >
-                <svg
-                  className="w-5 h-5"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M6 18L18 6M6 6l12 12"
-                  />
-                </svg>
-              </button>
-            </div>
-
-            <div className="space-y-2.5 text-sm">
-              <div className="flex justify-between py-1.5 border-b border-gray-50">
-                <span className="text-gray-500">Type</span>
-                <span className="text-gray-900 font-medium">
-                  {getAssetIcon(displayTruck)} {displayTruck.assetSubtype?.replace("_", " ") ?? "truck"}
-                </span>
-              </div>
-
-              {displayTruck.driverName && (
-                <div className="flex justify-between py-1.5 border-b border-gray-50">
-                  <span className="text-gray-500">Driver</span>
-                  <span className="text-gray-900 font-medium">
-                    {displayTruck.driverName}
-                  </span>
-                </div>
-              )}
-
-              {displayTruck.route?.origin?.name && (
-                <div className="flex justify-between py-1.5 border-b border-gray-50">
-                  <span className="text-gray-500">Route</span>
-                  <span className="text-gray-900 text-right">
-                    {displayTruck.route.origin.name} →{" "}
-                    {displayTruck.route?.destination?.name ?? "—"}
-                  </span>
-                </div>
-              )}
-
-              {displayTruck.route?.distance != null && (
-                <div className="flex justify-between py-1.5 border-b border-gray-50">
-                  <span className="text-gray-500">Distance</span>
-                  <span className="text-gray-900 font-medium">
-                    {displayTruck.route.distance} km
-                  </span>
-                </div>
-              )}
-
-              {displayTruck.cargo && (
-                <div className="flex justify-between py-1.5 border-b border-gray-50">
-                  <span className="text-gray-500">Cargo</span>
-                  <span className="text-gray-900">
-                    {displayTruck.cargo.type}
-                  </span>
-                </div>
-              )}
-
-              <div className="flex justify-between py-1.5">
-                <span className="text-gray-500">Location</span>
-                <span className="text-gray-900 text-right">
-                  {displayTruck.currentLocation?.name ?? "Unknown"}
-                </span>
-              </div>
-            </div>
-          </div>
-          );
-        })()}
+            );
+          })()}
 
         {/* Map attribution */}
         <div className="absolute bottom-3 left-3 bg-white/95 backdrop-blur-sm px-3 py-1.5 rounded-lg text-xs text-gray-500 shadow-sm border border-gray-100 z-10">

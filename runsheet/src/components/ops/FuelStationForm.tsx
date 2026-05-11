@@ -227,7 +227,7 @@ export default function FuelStationForm({
     "w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white";
 
   const errorInputClass =
-    "w-full px-3 py-2 text-sm border border-red-300 rounded-lg focus:ring-2 focus:ring-red-200 focus:border-red-400 bg-white";
+    "w-full px-3 py-2 text-sm border border-error rounded-lg focus:ring-2 focus:ring-error-light focus:border-error bg-white";
 
   const title = mode === "create" ? "Add Fuel Station" : "Edit Fuel Station";
   const submitLabel = mode === "create" ? "Create Station" : "Save Changes";
@@ -238,7 +238,7 @@ export default function FuelStationForm({
       <div className="bg-white rounded-xl shadow-xl w-full max-w-lg mx-4">
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-          <h2 className="text-lg font-semibold text-[#232323]">{title}</h2>
+          <h2 className="text-lg font-semibold text-primary">{title}</h2>
           <button
             onClick={onClose}
             className="p-1 text-gray-400 hover:text-gray-600 rounded"
@@ -252,7 +252,7 @@ export default function FuelStationForm({
         <form onSubmit={handleSubmit} className="px-6 py-4 space-y-4">
           {/* API error banner */}
           {error && (
-            <p className="text-sm text-red-600 bg-red-50 px-3 py-2 rounded-lg">
+            <p className="text-sm text-error bg-error-light px-3 py-2 rounded-lg">
               {error}
             </p>
           )}
@@ -280,7 +280,7 @@ export default function FuelStationForm({
               required
             />
             {fieldErrors.name && (
-              <p className="text-xs text-red-600 mt-1">{fieldErrors.name}</p>
+              <p className="text-xs text-error mt-1">{fieldErrors.name}</p>
             )}
           </div>
 
@@ -340,7 +340,7 @@ export default function FuelStationForm({
                 required
               />
               {fieldErrors.capacity_gallons && (
-                <p className="text-xs text-red-600 mt-1">
+                <p className="text-xs text-error mt-1">
                   {fieldErrors.capacity_gallons}
                 </p>
               )}
@@ -428,7 +428,7 @@ export default function FuelStationForm({
               Alert when stock falls below this percentage of capacity
             </p>
             {fieldErrors.alert_threshold_pct && (
-              <p className="text-xs text-red-600 mt-1">
+              <p className="text-xs text-error mt-1">
                 {fieldErrors.alert_threshold_pct}
               </p>
             )}
@@ -446,8 +446,7 @@ export default function FuelStationForm({
             <button
               type="submit"
               disabled={submitting}
-              className="px-4 py-2 text-sm text-white rounded-lg disabled:opacity-50"
-              style={{ backgroundColor: "#232323" }}
+              className="px-4 py-2 text-sm text-white rounded-lg disabled:opacity-50 bg-primary hover:bg-primary-hover"
             >
               {submitting ? submittingLabel : submitLabel}
             </button>

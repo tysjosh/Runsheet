@@ -1,7 +1,7 @@
 "use client";
 
 import { Filter } from "lucide-react";
-import type { JobType, JobStatus } from "../../types/api";
+import type { JobStatus, JobType } from "../../types/api";
 
 export interface JobFilterValues {
   job_type: JobType | "";

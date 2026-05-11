@@ -1,15 +1,16 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import type React from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
-  getPriceProtectionContracts,
-  createPriceProtectionContract,
-  updatePriceProtectionContract,
-  type PriceProtectionContract,
-  type ContractType,
   type ContractStatus,
+  type ContractType,
   type CreatePriceProtectionContractPayload,
+  createPriceProtectionContract,
+  getPriceProtectionContracts,
+  type PriceProtectionContract,
   type UpdatePriceProtectionContractPayload,
+  updatePriceProtectionContract,
 } from "../../services/complianceApi";
 
 // ─── Sub-view types ──────────────────────────────────────────────────────────
@@ -21,11 +22,11 @@ type ViewMode = "list" | "add" | "edit";
 function statusBadge(status: ContractStatus) {
   switch (status) {
     case "active":
-      return "bg-green-100 text-green-800";
+      return "bg-success-light text-success-dark";
     case "exhausted":
-      return "bg-yellow-100 text-yellow-800";
+      return "bg-warning-light text-warning-dark";
     case "expired":
-      return "bg-red-100 text-red-800";
+      return "bg-error-light text-error-dark";
     default:
       return "bg-gray-100 text-gray-800";
   }
@@ -34,11 +35,11 @@ function statusBadge(status: ContractStatus) {
 function contractTypeBadge(type: ContractType) {
   switch (type) {
     case "fixed_price":
-      return "bg-blue-100 text-blue-800";
+      return "bg-info-light text-info-dark";
     case "cap_price":
-      return "bg-purple-100 text-purple-800";
+      return "bg-brand-secondary-soft text-brand-secondary";
     case "collar":
-      return "bg-indigo-100 text-indigo-800";
+      return "bg-brand-secondary-soft text-brand-secondary";
     default:
       return "bg-gray-100 text-gray-800";
   }
@@ -62,7 +63,7 @@ function formatDate(dateStr: string | null): string {
   return new Date(dateStr).toLocaleDateString();
 }
 
-function formatCents(cents: number | null): string {
+function _formatCents(cents: number | null): string {
   if (cents === null || cents === undefined) return "—";
   return `$${(cents / 100).toFixed(2)}`;
 }
@@ -103,7 +104,10 @@ function computeSettlementVariance(
     case "collar":
       effectivePriceCents = Math.max(
         contract.price_floor_cents ?? 0,
-        Math.min(marketPriceCents, contract.price_cap_cents ?? marketPriceCents),
+        Math.min(
+          marketPriceCents,
+          contract.price_cap_cents ?? marketPriceCents,
+        ),
       );
       break;
     default:
@@ -162,9 +166,7 @@ export default function PriceProtectionContractsPage() {
       setContracts(response.data ?? []);
       setTotalPages(response.pagination?.total_pages ?? 1);
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to load contracts",
-      );
+      setError(err instanceof Error ? err.message : "Failed to load contracts");
     } finally {
       setLoading(false);
     }
@@ -203,7 +205,7 @@ export default function PriceProtectionContractsPage() {
     return (
       <div className="text-sm">
         <span
-          className={`font-medium ${isPositive ? "text-green-700" : "text-red-700"}`}
+          className={`font-medium ${isPositive ? "text-success-dark" : "text-error-dark"}`}
         >
           {isPositive ? "+" : ""}${varianceDollars.toFixed(2)}
         </span>
@@ -274,9 +276,7 @@ export default function PriceProtectionContractsPage() {
               type="number"
               min={0}
               value={marketPriceCents}
-              onChange={(e) =>
-                setMarketPriceCents(Number(e.target.value) || 0)
-              }
+              onChange={(e) => setMarketPriceCents(Number(e.target.value) || 0)}
               className="border rounded px-3 py-2 w-32"
               placeholder="350"
             />
@@ -287,7 +287,7 @@ export default function PriceProtectionContractsPage() {
         {loading && (
           <div role="status" className="flex justify-center py-12">
             <span className="sr-only">Loading contracts...</span>
-            <div className="animate-spin h-8 w-8 border-4 border-blue-600 border-t-transparent rounded-full" />
+            <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
           </div>
         )}
 
@@ -306,9 +306,7 @@ export default function PriceProtectionContractsPage() {
                     <th className="text-left p-3 font-medium">
                       Contracted Gal
                     </th>
-                    <th className="text-left p-3 font-medium">
-                      Remaining Gal
-                    </th>
+                    <th className="text-left p-3 font-medium">Remaining Gal</th>
                     <th className="text-left p-3 font-medium">Status</th>
                     <th className="text-left p-3 font-medium">
                       Settlement Variance
@@ -333,9 +331,7 @@ export default function PriceProtectionContractsPage() {
                           {contractTypeLabel(contract.contract_type)}
                         </span>
                       </td>
-                      <td className="p-3">
-                        {formatDate(contract.start_date)}
-                      </td>
+                      <td className="p-3">{formatDate(contract.start_date)}</td>
                       <td className="p-3">{formatDate(contract.end_date)}</td>
                       <td className="p-3">
                         {formatGallons(contract.contracted_gallons)}
@@ -355,7 +351,7 @@ export default function PriceProtectionContractsPage() {
                         <button
                           type="button"
                           onClick={() => handleEditContract(contract)}
-                          className="text-blue-600 hover:underline text-sm"
+                          className="text-info hover:underline text-sm"
                         >
                           Edit
                         </button>
@@ -470,7 +466,7 @@ export default function PriceProtectionContractsPage() {
               <button
                 type="button"
                 onClick={() => setViewMode("add")}
-                className="bg-blue-600 text-white px-4 py-2 rounded text-sm hover:bg-blue-700"
+                className="bg-primary text-white px-4 py-2 rounded text-sm hover:bg-primary-hover"
               >
                 Add Contract
               </button>
@@ -483,7 +479,7 @@ export default function PriceProtectionContractsPage() {
       {error && (
         <div
           role="alert"
-          className="bg-red-50 border border-red-200 text-red-700 p-4 rounded mb-4"
+          className="bg-error-light border border-error-light text-error-dark p-4 rounded mb-4"
         >
           {error}
         </div>
@@ -501,7 +497,9 @@ export default function PriceProtectionContractsPage() {
 interface ContractFormProps {
   initialData: PriceProtectionContract | null;
   onSubmit: (
-    data: CreatePriceProtectionContractPayload | UpdatePriceProtectionContractPayload,
+    data:
+      | CreatePriceProtectionContractPayload
+      | UpdatePriceProtectionContractPayload,
   ) => Promise<void>;
   onCancel: () => void;
   loading: boolean;
@@ -685,10 +683,7 @@ function ContractForm({
 
         {/* End Date */}
         <div>
-          <label
-            htmlFor="end-date"
-            className="block text-sm font-medium mb-1"
-          >
+          <label htmlFor="end-date" className="block text-sm font-medium mb-1">
             End Date
           </label>
           <input
@@ -724,7 +719,9 @@ function ContractForm({
         )}
 
         {/* Price Cap (cents) — for cap_price and collar */}
-        {(contractType === "cap_price" || contractType === "collar" || isEdit) && (
+        {(contractType === "cap_price" ||
+          contractType === "collar" ||
+          isEdit) && (
           <div>
             <label
               htmlFor="price-cap-cents"
@@ -813,13 +810,9 @@ function ContractForm({
         <button
           type="submit"
           disabled={loading}
-          className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 disabled:opacity-50"
+          className="bg-primary text-white px-4 py-2 rounded hover:bg-primary-hover disabled:opacity-50"
         >
-          {loading
-            ? "Saving..."
-            : isEdit
-              ? "Update Contract"
-              : "Add Contract"}
+          {loading ? "Saving..." : isEdit ? "Update Contract" : "Add Contract"}
         </button>
         <button
           type="button"

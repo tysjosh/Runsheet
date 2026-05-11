@@ -1,11 +1,11 @@
 /**
  * Pagination Component - Standardized pagination controls
- * 
+ *
  * Replaces duplicated pagination code across multiple components.
  */
 
-import React from 'react';
-import { Button } from './Button';
+import type React from "react";
+import { Button } from "./Button";
 
 export interface PaginationProps {
   currentPage: number;
@@ -20,12 +20,14 @@ export const Pagination: React.FC<PaginationProps> = ({
   totalPages,
   totalItems,
   onPageChange,
-  className = '',
+  className = "",
 }) => {
   if (totalPages <= 1) return null;
 
   return (
-    <div className={`flex items-center justify-between px-8 py-3 border-t border-gray-100 ${className}`}>
+    <div
+      className={`flex items-center justify-between px-8 py-3 border-t border-gray-100 ${className}`}
+    >
       <span className="text-xs text-gray-500">
         Page {currentPage} of {totalPages}
         {totalItems !== undefined && ` (${totalItems} items)`}

@@ -93,21 +93,21 @@ export const STATE_BADGE_CONFIG: Record<
 > = {
   clean: {
     label: "Clean",
-    color: "text-green-700",
-    bg: "bg-green-100",
+    color: "text-success-dark",
+    bg: "bg-success-light",
     title: "Compartment is empty and safe to load any allowed grade.",
   },
   loaded: {
     label: "Loaded",
-    color: "text-blue-700",
-    bg: "bg-blue-100",
+    color: "text-info-dark",
+    bg: "bg-info-light",
     title:
       "Compartment currently holds a product from the most recent loading plan.",
   },
   needs_cleaning: {
     label: "Needs Cleaning",
-    color: "text-red-700",
-    bg: "bg-red-100",
+    color: "text-error-dark",
+    bg: "bg-error-light",
     title:
       "Cross-contamination rule triggered — record a Cleaning_Event before the next load.",
   },
@@ -137,7 +137,7 @@ function ToastContainer({
         <div
           key={toast.id}
           className={`flex items-center gap-2 px-4 py-3 rounded-lg shadow-lg text-sm font-medium text-white ${
-            toast.type === "success" ? "bg-green-600" : "bg-red-600"
+            toast.type === "success" ? "bg-success" : "bg-error"
           }`}
         >
           {toast.type === "success" ? (
@@ -296,7 +296,7 @@ function CleaningEventModal({
   const inputClass =
     "w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white";
   const errorInputClass =
-    "w-full px-3 py-2 text-sm border border-red-300 rounded-lg focus:ring-2 focus:ring-red-200 focus:border-red-400 bg-white";
+    "w-full px-3 py-2 text-sm border border-error rounded-lg focus:ring-2 focus:ring-error-light focus:border-error bg-white";
 
   function updateField<K extends keyof CleaningFormValues>(
     key: K,
@@ -435,7 +435,7 @@ function CleaningEventModal({
           <div>
             <h2
               id="cleaning-event-modal-title"
-              className="text-lg font-semibold text-[#232323]"
+              className="text-lg font-semibold text-primary"
             >
               Record cleaning event
             </h2>
@@ -461,7 +461,7 @@ function CleaningEventModal({
           {apiError && (
             <p
               role="alert"
-              className="text-sm text-red-600 bg-red-50 px-3 py-2 rounded-lg"
+              className="text-sm text-error bg-error-light px-3 py-2 rounded-lg"
             >
               {apiError}
             </p>
@@ -508,7 +508,7 @@ function CleaningEventModal({
                 required
               />
               {fieldErrors.actor_id && (
-                <p className="text-xs text-red-600 mt-1">
+                <p className="text-xs text-error mt-1">
                   {fieldErrors.actor_id}
                 </p>
               )}
@@ -574,7 +574,7 @@ function CleaningEventModal({
                       {item.file.name}
                     </span>
                     {item.status === "uploading" && (
-                      <span className="inline-flex items-center gap-1 text-blue-700">
+                      <span className="inline-flex items-center gap-1 text-info-dark">
                         <Loader2
                           className="w-3 h-3 animate-spin"
                           aria-hidden="true"
@@ -583,13 +583,13 @@ function CleaningEventModal({
                       </span>
                     )}
                     {item.status === "uploaded" && (
-                      <span className="inline-flex items-center gap-1 text-green-700">
+                      <span className="inline-flex items-center gap-1 text-success-dark">
                         <Check className="w-3 h-3" aria-hidden="true" />
                         Uploaded
                       </span>
                     )}
                     {item.status === "error" && (
-                      <span className="inline-flex items-center gap-1 text-red-700">
+                      <span className="inline-flex items-center gap-1 text-error-dark">
                         <AlertTriangle className="w-3 h-3" aria-hidden="true" />
                         {item.error || "Failed"}
                       </span>
@@ -619,7 +619,7 @@ function CleaningEventModal({
             <button
               type="submit"
               disabled={submitting || anyUploading}
-              className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white rounded-lg bg-[#232323] hover:bg-[#1a1a1a] disabled:opacity-50"
+              className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white rounded-lg bg-primary hover:bg-primary-hover disabled:opacity-50"
             >
               {submitting ? (
                 <>
@@ -656,18 +656,18 @@ export const ELIGIBILITY_DECISION_CONFIG: Record<
 > = {
   allowed: {
     label: "Allowed",
-    color: "text-green-700",
-    bg: "bg-green-100",
+    color: "text-success-dark",
+    bg: "bg-success-light",
   },
   blocked: {
     label: "Blocked",
-    color: "text-red-700",
-    bg: "bg-red-100",
+    color: "text-error-dark",
+    bg: "bg-error-light",
   },
   requires_cleaning: {
     label: "Requires cleaning",
-    color: "text-amber-700",
-    bg: "bg-amber-100",
+    color: "text-warning-dark",
+    bg: "bg-warning-light",
   },
 };
 
@@ -738,13 +738,13 @@ function LoadEligibilityModal({
           <div>
             <h2
               id="load-eligibility-modal-title"
-              className="text-lg font-semibold text-[#232323]"
+              className="text-lg font-semibold text-primary"
             >
               Check load eligibility
             </h2>
             <p className="text-xs text-gray-500 mt-0.5">
               Compartment {compartment.compartment_id} · Last loaded{" "}
-              <span className="font-medium text-[#232323]">
+              <span className="font-medium text-primary">
                 {compartment.last_loaded_product ?? "none"}
               </span>
             </p>
@@ -767,7 +767,7 @@ function LoadEligibilityModal({
           {apiError && (
             <p
               role="alert"
-              className="text-sm text-red-600 bg-red-50 px-3 py-2 rounded-lg"
+              className="text-sm text-error bg-error-light px-3 py-2 rounded-lg"
             >
               {apiError}
             </p>
@@ -798,7 +798,7 @@ function LoadEligibilityModal({
             <button
               type="submit"
               disabled={checking}
-              className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white rounded-lg bg-[#232323] hover:bg-[#1a1a1a] disabled:opacity-50"
+              className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white rounded-lg bg-primary hover:bg-primary-hover disabled:opacity-50"
             >
               {checking ? (
                 <>
@@ -959,14 +959,17 @@ export default function TruckCompartmentsPage() {
       <div className="bg-white rounded-xl border border-gray-200 p-6 max-w-6xl w-full mx-auto">
         <div className="flex items-start justify-between gap-4 mb-6">
           <div>
-            <h1 className="text-2xl font-semibold text-[#232323] mb-1 flex items-center gap-2">
+            <h1 className="text-2xl font-semibold text-primary mb-1 flex items-center gap-2">
               <TruckIcon className="w-5 h-5" aria-hidden="true" />
               Truck compartments
             </h1>
             <p className="text-sm text-gray-500">
               Review compartment state and record a cleaning event when the
               cross-contamination guard flags a compartment as{" "}
-              <span className="font-medium text-red-700">needs_cleaning</span>.
+              <span className="font-medium text-error-dark">
+                needs_cleaning
+              </span>
+              .
             </p>
           </div>
           {activeTruckId && (
@@ -1017,7 +1020,7 @@ export default function TruckCompartmentsPage() {
           <button
             type="submit"
             disabled={loading}
-            className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white rounded-lg bg-[#232323] hover:bg-[#1a1a1a] disabled:opacity-50"
+            className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white rounded-lg bg-primary hover:bg-primary-hover disabled:opacity-50"
           >
             {loading ? (
               <Loader2
@@ -1034,7 +1037,7 @@ export default function TruckCompartmentsPage() {
         {error && (
           <p
             role="alert"
-            className="text-sm text-red-600 bg-red-50 px-3 py-2 rounded-lg mb-4"
+            className="text-sm text-error bg-error-light px-3 py-2 rounded-lg mb-4"
           >
             {error}
           </p>
@@ -1090,7 +1093,7 @@ export default function TruckCompartmentsPage() {
                     <td className="px-3 py-2 text-gray-600 font-mono text-xs">
                       {c.position_index}
                     </td>
-                    <td className="px-3 py-2 text-[#232323] font-medium font-mono text-xs">
+                    <td className="px-3 py-2 text-primary font-medium font-mono text-xs">
                       {c.compartment_id}
                     </td>
                     <td className="px-3 py-2">
@@ -1102,7 +1105,7 @@ export default function TruckCompartmentsPage() {
                     <td className="px-3 py-2 text-gray-600 text-xs">
                       {c.last_loaded_product ? (
                         <span>
-                          <span className="font-medium text-[#232323]">
+                          <span className="font-medium text-primary">
                             {c.last_loaded_product}
                           </span>
                           <span className="block text-[10px] text-gray-400">
@@ -1126,7 +1129,7 @@ export default function TruckCompartmentsPage() {
                         <button
                           type="button"
                           onClick={() => setEligibilityCompartment(c)}
-                          className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-[#232323] rounded-md bg-white border border-gray-200 hover:bg-gray-50"
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-primary rounded-md bg-white border border-gray-200 hover:bg-gray-50"
                           data-testid={`check-eligibility-${c.compartment_id}`}
                         >
                           <Search className="w-3 h-3" aria-hidden="true" />
@@ -1135,7 +1138,7 @@ export default function TruckCompartmentsPage() {
                         <button
                           type="button"
                           onClick={() => setModalCompartment(c)}
-                          className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-white rounded-md bg-[#232323] hover:bg-[#1a1a1a]"
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-white rounded-md bg-primary hover:bg-primary-hover"
                           data-testid={`record-cleaning-${c.compartment_id}`}
                         >
                           <Sparkles className="w-3 h-3" aria-hidden="true" />

@@ -7,8 +7,8 @@ import {
   Minus,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { DataType, FieldDef, SchemaTemplate } from "../../types/import";
 import { importApi } from "../../services/importApi";
+import type { DataType, FieldDef, SchemaTemplate } from "../../types/import";
 
 // ─── Props ───────────────────────────────────────────────────────────────────
 
@@ -128,8 +128,7 @@ export default function FieldMapper({
 
   // Count of mapped columns (excluding NOT_MAPPED)
   const mappedCount = useMemo(
-    () =>
-      Object.values(mapping).filter((v) => v !== NOT_MAPPED).length,
+    () => Object.values(mapping).filter((v) => v !== NOT_MAPPED).length,
     [mapping],
   );
 
@@ -171,7 +170,7 @@ export default function FieldMapper({
 
   if (error || !schema) {
     return (
-      <div className="flex flex-col items-center justify-center py-20 text-red-500">
+      <div className="flex flex-col items-center justify-center py-20 text-error">
         <AlertTriangle className="w-10 h-10 mb-4" />
         <p className="text-sm font-medium mb-2">Failed to load schema</p>
         <p className="text-xs text-gray-500">{error}</p>
@@ -185,35 +184,33 @@ export default function FieldMapper({
     <div>
       {/* Header */}
       <div className="mb-6">
-        <h2 className="text-lg font-semibold text-[#232323] mb-1">
-          Map Fields
-        </h2>
+        <h2 className="text-lg font-semibold text-primary mb-1">Map Fields</h2>
         <p className="text-sm text-gray-500">
           Map each source column to a target{" "}
-          <span className="font-medium text-[#232323]">
+          <span className="font-medium text-primary">
             {dataType.replace(/_/g, " ")}
           </span>{" "}
           field. Required fields are marked with{" "}
-          <span className="text-red-500 font-medium">*</span>.
+          <span className="text-error font-medium">*</span>.
         </p>
       </div>
 
       {/* Unmapped required fields warning */}
       {unmappedRequired.length > 0 && (
-        <div className="mb-6 p-4 rounded-xl bg-amber-50 border border-amber-200">
+        <div className="mb-6 p-4 rounded-xl bg-warning-light border border-warning-light">
           <div className="flex items-start gap-3">
-            <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
+            <AlertTriangle className="w-5 h-5 text-warning flex-shrink-0 mt-0.5" />
             <div>
-              <p className="text-sm font-medium text-amber-800 mb-1">
+              <p className="text-sm font-medium text-warning-dark mb-1">
                 {unmappedRequired.length} required{" "}
-                {unmappedRequired.length === 1 ? "field is" : "fields are"}{" "}
-                not mapped
+                {unmappedRequired.length === 1 ? "field is" : "fields are"} not
+                mapped
               </p>
               <div className="flex flex-wrap gap-2">
                 {unmappedRequired.map((field) => (
                   <span
                     key={field.name}
-                    className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-amber-700 bg-amber-100 rounded-lg"
+                    className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-warning-dark bg-warning-light rounded-lg"
                   >
                     <AlertTriangle className="w-3 h-3" />
                     {field.name}
@@ -228,12 +225,12 @@ export default function FieldMapper({
       {/* Mapping summary */}
       <div className="flex items-center gap-4 mb-4 text-xs text-gray-500">
         <span>
-          <span className="font-medium text-[#232323]">{mappedCount}</span> of{" "}
+          <span className="font-medium text-primary">{mappedCount}</span> of{" "}
           {sourceColumns.length} columns mapped
         </span>
         <span className="text-gray-300">•</span>
         <span>
-          <span className="font-medium text-[#232323]">
+          <span className="font-medium text-primary">
             {requiredFields.length - unmappedRequired.length}
           </span>{" "}
           of {requiredFields.length} required fields covered
@@ -256,7 +253,7 @@ export default function FieldMapper({
         {/* Mapping rows */}
         {sourceColumns.map((col, idx) => {
           const currentTarget = mapping[col] ?? NOT_MAPPED;
-          const targetField = targetFields.find(
+          const _targetField = targetFields.find(
             (f) => f.name === currentTarget,
           );
           const isMapped = currentTarget !== NOT_MAPPED;
@@ -269,14 +266,12 @@ export default function FieldMapper({
             <div
               key={col}
               className={`grid grid-cols-[1fr_40px_1fr] items-center gap-2 px-4 py-3 ${
-                idx < sourceColumns.length - 1
-                  ? "border-b border-gray-100"
-                  : ""
+                idx < sourceColumns.length - 1 ? "border-b border-gray-100" : ""
               } ${isMapped ? "bg-white" : "bg-gray-50/50"}`}
             >
               {/* Source column */}
               <div>
-                <p className="text-sm font-medium text-[#232323]">{col}</p>
+                <p className="text-sm font-medium text-primary">{col}</p>
                 {sampleValue !== undefined && (
                   <p className="text-xs text-gray-400 mt-0.5 truncate max-w-[240px]">
                     e.g. {sampleValue || "—"}
@@ -287,7 +282,7 @@ export default function FieldMapper({
               {/* Arrow */}
               <div className="flex justify-center">
                 {isMapped ? (
-                  <ArrowRight className="w-4 h-4 text-green-500" />
+                  <ArrowRight className="w-4 h-4 text-success" />
                 ) : (
                   <Minus className="w-4 h-4 text-gray-300" />
                 )}
@@ -311,7 +306,7 @@ export default function FieldMapper({
         <button
           type="button"
           onClick={onBack}
-          className="flex items-center gap-2 px-4 py-2.5 text-sm font-medium text-gray-600 hover:text-[#232323] transition-colors"
+          className="flex items-center gap-2 px-4 py-2.5 text-sm font-medium text-gray-600 hover:text-primary transition-colors"
         >
           <ArrowLeft className="w-4 h-4" />
           Back
@@ -320,7 +315,7 @@ export default function FieldMapper({
         <button
           type="button"
           onClick={handleConfirm}
-          className="px-6 py-2.5 text-sm font-medium rounded-xl bg-[#232323] text-white hover:bg-black transition-colors"
+          className="px-6 py-2.5 text-sm font-medium rounded-xl bg-primary text-white hover:bg-primary-hover transition-colors"
         >
           Confirm Mapping
         </button>
@@ -354,9 +349,9 @@ function TargetFieldDropdown({
         onChange={(e) => onChange(sourceColumn, e.target.value)}
         className={`w-full appearance-none pl-3 pr-8 py-2 text-sm rounded-lg border transition-colors cursor-pointer ${
           isMapped
-            ? "border-green-200 bg-green-50 text-green-800"
+            ? "border-success-light bg-success-light text-success-dark"
             : "border-gray-200 bg-white text-gray-500"
-        } focus:outline-none focus:ring-2 focus:ring-[#232323] focus:border-transparent`}
+        } focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent`}
         aria-label={`Target field for ${sourceColumn}`}
       >
         <option value={NOT_MAPPED}>— Not mapped —</option>
@@ -367,8 +362,7 @@ function TargetFieldDropdown({
             .filter((f) => f.required)
             .map((field) => {
               const isDisabled =
-                mappedTargets.has(field.name) &&
-                field.name !== currentTarget;
+                mappedTargets.has(field.name) && field.name !== currentTarget;
 
               return (
                 <option
@@ -388,8 +382,7 @@ function TargetFieldDropdown({
             .filter((f) => !f.required)
             .map((field) => {
               const isDisabled =
-                mappedTargets.has(field.name) &&
-                field.name !== currentTarget;
+                mappedTargets.has(field.name) && field.name !== currentTarget;
 
               return (
                 <option
@@ -407,7 +400,7 @@ function TargetFieldDropdown({
       {/* Dropdown chevron */}
       <ChevronDown
         className={`absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 pointer-events-none ${
-          isMapped ? "text-green-600" : "text-gray-400"
+          isMapped ? "text-success" : "text-gray-400"
         }`}
       />
 
@@ -415,7 +408,7 @@ function TargetFieldDropdown({
       {currentField && (
         <div className="flex items-center gap-1.5 mt-1">
           {currentField.required ? (
-            <span className="text-[10px] font-medium text-red-500 bg-red-50 px-1.5 py-0.5 rounded">
+            <span className="text-[10px] font-medium text-error bg-error-light px-1.5 py-0.5 rounded">
               Required
             </span>
           ) : (

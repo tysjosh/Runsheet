@@ -14,10 +14,10 @@ import { getShipmentById } from "../../../../services/opsApi";
 
 const STATUS_COLORS: Record<string, string> = {
   pending: "bg-gray-100 text-gray-700",
-  in_transit: "bg-yellow-100 text-yellow-700",
-  delivered: "bg-green-100 text-green-700",
-  failed: "bg-red-100 text-red-700",
-  returned: "bg-orange-100 text-orange-700",
+  in_transit: "bg-warning-light text-warning-dark",
+  delivered: "bg-success-light text-success-dark",
+  failed: "bg-error-light text-error-dark",
+  returned: "bg-warning-light text-warning-dark",
 };
 
 function formatDate(dateStr?: string): string {
@@ -107,10 +107,10 @@ export default function ShipmentTrackingPage() {
     return (
       <div className="h-full flex items-center justify-center">
         <div className="text-center">
-          <p className="text-red-600 mb-4">{error ?? "Shipment not found."}</p>
+          <p className="text-error mb-4">{error ?? "Shipment not found."}</p>
           <Link
             href="/ops"
-            className="text-sm text-[#232323] underline hover:no-underline"
+            className="text-sm text-primary underline hover:no-underline"
           >
             Back to Fleet
           </Link>
@@ -128,18 +128,18 @@ export default function ShipmentTrackingPage() {
       <div className="border-b border-gray-100 px-8 py-6">
         <Link
           href="/ops"
-          className="inline-flex items-center gap-1 text-sm text-gray-500 hover:text-[#232323] mb-4"
+          className="inline-flex items-center gap-1 text-sm text-gray-500 hover:text-primary mb-4"
         >
           <ArrowLeft className="w-4 h-4" />
           Back to Fleet
         </Link>
 
         <div className="flex items-center gap-3 mb-4">
-          <div className="w-10 h-10 bg-[#232323] rounded-xl flex items-center justify-center">
+          <div className="w-10 h-10 bg-primary rounded-xl flex items-center justify-center">
             <Package className="w-5 h-5 text-white" />
           </div>
           <div>
-            <h1 className="text-2xl font-semibold text-[#232323]">
+            <h1 className="text-2xl font-semibold text-primary">
               Shipment {shipment.shipment_id}
             </h1>
             <span
@@ -180,7 +180,7 @@ export default function ShipmentTrackingPage() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Timeline — takes 2 columns on large screens */}
           <div className="lg:col-span-2">
-            <h2 className="text-lg font-semibold text-[#232323] mb-4">
+            <h2 className="text-lg font-semibold text-primary mb-4">
               Event Timeline
             </h2>
             <ShipmentTimeline events={events} />
@@ -188,7 +188,7 @@ export default function ShipmentTrackingPage() {
 
           {/* Map sidebar */}
           <div>
-            <h2 className="text-lg font-semibold text-[#232323] mb-4">
+            <h2 className="text-lg font-semibold text-primary mb-4">
               Route Map
             </h2>
             <ShipmentMap events={events} />
@@ -214,7 +214,7 @@ function InfoItem({
       <div className="text-gray-400 mt-0.5">{icon}</div>
       <div>
         <p className="text-xs text-gray-500">{label}</p>
-        <p className="text-sm font-medium text-[#232323]">{value}</p>
+        <p className="text-sm font-medium text-primary">{value}</p>
       </div>
     </div>
   );

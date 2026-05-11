@@ -12,16 +12,14 @@
  * - Requirement 9.6: Pause and resume individual autonomous agents
  */
 
-import {
-  AlertCircle,
-  HeartPulse,
-  Pause,
-  Play,
-  RefreshCw,
-} from "lucide-react";
+import { AlertCircle, HeartPulse, Pause, Play, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import type { AgentHealthEntry } from "../../services/agentApi";
-import { getAgentHealth, pauseAgent, resumeAgent } from "../../services/agentApi";
+import {
+  getAgentHealth,
+  pauseAgent,
+  resumeAgent,
+} from "../../services/agentApi";
 
 /** Human-readable agent name and description mapping */
 const AGENT_META: Record<string, { label: string; description: string }> = {
@@ -53,9 +51,9 @@ const STATUS_STYLES: Record<
   { dot: string; bg: string; text: string; label: string }
 > = {
   running: {
-    dot: "bg-emerald-500",
-    bg: "bg-emerald-50",
-    text: "text-emerald-700",
+    dot: "bg-success-light0",
+    bg: "bg-success-light",
+    text: "text-success-dark",
     label: "Running",
   },
   stopped: {
@@ -65,9 +63,9 @@ const STATUS_STYLES: Record<
     label: "Paused",
   },
   error: {
-    dot: "bg-red-500",
-    bg: "bg-red-50",
-    text: "text-red-700",
+    dot: "bg-error-light0",
+    bg: "bg-error-light",
+    text: "text-error-dark",
     label: "Error",
   },
 };
@@ -95,48 +93,41 @@ export default function AgentHealth() {
     return () => clearInterval(interval);
   }, [loadHealth]);
 
-  const handlePause = useCallback(
-    async (agentId: string) => {
-      setActionInProgress(agentId);
-      try {
-        const result = await pauseAgent(agentId);
-        setAgents((prev) => ({
-          ...prev,
-          [agentId]: {
-            ...prev[agentId],
-            status: result.status === "already_stopped" ? "stopped" : "stopped",
-          },
-        }));
-      } catch (error) {
-        console.error(`Failed to pause agent ${agentId}:`, error);
-      } finally {
-        setActionInProgress(null);
-      }
-    },
-    [],
-  );
+  const handlePause = useCallback(async (agentId: string) => {
+    setActionInProgress(agentId);
+    try {
+      const result = await pauseAgent(agentId);
+      setAgents((prev) => ({
+        ...prev,
+        [agentId]: {
+          ...prev[agentId],
+          status: result.status === "already_stopped" ? "stopped" : "stopped",
+        },
+      }));
+    } catch (error) {
+      console.error(`Failed to pause agent ${agentId}:`, error);
+    } finally {
+      setActionInProgress(null);
+    }
+  }, []);
 
-  const handleResume = useCallback(
-    async (agentId: string) => {
-      setActionInProgress(agentId);
-      try {
-        const result = await resumeAgent(agentId);
-        setAgents((prev) => ({
-          ...prev,
-          [agentId]: {
-            ...prev[agentId],
-            status:
-              result.status === "already_running" ? "running" : "running",
-          },
-        }));
-      } catch (error) {
-        console.error(`Failed to resume agent ${agentId}:`, error);
-      } finally {
-        setActionInProgress(null);
-      }
-    },
-    [],
-  );
+  const handleResume = useCallback(async (agentId: string) => {
+    setActionInProgress(agentId);
+    try {
+      const result = await resumeAgent(agentId);
+      setAgents((prev) => ({
+        ...prev,
+        [agentId]: {
+          ...prev[agentId],
+          status: result.status === "already_running" ? "running" : "running",
+        },
+      }));
+    } catch (error) {
+      console.error(`Failed to resume agent ${agentId}:`, error);
+    } finally {
+      setActionInProgress(null);
+    }
+  }, []);
 
   const agentEntries = Object.values(agents);
 
@@ -145,14 +136,14 @@ export default function AgentHealth() {
       {/* Header */}
       <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
         <div className="flex items-center gap-2">
-          <div className="w-8 h-8 bg-[#232323] rounded-lg flex items-center justify-center">
+          <div className="w-8 h-8 bg-primary rounded-lg flex items-center justify-center">
             <HeartPulse className="w-4 h-4 text-white" />
           </div>
-          <h3 className="text-sm font-semibold text-[#232323]">Agent Health</h3>
+          <h3 className="text-sm font-semibold text-primary">Agent Health</h3>
         </div>
         <button
           onClick={loadHealth}
-          className="p-1.5 rounded-md text-gray-400 hover:text-[#232323] hover:bg-gray-100 transition-colors"
+          className="p-1.5 rounded-md text-gray-400 hover:text-primary hover:bg-gray-100 transition-colors"
           title="Refresh"
         >
           <RefreshCw className="w-3.5 h-3.5" />
@@ -163,7 +154,7 @@ export default function AgentHealth() {
       <div className="flex-1 overflow-y-auto px-3 py-2 space-y-2">
         {loading ? (
           <div className="flex items-center justify-center py-8">
-            <div className="w-5 h-5 border-2 border-gray-300 border-t-[#232323] rounded-full animate-spin" />
+            <div className="w-5 h-5 border-2 border-gray-300 border-t-primary rounded-full animate-spin" />
           </div>
         ) : agentEntries.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-8 text-gray-400">
@@ -185,7 +176,7 @@ export default function AgentHealth() {
                 {/* Status indicator */}
                 <div className="flex-shrink-0">
                   {agent.status === "error" ? (
-                    <AlertCircle className="w-5 h-5 text-red-500" />
+                    <AlertCircle className="w-5 h-5 text-error" />
                   ) : (
                     <span
                       className={`block w-3 h-3 rounded-full ${style.dot} ${
@@ -198,7 +189,7 @@ export default function AgentHealth() {
                 {/* Agent info */}
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 mb-0.5">
-                    <span className="text-xs font-medium text-[#232323]">
+                    <span className="text-xs font-medium text-primary">
                       {meta.label}
                     </span>
                     <span
@@ -222,8 +213,8 @@ export default function AgentHealth() {
                   disabled={isProcessing || agent.status === "error"}
                   className={`flex-shrink-0 p-2 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
                     isRunning
-                      ? "text-amber-600 hover:bg-amber-50"
-                      : "text-emerald-600 hover:bg-emerald-50"
+                      ? "text-warning hover:bg-warning-light"
+                      : "text-success hover:bg-success-light"
                   }`}
                   title={isRunning ? "Pause agent" : "Resume agent"}
                 >

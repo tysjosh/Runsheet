@@ -1,12 +1,18 @@
 "use client";
 
-import React, { useCallback, useEffect, useRef, useState } from "react";
-import type { Invoice, InvoiceEvent, VoidInvoicePayload } from "../../services/commerceApi";
+import type React from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Badge, Button, EmptyState, StatsBar, Table } from "@/components/ui";
+import type {
+  Invoice,
+  InvoiceEvent,
+  VoidInvoicePayload,
+} from "../../services/commerceApi";
 import {
   getInvoice,
   getInvoiceEvents,
-  voidInvoice,
   retryQboPush,
+  voidInvoice,
 } from "../../services/commerceApi";
 
 interface InvoiceDetailPageProps {
@@ -155,7 +161,7 @@ export default function InvoiceDetailPage({
     return (
       <div role="status" className="flex justify-center py-12">
         <span className="sr-only">Loading invoice details...</span>
-        <div className="animate-spin h-8 w-8 border-4 border-blue-600 border-t-transparent rounded-full" />
+        <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
       </div>
     );
   }
@@ -163,7 +169,7 @@ export default function InvoiceDetailPage({
   if (error) {
     return (
       <div role="alert" className="p-6">
-        <div className="bg-red-50 border border-red-200 text-red-700 p-4 rounded">
+        <div className="bg-error-light border border-error-light text-error-dark p-4 rounded">
           {error}
         </div>
       </div>
@@ -175,32 +181,32 @@ export default function InvoiceDetailPage({
   const formatCents = (cents: number) =>
     `$${(cents / 100).toLocaleString(undefined, { minimumFractionDigits: 2 })}`;
 
-  const statusColor = (status: string) => {
+  const _statusColor = (status: string) => {
     switch (status) {
       case "paid":
-        return "bg-green-100 text-green-800";
+        return "bg-success-light text-success-dark";
       case "open":
-        return "bg-blue-100 text-blue-800";
+        return "bg-info-light text-info-dark";
       case "partial":
-        return "bg-yellow-100 text-yellow-800";
+        return "bg-warning-light text-warning-dark";
       case "overdue":
-        return "bg-red-100 text-red-800";
+        return "bg-error-light text-error-dark";
       case "void":
         return "bg-gray-100 text-gray-800";
       default:
-        return "bg-purple-100 text-purple-800";
+        return "bg-brand-secondary-soft text-brand-secondary";
     }
   };
 
   return (
     <div className="p-6">
       {/* Header */}
-      <header className="mb-6">
+      <div className="mb-6">
         <div className="flex items-center gap-4 mb-2">
           {onBack && (
-            <button type="button" onClick={onBack} className="text-blue-600 hover:underline">
+            <Button variant="ghost" size="sm" onClick={onBack}>
               ← Back to Invoices
-            </button>
+            </Button>
           )}
         </div>
         <div className="flex items-center justify-between">
@@ -210,61 +216,56 @@ export default function InvoiceDetailPage({
             </h1>
             <p className="text-gray-600">
               Due: {invoice.due_date} · Account:{" "}
-              <button
-                type="button"
+              <Button
+                variant="ghost"
+                size="sm"
                 onClick={() => onViewAccount?.(invoice.account_id)}
-                className="text-blue-600 hover:underline"
               >
                 {invoice.account_id}
-              </button>
+              </Button>
             </p>
           </div>
           <div className="flex items-center gap-3">
-            <span
-              className={`px-3 py-1 rounded text-sm font-medium ${statusColor(invoice.status)}`}
+            <Badge
+              variant={
+                invoice.status === "paid"
+                  ? "success"
+                  : invoice.status === "open"
+                    ? "info"
+                    : invoice.status === "partial"
+                      ? "warning"
+                      : invoice.status === "overdue"
+                        ? "error"
+                        : invoice.status === "void"
+                          ? "neutral"
+                          : "default"
+              }
             >
               {invoice.status}
-            </span>
+            </Badge>
             {invoice.status !== "void" && invoice.status !== "paid" && (
-              <button
-                type="button"
-                onClick={() => setVoidDialogOpen(true)}
-                className="bg-red-600 text-white px-4 py-2 rounded hover:bg-red-700"
-              >
+              <Button variant="danger" onClick={() => setVoidDialogOpen(true)}>
                 Void Invoice
-              </button>
+              </Button>
             )}
           </div>
         </div>
-      </header>
+      </div>
 
       {/* Summary cards */}
       <section aria-labelledby="invoice-summary-heading" className="mb-8">
         <h2 id="invoice-summary-heading" className="sr-only">
           Invoice Summary
         </h2>
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-          <div className="border rounded p-4">
-            <p className="text-sm text-gray-600">Subtotal</p>
-            <p className="text-xl font-bold">{formatCents(invoice.subtotal_cents)}</p>
-          </div>
-          <div className="border rounded p-4">
-            <p className="text-sm text-gray-600">Tax</p>
-            <p className="text-xl font-bold">{formatCents(invoice.tax_cents)}</p>
-          </div>
-          <div className="border rounded p-4">
-            <p className="text-sm text-gray-600">Total</p>
-            <p className="text-xl font-bold">{formatCents(invoice.total_cents)}</p>
-          </div>
-          <div className="border rounded p-4">
-            <p className="text-sm text-gray-600">Paid</p>
-            <p className="text-xl font-bold">{formatCents(invoice.amount_paid_cents)}</p>
-          </div>
-          <div className="border rounded p-4">
-            <p className="text-sm text-gray-600">Remaining</p>
-            <p className="text-xl font-bold">{formatCents(invoice.remaining_cents)}</p>
-          </div>
-        </div>
+        <StatsBar
+          stats={[
+            { label: "Subtotal", value: formatCents(invoice.subtotal_cents) },
+            { label: "Tax", value: formatCents(invoice.tax_cents) },
+            { label: "Total", value: formatCents(invoice.total_cents) },
+            { label: "Paid", value: formatCents(invoice.amount_paid_cents) },
+            { label: "Remaining", value: formatCents(invoice.remaining_cents) },
+          ]}
+        />
       </section>
 
       {/* Line items */}
@@ -272,26 +273,24 @@ export default function InvoiceDetailPage({
         <h2 id="line-items-heading" className="text-lg font-semibold mb-3">
           Line Items
         </h2>
-        <table className="w-full border-collapse" role="table">
-          <thead>
-            <tr className="border-b bg-gray-50">
-              <th className="text-left p-3 font-medium">Product</th>
-              <th className="text-left p-3 font-medium">Quantity (gal)</th>
-              <th className="text-left p-3 font-medium">Unit Price</th>
-              <th className="text-left p-3 font-medium">Subtotal</th>
-            </tr>
-          </thead>
-          <tbody>
-            {invoice.line_items.map((item) => (
-              <tr key={item.line_id} className="border-b">
-                <td className="p-3">{item.product_code}</td>
-                <td className="p-3">{item.quantity_gallons}</td>
-                <td className="p-3">{formatCents(item.unit_price_cents)}</td>
-                <td className="p-3">{formatCents(item.subtotal_cents)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <Table
+          columns={[
+            { key: "product_code", label: "Product" },
+            { key: "quantity_gallons", label: "Quantity (gal)" },
+            {
+              key: "unit_price_cents",
+              label: "Unit Price",
+              render: (item) => formatCents(item.unit_price_cents),
+            },
+            {
+              key: "subtotal_cents",
+              label: "Subtotal",
+              render: (item) => formatCents(item.subtotal_cents),
+            },
+          ]}
+          data={invoice.line_items}
+          getRowId={(item) => item.line_id}
+        />
       </section>
 
       {/* QBO push state */}
@@ -300,25 +299,21 @@ export default function InvoiceDetailPage({
           QBO Sync Status
         </h2>
         <div className="flex items-center gap-4">
-          <span
-            className={`px-3 py-1 rounded text-sm font-medium ${
+          <Badge
+            variant={
               invoice.qbo_push_state === "pushed"
-                ? "bg-green-100 text-green-800"
+                ? "success"
                 : invoice.qbo_push_state === "dead_letter"
-                  ? "bg-red-100 text-red-800"
-                  : "bg-gray-100 text-gray-800"
-            }`}
+                  ? "error"
+                  : "neutral"
+            }
           >
             {invoice.qbo_push_state}
-          </span>
+          </Badge>
           {invoice.qbo_push_state === "dead_letter" && (
-            <button
-              type="button"
-              onClick={handleRetryQbo}
-              className="text-blue-600 hover:underline text-sm"
-            >
+            <Button variant="ghost" size="sm" onClick={handleRetryQbo}>
               Retry Push
-            </button>
+            </Button>
           )}
         </div>
       </section>
@@ -329,12 +324,19 @@ export default function InvoiceDetailPage({
           Event Timeline
         </h2>
         {events.length === 0 ? (
-          <p className="text-gray-500">No events recorded.</p>
+          <EmptyState
+            icon={<span className="text-4xl">📋</span>}
+            title="No events"
+            description="No events recorded."
+          />
         ) : (
-          <ol className="relative border-l border-gray-300 ml-4" aria-label="Invoice events">
+          <ol
+            className="relative border-l border-gray-300 ml-4"
+            aria-label="Invoice events"
+          >
             {events.map((event) => (
               <li key={event.event_id} className="mb-4 ml-6">
-                <span className="absolute -left-2 w-4 h-4 bg-blue-600 rounded-full border-2 border-white" />
+                <span className="absolute -left-2 w-4 h-4 bg-primary rounded-full border-2 border-white" />
                 <div className="flex items-center gap-2">
                   <span className="font-medium text-sm capitalize">
                     {event.event_type.replace(/_/g, " ")}
@@ -379,7 +381,10 @@ export default function InvoiceDetailPage({
             </p>
             <form onSubmit={handleVoid}>
               <div className="mb-4">
-                <label htmlFor="void-reason" className="block text-sm font-medium mb-1">
+                <label
+                  htmlFor="void-reason"
+                  className="block text-sm font-medium mb-1"
+                >
                   Reason
                 </label>
                 <textarea
@@ -401,26 +406,29 @@ export default function InvoiceDetailPage({
                       onChange={(e) => setVoidForce(e.target.checked)}
                     />
                     <span className="text-sm">
-                      Force void (reverse {formatCents(invoice.amount_paid_cents)} in applied payments)
+                      Force void (reverse{" "}
+                      {formatCents(invoice.amount_paid_cents)} in applied
+                      payments)
                     </span>
                   </label>
                 </div>
               )}
               <div className="flex gap-3">
-                <button
+                <Button
                   type="submit"
-                  disabled={voiding || !voidReason.trim()}
-                  className="bg-red-600 text-white px-4 py-2 rounded hover:bg-red-700 disabled:opacity-50"
+                  variant="danger"
+                  loading={voiding}
+                  disabled={!voidReason.trim()}
                 >
-                  {voiding ? "Voiding..." : "Confirm Void"}
-                </button>
-                <button
+                  Confirm Void
+                </Button>
+                <Button
                   type="button"
+                  variant="secondary"
                   onClick={() => setVoidDialogOpen(false)}
-                  className="border px-4 py-2 rounded hover:bg-gray-50"
                 >
                   Cancel
-                </button>
+                </Button>
               </div>
             </form>
           </div>

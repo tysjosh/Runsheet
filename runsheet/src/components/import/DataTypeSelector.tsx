@@ -1,16 +1,16 @@
 import {
-  CheckCircle,
-  Download,
-  Database,
-  Loader2,
-  Truck,
-  Fuel,
   Boxes,
   CalendarClock,
+  CheckCircle,
+  Database,
+  Download,
+  Fuel,
+  Loader2,
+  Truck,
 } from "lucide-react";
 import { useEffect, useState } from "react";
-import type { DataType, SchemaTemplate } from "../../types/import";
 import { importApi } from "../../services/importApi";
+import type { DataType, SchemaTemplate } from "../../types/import";
 
 // ─── Props ───────────────────────────────────────────────────────────────────
 
@@ -94,10 +94,7 @@ export default function DataTypeSelector({ onSelect }: DataTypeSelectorProps) {
     setSelected(dataType);
   };
 
-  const handleDownloadTemplate = (
-    e: React.MouseEvent,
-    dataType: DataType,
-  ) => {
+  const handleDownloadTemplate = (e: React.MouseEvent, dataType: DataType) => {
     e.stopPropagation();
     importApi.downloadTemplate(dataType);
   };
@@ -123,7 +120,7 @@ export default function DataTypeSelector({ onSelect }: DataTypeSelectorProps) {
 
   if (error) {
     return (
-      <div className="flex flex-col items-center justify-center py-20 text-red-500">
+      <div className="flex flex-col items-center justify-center py-20 text-error">
         <Database className="w-10 h-10 mb-4" />
         <p className="text-sm font-medium mb-2">Failed to load schemas</p>
         <p className="text-xs text-gray-500">{error}</p>
@@ -136,7 +133,7 @@ export default function DataTypeSelector({ onSelect }: DataTypeSelectorProps) {
   return (
     <div>
       <div className="mb-6">
-        <h2 className="text-lg font-semibold text-[#232323] mb-1">
+        <h2 className="text-lg font-semibold text-primary mb-1">
           Select Data Type
         </h2>
         <p className="text-sm text-gray-500">
@@ -166,14 +163,14 @@ export default function DataTypeSelector({ onSelect }: DataTypeSelectorProps) {
               onClick={() => handleCardClick(dataType)}
               className={`relative text-left rounded-xl border-2 p-5 transition-all cursor-pointer hover:shadow-md ${
                 isSelected
-                  ? "border-[#232323] bg-gray-50 shadow-md"
+                  ? "border-primary bg-gray-50 shadow-md"
                   : "border-gray-200 bg-white hover:border-gray-300"
               }`}
             >
               {/* Selected indicator */}
               {isSelected && (
                 <div className="absolute top-3 right-3">
-                  <CheckCircle className="w-5 h-5 text-green-600" />
+                  <CheckCircle className="w-5 h-5 text-success" />
                 </div>
               )}
 
@@ -182,13 +179,13 @@ export default function DataTypeSelector({ onSelect }: DataTypeSelectorProps) {
                 <div
                   className={`flex items-center justify-center w-10 h-10 rounded-lg ${
                     isSelected
-                      ? "bg-[#232323] text-white"
+                      ? "bg-primary text-white"
                       : "bg-gray-100 text-gray-600"
                   }`}
                 >
                   <Icon className="w-5 h-5" />
                 </div>
-                <h3 className="text-sm font-semibold text-[#232323]">
+                <h3 className="text-sm font-semibold text-primary">
                   {config.label}
                 </h3>
               </div>
@@ -214,7 +211,7 @@ export default function DataTypeSelector({ onSelect }: DataTypeSelectorProps) {
               {schema && (
                 <div className="flex items-center gap-3 mb-4">
                   <span className="text-xs text-gray-600">
-                    <span className="font-medium text-[#232323]">
+                    <span className="font-medium text-primary">
                       {requiredCount}
                     </span>{" "}
                     required
@@ -243,7 +240,7 @@ export default function DataTypeSelector({ onSelect }: DataTypeSelectorProps) {
                     );
                   }
                 }}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200 hover:text-[#232323] transition-colors"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200 hover:text-primary transition-colors"
               >
                 <Download className="w-3.5 h-3.5" />
                 Download Template
@@ -261,12 +258,11 @@ export default function DataTypeSelector({ onSelect }: DataTypeSelectorProps) {
           disabled={!selected}
           className={`px-6 py-2.5 text-sm font-medium rounded-xl transition-colors ${
             selected
-              ? "bg-[#232323] text-white hover:bg-black"
+              ? "bg-primary text-white hover:bg-primary-hover"
               : "bg-gray-100 text-gray-400 cursor-not-allowed"
           }`}
         >
-          Continue with{" "}
-          {selected ? DATA_TYPE_CONFIG[selected].label : "…"}
+          Continue with {selected ? DATA_TYPE_CONFIG[selected].label : "…"}
         </button>
       </div>
     </div>

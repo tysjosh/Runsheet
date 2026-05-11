@@ -60,7 +60,7 @@ export default function SignIn({ onSignIn }: SignInProps) {
           <div
             className="absolute inset-0"
             style={{
-              background: " #f3f4f6",
+              background: "var(--color-gray-100)",
               clipPath: "polygon(0 0, 60% 0, 35% 100%, 0 100%)",
             }}
           />
@@ -68,7 +68,7 @@ export default function SignIn({ onSignIn }: SignInProps) {
           <div
             className="absolute inset-0"
             style={{
-              backgroundColor: "#BDC4D4",
+              backgroundColor: "var(--color-gray-300)",
               clipPath: "polygon(60% 0, 100% 0, 100% 100%, 35% 100%)",
             }}
           />
@@ -115,7 +115,7 @@ export default function SignIn({ onSignIn }: SignInProps) {
           <div className="mb-10">
             {/* Mobile Logo */}
             <div className="flex justify-center mb-8 lg:hidden">
-              <div className="bg-gray-900 rounded-full p-4">
+              <div className="bg-primary rounded-full p-4">
                 <Truck className="w-8 h-8 text-white" />
               </div>
             </div>
@@ -148,7 +148,7 @@ export default function SignIn({ onSignIn }: SignInProps) {
                 onChange={(e) => setEmail(e.target.value)}
                 onKeyPress={handleKeyPress}
                 aria-describedby={error ? "signin-error" : undefined}
-                className="w-full px-4 py-3 bg-white border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent transition-all placeholder:text-gray-400"
+                className="w-full px-4 py-3 bg-white border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent transition-all placeholder:text-gray-400"
                 placeholder="Enter your email"
               />
             </div>
@@ -179,7 +179,7 @@ export default function SignIn({ onSignIn }: SignInProps) {
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   onKeyPress={handleKeyPress}
-                  className="w-full px-4 py-3 pr-12 bg-white border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent transition-all placeholder:text-gray-400"
+                  className="w-full px-4 py-3 pr-12 bg-white border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent transition-all placeholder:text-gray-400"
                   placeholder="Enter your password"
                 />
                 <button
@@ -199,8 +199,13 @@ export default function SignIn({ onSignIn }: SignInProps) {
 
             {/* Error Message */}
             {error && (
-              <div className="bg-red-50 border border-red-200 rounded-lg p-3" role="alert">
-                <p id="signin-error" className="text-sm text-red-600">{error}</p>
+              <div
+                className="bg-error-light border border-error-light rounded-lg p-3"
+                role="alert"
+              >
+                <p id="signin-error" className="text-sm text-error">
+                  {error}
+                </p>
               </div>
             )}
 
@@ -208,7 +213,7 @@ export default function SignIn({ onSignIn }: SignInProps) {
             <button
               onClick={handleSubmit}
               disabled={isLoading}
-              className="w-full bg-gray-900 hover:bg-gray-700 text-white font-medium py-3 px-4 rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-gray-900 focus:ring-offset-2"
+              className="w-full bg-primary hover:bg-primary-hover text-white font-medium py-3 px-4 rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2"
             >
               {isLoading ? (
                 <div className="flex items-center justify-center">

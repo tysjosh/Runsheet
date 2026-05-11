@@ -1,12 +1,12 @@
 /**
  * EmptyState Component - Standardized empty state display
- * 
+ *
  * Provides consistent empty state styling across all pages.
  * Replaces multiple empty state implementations.
  */
 
-import React from 'react';
-import { Button } from './Button';
+import React from "react";
+import { Button } from "./Button";
 
 export interface EmptyStateProps {
   icon?: React.ReactNode;
@@ -24,17 +24,19 @@ export const EmptyState: React.FC<EmptyStateProps> = ({
   title,
   description,
   action,
-  className = '',
+  className = "",
 }) => {
+  const renderedIcon = React.isValidElement<{ className?: string }>(icon)
+    ? React.cloneElement(icon, {
+        className: `w-16 h-16 ${icon.props.className ?? ""}`.trim(),
+      })
+    : icon;
+
   return (
     <div className={`text-center py-16 text-gray-500 ${className}`}>
       {icon && (
         <div className="flex justify-center mb-4 text-gray-300">
-          {React.isValidElement(icon)
-            ? React.cloneElement(icon as React.ReactElement, {
-                className: 'w-16 h-16',
-              })
-            : icon}
+          {renderedIcon}
         </div>
       )}
       <p className="text-lg font-medium text-gray-400">{title}</p>

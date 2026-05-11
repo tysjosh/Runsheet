@@ -94,8 +94,8 @@ export default class ErrorBoundary extends Component<
         <div className="h-full flex items-center justify-center bg-gray-50 p-6">
           <div className="max-w-md w-full bg-white rounded-xl shadow-sm border border-gray-200 p-8 text-center">
             {/* Error Icon */}
-            <div className="w-16 h-16 bg-red-50 rounded-full flex items-center justify-center mx-auto mb-6">
-              <AlertTriangle className="w-8 h-8 text-red-500" />
+            <div className="w-16 h-16 bg-error-light rounded-full flex items-center justify-center mx-auto mb-6">
+              <AlertTriangle className="w-8 h-8 text-error" />
             </div>
 
             {/* Error Title */}
@@ -122,7 +122,7 @@ export default class ErrorBoundary extends Component<
                 <summary className="text-sm text-gray-500 cursor-pointer hover:text-gray-700">
                   Technical details
                 </summary>
-                <pre className="mt-2 p-3 bg-gray-100 rounded-lg text-xs text-red-600 overflow-auto max-h-32">
+                <pre className="mt-2 p-3 bg-gray-100 rounded-lg text-xs text-error overflow-auto max-h-32">
                   {error.message}
                   {error.stack && `\n\n${error.stack}`}
                 </pre>
@@ -132,7 +132,7 @@ export default class ErrorBoundary extends Component<
             {/* Retry Button */}
             <button
               onClick={this.handleRetry}
-              className="inline-flex items-center gap-2 px-6 py-3 bg-[#232323] hover:bg-gray-800 text-white rounded-xl font-medium transition-colors"
+              className="inline-flex items-center gap-2 px-6 py-3 bg-primary hover:bg-primary-hover text-white rounded-xl font-medium transition-colors"
             >
               <RefreshCw className="w-4 h-4" />
               Try Again

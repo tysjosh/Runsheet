@@ -33,7 +33,7 @@ export default function LoadingSpinner({
     <div className={`${containerClasses} ${className}`}>
       <div className="text-center">
         <div
-          className={`animate-spin rounded-full border-b-2 border-[#232323] mx-auto ${sizeClasses[size]}`}
+          className={`animate-spin rounded-full border-b-2 border-primary mx-auto ${sizeClasses[size]}`}
           role="status"
           aria-label="Loading"
         />

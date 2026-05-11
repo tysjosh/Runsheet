@@ -236,7 +236,7 @@ export default function DataUpload() {
       <div className="border-b border-gray-100 px-8 py-6 flex-shrink-0">
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-2xl font-semibold text-[#232323] mb-1">
+            <h1 className="text-2xl font-semibold text-primary mb-1">
               Data Management
             </h1>
             <p className="text-gray-500">
@@ -251,7 +251,7 @@ export default function DataUpload() {
         <div className="w-1/2 p-8 border-r border-gray-100 overflow-y-auto">
           {/* Time Period Selection */}
           <div className="mb-8">
-            <h3 className="text-lg font-semibold text-[#232323] mb-4">
+            <h3 className="text-lg font-semibold text-primary mb-4">
               Select Time Period
             </h3>
             <div className="grid grid-cols-3 gap-4 mb-6">
@@ -260,15 +260,15 @@ export default function DataUpload() {
                 disabled={uploading}
                 className={`flex flex-col items-center gap-3 p-6 border rounded-2xl transition-all disabled:opacity-50 ${
                   selectedPeriod === "afternoon"
-                    ? "bg-orange-50 border-orange-200 shadow-sm"
+                    ? "bg-warning-light border-warning-light shadow-sm"
                     : "bg-white border-gray-200 hover:border-gray-300 hover:shadow-sm"
                 }`}
               >
                 <Sun
-                  className={`w-8 h-8 ${selectedPeriod === "afternoon" ? "text-orange-600" : "text-orange-500"}`}
+                  className={`w-8 h-8 ${selectedPeriod === "afternoon" ? "text-warning" : "text-warning"}`}
                 />
                 <div className="text-center">
-                  <div className="font-medium text-[#232323]">Afternoon</div>
+                  <div className="font-medium text-primary">Afternoon</div>
                   <div className="text-sm text-gray-500">
                     2:00 PM Operations
                   </div>
@@ -280,15 +280,15 @@ export default function DataUpload() {
                 disabled={uploading}
                 className={`flex flex-col items-center gap-3 p-6 border rounded-2xl transition-all disabled:opacity-50 ${
                   selectedPeriod === "evening"
-                    ? "bg-purple-50 border-purple-200 shadow-sm"
+                    ? "bg-brand-secondary-soft border-brand-secondary-soft shadow-sm"
                     : "bg-white border-gray-200 hover:border-gray-300 hover:shadow-sm"
                 }`}
               >
                 <Sunset
-                  className={`w-8 h-8 ${selectedPeriod === "evening" ? "text-purple-600" : "text-purple-500"}`}
+                  className={`w-8 h-8 ${selectedPeriod === "evening" ? "text-brand-secondary" : "text-brand-secondary"}`}
                 />
                 <div className="text-center">
-                  <div className="font-medium text-[#232323]">Evening</div>
+                  <div className="font-medium text-primary">Evening</div>
                   <div className="text-sm text-gray-500">
                     5:00 PM Operations
                   </div>
@@ -300,15 +300,15 @@ export default function DataUpload() {
                 disabled={uploading}
                 className={`flex flex-col items-center gap-3 p-6 border rounded-2xl transition-all disabled:opacity-50 ${
                   selectedPeriod === "night"
-                    ? "bg-blue-50 border-blue-200 shadow-sm"
+                    ? "bg-info-light border-info shadow-sm"
                     : "bg-white border-gray-200 hover:border-gray-300 hover:shadow-sm"
                 }`}
               >
                 <Moon
-                  className={`w-8 h-8 ${selectedPeriod === "night" ? "text-blue-600" : "text-blue-500"}`}
+                  className={`w-8 h-8 ${selectedPeriod === "night" ? "text-info" : "text-info"}`}
                 />
                 <div className="text-center">
-                  <div className="font-medium text-[#232323]">Night</div>
+                  <div className="font-medium text-primary">Night</div>
                   <div className="text-sm text-gray-500">11:00 PM Shift</div>
                 </div>
               </button>
@@ -321,7 +321,7 @@ export default function DataUpload() {
                 uploading ||
                 (batchMode === "selective" && selectedDataTypes.length === 0)
               }
-              className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-[#232323] text-white rounded-2xl hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed font-medium transition-colors"
+              className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-primary text-white rounded-2xl hover:bg-primary-hover disabled:opacity-50 disabled:cursor-not-allowed font-medium transition-colors"
             >
               {uploading ? (
                 <>
@@ -339,7 +339,7 @@ export default function DataUpload() {
 
           {/* Upload Method Selection */}
           <div className="mb-6">
-            <label className="block text-sm font-medium text-[#232323] mb-3">
+            <label className="block text-sm font-medium text-primary mb-3">
               Upload Method
             </label>
             <div className="flex gap-2 p-1 bg-gray-100 rounded-xl">
@@ -347,8 +347,8 @@ export default function DataUpload() {
                 onClick={() => setUploadMethod("batch")}
                 className={`flex-1 flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
                   uploadMethod === "batch"
-                    ? "bg-white text-[#232323] shadow-sm"
-                    : "text-gray-600 hover:text-[#232323]"
+                    ? "bg-white text-primary shadow-sm"
+                    : "text-gray-600 hover:text-primary"
                 }`}
               >
                 <Database className="w-4 h-4" />
@@ -358,8 +358,8 @@ export default function DataUpload() {
                 onClick={() => setUploadMethod("sheets")}
                 className={`flex-1 flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
                   uploadMethod === "sheets"
-                    ? "bg-white text-[#232323] shadow-sm"
-                    : "text-gray-600 hover:text-[#232323]"
+                    ? "bg-white text-primary shadow-sm"
+                    : "text-gray-600 hover:text-primary"
                 }`}
               >
                 <FileText className="w-4 h-4" />
@@ -369,8 +369,8 @@ export default function DataUpload() {
                 onClick={() => setUploadMethod("csv")}
                 className={`flex-1 flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
                   uploadMethod === "csv"
-                    ? "bg-white text-[#232323] shadow-sm"
-                    : "text-gray-600 hover:text-[#232323]"
+                    ? "bg-white text-primary shadow-sm"
+                    : "text-gray-600 hover:text-primary"
                 }`}
               >
                 <Upload className="w-4 h-4" />
@@ -382,7 +382,7 @@ export default function DataUpload() {
           {/* Batch Mode Configuration */}
           {uploadMethod === "batch" && (
             <div className="mb-6">
-              <label className="block text-sm font-medium text-[#232323] mb-3">
+              <label className="block text-sm font-medium text-primary mb-3">
                 Batch Configuration
               </label>
               <div className="space-y-4">
@@ -391,8 +391,8 @@ export default function DataUpload() {
                     onClick={() => handleBatchModeChange("all")}
                     className={`flex-1 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
                       batchMode === "all"
-                        ? "bg-white text-[#232323] shadow-sm"
-                        : "text-gray-600 hover:text-[#232323]"
+                        ? "bg-white text-primary shadow-sm"
+                        : "text-gray-600 hover:text-primary"
                     }`}
                   >
                     All Data Types
@@ -401,8 +401,8 @@ export default function DataUpload() {
                     onClick={() => handleBatchModeChange("selective")}
                     className={`flex-1 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
                       batchMode === "selective"
-                        ? "bg-white text-[#232323] shadow-sm"
-                        : "text-gray-600 hover:text-[#232323]"
+                        ? "bg-white text-primary shadow-sm"
+                        : "text-gray-600 hover:text-primary"
                     }`}
                   >
                     Select Types
@@ -412,8 +412,8 @@ export default function DataUpload() {
                 {batchMode === "all" ? (
                   <div className="p-4 bg-gray-50 rounded-xl">
                     <div className="flex items-center gap-2 mb-2">
-                      <CheckCircle className="w-4 h-4 text-green-600" />
-                      <span className="text-sm font-medium text-[#232323]">
+                      <CheckCircle className="w-4 h-4 text-success" />
+                      <span className="text-sm font-medium text-primary">
                         All data types selected:
                       </span>
                     </div>
@@ -432,9 +432,9 @@ export default function DataUpload() {
                           type="checkbox"
                           checked={selectedDataTypes.includes(type)}
                           onChange={() => handleDataTypeToggle(type)}
-                          className="w-4 h-4 rounded border-gray-300 text-[#232323] focus:ring-2 focus:ring-gray-200"
+                          className="w-4 h-4 rounded border-gray-300 text-primary focus:ring-2 focus:ring-gray-200"
                         />
-                        <span className="text-sm font-medium text-[#232323] capitalize">
+                        <span className="text-sm font-medium text-primary capitalize">
                           {type}
                         </span>
                       </label>
@@ -448,7 +448,7 @@ export default function DataUpload() {
           {/* Single Data Type Selection */}
           {uploadMethod !== "batch" && (
             <div className="mb-6">
-              <label className="block text-sm font-medium text-[#232323] mb-3">
+              <label className="block text-sm font-medium text-primary mb-3">
                 Data Type
               </label>
               <select
@@ -467,9 +467,7 @@ export default function DataUpload() {
           <div className="mb-6 p-6 bg-gray-50 rounded-2xl">
             <div className="flex items-center gap-2 mb-4">
               <Clock className="w-5 h-5 text-gray-600" />
-              <h4 className="font-semibold text-[#232323]">
-                Temporal Settings
-              </h4>
+              <h4 className="font-semibold text-primary">Temporal Settings</h4>
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div>
@@ -515,7 +513,7 @@ export default function DataUpload() {
           {/* Google Sheets Upload */}
           {uploadMethod === "sheets" && (
             <div className="mb-6">
-              <label className="block text-sm font-medium text-[#232323] mb-3">
+              <label className="block text-sm font-medium text-primary mb-3">
                 Google Sheets URL
               </label>
               <div className="space-y-3">
@@ -530,7 +528,7 @@ export default function DataUpload() {
                 <button
                   onClick={handleSheetsUpload}
                   disabled={!sheetsUrl.trim() || uploading}
-                  className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-[#232323] text-white text-sm rounded-xl hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed font-medium transition-colors"
+                  className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-primary text-white text-sm rounded-xl hover:bg-primary-hover disabled:opacity-50 disabled:cursor-not-allowed font-medium transition-colors"
                 >
                   {uploading ? (
                     <>
@@ -555,7 +553,7 @@ export default function DataUpload() {
           {/* CSV File Upload */}
           {uploadMethod === "csv" && (
             <div className="mb-6">
-              <label className="block text-sm font-medium text-[#232323] mb-3">
+              <label className="block text-sm font-medium text-primary mb-3">
                 CSV File Upload
               </label>
               <div
@@ -570,7 +568,7 @@ export default function DataUpload() {
                 onDrop={handleDrop}
               >
                 <Upload className="w-12 h-12 mx-auto mb-4 text-gray-400" />
-                <p className="text-sm font-medium text-[#232323] mb-1">
+                <p className="text-sm font-medium text-primary mb-1">
                   Drop CSV file here or click to browse
                 </p>
                 <p className="text-xs text-gray-500 mb-6">
@@ -586,7 +584,7 @@ export default function DataUpload() {
                 />
                 <label
                   htmlFor="file-upload"
-                  className="inline-flex items-center gap-2 px-6 py-3 bg-[#232323] text-white text-sm rounded-xl hover:bg-gray-800 cursor-pointer font-medium transition-colors"
+                  className="inline-flex items-center gap-2 px-6 py-3 bg-primary text-white text-sm rounded-xl hover:bg-primary-hover cursor-pointer font-medium transition-colors"
                 >
                   <Upload className="w-4 h-4" />
                   Choose File
@@ -600,13 +598,13 @@ export default function DataUpload() {
             <div className="mb-6 p-6 bg-gray-50 rounded-2xl">
               <div className="flex items-center gap-3 mb-3">
                 <RefreshCw className="w-5 h-5 text-gray-600 animate-spin" />
-                <span className="text-sm text-[#232323] font-medium">
+                <span className="text-sm text-primary font-medium">
                   Processing {dataType} data...
                 </span>
               </div>
               <div className="w-full bg-gray-200 rounded-full h-2">
                 <div
-                  className="bg-[#232323] h-2 rounded-full animate-pulse"
+                  className="bg-primary h-2 rounded-full animate-pulse"
                   style={{ width: "60%" }}
                 ></div>
               </div>
@@ -618,19 +616,19 @@ export default function DataUpload() {
             <div
               className={`p-6 rounded-2xl mb-6 ${
                 result.status === "success"
-                  ? "bg-green-50 border border-green-200"
-                  : "bg-red-50 border border-red-200"
+                  ? "bg-success-light border border-success-light"
+                  : "bg-error-light border border-error-light"
               }`}
             >
               {result.status === "success" ? (
                 <div>
                   <div className="flex items-center gap-3 mb-3">
-                    <CheckCircle className="w-6 h-6 text-green-600" />
-                    <span className="font-semibold text-green-900">
+                    <CheckCircle className="w-6 h-6 text-success" />
+                    <span className="font-semibold text-success-dark">
                       Success
                     </span>
                   </div>
-                  <div className="text-sm text-green-800 mb-4">
+                  <div className="text-sm text-success-dark mb-4">
                     <p className="mb-2">
                       Successfully processed {result.recordCount} records for{" "}
                       {result.dataType}
@@ -652,7 +650,7 @@ export default function DataUpload() {
                     onClick={() => {
                       setResult(null);
                     }}
-                    className="px-6 py-2 bg-green-600 text-white text-sm rounded-xl hover:bg-green-700 font-medium transition-colors"
+                    className="px-6 py-2 bg-success text-white text-sm rounded-xl hover:bg-success-dark font-medium transition-colors"
                   >
                     Continue
                   </button>
@@ -660,10 +658,10 @@ export default function DataUpload() {
               ) : (
                 <div>
                   <div className="flex items-center gap-3 mb-3">
-                    <XCircle className="w-6 h-6 text-red-600" />
-                    <span className="font-semibold text-red-900">Error</span>
+                    <XCircle className="w-6 h-6 text-error" />
+                    <span className="font-semibold text-error-dark">Error</span>
                   </div>
-                  <div className="text-sm text-red-800 mb-4">
+                  <div className="text-sm text-error-dark mb-4">
                     {result.errors?.map((error, index) => (
                       <p key={index} className="mb-1">
                         {error}
@@ -672,7 +670,7 @@ export default function DataUpload() {
                   </div>
                   <button
                     onClick={() => setResult(null)}
-                    className="px-6 py-2 bg-red-600 text-white text-sm rounded-xl hover:bg-red-700 font-medium transition-colors"
+                    className="px-6 py-2 bg-error text-white text-sm rounded-xl hover:bg-error-dark font-medium transition-colors"
                   >
                     Try Again
                   </button>
@@ -684,7 +682,7 @@ export default function DataUpload() {
 
         {/* Right Column - Guidelines and Help */}
         <div className="w-1/2 p-8 bg-gray-50 overflow-y-auto">
-          <h3 className="text-xl font-semibold text-[#232323] mb-6">
+          <h3 className="text-xl font-semibold text-primary mb-6">
             Data Format Guidelines
           </h3>
 
@@ -692,28 +690,26 @@ export default function DataUpload() {
             {/* CSV Format Requirements */}
             <div className="bg-white rounded-2xl overflow-hidden border border-gray-200">
               <div className="px-6 py-4 border-b border-gray-100">
-                <h4 className="font-semibold text-[#232323]">
+                <h4 className="font-semibold text-primary">
                   Required CSV Columns
                 </h4>
               </div>
               <div className="divide-y divide-gray-100">
                 <div className="px-6 py-4">
-                  <div className="font-medium text-[#232323] mb-2">Fleet</div>
+                  <div className="font-medium text-primary mb-2">Fleet</div>
                   <div className="text-xs text-gray-600 font-mono bg-gray-50 p-3 rounded-xl">
                     truck_id, driver, status, route, location, cargo,
                     destination
                   </div>
                 </div>
                 <div className="px-6 py-4">
-                  <div className="font-medium text-[#232323] mb-2">
-                    Inventory
-                  </div>
+                  <div className="font-medium text-primary mb-2">Inventory</div>
                   <div className="text-xs text-gray-600 font-mono bg-gray-50 p-3 rounded-xl">
                     item_id, name, category, quantity, unit, location, status
                   </div>
                 </div>
                 <div className="px-6 py-4">
-                  <div className="font-medium text-[#232323] mb-2">Support</div>
+                  <div className="font-medium text-primary mb-2">Support</div>
                   <div className="text-xs text-gray-600 font-mono bg-gray-50 p-3 rounded-xl">
                     ticket_id, customer, issue, description, priority, status
                   </div>
@@ -723,14 +719,14 @@ export default function DataUpload() {
 
             {/* Upload Tips */}
             <div className="bg-white rounded-2xl border border-gray-200 p-6">
-              <h4 className="font-semibold text-[#232323] mb-4">
+              <h4 className="font-semibold text-primary mb-4">
                 Upload Guidelines
               </h4>
               <div className="space-y-4">
                 <div className="flex items-start gap-3">
                   <AlertCircle className="w-5 h-5 text-gray-400 mt-0.5 flex-shrink-0" />
                   <div className="text-sm text-gray-600">
-                    <span className="font-medium text-[#232323]">
+                    <span className="font-medium text-primary">
                       CSV Format:
                     </span>{" "}
                     Use comma-separated values with headers in the first row
@@ -739,7 +735,7 @@ export default function DataUpload() {
                 <div className="flex items-start gap-3">
                   <AlertCircle className="w-5 h-5 text-gray-400 mt-0.5 flex-shrink-0" />
                   <div className="text-sm text-gray-600">
-                    <span className="font-medium text-[#232323]">
+                    <span className="font-medium text-primary">
                       Google Sheets:
                     </span>{" "}
                     Ensure the sheet is publicly accessible or properly shared
@@ -748,16 +744,14 @@ export default function DataUpload() {
                 <div className="flex items-start gap-3">
                   <AlertCircle className="w-5 h-5 text-gray-400 mt-0.5 flex-shrink-0" />
                   <div className="text-sm text-gray-600">
-                    <span className="font-medium text-[#232323]">
-                      File Size:
-                    </span>{" "}
+                    <span className="font-medium text-primary">File Size:</span>{" "}
                     Maximum 10MB per file for optimal performance
                   </div>
                 </div>
                 <div className="flex items-start gap-3">
                   <AlertCircle className="w-5 h-5 text-gray-400 mt-0.5 flex-shrink-0" />
                   <div className="text-sm text-gray-600">
-                    <span className="font-medium text-[#232323]">
+                    <span className="font-medium text-primary">
                       Validation:
                     </span>{" "}
                     Ensure all required fields are populated before upload
@@ -768,18 +762,18 @@ export default function DataUpload() {
 
             {/* Sample Templates */}
             <div className="bg-white rounded-2xl border border-gray-200 p-6">
-              <h4 className="font-semibold text-[#232323] mb-4">
+              <h4 className="font-semibold text-primary mb-4">
                 Sample Templates
               </h4>
               <p className="text-sm text-gray-600 mb-4">
                 Download CSV templates to get started:
               </p>
               <div className="space-y-3">
-                <button className="w-full flex items-center gap-3 px-4 py-3 text-sm text-gray-700 hover:text-[#232323] hover:bg-gray-50 rounded-xl border border-gray-200 transition-colors">
+                <button className="w-full flex items-center gap-3 px-4 py-3 text-sm text-gray-700 hover:text-primary hover:bg-gray-50 rounded-xl border border-gray-200 transition-colors">
                   <Database className="w-4 h-4" />
                   Fleet Template
                 </button>
-                <button className="w-full flex items-center gap-3 px-4 py-3 text-sm text-gray-700 hover:text-[#232323] hover:bg-gray-50 rounded-xl border border-gray-200 transition-colors">
+                <button className="w-full flex items-center gap-3 px-4 py-3 text-sm text-gray-700 hover:text-primary hover:bg-gray-50 rounded-xl border border-gray-200 transition-colors">
                   <Upload className="w-4 h-4" />
                   Inventory Template
                 </button>

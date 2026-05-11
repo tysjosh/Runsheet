@@ -57,7 +57,8 @@ export default function FailureTrendChart({ data }: FailureTrendChartProps) {
         aria-label="Failure trend chart"
       >
         {data.map((bucket, i) => {
-          const heightPct = maxCount > 0 ? ((bucket.count ?? 0) / maxCount) * 100 : 0;
+          const heightPct =
+            maxCount > 0 ? ((bucket.count ?? 0) / maxCount) * 100 : 0;
           return (
             <div
               key={`${bucket.timestamp}-${bucket.count}`}
@@ -67,7 +68,7 @@ export default function FailureTrendChart({ data }: FailureTrendChartProps) {
                 {(bucket.count ?? 0) > 0 ? bucket.count : ""}
               </span>
               <div
-                className="w-full bg-red-400 rounded-t transition-all hover:bg-red-500"
+                className="w-full bg-error rounded-t transition-all hover:bg-error-light0"
                 style={{
                   height: `${Math.max(heightPct, (bucket.count ?? 0) > 0 ? 4 : 0)}px`,
                   maxHeight: 100,

@@ -36,19 +36,19 @@ export default function FuelSummaryBar({ summary }: FuelSummaryBarProps) {
       label: "Total Capacity",
       value: formatGallons(totalCapacityGallons),
       icon: Fuel,
-      color: "text-[#232323]",
+      color: "text-primary",
     },
     {
       label: "Current Stock",
       value: `${formatGallons(totalCurrentStockGallons)} (${stockPct.toFixed(1)}%)`,
       icon: Droplets,
-      color: "text-blue-600",
+      color: "text-info",
     },
     {
       label: "Active Alerts",
       value: String(summary.active_alerts),
       icon: AlertTriangle,
-      color: summary.active_alerts > 0 ? "text-red-600" : "text-green-600",
+      color: summary.active_alerts > 0 ? "text-error" : "text-success",
     },
     {
       label: "Avg Days Until Empty",
@@ -59,10 +59,10 @@ export default function FuelSummaryBar({ summary }: FuelSummaryBarProps) {
       icon: Timer,
       color:
         summary.average_days_until_empty < 3
-          ? "text-red-600"
+          ? "text-error"
           : summary.average_days_until_empty < 7
-            ? "text-yellow-600"
-            : "text-green-600",
+            ? "text-warning"
+            : "text-success",
     },
   ];
 

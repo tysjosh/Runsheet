@@ -101,8 +101,8 @@ function ToastContainer({
           key={toast.id}
           className={`flex items-center gap-2 px-4 py-3 rounded-lg shadow-lg text-sm font-medium ${
             toast.type === "success"
-              ? "bg-green-600 text-white"
-              : "bg-red-600 text-white"
+              ? "bg-success text-white"
+              : "bg-error text-white"
           }`}
         >
           {toast.type === "success" ? (
@@ -176,8 +176,8 @@ export function varianceCellClass(
 ): string {
   if (pct == null || Number.isNaN(pct)) return "text-gray-400";
   const abs = Math.abs(pct);
-  if (abs >= threshold) return "text-red-700 font-semibold";
-  if (abs >= threshold * 0.5) return "text-yellow-700 font-medium";
+  if (abs >= threshold) return "text-error-dark font-semibold";
+  if (abs >= threshold * 0.5) return "text-warning-dark font-medium";
   return "text-gray-700";
 }
 
@@ -458,7 +458,7 @@ function PodDetailDrawer({ record, onClose, onError }: PodDetailDrawerProps) {
       >
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100 sticky top-0 bg-white">
           <div>
-            <h2 className="text-lg font-semibold text-[#232323]">
+            <h2 className="text-lg font-semibold text-primary">
               POD {record.pod_id}
             </h2>
             <p className="text-xs text-gray-500">
@@ -477,14 +477,14 @@ function PodDetailDrawer({ record, onClose, onError }: PodDetailDrawerProps) {
 
         <div className="px-6 py-4 space-y-4">
           {alerted && (
-            <div className="flex items-start gap-2 p-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-800">
+            <div className="flex items-start gap-2 p-3 rounded-lg bg-error-light border border-error-light text-sm text-error-dark">
               <AlertTriangle
                 className="w-4 h-4 mt-0.5 flex-shrink-0"
                 aria-hidden="true"
               />
               <div>
                 <div className="font-medium">Variance threshold exceeded</div>
-                <div className="text-xs text-red-700 mt-0.5">
+                <div className="text-xs text-error-dark mt-0.5">
                   At least one variance exceeded the tenant alert threshold.
                   Review the gallon legs below.
                 </div>
@@ -565,7 +565,7 @@ function PodDetailDrawer({ record, onClose, onError }: PodDetailDrawerProps) {
                 {record.alert_flags.map((flag) => (
                   <span
                     key={flag}
-                    className="inline-flex items-center text-[10px] px-2 py-0.5 rounded font-medium bg-red-100 text-red-700"
+                    className="inline-flex items-center text-[10px] px-2 py-0.5 rounded font-medium bg-error-light text-error-dark"
                   >
                     {flag}
                   </span>
@@ -590,7 +590,7 @@ function PodDetailDrawer({ record, onClose, onError }: PodDetailDrawerProps) {
                   : bolError}
               </div>
             ) : bolPending ? (
-              <div className="inline-flex items-center gap-2 text-sm text-yellow-800 bg-yellow-50 border border-yellow-200 rounded-lg px-3 py-2">
+              <div className="inline-flex items-center gap-2 text-sm text-warning-dark bg-warning-light border border-warning-light rounded-lg px-3 py-2">
                 <AlertTriangle className="w-4 h-4" aria-hidden="true" />
                 BOL is queued for regeneration.
               </div>
@@ -599,7 +599,7 @@ function PodDetailDrawer({ record, onClose, onError }: PodDetailDrawerProps) {
                 href={bol.download_url ?? "#"}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium text-white bg-[#232323] hover:bg-black rounded-lg"
+                className="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium text-white bg-primary hover:bg-primary-hover rounded-lg"
                 aria-label={`Download BOL PDF for POD ${record.pod_id}`}
               >
                 <Download className="w-4 h-4" aria-hidden="true" />
@@ -904,7 +904,7 @@ function TamperEvidenceSection({ podId, onError }: TamperEvidenceSectionProps) {
                   type="button"
                   onClick={handleVerifyChain}
                   disabled={verifying}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-[#232323] hover:bg-black rounded-lg disabled:opacity-50"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-primary hover:bg-primary-hover rounded-lg disabled:opacity-50"
                 >
                   {verifying ? (
                     <Loader2
@@ -919,11 +919,11 @@ function TamperEvidenceSection({ podId, onError }: TamperEvidenceSectionProps) {
               {verifyResult?.valid && (
                 <div
                   data-testid="chain-intact-badge"
-                  className="inline-flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-green-800 bg-green-50 border border-green-200 rounded-lg"
+                  className="inline-flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-success-dark bg-success-light border border-success-light rounded-lg"
                 >
                   <Check className="w-3.5 h-3.5" aria-hidden="true" />
                   Chain intact
-                  <span className="text-green-700">
+                  <span className="text-success-dark">
                     · {verifyResult.verified_count} POD
                     {verifyResult.verified_count === 1 ? "" : "s"} verified
                   </span>
@@ -947,47 +947,47 @@ function ChainMismatchCard({ mismatch }: { mismatch: HashChainMismatch }) {
   return (
     <div
       data-testid="chain-mismatch-card"
-      className="rounded-lg border border-red-200 bg-red-50 p-3 space-y-2"
+      className="rounded-lg border border-error-light bg-error-light p-3 space-y-2"
     >
-      <div className="flex items-center gap-2 text-sm font-semibold text-red-800">
+      <div className="flex items-center gap-2 text-sm font-semibold text-error-dark">
         <AlertTriangle className="w-4 h-4" aria-hidden="true" />
         Tamper detected
       </div>
-      <p className="text-xs text-red-700">
+      <p className="text-xs text-error-dark">
         Hash chain verification failed at the POD below. Rehash the canonical
         payload offline to confirm.
       </p>
       <dl className="grid grid-cols-1 gap-1.5 text-xs">
         <div>
-          <dt className="text-red-700">pod_id</dt>
+          <dt className="text-error-dark">pod_id</dt>
           <dd
-            className="font-mono break-all text-red-900"
+            className="font-mono break-all text-error-dark"
             data-testid="mismatch-pod-id"
           >
             {mismatch.pod_id}
           </dd>
         </div>
         <div>
-          <dt className="text-red-700">expected_hash</dt>
+          <dt className="text-error-dark">expected_hash</dt>
           <dd
-            className="font-mono break-all text-red-900"
+            className="font-mono break-all text-error-dark"
             data-testid="mismatch-expected-hash"
           >
             {mismatch.expected_hash ?? "—"}
           </dd>
         </div>
         <div>
-          <dt className="text-red-700">actual_hash</dt>
+          <dt className="text-error-dark">actual_hash</dt>
           <dd
-            className="font-mono break-all text-red-900"
+            className="font-mono break-all text-error-dark"
             data-testid="mismatch-actual-hash"
           >
             {mismatch.stored_hash ?? mismatch.computed_hash ?? "—"}
           </dd>
         </div>
         <div>
-          <dt className="text-red-700">reason</dt>
-          <dd className="text-red-900">{mismatch.reason}</dd>
+          <dt className="text-error-dark">reason</dt>
+          <dd className="text-error-dark">{mismatch.reason}</dd>
         </div>
       </dl>
     </div>
@@ -1070,7 +1070,7 @@ function ReconciliationTable({ records, onSelect }: ReconciliationTableProps) {
               <tr
                 key={record.reconciliation_id}
                 data-testid={`reconciliation-row-${record.reconciliation_id}`}
-                className={alerted ? "bg-red-50" : "bg-white"}
+                className={alerted ? "bg-error-light" : "bg-white"}
               >
                 <td className="px-3 py-2 font-mono text-xs text-gray-700 break-all">
                   {record.pod_id}
@@ -1152,13 +1152,13 @@ function SummaryBar({ total, pageCount, alertedCount }: SummaryBarProps) {
         <div className="text-xl font-semibold text-gray-900">{pageCount}</div>
       </div>
       <div
-        className={`border rounded-lg px-4 py-3 ${alertedCount > 0 ? "border-red-200 bg-red-50" : "border-gray-200 bg-white"}`}
+        className={`border rounded-lg px-4 py-3 ${alertedCount > 0 ? "border-error-light bg-error-light" : "border-gray-200 bg-white"}`}
       >
         <div className="text-xs uppercase tracking-wide text-gray-500">
           Alerted on this page
         </div>
         <div
-          className={`text-xl font-semibold ${alertedCount > 0 ? "text-red-700" : "text-gray-900"}`}
+          className={`text-xl font-semibold ${alertedCount > 0 ? "text-error-dark" : "text-gray-900"}`}
         >
           {alertedCount}
         </div>
@@ -1251,7 +1251,7 @@ export default function ReconciliationPage({
       <div className="border-b border-gray-200 bg-white px-6 py-4">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h1 className="text-xl font-semibold text-[#232323]">
+            <h1 className="text-xl font-semibold text-primary">
               Reconciliation
             </h1>
             <p className="text-sm text-gray-500 mt-0.5">
@@ -1279,7 +1279,7 @@ export default function ReconciliationPage({
         />
 
         {error && !loading && (
-          <div className="flex items-start gap-2 p-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-800">
+          <div className="flex items-start gap-2 p-3 rounded-lg bg-error-light border border-error-light text-sm text-error-dark">
             <AlertTriangle
               className="w-4 h-4 mt-0.5 flex-shrink-0"
               aria-hidden="true"

@@ -12,7 +12,13 @@
  * - Loading state rendering
  */
 
-import { fireEvent, render, screen, waitFor, act } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 
 // Mock WebSocket
 class MockWebSocket {
@@ -49,15 +55,19 @@ jest.mock("../../../services/commerceApi", () => ({
 import {
   getInvoice,
   getInvoiceEvents,
-  voidInvoice,
   retryQboPush,
+  voidInvoice,
 } from "../../../services/commerceApi";
 import InvoiceDetailPage from "../InvoiceDetailPage";
 
 const mockGetInvoice = getInvoice as jest.MockedFunction<typeof getInvoice>;
-const mockGetInvoiceEvents = getInvoiceEvents as jest.MockedFunction<typeof getInvoiceEvents>;
+const mockGetInvoiceEvents = getInvoiceEvents as jest.MockedFunction<
+  typeof getInvoiceEvents
+>;
 const mockVoidInvoice = voidInvoice as jest.MockedFunction<typeof voidInvoice>;
-const mockRetryQboPush = retryQboPush as jest.MockedFunction<typeof retryQboPush>;
+const mockRetryQboPush = retryQboPush as jest.MockedFunction<
+  typeof retryQboPush
+>;
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -121,7 +131,10 @@ describe("InvoiceDetailPage", () => {
   });
 
   it("renders invoice details and event timeline", async () => {
-    mockGetInvoice.mockResolvedValue({ data: invoiceFixture(), request_id: "r1" } as any);
+    mockGetInvoice.mockResolvedValue({
+      data: invoiceFixture(),
+      request_id: "r1",
+    } as any);
     mockGetInvoiceEvents.mockResolvedValue({
       data: [
         eventFixture(),
@@ -171,10 +184,22 @@ describe("InvoiceDetailPage", () => {
   });
 
   it("opens void dialog and submits void request", async () => {
-    const voidedInvoice = invoiceFixture({ status: "void", voided_at: "2024-06-15T10:00:00Z" });
-    mockGetInvoice.mockResolvedValue({ data: invoiceFixture(), request_id: "r1" } as any);
-    mockGetInvoiceEvents.mockResolvedValue({ data: [eventFixture()], request_id: "r2" } as any);
-    mockVoidInvoice.mockResolvedValue({ data: voidedInvoice, request_id: "r3" } as any);
+    const voidedInvoice = invoiceFixture({
+      status: "void",
+      voided_at: "2024-06-15T10:00:00Z",
+    });
+    mockGetInvoice.mockResolvedValue({
+      data: invoiceFixture(),
+      request_id: "r1",
+    } as any);
+    mockGetInvoiceEvents.mockResolvedValue({
+      data: [eventFixture()],
+      request_id: "r2",
+    } as any);
+    mockVoidInvoice.mockResolvedValue({
+      data: voidedInvoice,
+      request_id: "r3",
+    } as any);
 
     render(<InvoiceDetailPage invoiceId="inv_001" />);
 
@@ -209,8 +234,14 @@ describe("InvoiceDetailPage", () => {
       amount_paid_cents: 1000000,
       remaining_cents: 1500000,
     });
-    mockGetInvoice.mockResolvedValue({ data: invoiceWithPayments, request_id: "r1" } as any);
-    mockGetInvoiceEvents.mockResolvedValue({ data: [eventFixture()], request_id: "r2" } as any);
+    mockGetInvoice.mockResolvedValue({
+      data: invoiceWithPayments,
+      request_id: "r1",
+    } as any);
+    mockGetInvoiceEvents.mockResolvedValue({
+      data: [eventFixture()],
+      request_id: "r2",
+    } as any);
 
     render(<InvoiceDetailPage invoiceId="inv_001" />);
 
@@ -222,16 +253,27 @@ describe("InvoiceDetailPage", () => {
 
     await waitFor(() => {
       expect(screen.getByText(/Force void/)).toBeInTheDocument();
-      expect(screen.getByText(/\$10,000.00 in applied payments/)).toBeInTheDocument();
+      expect(
+        screen.getByText(/\$10,000.00 in applied payments/),
+      ).toBeInTheDocument();
     });
   });
 
   it("retries QBO push for dead-lettered invoices", async () => {
     const deadLetterInvoice = invoiceFixture({ qbo_push_state: "dead_letter" });
     const retriedInvoice = invoiceFixture({ qbo_push_state: "pending" });
-    mockGetInvoice.mockResolvedValue({ data: deadLetterInvoice, request_id: "r1" } as any);
-    mockGetInvoiceEvents.mockResolvedValue({ data: [eventFixture()], request_id: "r2" } as any);
-    mockRetryQboPush.mockResolvedValue({ data: retriedInvoice, request_id: "r3" } as any);
+    mockGetInvoice.mockResolvedValue({
+      data: deadLetterInvoice,
+      request_id: "r1",
+    } as any);
+    mockGetInvoiceEvents.mockResolvedValue({
+      data: [eventFixture()],
+      request_id: "r2",
+    } as any);
+    mockRetryQboPush.mockResolvedValue({
+      data: retriedInvoice,
+      request_id: "r3",
+    } as any);
 
     render(<InvoiceDetailPage invoiceId="inv_001" />);
 
@@ -247,8 +289,14 @@ describe("InvoiceDetailPage", () => {
   });
 
   it("receives live updates via WebSocket", async () => {
-    mockGetInvoice.mockResolvedValue({ data: invoiceFixture(), request_id: "r1" } as any);
-    mockGetInvoiceEvents.mockResolvedValue({ data: [eventFixture()], request_id: "r2" } as any);
+    mockGetInvoice.mockResolvedValue({
+      data: invoiceFixture(),
+      request_id: "r1",
+    } as any);
+    mockGetInvoiceEvents.mockResolvedValue({
+      data: [eventFixture()],
+      request_id: "r2",
+    } as any);
 
     render(<InvoiceDetailPage invoiceId="inv_001" />);
 
@@ -279,8 +327,14 @@ describe("InvoiceDetailPage", () => {
 
   it("does not show void button for already voided invoices", async () => {
     const voidedInvoice = invoiceFixture({ status: "void" });
-    mockGetInvoice.mockResolvedValue({ data: voidedInvoice, request_id: "r1" } as any);
-    mockGetInvoiceEvents.mockResolvedValue({ data: [eventFixture()], request_id: "r2" } as any);
+    mockGetInvoice.mockResolvedValue({
+      data: voidedInvoice,
+      request_id: "r1",
+    } as any);
+    mockGetInvoiceEvents.mockResolvedValue({
+      data: [eventFixture()],
+      request_id: "r2",
+    } as any);
 
     render(<InvoiceDetailPage invoiceId="inv_001" />);
 
@@ -288,6 +342,8 @@ describe("InvoiceDetailPage", () => {
       expect(screen.getByText("Invoice INV-2024-0001")).toBeInTheDocument();
     });
 
-    expect(screen.queryByRole("button", { name: /Void Invoice/i })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Void Invoice/i }),
+    ).not.toBeInTheDocument();
   });
 });

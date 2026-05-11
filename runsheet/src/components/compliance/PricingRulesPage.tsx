@@ -1,16 +1,17 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import type React from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
-  getPricingRules,
+  type CreatePricingRulePayload,
   createPricingRule,
-  resolvePrice,
+  getPricingRules,
+  type PriceResolution,
   type PricingRule,
   type PricingStrategy,
-  type CreatePricingRulePayload,
-  type TierBreak,
-  type PriceResolution,
   type ResolvePricePayload,
+  resolvePrice,
+  type TierBreak,
 } from "../../services/complianceApi";
 
 // ─── Sub-view types ──────────────────────────────────────────────────────────
@@ -22,13 +23,13 @@ type ViewMode = "list" | "add";
 function strategyBadgeClass(strategy: PricingStrategy): string {
   switch (strategy) {
     case "posted_price":
-      return "bg-blue-100 text-blue-800";
+      return "bg-info-light text-info-dark";
     case "rack_plus_margin":
-      return "bg-green-100 text-green-800";
+      return "bg-success-light text-success-dark";
     case "tiered_volume":
-      return "bg-purple-100 text-purple-800";
+      return "bg-brand-secondary-soft text-brand-secondary";
     case "cost_plus":
-      return "bg-orange-100 text-orange-800";
+      return "bg-warning-light text-warning-dark";
     default:
       return "bg-gray-100 text-gray-800";
   }
@@ -164,7 +165,7 @@ export default function PricingRulesPage() {
         {loading && (
           <div role="status" className="flex justify-center py-12">
             <span className="sr-only">Loading pricing rules...</span>
-            <div className="animate-spin h-8 w-8 border-4 border-blue-600 border-t-transparent rounded-full" />
+            <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
           </div>
         )}
 
@@ -172,7 +173,7 @@ export default function PricingRulesPage() {
         {!loading && error && (
           <div
             role="alert"
-            className="bg-red-50 border border-red-200 text-red-700 p-4 rounded mb-4"
+            className="bg-error-light border border-error-light text-error-dark p-4 rounded mb-4"
           >
             {error}
           </div>
@@ -219,18 +220,13 @@ export default function PricingRulesPage() {
                           : "—"}
                       </td>
                       <td className="p-3">{rule.priority}</td>
-                      <td className="p-3">
-                        {formatDate(rule.effective_date)}
-                      </td>
+                      <td className="p-3">{formatDate(rule.effective_date)}</td>
                       <td className="p-3">{formatDate(rule.expiry_date)}</td>
                     </tr>
                   ))}
                   {rules.length === 0 && (
                     <tr>
-                      <td
-                        colSpan={7}
-                        className="p-6 text-center text-gray-500"
-                      >
+                      <td colSpan={7} className="p-6 text-center text-gray-500">
                         No pricing rules found.
                       </td>
                     </tr>
@@ -325,7 +321,7 @@ export default function PricingRulesPage() {
               <button
                 type="button"
                 onClick={() => setViewMode("add")}
-                className="bg-blue-600 text-white px-4 py-2 rounded text-sm hover:bg-blue-700"
+                className="bg-primary text-white px-4 py-2 rounded text-sm hover:bg-primary-hover"
               >
                 Add Rule
               </button>
@@ -338,7 +334,7 @@ export default function PricingRulesPage() {
       {error && viewMode === "list" && (
         <div
           role="alert"
-          className="bg-red-50 border border-red-200 text-red-700 p-4 rounded mb-4"
+          className="bg-error-light border border-error-light text-error-dark p-4 rounded mb-4"
         >
           {error}
         </div>
@@ -351,7 +347,6 @@ export default function PricingRulesPage() {
   );
 }
 
-
 // ─── Pricing Rule Form Sub-Component ─────────────────────────────────────────
 
 interface PricingRuleFormProps {
@@ -360,7 +355,11 @@ interface PricingRuleFormProps {
   loading: boolean;
 }
 
-function PricingRuleForm({ onSubmit, onCancel, loading }: PricingRuleFormProps) {
+function PricingRuleForm({
+  onSubmit,
+  onCancel,
+  loading,
+}: PricingRuleFormProps) {
   const [customerId, setCustomerId] = useState("");
   const [productCode, setProductCode] = useState("");
   const [strategy, setStrategy] = useState<PricingStrategy>("posted_price");
@@ -677,7 +676,7 @@ function PricingRuleForm({ onSubmit, onCancel, loading }: PricingRuleFormProps) 
                     <button
                       type="button"
                       onClick={() => removeTier(idx)}
-                      className="text-red-500 hover:text-red-700 text-sm mt-4"
+                      className="text-error hover:text-error-dark text-sm mt-4"
                     >
                       Remove
                     </button>
@@ -688,7 +687,7 @@ function PricingRuleForm({ onSubmit, onCancel, loading }: PricingRuleFormProps) 
             <button
               type="button"
               onClick={addTier}
-              className="mt-2 text-blue-600 hover:underline text-sm"
+              className="mt-2 text-info hover:underline text-sm"
             >
               + Add Tier
             </button>
@@ -742,7 +741,7 @@ function PricingRuleForm({ onSubmit, onCancel, loading }: PricingRuleFormProps) 
         <button
           type="submit"
           disabled={loading}
-          className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 disabled:opacity-50"
+          className="bg-primary text-white px-4 py-2 rounded hover:bg-primary-hover disabled:opacity-50"
         >
           {loading ? "Saving..." : "Add Rule"}
         </button>
@@ -901,7 +900,7 @@ function ResolvePricePanel() {
             <button
               type="submit"
               disabled={resolving}
-              className="bg-green-600 text-white px-4 py-2 rounded hover:bg-green-700 disabled:opacity-50 w-full"
+              className="bg-success text-white px-4 py-2 rounded hover:bg-success-dark disabled:opacity-50 w-full"
             >
               {resolving ? "Resolving..." : "Resolve Price"}
             </button>
@@ -911,8 +910,8 @@ function ResolvePricePanel() {
 
       {/* Resolve result */}
       {result && (
-        <div className="mt-4 bg-white border border-green-200 rounded-lg p-4 max-w-3xl">
-          <h3 className="text-sm font-semibold text-green-800 mb-2">
+        <div className="mt-4 bg-white border border-success-light rounded-lg p-4 max-w-3xl">
+          <h3 className="text-sm font-semibold text-success-dark mb-2">
             Price Resolved
           </h3>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
@@ -953,7 +952,7 @@ function ResolvePricePanel() {
       {resolveError && (
         <div
           role="alert"
-          className="mt-4 bg-red-50 border border-red-200 text-red-700 p-4 rounded max-w-3xl"
+          className="mt-4 bg-error-light border border-error-light text-error-dark p-4 rounded max-w-3xl"
         >
           {resolveError}
         </div>

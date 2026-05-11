@@ -1,18 +1,19 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import type React from "react";
+import { useCallback, useEffect, useState } from "react";
 import type {
   PriceBook,
-  PricingRule,
-  PricingResolveResult,
   PricingResolveRequest,
+  PricingResolveResult,
+  PricingRule,
 } from "../../services/commerceApi";
 import {
-  getPriceBooks,
-  getPriceBook,
-  updatePriceBook,
   activatePriceBook,
+  getPriceBook,
+  getPriceBooks,
   resolvePricing,
+  updatePriceBook,
 } from "../../services/commerceApi";
 
 interface PriceBookEditorProps {
@@ -56,7 +57,9 @@ export default function PriceBookEditor({
   onBack,
 }: PriceBookEditorProps) {
   const [priceBooks, setPriceBooks] = useState<PriceBook[]>([]);
-  const [selectedBook, setSelectedBook] = useState<SelectedBookState | null>(null);
+  const [selectedBook, setSelectedBook] = useState<SelectedBookState | null>(
+    null,
+  );
   const [rules, setRules] = useState<PricingRule[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -70,7 +73,8 @@ export default function PriceBookEditor({
     product_code: "",
     quantity_gallons: 100,
   });
-  const [resolveResult, setResolveResult] = useState<PricingResolveResult | null>(null);
+  const [resolveResult, setResolveResult] =
+    useState<PricingResolveResult | null>(null);
   const [resolving, setResolving] = useState(false);
   const [resolveError, setResolveError] = useState<string | null>(null);
 
@@ -107,7 +111,9 @@ export default function PriceBookEditor({
       setSelectedBook(bookData);
       setRules(bookRules || []);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load price book");
+      setError(
+        err instanceof Error ? err.message : "Failed to load price book",
+      );
     } finally {
       setLoading(false);
     }
@@ -139,7 +145,10 @@ export default function PriceBookEditor({
   const handleSaveRule = () => {
     if (!editingRule) return;
     const newRule: PricingRule = {
-      rule_id: editingIndex !== null ? rules[editingIndex].rule_id : `new-${Date.now()}`,
+      rule_id:
+        editingIndex !== null
+          ? rules[editingIndex].rule_id
+          : `new-${Date.now()}`,
       price_book_id: selectedBook?.price_book_id || "",
       product_code: editingRule.product_code,
       scope_type: editingRule.scope_type,
@@ -152,7 +161,9 @@ export default function PriceBookEditor({
     };
 
     if (editingIndex !== null) {
-      setRules((prev) => prev.map((r, i) => (i === editingIndex ? newRule : r)));
+      setRules((prev) =>
+        prev.map((r, i) => (i === editingIndex ? newRule : r)),
+      );
     } else {
       setRules((prev) => [...prev, newRule]);
     }
@@ -168,10 +179,14 @@ export default function PriceBookEditor({
       await updatePriceBook(selectedBook.price_book_id, {
         name: selectedBook.name,
         description: selectedBook.description || undefined,
-        rules: rules.map(({ rule_id, price_book_id, created_at, ...rest }) => rest),
+        rules: rules.map(
+          ({ rule_id, price_book_id, created_at, ...rest }) => rest,
+        ),
       });
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to save price book");
+      setError(
+        err instanceof Error ? err.message : "Failed to save price book",
+      );
     } finally {
       setSaving(false);
     }
@@ -185,7 +200,9 @@ export default function PriceBookEditor({
       const res = await activatePriceBook(selectedBook.price_book_id);
       setSelectedBook(res.data);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to activate price book");
+      setError(
+        err instanceof Error ? err.message : "Failed to activate price book",
+      );
     } finally {
       setSaving(false);
     }
@@ -209,14 +226,13 @@ export default function PriceBookEditor({
     }
   };
 
-  const formatCents = (cents: number) =>
-    `$${(cents / 100).toFixed(2)}`;
+  const formatCents = (cents: number) => `$${(cents / 100).toFixed(2)}`;
 
   if (loading) {
     return (
       <div role="status" className="flex justify-center py-12">
         <span className="sr-only">Loading price books...</span>
-        <div className="animate-spin h-8 w-8 border-4 border-blue-600 border-t-transparent rounded-full" />
+        <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
       </div>
     );
   }
@@ -226,7 +242,11 @@ export default function PriceBookEditor({
       <header className="mb-6">
         <div className="flex items-center gap-4 mb-2">
           {onBack && (
-            <button type="button" onClick={onBack} className="text-blue-600 hover:underline">
+            <button
+              type="button"
+              onClick={onBack}
+              className="text-info hover:underline"
+            >
               ← Back
             </button>
           )}
@@ -238,7 +258,10 @@ export default function PriceBookEditor({
       </header>
 
       {error && (
-        <div role="alert" className="bg-red-50 border border-red-200 text-red-700 p-4 rounded mb-4">
+        <div
+          role="alert"
+          className="bg-error-light border border-error-light text-error-dark p-4 rounded mb-4"
+        >
           {error}
         </div>
       )}
@@ -258,13 +281,15 @@ export default function PriceBookEditor({
                 className="border rounded p-4 text-left hover:bg-gray-50"
               >
                 <p className="font-medium">{book.name}</p>
-                <p className="text-sm text-gray-600">{book.description || "No description"}</p>
+                <p className="text-sm text-gray-600">
+                  {book.description || "No description"}
+                </p>
                 <span
                   className={`inline-block mt-2 px-2 py-1 rounded text-xs font-medium ${
                     book.status === "active"
-                      ? "bg-green-100 text-green-800"
+                      ? "bg-success-light text-success-dark"
                       : book.status === "draft"
-                        ? "bg-yellow-100 text-yellow-800"
+                        ? "bg-warning-light text-warning-dark"
                         : "bg-gray-100 text-gray-800"
                   }`}
                 >
@@ -291,7 +316,7 @@ export default function PriceBookEditor({
                 <button
                   type="button"
                   onClick={handleAddRule}
-                  className="bg-blue-600 text-white px-3 py-1 rounded text-sm hover:bg-blue-700"
+                  className="bg-primary text-white px-3 py-1 rounded text-sm hover:bg-primary-hover"
                 >
                   Add Rule
                 </button>
@@ -299,7 +324,7 @@ export default function PriceBookEditor({
                   type="button"
                   onClick={handleSaveBook}
                   disabled={saving}
-                  className="bg-green-600 text-white px-3 py-1 rounded text-sm hover:bg-green-700 disabled:opacity-50"
+                  className="bg-success text-white px-3 py-1 rounded text-sm hover:bg-success-dark disabled:opacity-50"
                 >
                   {saving ? "Saving..." : "Save"}
                 </button>
@@ -308,7 +333,7 @@ export default function PriceBookEditor({
                     type="button"
                     onClick={handleActivate}
                     disabled={saving}
-                    className="bg-purple-600 text-white px-3 py-1 rounded text-sm hover:bg-purple-700 disabled:opacity-50"
+                    className="bg-brand-secondary text-white px-3 py-1 rounded text-sm hover:bg-brand-secondary disabled:opacity-50"
                   >
                     Activate
                   </button>
@@ -335,7 +360,9 @@ export default function PriceBookEditor({
                       {rule.scope_type}
                       {rule.scope_value && `: ${rule.scope_value}`}
                     </td>
-                    <td className="p-3">{formatCents(rule.unit_price_cents)}</td>
+                    <td className="p-3">
+                      {formatCents(rule.unit_price_cents)}
+                    </td>
                     <td className="p-3">
                       {rule.min_quantity_gallons ?? "—"} gal+
                     </td>
@@ -347,14 +374,14 @@ export default function PriceBookEditor({
                       <button
                         type="button"
                         onClick={() => handleEditRule(idx)}
-                        className="text-blue-600 hover:underline text-sm"
+                        className="text-info hover:underline text-sm"
                       >
                         Edit
                       </button>
                       <button
                         type="button"
                         onClick={() => handleDeleteRule(idx)}
-                        className="text-red-600 hover:underline text-sm"
+                        className="text-error hover:underline text-sm"
                       >
                         Delete
                       </button>
@@ -383,7 +410,10 @@ export default function PriceBookEditor({
               </h3>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div>
-                  <label htmlFor="rule-product" className="block text-sm font-medium mb-1">
+                  <label
+                    htmlFor="rule-product"
+                    className="block text-sm font-medium mb-1"
+                  >
                     Product Code
                   </label>
                   <input
@@ -391,13 +421,19 @@ export default function PriceBookEditor({
                     type="text"
                     value={editingRule.product_code}
                     onChange={(e) =>
-                      setEditingRule({ ...editingRule, product_code: e.target.value })
+                      setEditingRule({
+                        ...editingRule,
+                        product_code: e.target.value,
+                      })
                     }
                     className="w-full border rounded px-3 py-2"
                   />
                 </div>
                 <div>
-                  <label htmlFor="rule-scope-type" className="block text-sm font-medium mb-1">
+                  <label
+                    htmlFor="rule-scope-type"
+                    className="block text-sm font-medium mb-1"
+                  >
                     Scope Type
                   </label>
                   <select
@@ -406,7 +442,10 @@ export default function PriceBookEditor({
                     onChange={(e) =>
                       setEditingRule({
                         ...editingRule,
-                        scope_type: e.target.value as "account" | "tier" | "default",
+                        scope_type: e.target.value as
+                          | "account"
+                          | "tier"
+                          | "default",
                       })
                     }
                     className="w-full border rounded px-3 py-2"
@@ -417,7 +456,10 @@ export default function PriceBookEditor({
                   </select>
                 </div>
                 <div>
-                  <label htmlFor="rule-scope-id" className="block text-sm font-medium mb-1">
+                  <label
+                    htmlFor="rule-scope-id"
+                    className="block text-sm font-medium mb-1"
+                  >
                     Scope Value
                   </label>
                   <input
@@ -425,14 +467,20 @@ export default function PriceBookEditor({
                     type="text"
                     value={editingRule.scope_value}
                     onChange={(e) =>
-                      setEditingRule({ ...editingRule, scope_value: e.target.value })
+                      setEditingRule({
+                        ...editingRule,
+                        scope_value: e.target.value,
+                      })
                     }
                     className="w-full border rounded px-3 py-2"
                     placeholder="Account/tier ID (optional for default)"
                   />
                 </div>
                 <div>
-                  <label htmlFor="rule-price" className="block text-sm font-medium mb-1">
+                  <label
+                    htmlFor="rule-price"
+                    className="block text-sm font-medium mb-1"
+                  >
                     Unit Price (cents)
                   </label>
                   <input
@@ -450,7 +498,10 @@ export default function PriceBookEditor({
                   />
                 </div>
                 <div>
-                  <label htmlFor="rule-effective-from" className="block text-sm font-medium mb-1">
+                  <label
+                    htmlFor="rule-effective-from"
+                    className="block text-sm font-medium mb-1"
+                  >
                     Effective From
                   </label>
                   <input
@@ -458,13 +509,19 @@ export default function PriceBookEditor({
                     type="date"
                     value={editingRule.effective_from}
                     onChange={(e) =>
-                      setEditingRule({ ...editingRule, effective_from: e.target.value })
+                      setEditingRule({
+                        ...editingRule,
+                        effective_from: e.target.value,
+                      })
                     }
                     className="w-full border rounded px-3 py-2"
                   />
                 </div>
                 <div>
-                  <label htmlFor="rule-min-qty" className="block text-sm font-medium mb-1">
+                  <label
+                    htmlFor="rule-min-qty"
+                    className="block text-sm font-medium mb-1"
+                  >
                     Min Quantity (gallons)
                   </label>
                   <input
@@ -474,7 +531,9 @@ export default function PriceBookEditor({
                     onChange={(e) =>
                       setEditingRule({
                         ...editingRule,
-                        min_quantity_gallons: e.target.value ? parseInt(e.target.value, 10) : null,
+                        min_quantity_gallons: e.target.value
+                          ? parseInt(e.target.value, 10)
+                          : null,
                       })
                     }
                     className="w-full border rounded px-3 py-2"
@@ -486,7 +545,7 @@ export default function PriceBookEditor({
                 <button
                   type="button"
                   onClick={handleSaveRule}
-                  className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700"
+                  className="bg-primary text-white px-4 py-2 rounded hover:bg-primary-hover"
                 >
                   {editingIndex !== null ? "Update Rule" : "Add Rule"}
                 </button>
@@ -509,9 +568,15 @@ export default function PriceBookEditor({
             <h2 id="resolve-heading" className="text-lg font-semibold mb-3">
               Pricing Resolve — Dry Run Preview
             </h2>
-            <form onSubmit={handleResolve} className="flex gap-4 items-end flex-wrap mb-4">
+            <form
+              onSubmit={handleResolve}
+              className="flex gap-4 items-end flex-wrap mb-4"
+            >
               <div>
-                <label htmlFor="resolve-account" className="block text-sm font-medium mb-1">
+                <label
+                  htmlFor="resolve-account"
+                  className="block text-sm font-medium mb-1"
+                >
                   Account ID
                 </label>
                 <input
@@ -519,14 +584,20 @@ export default function PriceBookEditor({
                   type="text"
                   value={resolveRequest.account_id}
                   onChange={(e) =>
-                    setResolveRequest({ ...resolveRequest, account_id: e.target.value })
+                    setResolveRequest({
+                      ...resolveRequest,
+                      account_id: e.target.value,
+                    })
                   }
                   className="border rounded px-3 py-2"
                   placeholder="acc_..."
                 />
               </div>
               <div>
-                <label htmlFor="resolve-product" className="block text-sm font-medium mb-1">
+                <label
+                  htmlFor="resolve-product"
+                  className="block text-sm font-medium mb-1"
+                >
                   Product Code
                 </label>
                 <input
@@ -534,14 +605,20 @@ export default function PriceBookEditor({
                   type="text"
                   value={resolveRequest.product_code}
                   onChange={(e) =>
-                    setResolveRequest({ ...resolveRequest, product_code: e.target.value })
+                    setResolveRequest({
+                      ...resolveRequest,
+                      product_code: e.target.value,
+                    })
                   }
                   className="border rounded px-3 py-2"
                   placeholder="ULSD"
                 />
               </div>
               <div>
-                <label htmlFor="resolve-quantity" className="block text-sm font-medium mb-1">
+                <label
+                  htmlFor="resolve-quantity"
+                  className="block text-sm font-medium mb-1"
+                >
                   Quantity (gal)
                 </label>
                 <input
@@ -561,29 +638,36 @@ export default function PriceBookEditor({
               <button
                 type="submit"
                 disabled={resolving}
-                className="bg-purple-600 text-white px-4 py-2 rounded hover:bg-purple-700 disabled:opacity-50"
+                className="bg-brand-secondary text-white px-4 py-2 rounded hover:bg-brand-secondary disabled:opacity-50"
               >
                 {resolving ? "Resolving..." : "Resolve Price"}
               </button>
             </form>
 
             {resolveError && (
-              <div role="alert" className="bg-red-50 border border-red-200 text-red-700 p-3 rounded mb-4">
+              <div
+                role="alert"
+                className="bg-error-light border border-error-light text-error-dark p-3 rounded mb-4"
+              >
                 {resolveError}
               </div>
             )}
 
             {resolveResult && (
-              <div className="border rounded p-4 bg-green-50">
+              <div className="border rounded p-4 bg-success-light">
                 <h3 className="font-medium mb-2">Resolution Result</h3>
                 <dl className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
                   <div>
                     <dt className="text-gray-600">Unit Price</dt>
-                    <dd className="font-bold">{formatCents(resolveResult.unit_price_cents)}</dd>
+                    <dd className="font-bold">
+                      {formatCents(resolveResult.unit_price_cents)}
+                    </dd>
                   </div>
                   <div>
                     <dt className="text-gray-600">Matched Rule</dt>
-                    <dd className="font-mono text-xs">{resolveResult.rule_id}</dd>
+                    <dd className="font-mono text-xs">
+                      {resolveResult.rule_id}
+                    </dd>
                   </div>
                   <div>
                     <dt className="text-gray-600">Scope</dt>

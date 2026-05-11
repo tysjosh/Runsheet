@@ -22,34 +22,36 @@ import {
   getNotificationPreferences,
   getNotificationRules,
   getNotificationTemplates,
-  updateNotificationRule,
-  updateNotificationTemplate,
-  upsertNotificationPreference,
   type NotificationChannel,
   type NotificationPreference,
   type NotificationRule,
   type NotificationTemplate,
   type PreferenceUpsertPayload,
+  updateNotificationRule,
+  updateNotificationTemplate,
+  upsertNotificationPreference,
 } from "../services/notificationApi";
+import { PageHeader, type Tab, TabNavigation } from "./ui";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 type SettingsSubTab = "rules" | "preferences" | "templates";
 
-const SUB_TABS: { key: SettingsSubTab; label: string; icon: React.ReactNode }[] = [
-  { key: "rules", label: "Rules", icon: <Shield className="w-4 h-4" /> },
-  { key: "preferences", label: "Preferences", icon: <Users className="w-4 h-4" /> },
-  { key: "templates", label: "Templates", icon: <FileText className="w-4 h-4" /> },
+const SUB_TABS: Tab[] = [
+  { id: "rules", label: "Rules", icon: <Shield className="w-4 h-4" /> },
+  {
+    id: "preferences",
+    label: "Preferences",
+    icon: <Users className="w-4 h-4" />,
+  },
+  {
+    id: "templates",
+    label: "Templates",
+    icon: <FileText className="w-4 h-4" />,
+  },
 ];
 
 const ALL_CHANNELS: NotificationChannel[] = ["sms", "email", "whatsapp"];
-
-const EVENT_TYPES = [
-  "delivery_confirmation",
-  "delay_alert",
-  "eta_change",
-  "order_status_update",
-];
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -122,42 +124,17 @@ export default function NotificationSettingsTab() {
 
   return (
     <div className="flex-1 flex flex-col bg-white overflow-hidden">
-      {/* Header */}
-      <div className="border-b border-gray-100 px-8 py-6">
-        <div className="flex items-center gap-3 mb-6">
-          <div className="w-10 h-10 bg-[#232323] rounded-xl flex items-center justify-center">
-            <Settings className="w-5 h-5 text-white" />
-          </div>
-          <div>
-            <h1 className="text-2xl font-semibold text-[#232323]">
-              Notification Settings
-            </h1>
-            <p className="text-gray-500">
-              Manage rules, preferences, and templates
-            </p>
-          </div>
-        </div>
-
-        {/* Sub-tab navigation */}
-        <nav className="flex gap-4" aria-label="Settings sub-tabs">
-          {SUB_TABS.map((tab) => (
-            <button
-              key={tab.key}
-              onClick={() => setActiveSubTab(tab.key)}
-              className={`flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg transition-colors ${
-                activeSubTab === tab.key
-                  ? "bg-[#232323] text-white"
-                  : "text-gray-600 hover:bg-gray-100"
-              }`}
-              aria-selected={activeSubTab === tab.key}
-              role="tab"
-            >
-              {tab.icon}
-              {tab.label}
-            </button>
-          ))}
-        </nav>
-      </div>
+      <PageHeader
+        title="Notification Settings"
+        subtitle="Manage rules, preferences, and templates"
+        icon={<Settings className="w-5 h-5" />}
+      />
+      <TabNavigation
+        tabs={SUB_TABS}
+        activeTab={activeSubTab}
+        onChange={(id) => setActiveSubTab(id as SettingsSubTab)}
+        className="!px-8"
+      />
 
       {/* Sub-tab content */}
       {activeSubTab === "rules" && <RulesSection />}
@@ -230,7 +207,7 @@ function RulesSection() {
     return (
       <div className="flex-1 flex items-center justify-center py-16">
         <div className="text-center">
-          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#232323] mx-auto mb-3" />
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary mx-auto mb-3" />
           <p className="text-sm text-gray-500">Loading rules...</p>
         </div>
       </div>
@@ -240,9 +217,12 @@ function RulesSection() {
   if (error) {
     return (
       <div className="flex-1 px-8 py-8">
-        <div className="bg-red-50 text-red-700 px-4 py-3 rounded-xl text-sm">
+        <div className="bg-error-light text-error-dark px-4 py-3 rounded-xl text-sm">
           {error}
-          <button onClick={loadRules} className="ml-3 underline hover:no-underline">
+          <button
+            onClick={loadRules}
+            className="ml-3 underline hover:no-underline"
+          >
             Retry
           </button>
         </div>
@@ -267,13 +247,13 @@ function RulesSection() {
               <div className="flex items-center justify-between">
                 <div className="flex-1">
                   <div className="flex items-center gap-3 mb-2">
-                    <span className="text-sm font-semibold text-[#232323]">
+                    <span className="text-sm font-semibold text-primary">
                       {getTypeLabel(rule.event_type)}
                     </span>
                     <span
                       className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
                         rule.enabled
-                          ? "bg-green-50 text-green-700"
+                          ? "bg-success-light text-success-dark"
                           : "bg-gray-100 text-gray-500"
                       }`}
                     >
@@ -311,7 +291,7 @@ function RulesSection() {
                   aria-label={`${rule.enabled ? "Disable" : "Enable"} ${getTypeLabel(rule.event_type)} notifications`}
                 >
                   {rule.enabled ? (
-                    <ToggleRight className="w-10 h-10 text-green-600" />
+                    <ToggleRight className="w-10 h-10 text-success" />
                   ) : (
                     <ToggleLeft className="w-10 h-10 text-gray-400" />
                   )}
@@ -320,7 +300,7 @@ function RulesSection() {
 
               {/* Error message for this rule */}
               {ruleErrors[rule.rule_id] && (
-                <div className="mt-3 bg-red-50 text-red-700 px-3 py-2 rounded-lg text-sm flex items-center gap-2">
+                <div className="mt-3 bg-error-light text-error-dark px-3 py-2 rounded-lg text-sm flex items-center gap-2">
                   <AlertTriangle className="w-4 h-4 flex-shrink-0" />
                   {ruleErrors[rule.rule_id]}
                 </div>
@@ -489,7 +469,7 @@ function PreferencesSection() {
 
         {/* Error */}
         {error && (
-          <div className="mx-8 mt-4 bg-red-50 text-red-700 px-4 py-3 rounded-xl text-sm">
+          <div className="mx-8 mt-4 bg-error-light text-error-dark px-4 py-3 rounded-xl text-sm">
             {error}
             <button
               onClick={loadPreferences}
@@ -505,7 +485,7 @@ function PreferencesSection() {
           {loading ? (
             <div className="flex items-center justify-center py-16">
               <div className="text-center">
-                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#232323] mx-auto mb-3" />
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary mx-auto mb-3" />
                 <p className="text-sm text-gray-500">Loading preferences...</p>
               </div>
             </div>
@@ -538,7 +518,7 @@ function PreferencesSection() {
                   >
                     <div className="flex items-center justify-between">
                       <div>
-                        <p className="text-sm font-medium text-[#232323]">
+                        <p className="text-sm font-medium text-primary">
                           {pref.customer_name}
                         </p>
                         <p className="text-xs text-gray-500 mt-0.5">
@@ -570,7 +550,7 @@ function PreferencesSection() {
                         {events.map((evt) => (
                           <span
                             key={evt}
-                            className="px-2 py-0.5 bg-blue-50 text-blue-700 rounded text-xs"
+                            className="px-2 py-0.5 bg-info-light text-info-dark rounded text-xs"
                           >
                             {getTypeLabel(evt)}
                           </span>
@@ -591,7 +571,7 @@ function PreferencesSection() {
           <div className="px-6 py-4 border-b border-gray-100">
             <div className="flex items-center justify-between">
               <div>
-                <h3 className="font-semibold text-[#232323]">
+                <h3 className="font-semibold text-primary">
                   {selectedPreference.customer_name}
                 </h3>
                 <p className="text-xs text-gray-500">
@@ -604,7 +584,7 @@ function PreferencesSection() {
                   setSaveError("");
                   setSaveSuccess(false);
                 }}
-                className="text-gray-400 hover:text-[#232323] p-2 rounded-lg hover:bg-white transition-colors"
+                className="text-gray-400 hover:text-primary p-2 rounded-lg hover:bg-white transition-colors"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -629,9 +609,7 @@ function PreferencesSection() {
                       value={editChannels[ch] || ""}
                       onChange={(e) => handleChannelChange(ch, e.target.value)}
                       placeholder={
-                        ch === "email"
-                          ? "user@example.com"
-                          : "+254 7XX XXX XXX"
+                        ch === "email" ? "user@example.com" : "+254 7XX XXX XXX"
                       }
                       className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white"
                     />
@@ -651,7 +629,7 @@ function PreferencesSection() {
                     key={ep.event_type}
                     className="bg-white border border-gray-200 rounded-lg p-3"
                   >
-                    <p className="text-sm font-medium text-[#232323] mb-2">
+                    <p className="text-sm font-medium text-primary mb-2">
                       {getTypeLabel(ep.event_type)}
                     </p>
                     <div className="flex gap-2">
@@ -665,7 +643,7 @@ function PreferencesSection() {
                             }
                             className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
                               isEnabled
-                                ? "bg-[#232323] text-white"
+                                ? "bg-primary text-white"
                                 : "bg-gray-100 text-gray-500 hover:bg-gray-200"
                             }`}
                           >
@@ -687,7 +665,7 @@ function PreferencesSection() {
 
             {/* Save error */}
             {saveError && (
-              <div className="bg-red-50 text-red-700 px-3 py-2 rounded-lg text-sm flex items-center gap-2">
+              <div className="bg-error-light text-error-dark px-3 py-2 rounded-lg text-sm flex items-center gap-2">
                 <AlertTriangle className="w-4 h-4 flex-shrink-0" />
                 {saveError}
               </div>
@@ -695,7 +673,7 @@ function PreferencesSection() {
 
             {/* Save success */}
             {saveSuccess && (
-              <div className="bg-green-50 text-green-700 px-3 py-2 rounded-lg text-sm flex items-center gap-2">
+              <div className="bg-success-light text-success-dark px-3 py-2 rounded-lg text-sm flex items-center gap-2">
                 <Check className="w-4 h-4 flex-shrink-0" />
                 Preferences saved successfully
               </div>
@@ -707,8 +685,7 @@ function PreferencesSection() {
             <button
               onClick={handleSave}
               disabled={saving}
-              className="w-full flex items-center justify-center gap-2 px-4 py-2.5 text-sm text-white rounded-lg transition-colors hover:opacity-90 disabled:opacity-50"
-              style={{ backgroundColor: "#232323" }}
+              className="w-full flex items-center justify-center gap-2 px-4 py-2.5 text-sm text-white rounded-lg transition-colors disabled:opacity-50 bg-primary hover:bg-primary-hover"
             >
               <Save className="w-4 h-4" />
               {saving ? "Saving..." : "Save Preferences"}
@@ -753,9 +730,7 @@ function TemplatesSection() {
       const response = await getNotificationTemplates();
       setTemplates(response.items);
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to load templates",
-      );
+      setError(err instanceof Error ? err.message : "Failed to load templates");
     } finally {
       setLoading(false);
     }
@@ -788,9 +763,7 @@ function TemplatesSection() {
         },
       );
       setTemplates((prev) =>
-        prev.map((t) =>
-          t.template_id === updated.template_id ? updated : t,
-        ),
+        prev.map((t) => (t.template_id === updated.template_id ? updated : t)),
       );
       setSelectedTemplate(updated);
       setSaveSuccess(true);
@@ -832,7 +805,7 @@ function TemplatesSection() {
       <div className="flex-1 flex flex-col border-r border-gray-100">
         {/* Error */}
         {error && (
-          <div className="mx-8 mt-4 bg-red-50 text-red-700 px-4 py-3 rounded-xl text-sm">
+          <div className="mx-8 mt-4 bg-error-light text-error-dark px-4 py-3 rounded-xl text-sm">
             {error}
             <button
               onClick={loadTemplates}
@@ -848,7 +821,7 @@ function TemplatesSection() {
           {loading ? (
             <div className="flex items-center justify-center py-16">
               <div className="text-center">
-                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#232323] mx-auto mb-3" />
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary mx-auto mb-3" />
                 <p className="text-sm text-gray-500">Loading templates...</p>
               </div>
             </div>
@@ -868,7 +841,7 @@ function TemplatesSection() {
               {Object.entries(groupedTemplates).map(
                 ([eventType, eventTemplates]) => (
                   <div key={eventType}>
-                    <h3 className="text-sm font-semibold text-[#232323] mb-3">
+                    <h3 className="text-sm font-semibold text-primary mb-3">
                       {getTypeLabel(eventType)}
                     </h3>
                     <div className="space-y-2">
@@ -878,7 +851,7 @@ function TemplatesSection() {
                           onClick={() => handleSelectTemplate(tmpl)}
                           className={`w-full text-left border rounded-xl p-4 transition-colors ${
                             selectedTemplate?.template_id === tmpl.template_id
-                              ? "border-[#232323] bg-gray-50"
+                              ? "border-primary bg-gray-50"
                               : "border-gray-200 hover:border-gray-300"
                           }`}
                         >
@@ -909,7 +882,7 @@ function TemplatesSection() {
           <div className="px-6 py-4 border-b border-gray-100">
             <div className="flex items-center justify-between">
               <div>
-                <h3 className="font-semibold text-[#232323]">Edit Template</h3>
+                <h3 className="font-semibold text-primary">Edit Template</h3>
                 <p className="text-xs text-gray-500 mt-0.5">
                   {getTypeLabel(selectedTemplate.event_type)} ·{" "}
                   {getChannelLabel(selectedTemplate.channel)}
@@ -921,7 +894,7 @@ function TemplatesSection() {
                   setSaveError("");
                   setSaveSuccess(false);
                 }}
-                className="text-gray-400 hover:text-[#232323] p-2 rounded-lg hover:bg-white transition-colors"
+                className="text-gray-400 hover:text-primary p-2 rounded-lg hover:bg-white transition-colors"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -983,7 +956,7 @@ function TemplatesSection() {
               </label>
               <div className="bg-white border border-gray-200 rounded-lg p-4">
                 {subjectPreview && (
-                  <p className="text-sm font-semibold text-[#232323] mb-2">
+                  <p className="text-sm font-semibold text-primary mb-2">
                     {subjectPreview}
                   </p>
                 )}
@@ -999,7 +972,7 @@ function TemplatesSection() {
 
             {/* Save error */}
             {saveError && (
-              <div className="bg-red-50 text-red-700 px-3 py-2 rounded-lg text-sm flex items-center gap-2">
+              <div className="bg-error-light text-error-dark px-3 py-2 rounded-lg text-sm flex items-center gap-2">
                 <AlertTriangle className="w-4 h-4 flex-shrink-0" />
                 {saveError}
               </div>
@@ -1007,7 +980,7 @@ function TemplatesSection() {
 
             {/* Save success */}
             {saveSuccess && (
-              <div className="bg-green-50 text-green-700 px-3 py-2 rounded-lg text-sm flex items-center gap-2">
+              <div className="bg-success-light text-success-dark px-3 py-2 rounded-lg text-sm flex items-center gap-2">
                 <Check className="w-4 h-4 flex-shrink-0" />
                 Template saved successfully
               </div>
@@ -1019,8 +992,7 @@ function TemplatesSection() {
             <button
               onClick={handleSave}
               disabled={saving}
-              className="w-full flex items-center justify-center gap-2 px-4 py-2.5 text-sm text-white rounded-lg transition-colors hover:opacity-90 disabled:opacity-50"
-              style={{ backgroundColor: "#232323" }}
+              className="w-full flex items-center justify-center gap-2 px-4 py-2.5 text-sm text-white rounded-lg transition-colors disabled:opacity-50 bg-primary hover:bg-primary-hover"
             >
               <Save className="w-4 h-4" />
               {saving ? "Saving..." : "Save Template"}

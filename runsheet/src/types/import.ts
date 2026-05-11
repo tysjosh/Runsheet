@@ -2,11 +2,19 @@
 
 export type DataType = "fleet" | "fuel_stations" | "inventory" | "jobs";
 
-export type ImportStatus = 'parsing' | 'mapped' | 'validating' | 'validated' | 'importing' | 'completed' | 'partial' | 'failed';
+export type ImportStatus =
+  | "parsing"
+  | "mapped"
+  | "validating"
+  | "validated"
+  | "importing"
+  | "completed"
+  | "partial"
+  | "failed";
 
 export interface FieldDef {
   name: string;
-  type: 'string' | 'number' | 'date' | 'enum' | 'boolean' | 'geo_point';
+  type: "string" | "number" | "date" | "enum" | "boolean" | "geo_point";
   required: boolean;
   description: string;
   enum_values?: string[];
@@ -60,7 +68,7 @@ export interface ImportResult {
 export interface ImportSessionRecord {
   session_id: string;
   data_type: string;
-  source_type: 'csv' | 'google_sheets';
+  source_type: "csv" | "google_sheets";
   source_name: string;
   total_records: number;
   imported_records: number;

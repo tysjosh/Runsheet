@@ -51,6 +51,7 @@ import {
   type SyncRun,
   syncIntegrationNow,
 } from "../../../services/integrationsApi";
+import { filterProviders, groupProvidersByCategory } from "./helpers";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -98,8 +99,8 @@ function ToastContainer({
           key={toast.id}
           className={`flex items-center gap-2 px-4 py-3 rounded-lg shadow-lg text-sm font-medium ${
             toast.type === "success"
-              ? "bg-green-600 text-white"
-              : "bg-red-600 text-white"
+              ? "bg-success text-white"
+              : "bg-error text-white"
           }`}
         >
           {toast.type === "success" ? (
@@ -140,74 +141,6 @@ function useToasts() {
   return { toasts, addToast, dismissToast };
 }
 
-// ─── Grouping helpers ────────────────────────────────────────────────────────
-
-/**
- * Build a stable, category-ordered list of ``[category, providers]``
- * pairs from the catalog response. Unknown categories fall through to
- * the end of the list so adding a new category on the backend does not
- * require a frontend change.
- */
-export function groupProvidersByCategory(
-  providers: ProviderCatalogEntry[],
-): Array<{ category: string; providers: ProviderCatalogEntry[] }> {
-  const groups = new Map<string, ProviderCatalogEntry[]>();
-  for (const provider of providers) {
-    const list = groups.get(provider.category) ?? [];
-    list.push(provider);
-    groups.set(provider.category, list);
-  }
-  const ordered: Array<{
-    category: string;
-    providers: ProviderCatalogEntry[];
-  }> = [];
-  // Emit known categories first in declaration order.
-  for (const category of INTEGRATION_CATEGORY_ORDER) {
-    const list = groups.get(category);
-    if (list && list.length > 0) {
-      ordered.push({ category, providers: sortByName(list) });
-      groups.delete(category);
-    }
-  }
-  // Then any unknown categories in insertion order.
-  for (const [category, list] of groups.entries()) {
-    ordered.push({ category, providers: sortByName(list) });
-  }
-  return ordered;
-}
-
-function sortByName(providers: ProviderCatalogEntry[]): ProviderCatalogEntry[] {
-  return [...providers].sort((a, b) =>
-    a.provider_name.localeCompare(b.provider_name),
-  );
-}
-
-/**
- * Filter the catalog by free-text search and derived marketplace
- * status. Extracted so the main component can stay declarative and
- * unit tests can pin the expected behaviour.
- */
-export function filterProviders(
-  providers: ProviderCatalogEntry[],
-  instancesByProvider: Map<string, IntegrationInstance>,
-  query: string,
-  status: MarketplaceStatus | "all",
-): ProviderCatalogEntry[] {
-  const normalized = query.trim().toLowerCase();
-  return providers.filter((provider) => {
-    if (normalized) {
-      const haystack =
-        `${provider.provider_name} ${provider.description} ${provider.category}`.toLowerCase();
-      if (!haystack.includes(normalized)) return false;
-    }
-    if (status !== "all") {
-      const instance = instancesByProvider.get(provider.provider_name) ?? null;
-      if (deriveMarketplaceStatus(instance) !== status) return false;
-    }
-    return true;
-  });
-}
-
 function formatCategoryLabel(category: string): string {
   const known = INTEGRATION_CATEGORY_LABELS as Record<string, string>;
   return (
@@ -237,7 +170,7 @@ function CategoryPills({ categories, selected, onSelect }: CategoryPillsProps) {
         onClick={() => onSelect(null)}
         className={`${pillClass} ${
           selected === null
-            ? "bg-[#232323] text-white border-[#232323]"
+            ? "bg-primary text-white border-primary"
             : "bg-white text-gray-700 border-gray-200 hover:bg-gray-50"
         }`}
       >
@@ -250,7 +183,7 @@ function CategoryPills({ categories, selected, onSelect }: CategoryPillsProps) {
           onClick={() => onSelect(category === selected ? null : category)}
           className={`${pillClass} ${
             selected === category
-              ? "bg-[#232323] text-white border-[#232323]"
+              ? "bg-primary text-white border-primary"
               : "bg-white text-gray-700 border-gray-200 hover:bg-gray-50"
           }`}
         >
@@ -586,14 +519,11 @@ export default function IntegrationMarketplacePage() {
         <div className="flex items-start justify-between flex-wrap gap-4">
           <div>
             <div className="flex items-center gap-3">
-              <div
-                className="w-10 h-10 rounded-xl flex items-center justify-center"
-                style={{ backgroundColor: "#232323" }}
-              >
+              <div className="w-10 h-10 rounded-xl flex items-center justify-center bg-primary">
                 <Link2 className="w-5 h-5 text-white" aria-hidden="true" />
               </div>
               <div>
-                <h1 className="text-xl font-semibold text-[#232323]">
+                <h1 className="text-xl font-semibold text-primary">
                   Integration Marketplace
                 </h1>
                 <p className="text-sm text-gray-500 mt-0.5">
@@ -680,18 +610,18 @@ export default function IntegrationMarketplacePage() {
         {loadError && !loading && (
           <div
             role="alert"
-            className="flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3"
+            className="flex items-start gap-3 rounded-xl border border-error-light bg-error-light px-4 py-3"
           >
             <AlertTriangle
-              className="h-4 w-4 text-red-700 mt-0.5 shrink-0"
+              className="h-4 w-4 text-error-dark mt-0.5 shrink-0"
               aria-hidden="true"
             />
             <div className="flex-1 min-w-0">
-              <p className="text-sm font-semibold text-red-900">
+              <p className="text-sm font-semibold text-error-dark">
                 Could not load integrations
               </p>
               <p
-                className="mt-1 text-xs text-red-800 truncate"
+                className="mt-1 text-xs text-error-dark truncate"
                 title={loadError}
               >
                 {loadError}
@@ -700,8 +630,7 @@ export default function IntegrationMarketplacePage() {
             <button
               type="button"
               onClick={loadCatalogAndInstances}
-              className="shrink-0 px-3 py-1.5 text-xs font-medium text-white rounded-lg hover:opacity-90"
-              style={{ backgroundColor: "#232323" }}
+              className="shrink-0 px-3 py-1.5 text-xs font-medium text-white rounded-lg bg-primary hover:bg-primary-hover"
             >
               Retry
             </button>
@@ -731,7 +660,7 @@ export default function IntegrationMarketplacePage() {
               ({ category, providers: categoryProviders }) => (
                 <section key={category} data-testid={`category-${category}`}>
                   <div className="flex items-baseline gap-2 mb-3">
-                    <h2 className="text-sm font-semibold text-[#232323] uppercase tracking-wide">
+                    <h2 className="text-sm font-semibold text-primary uppercase tracking-wide">
                       {formatCategoryLabel(category)}
                     </h2>
                     <span className="text-[11px] text-gray-400">
@@ -804,10 +733,10 @@ function SummaryTile({
 }) {
   const toneClasses =
     tone === "success"
-      ? "text-green-700"
+      ? "text-success-dark"
       : tone === "error"
-        ? "text-red-700"
-        : "text-[#232323]";
+        ? "text-error-dark"
+        : "text-primary";
   return (
     <div className="bg-white rounded-xl shadow-sm border border-gray-100 px-4 py-3">
       <p className="text-[10px] text-gray-400 uppercase tracking-wide">

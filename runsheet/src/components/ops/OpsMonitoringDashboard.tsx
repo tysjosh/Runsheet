@@ -40,16 +40,16 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
-  IngestionMetrics,
   IndexingMetrics,
+  IngestionMetrics,
   MetricsBucket,
   MetricsFilters,
   MetricsResponse,
   PoisonQueueMetrics,
 } from "../../services/opsApi";
 import {
-  getIngestionMonitoring,
   getIndexingMonitoring,
+  getIngestionMonitoring,
   getPoisonQueueMonitoring,
   getShipmentMetrics,
   getSlaMetrics,
@@ -109,9 +109,9 @@ const POISON_QUEUE_THRESHOLDS: Record<string, ThresholdConfig> = {
 // ─── Status Styling ──────────────────────────────────────────────────────────
 
 const STATUS_STYLES: Record<MetricStatus, { text: string; bg: string }> = {
-  healthy: { text: "text-green-600", bg: "bg-green-50" },
-  degraded: { text: "text-yellow-600", bg: "bg-yellow-50" },
-  critical: { text: "text-red-600", bg: "bg-red-50" },
+  healthy: { text: "text-success", bg: "bg-success-light" },
+  degraded: { text: "text-warning", bg: "bg-warning-light" },
+  critical: { text: "text-error", bg: "bg-error-light" },
 };
 
 // ─── Polling Interval ────────────────────────────────────────────────────────
@@ -133,7 +133,10 @@ function MetricItem({ label, value, status }: MetricItemProps) {
       <span className="text-sm text-gray-600">{label}</span>
       <div className="flex items-center gap-1.5">
         {status === "critical" && (
-          <AlertTriangle className="w-3.5 h-3.5 text-red-500" aria-label="Critical alert" />
+          <AlertTriangle
+            className="w-3.5 h-3.5 text-error"
+            aria-label="Critical alert"
+          />
         )}
         <span
           className={`text-sm font-semibold px-2 py-0.5 rounded ${style.text} ${style.bg}`}
@@ -158,10 +161,10 @@ function MetricCard({ title, icon, children, loading }: MetricCardProps) {
   return (
     <div className="bg-white border border-gray-200 rounded-lg">
       <div className="flex items-center gap-2 px-5 py-4 border-b border-gray-100">
-        <div className="w-8 h-8 bg-[#232323] rounded-lg flex items-center justify-center">
+        <div className="w-8 h-8 bg-primary rounded-lg flex items-center justify-center">
           {icon}
         </div>
-        <h3 className="text-sm font-semibold text-[#232323]">{title}</h3>
+        <h3 className="text-sm font-semibold text-primary">{title}</h3>
       </div>
       <div className="px-5 py-4">
         {loading ? (
@@ -222,12 +225,10 @@ function ShipmentMetricsSection({
   return (
     <div className="bg-white border border-gray-200 rounded-lg">
       <div className="flex items-center gap-2 px-5 py-4 border-b border-gray-100">
-        <div className="w-8 h-8 bg-[#232323] rounded-lg flex items-center justify-center">
+        <div className="w-8 h-8 bg-primary rounded-lg flex items-center justify-center">
           <BarChart3 className="w-4 h-4 text-white" />
         </div>
-        <h3 className="text-sm font-semibold text-[#232323]">
-          Shipment Metrics
-        </h3>
+        <h3 className="text-sm font-semibold text-primary">Shipment Metrics</h3>
       </div>
 
       {/* Filter Controls */}
@@ -240,7 +241,7 @@ function ShipmentMetricsSection({
               onClick={() => handleBucketChange("hourly")}
               className={`px-3 py-1 text-xs font-medium transition-colors ${
                 (filters.bucket ?? "daily") === "hourly"
-                  ? "bg-[#232323] text-white"
+                  ? "bg-primary text-white"
                   : "bg-white text-gray-600 hover:bg-gray-50"
               }`}
             >
@@ -250,7 +251,7 @@ function ShipmentMetricsSection({
               onClick={() => handleBucketChange("daily")}
               className={`px-3 py-1 text-xs font-medium transition-colors ${
                 (filters.bucket ?? "daily") === "daily"
-                  ? "bg-[#232323] text-white"
+                  ? "bg-primary text-white"
                   : "bg-white text-gray-600 hover:bg-gray-50"
               }`}
             >
@@ -266,7 +267,7 @@ function ShipmentMetricsSection({
             type="date"
             value={filters.start_date ?? ""}
             onChange={handleStartDateChange}
-            className="text-xs border border-gray-200 rounded-lg px-2 py-1 text-gray-700 focus:outline-none focus:ring-1 focus:ring-[#232323]"
+            className="text-xs border border-gray-200 rounded-lg px-2 py-1 text-gray-700 focus:outline-none focus:ring-1 focus:ring-primary"
           />
         </div>
         <div className="flex items-center gap-2">
@@ -275,7 +276,7 @@ function ShipmentMetricsSection({
             type="date"
             value={filters.end_date ?? ""}
             onChange={handleEndDateChange}
-            className="text-xs border border-gray-200 rounded-lg px-2 py-1 text-gray-700 focus:outline-none focus:ring-1 focus:ring-[#232323]"
+            className="text-xs border border-gray-200 rounded-lg px-2 py-1 text-gray-700 focus:outline-none focus:ring-1 focus:ring-primary"
           />
         </div>
       </div>
@@ -287,7 +288,7 @@ function ShipmentMetricsSection({
             <Loader2 className="w-5 h-5 text-gray-400 animate-spin" />
           </div>
         ) : error ? (
-          <div className="text-sm text-red-600 bg-red-50 px-4 py-3 rounded-lg">
+          <div className="text-sm text-error bg-error-light px-4 py-3 rounded-lg">
             {error}
           </div>
         ) : data && data.data.length > 0 ? (
@@ -354,7 +355,13 @@ interface SlaMetricsSectionProps {
   onFiltersChange: (filters: MetricsFilters) => void;
 }
 
-function SlaMetricsSection({ data, loading, error, filters, onFiltersChange }: SlaMetricsSectionProps) {
+function SlaMetricsSection({
+  data,
+  loading,
+  error,
+  filters,
+  onFiltersChange,
+}: SlaMetricsSectionProps) {
   const handleBucketChange = (bucket: MetricsBucket) => {
     onFiltersChange({ ...filters, bucket });
   };
@@ -384,19 +391,18 @@ function SlaMetricsSection({ data, loading, error, filters, onFiltersChange }: S
     totalShipments > 0
       ? ((totalCompliant / totalShipments) * 100).toFixed(1)
       : "100.0";
-  const complianceNum = totalShipments > 0 ? totalCompliant / totalShipments : 1;
+  const complianceNum =
+    totalShipments > 0 ? totalCompliant / totalShipments : 1;
   const isHealthy = complianceNum >= 0.95;
   const isDegraded = complianceNum >= 0.85 && complianceNum < 0.95;
 
   return (
     <div className="bg-white border border-gray-200 rounded-lg">
       <div className="flex items-center gap-2 px-5 py-4 border-b border-gray-100">
-        <div className="w-8 h-8 bg-[#232323] rounded-lg flex items-center justify-center">
+        <div className="w-8 h-8 bg-primary rounded-lg flex items-center justify-center">
           <Shield className="w-4 h-4 text-white" />
         </div>
-        <h3 className="text-sm font-semibold text-[#232323]">
-          SLA Compliance
-        </h3>
+        <h3 className="text-sm font-semibold text-primary">SLA Compliance</h3>
       </div>
 
       {/* Filter Controls */}
@@ -409,7 +415,7 @@ function SlaMetricsSection({ data, loading, error, filters, onFiltersChange }: S
               onClick={() => handleBucketChange("hourly")}
               className={`px-3 py-1 text-xs font-medium transition-colors ${
                 (filters.bucket ?? "daily") === "hourly"
-                  ? "bg-[#232323] text-white"
+                  ? "bg-primary text-white"
                   : "bg-white text-gray-600 hover:bg-gray-50"
               }`}
             >
@@ -419,7 +425,7 @@ function SlaMetricsSection({ data, loading, error, filters, onFiltersChange }: S
               onClick={() => handleBucketChange("daily")}
               className={`px-3 py-1 text-xs font-medium transition-colors ${
                 (filters.bucket ?? "daily") === "daily"
-                  ? "bg-[#232323] text-white"
+                  ? "bg-primary text-white"
                   : "bg-white text-gray-600 hover:bg-gray-50"
               }`}
             >
@@ -435,7 +441,7 @@ function SlaMetricsSection({ data, loading, error, filters, onFiltersChange }: S
             type="date"
             value={filters.start_date ?? ""}
             onChange={handleStartDateChange}
-            className="text-xs border border-gray-200 rounded-lg px-2 py-1 text-gray-700 focus:outline-none focus:ring-1 focus:ring-[#232323]"
+            className="text-xs border border-gray-200 rounded-lg px-2 py-1 text-gray-700 focus:outline-none focus:ring-1 focus:ring-primary"
           />
         </div>
         <div className="flex items-center gap-2">
@@ -444,7 +450,7 @@ function SlaMetricsSection({ data, loading, error, filters, onFiltersChange }: S
             type="date"
             value={filters.end_date ?? ""}
             onChange={handleEndDateChange}
-            className="text-xs border border-gray-200 rounded-lg px-2 py-1 text-gray-700 focus:outline-none focus:ring-1 focus:ring-[#232323]"
+            className="text-xs border border-gray-200 rounded-lg px-2 py-1 text-gray-700 focus:outline-none focus:ring-1 focus:ring-primary"
           />
         </div>
       </div>
@@ -455,7 +461,7 @@ function SlaMetricsSection({ data, loading, error, filters, onFiltersChange }: S
             <Loader2 className="w-5 h-5 text-gray-400 animate-spin" />
           </div>
         ) : error ? (
-          <div className="text-sm text-red-600 bg-red-50 px-4 py-3 rounded-lg">
+          <div className="text-sm text-error bg-error-light px-4 py-3 rounded-lg">
             {error}
           </div>
         ) : data && data.data.length > 0 ? (
@@ -470,19 +476,19 @@ function SlaMetricsSection({ data, loading, error, filters, onFiltersChange }: S
               </div>
               <div className="border border-gray-100 rounded-lg p-4 text-center">
                 <p className="text-xs text-gray-500 mb-1 flex items-center justify-center gap-1">
-                  <CheckCircle className="w-3 h-3 text-green-500" />
+                  <CheckCircle className="w-3 h-3 text-success" />
                   Compliant
                 </p>
-                <p className="text-xl font-semibold text-green-600">
+                <p className="text-xl font-semibold text-success">
                   {totalCompliant.toLocaleString()}
                 </p>
               </div>
               <div className="border border-gray-100 rounded-lg p-4 text-center">
                 <p className="text-xs text-gray-500 mb-1 flex items-center justify-center gap-1">
-                  <XCircle className="w-3 h-3 text-red-500" />
+                  <XCircle className="w-3 h-3 text-error" />
                   Breached
                 </p>
-                <p className="text-xl font-semibold text-red-600">
+                <p className="text-xl font-semibold text-error">
                   {totalBreached.toLocaleString()}
                 </p>
               </div>
@@ -491,10 +497,10 @@ function SlaMetricsSection({ data, loading, error, filters, onFiltersChange }: S
                 <p
                   className={`text-xl font-bold ${
                     isHealthy
-                      ? "text-green-600"
+                      ? "text-success"
                       : isDegraded
-                        ? "text-yellow-600"
-                        : "text-red-600"
+                        ? "text-warning"
+                        : "text-error"
                   }`}
                 >
                   {compliancePct}%
@@ -537,20 +543,20 @@ function SlaMetricsSection({ data, loading, error, filters, onFiltersChange }: S
                         <td className="py-2 px-3 text-xs text-right font-medium text-gray-900">
                           {(entry.values?.total ?? 0).toLocaleString()}
                         </td>
-                        <td className="py-2 px-3 text-xs text-right text-green-600">
+                        <td className="py-2 px-3 text-xs text-right text-success">
                           {(entry.values?.compliant ?? 0).toLocaleString()}
                         </td>
-                        <td className="py-2 px-3 text-xs text-right text-red-600">
+                        <td className="py-2 px-3 text-xs text-right text-error">
                           {(entry.values?.breached ?? 0).toLocaleString()}
                         </td>
                         <td className="py-2 px-3 text-xs text-right">
                           <span
                             className={`px-2 py-0.5 rounded text-xs font-medium ${
                               pctHealthy
-                                ? "text-green-600 bg-green-50"
+                                ? "text-success bg-success-light"
                                 : pctDegraded
-                                  ? "text-yellow-600 bg-yellow-50"
-                                  : "text-red-600 bg-red-50"
+                                  ? "text-warning bg-warning-light"
+                                  : "text-error bg-error-light"
                             }`}
                           >
                             {pct.toFixed(1)}%
@@ -642,9 +648,7 @@ export default function OpsMonitoringDashboard() {
       setShipmentError("");
     } catch (err) {
       setShipmentError(
-        err instanceof Error
-          ? err.message
-          : "Failed to fetch shipment metrics",
+        err instanceof Error ? err.message : "Failed to fetch shipment metrics",
       );
     } finally {
       setShipmentLoading(false);
@@ -691,9 +695,7 @@ export default function OpsMonitoringDashboard() {
     const tick = setInterval(() => {
       if (lastUpdatedRef.current) {
         setSecondsAgo(
-          Math.floor(
-            (Date.now() - lastUpdatedRef.current.getTime()) / 1000,
-          ),
+          Math.floor((Date.now() - lastUpdatedRef.current.getTime()) / 1000),
         );
       }
     }, 1000);
@@ -727,7 +729,7 @@ export default function OpsMonitoringDashboard() {
               <Activity className="w-5 h-5 text-white" />
             </div>
             <div>
-              <h2 className="text-lg font-semibold text-[#232323]">
+              <h2 className="text-lg font-semibold text-primary">
                 Ops Monitoring
               </h2>
               <p className="text-xs text-gray-500">
@@ -737,14 +739,14 @@ export default function OpsMonitoringDashboard() {
           </div>
           <div className="flex items-center gap-3">
             {error && lastUpdated && (
-              <span className="text-xs text-yellow-600 bg-yellow-50 px-2 py-1 rounded">
+              <span className="text-xs text-warning bg-warning-light px-2 py-1 rounded">
                 Last updated {secondsAgo}s ago
               </span>
             )}
             <button
               onClick={fetchMetrics}
               disabled={loading}
-              className="p-2 rounded-lg text-gray-400 hover:text-[#232323] hover:bg-gray-100 transition-colors disabled:opacity-50"
+              className="p-2 rounded-lg text-gray-400 hover:text-primary hover:bg-gray-100 transition-colors disabled:opacity-50"
               title="Refresh metrics"
             >
               <RefreshCw
@@ -758,7 +760,7 @@ export default function OpsMonitoringDashboard() {
       {/* Error banner (only on initial load failure with no data) */}
       {error && !ingestion && !indexing && !poisonQueue && (
         <div className="mx-6 mb-4">
-          <p className="text-sm text-red-600 bg-red-50 px-4 py-3 rounded-lg">
+          <p className="text-sm text-error bg-error-light px-4 py-3 rounded-lg">
             {error}
           </p>
         </div>
@@ -804,7 +806,9 @@ export default function OpsMonitoringDashboard() {
                   value={`${((ingestion as any).avg_latency_ms ?? (ingestion as any).avg_processing_latency_ms ?? 0).toFixed(1)} ms`}
                   status={ingestionStatus(
                     "avg_latency_ms",
-                    (ingestion as any).avg_latency_ms ?? (ingestion as any).avg_processing_latency_ms ?? 0,
+                    (ingestion as any).avg_latency_ms ??
+                      (ingestion as any).avg_processing_latency_ms ??
+                      0,
                   )}
                 />
               </>
@@ -821,10 +825,16 @@ export default function OpsMonitoringDashboard() {
               <>
                 <MetricItem
                   label="Documents Indexed"
-                  value={(indexing as any).documents_indexed ?? (indexing as any).total_documents_indexed ?? 0}
+                  value={
+                    (indexing as any).documents_indexed ??
+                    (indexing as any).total_documents_indexed ??
+                    0
+                  }
                   status={indexingStatus(
                     "documents_indexed",
-                    (indexing as any).documents_indexed ?? (indexing as any).total_documents_indexed ?? 0,
+                    (indexing as any).documents_indexed ??
+                      (indexing as any).total_documents_indexed ??
+                      0,
                   )}
                 />
                 <MetricItem
@@ -840,7 +850,10 @@ export default function OpsMonitoringDashboard() {
                   value={`${(((indexing as any).bulk_success_rate ?? ((indexing as any).bulk_success_rate_pct != null ? (indexing as any).bulk_success_rate_pct / 100 : 1)) * 100).toFixed(1)}%`}
                   status={indexingStatus(
                     "bulk_success_rate",
-                    (indexing as any).bulk_success_rate ?? ((indexing as any).bulk_success_rate_pct != null ? (indexing as any).bulk_success_rate_pct / 100 : 1),
+                    (indexing as any).bulk_success_rate ??
+                      ((indexing as any).bulk_success_rate_pct != null
+                        ? (indexing as any).bulk_success_rate_pct / 100
+                        : 1),
                   )}
                 />
                 <MetricItem
@@ -848,7 +861,9 @@ export default function OpsMonitoringDashboard() {
                   value={`${((indexing as any).avg_latency_ms ?? (indexing as any).avg_indexing_latency_ms ?? 0).toFixed(1)} ms`}
                   status={indexingStatus(
                     "avg_latency_ms",
-                    (indexing as any).avg_latency_ms ?? (indexing as any).avg_indexing_latency_ms ?? 0,
+                    (indexing as any).avg_latency_ms ??
+                      (indexing as any).avg_indexing_latency_ms ??
+                      0,
                   )}
                 />
               </>
@@ -881,18 +896,31 @@ export default function OpsMonitoringDashboard() {
                 />
                 <MetricItem
                   label="Pending Count"
-                  value={(poisonQueue as any).pending_count ?? (poisonQueue as any).status_breakdown?.pending ?? 0}
+                  value={
+                    (poisonQueue as any).pending_count ??
+                    (poisonQueue as any).status_breakdown?.pending ??
+                    0
+                  }
                   status={poisonStatus(
                     "pending_count",
-                    (poisonQueue as any).pending_count ?? (poisonQueue as any).status_breakdown?.pending ?? 0,
+                    (poisonQueue as any).pending_count ??
+                      (poisonQueue as any).status_breakdown?.pending ??
+                      0,
                   )}
                 />
                 <MetricItem
                   label="Permanently Failed"
-                  value={(poisonQueue as any).permanently_failed_count ?? (poisonQueue as any).status_breakdown?.permanently_failed ?? 0}
+                  value={
+                    (poisonQueue as any).permanently_failed_count ??
+                    (poisonQueue as any).status_breakdown?.permanently_failed ??
+                    0
+                  }
                   status={poisonStatus(
                     "permanently_failed_count",
-                    (poisonQueue as any).permanently_failed_count ?? (poisonQueue as any).status_breakdown?.permanently_failed ?? 0,
+                    (poisonQueue as any).permanently_failed_count ??
+                      (poisonQueue as any).status_breakdown
+                        ?.permanently_failed ??
+                      0,
                   )}
                 />
               </>

@@ -50,6 +50,7 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { PageHeader, type Tab, TabNavigation } from "@/components/ui";
 import type { ExecutionUpdateData } from "../../hooks/usePlanExecutionSocket";
 import { usePlanExecutionSocket } from "../../hooks/usePlanExecutionSocket";
 import type {
@@ -111,28 +112,36 @@ function activeTenantId(): string {
   return getCurrentTenantId();
 }
 
-const TABS = [
-  { id: "plans", label: "Plans", icon: Truck },
-  { id: "forecasts", label: "Forecasts", icon: Droplets },
-  { id: "priorities", label: "Priorities", icon: MapPin },
-  { id: "clusters", label: "Clusters", icon: Layers },
-] as const;
+const TABS: Tab[] = [
+  { id: "plans", label: "Plans", icon: <Truck className="w-4 h-4" /> },
+  {
+    id: "forecasts",
+    label: "Forecasts",
+    icon: <Droplets className="w-4 h-4" />,
+  },
+  {
+    id: "priorities",
+    label: "Priorities",
+    icon: <MapPin className="w-4 h-4" />,
+  },
+  { id: "clusters", label: "Clusters", icon: <Layers className="w-4 h-4" /> },
+];
 
-type TabId = (typeof TABS)[number]["id"];
+type TabId = string;
 
 const URGENCY_CONFIG: Record<string, { color: string; bg: string }> = {
-  low: { color: "text-green-700", bg: "bg-green-100" },
-  medium: { color: "text-yellow-700", bg: "bg-yellow-100" },
-  high: { color: "text-orange-700", bg: "bg-orange-100" },
-  critical: { color: "text-red-700", bg: "bg-red-100" },
+  low: { color: "text-success-dark", bg: "bg-success-light" },
+  medium: { color: "text-warning-dark", bg: "bg-warning-light" },
+  high: { color: "text-warning-dark", bg: "bg-warning-light" },
+  critical: { color: "text-error-dark", bg: "bg-error-light" },
 };
 
 const STATUS_BADGE_CONFIG: Record<string, { color: string; bg: string }> = {
   draft: { color: "text-gray-700", bg: "bg-gray-100" },
   proposed: { color: "text-gray-700", bg: "bg-gray-100" },
-  dispatched: { color: "text-blue-700", bg: "bg-blue-100" },
-  completed: { color: "text-green-700", bg: "bg-green-100" },
-  rejected: { color: "text-red-700", bg: "bg-red-100" },
+  dispatched: { color: "text-info-dark", bg: "bg-info-light" },
+  completed: { color: "text-success-dark", bg: "bg-success-light" },
+  rejected: { color: "text-error-dark", bg: "bg-error-light" },
 };
 
 const VARIANCE_THRESHOLD = 5; // 5% threshold for color coding
@@ -165,8 +174,8 @@ function ToastContainer({
           key={toast.id}
           className={`flex items-center gap-2 px-4 py-3 rounded-lg shadow-lg text-sm font-medium ${
             toast.type === "success"
-              ? "bg-green-600 text-white"
-              : "bg-red-600 text-white"
+              ? "bg-success text-white"
+              : "bg-error text-white"
           }`}
         >
           {toast.type === "success" ? (
@@ -240,7 +249,7 @@ function RejectDialog({
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
       <div className="bg-white rounded-xl shadow-xl w-full max-w-md mx-4">
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-          <h2 className="text-lg font-semibold text-[#232323]">Reject Plan</h2>
+          <h2 className="text-lg font-semibold text-primary">Reject Plan</h2>
           <button
             onClick={onCancel}
             className="p-1 text-gray-400 hover:text-gray-600 rounded"
@@ -281,7 +290,7 @@ function RejectDialog({
               type="button"
               onClick={() => onConfirm(reason)}
               disabled={loading}
-              className="px-4 py-2 text-sm text-white bg-red-600 hover:bg-red-700 rounded-lg disabled:opacity-50"
+              className="px-4 py-2 text-sm text-white bg-error hover:bg-error-dark rounded-lg disabled:opacity-50"
             >
               {loading ? "Rejecting..." : "Reject Plan"}
             </button>
@@ -333,7 +342,7 @@ function CostConfigPanel({ onClose, onSave, addToast }: CostConfigPanelProps) {
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
       <div className="bg-white rounded-xl shadow-xl w-full max-w-md mx-4">
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-          <h2 className="text-lg font-semibold text-[#232323]">
+          <h2 className="text-lg font-semibold text-primary">
             Cost Configuration
           </h2>
           <button
@@ -425,8 +434,7 @@ function CostConfigPanel({ onClose, onSave, addToast }: CostConfigPanelProps) {
               type="button"
               onClick={handleSave}
               disabled={saving}
-              className="px-4 py-2 text-sm text-white rounded-lg disabled:opacity-50"
-              style={{ backgroundColor: "#232323" }}
+              className="px-4 py-2 text-sm text-white rounded-lg disabled:opacity-50 bg-primary hover:bg-primary-hover"
             >
               {saving ? "Saving..." : "Save Configuration"}
             </button>
@@ -451,12 +459,10 @@ function ExecutionProgress({ planId, executionData }: ExecutionProgressProps) {
     totalStops > 0 ? Math.round((completedStops / totalStops) * 100) : 0;
 
   return (
-    <div className="border border-blue-100 rounded-lg p-4 bg-blue-50/30">
+    <div className="border border-info rounded-lg p-4 bg-info-light/30">
       <div className="flex items-center gap-2 mb-3">
-        <Route className="w-4 h-4 text-blue-600" />
-        <h4 className="text-sm font-medium text-[#232323]">
-          Execution Progress
-        </h4>
+        <Route className="w-4 h-4 text-info" />
+        <h4 className="text-sm font-medium text-primary">Execution Progress</h4>
         <StatusBadge status="dispatched" />
       </div>
 
@@ -470,7 +476,7 @@ function ExecutionProgress({ planId, executionData }: ExecutionProgressProps) {
         </div>
         <div className="w-full h-2.5 bg-gray-200 rounded-full overflow-hidden">
           <div
-            className="h-full bg-blue-600 rounded-full transition-all duration-500"
+            className="h-full bg-primary rounded-full transition-all duration-500"
             style={{ width: `${percentage}%` }}
           />
         </div>
@@ -492,8 +498,8 @@ function ExecutionProgress({ planId, executionData }: ExecutionProgressProps) {
             <span
               className={
                 executionData.stop.status === "completed"
-                  ? "text-green-600 font-medium"
-                  : "text-yellow-600 font-medium"
+                  ? "text-success font-medium"
+                  : "text-warning font-medium"
               }
             >
               {executionData.stop.status}
@@ -550,7 +556,7 @@ function OutcomeComparison({ planId }: OutcomeComparisonProps) {
   if (error) {
     return (
       <div className="border border-gray-100 rounded-lg p-4">
-        <p className="text-sm text-red-600">{error}</p>
+        <p className="text-sm text-error">{error}</p>
       </div>
     );
   }
@@ -558,13 +564,13 @@ function OutcomeComparison({ planId }: OutcomeComparisonProps) {
   if (!outcome) return null;
 
   const varianceColor = (value: number) =>
-    Math.abs(value) <= VARIANCE_THRESHOLD ? "text-green-600" : "text-red-600";
+    Math.abs(value) <= VARIANCE_THRESHOLD ? "text-success" : "text-error";
 
   return (
-    <div className="border border-green-100 rounded-lg p-4 bg-green-50/30">
+    <div className="border border-success-light rounded-lg p-4 bg-success-light/30">
       <div className="flex items-center gap-2 mb-3">
-        <Check className="w-4 h-4 text-green-600" />
-        <h4 className="text-sm font-medium text-[#232323]">
+        <Check className="w-4 h-4 text-success" />
+        <h4 className="text-sm font-medium text-primary">
           Plan vs Actual Outcomes
         </h4>
       </div>
@@ -582,7 +588,7 @@ function OutcomeComparison({ planId }: OutcomeComparisonProps) {
         <div className="bg-white rounded-lg p-3 border border-gray-100">
           <p className="text-xs text-gray-500">Time Variance</p>
           <p
-            className={`text-lg font-semibold ${Math.abs(outcome.aggregate_time_variance_minutes) <= 15 ? "text-green-600" : "text-red-600"}`}
+            className={`text-lg font-semibold ${Math.abs(outcome.aggregate_time_variance_minutes) <= 15 ? "text-success" : "text-error"}`}
           >
             {outcome.aggregate_time_variance_minutes.toFixed(0)} min
           </p>
@@ -590,7 +596,7 @@ function OutcomeComparison({ planId }: OutcomeComparisonProps) {
         <div className="bg-white rounded-lg p-3 border border-gray-100">
           <p className="text-xs text-gray-500">Missed Stops</p>
           <p
-            className={`text-lg font-semibold ${outcome.missed_stops_count === 0 ? "text-green-600" : "text-red-600"}`}
+            className={`text-lg font-semibold ${outcome.missed_stops_count === 0 ? "text-success" : "text-error"}`}
           >
             {outcome.missed_stops_count}
           </p>
@@ -635,7 +641,7 @@ function OutcomeComparison({ planId }: OutcomeComparisonProps) {
                     {sv.quantity_variance_pct.toFixed(1)}%
                   </td>
                   <td
-                    className={`px-3 py-2 text-right font-medium ${Math.abs(sv.time_variance_minutes) <= 15 ? "text-green-600" : "text-red-600"}`}
+                    className={`px-3 py-2 text-right font-medium ${Math.abs(sv.time_variance_minutes) <= 15 ? "text-success" : "text-error"}`}
                   >
                     {sv.time_variance_minutes.toFixed(0)}
                   </td>
@@ -643,8 +649,8 @@ function OutcomeComparison({ planId }: OutcomeComparisonProps) {
                     <span
                       className={`inline-flex items-center text-[10px] px-1.5 py-0.5 rounded font-medium ${
                         sv.status === "completed"
-                          ? "bg-green-50 text-green-600"
-                          : "bg-yellow-50 text-yellow-600"
+                          ? "bg-success-light text-success"
+                          : "bg-warning-light text-warning"
                       }`}
                     >
                       {sv.status}
@@ -724,7 +730,7 @@ function CostBreakdownSection({
     <div className="border border-gray-100 rounded-lg p-4">
       <div className="flex items-center gap-2 mb-3">
         <DollarSign className="w-4 h-4 text-gray-500" />
-        <h4 className="text-sm font-medium text-[#232323]">Cost Analysis</h4>
+        <h4 className="text-sm font-medium text-primary">Cost Analysis</h4>
       </div>
 
       <div className="overflow-x-auto">
@@ -769,8 +775,8 @@ function CostBreakdownSection({
                           estimated.fuel_cost) *
                           100,
                       ) <= VARIANCE_THRESHOLD
-                        ? "text-green-600"
-                        : "text-red-600"
+                        ? "text-success"
+                        : "text-error"
                     }`}
                   >
                     {estimated.fuel_cost > 0
@@ -799,8 +805,8 @@ function CostBreakdownSection({
                           estimated.driver_cost) *
                           100,
                       ) <= VARIANCE_THRESHOLD
-                        ? "text-green-600"
-                        : "text-red-600"
+                        ? "text-success"
+                        : "text-error"
                     }`}
                   >
                     {estimated.driver_cost > 0
@@ -811,8 +817,8 @@ function CostBreakdownSection({
               )}
             </tr>
             <tr className="font-medium">
-              <td className="px-3 py-2 text-[#232323]">Total</td>
-              <td className="px-3 py-2 text-right text-[#232323]">
+              <td className="px-3 py-2 text-primary">Total</td>
+              <td className="px-3 py-2 text-right text-primary">
                 {estimated.currency ?? "$"}
                 {(
                   estimated.total_estimated_cost ??
@@ -821,7 +827,7 @@ function CostBreakdownSection({
               </td>
               {planStatus === "completed" && actual && (
                 <>
-                  <td className="px-3 py-2 text-right text-[#232323]">
+                  <td className="px-3 py-2 text-right text-primary">
                     {actual.currency ?? "$"}
                     {(
                       actual.total_actual_cost ??
@@ -832,8 +838,8 @@ function CostBreakdownSection({
                     className={`px-3 py-2 text-right ${
                       cost_variance_pct != null &&
                       Math.abs(cost_variance_pct) <= VARIANCE_THRESHOLD
-                        ? "text-green-600"
-                        : "text-red-600"
+                        ? "text-success"
+                        : "text-error"
                     }`}
                   >
                     {cost_variance_pct != null
@@ -893,7 +899,7 @@ function ReplanForm({ planId, onClose, onSuccess }: ReplanFormProps) {
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
       <div className="bg-white rounded-xl shadow-xl w-full max-w-lg mx-4">
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-          <h2 className="text-lg font-semibold text-[#232323]">Replan</h2>
+          <h2 className="text-lg font-semibold text-primary">Replan</h2>
           <button
             onClick={onClose}
             className="p-1 text-gray-400 hover:text-gray-600 rounded"
@@ -905,7 +911,7 @@ function ReplanForm({ planId, onClose, onSuccess }: ReplanFormProps) {
 
         <form onSubmit={handleSubmit} className="px-6 py-4 space-y-4">
           {error && (
-            <p className="text-sm text-red-600 bg-red-50 px-3 py-2 rounded-lg">
+            <p className="text-sm text-error bg-error-light px-3 py-2 rounded-lg">
               {error}
             </p>
           )}
@@ -972,8 +978,7 @@ function ReplanForm({ planId, onClose, onSuccess }: ReplanFormProps) {
             <button
               type="submit"
               disabled={submitting}
-              className="px-4 py-2 text-sm text-white rounded-lg disabled:opacity-50"
-              style={{ backgroundColor: "#232323" }}
+              className="px-4 py-2 text-sm text-white rounded-lg disabled:opacity-50 bg-primary hover:bg-primary-hover"
             >
               {submitting ? "Submitting..." : "Submit Replan"}
             </button>
@@ -1114,8 +1119,8 @@ function EmergencyStopModal({
       <div className="bg-white rounded-xl shadow-xl w-full max-w-lg mx-4">
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
           <div className="flex items-center gap-2">
-            <Siren className="w-4 h-4 text-red-600" />
-            <h2 className="text-lg font-semibold text-[#232323]">
+            <Siren className="w-4 h-4 text-error" />
+            <h2 className="text-lg font-semibold text-primary">
               Emergency Stop
             </h2>
           </div>
@@ -1130,7 +1135,7 @@ function EmergencyStopModal({
 
         <form onSubmit={handleSubmit} className="px-6 py-4 space-y-4">
           {error && (
-            <p className="text-sm text-red-600 bg-red-50 px-3 py-2 rounded-lg">
+            <p className="text-sm text-error bg-error-light px-3 py-2 rounded-lg">
               {error}
             </p>
           )}
@@ -1145,7 +1150,7 @@ function EmergencyStopModal({
                 onClick={() => setDestinationType("station")}
                 className={`flex-1 px-3 py-2 text-xs font-medium rounded-lg border transition-colors ${
                   destinationType === "station"
-                    ? "bg-gray-900 text-white border-gray-900"
+                    ? "bg-primary text-white border-primary"
                     : "bg-white text-gray-600 border-gray-200 hover:bg-gray-50"
                 }`}
               >
@@ -1156,7 +1161,7 @@ function EmergencyStopModal({
                 onClick={() => setDestinationType("customer_tank")}
                 className={`flex-1 px-3 py-2 text-xs font-medium rounded-lg border transition-colors ${
                   destinationType === "customer_tank"
-                    ? "bg-gray-900 text-white border-gray-900"
+                    ? "bg-primary text-white border-primary"
                     : "bg-white text-gray-600 border-gray-200 hover:bg-gray-50"
                 }`}
               >
@@ -1177,7 +1182,7 @@ function EmergencyStopModal({
             {destinationsFailed ? (
               <>
                 <div
-                  className="mb-1 flex items-start gap-2 px-2 py-1.5 text-[11px] text-yellow-800 bg-yellow-50 border border-yellow-200 rounded"
+                  className="mb-1 flex items-start gap-2 px-2 py-1.5 text-[11px] text-warning-dark bg-warning-light border border-warning-light rounded"
                   role="status"
                 >
                   <AlertTriangle
@@ -1355,7 +1360,7 @@ function EmergencyStopModal({
             <button
               type="submit"
               disabled={submitting}
-              className="px-4 py-2 text-sm text-white bg-red-600 hover:bg-red-700 rounded-lg disabled:opacity-50"
+              className="px-4 py-2 text-sm text-white bg-error hover:bg-error-dark rounded-lg disabled:opacity-50"
             >
               {submitting ? "Inserting..." : "Insert Emergency Stop"}
             </button>
@@ -1395,7 +1400,7 @@ function ReplanDiffSection<T>({
         className={`w-full flex items-center justify-between px-4 py-2.5 text-sm font-medium transition-colors ${
           isEmpty
             ? "text-gray-400 cursor-default"
-            : "text-[#232323] hover:bg-gray-50"
+            : "text-primary hover:bg-gray-50"
         }`}
         aria-expanded={open}
       >
@@ -1403,7 +1408,9 @@ function ReplanDiffSection<T>({
           {title}
           <span
             className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
-              isEmpty ? "bg-gray-50 text-gray-400" : "bg-blue-50 text-blue-700"
+              isEmpty
+                ? "bg-gray-50 text-gray-400"
+                : "bg-info-light text-info-dark"
             }`}
           >
             {items.length}
@@ -1440,7 +1447,7 @@ function ReplanDiffBody({ diff }: { diff: ReplanDiff }) {
         items={diff.added_stops}
         render={(s) => (
           <div className="flex items-center justify-between">
-            <span className="font-medium text-[#232323]">{s.stop_id}</span>
+            <span className="font-medium text-primary">{s.stop_id}</span>
             <span className="text-gray-500">
               index {s.index}
               {s.gallons != null ? ` · ${s.gallons.toFixed(0)} gal` : ""}
@@ -1456,7 +1463,7 @@ function ReplanDiffBody({ diff }: { diff: ReplanDiff }) {
         items={diff.removed_stops}
         render={(s) => (
           <div className="flex items-center justify-between">
-            <span className="font-medium text-[#232323]">{s.stop_id}</span>
+            <span className="font-medium text-primary">{s.stop_id}</span>
             <span className="text-gray-500">
               was index {s.index}
               {s.gallons != null ? ` · ${s.gallons.toFixed(0)} gal` : ""}
@@ -1470,7 +1477,7 @@ function ReplanDiffBody({ diff }: { diff: ReplanDiff }) {
         items={diff.reordered_stops}
         render={(s) => (
           <div className="flex items-center justify-between">
-            <span className="font-medium text-[#232323]">{s.stop_id}</span>
+            <span className="font-medium text-primary">{s.stop_id}</span>
             <span className="text-gray-500">
               {s.before_index} → {s.after_index}
             </span>
@@ -1483,7 +1490,7 @@ function ReplanDiffBody({ diff }: { diff: ReplanDiff }) {
         items={diff.reassigned_stops}
         render={(s) => (
           <div className="flex items-center justify-between">
-            <span className="font-medium text-[#232323]">{s.stop_id}</span>
+            <span className="font-medium text-primary">{s.stop_id}</span>
             <span className="text-gray-500">
               {s.from_truck_id} → {s.to_truck_id}
             </span>
@@ -1495,7 +1502,7 @@ function ReplanDiffBody({ diff }: { diff: ReplanDiff }) {
         items={diff.quantity_changes}
         render={(s) => (
           <div className="flex items-center justify-between">
-            <span className="font-medium text-[#232323]">{s.stop_id}</span>
+            <span className="font-medium text-primary">{s.stop_id}</span>
             <span className="text-gray-500">
               {s.before_gallons.toFixed(0)} → {s.after_gallons.toFixed(0)} gal
               {s.product_code ? ` · ${s.product_code}` : ""}
@@ -1508,7 +1515,7 @@ function ReplanDiffBody({ diff }: { diff: ReplanDiff }) {
         items={diff.eta_shifts}
         render={(s) => (
           <div className="flex items-center justify-between">
-            <span className="font-medium text-[#232323]">{s.stop_id}</span>
+            <span className="font-medium text-primary">{s.stop_id}</span>
             <span className="text-gray-500">
               {new Date(s.before_eta).toLocaleString()} →{" "}
               {new Date(s.after_eta).toLocaleString()} (
@@ -1580,14 +1587,14 @@ function ReplanDiffPanel({ seedEventId }: ReplanDiffPanelProps) {
     <div className="border border-gray-100 rounded-lg p-4 space-y-3">
       <div className="flex items-center gap-2">
         <GitBranch className="w-4 h-4 text-gray-500" />
-        <h4 className="text-sm font-medium text-[#232323]">Replan Diff</h4>
+        <h4 className="text-sm font-medium text-primary">Replan Diff</h4>
         {diff?.replan_type && (
           <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-gray-100 text-gray-600">
             {diff.replan_type}
           </span>
         )}
         {diff?.status && (
-          <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-blue-50 text-blue-700">
+          <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-info-light text-info-dark">
             {diff.status}
           </span>
         )}
@@ -1605,15 +1612,14 @@ function ReplanDiffPanel({ seedEventId }: ReplanDiffPanelProps) {
         <button
           type="submit"
           disabled={loading || !inputValue.trim()}
-          className="px-3 py-1.5 text-sm font-medium text-white rounded-lg disabled:opacity-50"
-          style={{ backgroundColor: "#232323" }}
+          className="px-3 py-1.5 text-sm font-medium text-white rounded-lg disabled:opacity-50 bg-primary hover:bg-primary-hover"
         >
           {loading ? "Loading..." : "Load Diff"}
         </button>
       </form>
 
       {error && (
-        <p className="text-sm text-red-600 bg-red-50 px-3 py-2 rounded-lg">
+        <p className="text-sm text-error bg-error-light px-3 py-2 rounded-lg">
           {error}
         </p>
       )}
@@ -1716,7 +1722,7 @@ function PlanDetailView({
         >
           <ChevronLeft className="w-4 h-4" /> Back to plans
         </button>
-        <p className="text-sm text-red-600 bg-red-50 px-4 py-3 rounded-lg">
+        <p className="text-sm text-error bg-error-light px-4 py-3 rounded-lg">
           {error}
         </p>
       </div>
@@ -1742,14 +1748,14 @@ function PlanDetailView({
             <>
               <button
                 onClick={() => onApprove(planId)}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-green-600 hover:bg-green-700 rounded-lg transition-colors"
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-success hover:bg-success-dark rounded-lg transition-colors"
               >
                 <Check className="w-3 h-3" />
                 Approve
               </button>
               <button
                 onClick={() => onReject(planId)}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-red-600 hover:bg-red-700 rounded-lg transition-colors"
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-error hover:bg-error-dark rounded-lg transition-colors"
               >
                 <X className="w-3 h-3" />
                 Reject
@@ -1758,8 +1764,7 @@ function PlanDetailView({
           )}
           <button
             onClick={onReplan}
-            className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white rounded-lg"
-            style={{ backgroundColor: "#232323" }}
+            className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white rounded-lg bg-primary hover:bg-primary-hover"
           >
             <RefreshCw className="w-4 h-4" />
             Replan
@@ -1768,7 +1773,7 @@ function PlanDetailView({
       </div>
 
       <div className="flex items-center gap-3">
-        <h3 className="text-sm font-semibold text-[#232323]">
+        <h3 className="text-sm font-semibold text-primary">
           Plan: {plan.plan_id}
         </h3>
         <StatusBadge status={currentStatus} />
@@ -1790,12 +1795,12 @@ function PlanDetailView({
         <div className="border border-gray-100 rounded-lg p-4">
           <div className="flex items-center gap-2 mb-3">
             <Truck className="w-4 h-4 text-gray-500" />
-            <h4 className="text-sm font-medium text-[#232323]">Loading Plan</h4>
+            <h4 className="text-sm font-medium text-primary">Loading Plan</h4>
             <span
               className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
                 plan.loading_plan.status === "completed"
-                  ? "bg-green-50 text-green-600"
-                  : "bg-yellow-50 text-yellow-600"
+                  ? "bg-success-light text-success"
+                  : "bg-warning-light text-warning"
               }`}
             >
               {plan.loading_plan.status}
@@ -1878,7 +1883,7 @@ function PlanDetailView({
         <div className="border border-gray-100 rounded-lg p-4">
           <div className="flex items-center gap-2 mb-3">
             <Route className="w-4 h-4 text-gray-500" />
-            <h4 className="text-sm font-medium text-[#232323]">Route Plan</h4>
+            <h4 className="text-sm font-medium text-primary">Route Plan</h4>
           </div>
           {plan.route_plan.routes.length > 0 ? (
             <div className="space-y-3">
@@ -1889,7 +1894,7 @@ function PlanDetailView({
                     className="border border-gray-50 rounded-lg p-3"
                   >
                     <div className="flex items-center justify-between mb-2">
-                      <span className="text-xs font-medium text-[#232323]">
+                      <span className="text-xs font-medium text-primary">
                         {route.truck_id}
                       </span>
                       <div className="flex items-center gap-2">
@@ -1900,7 +1905,7 @@ function PlanDetailView({
                           <button
                             type="button"
                             onClick={() => onEmergencyStop(route.route_id)}
-                            className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-white bg-red-600 hover:bg-red-700 rounded"
+                            className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-white bg-error hover:bg-error-dark rounded"
                             aria-label={`Insert emergency stop into route ${route.route_id}`}
                           >
                             <Siren className="w-3 h-3" />
@@ -1940,10 +1945,10 @@ function PlanDetailView({
       {/* Excluded Trucks — Equipment Unavailability */}
       {(plan as any).excluded_trucks &&
         (plan as any).excluded_trucks.length > 0 && (
-          <div className="border border-orange-100 rounded-lg p-4 bg-orange-50/50">
+          <div className="border border-warning-light rounded-lg p-4 bg-warning-light/50">
             <div className="flex items-center gap-2 mb-3">
-              <AlertTriangle className="w-4 h-4 text-orange-600" />
-              <h4 className="text-sm font-medium text-orange-800">
+              <AlertTriangle className="w-4 h-4 text-warning" />
+              <h4 className="text-sm font-medium text-warning-dark">
                 Excluded Trucks — Equipment Unavailable
               </h4>
             </div>
@@ -1957,11 +1962,11 @@ function PlanDetailView({
               ).map((excluded, i) => (
                 <div
                   key={excluded.truck_id || i}
-                  className="flex items-start gap-2 text-xs bg-white rounded-lg px-3 py-2 border border-orange-100"
+                  className="flex items-start gap-2 text-xs bg-white rounded-lg px-3 py-2 border border-warning-light"
                 >
-                  <Truck className="w-3.5 h-3.5 text-orange-500 mt-0.5 flex-shrink-0" />
+                  <Truck className="w-3.5 h-3.5 text-warning mt-0.5 flex-shrink-0" />
                   <div>
-                    <span className="font-medium text-[#232323]">
+                    <span className="font-medium text-primary">
                       {excluded.truck_id}
                     </span>
                     {excluded.missing_equipment &&
@@ -2244,7 +2249,7 @@ function PlansTab() {
 
       {/* Header with generate button and settings */}
       <div className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold text-[#232323]">
+        <h3 className="text-sm font-semibold text-primary">
           Distribution Plans
         </h3>
         <div className="flex items-center gap-2">
@@ -2258,8 +2263,7 @@ function PlansTab() {
           <button
             onClick={handleGenerate}
             disabled={generating}
-            className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white rounded-lg disabled:opacity-50"
-            style={{ backgroundColor: "#232323" }}
+            className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white rounded-lg disabled:opacity-50 bg-primary hover:bg-primary-hover"
           >
             {generating ? (
               <Loader2 className="w-4 h-4 animate-spin" />
@@ -2298,7 +2302,7 @@ function PlansTab() {
       </div>
 
       {error && (
-        <p className="text-sm text-red-600 bg-red-50 px-4 py-3 rounded-lg">
+        <p className="text-sm text-error bg-error-light px-4 py-3 rounded-lg">
           {error}
         </p>
       )}
@@ -2325,7 +2329,7 @@ function PlansTab() {
             >
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2">
-                  <p className="text-sm font-medium text-[#232323] truncate">
+                  <p className="text-sm font-medium text-primary truncate">
                     {p.plan_id}
                   </p>
                   <StatusBadge status={p.status} />
@@ -2340,12 +2344,12 @@ function PlansTab() {
                   )}
                   {/* Cost summary in list view */}
                   {p.status === "completed" && p.actual_cost != null && (
-                    <span className="text-green-600 font-medium">
+                    <span className="text-success font-medium">
                       Actual: ${p.actual_cost.toFixed(0)}
                     </span>
                   )}
                   {p.status === "dispatched" && p.estimated_cost != null && (
-                    <span className="text-blue-600 font-medium">
+                    <span className="text-info font-medium">
                       Est: ${p.estimated_cost.toFixed(0)}
                     </span>
                   )}
@@ -2361,7 +2365,7 @@ function PlansTab() {
                         handleApprove(p.plan_id);
                       }}
                       disabled={approveLoading === p.plan_id}
-                      className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-white bg-green-600 hover:bg-green-700 rounded-lg transition-colors disabled:opacity-50"
+                      className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-white bg-success hover:bg-success-dark rounded-lg transition-colors disabled:opacity-50"
                       aria-label={`Approve plan ${p.plan_id}`}
                     >
                       {approveLoading === p.plan_id ? (
@@ -2376,7 +2380,7 @@ function PlansTab() {
                         e.stopPropagation();
                         setShowRejectDialog(p.plan_id);
                       }}
-                      className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-white bg-red-600 hover:bg-red-700 rounded-lg transition-colors"
+                      className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-white bg-error hover:bg-error-dark rounded-lg transition-colors"
                       aria-label={`Reject plan ${p.plan_id}`}
                     >
                       <X className="w-3 h-3" />
@@ -2475,7 +2479,7 @@ function ForecastsTab() {
 
   return (
     <div className="space-y-4">
-      <h3 className="text-sm font-semibold text-[#232323]">Tank Forecasts</h3>
+      <h3 className="text-sm font-semibold text-primary">Tank Forecasts</h3>
 
       {/* Filters */}
       <div className="flex items-center gap-3">
@@ -2506,7 +2510,7 @@ function ForecastsTab() {
       </div>
 
       {error && (
-        <p className="text-sm text-red-600 bg-red-50 px-4 py-3 rounded-lg">
+        <p className="text-sm text-error bg-error-light px-4 py-3 rounded-lg">
           {error}
         </p>
       )}
@@ -2551,7 +2555,7 @@ function ForecastsTab() {
                   key={`${f.station_id}-${f.fuel_grade}-${i}`}
                   className="hover:bg-gray-50"
                 >
-                  <td className="px-4 py-3 text-sm font-medium text-[#232323]">
+                  <td className="px-4 py-3 text-sm font-medium text-primary">
                     {f.station_id}
                   </td>
                   <td className="px-4 py-3 text-sm text-gray-700">
@@ -2595,10 +2599,10 @@ const SAFE_TO_DELAY_BUCKET_LABELS: Record<SafeToDelayBucket, string> = {
 };
 
 const SAFE_TO_DELAY_BADGE: Record<SafeToDelayBucket, string> = {
-  none: "bg-red-50 text-red-700",
-  short: "bg-orange-50 text-orange-700",
-  medium: "bg-yellow-50 text-yellow-700",
-  long: "bg-green-50 text-green-700",
+  none: "bg-error-light text-error-dark",
+  short: "bg-warning-light text-warning-dark",
+  medium: "bg-warning-light text-warning-dark",
+  long: "bg-success-light text-success-dark",
 };
 
 interface PriorityCluster {
@@ -2757,7 +2761,7 @@ function PrioritiesTab() {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold text-[#232323]">
+        <h3 className="text-sm font-semibold text-primary">
           Delivery Priorities
         </h3>
         <button
@@ -2804,7 +2808,7 @@ function PrioritiesTab() {
             onClick={() => setClusterView((v) => !v)}
             className={`flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border transition-colors ${
               clusterView
-                ? "bg-gray-900 text-white border-gray-900"
+                ? "bg-primary text-white border-primary"
                 : "bg-white text-gray-600 border-gray-200 hover:bg-gray-50"
             }`}
             aria-pressed={clusterView}
@@ -2816,7 +2820,7 @@ function PrioritiesTab() {
       </div>
 
       {error && (
-        <p className="text-sm text-red-600 bg-red-50 px-4 py-3 rounded-lg">
+        <p className="text-sm text-error bg-error-light px-4 py-3 rounded-lg">
           {error}
         </p>
       )}
@@ -2856,7 +2860,7 @@ function PrioritiesTab() {
             <tbody className="divide-y divide-gray-100">
               {clusters.map((c) => (
                 <tr key={c.cluster_id} className="hover:bg-gray-50 align-top">
-                  <td className="px-4 py-3 text-sm font-medium text-[#232323]">
+                  <td className="px-4 py-3 text-sm font-medium text-primary">
                     {c.cluster_id}
                   </td>
                   <td className="px-4 py-3 text-sm text-right text-gray-700">
@@ -2936,7 +2940,7 @@ function PrioritiesTab() {
                     key={`${p.station_id ?? p.customer_tank_id ?? "row"}-${p.fuel_grade}-${i}`}
                     className="hover:bg-gray-50"
                   >
-                    <td className="px-4 py-3 text-sm font-medium text-[#232323]">
+                    <td className="px-4 py-3 text-sm font-medium text-primary">
                       {p.station_id ?? p.customer_tank_id ?? "—"}
                     </td>
                     <td className="px-4 py-3 text-sm text-gray-700">
@@ -3076,7 +3080,7 @@ function PriorityClustersPanel({ addError }: PriorityClustersPanelProps) {
     >
       <div className="flex items-center gap-2">
         <Layers className="w-4 h-4 text-gray-500" />
-        <h4 className="text-sm font-medium text-[#232323]">
+        <h4 className="text-sm font-medium text-primary">
           Priority Clusters (DBSCAN)
         </h4>
       </div>
@@ -3124,8 +3128,7 @@ function PriorityClustersPanel({ addError }: PriorityClustersPanelProps) {
         <button
           type="submit"
           disabled={loading}
-          className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white rounded-lg disabled:opacity-50"
-          style={{ backgroundColor: "#232323" }}
+          className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white rounded-lg disabled:opacity-50 bg-primary hover:bg-primary-hover"
         >
           {loading ? (
             <Loader2 className="w-4 h-4 animate-spin" />
@@ -3138,7 +3141,7 @@ function PriorityClustersPanel({ addError }: PriorityClustersPanelProps) {
 
       {data && (
         <div className="flex flex-wrap items-center gap-2 text-[11px]">
-          <span className="inline-flex items-center px-2 py-0.5 rounded bg-blue-50 text-blue-700 font-medium">
+          <span className="inline-flex items-center px-2 py-0.5 rounded bg-info-light text-info-dark font-medium">
             clusters: {data.items.length}
           </span>
           <span className="inline-flex items-center px-2 py-0.5 rounded bg-gray-100 text-gray-700 font-medium">
@@ -3155,7 +3158,7 @@ function PriorityClustersPanel({ addError }: PriorityClustersPanelProps) {
       )}
 
       {error && (
-        <p className="text-sm text-red-600 bg-red-50 px-3 py-2 rounded-lg">
+        <p className="text-sm text-error bg-error-light px-3 py-2 rounded-lg">
           {error}
         </p>
       )}
@@ -3197,7 +3200,7 @@ function PriorityClustersPanel({ addError }: PriorityClustersPanelProps) {
                   : null;
                 return (
                   <tr key={cluster.cluster_id} className="hover:bg-gray-50">
-                    <td className="px-3 py-2 font-medium text-[#232323]">
+                    <td className="px-3 py-2 font-medium text-primary">
                       {cluster.cluster_id}
                     </td>
                     <td className="px-3 py-2 text-right text-gray-700">
@@ -3328,7 +3331,7 @@ function CombinableGroupsPanel({ addError }: CombinableGroupsPanelProps) {
     >
       <div className="flex items-center gap-2">
         <GitBranch className="w-4 h-4 text-gray-500" />
-        <h4 className="text-sm font-medium text-[#232323]">
+        <h4 className="text-sm font-medium text-primary">
           Combinable Groups (Union-Find)
         </h4>
       </div>
@@ -3391,8 +3394,7 @@ function CombinableGroupsPanel({ addError }: CombinableGroupsPanelProps) {
         <button
           type="submit"
           disabled={loading}
-          className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white rounded-lg disabled:opacity-50"
-          style={{ backgroundColor: "#232323" }}
+          className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white rounded-lg disabled:opacity-50 bg-primary hover:bg-primary-hover"
         >
           {loading ? (
             <Loader2 className="w-4 h-4 animate-spin" />
@@ -3404,7 +3406,7 @@ function CombinableGroupsPanel({ addError }: CombinableGroupsPanelProps) {
       </form>
 
       {error && (
-        <p className="text-sm text-red-600 bg-red-50 px-3 py-2 rounded-lg">
+        <p className="text-sm text-error bg-error-light px-3 py-2 rounded-lg">
           {error}
         </p>
       )}
@@ -3426,7 +3428,7 @@ function CombinableGroupsPanel({ addError }: CombinableGroupsPanelProps) {
             >
               <div className="flex items-start justify-between gap-3 mb-2">
                 <div className="flex flex-wrap items-center gap-2 min-w-0">
-                  <span className="text-sm font-medium text-[#232323] truncate">
+                  <span className="text-sm font-medium text-primary truncate">
                     {group.group_id}
                   </span>
                   {group.fuel_grades.map((grade) => (
@@ -3438,7 +3440,7 @@ function CombinableGroupsPanel({ addError }: CombinableGroupsPanelProps) {
                     </span>
                   ))}
                 </div>
-                <span className="inline-flex items-center gap-1 text-sm font-medium text-[#232323] whitespace-nowrap">
+                <span className="inline-flex items-center gap-1 text-sm font-medium text-primary whitespace-nowrap">
                   <DollarSign className="w-3.5 h-3.5 text-gray-400" />
                   <Droplets className="w-3.5 h-3.5 text-gray-400" />
                   {group.estimated_combined_gallons.toLocaleString(undefined, {
@@ -3471,7 +3473,7 @@ function CombinableGroupsPanel({ addError }: CombinableGroupsPanelProps) {
                         <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-gray-50 text-gray-600">
                           {member.destination_type}
                         </span>
-                        <span className="font-medium text-[#232323] truncate">
+                        <span className="font-medium text-primary truncate">
                           {member.destination_id}
                         </span>
                       </span>
@@ -3544,7 +3546,7 @@ function ClustersTab() {
     <div className="space-y-4">
       <ToastContainer toasts={toasts} onDismiss={dismissToast} />
       <div className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold text-[#232323]">
+        <h3 className="text-sm font-semibold text-primary">
           Priority &amp; Combinable Clusters
         </h3>
       </div>
@@ -3569,40 +3571,18 @@ export default function FuelDistributionPage() {
           form inline; other roles see the advisory without the control. */}
       <StormModeBanner roles={["dispatcher"]} actorId={DISPATCHER_ID} />
 
-      {/* Header */}
-      <div className="px-6 pt-6 pb-0">
-        <div className="flex items-center gap-3 mb-4">
-          <div className="w-9 h-9 bg-blue-600 rounded-lg flex items-center justify-center">
-            <Droplets className="w-5 h-5 text-white" />
-          </div>
-          <div>
-            <h2 className="text-lg font-semibold text-[#232323]">
-              Fuel Distribution
-            </h2>
-            <p className="text-xs text-gray-500">
-              Plan generation, forecasts, and delivery priorities
-            </p>
-          </div>
-        </div>
-
-        {/* Tab bar */}
-        <div className="flex items-center gap-1">
-          {TABS.map((tab) => (
-            <button
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
-              className={`flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-t-lg transition-colors ${
-                activeTab === tab.id
-                  ? "bg-white text-[#232323] border border-gray-200 border-b-white -mb-px z-10"
-                  : "text-gray-500 hover:text-gray-700 hover:bg-gray-100"
-              }`}
-            >
-              <tab.icon className="w-4 h-4" />
-              {tab.label}
-            </button>
-          ))}
-        </div>
-      </div>
+      <PageHeader
+        title="Fuel Distribution"
+        subtitle="Plan generation, forecasts, and delivery priorities"
+        icon={<Droplets className="w-5 h-5" />}
+        className="bg-gray-50"
+      />
+      <TabNavigation
+        tabs={TABS}
+        activeTab={activeTab}
+        onChange={setActiveTab}
+        className="bg-gray-50"
+      />
 
       {/* Tab content */}
       <div className="flex-1 min-h-0 overflow-auto bg-white border-t border-gray-200 px-6 py-6">

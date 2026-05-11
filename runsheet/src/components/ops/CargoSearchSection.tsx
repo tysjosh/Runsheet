@@ -14,12 +14,12 @@
 
 import { Loader2, Package, Search } from "lucide-react";
 import { useCallback, useState } from "react";
-import type { CargoItemStatus, SchedulingCargoItem } from "../../types/api";
 import {
-  searchCargo,
   type CargoSearchFilters,
   type PaginationMeta,
+  searchCargo,
 } from "../../services/schedulingApi";
+import type { CargoItemStatus, SchedulingCargoItem } from "../../types/api";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -43,13 +43,13 @@ function getStatusBadge(status: CargoItemStatus): string {
     case "pending":
       return "text-gray-700 bg-gray-100";
     case "loaded":
-      return "text-blue-700 bg-blue-100";
+      return "text-info-dark bg-info-light";
     case "in_transit":
-      return "text-yellow-700 bg-yellow-100";
+      return "text-warning-dark bg-warning-light";
     case "delivered":
-      return "text-green-700 bg-green-100";
+      return "text-success-dark bg-success-light";
     case "damaged":
-      return "text-red-700 bg-red-100";
+      return "text-error-dark bg-error-light";
     default:
       return "text-gray-700 bg-gray-100";
   }
@@ -134,18 +134,19 @@ export default function CargoSearchSection() {
       <div className="px-6 py-4 border-b border-gray-100">
         <div className="flex items-center gap-2">
           <Search className="w-5 h-5 text-gray-500" />
-          <h2 className="text-base font-semibold text-[#232323]">
-            Cargo Search
-          </h2>
+          <h2 className="text-base font-semibold text-primary">Cargo Search</h2>
         </div>
         <p className="text-sm text-gray-500 mt-1">
-          Search cargo items across all jobs by container number, description, or
-          status.
+          Search cargo items across all jobs by container number, description,
+          or status.
         </p>
       </div>
 
       {/* Search Form */}
-      <form onSubmit={handleSubmit} className="px-6 py-4 border-b border-gray-100">
+      <form
+        onSubmit={handleSubmit}
+        className="px-6 py-4 border-b border-gray-100"
+      >
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           {/* Container Number */}
           <div>
@@ -161,7 +162,7 @@ export default function CargoSearchSection() {
               value={containerNumber}
               onChange={(e) => setContainerNumber(e.target.value)}
               placeholder="e.g. CNTR-001"
-              className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white text-[#232323] placeholder-gray-400"
+              className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white text-primary placeholder-gray-400"
             />
           </div>
 
@@ -179,7 +180,7 @@ export default function CargoSearchSection() {
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               placeholder="e.g. fuel drums"
-              className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white text-[#232323] placeholder-gray-400"
+              className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white text-primary placeholder-gray-400"
             />
           </div>
 
@@ -197,7 +198,7 @@ export default function CargoSearchSection() {
               onChange={(e) =>
                 setItemStatus(e.target.value as CargoItemStatus | "")
               }
-              className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white text-[#232323]"
+              className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white text-primary"
             >
               {CARGO_STATUS_OPTIONS.map((opt) => (
                 <option key={opt.value} value={opt.value}>
@@ -213,8 +214,7 @@ export default function CargoSearchSection() {
           <button
             type="submit"
             disabled={loading}
-            className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-white rounded-lg disabled:opacity-50 transition-colors"
-            style={{ backgroundColor: "#232323" }}
+            className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-white rounded-lg disabled:opacity-50 transition-colors bg-primary hover:bg-primary-hover"
           >
             {loading ? (
               <Loader2 className="w-4 h-4 animate-spin" />
@@ -229,7 +229,7 @@ export default function CargoSearchSection() {
       {/* Error */}
       {error && (
         <div className="mx-6 mt-4">
-          <p className="text-sm text-red-600 bg-red-50 px-3 py-2 rounded-lg">
+          <p className="text-sm text-error bg-error-light px-3 py-2 rounded-lg">
             {error}
           </p>
         </div>
@@ -253,8 +253,7 @@ export default function CargoSearchSection() {
               {/* Results count */}
               {pagination && (
                 <p className="text-sm text-gray-500 mb-3">
-                  Showing{" "}
-                  {(pagination.page - 1) * pagination.size + 1}–
+                  Showing {(pagination.page - 1) * pagination.size + 1}–
                   {Math.min(
                     pagination.page * pagination.size,
                     pagination.total,
@@ -265,10 +264,7 @@ export default function CargoSearchSection() {
 
               {/* Results Table */}
               <div className="overflow-x-auto border border-gray-200 rounded-lg">
-                <table
-                  className="w-full"
-                  aria-label="Cargo search results"
-                >
+                <table className="w-full" aria-label="Cargo search results">
                   <thead className="bg-gray-50 border-b border-gray-100">
                     <tr>
                       <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
@@ -297,7 +293,7 @@ export default function CargoSearchSection() {
                         key={`${item.job_id}-${item.item_id}`}
                         className="transition-colors hover:bg-gray-50"
                       >
-                        <td className="px-4 py-3 text-sm font-medium text-[#232323]">
+                        <td className="px-4 py-3 text-sm font-medium text-primary">
                           {item.item_id}
                         </td>
                         <td className="px-4 py-3 text-sm text-gray-700">

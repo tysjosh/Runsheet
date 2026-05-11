@@ -217,21 +217,21 @@ describe("CompartmentStateBadge", () => {
     render(<CompartmentStateBadge state="needs_cleaning" />);
     const badge = screen.getByTestId("compartment-state-badge-needs_cleaning");
     expect(badge).toHaveTextContent(/needs cleaning/i);
-    expect(badge.className).toMatch(/bg-red-100/);
+    expect(badge.className).toMatch(/bg-error-light/);
   });
 
   it("renders the clean label with green styling", () => {
     render(<CompartmentStateBadge state="clean" />);
     const badge = screen.getByTestId("compartment-state-badge-clean");
     expect(badge).toHaveTextContent(/clean/i);
-    expect(badge.className).toMatch(/bg-green-100/);
+    expect(badge.className).toMatch(/bg-success-light/);
   });
 
   it("renders the loaded label with blue styling", () => {
     render(<CompartmentStateBadge state="loaded" />);
     const badge = screen.getByTestId("compartment-state-badge-loaded");
     expect(badge).toHaveTextContent(/loaded/i);
-    expect(badge.className).toMatch(/bg-blue-100/);
+    expect(badge.className).toMatch(/bg-info-light/);
   });
 });
 

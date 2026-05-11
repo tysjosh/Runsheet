@@ -1,6 +1,6 @@
 "use client";
 
-import { Play, CheckCircle, XCircle, AlertTriangle } from "lucide-react";
+import { AlertTriangle, CheckCircle, Play, XCircle } from "lucide-react";
 import { useState } from "react";
 import type { JobStatus } from "../../types/api";
 
@@ -34,25 +34,25 @@ const TRANSITION_BUTTONS: Record<string, TransitionButton> = {
     targetStatus: "assigned",
     label: "Assign",
     icon: <Play className="w-3 h-3" />,
-    className: "text-orange-700 bg-orange-100 hover:bg-orange-200",
+    className: "text-warning-dark bg-warning-light hover:bg-warning-light",
   },
   in_progress: {
     targetStatus: "in_progress",
     label: "Start",
     icon: <Play className="w-3 h-3" />,
-    className: "text-blue-700 bg-blue-100 hover:bg-blue-200",
+    className: "text-info-dark bg-info-light hover:bg-info-light",
   },
   completed: {
     targetStatus: "completed",
     label: "Complete",
     icon: <CheckCircle className="w-3 h-3" />,
-    className: "text-green-700 bg-green-100 hover:bg-green-200",
+    className: "text-success-dark bg-success-light hover:bg-success-light",
   },
   failed: {
     targetStatus: "failed",
     label: "Fail",
     icon: <AlertTriangle className="w-3 h-3" />,
-    className: "text-red-700 bg-red-100 hover:bg-red-200",
+    className: "text-error-dark bg-error-light hover:bg-error-light",
   },
   cancelled: {
     targetStatus: "cancelled",
@@ -65,7 +65,11 @@ const TRANSITION_BUTTONS: Record<string, TransitionButton> = {
 interface JobActionButtonsProps {
   jobId: string;
   currentStatus: JobStatus;
-  onTransition: (jobId: string, targetStatus: JobStatus, failureReason?: string) => Promise<void>;
+  onTransition: (
+    jobId: string,
+    targetStatus: JobStatus,
+    failureReason?: string,
+  ) => Promise<void>;
 }
 
 /**

@@ -1,12 +1,12 @@
-import { API_TIMEOUTS, ApiError, ApiTimeoutError } from "./api";
-import { getAuthToken } from "../utils/auth";
 import type {
-  ParseResponse,
-  ValidationResult,
   ImportResult,
   ImportSessionRecord,
+  ParseResponse,
   SchemaTemplate,
+  ValidationResult,
 } from "../types/import";
+import { getAuthToken } from "../utils/auth";
+import { API_TIMEOUTS, ApiError, ApiTimeoutError } from "./api";
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -41,9 +41,7 @@ async function fetchWithTimeout(
   }
 }
 
-function buildQueryString(
-  params: Record<string, string | undefined>,
-): string {
+function buildQueryString(params: Record<string, string | undefined>): string {
   const entries = Object.entries(params).filter(
     ([, v]) => v !== undefined && v !== null && v !== "",
   );
@@ -67,10 +65,10 @@ async function importRequest<T>(
       "Content-Type": "application/json",
       ...(options?.headers as Record<string, string> | undefined),
     };
-    
+
     // Add Authorization header if token exists
     if (token) {
-      headers["Authorization"] = `Bearer ${token}`;
+      headers.Authorization = `Bearer ${token}`;
     }
 
     const response = await fetchWithTimeout(url, {
@@ -121,7 +119,9 @@ export const importApi = {
       if (!response.ok) {
         const body = await response.json().catch(() => ({}));
         throw new ApiError(
-          body.detail || body.message || `HTTP error! status: ${response.status}`,
+          body.detail ||
+            body.message ||
+            `HTTP error! status: ${response.status}`,
           response.status,
         );
       }
@@ -170,10 +170,7 @@ export const importApi = {
    * Commit validated records to Elasticsearch.
    * POST /import/commit — JSON body
    */
-  async commit(
-    sessionId: string,
-    skipErrors: boolean,
-  ): Promise<ImportResult> {
+  async commit(sessionId: string, skipErrors: boolean): Promise<ImportResult> {
     return importRequest<ImportResult>("/import/commit", {
       method: "POST",
       body: JSON.stringify({
@@ -187,9 +184,10 @@ export const importApi = {
    * Retrieve import history with optional filters.
    * GET /import/history
    */
-  async getHistory(
-    filters?: { dataType?: string; status?: string },
-  ): Promise<ImportSessionRecord[]> {
+  async getHistory(filters?: {
+    dataType?: string;
+    status?: string;
+  }): Promise<ImportSessionRecord[]> {
     const qs = buildQueryString({
       data_type: filters?.dataType,
       status: filters?.status,

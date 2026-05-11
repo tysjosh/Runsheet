@@ -17,11 +17,11 @@ export default function OperationsControlPage() {
       {/* Header */}
       <div className="border-b border-gray-100 px-8 py-6">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 bg-[#232323] rounded-xl flex items-center justify-center">
+          <div className="w-10 h-10 bg-primary rounded-xl flex items-center justify-center">
             <Radio className="w-5 h-5 text-white" />
           </div>
           <div>
-            <h1 className="text-2xl font-semibold text-[#232323]">
+            <h1 className="text-2xl font-semibold text-primary">
               Operations Control
             </h1>
             <p className="text-gray-500">

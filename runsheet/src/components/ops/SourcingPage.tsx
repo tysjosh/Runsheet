@@ -73,9 +73,9 @@ import {
 /**
  * Seeded product suggestions shown in the product_code dropdown. The
  * full catalog lives in the backend (``FUEL_PRODUCT_CATALOG``) and is
-   * exposed via ``GET /api/fuel/products``; the UI still accepts a free
-   * form entry so newly added catalog codes do not require a frontend
-   * deploy before dispatchers can rank them.
+ * exposed via ``GET /api/fuel/products``; the UI still accepts a free
+ * form entry so newly added catalog codes do not require a frontend
+ * deploy before dispatchers can rank them.
  */
 const COMMON_PRODUCT_CODES: ReadonlyArray<{ code: string; label: string }> = [
   { code: "DIESEL_2", label: "Diesel #2" },
@@ -117,9 +117,9 @@ function ToastContainer({
           key={toast.id}
           className={`flex items-center gap-2 px-4 py-3 rounded-lg shadow-lg text-sm font-medium text-white ${
             toast.type === "success"
-              ? "bg-green-600"
+              ? "bg-success"
               : toast.type === "error"
-                ? "bg-red-600"
+                ? "bg-error"
                 : "bg-slate-700"
           }`}
         >
@@ -450,7 +450,7 @@ function QueryForm({
         <button
           type="submit"
           disabled={loading}
-          className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-[#232323] hover:bg-black rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
+          className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-primary hover:bg-primary-hover rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
           aria-label="Rank terminals"
         >
           {loading ? (
@@ -562,7 +562,7 @@ function RecommendationBanner({
       {recommendation.rack_price_fallback && (
         <div
           data-testid="sourcing-rack-fallback-banner"
-          className="flex items-start gap-2 p-3 rounded-lg bg-yellow-50 border border-yellow-200 text-sm text-yellow-900"
+          className="flex items-start gap-2 p-3 rounded-lg bg-warning-light border border-warning-light text-sm text-warning-dark"
         >
           <AlertTriangle
             className="w-4 h-4 mt-0.5 flex-shrink-0"
@@ -581,7 +581,7 @@ function RecommendationBanner({
       {waitWarningCount > 0 && (
         <div
           data-testid="sourcing-wait-warning-banner"
-          className="flex items-start gap-2 p-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-800"
+          className="flex items-start gap-2 p-3 rounded-lg bg-error-light border border-error-light text-sm text-error-dark"
         >
           <Clock className="w-4 h-4 mt-0.5 flex-shrink-0" aria-hidden="true" />
           <div>
@@ -682,7 +682,7 @@ function WaitReportForm({ terminalId, onSubmitted }: WaitReportFormProps) {
   const inputClass =
     "w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white";
   const errorInputClass =
-    "w-full px-3 py-2 text-sm border border-red-300 rounded-lg focus:ring-2 focus:ring-red-200 focus:border-red-400 bg-white";
+    "w-full px-3 py-2 text-sm border border-error rounded-lg focus:ring-2 focus:ring-error-light focus:border-error bg-white";
 
   function updateField<K extends keyof WaitReportFormValues>(
     key: K,
@@ -740,7 +740,7 @@ function WaitReportForm({ terminalId, onSubmitted }: WaitReportFormProps) {
       {apiError && (
         <p
           role="alert"
-          className="text-sm text-red-600 bg-red-50 px-3 py-2 rounded-lg"
+          className="text-sm text-error bg-error-light px-3 py-2 rounded-lg"
           data-testid={`wait-report-error-${terminalId}`}
         >
           {apiError}
@@ -766,7 +766,7 @@ function WaitReportForm({ terminalId, onSubmitted }: WaitReportFormProps) {
             required
           />
           {fieldErrors.wait_minutes && (
-            <p className="text-xs text-red-600 mt-1">
+            <p className="text-xs text-error mt-1">
               {fieldErrors.wait_minutes}
             </p>
           )}
@@ -800,7 +800,7 @@ function WaitReportForm({ terminalId, onSubmitted }: WaitReportFormProps) {
           >
             Reporter ID
             {form.source === "driver_report" && (
-              <span className="text-red-600"> *</span>
+              <span className="text-error"> *</span>
             )}
           </label>
           <input
@@ -812,9 +812,7 @@ function WaitReportForm({ terminalId, onSubmitted }: WaitReportFormProps) {
             placeholder="e.g. driver-042"
           />
           {fieldErrors.reporter_id && (
-            <p className="text-xs text-red-600 mt-1">
-              {fieldErrors.reporter_id}
-            </p>
+            <p className="text-xs text-error mt-1">{fieldErrors.reporter_id}</p>
           )}
         </div>
       </div>
@@ -838,7 +836,7 @@ function WaitReportForm({ terminalId, onSubmitted }: WaitReportFormProps) {
         <button
           type="submit"
           disabled={submitting}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white rounded-lg bg-[#232323] hover:bg-[#1a1a1a] disabled:opacity-50"
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white rounded-lg bg-primary hover:bg-primary-hover disabled:opacity-50"
         >
           {submitting ? (
             <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden="true" />
@@ -904,7 +902,7 @@ function CandidateRow({ candidate, rank, isBest }: CandidateRowProps) {
     <div
       data-testid={`sourcing-candidate-${candidate.terminal_id}`}
       className={`border rounded-lg overflow-hidden ${
-        isBest ? "border-green-300 bg-green-50" : "border-gray-200 bg-white"
+        isBest ? "border-success bg-success-light" : "border-gray-200 bg-white"
       }`}
     >
       <button
@@ -921,17 +919,17 @@ function CandidateRow({ candidate, rank, isBest }: CandidateRowProps) {
         <div className="flex items-center gap-3 min-w-0">
           <div
             className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-semibold ${
-              isBest ? "bg-green-600 text-white" : "bg-gray-100 text-gray-700"
+              isBest ? "bg-success text-white" : "bg-gray-100 text-gray-700"
             }`}
             aria-hidden="true"
           >
             {rankLabel(rank)}
           </div>
           <div className="min-w-0">
-            <div className="flex items-center gap-2 text-sm font-semibold text-[#232323] truncate">
+            <div className="flex items-center gap-2 text-sm font-semibold text-primary truncate">
               <span className="font-mono">{candidate.terminal_id}</span>
               {candidate.branded_flag ? (
-                <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 font-medium">
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-info-light text-info-dark font-medium">
                   Branded
                 </span>
               ) : (
@@ -940,13 +938,13 @@ function CandidateRow({ candidate, rank, isBest }: CandidateRowProps) {
                 </span>
               )}
               {candidate.contract_id && (
-                <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 font-medium inline-flex items-center gap-1">
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-brand-secondary-soft text-brand-secondary font-medium inline-flex items-center gap-1">
                   <FileText className="w-3 h-3" aria-hidden="true" />
                   Contract
                 </span>
               )}
               {candidate.wait_warning && (
-                <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-100 text-red-700 font-medium inline-flex items-center gap-1">
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-error-light text-error-dark font-medium inline-flex items-center gap-1">
                   <Clock className="w-3 h-3" aria-hidden="true" />
                   Wait warning
                 </span>
@@ -992,7 +990,7 @@ function CandidateRow({ candidate, rank, isBest }: CandidateRowProps) {
                 {candidate.reasons.map((reason, idx) => (
                   <li key={idx} className="flex items-start gap-2">
                     <Check
-                      className="w-3.5 h-3.5 text-green-600 mt-0.5 flex-shrink-0"
+                      className="w-3.5 h-3.5 text-success mt-0.5 flex-shrink-0"
                       aria-hidden="true"
                     />
                     <span>{reason}</span>
@@ -1044,7 +1042,7 @@ function CandidateRow({ candidate, rank, isBest }: CandidateRowProps) {
                   <dd
                     className={
                       waitSummary.wait_warning_exceeded
-                        ? "font-semibold text-red-700"
+                        ? "font-semibold text-error-dark"
                         : "font-semibold text-gray-900"
                     }
                   >
@@ -1096,7 +1094,7 @@ function RackPricesPanel({
     >
       <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
         <div>
-          <div className="text-sm font-semibold text-[#232323]">
+          <div className="text-sm font-semibold text-primary">
             Latest rack prices
           </div>
           <div className="text-xs text-gray-500">
@@ -1112,7 +1110,7 @@ function RackPricesPanel({
             Loading rack prices…
           </div>
         ) : error ? (
-          <div className="px-4 py-3 text-xs text-red-700 bg-red-50">
+          <div className="px-4 py-3 text-xs text-error-dark bg-error-light">
             {error}
           </div>
         ) : prices.length === 0 ? (
@@ -1144,7 +1142,7 @@ function RackPricesPanel({
                   </td>
                   <td className="px-3 py-2 text-xs">
                     {price.branded_flag ? (
-                      <span className="inline-flex items-center text-[10px] px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 font-medium">
+                      <span className="inline-flex items-center text-[10px] px-1.5 py-0.5 rounded bg-info-light text-info-dark font-medium">
                         {price.supplier_brand || "Branded"}
                       </span>
                     ) : (
@@ -1186,7 +1184,7 @@ function SupplierContractsPanel({
     >
       <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
         <div>
-          <div className="text-sm font-semibold text-[#232323]">
+          <div className="text-sm font-semibold text-primary">
             Supplier contracts
           </div>
           <div className="text-xs text-gray-500">
@@ -1202,7 +1200,7 @@ function SupplierContractsPanel({
             Loading contracts…
           </div>
         ) : error ? (
-          <div className="px-4 py-3 text-xs text-red-700 bg-red-50">
+          <div className="px-4 py-3 text-xs text-error-dark bg-error-light">
             {error}
           </div>
         ) : contracts.length === 0 ? (
@@ -1228,12 +1226,12 @@ function SupplierContractsPanel({
                   </div>
                   <div className="flex items-center gap-1">
                     {contract.branded_required && (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 font-medium">
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-info-light text-info-dark font-medium">
                         Branded
                       </span>
                     )}
                     {lift_summary.below_minimum && (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-100 text-red-700 font-medium">
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-error-light text-error-dark font-medium">
                         Below min
                       </span>
                     )}
@@ -1447,7 +1445,7 @@ export default function SourcingPage({ initialQuery }: SourcingPageProps = {}) {
       <div className="border-b border-gray-200 bg-white px-6 py-4 space-y-3">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h1 className="text-xl font-semibold text-[#232323]">
+            <h1 className="text-xl font-semibold text-primary">
               Terminal Sourcing
             </h1>
             <p className="text-sm text-gray-500 mt-0.5">
@@ -1494,7 +1492,7 @@ export default function SourcingPage({ initialQuery }: SourcingPageProps = {}) {
             <div
               className={`border rounded-lg px-4 py-3 ${
                 summary.waitWarnings > 0
-                  ? "border-red-200 bg-red-50"
+                  ? "border-error-light bg-error-light"
                   : "border-gray-200 bg-white"
               }`}
             >
@@ -1503,7 +1501,7 @@ export default function SourcingPage({ initialQuery }: SourcingPageProps = {}) {
               </div>
               <div
                 className={`text-xl font-semibold ${
-                  summary.waitWarnings > 0 ? "text-red-700" : "text-gray-900"
+                  summary.waitWarnings > 0 ? "text-error-dark" : "text-gray-900"
                 }`}
               >
                 {summary.waitWarnings}
@@ -1533,7 +1531,7 @@ export default function SourcingPage({ initialQuery }: SourcingPageProps = {}) {
         )}
 
         {recError && !loadingRec && (
-          <div className="flex items-start gap-2 p-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-800">
+          <div className="flex items-start gap-2 p-3 rounded-lg bg-error-light border border-error-light text-sm text-error-dark">
             <AlertTriangle
               className="w-4 h-4 mt-0.5 flex-shrink-0"
               aria-hidden="true"
@@ -1549,7 +1547,7 @@ export default function SourcingPage({ initialQuery }: SourcingPageProps = {}) {
 
         <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
           <div className="xl:col-span-2 space-y-2">
-            <h2 className="text-sm font-semibold text-[#232323]">
+            <h2 className="text-sm font-semibold text-primary">
               Ranked terminals
             </h2>
             {loadingRec ? (

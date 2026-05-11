@@ -63,7 +63,7 @@ export default function FailureBarChart({
               onClick={() => onReasonClick(isSelected ? "" : reason)}
               className={`w-full text-left group rounded-lg p-2 transition-colors ${
                 isSelected
-                  ? "bg-red-50 ring-1 ring-red-200"
+                  ? "bg-error-light ring-1 ring-error-light"
                   : "hover:bg-gray-50"
               }`}
               aria-label={`${reason}: ${count} failures${isSelected ? " (selected)" : ""}`}
@@ -81,8 +81,8 @@ export default function FailureBarChart({
                 <div
                   className={`h-2 rounded-full transition-all ${
                     isSelected
-                      ? "bg-red-500"
-                      : "bg-red-400 group-hover:bg-red-500"
+                      ? "bg-error-light0"
+                      : "bg-error group-hover:bg-error-light0"
                   }`}
                   style={{ width: `${pct}%` }}
                 />

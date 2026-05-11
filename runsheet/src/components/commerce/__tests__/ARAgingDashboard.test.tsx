@@ -22,7 +22,9 @@ import { getArAging, getArAgingHistory } from "../../../services/commerceApi";
 import ARAgingDashboard from "../ARAgingDashboard";
 
 const mockGetArAging = getArAging as jest.MockedFunction<typeof getArAging>;
-const mockGetArAgingHistory = getArAgingHistory as jest.MockedFunction<typeof getArAgingHistory>;
+const mockGetArAgingHistory = getArAgingHistory as jest.MockedFunction<
+  typeof getArAgingHistory
+>;
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -92,8 +94,14 @@ describe("ARAgingDashboard", () => {
   });
 
   it("renders aging summary and top accounts table", async () => {
-    mockGetArAging.mockResolvedValue({ data: agingSummaryFixture(), request_id: "r1" } as any);
-    mockGetArAgingHistory.mockResolvedValue({ data: agingHistoryFixture(), request_id: "r2" } as any);
+    mockGetArAging.mockResolvedValue({
+      data: agingSummaryFixture(),
+      request_id: "r1",
+    } as any);
+    mockGetArAgingHistory.mockResolvedValue({
+      data: agingHistoryFixture(),
+      request_id: "r2",
+    } as any);
 
     render(<ARAgingDashboard />);
 
@@ -132,8 +140,14 @@ describe("ARAgingDashboard", () => {
   });
 
   it("renders bucket chart with correct aria label", async () => {
-    mockGetArAging.mockResolvedValue({ data: agingSummaryFixture(), request_id: "r1" } as any);
-    mockGetArAgingHistory.mockResolvedValue({ data: agingHistoryFixture(), request_id: "r2" } as any);
+    mockGetArAging.mockResolvedValue({
+      data: agingSummaryFixture(),
+      request_id: "r1",
+    } as any);
+    mockGetArAgingHistory.mockResolvedValue({
+      data: agingHistoryFixture(),
+      request_id: "r2",
+    } as any);
 
     render(<ARAgingDashboard />);
 
@@ -145,8 +159,14 @@ describe("ARAgingDashboard", () => {
   });
 
   it("renders bucket legend with amounts", async () => {
-    mockGetArAging.mockResolvedValue({ data: agingSummaryFixture(), request_id: "r1" } as any);
-    mockGetArAgingHistory.mockResolvedValue({ data: agingHistoryFixture(), request_id: "r2" } as any);
+    mockGetArAging.mockResolvedValue({
+      data: agingSummaryFixture(),
+      request_id: "r1",
+    } as any);
+    mockGetArAgingHistory.mockResolvedValue({
+      data: agingHistoryFixture(),
+      request_id: "r2",
+    } as any);
 
     render(<ARAgingDashboard />);
 
@@ -159,8 +179,14 @@ describe("ARAgingDashboard", () => {
   });
 
   it("calls onViewAccount when View button is clicked in top accounts", async () => {
-    mockGetArAging.mockResolvedValue({ data: agingSummaryFixture(), request_id: "r1" } as any);
-    mockGetArAgingHistory.mockResolvedValue({ data: agingHistoryFixture(), request_id: "r2" } as any);
+    mockGetArAging.mockResolvedValue({
+      data: agingSummaryFixture(),
+      request_id: "r1",
+    } as any);
+    mockGetArAgingHistory.mockResolvedValue({
+      data: agingHistoryFixture(),
+      request_id: "r2",
+    } as any);
 
     const onViewAccount = jest.fn();
     render(<ARAgingDashboard onViewAccount={onViewAccount} />);
@@ -176,8 +202,14 @@ describe("ARAgingDashboard", () => {
   });
 
   it("renders aging history table", async () => {
-    mockGetArAging.mockResolvedValue({ data: agingSummaryFixture(), request_id: "r1" } as any);
-    mockGetArAgingHistory.mockResolvedValue({ data: agingHistoryFixture(), request_id: "r2" } as any);
+    mockGetArAging.mockResolvedValue({
+      data: agingSummaryFixture(),
+      request_id: "r1",
+    } as any);
+    mockGetArAgingHistory.mockResolvedValue({
+      data: agingHistoryFixture(),
+      request_id: "r2",
+    } as any);
 
     render(<ARAgingDashboard />);
 
@@ -198,13 +230,21 @@ describe("ARAgingDashboard", () => {
       bucket_90_plus_cents: 0,
       total_open_cents: 0,
     });
-    mockGetArAging.mockResolvedValue({ data: emptyAging, request_id: "r1" } as any);
-    mockGetArAgingHistory.mockResolvedValue({ data: [], request_id: "r2" } as any);
+    mockGetArAging.mockResolvedValue({
+      data: emptyAging,
+      request_id: "r1",
+    } as any);
+    mockGetArAgingHistory.mockResolvedValue({
+      data: [],
+      request_id: "r2",
+    } as any);
 
     render(<ARAgingDashboard />);
 
     await waitFor(() => {
-      expect(screen.getByText("No accounts with outstanding balances.")).toBeInTheDocument();
+      expect(
+        screen.getByText("No accounts with outstanding balances."),
+      ).toBeInTheDocument();
     });
   });
 });

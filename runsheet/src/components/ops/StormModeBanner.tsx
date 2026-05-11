@@ -95,10 +95,10 @@ const STATUS_POLL_INTERVAL_MS = 60_000;
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 const SEVERITY_BADGE: Record<WeatherAlertSeverity, string> = {
-  minor: "bg-yellow-100 text-yellow-800 border-yellow-200",
-  moderate: "bg-orange-100 text-orange-800 border-orange-200",
-  severe: "bg-red-100 text-red-800 border-red-200",
-  extreme: "bg-red-200 text-red-900 border-red-300",
+  minor: "bg-warning-light text-warning-dark border-warning-light",
+  moderate: "bg-warning-light text-warning-dark border-warning-light",
+  severe: "bg-error-light text-error-dark border-error-light",
+  extreme: "bg-error-light text-error-dark border-error",
 };
 
 function formatDateTime(iso: string | null | undefined): string {
@@ -195,22 +195,22 @@ function OverrideForm({ actorId, onSubmitted, onClose }: OverrideFormProps) {
   );
 
   const inputClass =
-    "w-full px-3 py-2 text-sm border border-red-200 rounded-lg bg-white focus:ring-2 focus:ring-red-200 focus:border-red-300 text-gray-900";
+    "w-full px-3 py-2 text-sm border border-error-light rounded-lg bg-white focus:ring-2 focus:ring-error-light focus:border-error text-gray-900";
 
   return (
     <form
       onSubmit={handleSubmit}
-      className="mt-4 bg-white border border-red-200 rounded-lg p-4 space-y-3"
+      className="mt-4 bg-white border border-error-light rounded-lg p-4 space-y-3"
       aria-label="Submit Storm_Mode override"
     >
       <div className="flex items-center justify-between">
-        <h4 className="text-sm font-semibold text-red-900">
+        <h4 className="text-sm font-semibold text-error-dark">
           Submit Storm_Mode override
         </h4>
         <button
           type="button"
           onClick={onClose}
-          className="p-1 rounded hover:bg-red-50 text-red-700"
+          className="p-1 rounded hover:bg-error-light text-error-dark"
           aria-label="Close override form"
         >
           <X className="w-4 h-4" />
@@ -251,7 +251,7 @@ function OverrideForm({ actorId, onSubmitted, onClose }: OverrideFormProps) {
 
       <label className="block">
         <span className="text-xs font-medium text-gray-700">
-          Reason <span className="text-red-600">*</span>
+          Reason <span className="text-error">*</span>
         </span>
         <textarea
           value={reason}
@@ -267,7 +267,7 @@ function OverrideForm({ actorId, onSubmitted, onClose }: OverrideFormProps) {
 
       {error && (
         <p
-          className="text-xs text-red-700 bg-red-50 border border-red-200 rounded px-2 py-1"
+          className="text-xs text-error-dark bg-error-light border border-error-light rounded px-2 py-1"
           role="alert"
         >
           {error}
@@ -285,7 +285,7 @@ function OverrideForm({ actorId, onSubmitted, onClose }: OverrideFormProps) {
         </button>
         <button
           type="submit"
-          className="inline-flex items-center gap-2 px-3 py-1.5 text-sm font-medium bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:bg-red-400"
+          className="inline-flex items-center gap-2 px-3 py-1.5 text-sm font-medium bg-error text-white rounded-lg hover:bg-error-dark disabled:bg-error"
           disabled={submitting}
         >
           {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
@@ -401,24 +401,24 @@ export default function StormModeBanner({
   const severity = triggeringAlert?.severity;
   const severityBadge = severity
     ? SEVERITY_BADGE[severity]
-    : "bg-red-100 text-red-800 border-red-200";
+    : "bg-error-light text-error-dark border-error-light";
 
   return (
     <div
       role="alert"
       aria-live="polite"
       data-testid="storm-mode-banner"
-      className="sticky top-0 z-30 w-full bg-red-50 border-b-2 border-red-400 shadow-sm"
+      className="sticky top-0 z-30 w-full bg-error-light border-b-2 border-error shadow-sm"
     >
       <div className="px-6 py-3">
         <div className="flex items-start gap-3">
-          <div className="w-9 h-9 bg-red-600 rounded-lg flex items-center justify-center flex-shrink-0">
+          <div className="w-9 h-9 bg-error rounded-lg flex items-center justify-center flex-shrink-0">
             <AlertTriangle className="w-5 h-5 text-white" />
           </div>
 
           <div className="flex-1 min-w-0">
             <div className="flex flex-wrap items-center gap-2">
-              <h3 className="text-sm font-semibold text-red-900">
+              <h3 className="text-sm font-semibold text-error-dark">
                 Storm_Mode active
               </h3>
               {severity && (
@@ -429,7 +429,7 @@ export default function StormModeBanner({
                 </span>
               )}
               {status.override_active && status.override && (
-                <span className="inline-flex items-center gap-1 text-[11px] text-purple-800 bg-purple-50 border border-purple-200 rounded px-2 py-0.5">
+                <span className="inline-flex items-center gap-1 text-[11px] text-brand-secondary bg-brand-secondary-soft border border-brand-secondary-soft rounded px-2 py-0.5">
                   <ShieldAlert className="w-3 h-3" />
                   Override: {describeOverride(status.override)}
                 </span>
@@ -437,7 +437,7 @@ export default function StormModeBanner({
             </div>
 
             {triggeringAlert ? (
-              <p className="text-sm text-red-900 mt-1">
+              <p className="text-sm text-error-dark mt-1">
                 <span className="font-medium">
                   {humanizeAlertType(triggeringAlert.alert_type)}
                 </span>
@@ -446,12 +446,12 @@ export default function StormModeBanner({
                   : ""}
               </p>
             ) : (
-              <p className="text-sm text-red-900 mt-1">
+              <p className="text-sm text-error-dark mt-1">
                 Heightened operations posture active.
               </p>
             )}
 
-            <dl className="mt-2 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-x-6 gap-y-1 text-xs text-red-900">
+            <dl className="mt-2 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-x-6 gap-y-1 text-xs text-error-dark">
               <div>
                 <dt className="inline font-medium">Activated:</dt>{" "}
                 <dd className="inline">
@@ -489,7 +489,7 @@ export default function StormModeBanner({
             </dl>
 
             {transientError && (
-              <p className="mt-2 text-xs text-red-700">
+              <p className="mt-2 text-xs text-error-dark">
                 Status telemetry stale: {transientError}
               </p>
             )}
@@ -498,7 +498,7 @@ export default function StormModeBanner({
           <div className="flex items-center gap-2 flex-shrink-0">
             <a
               href={detailsHref}
-              className="inline-flex items-center gap-1 text-xs font-medium text-red-700 hover:text-red-900 underline"
+              className="inline-flex items-center gap-1 text-xs font-medium text-error-dark hover:text-error-dark underline"
             >
               Full details
               <ExternalLink className="w-3 h-3" />
@@ -507,7 +507,7 @@ export default function StormModeBanner({
               <button
                 type="button"
                 onClick={() => setShowOverrideForm(true)}
-                className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium bg-white border border-red-300 text-red-800 rounded-lg hover:bg-red-100"
+                className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium bg-white border border-error text-error-dark rounded-lg hover:bg-error-light"
               >
                 Override
               </button>

@@ -10,8 +10,8 @@
  * Validates: Requirements 2.4, 2.5.
  */
 
-import { API_TIMEOUTS, ApiError, ApiTimeoutError } from "./api";
 import { getAuthToken } from "../utils/auth";
+import { API_TIMEOUTS, ApiError, ApiTimeoutError } from "./api";
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -237,10 +237,10 @@ async function ordersRequest<T>(
       "Content-Type": "application/json",
       ...(options?.headers as Record<string, string> | undefined),
     };
-    
+
     // Add Authorization header if token exists
     if (token) {
-      headers["Authorization"] = `Bearer ${token}`;
+      headers.Authorization = `Bearer ${token}`;
     }
 
     const response = await fetchWithTimeout(url, {
@@ -280,9 +280,7 @@ export async function listOrders(
 
 /** GET /api/orders/:order_id — fetch a single order by ID */
 export async function getOrder(orderId: string): Promise<OrderResponse> {
-  return ordersRequest<OrderResponse>(
-    `/orders/${encodeURIComponent(orderId)}`,
-  );
+  return ordersRequest<OrderResponse>(`/orders/${encodeURIComponent(orderId)}`);
 }
 
 /** GET /api/orders/:order_id/events — fetch the event timeline for an order */

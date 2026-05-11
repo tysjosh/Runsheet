@@ -8,19 +8,28 @@
  * Validates: Requirements 2.1.1, 2.1.4, 2.1.6
  */
 
-import { AlertTriangle, Check, Copy, Key, Loader2, Plus, RefreshCw, X } from "lucide-react";
+import {
+  AlertTriangle,
+  Check,
+  Copy,
+  Key,
+  Loader2,
+  Plus,
+  RefreshCw,
+  X,
+} from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { ApiError } from "../../services/api";
 import {
+  type CreateIntakeChannelPayload,
   createIntakeChannel,
   deleteIntakeChannel,
-  listIntakeChannels,
-  rotateIntakeChannelSecret,
-  updateIntakeChannel,
-  type CreateIntakeChannelPayload,
   type IntakeChannel,
   type IntakeChannelType,
   type IntakeChannelWithSecret,
+  listIntakeChannels,
+  rotateIntakeChannelSecret,
+  updateIntakeChannel,
 } from "../../services/intakeChannelsApi";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -89,7 +98,8 @@ export default function IntakeChannelsAdminPanel() {
     setWorking("create");
     setCreateError(null);
     try {
-      const result: IntakeChannelWithSecret = await createIntakeChannel(createForm);
+      const result: IntakeChannelWithSecret =
+        await createIntakeChannel(createForm);
       setSecretModal({
         isOpen: true,
         secret: result.hmac_secret,
@@ -106,7 +116,9 @@ export default function IntakeChannelsAdminPanel() {
       });
       await fetchChannels();
     } catch (err) {
-      setCreateError(err instanceof ApiError ? err.message : "Failed to create channel");
+      setCreateError(
+        err instanceof ApiError ? err.message : "Failed to create channel",
+      );
     } finally {
       setWorking(null);
     }
@@ -117,7 +129,8 @@ export default function IntakeChannelsAdminPanel() {
   const handleRotate = useCallback(async (channelId: string) => {
     setWorking(channelId);
     try {
-      const result: IntakeChannelWithSecret = await rotateIntakeChannelSecret(channelId);
+      const result: IntakeChannelWithSecret =
+        await rotateIntakeChannelSecret(channelId);
       setSecretModal({
         isOpen: true,
         secret: result.hmac_secret,
@@ -125,7 +138,9 @@ export default function IntakeChannelsAdminPanel() {
         action: "rotate",
       });
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Failed to rotate secret");
+      setError(
+        err instanceof ApiError ? err.message : "Failed to rotate secret",
+      );
     } finally {
       setWorking(null);
     }
@@ -133,32 +148,44 @@ export default function IntakeChannelsAdminPanel() {
 
   // ── Toggle enabled ────────────────────────────────────────────────────────
 
-  const handleToggleEnabled = useCallback(async (channel: IntakeChannel) => {
-    setWorking(channel.channel_id);
-    try {
-      await updateIntakeChannel(channel.channel_id, { enabled: !channel.enabled });
-      await fetchChannels();
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Failed to update channel");
-    } finally {
-      setWorking(null);
-    }
-  }, [fetchChannels]);
+  const handleToggleEnabled = useCallback(
+    async (channel: IntakeChannel) => {
+      setWorking(channel.channel_id);
+      try {
+        await updateIntakeChannel(channel.channel_id, {
+          enabled: !channel.enabled,
+        });
+        await fetchChannels();
+      } catch (err) {
+        setError(
+          err instanceof ApiError ? err.message : "Failed to update channel",
+        );
+      } finally {
+        setWorking(null);
+      }
+    },
+    [fetchChannels],
+  );
 
   // ── Delete channel ────────────────────────────────────────────────────────
 
-  const handleDelete = useCallback(async (channelId: string) => {
-    if (!confirm("Are you sure you want to delete this channel?")) return;
-    setWorking(channelId);
-    try {
-      await deleteIntakeChannel(channelId);
-      await fetchChannels();
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Failed to delete channel");
-    } finally {
-      setWorking(null);
-    }
-  }, [fetchChannels]);
+  const handleDelete = useCallback(
+    async (channelId: string) => {
+      if (!confirm("Are you sure you want to delete this channel?")) return;
+      setWorking(channelId);
+      try {
+        await deleteIntakeChannel(channelId);
+        await fetchChannels();
+      } catch (err) {
+        setError(
+          err instanceof ApiError ? err.message : "Failed to delete channel",
+        );
+      } finally {
+        setWorking(null);
+      }
+    },
+    [fetchChannels],
+  );
 
   // ── Copy to clipboard ─────────────────────────────────────────────────────
 
@@ -187,7 +214,9 @@ export default function IntakeChannelsAdminPanel() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-lg font-semibold text-[#232323]">Intake Channels</h2>
+          <h2 className="text-lg font-semibold text-primary">
+            Intake Channels
+          </h2>
           <p className="text-sm text-gray-500 mt-0.5">
             Register and manage webhook intake channels for order ingestion.
           </p>
@@ -200,13 +229,14 @@ export default function IntakeChannelsAdminPanel() {
             className="inline-flex items-center gap-1.5 px-3 py-2 text-sm text-gray-600 hover:text-gray-800 rounded-lg hover:bg-gray-100 border border-gray-200"
             aria-label="Refresh channels"
           >
-            <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
+            <RefreshCw
+              className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`}
+            />
           </button>
           <button
             type="button"
             onClick={() => setShowCreateForm(true)}
-            className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white rounded-lg"
-            style={{ backgroundColor: "#232323" }}
+            className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white rounded-lg bg-primary hover:bg-primary-hover"
             aria-label="Register channel"
           >
             <Plus className="w-4 h-4" />
@@ -217,7 +247,10 @@ export default function IntakeChannelsAdminPanel() {
 
       {/* Error */}
       {error && (
-        <div role="alert" className="rounded-lg bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-800 flex items-center gap-2">
+        <div
+          role="alert"
+          className="rounded-lg bg-error-light border border-error-light px-4 py-3 text-sm text-error-dark flex items-center gap-2"
+        >
           <AlertTriangle className="w-4 h-4" />
           {error}
         </div>
@@ -226,40 +259,64 @@ export default function IntakeChannelsAdminPanel() {
       {/* Create Form */}
       {showCreateForm && (
         <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-4 space-y-3">
-          <h3 className="text-sm font-semibold text-[#232323]">Register New Channel</h3>
-          {createError && (
-            <p className="text-xs text-red-600">{createError}</p>
-          )}
+          <h3 className="text-sm font-semibold text-primary">
+            Register New Channel
+          </h3>
+          {createError && <p className="text-xs text-error">{createError}</p>}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             <div>
-              <label htmlFor="ic-channel-id" className="block text-xs text-gray-600 mb-1">Channel ID *</label>
+              <label
+                htmlFor="ic-channel-id"
+                className="block text-xs text-gray-600 mb-1"
+              >
+                Channel ID *
+              </label>
               <input
                 id="ic-channel-id"
                 type="text"
                 value={createForm.channel_id}
-                onChange={(e) => setCreateForm((f) => ({ ...f, channel_id: e.target.value }))}
+                onChange={(e) =>
+                  setCreateForm((f) => ({ ...f, channel_id: e.target.value }))
+                }
                 placeholder="my-voice-provider"
-                className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-[#232323] focus:outline-none"
+                className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-primary focus:outline-none"
               />
             </div>
             <div>
-              <label htmlFor="ic-display-name" className="block text-xs text-gray-600 mb-1">Display Name *</label>
+              <label
+                htmlFor="ic-display-name"
+                className="block text-xs text-gray-600 mb-1"
+              >
+                Display Name *
+              </label>
               <input
                 id="ic-display-name"
                 type="text"
                 value={createForm.display_name}
-                onChange={(e) => setCreateForm((f) => ({ ...f, display_name: e.target.value }))}
+                onChange={(e) =>
+                  setCreateForm((f) => ({ ...f, display_name: e.target.value }))
+                }
                 placeholder="Voice AI Provider"
-                className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-[#232323] focus:outline-none"
+                className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-primary focus:outline-none"
               />
             </div>
             <div>
-              <label htmlFor="ic-channel-type" className="block text-xs text-gray-600 mb-1">Type</label>
+              <label
+                htmlFor="ic-channel-type"
+                className="block text-xs text-gray-600 mb-1"
+              >
+                Type
+              </label>
               <select
                 id="ic-channel-type"
                 value={createForm.channel_type}
-                onChange={(e) => setCreateForm((f) => ({ ...f, channel_type: e.target.value as IntakeChannelType }))}
-                className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-[#232323] focus:outline-none"
+                onChange={(e) =>
+                  setCreateForm((f) => ({
+                    ...f,
+                    channel_type: e.target.value as IntakeChannelType,
+                  }))
+                }
+                className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-primary focus:outline-none"
               >
                 <option value="voice">Voice</option>
                 <option value="web_portal">Web Portal</option>
@@ -275,10 +332,13 @@ export default function IntakeChannelsAdminPanel() {
                   type="button"
                   onClick={handleCreate}
                   disabled={working === "create"}
-                  className="px-4 py-2 text-sm font-medium text-white rounded-lg disabled:opacity-50"
-                  style={{ backgroundColor: "#232323" }}
+                  className="px-4 py-2 text-sm font-medium text-white rounded-lg disabled:opacity-50 bg-primary hover:bg-primary-hover"
                 >
-                  {working === "create" ? <Loader2 className="w-4 h-4 animate-spin" /> : "Create"}
+                  {working === "create" ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    "Create"
+                  )}
                 </button>
                 <button
                   type="button"
@@ -307,22 +367,42 @@ export default function IntakeChannelsAdminPanel() {
           <table className="w-full" aria-label="Intake channels list">
             <thead className="bg-gray-50 border-b border-gray-100">
               <tr>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">Channel ID</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">Name</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">Type</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">Status</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">Versions</th>
-                <th className="px-4 py-3 text-right text-xs font-medium text-gray-600 uppercase">Actions</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">
+                  Channel ID
+                </th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">
+                  Name
+                </th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">
+                  Type
+                </th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">
+                  Status
+                </th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">
+                  Versions
+                </th>
+                <th className="px-4 py-3 text-right text-xs font-medium text-gray-600 uppercase">
+                  Actions
+                </th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
               {channels.map((channel) => (
                 <tr key={channel.channel_id} className="hover:bg-gray-50">
-                  <td className="px-4 py-3 text-sm font-mono text-[#232323]">{channel.channel_id}</td>
-                  <td className="px-4 py-3 text-sm text-gray-700">{channel.display_name}</td>
-                  <td className="px-4 py-3 text-sm text-gray-700">{channel.channel_type.replace("_", " ")}</td>
+                  <td className="px-4 py-3 text-sm font-mono text-primary">
+                    {channel.channel_id}
+                  </td>
+                  <td className="px-4 py-3 text-sm text-gray-700">
+                    {channel.display_name}
+                  </td>
+                  <td className="px-4 py-3 text-sm text-gray-700">
+                    {channel.channel_type.replace("_", " ")}
+                  </td>
                   <td className="px-4 py-3">
-                    <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium ${channel.enabled ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-600"}`}>
+                    <span
+                      className={`inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium ${channel.enabled ? "bg-success-light text-success-dark" : "bg-gray-100 text-gray-600"}`}
+                    >
                       {channel.enabled ? "Enabled" : "Disabled"}
                     </span>
                   </td>
@@ -354,7 +434,7 @@ export default function IntakeChannelsAdminPanel() {
                         type="button"
                         onClick={() => handleDelete(channel.channel_id)}
                         disabled={working === channel.channel_id}
-                        className="p-1.5 rounded hover:bg-red-50 text-red-600"
+                        className="p-1.5 rounded hover:bg-error-light text-error"
                         title="Delete channel"
                         aria-label={`Delete ${channel.channel_id}`}
                       >
@@ -371,21 +451,34 @@ export default function IntakeChannelsAdminPanel() {
 
       {/* Secret Modal — shown exactly once on create + rotate */}
       {secretModal.isOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" role="dialog" aria-modal="true" aria-labelledby="secret-modal-title">
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="secret-modal-title"
+        >
           <div className="bg-white rounded-xl shadow-xl w-full max-w-md mx-4 p-6">
             <div className="flex items-center gap-2 mb-4">
-              <Key className="w-5 h-5 text-amber-600" />
-              <h3 id="secret-modal-title" className="text-lg font-semibold text-[#232323]">
-                {secretModal.action === "create" ? "Channel Created" : "Secret Rotated"}
+              <Key className="w-5 h-5 text-warning" />
+              <h3
+                id="secret-modal-title"
+                className="text-lg font-semibold text-primary"
+              >
+                {secretModal.action === "create"
+                  ? "Channel Created"
+                  : "Secret Rotated"}
               </h3>
             </div>
-            <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4">
-              <p className="text-xs text-amber-800 font-medium mb-1">
+            <div className="bg-warning-light border border-warning-light rounded-lg p-3 mb-4">
+              <p className="text-xs text-warning-dark font-medium mb-1">
                 ⚠️ This secret will only be shown once. Copy it now.
               </p>
             </div>
             <div className="flex items-center gap-2 mb-4">
-              <code className="flex-1 bg-gray-100 rounded-lg px-3 py-2 text-sm font-mono text-[#232323] break-all" data-testid="secret-value">
+              <code
+                className="flex-1 bg-gray-100 rounded-lg px-3 py-2 text-sm font-mono text-primary break-all"
+                data-testid="secret-value"
+              >
                 {secretModal.secret}
               </code>
               <button
@@ -394,19 +487,23 @@ export default function IntakeChannelsAdminPanel() {
                 className="flex-shrink-0 inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium border border-gray-200 rounded-lg hover:bg-gray-50"
                 aria-label="Copy to clipboard"
               >
-                {copied ? <Check className="w-4 h-4 text-green-600" /> : <Copy className="w-4 h-4" />}
+                {copied ? (
+                  <Check className="w-4 h-4 text-success" />
+                ) : (
+                  <Copy className="w-4 h-4" />
+                )}
                 {copied ? "Copied" : "Copy"}
               </button>
             </div>
             <p className="text-xs text-gray-500 mb-4">
-              Channel: <span className="font-mono">{secretModal.channelId}</span>
+              Channel:{" "}
+              <span className="font-mono">{secretModal.channelId}</span>
             </p>
             <div className="flex justify-end">
               <button
                 type="button"
                 onClick={() => setSecretModal((s) => ({ ...s, isOpen: false }))}
-                className="px-4 py-2 text-sm font-medium text-white rounded-lg"
-                style={{ backgroundColor: "#232323" }}
+                className="px-4 py-2 text-sm font-medium text-white rounded-lg bg-primary hover:bg-primary-hover"
               >
                 Done
               </button>

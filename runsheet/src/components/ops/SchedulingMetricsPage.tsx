@@ -55,10 +55,10 @@ function SectionCard({ title, icon, children, loading }: SectionCardProps) {
   return (
     <div className="bg-white border border-gray-200 rounded-lg">
       <div className="flex items-center gap-2 px-5 py-4 border-b border-gray-100">
-        <div className="w-8 h-8 bg-[#232323] rounded-lg flex items-center justify-center">
+        <div className="w-8 h-8 bg-primary rounded-lg flex items-center justify-center">
           {icon}
         </div>
-        <h3 className="text-sm font-semibold text-[#232323]">{title}</h3>
+        <h3 className="text-sm font-semibold text-primary">{title}</h3>
       </div>
       <div className="px-5 py-4">
         {loading ? (
@@ -83,18 +83,39 @@ interface StatCardProps {
 }
 
 function StatCard({ label, value, icon, accent = "blue" }: StatCardProps) {
-  const accentStyles: Record<string, { bg: string; text: string; iconBg: string }> = {
-    red: { bg: "bg-red-50", text: "text-red-700", iconBg: "bg-red-100" },
-    yellow: { bg: "bg-yellow-50", text: "text-yellow-700", iconBg: "bg-yellow-100" },
-    blue: { bg: "bg-blue-50", text: "text-blue-700", iconBg: "bg-blue-100" },
-    green: { bg: "bg-green-50", text: "text-green-700", iconBg: "bg-green-100" },
+  const accentStyles: Record<
+    string,
+    { bg: string; text: string; iconBg: string }
+  > = {
+    red: {
+      bg: "bg-error-light",
+      text: "text-error-dark",
+      iconBg: "bg-error-light",
+    },
+    yellow: {
+      bg: "bg-warning-light",
+      text: "text-warning-dark",
+      iconBg: "bg-warning-light",
+    },
+    blue: {
+      bg: "bg-info-light",
+      text: "text-info-dark",
+      iconBg: "bg-info-light",
+    },
+    green: {
+      bg: "bg-success-light",
+      text: "text-success-dark",
+      iconBg: "bg-success-light",
+    },
   };
   const style = accentStyles[accent];
 
   return (
     <div className={`rounded-lg p-4 ${style.bg}`}>
       <div className="flex items-center gap-2 mb-2">
-        <div className={`w-7 h-7 ${style.iconBg} rounded-md flex items-center justify-center`}>
+        <div
+          className={`w-7 h-7 ${style.iconBg} rounded-md flex items-center justify-center`}
+        >
           {icon}
         </div>
         <span className="text-xs text-gray-500">{label}</span>
@@ -116,8 +137,12 @@ export default function SchedulingMetricsPage() {
 
   // ── Section data ─────────────────────────────────────────────────────────
   const [jobMetrics, setJobMetrics] = useState<JobMetricsBucket[]>([]);
-  const [completionMetrics, setCompletionMetrics] = useState<CompletionMetric[]>([]);
-  const [assetUtilization, setAssetUtilization] = useState<AssetUtilizationMetric[]>([]);
+  const [completionMetrics, setCompletionMetrics] = useState<
+    CompletionMetric[]
+  >([]);
+  const [assetUtilization, setAssetUtilization] = useState<
+    AssetUtilizationMetric[]
+  >([]);
   const [delayMetrics, setDelayMetrics] = useState<DelayMetrics | null>(null);
 
   // ── Loading & error state ────────────────────────────────────────────────
@@ -139,19 +164,26 @@ export default function SchedulingMetricsPage() {
     const filters = buildFilters();
 
     try {
-      const [jobRes, completionRes, assetRes, delayRes] = await Promise.allSettled([
-        getJobMetrics(filters),
-        getCompletionMetrics(filters),
-        getAssetUtilization(filters),
-        getDelayMetrics(filters),
-      ]);
+      const [jobRes, completionRes, assetRes, delayRes] =
+        await Promise.allSettled([
+          getJobMetrics(filters),
+          getCompletionMetrics(filters),
+          getAssetUtilization(filters),
+          getDelayMetrics(filters),
+        ]);
 
-      if (jobRes.status === "fulfilled") setJobMetrics((jobRes.value as any).data ?? []);
-      if (completionRes.status === "fulfilled") setCompletionMetrics((completionRes.value as any).data ?? []);
-      if (assetRes.status === "fulfilled") setAssetUtilization((assetRes.value as any).data ?? []);
-      if (delayRes.status === "fulfilled") setDelayMetrics((delayRes.value as any).data ?? null);
+      if (jobRes.status === "fulfilled")
+        setJobMetrics((jobRes.value as any).data ?? []);
+      if (completionRes.status === "fulfilled")
+        setCompletionMetrics((completionRes.value as any).data ?? []);
+      if (assetRes.status === "fulfilled")
+        setAssetUtilization((assetRes.value as any).data ?? []);
+      if (delayRes.status === "fulfilled")
+        setDelayMetrics((delayRes.value as any).data ?? null);
 
-      const failed = [jobRes, completionRes, assetRes, delayRes].filter(r => r.status === "rejected");
+      const failed = [jobRes, completionRes, assetRes, delayRes].filter(
+        (r) => r.status === "rejected",
+      );
       if (failed.length > 0 && failed.length < 4) {
         setError(`Some metrics failed to load (${failed.length}/4)`);
       } else if (failed.length === 4) {
@@ -159,7 +191,9 @@ export default function SchedulingMetricsPage() {
       }
     } catch (err) {
       setError(
-        err instanceof Error ? err.message : "Failed to fetch scheduling metrics",
+        err instanceof Error
+          ? err.message
+          : "Failed to fetch scheduling metrics",
       );
     } finally {
       setLoading(false);
@@ -177,22 +211,23 @@ export default function SchedulingMetricsPage() {
       <div className="border-b border-gray-100 px-8 py-6">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-[#232323] rounded-xl flex items-center justify-center">
+            <div className="w-10 h-10 bg-primary rounded-xl flex items-center justify-center">
               <TrendingUp className="w-5 h-5 text-white" />
             </div>
             <div>
-              <h1 className="text-2xl font-semibold text-[#232323]">
+              <h1 className="text-2xl font-semibold text-primary">
                 Scheduling Metrics
               </h1>
               <p className="text-gray-500">
-                Job counts, completion rates, asset utilization & delay statistics
+                Job counts, completion rates, asset utilization & delay
+                statistics
               </p>
             </div>
           </div>
           <button
             onClick={fetchAllMetrics}
             disabled={loading}
-            className="p-2 rounded-lg text-gray-400 hover:text-[#232323] hover:bg-gray-100 transition-colors disabled:opacity-50"
+            className="p-2 rounded-lg text-gray-400 hover:text-primary hover:bg-gray-100 transition-colors disabled:opacity-50"
             title="Refresh metrics"
           >
             <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
@@ -217,7 +252,7 @@ export default function SchedulingMetricsPage() {
               id="bucket-select"
               value={bucket}
               onChange={(e) => setBucket(e.target.value as "hourly" | "daily")}
-              className="text-sm border border-gray-200 rounded-md px-2 py-1 bg-white text-[#232323] focus:outline-none focus:ring-1 focus:ring-gray-300"
+              className="text-sm border border-gray-200 rounded-md px-2 py-1 bg-white text-primary focus:outline-none focus:ring-1 focus:ring-gray-300"
             >
               <option value="hourly">Hourly</option>
               <option value="daily">Daily</option>
@@ -234,7 +269,7 @@ export default function SchedulingMetricsPage() {
               type="date"
               value={startDate}
               onChange={(e) => setStartDate(e.target.value)}
-              className="text-sm border border-gray-200 rounded-md px-2 py-1 bg-white text-[#232323] focus:outline-none focus:ring-1 focus:ring-gray-300"
+              className="text-sm border border-gray-200 rounded-md px-2 py-1 bg-white text-primary focus:outline-none focus:ring-1 focus:ring-gray-300"
             />
           </div>
 
@@ -248,7 +283,7 @@ export default function SchedulingMetricsPage() {
               type="date"
               value={endDate}
               onChange={(e) => setEndDate(e.target.value)}
-              className="text-sm border border-gray-200 rounded-md px-2 py-1 bg-white text-[#232323] focus:outline-none focus:ring-1 focus:ring-gray-300"
+              className="text-sm border border-gray-200 rounded-md px-2 py-1 bg-white text-primary focus:outline-none focus:ring-1 focus:ring-gray-300"
             />
           </div>
 
@@ -270,7 +305,7 @@ export default function SchedulingMetricsPage() {
       {/* Error banner */}
       {error && (
         <div className="mx-6 mb-4">
-          <p className="text-sm text-red-600 bg-red-50 px-4 py-3 rounded-lg">
+          <p className="text-sm text-error bg-error-light px-4 py-3 rounded-lg">
             {error}
           </p>
         </div>
@@ -331,7 +366,7 @@ export default function SchedulingMetricsPage() {
                             ([type, count]) => (
                               <span
                                 key={type}
-                                className="inline-flex items-center gap-1 text-xs bg-blue-50 text-blue-700 px-2 py-0.5 rounded"
+                                className="inline-flex items-center gap-1 text-xs bg-info-light text-info-dark px-2 py-0.5 rounded"
                               >
                                 <span className="font-medium">{type}:</span>{" "}
                                 {count}
@@ -373,13 +408,13 @@ export default function SchedulingMetricsPage() {
                       <span className="text-xs text-gray-500">
                         Completion Rate
                       </span>
-                      <span className="text-sm font-semibold text-[#232323]">
+                      <span className="text-sm font-semibold text-primary">
                         {(metric.completion_rate * 100).toFixed(1)}%
                       </span>
                     </div>
                     <div className="w-full bg-gray-100 rounded-full h-1.5">
                       <div
-                        className="bg-green-500 h-1.5 rounded-full transition-all"
+                        className="bg-success-light0 h-1.5 rounded-full transition-all"
                         style={{
                           width: `${Math.min(metric.completion_rate * 100, 100)}%`,
                         }}
@@ -389,7 +424,7 @@ export default function SchedulingMetricsPage() {
                       <span className="text-xs text-gray-500">
                         Avg Completion
                       </span>
-                      <span className="text-sm font-semibold text-[#232323]">
+                      <span className="text-sm font-semibold text-primary">
                         {metric.avg_completion_minutes.toFixed(1)} min
                       </span>
                     </div>
@@ -494,40 +529,43 @@ export default function SchedulingMetricsPage() {
                 <StatCard
                   label="Total Delayed"
                   value={(delayMetrics as any).total_delayed ?? 0}
-                  icon={<AlertTriangle className="w-3.5 h-3.5 text-red-500" />}
+                  icon={<AlertTriangle className="w-3.5 h-3.5 text-error" />}
                   accent="red"
                 />
                 <StatCard
                   label="Avg Delay"
                   value={`${((delayMetrics as any).avg_delay_minutes ?? 0).toFixed(1)} min`}
-                  icon={<Clock className="w-3.5 h-3.5 text-yellow-500" />}
+                  icon={<Clock className="w-3.5 h-3.5 text-warning" />}
                   accent="yellow"
                 />
               </div>
 
               {/* Delays by type breakdown */}
-              {delayMetrics.delays_by_type && Object.keys(delayMetrics.delays_by_type).length > 0 && (
-                <div>
-                  <p className="text-xs font-medium text-gray-500 mb-2">
-                    Delays by Type
-                  </p>
-                  <div className="space-y-1.5">
-                    {Object.entries(delayMetrics.delays_by_type).map(
-                      ([type, count]) => (
-                        <div
-                          key={type}
-                          className="flex items-center justify-between py-1.5"
-                        >
-                          <span className="text-sm text-gray-600">{type}</span>
-                          <span className="text-sm font-semibold text-[#232323] bg-gray-100 px-2 py-0.5 rounded">
-                            {count}
-                          </span>
-                        </div>
-                      ),
-                    )}
+              {delayMetrics.delays_by_type &&
+                Object.keys(delayMetrics.delays_by_type).length > 0 && (
+                  <div>
+                    <p className="text-xs font-medium text-gray-500 mb-2">
+                      Delays by Type
+                    </p>
+                    <div className="space-y-1.5">
+                      {Object.entries(delayMetrics.delays_by_type).map(
+                        ([type, count]) => (
+                          <div
+                            key={type}
+                            className="flex items-center justify-between py-1.5"
+                          >
+                            <span className="text-sm text-gray-600">
+                              {type}
+                            </span>
+                            <span className="text-sm font-semibold text-primary bg-gray-100 px-2 py-0.5 rounded">
+                              {count}
+                            </span>
+                          </div>
+                        ),
+                      )}
+                    </div>
                   </div>
-                </div>
-              )}
+                )}
             </div>
           )}
         </SectionCard>

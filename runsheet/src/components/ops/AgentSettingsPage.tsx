@@ -131,9 +131,7 @@ function DeleteConfirmDialog({
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
       <div className="bg-white rounded-xl shadow-xl w-full max-w-md mx-4">
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-          <h2 className="text-lg font-semibold text-[#232323]">
-            Delete Memory
-          </h2>
+          <h2 className="text-lg font-semibold text-primary">Delete Memory</h2>
           <button
             onClick={onCancel}
             className="p-1 text-gray-400 hover:text-gray-600 rounded"
@@ -145,7 +143,7 @@ function DeleteConfirmDialog({
         <div className="px-6 py-4">
           <p className="text-sm text-gray-600">
             Are you sure you want to delete memory{" "}
-            <span className="font-medium text-[#232323]">{memoryId}</span>? This
+            <span className="font-medium text-primary">{memoryId}</span>? This
             action cannot be undone.
           </p>
         </div>
@@ -162,7 +160,7 @@ function DeleteConfirmDialog({
             type="button"
             onClick={onConfirm}
             disabled={deleting}
-            className="px-4 py-2 text-sm text-white bg-red-600 hover:bg-red-700 rounded-lg disabled:opacity-50"
+            className="px-4 py-2 text-sm text-white bg-error hover:bg-error-dark rounded-lg disabled:opacity-50"
           >
             {deleting ? "Deleting..." : "Delete"}
           </button>
@@ -250,15 +248,15 @@ function AutonomySection({ isAdmin }: AutonomySectionProps) {
     <div className="space-y-4">
       <div className="flex items-center gap-2">
         <Shield className="w-4 h-4 text-gray-500" />
-        <h3 className="text-sm font-semibold text-[#232323]">
+        <h3 className="text-sm font-semibold text-primary">
           Autonomy Configuration
         </h3>
       </div>
 
       {!isAdmin && (
-        <div className="flex items-center gap-2 px-4 py-3 bg-yellow-50 border border-yellow-200 rounded-lg">
-          <ShieldAlert className="w-4 h-4 text-yellow-600 flex-shrink-0" />
-          <p className="text-sm text-yellow-700">
+        <div className="flex items-center gap-2 px-4 py-3 bg-warning-light border border-warning-light rounded-lg">
+          <ShieldAlert className="w-4 h-4 text-warning flex-shrink-0" />
+          <p className="text-sm text-warning-dark">
             Admin access required to change autonomy settings. Current level is
             displayed as read-only.
           </p>
@@ -266,17 +264,17 @@ function AutonomySection({ isAdmin }: AutonomySectionProps) {
       )}
 
       {error && (
-        <p className="text-sm text-red-600 bg-red-50 px-4 py-3 rounded-lg">
+        <p className="text-sm text-error bg-error-light px-4 py-3 rounded-lg">
           {error}
         </p>
       )}
 
       {successInfo && (
-        <div className="px-4 py-3 bg-green-50 border border-green-200 rounded-lg">
-          <p className="text-sm text-green-700">
+        <div className="px-4 py-3 bg-success-light border border-success-light rounded-lg">
+          <p className="text-sm text-success-dark">
             Autonomy level updated successfully.
           </p>
-          <p className="text-xs text-green-600 mt-1">
+          <p className="text-xs text-success mt-1">
             Previous:{" "}
             <span className="font-medium">{successInfo.previous_level}</span>
             {" → "}
@@ -289,7 +287,7 @@ function AutonomySection({ isAdmin }: AutonomySectionProps) {
       {currentLevel && (
         <div className="text-xs text-gray-500">
           Current level:{" "}
-          <span className="font-medium text-[#232323]">
+          <span className="font-medium text-primary">
             {AUTONOMY_OPTIONS.find((o) => o.value === currentLevel)?.label ??
               currentLevel}
           </span>
@@ -322,15 +320,15 @@ function AutonomySection({ isAdmin }: AutonomySectionProps) {
                   }
                 }}
                 disabled={!isAdmin}
-                className="mt-0.5 accent-[#232323]"
+                className="mt-0.5 accent-primary"
               />
               <div className="flex-1">
                 <div className="flex items-center gap-2">
-                  <span className="text-sm font-medium text-[#232323]">
+                  <span className="text-sm font-medium text-primary">
                     {option.label}
                   </span>
                   {isCurrent && (
-                    <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-blue-50 text-blue-600">
+                    <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-info-light text-info">
                       current
                     </span>
                   )}
@@ -352,8 +350,7 @@ function AutonomySection({ isAdmin }: AutonomySectionProps) {
             disabled={
               saving || !selectedLevel || selectedLevel === currentLevel
             }
-            className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white rounded-lg disabled:opacity-50"
-            style={{ backgroundColor: "#232323" }}
+            className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white rounded-lg disabled:opacity-50 bg-primary hover:bg-primary-hover"
           >
             {saving ? (
               <Loader2 className="w-4 h-4 animate-spin" />
@@ -385,7 +382,7 @@ function AgentHealthSection() {
       const agentList = Object.values(result.agents ?? {});
       // Only show autonomous agents (ones that can be paused/resumed)
       const autonomousAgents = agentList.filter(
-        (agent) => (agent as any).type === "autonomous"
+        (agent) => (agent as any).type === "autonomous",
       );
       setAgents(autonomousAgents);
     } catch (err) {
@@ -437,22 +434,22 @@ function AgentHealthSection() {
     switch (status) {
       case "running":
         return (
-          <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full font-medium bg-green-50 text-green-700">
-            <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
+          <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full font-medium bg-success-light text-success-dark">
+            <span className="w-1.5 h-1.5 rounded-full bg-success-light0" />
             Running
           </span>
         );
       case "stopped":
         return (
-          <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full font-medium bg-yellow-50 text-yellow-700">
-            <span className="w-1.5 h-1.5 rounded-full bg-yellow-500" />
+          <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full font-medium bg-warning-light text-warning-dark">
+            <span className="w-1.5 h-1.5 rounded-full bg-warning-light0" />
             Paused
           </span>
         );
       case "error":
         return (
-          <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full font-medium bg-red-50 text-red-700">
-            <span className="w-1.5 h-1.5 rounded-full bg-red-500" />
+          <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full font-medium bg-error-light text-error-dark">
+            <span className="w-1.5 h-1.5 rounded-full bg-error-light0" />
             Stopped
           </span>
         );
@@ -470,13 +467,13 @@ function AgentHealthSection() {
     <div className="space-y-4">
       <div className="flex items-center gap-2">
         <Play className="w-4 h-4 text-gray-500" />
-        <h3 className="text-sm font-semibold text-[#232323]">
+        <h3 className="text-sm font-semibold text-primary">
           Agent Health & Control
         </h3>
       </div>
 
       {error && (
-        <p className="text-sm text-red-600 bg-red-50 px-4 py-3 rounded-lg">
+        <p className="text-sm text-error bg-error-light px-4 py-3 rounded-lg">
           {error}
         </p>
       )}
@@ -505,7 +502,7 @@ function AgentHealthSection() {
                   <Settings className="w-4 h-4 text-gray-500" />
                 </div>
                 <div>
-                  <p className="text-sm font-medium text-[#232323]">
+                  <p className="text-sm font-medium text-primary">
                     {agent.agent_id}
                   </p>
                   <div className="mt-0.5">{getStatusBadge(agent.status)}</div>
@@ -516,7 +513,7 @@ function AgentHealthSection() {
                   <button
                     onClick={() => handlePause(agent.agent_id)}
                     disabled={actionLoading === agent.agent_id}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-yellow-200 text-yellow-700 hover:bg-yellow-50 disabled:opacity-50 transition-colors"
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-warning-light text-warning-dark hover:bg-warning-light disabled:opacity-50 transition-colors"
                     title="Pause agent"
                   >
                     {actionLoading === agent.agent_id ? (
@@ -531,7 +528,7 @@ function AgentHealthSection() {
                   <button
                     onClick={() => handleResume(agent.agent_id)}
                     disabled={actionLoading === agent.agent_id}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-green-200 text-green-700 hover:bg-green-50 disabled:opacity-50 transition-colors"
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-success-light text-success-dark hover:bg-success-light disabled:opacity-50 transition-colors"
                     title="Resume agent"
                   >
                     {actionLoading === agent.agent_id ? (
@@ -637,7 +634,7 @@ function MemorySection() {
     <div className="space-y-4">
       <div className="flex items-center gap-2">
         <Brain className="w-4 h-4 text-gray-500" />
-        <h3 className="text-sm font-semibold text-[#232323]">
+        <h3 className="text-sm font-semibold text-primary">
           Memory Management
         </h3>
       </div>
@@ -675,13 +672,13 @@ function MemorySection() {
       </div>
 
       {error && (
-        <p className="text-sm text-red-600 bg-red-50 px-4 py-3 rounded-lg">
+        <p className="text-sm text-error bg-error-light px-4 py-3 rounded-lg">
           {error}
         </p>
       )}
 
       {deleteError && (
-        <p className="text-sm text-red-600 bg-red-50 px-4 py-3 rounded-lg">
+        <p className="text-sm text-error bg-error-light px-4 py-3 rounded-lg">
           {deleteError}
         </p>
       )}
@@ -710,8 +707,8 @@ function MemorySection() {
                   <span
                     className={`inline-flex items-center text-[10px] px-1.5 py-0.5 rounded font-medium ${
                       memory.memory_type === "pattern"
-                        ? "bg-purple-50 text-purple-600"
-                        : "bg-blue-50 text-blue-600"
+                        ? "bg-brand-secondary-soft text-brand-secondary"
+                        : "bg-info-light text-info"
                     }`}
                   >
                     {memory.memory_type}
@@ -720,7 +717,7 @@ function MemorySection() {
                     {memory.memory_id}
                   </span>
                 </div>
-                <p className="text-sm text-[#232323] mb-1.5 break-words">
+                <p className="text-sm text-primary mb-1.5 break-words">
                   {memory.content}
                 </p>
                 <div className="flex items-center gap-2 flex-wrap">
@@ -739,7 +736,7 @@ function MemorySection() {
               </div>
               <button
                 onClick={() => setDeleteTarget(memory.memory_id)}
-                className="ml-3 p-1.5 text-gray-400 hover:text-red-500 rounded hover:bg-red-50 transition-colors flex-shrink-0"
+                className="ml-3 p-1.5 text-gray-400 hover:text-error rounded hover:bg-error-light transition-colors flex-shrink-0"
                 aria-label={`Delete memory ${memory.memory_id}`}
               >
                 <Trash2 className="w-4 h-4" />
@@ -856,21 +853,21 @@ function FeedbackSection() {
     switch (type) {
       case "positive":
         return (
-          <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded font-medium bg-green-50 text-green-600">
+          <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded font-medium bg-success-light text-success">
             <ThumbsUp className="w-3 h-3" />
             positive
           </span>
         );
       case "negative":
         return (
-          <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded font-medium bg-red-50 text-red-600">
+          <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded font-medium bg-error-light text-error">
             <ThumbsDown className="w-3 h-3" />
             negative
           </span>
         );
       case "correction":
         return (
-          <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded font-medium bg-yellow-50 text-yellow-600">
+          <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded font-medium bg-warning-light text-warning">
             <MessageSquare className="w-3 h-3" />
             correction
           </span>
@@ -891,7 +888,7 @@ function FeedbackSection() {
     <div className="space-y-4">
       <div className="flex items-center gap-2">
         <BarChart3 className="w-4 h-4 text-gray-500" />
-        <h3 className="text-sm font-semibold text-[#232323]">Feedback</h3>
+        <h3 className="text-sm font-semibold text-primary">Feedback</h3>
       </div>
 
       {/* Stats Cards */}
@@ -899,13 +896,13 @@ function FeedbackSection() {
         <div className="grid grid-cols-3 gap-4">
           <div className="bg-gray-50 rounded-lg p-4">
             <p className="text-xs text-gray-500 mb-1">Total Feedback</p>
-            <p className="text-xl font-semibold text-[#232323]">
+            <p className="text-xl font-semibold text-primary">
               {stats.total_feedback ?? stats.total_actions ?? 0}
             </p>
           </div>
-          <div className="bg-green-50 rounded-lg p-4">
+          <div className="bg-success-light rounded-lg p-4">
             <p className="text-xs text-gray-500 mb-1">Approval Rate</p>
-            <p className="text-xl font-semibold text-green-700">
+            <p className="text-xl font-semibold text-success-dark">
               {(() => {
                 const rate =
                   stats.approval_rate ??
@@ -914,9 +911,9 @@ function FeedbackSection() {
               })()}%
             </p>
           </div>
-          <div className="bg-red-50 rounded-lg p-4">
+          <div className="bg-error-light rounded-lg p-4">
             <p className="text-xs text-gray-500 mb-1">Rejection Rate</p>
-            <p className="text-xl font-semibold text-red-700">
+            <p className="text-xl font-semibold text-error-dark">
               {Number.isFinite(stats.rejection_rate)
                 ? (stats.rejection_rate * 100).toFixed(1)
                 : "0.0"}
@@ -975,7 +972,7 @@ function FeedbackSection() {
       </div>
 
       {error && (
-        <p className="text-sm text-red-600 bg-red-50 px-4 py-3 rounded-lg">
+        <p className="text-sm text-error bg-error-light px-4 py-3 rounded-lg">
           {error}
         </p>
       )}
@@ -1085,7 +1082,7 @@ export default function AgentSettingsPage() {
             <Settings className="w-5 h-5 text-white" />
           </div>
           <div>
-            <h2 className="text-lg font-semibold text-[#232323]">
+            <h2 className="text-lg font-semibold text-primary">
               Agent Settings
             </h2>
             <p className="text-xs text-gray-500">

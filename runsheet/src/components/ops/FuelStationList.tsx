@@ -37,21 +37,21 @@ const STATUS_CONFIG: Record<
 > = {
   normal: {
     label: "Normal",
-    color: "text-green-700",
-    bg: "bg-green-100",
-    barColor: "bg-green-500",
+    color: "text-success-dark",
+    bg: "bg-success-light",
+    barColor: "bg-success-light0",
   },
   low: {
     label: "Low",
-    color: "text-yellow-700",
-    bg: "bg-yellow-100",
-    barColor: "bg-yellow-500",
+    color: "text-warning-dark",
+    bg: "bg-warning-light",
+    barColor: "bg-warning-light0",
   },
   critical: {
     label: "Critical",
-    color: "text-red-700",
-    bg: "bg-red-100",
-    barColor: "bg-red-500",
+    color: "text-error-dark",
+    bg: "bg-error-light",
+    barColor: "bg-error-light0",
   },
   empty: {
     label: "Empty",
@@ -203,7 +203,7 @@ export default function FuelStationList({
               <tr
                 key={`${station.station_id}::${station.fuel_type}`}
                 className={`transition-colors cursor-pointer ${
-                  isSelected ? "bg-blue-50" : "hover:bg-gray-50"
+                  isSelected ? "bg-info-light" : "hover:bg-gray-50"
                 }`}
                 onClick={() => onSelectStation?.(station.station_id)}
                 role="button"
@@ -216,7 +216,7 @@ export default function FuelStationList({
                   }
                 }}
               >
-                <td className="px-6 py-3 text-sm font-medium text-[#232323]">
+                <td className="px-6 py-3 text-sm font-medium text-primary">
                   {station.name}
                 </td>
                 <td className="px-6 py-3 text-sm text-gray-700">

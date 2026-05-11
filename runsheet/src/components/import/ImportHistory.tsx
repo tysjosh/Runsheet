@@ -5,15 +5,14 @@ import {
   ChevronRight,
   Clock,
   Database,
-  FileSpreadsheet,
   Filter,
   Loader2,
   X,
   XCircle,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import type { ImportSessionRecord, ImportStatus } from "../../types/import";
 import { importApi } from "../../services/importApi";
+import type { ImportSessionRecord, ImportStatus } from "../../types/import";
 
 // ─── Props ───────────────────────────────────────────────────────────────────
 
@@ -78,20 +77,23 @@ function formatDuration(seconds?: number): string {
 // ─── Status Badge ────────────────────────────────────────────────────────────
 
 function StatusBadge({ status }: { status: ImportStatus | string }) {
-  const config: Record<string, { bg: string; text: string; icon: React.ReactNode }> = {
+  const config: Record<
+    string,
+    { bg: string; text: string; icon: React.ReactNode }
+  > = {
     completed: {
-      bg: "bg-green-50",
-      text: "text-green-700",
+      bg: "bg-success-light",
+      text: "text-success-dark",
       icon: <CheckCircle2 className="w-3.5 h-3.5" />,
     },
     partial: {
-      bg: "bg-amber-50",
-      text: "text-amber-700",
+      bg: "bg-warning-light",
+      text: "text-warning-dark",
       icon: <AlertTriangle className="w-3.5 h-3.5" />,
     },
     failed: {
-      bg: "bg-red-50",
-      text: "text-red-700",
+      bg: "bg-error-light",
+      text: "text-error-dark",
       icon: <XCircle className="w-3.5 h-3.5" />,
     },
   };
@@ -132,22 +134,10 @@ function SessionDetail({ session }: { session: ImportSessionRecord }) {
           label="Total Records"
           value={String(session.total_records)}
         />
-        <DetailItem
-          label="Imported"
-          value={String(session.imported_records)}
-        />
-        <DetailItem
-          label="Skipped"
-          value={String(session.skipped_records)}
-        />
-        <DetailItem
-          label="Errors"
-          value={String(session.error_count)}
-        />
-        <DetailItem
-          label="Started"
-          value={formatDate(session.created_at)}
-        />
+        <DetailItem label="Imported" value={String(session.imported_records)} />
+        <DetailItem label="Skipped" value={String(session.skipped_records)} />
+        <DetailItem label="Errors" value={String(session.error_count)} />
+        <DetailItem label="Started" value={formatDate(session.created_at)} />
         <DetailItem
           label="Completed"
           value={session.completed_at ? formatDate(session.completed_at) : "—"}
@@ -157,15 +147,15 @@ function SessionDetail({ session }: { session: ImportSessionRecord }) {
       {/* Error messages */}
       {session.errors.length > 0 && (
         <div className="mt-3">
-          <h4 className="text-xs font-medium text-red-600 uppercase tracking-wider mb-2">
+          <h4 className="text-xs font-medium text-error uppercase tracking-wider mb-2">
             Error Messages
           </h4>
-          <div className="rounded-lg border border-red-200 bg-red-50 p-3 max-h-40 overflow-y-auto">
+          <div className="rounded-lg border border-error-light bg-error-light p-3 max-h-40 overflow-y-auto">
             <ul className="space-y-1">
               {session.errors.map((err, idx) => (
                 <li
                   key={idx}
-                  className="text-xs text-red-700 flex items-start gap-2"
+                  className="text-xs text-error-dark flex items-start gap-2"
                 >
                   <XCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
                   <span>{err}</span>
@@ -192,7 +182,7 @@ function DetailItem({
     <div>
       <p className="text-xs text-gray-400 mb-0.5">{label}</p>
       <p
-        className={`text-sm text-[#232323] ${mono ? "font-mono text-xs" : ""} truncate`}
+        className={`text-sm text-primary ${mono ? "font-mono text-xs" : ""} truncate`}
         title={value}
       >
         {value}
@@ -228,9 +218,7 @@ export default function ImportHistory({ onClose }: ImportHistoryProps) {
       setSessions(data);
     } catch (err) {
       setError(
-        err instanceof Error
-          ? err.message
-          : "Failed to load import history.",
+        err instanceof Error ? err.message : "Failed to load import history.",
       );
     } finally {
       setLoading(false);
@@ -263,8 +251,8 @@ export default function ImportHistory({ onClose }: ImportHistoryProps) {
   if (error) {
     return (
       <div className="flex flex-col items-center justify-center py-20">
-        <XCircle className="w-10 h-10 text-red-500 mb-4" />
-        <p className="text-sm font-medium text-red-600 mb-2">
+        <XCircle className="w-10 h-10 text-error mb-4" />
+        <p className="text-sm font-medium text-error mb-2">
           Failed to Load History
         </p>
         <p className="text-xs text-gray-500 mb-6 max-w-md text-center">
@@ -274,7 +262,7 @@ export default function ImportHistory({ onClose }: ImportHistoryProps) {
           <button
             type="button"
             onClick={fetchHistory}
-            className="px-4 py-2 text-sm font-medium text-[#232323] hover:bg-gray-50 rounded-xl transition-colors"
+            className="px-4 py-2 text-sm font-medium text-primary hover:bg-gray-50 rounded-xl transition-colors"
           >
             Try Again
           </button>
@@ -297,7 +285,7 @@ export default function ImportHistory({ onClose }: ImportHistoryProps) {
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
         <div>
-          <h2 className="text-lg font-semibold text-[#232323] mb-1">
+          <h2 className="text-lg font-semibold text-primary mb-1">
             Import History
           </h2>
           <p className="text-sm text-gray-500">
@@ -307,7 +295,7 @@ export default function ImportHistory({ onClose }: ImportHistoryProps) {
         <button
           type="button"
           onClick={onClose}
-          className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-gray-600 hover:text-[#232323] hover:bg-gray-50 rounded-xl transition-colors"
+          className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-gray-600 hover:text-primary hover:bg-gray-50 rounded-xl transition-colors"
         >
           <X className="w-4 h-4" />
           Close
@@ -321,7 +309,7 @@ export default function ImportHistory({ onClose }: ImportHistoryProps) {
         <select
           value={dataTypeFilter}
           onChange={(e) => setDataTypeFilter(e.target.value)}
-          className="px-3 py-2 text-sm border border-gray-200 rounded-xl bg-white text-[#232323] focus:outline-none focus:ring-2 focus:ring-gray-200"
+          className="px-3 py-2 text-sm border border-gray-200 rounded-xl bg-white text-primary focus:outline-none focus:ring-2 focus:ring-gray-200"
           aria-label="Filter by data type"
         >
           {DATA_TYPE_OPTIONS.map((opt) => (
@@ -334,7 +322,7 @@ export default function ImportHistory({ onClose }: ImportHistoryProps) {
         <select
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value)}
-          className="px-3 py-2 text-sm border border-gray-200 rounded-xl bg-white text-[#232323] focus:outline-none focus:ring-2 focus:ring-gray-200"
+          className="px-3 py-2 text-sm border border-gray-200 rounded-xl bg-white text-primary focus:outline-none focus:ring-2 focus:ring-gray-200"
           aria-label="Filter by status"
         >
           {STATUS_OPTIONS.map((opt) => (
@@ -454,13 +442,16 @@ function SessionRow({
         <td className="px-4 py-3 text-gray-600 whitespace-nowrap">
           {formatDate(session.created_at)}
         </td>
-        <td className="px-4 py-3 text-[#232323] font-medium whitespace-nowrap">
+        <td className="px-4 py-3 text-primary font-medium whitespace-nowrap">
           {DATA_TYPE_LABELS[session.data_type] ?? session.data_type}
         </td>
         <td className="px-4 py-3 text-gray-600 whitespace-nowrap">
           {SOURCE_TYPE_LABELS[session.source_type] ?? session.source_type}
         </td>
-        <td className="px-4 py-3 text-gray-600 truncate max-w-[200px]" title={session.source_name}>
+        <td
+          className="px-4 py-3 text-gray-600 truncate max-w-[200px]"
+          title={session.source_name}
+        >
           {session.source_name}
         </td>
         <td className="px-4 py-3 text-right text-gray-600 tabular-nums">

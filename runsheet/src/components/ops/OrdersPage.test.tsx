@@ -11,7 +11,13 @@
  * - Empty state rendering
  */
 
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 
 // Mock the ordersApi module
 jest.mock("../../services/ordersApi", () => ({
@@ -32,13 +38,15 @@ jest.mock("../../hooks/useOrdersWebSocket", () => ({
   })),
 }));
 
-import { listOrders } from "../../services/ordersApi";
 import { useOrdersWebSocket } from "../../hooks/useOrdersWebSocket";
 import type { FuelOrder, PaginatedResponse } from "../../services/ordersApi";
+import { listOrders } from "../../services/ordersApi";
 import OrdersPage from "./OrdersPage";
 
 const mockListOrders = listOrders as jest.MockedFunction<typeof listOrders>;
-const mockUseOrdersWebSocket = useOrdersWebSocket as jest.MockedFunction<typeof useOrdersWebSocket>;
+const mockUseOrdersWebSocket = useOrdersWebSocket as jest.MockedFunction<
+  typeof useOrdersWebSocket
+>;
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -189,7 +197,9 @@ describe("OrdersPage — filters", () => {
 
     await waitFor(() => expect(mockListOrders).toHaveBeenCalledTimes(2));
     const lastCall = mockListOrders.mock.calls[1][0];
-    expect(lastCall).toEqual(expect.objectContaining({ intake_channel: "voice" }));
+    expect(lastCall).toEqual(
+      expect.objectContaining({ intake_channel: "voice" }),
+    );
   });
 });
 

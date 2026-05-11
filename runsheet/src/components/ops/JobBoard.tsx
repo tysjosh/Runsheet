@@ -20,7 +20,11 @@ type SortOrder = "asc" | "desc";
 
 interface JobBoardProps {
   jobs: Job[];
-  onTransition: (jobId: string, targetStatus: JobStatus, failureReason?: string) => Promise<void>;
+  onTransition: (
+    jobId: string,
+    targetStatus: JobStatus,
+    failureReason?: string,
+  ) => Promise<void>;
   /** Optional callback when a job row is clicked — navigates to job detail */
   onSelectJob?: (jobId: string) => void;
 }
@@ -43,18 +47,18 @@ const COLUMNS: { key: SortField; label: string }[] = [
  * Validates: Requirement 11.2
  */
 function getRowColor(job: Job): string {
-  if (job.delayed) return "bg-yellow-50";
+  if (job.delayed) return "bg-warning-light";
   switch (job.status) {
     case "scheduled":
-      return "bg-blue-50";
+      return "bg-info-light";
     case "assigned":
-      return "bg-orange-50";
+      return "bg-warning-light";
     case "in_progress":
-      return "bg-green-50";
+      return "bg-success-light";
     case "completed":
       return "bg-gray-50";
     case "failed":
-      return "bg-red-50";
+      return "bg-error-light";
     case "cancelled":
       return "bg-gray-50";
     default:
@@ -63,18 +67,18 @@ function getRowColor(job: Job): string {
 }
 
 function getStatusBadge(status: JobStatus, delayed: boolean): string {
-  if (delayed) return "text-yellow-700 bg-yellow-100";
+  if (delayed) return "text-warning-dark bg-warning-light";
   switch (status) {
     case "scheduled":
-      return "text-blue-700 bg-blue-100";
+      return "text-info-dark bg-info-light";
     case "assigned":
-      return "text-orange-700 bg-orange-100";
+      return "text-warning-dark bg-warning-light";
     case "in_progress":
-      return "text-green-700 bg-green-100";
+      return "text-success-dark bg-success-light";
     case "completed":
       return "text-gray-600 bg-gray-100";
     case "failed":
-      return "text-red-700 bg-red-100";
+      return "text-error-dark bg-error-light";
     case "cancelled":
       return "text-gray-500 bg-gray-100";
     default:
@@ -115,7 +119,11 @@ function compareValues(
  *
  * Validates: Requirements 11.1, 11.2, 11.4, 11.7
  */
-export default function JobBoard({ jobs, onTransition, onSelectJob }: JobBoardProps) {
+export default function JobBoard({
+  jobs,
+  onTransition,
+  onSelectJob,
+}: JobBoardProps) {
   const [sortField, setSortField] = useState<SortField>("scheduled_time");
   const [sortOrder, setSortOrder] = useState<SortOrder>("asc");
 
@@ -189,7 +197,7 @@ export default function JobBoard({ jobs, onTransition, onSelectJob }: JobBoardPr
               className={`${getRowColor(job)} transition-colors ${onSelectJob ? "cursor-pointer hover:bg-gray-100" : ""}`}
               onClick={() => onSelectJob?.(job.job_id)}
             >
-              <td className="px-6 py-3 text-sm font-medium text-[#232323]">
+              <td className="px-6 py-3 text-sm font-medium text-primary">
                 {job.job_type === "cargo_transport" ? (
                   <Link
                     href={`/ops/scheduling/${encodeURIComponent(job.job_id)}/cargo`}
@@ -214,7 +222,9 @@ export default function JobBoard({ jobs, onTransition, onSelectJob }: JobBoardPr
                 </span>
               </td>
               <td className="px-6 py-3 text-sm text-gray-700">{job.origin}</td>
-              <td className="px-6 py-3 text-sm text-gray-700">{job.destination}</td>
+              <td className="px-6 py-3 text-sm text-gray-700">
+                {job.destination}
+              </td>
               <td className="px-6 py-3 text-sm text-gray-700">
                 {job.asset_assigned ?? "—"}
               </td>

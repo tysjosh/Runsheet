@@ -1,11 +1,12 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import type React from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
-  getTaxJurisdictions,
-  createTaxJurisdiction,
-  type JurisdictionRate,
   type CreateJurisdictionRatePayload,
+  createTaxJurisdiction,
+  getTaxJurisdictions,
+  type JurisdictionRate,
 } from "../../services/complianceApi";
 
 // ─── Sub-view types ──────────────────────────────────────────────────────────
@@ -22,13 +23,13 @@ function formatDate(dateStr: string | null): string {
 function jurisdictionLevelBadge(level: JurisdictionRate["jurisdiction_level"]) {
   switch (level) {
     case "federal":
-      return "bg-blue-100 text-blue-800";
+      return "bg-info-light text-info-dark";
     case "state":
-      return "bg-purple-100 text-purple-800";
+      return "bg-brand-secondary-soft text-brand-secondary";
     case "county":
-      return "bg-orange-100 text-orange-800";
+      return "bg-warning-light text-warning-dark";
     case "city":
-      return "bg-green-100 text-green-800";
+      return "bg-success-light text-success-dark";
     default:
       return "bg-gray-100 text-gray-800";
   }
@@ -37,13 +38,13 @@ function jurisdictionLevelBadge(level: JurisdictionRate["jurisdiction_level"]) {
 function taxTypeBadge(taxType: JurisdictionRate["tax_type"]) {
   switch (taxType) {
     case "excise":
-      return "bg-red-100 text-red-800";
+      return "bg-error-light text-error-dark";
     case "ust":
-      return "bg-yellow-100 text-yellow-800";
+      return "bg-warning-light text-warning-dark";
     case "spcc":
       return "bg-teal-100 text-teal-800";
     case "environmental":
-      return "bg-emerald-100 text-emerald-800";
+      return "bg-success-light text-success-dark";
     default:
       return "bg-gray-100 text-gray-800";
   }
@@ -59,7 +60,10 @@ interface CSVParseResult {
 function parseCSV(csvText: string): CSVParseResult {
   const lines = csvText.trim().split("\n");
   if (lines.length < 2) {
-    return { rows: [], errors: ["CSV must have a header row and at least one data row."] };
+    return {
+      rows: [],
+      errors: ["CSV must have a header row and at least one data row."],
+    };
   }
 
   const header = lines[0].split(",").map((h) => h.trim().toLowerCase());
@@ -74,7 +78,10 @@ function parseCSV(csvText: string): CSVParseResult {
 
   const missingColumns = requiredColumns.filter((col) => !header.includes(col));
   if (missingColumns.length > 0) {
-    return { rows: [], errors: [`Missing required columns: ${missingColumns.join(", ")}`] };
+    return {
+      rows: [],
+      errors: [`Missing required columns: ${missingColumns.join(", ")}`],
+    };
   }
 
   const rows: CreateJurisdictionRatePayload[] = [];
@@ -97,26 +104,32 @@ function parseCSV(csvText: string): CSVParseResult {
     const rateCents = parseInt(getVal("rate_cents_per_gallon"), 10);
 
     if (!["federal", "state", "county", "city"].includes(jurisdictionLevel)) {
-      errors.push(`Row ${i + 1}: invalid jurisdiction_level "${jurisdictionLevel}"`);
+      errors.push(
+        `Row ${i + 1}: invalid jurisdiction_level "${jurisdictionLevel}"`,
+      );
       continue;
     }
     if (!["excise", "ust", "spcc", "environmental"].includes(taxType)) {
       errors.push(`Row ${i + 1}: invalid tax_type "${taxType}"`);
       continue;
     }
-    if (isNaN(rateCents)) {
+    if (Number.isNaN(rateCents)) {
       errors.push(`Row ${i + 1}: invalid rate_cents_per_gallon`);
       continue;
     }
 
     const productCodesRaw = getVal("product_codes");
     const productCodes = productCodesRaw
-      ? productCodesRaw.split(";").map((c) => c.trim()).filter(Boolean)
+      ? productCodesRaw
+          .split(";")
+          .map((c) => c.trim())
+          .filter(Boolean)
       : [];
 
     rows.push({
       fips_code: getVal("fips_code"),
-      jurisdiction_level: jurisdictionLevel as CreateJurisdictionRatePayload["jurisdiction_level"],
+      jurisdiction_level:
+        jurisdictionLevel as CreateJurisdictionRatePayload["jurisdiction_level"],
       tax_type: taxType as CreateJurisdictionRatePayload["tax_type"],
       product_codes: productCodes,
       rate_cents_per_gallon: rateCents,
@@ -139,7 +152,8 @@ export default function TaxJurisdictionsPage() {
   const [totalPages, setTotalPages] = useState(1);
 
   // Filters
-  const [jurisdictionLevelFilter, setJurisdictionLevelFilter] = useState<string>("");
+  const [jurisdictionLevelFilter, setJurisdictionLevelFilter] =
+    useState<string>("");
   const [taxTypeFilter, setTaxTypeFilter] = useState<string>("");
 
   // CSV import state
@@ -160,14 +174,19 @@ export default function TaxJurisdictionsPage() {
         page,
         size: 20,
       };
-      if (jurisdictionLevelFilter) filters.jurisdiction_level = jurisdictionLevelFilter;
+      if (jurisdictionLevelFilter)
+        filters.jurisdiction_level = jurisdictionLevelFilter;
       if (taxTypeFilter) filters.tax_type = taxTypeFilter;
 
-      const response = await getTaxJurisdictions(filters as Parameters<typeof getTaxJurisdictions>[0]);
+      const response = await getTaxJurisdictions(
+        filters as Parameters<typeof getTaxJurisdictions>[0],
+      );
       setJurisdictions(response.data ?? []);
       setTotalPages(response.pagination?.total_pages ?? 1);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load tax jurisdictions");
+      setError(
+        err instanceof Error ? err.message : "Failed to load tax jurisdictions",
+      );
     } finally {
       setLoading(false);
     }
@@ -229,25 +248,34 @@ export default function TaxJurisdictionsPage() {
   function renderImport() {
     return (
       <div className="bg-white border border-gray-200 rounded-lg p-6 shadow-sm max-w-2xl">
-        <h2 className="text-lg font-bold mb-4">Import Tax Jurisdictions from CSV</h2>
+        <h2 className="text-lg font-bold mb-4">
+          Import Tax Jurisdictions from CSV
+        </h2>
 
         <div className="mb-4">
           <p className="text-sm text-gray-600 mb-2">
             Upload a CSV file with the following columns:
           </p>
           <code className="block bg-gray-50 p-3 rounded text-xs text-gray-700">
-            fips_code, jurisdiction_level, tax_type, product_codes, rate_cents_per_gallon, effective_date, expiry_date
+            fips_code, jurisdiction_level, tax_type, product_codes,
+            rate_cents_per_gallon, effective_date, expiry_date
           </code>
           <p className="text-xs text-gray-500 mt-2">
-            • <strong>jurisdiction_level:</strong> federal, state, county, or city<br />
-            • <strong>tax_type:</strong> excise, ust, spcc, or environmental<br />
-            • <strong>product_codes:</strong> semicolon-separated (e.g., UNL;DSL)<br />
-            • <strong>expiry_date:</strong> optional
+            • <strong>jurisdiction_level:</strong> federal, state, county, or
+            city
+            <br />• <strong>tax_type:</strong> excise, ust, spcc, or
+            environmental
+            <br />• <strong>product_codes:</strong> semicolon-separated (e.g.,
+            UNL;DSL)
+            <br />• <strong>expiry_date:</strong> optional
           </p>
         </div>
 
         <div className="mb-4">
-          <label htmlFor="csv-file-input" className="block text-sm font-medium mb-1">
+          <label
+            htmlFor="csv-file-input"
+            className="block text-sm font-medium mb-1"
+          >
             Select CSV File
           </label>
           <input
@@ -261,13 +289,13 @@ export default function TaxJurisdictionsPage() {
                 handleCSVImport(file);
               }
             }}
-            className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-medium file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+            className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-medium file:bg-info-light file:text-info-dark hover:file:bg-info-light"
           />
         </div>
 
         {importing && (
           <div role="status" className="flex items-center gap-2 py-4">
-            <div className="animate-spin h-5 w-5 border-2 border-blue-600 border-t-transparent rounded-full" />
+            <div className="animate-spin h-5 w-5 border-2 border-primary border-t-transparent rounded-full" />
             <span className="text-sm text-gray-600">Importing...</span>
           </div>
         )}
@@ -275,23 +303,25 @@ export default function TaxJurisdictionsPage() {
         {importResult && (
           <div className="mt-4">
             <div className="flex gap-4 mb-3">
-              <div className="bg-green-50 border border-green-200 rounded px-3 py-2">
-                <span className="text-sm font-medium text-green-800">
+              <div className="bg-success-light border border-success-light rounded px-3 py-2">
+                <span className="text-sm font-medium text-success-dark">
                   ✓ {importResult.success} imported
                 </span>
               </div>
               {importResult.failed > 0 && (
-                <div className="bg-red-50 border border-red-200 rounded px-3 py-2">
-                  <span className="text-sm font-medium text-red-800">
+                <div className="bg-error-light border border-error-light rounded px-3 py-2">
+                  <span className="text-sm font-medium text-error-dark">
                     ✗ {importResult.failed} failed
                   </span>
                 </div>
               )}
             </div>
             {importResult.errors.length > 0 && (
-              <div className="bg-yellow-50 border border-yellow-200 rounded p-3">
-                <p className="text-sm font-medium text-yellow-800 mb-1">Errors:</p>
-                <ul className="text-xs text-yellow-700 list-disc list-inside max-h-40 overflow-y-auto">
+              <div className="bg-warning-light border border-warning-light rounded p-3">
+                <p className="text-sm font-medium text-warning-dark mb-1">
+                  Errors:
+                </p>
+                <ul className="text-xs text-warning-dark list-disc list-inside max-h-40 overflow-y-auto">
                   {importResult.errors.map((err, idx) => (
                     <li key={idx}>{err}</li>
                   ))}
@@ -329,7 +359,11 @@ export default function TaxJurisdictionsPage() {
             await createTaxJurisdiction(data);
             setViewMode("list");
           } catch (err) {
-            setError(err instanceof Error ? err.message : "Failed to create jurisdiction rate");
+            setError(
+              err instanceof Error
+                ? err.message
+                : "Failed to create jurisdiction rate",
+            );
           } finally {
             setLoading(false);
           }
@@ -399,7 +433,7 @@ export default function TaxJurisdictionsPage() {
         {loading && (
           <div role="status" className="flex justify-center py-12">
             <span className="sr-only">Loading tax jurisdictions...</span>
-            <div className="animate-spin h-8 w-8 border-4 border-blue-600 border-t-transparent rounded-full" />
+            <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
           </div>
         )}
 
@@ -415,7 +449,9 @@ export default function TaxJurisdictionsPage() {
                     <th className="text-left p-3 font-medium">Tax Type</th>
                     <th className="text-left p-3 font-medium">Product Codes</th>
                     <th className="text-left p-3 font-medium">Rate (¢/gal)</th>
-                    <th className="text-left p-3 font-medium">Effective Date</th>
+                    <th className="text-left p-3 font-medium">
+                      Effective Date
+                    </th>
                     <th className="text-left p-3 font-medium">Expiry Date</th>
                   </tr>
                 </thead>
@@ -425,7 +461,9 @@ export default function TaxJurisdictionsPage() {
                       key={rate.jurisdiction_id}
                       className="border-b hover:bg-gray-50"
                     >
-                      <td className="p-3 font-mono text-sm">{rate.fips_code}</td>
+                      <td className="p-3 font-mono text-sm">
+                        {rate.fips_code}
+                      </td>
                       <td className="p-3">
                         <span
                           className={`inline-block px-2 py-1 rounded text-xs font-medium ${jurisdictionLevelBadge(rate.jurisdiction_level)}`}
@@ -446,8 +484,12 @@ export default function TaxJurisdictionsPage() {
                       <td className="p-3 font-medium">
                         {rate.rate_cents_per_gallon}¢
                       </td>
-                      <td className="p-3 text-sm">{formatDate(rate.effective_date)}</td>
-                      <td className="p-3 text-sm">{formatDate(rate.expiry_date)}</td>
+                      <td className="p-3 text-sm">
+                        {formatDate(rate.effective_date)}
+                      </td>
+                      <td className="p-3 text-sm">
+                        {formatDate(rate.expiry_date)}
+                      </td>
                     </tr>
                   ))}
                   {jurisdictions.length === 0 && (
@@ -501,7 +543,8 @@ export default function TaxJurisdictionsPage() {
           <div>
             <h1 className="text-2xl font-bold">Tax Jurisdictions</h1>
             <p className="text-gray-600 mt-1">
-              Manage fuel tax rates by jurisdiction level, FIPS code, and tax type.
+              Manage fuel tax rates by jurisdiction level, FIPS code, and tax
+              type.
             </p>
           </div>
           <div className="flex gap-2">
@@ -517,7 +560,7 @@ export default function TaxJurisdictionsPage() {
                 <button
                   type="button"
                   onClick={() => setViewMode("add")}
-                  className="bg-blue-600 text-white px-4 py-2 rounded text-sm hover:bg-blue-700"
+                  className="bg-primary text-white px-4 py-2 rounded text-sm hover:bg-primary-hover"
                 >
                   Add Rate
                 </button>
@@ -543,7 +586,7 @@ export default function TaxJurisdictionsPage() {
       {error && (
         <div
           role="alert"
-          className="bg-red-50 border border-red-200 text-red-700 p-4 rounded mb-4"
+          className="bg-error-light border border-error-light text-error-dark p-4 rounded mb-4"
         >
           {error}
         </div>
@@ -567,10 +610,10 @@ interface AddRateFormProps {
 
 function AddRateForm({ onSubmit, onCancel, loading }: AddRateFormProps) {
   const [fipsCode, setFipsCode] = useState("");
-  const [jurisdictionLevel, setJurisdictionLevel] = useState<
-    CreateJurisdictionRatePayload["jurisdiction_level"]
-  >("state");
-  const [taxType, setTaxType] = useState<CreateJurisdictionRatePayload["tax_type"]>("excise");
+  const [jurisdictionLevel, setJurisdictionLevel] =
+    useState<CreateJurisdictionRatePayload["jurisdiction_level"]>("state");
+  const [taxType, setTaxType] =
+    useState<CreateJurisdictionRatePayload["tax_type"]>("excise");
   const [productCodes, setProductCodes] = useState("");
   const [rateCentsPerGallon, setRateCentsPerGallon] = useState("");
   const [effectiveDate, setEffectiveDate] = useState("");
@@ -616,7 +659,10 @@ function AddRateForm({ onSubmit, onCancel, loading }: AddRateFormProps) {
           />
         </div>
         <div>
-          <label htmlFor="jurisdiction-level" className="block text-sm font-medium mb-1">
+          <label
+            htmlFor="jurisdiction-level"
+            className="block text-sm font-medium mb-1"
+          >
             Jurisdiction Level
           </label>
           <select
@@ -624,7 +670,8 @@ function AddRateForm({ onSubmit, onCancel, loading }: AddRateFormProps) {
             value={jurisdictionLevel}
             onChange={(e) =>
               setJurisdictionLevel(
-                e.target.value as CreateJurisdictionRatePayload["jurisdiction_level"],
+                e.target
+                  .value as CreateJurisdictionRatePayload["jurisdiction_level"],
               )
             }
             className="w-full border rounded px-3 py-2"
@@ -643,7 +690,9 @@ function AddRateForm({ onSubmit, onCancel, loading }: AddRateFormProps) {
             id="tax-type"
             value={taxType}
             onChange={(e) =>
-              setTaxType(e.target.value as CreateJurisdictionRatePayload["tax_type"])
+              setTaxType(
+                e.target.value as CreateJurisdictionRatePayload["tax_type"],
+              )
             }
             className="w-full border rounded px-3 py-2"
           >
@@ -654,7 +703,10 @@ function AddRateForm({ onSubmit, onCancel, loading }: AddRateFormProps) {
           </select>
         </div>
         <div>
-          <label htmlFor="product-codes" className="block text-sm font-medium mb-1">
+          <label
+            htmlFor="product-codes"
+            className="block text-sm font-medium mb-1"
+          >
             Product Codes
           </label>
           <input
@@ -669,7 +721,10 @@ function AddRateForm({ onSubmit, onCancel, loading }: AddRateFormProps) {
           <p className="text-xs text-gray-500 mt-1">Comma-separated</p>
         </div>
         <div>
-          <label htmlFor="rate-cents" className="block text-sm font-medium mb-1">
+          <label
+            htmlFor="rate-cents"
+            className="block text-sm font-medium mb-1"
+          >
             Rate (cents per gallon)
           </label>
           <input
@@ -682,10 +737,15 @@ function AddRateForm({ onSubmit, onCancel, loading }: AddRateFormProps) {
             className="w-full border rounded px-3 py-2"
             placeholder="e.g., 1840 for 18.4¢"
           />
-          <p className="text-xs text-gray-500 mt-1">Integer cents (e.g., 1840 = 18.40¢)</p>
+          <p className="text-xs text-gray-500 mt-1">
+            Integer cents (e.g., 1840 = 18.40¢)
+          </p>
         </div>
         <div>
-          <label htmlFor="effective-date" className="block text-sm font-medium mb-1">
+          <label
+            htmlFor="effective-date"
+            className="block text-sm font-medium mb-1"
+          >
             Effective Date
           </label>
           <input
@@ -698,7 +758,10 @@ function AddRateForm({ onSubmit, onCancel, loading }: AddRateFormProps) {
           />
         </div>
         <div>
-          <label htmlFor="expiry-date" className="block text-sm font-medium mb-1">
+          <label
+            htmlFor="expiry-date"
+            className="block text-sm font-medium mb-1"
+          >
             Expiry Date
           </label>
           <input
@@ -708,7 +771,9 @@ function AddRateForm({ onSubmit, onCancel, loading }: AddRateFormProps) {
             onChange={(e) => setExpiryDate(e.target.value)}
             className="w-full border rounded px-3 py-2"
           />
-          <p className="text-xs text-gray-500 mt-1">Optional — leave blank for no expiry</p>
+          <p className="text-xs text-gray-500 mt-1">
+            Optional — leave blank for no expiry
+          </p>
         </div>
       </div>
 
@@ -716,7 +781,7 @@ function AddRateForm({ onSubmit, onCancel, loading }: AddRateFormProps) {
         <button
           type="submit"
           disabled={loading}
-          className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 disabled:opacity-50"
+          className="bg-primary text-white px-4 py-2 rounded hover:bg-primary-hover disabled:opacity-50"
         >
           {loading ? "Saving..." : "Add Rate"}
         </button>

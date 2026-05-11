@@ -18,15 +18,15 @@ import {
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNotificationWebSocket } from "../hooks/useNotificationWebSocket";
 import {
-  getNotifications,
-  getNotificationSummary,
-  retryNotification,
   type DeliveryStatus,
+  getNotificationSummary,
+  getNotifications,
   type Notification,
   type NotificationChannel,
   type NotificationFilters,
   type NotificationSummary,
   type NotificationType,
+  retryNotification,
 } from "../services/notificationApi";
 import type { PaginationMeta } from "../services/schedulingApi";
 
@@ -62,13 +62,13 @@ const PAGE_SIZE = 20;
 function getStatusColor(status: string) {
   switch (status) {
     case "pending":
-      return "text-yellow-700 bg-yellow-50";
+      return "text-warning-dark bg-warning-light";
     case "sent":
-      return "text-blue-700 bg-blue-50";
+      return "text-info-dark bg-info-light";
     case "delivered":
-      return "text-green-700 bg-green-50";
+      return "text-success-dark bg-success-light";
     case "failed":
-      return "text-red-700 bg-red-50";
+      return "text-error-dark bg-error-light";
     default:
       return "text-gray-700 bg-gray-50";
   }
@@ -173,7 +173,10 @@ export default function NotificationHistoryTab() {
   // Prepend new notifications from WebSocket
   useEffect(() => {
     if (lastNotificationCreated?.notification) {
-      setNotifications((prev) => [lastNotificationCreated.notification, ...prev]);
+      setNotifications((prev) => [
+        lastNotificationCreated.notification,
+        ...prev,
+      ]);
       // Update summary counts
       setSummary((prev) => ({
         ...prev,
@@ -181,17 +184,22 @@ export default function NotificationHistoryTab() {
         by_status: {
           ...prev.by_status,
           [lastNotificationCreated.notification.delivery_status]:
-            (prev.by_status[lastNotificationCreated.notification.delivery_status] || 0) + 1,
+            (prev.by_status[
+              lastNotificationCreated.notification.delivery_status
+            ] || 0) + 1,
         },
         by_type: {
           ...prev.by_type,
           [lastNotificationCreated.notification.notification_type]:
-            (prev.by_type[lastNotificationCreated.notification.notification_type] || 0) + 1,
+            (prev.by_type[
+              lastNotificationCreated.notification.notification_type
+            ] || 0) + 1,
         },
         by_channel: {
           ...prev.by_channel,
           [lastNotificationCreated.notification.channel]:
-            (prev.by_channel[lastNotificationCreated.notification.channel] || 0) + 1,
+            (prev.by_channel[lastNotificationCreated.notification.channel] ||
+              0) + 1,
         },
       }));
     }
@@ -205,28 +213,36 @@ export default function NotificationHistoryTab() {
           n.notification_id === lastStatusChanged.notification_id
             ? {
                 ...n,
-                delivery_status: lastStatusChanged.delivery_status as DeliveryStatus,
+                delivery_status:
+                  lastStatusChanged.delivery_status as DeliveryStatus,
                 updated_at: lastStatusChanged.updated_at,
                 sent_at: lastStatusChanged.sent_at ?? n.sent_at,
                 delivered_at: lastStatusChanged.delivered_at ?? n.delivered_at,
                 failed_at: lastStatusChanged.failed_at ?? n.failed_at,
-                failure_reason: lastStatusChanged.failure_reason ?? n.failure_reason,
+                failure_reason:
+                  lastStatusChanged.failure_reason ?? n.failure_reason,
               }
             : n,
         ),
       );
       // Update selected notification if it matches
-      if (selectedNotification?.notification_id === lastStatusChanged.notification_id) {
+      if (
+        selectedNotification?.notification_id ===
+        lastStatusChanged.notification_id
+      ) {
         setSelectedNotification((prev) =>
           prev
             ? {
                 ...prev,
-                delivery_status: lastStatusChanged.delivery_status as DeliveryStatus,
+                delivery_status:
+                  lastStatusChanged.delivery_status as DeliveryStatus,
                 updated_at: lastStatusChanged.updated_at,
                 sent_at: lastStatusChanged.sent_at ?? prev.sent_at,
-                delivered_at: lastStatusChanged.delivered_at ?? prev.delivered_at,
+                delivered_at:
+                  lastStatusChanged.delivered_at ?? prev.delivered_at,
                 failed_at: lastStatusChanged.failed_at ?? prev.failed_at,
-                failure_reason: lastStatusChanged.failure_reason ?? prev.failure_reason,
+                failure_reason:
+                  lastStatusChanged.failure_reason ?? prev.failure_reason,
               }
             : prev,
         );
@@ -240,9 +256,12 @@ export default function NotificationHistoryTab() {
       page: currentPage,
       size: PAGE_SIZE,
     };
-    if (filterType !== "all") filters.notification_type = filterType as NotificationType;
-    if (filterChannel !== "all") filters.channel = filterChannel as NotificationChannel;
-    if (filterStatus !== "all") filters.delivery_status = filterStatus as DeliveryStatus;
+    if (filterType !== "all")
+      filters.notification_type = filterType as NotificationType;
+    if (filterChannel !== "all")
+      filters.channel = filterChannel as NotificationChannel;
+    if (filterStatus !== "all")
+      filters.delivery_status = filterStatus as DeliveryStatus;
     if (searchTerm.trim()) filters.recipient_reference = searchTerm.trim();
     return filters;
   }, [currentPage, filterType, filterChannel, filterStatus, searchTerm]);
@@ -297,10 +316,7 @@ export default function NotificationHistoryTab() {
     setCurrentPage(1);
   };
 
-  const handleFilterChange = (
-    setter: (v: string) => void,
-    value: string,
-  ) => {
+  const handleFilterChange = (setter: (v: string) => void, value: string) => {
     setter(value);
     setCurrentPage(1);
   };
@@ -311,26 +327,26 @@ export default function NotificationHistoryTab() {
       {
         label: "Total",
         value: summary.total,
-        color: "text-[#232323]",
+        color: "text-primary",
         icon: <Bell className="w-5 h-5 text-gray-400" />,
       },
       {
         label: "Sent",
         value: summary.by_status.sent || 0,
-        color: "text-blue-600",
-        icon: <Send className="w-5 h-5 text-blue-400" />,
+        color: "text-info",
+        icon: <Send className="w-5 h-5 text-info" />,
       },
       {
         label: "Delivered",
         value: summary.by_status.delivered || 0,
-        color: "text-green-600",
-        icon: <CheckCircle className="w-5 h-5 text-green-400" />,
+        color: "text-success",
+        icon: <CheckCircle className="w-5 h-5 text-success" />,
       },
       {
         label: "Failed",
         value: summary.by_status.failed || 0,
-        color: "text-red-600",
-        icon: <AlertTriangle className="w-5 h-5 text-red-400" />,
+        color: "text-error",
+        icon: <AlertTriangle className="w-5 h-5 text-error" />,
       },
     ],
     [summary],
@@ -344,11 +360,11 @@ export default function NotificationHistoryTab() {
         {/* Header */}
         <div className="border-b border-gray-100 px-8 py-6">
           <div className="flex items-center gap-3 mb-6">
-            <div className="w-10 h-10 bg-[#232323] rounded-xl flex items-center justify-center">
+            <div className="w-10 h-10 bg-primary rounded-xl flex items-center justify-center">
               <Bell className="w-5 h-5 text-white" />
             </div>
             <div>
-              <h1 className="text-2xl font-semibold text-[#232323]">
+              <h1 className="text-2xl font-semibold text-primary">
                 Notification History
               </h1>
               <p className="text-gray-500">
@@ -373,7 +389,9 @@ export default function NotificationHistoryTab() {
               <Filter className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
               <select
                 value={filterType}
-                onChange={(e) => handleFilterChange(setFilterType, e.target.value)}
+                onChange={(e) =>
+                  handleFilterChange(setFilterType, e.target.value)
+                }
                 className="pl-10 pr-8 py-3 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white min-w-[180px]"
               >
                 {NOTIFICATION_TYPES.map((t) => (
@@ -385,7 +403,9 @@ export default function NotificationHistoryTab() {
             </div>
             <select
               value={filterChannel}
-              onChange={(e) => handleFilterChange(setFilterChannel, e.target.value)}
+              onChange={(e) =>
+                handleFilterChange(setFilterChannel, e.target.value)
+              }
               className="px-4 py-3 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white min-w-[130px]"
             >
               {CHANNELS.map((c) => (
@@ -396,7 +416,9 @@ export default function NotificationHistoryTab() {
             </select>
             <select
               value={filterStatus}
-              onChange={(e) => handleFilterChange(setFilterStatus, e.target.value)}
+              onChange={(e) =>
+                handleFilterChange(setFilterStatus, e.target.value)
+              }
               className="px-4 py-3 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white min-w-[130px]"
             >
               {STATUSES.map((s) => (
@@ -427,7 +449,7 @@ export default function NotificationHistoryTab() {
 
         {/* Error Banner */}
         {error && (
-          <div className="mx-8 mt-4 bg-red-50 text-red-700 px-4 py-3 rounded-xl text-sm">
+          <div className="mx-8 mt-4 bg-error-light text-error-dark px-4 py-3 rounded-xl text-sm">
             {error}
             <button
               onClick={loadNotifications}
@@ -443,8 +465,10 @@ export default function NotificationHistoryTab() {
           {loading ? (
             <div className="flex items-center justify-center py-16">
               <div className="text-center">
-                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#232323] mx-auto mb-3" />
-                <p className="text-sm text-gray-500">Loading notifications...</p>
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary mx-auto mb-3" />
+                <p className="text-sm text-gray-500">
+                  Loading notifications...
+                </p>
               </div>
             </div>
           ) : (
@@ -479,7 +503,8 @@ export default function NotificationHistoryTab() {
                   <tr
                     key={notification.notification_id}
                     className={`cursor-pointer transition-colors ${
-                      selectedNotification?.notification_id === notification.notification_id
+                      selectedNotification?.notification_id ===
+                      notification.notification_id
                         ? "bg-gray-50"
                         : "hover:bg-gray-50"
                     }`}
@@ -489,7 +514,7 @@ export default function NotificationHistoryTab() {
                     }}
                   >
                     <td className="px-8 py-4">
-                      <span className="text-sm font-medium text-[#232323]">
+                      <span className="text-sm font-medium text-primary">
                         {getTypeLabel(notification.notification_type)}
                       </span>
                     </td>
@@ -500,8 +525,9 @@ export default function NotificationHistoryTab() {
                       </span>
                     </td>
                     <td className="px-6 py-4">
-                      <div className="text-sm text-[#232323]">
-                        {notification.recipient_name || notification.recipient_reference}
+                      <div className="text-sm text-primary">
+                        {notification.recipient_name ||
+                          notification.recipient_reference}
                       </div>
                       {notification.recipient_name && (
                         <div className="text-xs text-gray-500">
@@ -526,7 +552,7 @@ export default function NotificationHistoryTab() {
                     <td className="px-6 py-4">
                       {notification.related_entity_id ? (
                         <div>
-                          <span className="text-sm text-[#232323] font-medium">
+                          <span className="text-sm text-primary font-medium">
                             {notification.related_entity_id}
                           </span>
                           {notification.related_entity_type && (
@@ -601,7 +627,7 @@ export default function NotificationHistoryTab() {
         <div className="w-96 border-l border-gray-100 bg-gray-50 flex flex-col">
           <div className="px-6 py-4 border-b border-gray-100">
             <div className="flex items-center justify-between">
-              <h3 className="font-semibold text-[#232323]">
+              <h3 className="font-semibold text-primary">
                 Notification Details
               </h3>
               <button
@@ -609,7 +635,7 @@ export default function NotificationHistoryTab() {
                   setSelectedNotification(null);
                   setRetryError("");
                 }}
-                className="text-gray-400 hover:text-[#232323] p-2 rounded-lg hover:bg-white transition-colors"
+                className="text-gray-400 hover:text-primary p-2 rounded-lg hover:bg-white transition-colors"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -622,7 +648,7 @@ export default function NotificationHistoryTab() {
               <label className="block text-sm font-medium text-gray-500 mb-2">
                 Notification ID
               </label>
-              <p className="text-sm text-[#232323] font-mono">
+              <p className="text-sm text-primary font-mono">
                 {selectedNotification.notification_id}
               </p>
             </div>
@@ -633,7 +659,7 @@ export default function NotificationHistoryTab() {
                 <label className="block text-sm font-medium text-gray-500 mb-2">
                   Type
                 </label>
-                <span className="text-sm text-[#232323] font-medium">
+                <span className="text-sm text-primary font-medium">
                   {getTypeLabel(selectedNotification.notification_type)}
                 </span>
               </div>
@@ -641,7 +667,7 @@ export default function NotificationHistoryTab() {
                 <label className="block text-sm font-medium text-gray-500 mb-2">
                   Channel
                 </label>
-                <span className="inline-flex items-center gap-1.5 text-sm text-[#232323]">
+                <span className="inline-flex items-center gap-1.5 text-sm text-primary">
                   {getChannelIcon(selectedNotification.channel)}
                   {selectedNotification.channel.toUpperCase()}
                 </span>
@@ -667,7 +693,7 @@ export default function NotificationHistoryTab() {
               <label className="block text-sm font-medium text-gray-500 mb-2">
                 Recipient
               </label>
-              <p className="text-sm text-[#232323]">
+              <p className="text-sm text-primary">
                 {selectedNotification.recipient_name || "—"}
               </p>
               <p className="text-xs text-gray-500 mt-0.5">
@@ -681,7 +707,7 @@ export default function NotificationHistoryTab() {
                 <label className="block text-sm font-medium text-gray-500 mb-2">
                   Subject
                 </label>
-                <p className="text-sm text-[#232323]">
+                <p className="text-sm text-primary">
                   {selectedNotification.subject}
                 </p>
               </div>
@@ -692,7 +718,7 @@ export default function NotificationHistoryTab() {
               <label className="block text-sm font-medium text-gray-500 mb-2">
                 Message Body
               </label>
-              <div className="bg-white border border-gray-200 rounded-lg p-3 text-sm text-[#232323] leading-relaxed whitespace-pre-wrap">
+              <div className="bg-white border border-gray-200 rounded-lg p-3 text-sm text-primary leading-relaxed whitespace-pre-wrap">
                 {selectedNotification.message_body}
               </div>
             </div>
@@ -703,7 +729,7 @@ export default function NotificationHistoryTab() {
                 <label className="block text-sm font-medium text-gray-500 mb-2">
                   Related Entity
                 </label>
-                <p className="text-sm text-[#232323] font-medium">
+                <p className="text-sm text-primary font-medium">
                   {selectedNotification.related_entity_id}
                 </p>
                 {selectedNotification.related_entity_type && (
@@ -720,7 +746,7 @@ export default function NotificationHistoryTab() {
                 <label className="block text-sm font-medium text-gray-500 mb-2">
                   Failure Reason
                 </label>
-                <div className="bg-red-50 text-red-700 px-3 py-2 rounded-lg text-sm">
+                <div className="bg-error-light text-error-dark px-3 py-2 rounded-lg text-sm">
                   {selectedNotification.failure_reason}
                 </div>
               </div>
@@ -731,7 +757,7 @@ export default function NotificationHistoryTab() {
               <label className="block text-sm font-medium text-gray-500 mb-2">
                 Retry Count
               </label>
-              <p className="text-sm text-[#232323]">
+              <p className="text-sm text-primary">
                 {selectedNotification.retry_count}
               </p>
             </div>
@@ -744,31 +770,31 @@ export default function NotificationHistoryTab() {
               <div className="space-y-2 text-sm">
                 <div className="flex justify-between">
                   <span className="text-gray-500">Created</span>
-                  <span className="text-[#232323]">
+                  <span className="text-primary">
                     {formatFullDate(selectedNotification.created_at)}
                   </span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-gray-500">Updated</span>
-                  <span className="text-[#232323]">
+                  <span className="text-primary">
                     {formatFullDate(selectedNotification.updated_at)}
                   </span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-gray-500">Sent</span>
-                  <span className="text-[#232323]">
+                  <span className="text-primary">
                     {formatFullDate(selectedNotification.sent_at)}
                   </span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-gray-500">Delivered</span>
-                  <span className="text-[#232323]">
+                  <span className="text-primary">
                     {formatFullDate(selectedNotification.delivered_at)}
                   </span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-gray-500">Failed</span>
-                  <span className="text-[#232323]">
+                  <span className="text-primary">
                     {formatFullDate(selectedNotification.failed_at)}
                   </span>
                 </div>
@@ -779,16 +805,19 @@ export default function NotificationHistoryTab() {
             {selectedNotification.delivery_status === "failed" && (
               <div>
                 <button
-                  onClick={() => handleRetry(selectedNotification.notification_id)}
+                  onClick={() =>
+                    handleRetry(selectedNotification.notification_id)
+                  }
                   disabled={retrying}
-                  className="w-full flex items-center justify-center gap-2 px-4 py-2.5 text-sm text-white rounded-lg transition-colors hover:opacity-90 disabled:opacity-50"
-                  style={{ backgroundColor: "#232323" }}
+                  className="w-full flex items-center justify-center gap-2 px-4 py-2.5 text-sm text-white rounded-lg transition-colors disabled:opacity-50 bg-primary hover:bg-primary-hover"
                 >
-                  <RefreshCw className={`w-4 h-4 ${retrying ? "animate-spin" : ""}`} />
+                  <RefreshCw
+                    className={`w-4 h-4 ${retrying ? "animate-spin" : ""}`}
+                  />
                   {retrying ? "Retrying..." : "Retry Notification"}
                 </button>
                 {retryError && (
-                  <p className="text-xs text-red-600 mt-2">{retryError}</p>
+                  <p className="text-xs text-error mt-2">{retryError}</p>
                 )}
               </div>
             )}

@@ -22,8 +22,8 @@
  * Validates: Requirements 4.1.3, 4.1.5.
  */
 
-import { API_TIMEOUTS, ApiError, ApiTimeoutError } from "./api";
 import { getAuthToken } from "../utils/auth";
+import { API_TIMEOUTS, ApiError, ApiTimeoutError } from "./api";
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -118,10 +118,10 @@ async function driverRequest<T>(
       "Content-Type": "application/json",
       ...(options?.headers as Record<string, string> | undefined),
     };
-    
+
     // Add Authorization header if token exists
     if (token) {
-      headers["Authorization"] = `Bearer ${token}`;
+      headers.Authorization = `Bearer ${token}`;
     }
 
     const response = await fetchWithTimeout(url, {

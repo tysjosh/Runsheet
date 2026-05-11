@@ -15,13 +15,13 @@ function getStatusBadge(status: CargoItemStatus): string {
     case "pending":
       return "text-gray-700 bg-gray-100";
     case "loaded":
-      return "text-blue-700 bg-blue-100";
+      return "text-info-dark bg-info-light";
     case "in_transit":
-      return "text-yellow-700 bg-yellow-100";
+      return "text-warning-dark bg-warning-light";
     case "delivered":
-      return "text-green-700 bg-green-100";
+      return "text-success-dark bg-success-light";
     case "damaged":
-      return "text-red-700 bg-red-100";
+      return "text-error-dark bg-error-light";
     default:
       return "text-gray-700 bg-gray-100";
   }
@@ -36,7 +36,10 @@ function formatStatus(status: string): string {
 
 interface CargoManifestViewProps {
   items: SchedulingCargoItem[];
-  onUpdateItemStatus: (itemId: string, newStatus: CargoItemStatus) => Promise<void>;
+  onUpdateItemStatus: (
+    itemId: string,
+    newStatus: CargoItemStatus,
+  ) => Promise<void>;
 }
 
 /**
@@ -90,8 +93,11 @@ export default function CargoManifestView({
         </thead>
         <tbody className="divide-y divide-gray-100">
           {items.map((item) => (
-            <tr key={item.item_id} className="transition-colors hover:bg-gray-50">
-              <td className="px-6 py-3 text-sm font-medium text-[#232323]">
+            <tr
+              key={item.item_id}
+              className="transition-colors hover:bg-gray-50"
+            >
+              <td className="px-6 py-3 text-sm font-medium text-primary">
                 {item.item_id}
               </td>
               <td className="px-6 py-3 text-sm text-gray-700">

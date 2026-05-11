@@ -12,7 +12,7 @@
  * - Requirement 9.7: Show agent name, action summary, and outcome
  */
 
-import { Activity, AlertCircle, CheckCircle2, Clock, XCircle } from "lucide-react";
+import { Activity, CheckCircle2, Clock, XCircle } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { useAgentWebSocket } from "../../hooks/useAgentWebSocket";
 import type { ActivityLogEntry } from "../../services/agentApi";
@@ -30,10 +30,21 @@ const AGENT_LABELS: Record<string, string> = {
 };
 
 /** Outcome badge colors */
-const OUTCOME_STYLES: Record<string, { bg: string; text: string; icon: typeof CheckCircle2 }> = {
-  success: { bg: "bg-emerald-50", text: "text-emerald-700", icon: CheckCircle2 },
-  failure: { bg: "bg-red-50", text: "text-red-700", icon: XCircle },
-  pending_approval: { bg: "bg-amber-50", text: "text-amber-700", icon: Clock },
+const OUTCOME_STYLES: Record<
+  string,
+  { bg: string; text: string; icon: typeof CheckCircle2 }
+> = {
+  success: {
+    bg: "bg-success-light",
+    text: "text-success-dark",
+    icon: CheckCircle2,
+  },
+  failure: { bg: "bg-error-light", text: "text-error-dark", icon: XCircle },
+  pending_approval: {
+    bg: "bg-warning-light",
+    text: "text-warning-dark",
+    icon: Clock,
+  },
   rejected: { bg: "bg-gray-100", text: "text-gray-600", icon: XCircle },
 };
 
@@ -44,7 +55,11 @@ function getAgentLabel(agentId: string): string {
 function formatTimestamp(iso: string): string {
   try {
     const date = new Date(iso);
-    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    return date.toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
   } catch {
     return iso;
   }
@@ -52,8 +67,10 @@ function formatTimestamp(iso: string): string {
 
 function buildActionSummary(entry: ActivityLogEntry): string {
   if (entry.action_type === "monitoring_cycle") {
-    const detections = (entry.details as Record<string, unknown>)?.detection_count ?? 0;
-    const actions = (entry.details as Record<string, unknown>)?.action_count ?? 0;
+    const detections =
+      (entry.details as Record<string, unknown>)?.detection_count ?? 0;
+    const actions =
+      (entry.details as Record<string, unknown>)?.action_count ?? 0;
     return `Monitoring cycle: ${detections} detections, ${actions} actions`;
   }
   if (entry.tool_name) {
@@ -82,7 +99,9 @@ export default function AgentActivityFeed() {
       }
     }
     load();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Subscribe to real-time updates
@@ -110,14 +129,14 @@ export default function AgentActivityFeed() {
       {/* Header */}
       <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
         <div className="flex items-center gap-2">
-          <div className="w-8 h-8 bg-[#232323] rounded-lg flex items-center justify-center">
+          <div className="w-8 h-8 bg-primary rounded-lg flex items-center justify-center">
             <Activity className="w-4 h-4 text-white" />
           </div>
-          <h3 className="text-sm font-semibold text-[#232323]">Agent Activity</h3>
+          <h3 className="text-sm font-semibold text-primary">Agent Activity</h3>
         </div>
         <div className="flex items-center gap-1.5">
           <span
-            className={`w-2 h-2 rounded-full ${isConnected ? "bg-emerald-500" : "bg-gray-300"}`}
+            className={`w-2 h-2 rounded-full ${isConnected ? "bg-success-light0" : "bg-gray-300"}`}
           />
           <span className="text-xs text-gray-400">
             {isConnected ? "Live" : "Offline"}
@@ -129,7 +148,7 @@ export default function AgentActivityFeed() {
       <div className="flex-1 overflow-y-auto px-3 py-2 space-y-1.5">
         {loading ? (
           <div className="flex items-center justify-center py-8">
-            <div className="w-5 h-5 border-2 border-gray-300 border-t-[#232323] rounded-full animate-spin" />
+            <div className="w-5 h-5 border-2 border-gray-300 border-t-primary rounded-full animate-spin" />
           </div>
         ) : entries.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-8 text-gray-400">
@@ -138,27 +157,30 @@ export default function AgentActivityFeed() {
           </div>
         ) : (
           entries.map((entry) => {
-            const outcomeStyle = OUTCOME_STYLES[entry.outcome] ?? OUTCOME_STYLES.success;
+            const outcomeStyle =
+              OUTCOME_STYLES[entry.outcome] ?? OUTCOME_STYLES.success;
             const OutcomeIcon = outcomeStyle.icon;
             return (
               <div
                 key={entry.log_id}
                 className="flex items-start gap-3 px-3 py-2.5 rounded-lg hover:bg-gray-50 transition-colors"
               >
-                <OutcomeIcon className={`w-4 h-4 mt-0.5 flex-shrink-0 ${outcomeStyle.text}`} />
+                <OutcomeIcon
+                  className={`w-4 h-4 mt-0.5 flex-shrink-0 ${outcomeStyle.text}`}
+                />
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 mb-0.5">
-                    <span className="text-xs font-medium text-[#232323]">
+                    <span className="text-xs font-medium text-primary">
                       {getAgentLabel(entry.agent_id)}
                     </span>
                     {entry.risk_level && (
                       <span
                         className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
                           entry.risk_level === "high"
-                            ? "bg-red-50 text-red-600"
+                            ? "bg-error-light text-error"
                             : entry.risk_level === "medium"
-                              ? "bg-amber-50 text-amber-600"
-                              : "bg-emerald-50 text-emerald-600"
+                              ? "bg-warning-light text-warning"
+                              : "bg-success-light text-success"
                         }`}
                       >
                         {entry.risk_level}

@@ -27,7 +27,11 @@ const OPS_WS_URL = `${WS_BASE}/ws/ops`;
 /**
  * Event types the ops WebSocket can deliver
  */
-export type OpsEventType = "shipment_update" | "rider_update" | "sla_breach" | "fuel_alert";
+export type OpsEventType =
+  | "shipment_update"
+  | "rider_update"
+  | "sla_breach"
+  | "fuel_alert";
 
 /**
  * Base message structure from the ops WebSocket endpoint
@@ -152,7 +156,9 @@ export function useOpsWebSocket(
     useState<OpsShipment | null>(null);
   const [lastRiderUpdate, setLastRiderUpdate] = useState<OpsRider | null>(null);
   const [lastSlaBreach, setLastSlaBreach] = useState<SlaBreach | null>(null);
-  const [lastFuelAlert, setLastFuelAlert] = useState<FuelAlertEvent | null>(null);
+  const [lastFuelAlert, setLastFuelAlert] = useState<FuelAlertEvent | null>(
+    null,
+  );
   const [connectionStatus, setConnectionStatus] = useState<string | null>(null);
 
   const subscriptions = options.subscriptions ?? [

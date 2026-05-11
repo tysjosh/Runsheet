@@ -24,17 +24,21 @@ const DispatchPage = lazy(() => import("../../components/DispatchPage"));
 const FuelOpsPage = lazy(() => import("../../components/FuelOpsPage"));
 const ComplianceHub = lazy(() => import("../../components/ComplianceHub"));
 const CommerceHub = lazy(() => import("../../components/CommerceHub"));
-const ReconciliationHub = lazy(() => import("../../components/ReconciliationHub"));
+const ReconciliationHub = lazy(
+  () => import("../../components/ReconciliationHub"),
+);
 const AnalyticsHub = lazy(() => import("../../components/AnalyticsHub"));
 const SettingsPage = lazy(() => import("../../components/SettingsPage"));
-const CustomersPage = lazy(() => import("../../components/commerce/CustomersListPage"));
+const CustomersPage = lazy(
+  () => import("../../components/commerce/CustomersListPage"),
+);
 const DriversPage = lazy(() => import("../ops/drivers/page"));
 
 function MapLoadingPlaceholder() {
   return (
     <div className="h-full flex items-center justify-center bg-gray-50">
       <div className="text-center">
-        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900 mx-auto"></div>
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary mx-auto"></div>
         <p className="mt-2 text-gray-600">Loading map...</p>
       </div>
     </div>
@@ -220,7 +224,7 @@ export default function Home() {
     return (
       <div className="h-screen flex items-center justify-center bg-gray-50">
         <div className="text-center">
-          <div className="w-8 h-8 border-4 border-gray-300 border-t-blue-600 rounded-full animate-spin mx-auto mb-4"></div>
+          <div className="w-8 h-8 border-4 border-gray-300 border-t-primary rounded-full animate-spin mx-auto mb-4"></div>
           <p className="text-gray-600">Loading...</p>
         </div>
       </div>

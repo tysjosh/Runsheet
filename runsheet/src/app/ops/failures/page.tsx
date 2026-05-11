@@ -1,6 +1,15 @@
 "use client";
 
-import { AlertTriangle, ChevronDown, Download, X, MapPin, Clock, Package, User } from "lucide-react";
+import {
+  AlertTriangle,
+  ChevronDown,
+  Clock,
+  Download,
+  MapPin,
+  Package,
+  User,
+  X,
+} from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import LoadingSpinner from "../../../components/LoadingSpinner";
 import FailureBarChart from "../../../components/ops/FailureBarChart";
@@ -80,7 +89,9 @@ export default function OpsFailureAnalyticsPage() {
   const [loading, setLoading] = useState(true);
   const [selectedReason, setSelectedReason] = useState("");
   const [knownReasons, setKnownReasons] = useState<string[]>([]);
-  const [drillDownShipmentId, setDrillDownShipmentId] = useState<string | null>(null);
+  const [drillDownShipmentId, setDrillDownShipmentId] = useState<string | null>(
+    null,
+  );
   const [timeRange, setTimeRange] = useState<TimeRange>(() => {
     const dates = getPresetDates("7d");
     return { preset: "7d", ...dates };
@@ -96,15 +107,13 @@ export default function OpsFailureAnalyticsPage() {
       if (timeRange.start_date)
         metricsFilters.start_date = timeRange.start_date;
       if (timeRange.end_date) metricsFilters.end_date = timeRange.end_date;
-      if (selectedReason)
-        metricsFilters.failure_reason = selectedReason;
+      if (selectedReason) metricsFilters.failure_reason = selectedReason;
 
       const failureFilters: FailureFilters = {};
       if (timeRange.start_date)
         failureFilters.start_date = timeRange.start_date;
       if (timeRange.end_date) failureFilters.end_date = timeRange.end_date;
-      if (selectedReason)
-        failureFilters.failure_reason = selectedReason;
+      if (selectedReason) failureFilters.failure_reason = selectedReason;
 
       const [metricsRes, failuresRes] = await Promise.all([
         getFailureMetrics(metricsFilters),
@@ -216,11 +225,11 @@ export default function OpsFailureAnalyticsPage() {
       {/* Header */}
       <div className="border-b border-gray-100 px-8 py-6">
         <div className="flex items-center gap-3 mb-4">
-          <div className="w-10 h-10 bg-[#232323] rounded-xl flex items-center justify-center">
+          <div className="w-10 h-10 bg-primary rounded-xl flex items-center justify-center">
             <AlertTriangle className="w-5 h-5 text-white" />
           </div>
           <div>
-            <h1 className="text-2xl font-semibold text-[#232323]">
+            <h1 className="text-2xl font-semibold text-primary">
               Failure Analytics
             </h1>
             <p className="text-gray-500">Analyze failure reasons and trends</p>
@@ -313,7 +322,7 @@ function TimeRangeSelector({
           onClick={() => onPresetChange(opt.value)}
           className={`px-3 py-1.5 text-sm rounded-lg border transition-colors ${
             timeRange.preset === opt.value
-              ? "bg-[#232323] text-white border-[#232323]"
+              ? "bg-primary text-white border-primary"
               : "bg-white text-gray-600 border-gray-200 hover:border-gray-300"
           }`}
           aria-pressed={timeRange.preset === opt.value}
@@ -366,7 +375,7 @@ function FailureTypeDropdown({
         onChange={(e) => onReasonChange(e.target.value)}
         className={`appearance-none pl-3 pr-8 py-1.5 text-sm rounded-lg border transition-colors cursor-pointer ${
           selectedReason
-            ? "bg-red-50 text-red-700 border-red-200"
+            ? "bg-error-light text-error-dark border-error-light"
             : "bg-white text-gray-600 border-gray-200 hover:border-gray-300"
         }`}
         aria-label="Filter by failure type"
@@ -400,7 +409,7 @@ function FailedShipmentsTable({
         <h3 className="text-sm font-medium text-gray-700">
           Recent Failed Shipments
           {selectedReason && (
-            <span className="ml-2 text-xs text-red-600 font-normal">
+            <span className="ml-2 text-xs text-error font-normal">
               filtered: {selectedReason}
             </span>
           )}
@@ -449,7 +458,7 @@ function FailedShipmentsTable({
                     {s.shipment_id}
                   </td>
                   <td className="py-2.5 pr-4">
-                    <span className="inline-block px-2 py-0.5 text-xs rounded bg-red-50 text-red-700">
+                    <span className="inline-block px-2 py-0.5 text-xs rounded bg-error-light text-error-dark">
                       {s.failure_reason ?? "Unknown"}
                     </span>
                   </td>
@@ -500,7 +509,9 @@ function ShipmentDrillDownPanel({
       } catch (err) {
         if (!cancelled) {
           setError(
-            err instanceof Error ? err.message : "Failed to load shipment detail",
+            err instanceof Error
+              ? err.message
+              : "Failed to load shipment detail",
           );
         }
       } finally {
@@ -544,8 +555,8 @@ function ShipmentDrillDownPanel({
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100 flex-shrink-0">
           <div className="flex items-center gap-2 min-w-0">
-            <Package className="w-5 h-5 text-[#232323] flex-shrink-0" />
-            <h2 className="text-lg font-semibold text-[#232323] truncate">
+            <Package className="w-5 h-5 text-primary flex-shrink-0" />
+            <h2 className="text-lg font-semibold text-primary truncate">
               Shipment Detail
             </h2>
           </div>
@@ -567,7 +578,7 @@ function ShipmentDrillDownPanel({
           )}
 
           {error && (
-            <div className="text-sm text-red-600 bg-red-50 px-4 py-3 rounded-lg">
+            <div className="text-sm text-error bg-error-light px-4 py-3 rounded-lg">
               {error}
             </div>
           )}
@@ -580,11 +591,15 @@ function ShipmentDrillDownPanel({
                   Shipment Information
                 </h3>
                 <div className="space-y-3">
-                  <DetailRow label="Shipment ID" value={detail.shipment_id} mono />
+                  <DetailRow
+                    label="Shipment ID"
+                    value={detail.shipment_id}
+                    mono
+                  />
                   <DetailRow
                     label="Status"
                     value={
-                      <span className="inline-block px-2 py-0.5 text-xs rounded bg-red-50 text-red-700 font-medium">
+                      <span className="inline-block px-2 py-0.5 text-xs rounded bg-error-light text-error-dark font-medium">
                         {detail.status}
                       </span>
                     }
@@ -630,7 +645,9 @@ function ShipmentDrillDownPanel({
                     <DetailRow
                       label="Estimated Delivery"
                       icon={<Clock className="w-3.5 h-3.5" />}
-                      value={new Date(detail.estimated_delivery).toLocaleString()}
+                      value={new Date(
+                        detail.estimated_delivery,
+                      ).toLocaleString()}
                     />
                   )}
                   {detail.trace_id && (
@@ -651,12 +668,15 @@ function ShipmentDrillDownPanel({
 
                     <div className="space-y-4">
                       {detail.events.map((event, idx) => (
-                        <div key={event.event_id} className="relative flex gap-3 pl-1">
+                        <div
+                          key={event.event_id}
+                          className="relative flex gap-3 pl-1"
+                        >
                           {/* Timeline dot */}
                           <div
                             className={`relative z-10 w-5 h-5 rounded-full border-2 flex items-center justify-center flex-shrink-0 mt-0.5 ${
                               idx === 0
-                                ? "border-[#232323] bg-[#232323]"
+                                ? "border-primary bg-primary"
                                 : "border-gray-300 bg-white"
                             }`}
                           >
@@ -668,7 +688,7 @@ function ShipmentDrillDownPanel({
                           {/* Event content */}
                           <div className="flex-1 min-w-0 pb-1">
                             <div className="flex items-center gap-2 mb-0.5">
-                              <span className="text-sm font-medium text-[#232323]">
+                              <span className="text-sm font-medium text-primary">
                                 {event.event_type}
                               </span>
                             </div>
@@ -677,7 +697,8 @@ function ShipmentDrillDownPanel({
                             </p>
                             {event.location && (
                               <p className="text-xs text-gray-400 mt-0.5">
-                                📍 {event.location.lat.toFixed(4)}, {event.location.lon.toFixed(4)}
+                                📍 {event.location.lat.toFixed(4)},{" "}
+                                {event.location.lon.toFixed(4)}
                               </p>
                             )}
                             {event.event_payload &&
@@ -722,7 +743,7 @@ function DetailRow({
         {label}
       </span>
       <span
-        className={`text-sm text-[#232323] ${mono ? "font-mono text-xs" : ""}`}
+        className={`text-sm text-primary ${mono ? "font-mono text-xs" : ""}`}
       >
         {value}
       </span>

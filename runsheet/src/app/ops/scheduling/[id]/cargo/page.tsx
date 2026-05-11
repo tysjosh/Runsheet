@@ -7,16 +7,13 @@ import { useCallback, useEffect, useState } from "react";
 import LoadingSpinner from "../../../../../components/LoadingSpinner";
 import CargoManifestEditor from "../../../../../components/ops/CargoManifestEditor";
 import { useSchedulingWebSocket } from "../../../../../hooks/useSchedulingWebSocket";
+import { getCargo, getJob } from "../../../../../services/schedulingApi";
 import type {
   CargoItemStatus,
   Job,
   JobStatus,
   SchedulingCargoItem,
 } from "../../../../../types/api";
-import {
-  getCargo,
-  getJob,
-} from "../../../../../services/schedulingApi";
 
 /**
  * Job status badge color-coding (matches Job Board pattern).
@@ -24,15 +21,15 @@ import {
 function getJobStatusBadge(status: JobStatus): string {
   switch (status) {
     case "scheduled":
-      return "text-blue-700 bg-blue-100";
+      return "text-info-dark bg-info-light";
     case "assigned":
-      return "text-orange-700 bg-orange-100";
+      return "text-warning-dark bg-warning-light";
     case "in_progress":
-      return "text-green-700 bg-green-100";
+      return "text-success-dark bg-success-light";
     case "completed":
       return "text-gray-700 bg-gray-100";
     case "failed":
-      return "text-red-700 bg-red-100";
+      return "text-error-dark bg-error-light";
     case "cancelled":
       return "text-gray-500 bg-gray-100";
     default:
@@ -102,10 +99,10 @@ export default function CargoTrackingPage() {
       setCargoItems((prev) =>
         prev.map((item) =>
           item.item_id === event.item_id
-            ? event.item ?? {
+            ? (event.item ?? {
                 ...item,
                 item_status: event.new_status as CargoItemStatus,
-              }
+              })
             : item,
         ),
       );
@@ -120,9 +117,7 @@ export default function CargoTrackingPage() {
     (event: { job_id: string; new_status: string }) => {
       if (event.job_id !== jobId) return;
       setJob((prev) =>
-        prev
-          ? { ...prev, status: event.new_status as JobStatus }
-          : prev,
+        prev ? { ...prev, status: event.new_status as JobStatus } : prev,
       );
     },
     [jobId],
@@ -155,16 +150,16 @@ export default function CargoTrackingPage() {
         <div className="flex items-center gap-3 mb-4">
           <Link
             href="/ops/scheduling"
-            className="text-gray-400 hover:text-[#232323] transition-colors"
+            className="text-gray-400 hover:text-primary transition-colors"
             aria-label="Back to Job Board"
           >
             <ArrowLeft className="w-5 h-5" />
           </Link>
-          <div className="w-10 h-10 bg-[#232323] rounded-xl flex items-center justify-center">
+          <div className="w-10 h-10 bg-primary rounded-xl flex items-center justify-center">
             <Package className="w-5 h-5 text-white" />
           </div>
           <div>
-            <h1 className="text-2xl font-semibold text-[#232323]">
+            <h1 className="text-2xl font-semibold text-primary">
               Cargo Tracking
             </h1>
             <p className="text-gray-500">
@@ -178,7 +173,7 @@ export default function CargoTrackingPage() {
           <div className="flex flex-wrap items-center gap-4 mt-2 text-sm">
             <div>
               <span className="text-gray-500">Job ID: </span>
-              <span className="font-medium text-[#232323]">{job.job_id}</span>
+              <span className="font-medium text-primary">{job.job_id}</span>
             </div>
             <div>
               <span className="text-gray-500">Origin: </span>

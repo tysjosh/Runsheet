@@ -126,7 +126,6 @@ export interface FleetFilters {
   };
 }
 
-
 // ─── Scheduling Types (Logistics Scheduling & Dispatch) ──────────────────────
 
 export type JobType =

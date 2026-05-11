@@ -1,11 +1,12 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import type React from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
-  getTaxExemptions,
-  createTaxExemption,
-  type TaxExemption,
   type CreateTaxExemptionPayload,
+  createTaxExemption,
+  getTaxExemptions,
+  type TaxExemption,
 } from "../../services/complianceApi";
 
 // ─── Sub-view types ──────────────────────────────────────────────────────────
@@ -30,11 +31,11 @@ function getExpiryStatus(expiryDate: string): ExpiryStatus {
 function expiryStatusBadge(status: ExpiryStatus): string {
   switch (status) {
     case "active":
-      return "bg-green-100 text-green-800";
+      return "bg-success-light text-success-dark";
     case "expiring_soon":
-      return "bg-yellow-100 text-yellow-800";
+      return "bg-warning-light text-warning-dark";
     case "expired":
-      return "bg-red-100 text-red-800";
+      return "bg-error-light text-error-dark";
     default:
       return "bg-gray-100 text-gray-800";
   }
@@ -176,7 +177,7 @@ export default function ExemptionsPage() {
         {loading && (
           <div role="status" className="flex justify-center py-12">
             <span className="sr-only">Loading exemptions...</span>
-            <div className="animate-spin h-8 w-8 border-4 border-blue-600 border-t-transparent rounded-full" />
+            <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
           </div>
         )}
 
@@ -273,9 +274,7 @@ export default function ExemptionsPage() {
       <header className="mb-6">
         <div className="flex justify-between items-center">
           <div>
-            <h1 className="text-2xl font-bold">
-              Tax Exemption Certificates
-            </h1>
+            <h1 className="text-2xl font-bold">Tax Exemption Certificates</h1>
             <p className="text-gray-600 mt-1">
               Manage customer tax exemption certificates for dyed diesel, farm,
               and road-use exemptions.
@@ -295,7 +294,7 @@ export default function ExemptionsPage() {
               <button
                 type="button"
                 onClick={() => setViewMode("add")}
-                className="bg-blue-600 text-white px-4 py-2 rounded text-sm hover:bg-blue-700"
+                className="bg-primary text-white px-4 py-2 rounded text-sm hover:bg-primary-hover"
               >
                 Add Exemption
               </button>
@@ -308,7 +307,7 @@ export default function ExemptionsPage() {
       {error && (
         <div
           role="alert"
-          className="bg-red-50 border border-red-200 text-red-700 p-4 rounded mb-4"
+          className="bg-error-light border border-error-light text-error-dark p-4 rounded mb-4"
         >
           {error}
         </div>
@@ -432,7 +431,7 @@ function ExemptionForm({ onSubmit, onCancel, loading }: ExemptionFormProps) {
         <button
           type="submit"
           disabled={loading}
-          className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 disabled:opacity-50"
+          className="bg-primary text-white px-4 py-2 rounded hover:bg-primary-hover disabled:opacity-50"
         >
           {loading ? "Saving..." : "Add Exemption"}
         </button>

@@ -11,7 +11,13 @@
  * - Error handling on mutations
  */
 
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 
 // Mock next/navigation
 jest.mock("next/navigation", () => ({
@@ -40,6 +46,8 @@ jest.mock("../../services/api", () => ({
   ApiTimeoutError: class extends Error {},
 }));
 
+import OrderDetailPage from "../../app/orders/[orderId]/page";
+import type { FuelOrder, FuelOrderEvent } from "../../services/ordersApi";
 import {
   assignDriver,
   cancelOrder,
@@ -47,13 +55,17 @@ import {
   getOrderEvents,
   updateOrderStatus,
 } from "../../services/ordersApi";
-import type { FuelOrder, FuelOrderEvent } from "../../services/ordersApi";
-import OrderDetailPage from "../../app/orders/[orderId]/page";
 
 const mockGetOrder = getOrder as jest.MockedFunction<typeof getOrder>;
-const mockGetOrderEvents = getOrderEvents as jest.MockedFunction<typeof getOrderEvents>;
-const mockUpdateOrderStatus = updateOrderStatus as jest.MockedFunction<typeof updateOrderStatus>;
-const mockAssignDriver = assignDriver as jest.MockedFunction<typeof assignDriver>;
+const mockGetOrderEvents = getOrderEvents as jest.MockedFunction<
+  typeof getOrderEvents
+>;
+const mockUpdateOrderStatus = updateOrderStatus as jest.MockedFunction<
+  typeof updateOrderStatus
+>;
+const mockAssignDriver = assignDriver as jest.MockedFunction<
+  typeof assignDriver
+>;
 const mockCancelOrder = cancelOrder as jest.MockedFunction<typeof cancelOrder>;
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
@@ -151,7 +163,10 @@ describe("OrderDetailPage — intake metadata", () => {
     mockGetOrder.mockResolvedValue({
       data: orderFixture({
         intake_channel: "dispatcher",
-        intake_metadata: { dispatcher_user_id: "disp-42", session_id: "sess-99" },
+        intake_metadata: {
+          dispatcher_user_id: "disp-42",
+          session_id: "sess-99",
+        },
       }),
       request_id: "r1",
     });
@@ -180,7 +195,9 @@ describe("OrderDetailPage — intake metadata", () => {
 
     render(<OrderDetailPage />);
 
-    expect(await screen.findByText(/500 gallons of diesel/)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/500 gallons of diesel/),
+    ).toBeInTheDocument();
     expect(screen.getByLabelText(/call recording/i)).toBeInTheDocument();
     expect(screen.getByText("95%")).toBeInTheDocument();
   });
@@ -234,14 +251,19 @@ describe("OrderDetailPage — storm mode banner", () => {
 describe("OrderDetailPage — assigned driver card", () => {
   it("shows driver card when assigned_driver_id is present", async () => {
     mockGetOrder.mockResolvedValue({
-      data: orderFixture({ assigned_driver_id: "drv-007", assigned_run_id: "run-1" }),
+      data: orderFixture({
+        assigned_driver_id: "drv-007",
+        assigned_run_id: "run-1",
+      }),
       request_id: "r1",
     });
     mockGetOrderEvents.mockResolvedValue({ data: [], request_id: "r2" });
 
     render(<OrderDetailPage />);
 
-    expect(await screen.findByTestId("assigned-driver-card")).toBeInTheDocument();
+    expect(
+      await screen.findByTestId("assigned-driver-card"),
+    ).toBeInTheDocument();
     expect(screen.getByText("drv-007")).toBeInTheDocument();
     expect(screen.getByText(/run-1/)).toBeInTheDocument();
   });
@@ -285,14 +307,21 @@ describe("OrderDetailPage — mutation controls", () => {
     render(<OrderDetailPage />);
 
     await waitFor(() => expect(mockGetOrder).toHaveBeenCalled());
-    expect(screen.queryByRole("button", { name: /change status/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /cancel order/i })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /change status/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /cancel order/i }),
+    ).not.toBeInTheDocument();
   });
 
   it("shows cancel modal (HIGH risk) and submits", async () => {
     mockGetOrder.mockResolvedValue({ data: orderFixture(), request_id: "r1" });
     mockGetOrderEvents.mockResolvedValue({ data: [], request_id: "r2" });
-    mockCancelOrder.mockResolvedValue({ data: orderFixture({ status: "cancelled" }), request_id: "r3" });
+    mockCancelOrder.mockResolvedValue({
+      data: orderFixture({ status: "cancelled" }),
+      request_id: "r3",
+    });
 
     render(<OrderDetailPage />);
 
@@ -301,7 +330,9 @@ describe("OrderDetailPage — mutation controls", () => {
     fireEvent.click(screen.getByRole("button", { name: /cancel order/i }));
 
     // Modal appears
-    expect(await screen.findByText(/this action cannot be undone/i)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/this action cannot be undone/i),
+    ).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText(/cancellation reason/i), {
       target: { value: "Customer requested" },
@@ -311,7 +342,11 @@ describe("OrderDetailPage — mutation controls", () => {
       fireEvent.click(screen.getByRole("button", { name: /confirm cancel/i }));
     });
 
-    await waitFor(() => expect(mockCancelOrder).toHaveBeenCalledWith("ord_test123", { reason: "Customer requested" }));
+    await waitFor(() =>
+      expect(mockCancelOrder).toHaveBeenCalledWith("ord_test123", {
+        reason: "Customer requested",
+      }),
+    );
   });
 
   it("surfaces backend error_code on mutation failure", async () => {
@@ -326,7 +361,9 @@ describe("OrderDetailPage — mutation controls", () => {
     expect(await screen.findByText(/acme fuel co/i)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /assign driver/i }));
-    fireEvent.change(screen.getByLabelText(/driver id/i), { target: { value: "drv-off" } });
+    fireEvent.change(screen.getByLabelText(/driver id/i), {
+      target: { value: "drv-off" },
+    });
 
     await act(async () => {
       fireEvent.click(screen.getByText("Assign"));

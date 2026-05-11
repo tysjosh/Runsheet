@@ -8,8 +8,8 @@ interface FuelStatusSidebarProps {
 }
 
 const STATUS_CONFIG: Record<string, { bg: string; text: string }> = {
-  critical: { bg: "bg-red-100", text: "text-red-700" },
-  low: { bg: "bg-yellow-100", text: "text-yellow-700" },
+  critical: { bg: "bg-error-light", text: "text-error-dark" },
+  low: { bg: "bg-warning-light", text: "text-warning-dark" },
   empty: { bg: "bg-gray-100", text: "text-gray-700" },
 };
 
@@ -22,29 +22,28 @@ export default function FuelStatusSidebar({ alerts }: FuelStatusSidebarProps) {
   return (
     <div className="bg-white rounded-xl border border-gray-100">
       <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-100">
-        <Fuel className="w-4 h-4 text-orange-600" />
-        <h3 className="text-sm font-semibold text-[#232323]">Fuel Alerts</h3>
-        <span className="ml-auto text-xs text-orange-500 font-medium">
+        <Fuel className="w-4 h-4 text-warning" />
+        <h3 className="text-sm font-semibold text-primary">Fuel Alerts</h3>
+        <span className="ml-auto text-xs text-warning font-medium">
           {alerts.length}
         </span>
       </div>
 
       <div className="max-h-48 overflow-y-auto divide-y divide-gray-50">
         {alerts.length === 0 ? (
-          <div className="px-4 py-6 text-center text-sm text-green-600">
+          <div className="px-4 py-6 text-center text-sm text-success">
             All stations normal
           </div>
         ) : (
           alerts.map((alert) => {
-            const config =
-              STATUS_CONFIG[alert.status] ?? STATUS_CONFIG.low;
+            const config = STATUS_CONFIG[alert.status] ?? STATUS_CONFIG.low;
             return (
               <div
                 key={`${alert.station_id}-${alert.fuel_type}`}
                 className="px-4 py-2.5 hover:bg-gray-50"
               >
                 <div className="flex items-center justify-between">
-                  <span className="text-xs font-medium text-[#232323] truncate">
+                  <span className="text-xs font-medium text-primary truncate">
                     {alert.name}
                   </span>
                   <span
@@ -73,10 +72,10 @@ export default function FuelStatusSidebar({ alerts }: FuelStatusSidebarProps) {
                   <div
                     className={`h-full rounded-full ${
                       alert.status === "critical"
-                        ? "bg-red-500"
+                        ? "bg-error-light0"
                         : alert.status === "empty"
                           ? "bg-gray-400"
-                          : "bg-yellow-500"
+                          : "bg-warning-light0"
                     }`}
                     style={{
                       width: `${Math.min(alert.stock_percentage, 100)}%`,

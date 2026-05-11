@@ -133,7 +133,8 @@ export function usePlanExecutionSocket(
 
   // Construct WebSocket URL with tenant_id query parameter
   const wsUrl = useMemo(
-    () => `${WS_BASE_URL}/ws/plan-execution?tenant_id=${encodeURIComponent(tenantId)}`,
+    () =>
+      `${WS_BASE_URL}/ws/plan-execution?tenant_id=${encodeURIComponent(tenantId)}`,
     [tenantId],
   );
 

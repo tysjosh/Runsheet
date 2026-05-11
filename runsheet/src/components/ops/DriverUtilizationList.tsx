@@ -67,7 +67,8 @@ const STATUS_OPTIONS: { value: DriverStatus | ""; label: string }[] = [
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function getUtilization(driver: DriverUtilization, capacity: number): number {
-  if (driver.utilization_percentage != null) return driver.utilization_percentage;
+  if (driver.utilization_percentage != null)
+    return driver.utilization_percentage;
   if (capacity <= 0) return 0;
   return Math.round((driver.active_order_count / capacity) * 100);
 }
@@ -77,8 +78,8 @@ function isOverloaded(driver: DriverUtilization, capacity: number): boolean {
 }
 
 function getRowHighlight(driver: DriverUtilization, capacity: number): string {
-  if (isOverloaded(driver, capacity)) return "bg-red-50";
-  if (isMedicalCardExpiring(driver)) return "bg-yellow-50";
+  if (isOverloaded(driver, capacity)) return "bg-error-light";
+  if (isMedicalCardExpiring(driver)) return "bg-warning-light";
   return "";
 }
 
@@ -106,11 +107,11 @@ function getMedicalCardWarning(driver: DriverUtilization): string | null {
 function getStatusBadge(status: DriverStatus): string {
   switch (status) {
     case "active":
-      return "text-green-700 bg-green-100";
+      return "text-success-dark bg-success-light";
     case "on_break":
-      return "text-yellow-700 bg-yellow-100";
+      return "text-warning-dark bg-warning-light";
     case "off_duty":
-      return "text-orange-700 bg-orange-100";
+      return "text-warning-dark bg-warning-light";
     case "inactive":
       return "text-gray-700 bg-gray-100";
     default:
@@ -119,9 +120,9 @@ function getStatusBadge(status: DriverStatus): string {
 }
 
 function getBarColor(percentage: number): string {
-  if (percentage > 100) return "bg-red-500";
-  if (percentage >= 60) return "bg-yellow-500";
-  return "bg-green-500";
+  if (percentage > 100) return "bg-error-light0";
+  if (percentage >= 60) return "bg-warning-light0";
+  return "bg-success-light0";
 }
 
 function formatDate(dateStr?: string | null): string {
@@ -209,7 +210,9 @@ export default function DriverUtilizationList({
     <div>
       {/* Header */}
       <div className="px-6 py-4 border-b border-gray-100">
-        <h2 className="text-lg font-semibold text-[#232323]">Driver Utilization</h2>
+        <h2 className="text-lg font-semibold text-primary">
+          Driver Utilization
+        </h2>
       </div>
 
       {/* Status filter */}
@@ -224,7 +227,7 @@ export default function DriverUtilizationList({
             onChange={(e) =>
               onStatusFilterChange(e.target.value as DriverStatus | "")
             }
-            className="rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-[#232323] focus:border-transparent"
+            className="rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent"
             aria-label="Filter drivers by status"
           >
             {STATUS_OPTIONS.map((opt) => (
@@ -281,7 +284,7 @@ export default function DriverUtilizationList({
                     key={driver.driver_id}
                     className={`${getRowHighlight(driver, capacity)} transition-colors`}
                   >
-                    <td className="px-6 py-3 text-sm font-medium text-[#232323]">
+                    <td className="px-6 py-3 text-sm font-medium text-primary">
                       {driver.driver_id}
                     </td>
                     <td className="px-6 py-3 text-sm text-gray-700">
@@ -325,7 +328,9 @@ export default function DriverUtilizationList({
                     </td>
                     <td className="px-6 py-3">
                       {medWarning ? (
-                        <span className={`inline-flex items-center gap-1 text-xs font-medium ${isMedicalCardExpired(driver) ? "text-red-700" : "text-yellow-700"}`}>
+                        <span
+                          className={`inline-flex items-center gap-1 text-xs font-medium ${isMedicalCardExpired(driver) ? "text-error-dark" : "text-warning-dark"}`}
+                        >
                           <AlertTriangle className="w-3 h-3" />
                           {medWarning}
                         </span>

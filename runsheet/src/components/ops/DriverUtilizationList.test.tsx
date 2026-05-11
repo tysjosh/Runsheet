@@ -11,11 +11,15 @@
  */
 
 import { fireEvent, render, screen } from "@testing-library/react";
-import DriverUtilizationList, { type DriverUtilization } from "./DriverUtilizationList";
+import DriverUtilizationList, {
+  type DriverUtilization,
+} from "./DriverUtilizationList";
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
 
-function driverFixture(overrides: Partial<DriverUtilization> = {}): DriverUtilization {
+function driverFixture(
+  overrides: Partial<DriverUtilization> = {},
+): DriverUtilization {
   return {
     driver_id: "drv-001",
     driver_name: "John Smith",
@@ -45,7 +49,11 @@ describe("DriverUtilizationList — render", () => {
       <DriverUtilizationList
         drivers={[
           driverFixture({ driver_id: "drv-001", driver_name: "John Smith" }),
-          driverFixture({ driver_id: "drv-002", driver_name: "Jane Doe", active_order_count: 7 }),
+          driverFixture({
+            driver_id: "drv-002",
+            driver_name: "Jane Doe",
+            active_order_count: 7,
+          }),
         ]}
       />,
     );
@@ -95,7 +103,9 @@ describe("DriverUtilizationList — medical card warning", () => {
   it("shows Expired for past medical card", () => {
     render(
       <DriverUtilizationList
-        drivers={[driverFixture({ medical_card_expiry: "2020-01-01T00:00:00Z" })]}
+        drivers={[
+          driverFixture({ medical_card_expiry: "2020-01-01T00:00:00Z" }),
+        ]}
       />,
     );
 
@@ -105,7 +115,9 @@ describe("DriverUtilizationList — medical card warning", () => {
   it("does not show warning for far-future medical card", () => {
     render(
       <DriverUtilizationList
-        drivers={[driverFixture({ medical_card_expiry: "2030-01-01T00:00:00Z" })]}
+        drivers={[
+          driverFixture({ medical_card_expiry: "2030-01-01T00:00:00Z" }),
+        ]}
       />,
     );
 

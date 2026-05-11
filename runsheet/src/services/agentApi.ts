@@ -11,8 +11,8 @@
  * Requirements: 2.3, 2.4, 2.5, 8.4, 8.5, 9.5, 9.6
  */
 
-import { API_TIMEOUTS, ApiError, ApiTimeoutError } from "./api";
 import { getAuthToken } from "../utils/auth";
+import { API_TIMEOUTS, ApiError, ApiTimeoutError } from "./api";
 import { getCurrentTenantId } from "./tenant";
 
 // ─── Configuration ───────────────────────────────────────────────────────────
@@ -143,10 +143,10 @@ async function agentRequest<T>(
       "Content-Type": "application/json",
       ...(options?.headers as Record<string, string> | undefined),
     };
-    
+
     // Add Authorization header if token exists
     if (token) {
-      headers["Authorization"] = `Bearer ${token}`;
+      headers.Authorization = `Bearer ${token}`;
     }
 
     const response = await fetchWithTimeout(url, {

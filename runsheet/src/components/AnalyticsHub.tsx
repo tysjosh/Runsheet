@@ -1,51 +1,53 @@
 "use client";
-import { useState, lazy, Suspense } from "react";
-import { BarChart3, TrendingUp, AlertTriangle, Activity } from "lucide-react";
+import { Activity, AlertTriangle, BarChart3, TrendingUp } from "lucide-react";
+import { lazy, Suspense, useState } from "react";
 import ErrorBoundary from "./ErrorBoundary";
 import LoadingSpinner from "./LoadingSpinner";
+import { PageHeader, type Tab, TabNavigation } from "./ui";
 
 const Analytics = lazy(() => import("./Analytics"));
 const SchedulingMetricsPage = lazy(() => import("./ops/SchedulingMetricsPage"));
 const FailureAnalytics = lazy(() => import("../app/ops/failures/page"));
-const OpsMonitoringDashboard = lazy(() => import("./ops/OpsMonitoringDashboard"));
+const OpsMonitoringDashboard = lazy(
+  () => import("./ops/OpsMonitoringDashboard"),
+);
 
-const TABS = [
-  { id: "overview", label: "Overview", icon: BarChart3 },
-  { id: "scheduling", label: "Scheduling Metrics", icon: TrendingUp },
-  { id: "failures", label: "Failure Analytics", icon: AlertTriangle },
-  { id: "ops-monitoring", label: "Ops Monitoring", icon: Activity },
-] as const;
+const TABS: Tab[] = [
+  {
+    id: "overview",
+    label: "Overview",
+    icon: <BarChart3 className="w-4 h-4" />,
+  },
+  {
+    id: "scheduling",
+    label: "Scheduling Metrics",
+    icon: <TrendingUp className="w-4 h-4" />,
+  },
+  {
+    id: "failures",
+    label: "Failure Analytics",
+    icon: <AlertTriangle className="w-4 h-4" />,
+  },
+  {
+    id: "ops-monitoring",
+    label: "Ops Monitoring",
+    icon: <Activity className="w-4 h-4" />,
+  },
+];
 
-type TabId = (typeof TABS)[number]["id"];
+type TabId = string;
 
 export default function AnalyticsHub() {
   const [activeTab, setActiveTab] = useState<TabId>("overview");
 
   return (
     <div className="flex flex-col h-full">
-      <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
-        <h1 className="text-xl font-semibold text-gray-900">Analytics & Monitoring</h1>
-      </div>
-      <div className="flex border-b border-gray-200 px-6">
-        {TABS.map((tab) => {
-          const Icon = tab.icon;
-          const isActive = activeTab === tab.id;
-          return (
-            <button
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
-              className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
-                isActive
-                  ? "border-gray-900 text-gray-900"
-                  : "border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"
-              }`}
-            >
-              <Icon className="w-4 h-4" />
-              {tab.label}
-            </button>
-          );
-        })}
-      </div>
+      <PageHeader title="Analytics & Monitoring" />
+      <TabNavigation
+        tabs={TABS}
+        activeTab={activeTab}
+        onChange={setActiveTab}
+      />
       <div className="flex-1 overflow-auto">
         <Suspense fallback={<LoadingSpinner message="Loading..." />}>
           {activeTab === "overview" && (

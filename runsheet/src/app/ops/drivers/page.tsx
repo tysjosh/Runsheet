@@ -3,11 +3,11 @@
 import { Truck } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import LoadingSpinner from "../../../components/LoadingSpinner";
-import DriverUtilizationList from "../../../components/ops/DriverUtilizationList";
 import type {
   DriverStatus,
   DriverUtilization,
 } from "../../../components/ops/DriverUtilizationList";
+import DriverUtilizationList from "../../../components/ops/DriverUtilizationList";
 
 /**
  * Drivers page — displays the DriverUtilizationList with data fetched
@@ -51,11 +51,11 @@ export default function DriversPage() {
     <div className="h-full flex flex-col bg-white">
       <div className="border-b border-gray-100 px-8 py-6">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 bg-[#232323] rounded-xl flex items-center justify-center">
+          <div className="w-10 h-10 bg-primary rounded-xl flex items-center justify-center">
             <Truck className="w-5 h-5 text-white" />
           </div>
           <div>
-            <h1 className="text-2xl font-semibold text-[#232323]">
+            <h1 className="text-2xl font-semibold text-primary">
               Driver Utilization
             </h1>
             <p className="text-gray-500">

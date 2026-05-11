@@ -53,9 +53,10 @@ export default function Sidebar({
     <aside
       className={`h-full transition-all duration-300 ease-in-out relative flex-shrink-0`}
       style={{
-        backgroundColor: "#f8f8f8",
+        backgroundColor: "var(--color-surface-muted)",
         width: isCollapsed ? "72px" : "240px",
-        borderRight: "1px solid rgba(35,35,35,0.08)",
+        borderRight:
+          "1px solid color-mix(in srgb, var(--color-primary) 8%, transparent)",
       }}
     >
       {/* Toggle Button */}
@@ -65,26 +66,28 @@ export default function Sidebar({
         aria-expanded={!isCollapsed}
         className="absolute -right-3 border rounded-full p-1.5 z-20 transition-all duration-200 shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-500"
         style={{
-          backgroundColor: "white",
-          borderColor: "rgba(35,35,35,0.12)",
+          backgroundColor: "var(--color-surface)",
+          borderColor:
+            "color-mix(in srgb, var(--color-primary) 12%, transparent)",
           top: "20px",
         }}
         onMouseEnter={(e) => {
-          e.currentTarget.style.backgroundColor = "#232323";
-          e.currentTarget.style.borderColor = "#232323";
+          e.currentTarget.style.backgroundColor = "var(--color-primary)";
+          e.currentTarget.style.borderColor = "var(--color-primary)";
           const icon = e.currentTarget.querySelector("svg");
           if (icon) icon.style.color = "white";
         }}
         onMouseLeave={(e) => {
-          e.currentTarget.style.backgroundColor = "white";
-          e.currentTarget.style.borderColor = "rgba(35,35,35,0.12)";
+          e.currentTarget.style.backgroundColor = "var(--color-surface)";
+          e.currentTarget.style.borderColor =
+            "color-mix(in srgb, var(--color-primary) 12%, transparent)";
           const icon = e.currentTarget.querySelector("svg");
-          if (icon) icon.style.color = "#232323";
+          if (icon) icon.style.color = "var(--color-primary)";
         }}
       >
         <ChevronLeft
           className={`w-4 h-4 transition-transform duration-300 ${isCollapsed ? "rotate-180" : ""}`}
-          style={{ color: "#232323" }}
+          style={{ color: "var(--color-primary)" }}
         />
       </button>
 
@@ -96,25 +99,29 @@ export default function Sidebar({
                 className={`flex items-center ${isCollapsed ? "justify-center" : "justify-start"} px-3 py-2.5 ${isCollapsed ? "rounded-2xl" : "rounded-lg"} cursor-pointer transition-all duration-200`}
                 style={{
                   color:
-                    activeItem.toLowerCase() === item.id ? "white" : "#232323",
+                    activeItem.toLowerCase() === item.id
+                      ? "white"
+                      : "var(--color-primary)",
                   backgroundColor:
                     activeItem.toLowerCase() === item.id
-                      ? "#232323"
+                      ? "var(--color-primary)"
                       : "transparent",
                 }}
                 onMouseEnter={(e) => {
                   if (activeItem.toLowerCase() !== item.id) {
                     e.currentTarget.style.backgroundColor =
-                      "rgba(35,35,35,0.06)";
+                      "color-mix(in srgb, var(--color-primary) 6%, transparent)";
                   } else {
-                    e.currentTarget.style.backgroundColor = "#1a1a1a";
+                    e.currentTarget.style.backgroundColor =
+                      "var(--color-primary-hover)";
                   }
                 }}
                 onMouseLeave={(e) => {
                   if (activeItem.toLowerCase() !== item.id) {
                     e.currentTarget.style.backgroundColor = "transparent";
                   } else {
-                    e.currentTarget.style.backgroundColor = "#232323";
+                    e.currentTarget.style.backgroundColor =
+                      "var(--color-primary)";
                   }
                 }}
                 onClick={() => handleItemClick(item.id)}
@@ -129,7 +136,7 @@ export default function Sidebar({
                       color:
                         activeItem.toLowerCase() === item.id
                           ? "white"
-                          : "#232323",
+                          : "var(--color-primary)",
                     }}
                   />
                   {!isCollapsed && (
@@ -153,30 +160,34 @@ export default function Sidebar({
       >
         <div
           className="flex items-center space-x-3 p-3 rounded-lg transition-colors"
-          style={{ backgroundColor: "rgba(255,255,255,0.6)" }}
+          style={{
+            backgroundColor:
+              "color-mix(in srgb, var(--color-surface) 60%, transparent)",
+          }}
         >
-          <div
-            className="w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0"
-            style={{ backgroundColor: "#232323" }}
-          >
+          <div className="w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0 bg-primary">
             <User className="w-5 h-5 text-white" />
           </div>
           <div className="flex-1 min-w-0">
-            <p className="text-sm font-medium" style={{ color: "#232323" }}>
+            <p
+              className="text-sm font-medium"
+              style={{ color: "var(--color-primary)" }}
+            >
               User
             </p>
           </div>
           <button
             onClick={handleLogout}
             className="flex-shrink-0 transition-all duration-200 p-1.5 rounded-md"
-            style={{ color: "#666" }}
+            style={{ color: "var(--color-gray-500)" }}
             onMouseEnter={(e) => {
-              e.currentTarget.style.backgroundColor = "rgba(239,68,68,0.1)";
-              e.currentTarget.style.color = "#ef4444";
+              e.currentTarget.style.backgroundColor =
+                "color-mix(in srgb, var(--color-error) 10%, transparent)";
+              e.currentTarget.style.color = "var(--color-error)";
             }}
             onMouseLeave={(e) => {
               e.currentTarget.style.backgroundColor = "transparent";
-              e.currentTarget.style.color = "#666";
+              e.currentTarget.style.color = "var(--color-gray-500)";
             }}
             title="Logout"
           >
@@ -191,14 +202,14 @@ export default function Sidebar({
       >
         <button
           onClick={handleLogout}
-          className="w-10 h-10 rounded-full flex items-center justify-center transition-all duration-200"
-          style={{ backgroundColor: "#232323" }}
+          className="w-10 h-10 rounded-full flex items-center justify-center transition-all duration-200 bg-primary hover:bg-primary-hover"
           onMouseEnter={(e) => {
-            e.currentTarget.style.backgroundColor = "#1a1a1a";
+            e.currentTarget.style.backgroundColor =
+              "var(--color-primary-hover)";
             e.currentTarget.style.transform = "scale(1.05)";
           }}
           onMouseLeave={(e) => {
-            e.currentTarget.style.backgroundColor = "#232323";
+            e.currentTarget.style.backgroundColor = "var(--color-primary)";
             e.currentTarget.style.transform = "scale(1)";
           }}
           title="Logout"

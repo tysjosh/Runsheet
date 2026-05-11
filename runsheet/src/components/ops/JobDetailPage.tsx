@@ -23,30 +23,35 @@
  */
 
 import {
+  Activity,
+  AlertTriangle,
   ArrowLeft,
   Calendar,
   Clock,
+  FileText,
+  Flag,
+  Hash,
   MapPin,
   Package,
+  Repeat,
+  Timer,
   Truck,
   User,
-  AlertTriangle,
-  FileText,
-  Activity,
-  Hash,
-  Flag,
-  Timer,
-  RefreshCw,
-  Repeat,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
+import {
+  getCargo,
+  getJob,
+  getJobEta,
+  reassignAsset,
+  transitionStatus,
+} from "../../services/schedulingApi";
 import type {
   Job,
   JobEvent,
   JobStatus,
   SchedulingCargoItem,
 } from "../../types/api";
-import { getJob, getCargo, transitionStatus, getJobEta, reassignAsset } from "../../services/schedulingApi";
 import LoadingSpinner from "../LoadingSpinner";
 import CargoManifestEditor from "./CargoManifestEditor";
 import JobActionButtons from "./JobActionButtons";
@@ -95,18 +100,18 @@ function formatEventType(eventType: string): string {
 }
 
 function getStatusBadge(status: string, delayed?: boolean): string {
-  if (delayed) return "text-yellow-700 bg-yellow-100";
+  if (delayed) return "text-warning-dark bg-warning-light";
   switch (status) {
     case "scheduled":
-      return "text-blue-700 bg-blue-100";
+      return "text-info-dark bg-info-light";
     case "assigned":
-      return "text-orange-700 bg-orange-100";
+      return "text-warning-dark bg-warning-light";
     case "in_progress":
-      return "text-green-700 bg-green-100";
+      return "text-success-dark bg-success-light";
     case "completed":
       return "text-gray-600 bg-gray-100";
     case "failed":
-      return "text-red-700 bg-red-100";
+      return "text-error-dark bg-error-light";
     case "cancelled":
       return "text-gray-500 bg-gray-100";
     default:
@@ -117,11 +122,11 @@ function getStatusBadge(status: string, delayed?: boolean): string {
 function getPriorityBadge(priority: string): string {
   switch (priority) {
     case "urgent":
-      return "text-red-700 bg-red-100";
+      return "text-error-dark bg-error-light";
     case "high":
-      return "text-orange-700 bg-orange-100";
+      return "text-warning-dark bg-warning-light";
     case "normal":
-      return "text-blue-700 bg-blue-100";
+      return "text-info-dark bg-info-light";
     case "low":
       return "text-gray-600 bg-gray-100";
     default:
@@ -160,44 +165,62 @@ function EventTimeline({ events }: EventTimelineProps) {
   }
 
   // Separate parts_consumed events for special rendering
-  const partsConsumedEvents = sorted.filter((e) => e.event_type === "parts_consumed");
+  const partsConsumedEvents = sorted.filter(
+    (e) => e.event_type === "parts_consumed",
+  );
   const otherEvents = sorted.filter((e) => e.event_type !== "parts_consumed");
 
   return (
     <div className="space-y-6">
       {/* Parts Consumed Section (Requirement 7.8) */}
       {partsConsumedEvents.length > 0 && (
-        <div className="border border-blue-100 rounded-lg bg-blue-50/50 p-4">
+        <div className="border border-info rounded-lg bg-info-light/50 p-4">
           <div className="flex items-center gap-2 mb-3">
-            <Package className="w-4 h-4 text-blue-600" />
-            <h4 className="text-sm font-medium text-[#232323]">Parts Consumed</h4>
-            <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 font-medium">
-              {partsConsumedEvents.length} {partsConsumedEvents.length === 1 ? "event" : "events"}
+            <Package className="w-4 h-4 text-info" />
+            <h4 className="text-sm font-medium text-primary">Parts Consumed</h4>
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-info-light text-info-dark font-medium">
+              {partsConsumedEvents.length}{" "}
+              {partsConsumedEvents.length === 1 ? "event" : "events"}
             </span>
           </div>
           <div className="space-y-2">
             {partsConsumedEvents.map((event) => {
               const payload = event.event_payload || {};
-              const items = (payload.items as Array<{ name?: string; item_name?: string; quantity?: number }>) || [];
+              const items =
+                (payload.items as Array<{
+                  name?: string;
+                  item_name?: string;
+                  quantity?: number;
+                }>) || [];
               const itemName = payload.item_name as string | undefined;
               const quantity = payload.quantity_change as number | undefined;
 
               return (
-                <div key={event.event_id} className="bg-white rounded-lg px-3 py-2 border border-blue-100">
+                <div
+                  key={event.event_id}
+                  className="bg-white rounded-lg px-3 py-2 border border-info"
+                >
                   <div className="flex items-center justify-between mb-1">
                     <span className="text-xs text-gray-500">
                       {formatDateTime(event.event_timestamp)}
                     </span>
                     {event.actor_id && (
-                      <span className="text-[10px] text-gray-400">by {event.actor_id}</span>
+                      <span className="text-[10px] text-gray-400">
+                        by {event.actor_id}
+                      </span>
                     )}
                   </div>
                   {items.length > 0 ? (
                     <div className="space-y-1">
                       {items.map((item, idx) => (
-                        <div key={idx} className="flex items-center justify-between text-xs">
-                          <span className="text-gray-700">{item.name || item.item_name || "Unknown item"}</span>
-                          <span className="font-medium text-blue-700">
+                        <div
+                          key={idx}
+                          className="flex items-center justify-between text-xs"
+                        >
+                          <span className="text-gray-700">
+                            {item.name || item.item_name || "Unknown item"}
+                          </span>
+                          <span className="font-medium text-info-dark">
                             -{Math.abs(item.quantity || 0)} units
                           </span>
                         </div>
@@ -206,7 +229,7 @@ function EventTimeline({ events }: EventTimelineProps) {
                   ) : itemName ? (
                     <div className="flex items-center justify-between text-xs">
                       <span className="text-gray-700">{itemName}</span>
-                      <span className="font-medium text-blue-700">
+                      <span className="font-medium text-info-dark">
                         -{Math.abs(quantity || 0)} units
                       </span>
                     </div>
@@ -216,7 +239,9 @@ function EventTimeline({ events }: EventTimelineProps) {
                         .filter(([key]) => key !== "items")
                         .map(([key, value]) => (
                           <span key={key} className="mr-3">
-                            <span className="text-gray-400">{key.replace(/_/g, " ")}:</span>{" "}
+                            <span className="text-gray-400">
+                              {key.replace(/_/g, " ")}:
+                            </span>{" "}
                             {String(value)}
                           </span>
                         ))}
@@ -249,7 +274,7 @@ function EventTimeline({ events }: EventTimelineProps) {
             {/* Event content */}
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2 flex-wrap">
-                <span className="text-sm font-medium text-[#232323]">
+                <span className="text-sm font-medium text-primary">
                   {formatEventType(event.event_type)}
                 </span>
                 <span className="text-xs text-gray-400">
@@ -307,7 +332,7 @@ function DetailField({ icon, label, value }: DetailFieldProps) {
         <p className="text-xs font-medium text-gray-500 uppercase tracking-wider">
           {label}
         </p>
-        <p className="text-sm text-[#232323] mt-0.5">{value ?? "—"}</p>
+        <p className="text-sm text-primary mt-0.5">{value ?? "—"}</p>
       </div>
     </div>
   );
@@ -325,7 +350,10 @@ export default function JobDetailPage({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [transitionError, setTransitionError] = useState("");
-  const [eta, setEta] = useState<{ eta_minutes: number; estimated_arrival: string } | null>(null);
+  const [eta, setEta] = useState<{
+    eta_minutes: number;
+    estimated_arrival: string;
+  } | null>(null);
   const [showReassign, setShowReassign] = useState(false);
   const [reassignAssetId, setReassignAssetId] = useState("");
   const [reassigning, setReassigning] = useState(false);
@@ -378,15 +406,11 @@ export default function JobDetailPage({
    * Handle status transition and update local job state.
    */
   const handleTransition = useCallback(
-    async (
-      id: string,
-      targetStatus: JobStatus,
-      failureReason?: string,
-    ) => {
+    async (id: string, targetStatus: JobStatus, failureReason?: string) => {
       setTransitionError("");
       try {
         // Call API directly so we can catch errors for inline display
-        const res = await transitionStatus(id, {
+        const _res = await transitionStatus(id, {
           status: targetStatus,
           failure_reason: failureReason,
         });
@@ -406,7 +430,9 @@ export default function JobDetailPage({
         }
       } catch (err) {
         setTransitionError(
-          err instanceof Error ? err.message : "Failed to transition job status",
+          err instanceof Error
+            ? err.message
+            : "Failed to transition job status",
         );
       }
     },
@@ -438,7 +464,7 @@ export default function JobDetailPage({
         <div className="border-b border-gray-100 px-8 py-4">
           <button
             onClick={onBack}
-            className="flex items-center gap-2 text-sm text-gray-600 hover:text-[#232323] transition-colors"
+            className="flex items-center gap-2 text-sm text-gray-600 hover:text-primary transition-colors"
           >
             <ArrowLeft className="w-4 h-4" />
             Back to Jobs
@@ -457,7 +483,7 @@ export default function JobDetailPage({
         <div className="border-b border-gray-100 px-8 py-4">
           <button
             onClick={onBack}
-            className="flex items-center gap-2 text-sm text-gray-600 hover:text-[#232323] transition-colors"
+            className="flex items-center gap-2 text-sm text-gray-600 hover:text-primary transition-colors"
           >
             <ArrowLeft className="w-4 h-4" />
             Back to Jobs
@@ -465,14 +491,13 @@ export default function JobDetailPage({
         </div>
         <div className="flex-1 flex items-center justify-center">
           <div className="text-center">
-            <AlertTriangle className="w-10 h-10 text-red-400 mx-auto mb-3" />
-            <p className="text-sm text-red-600 mb-4">
+            <AlertTriangle className="w-10 h-10 text-error mx-auto mb-3" />
+            <p className="text-sm text-error mb-4">
               {error || "Job not found"}
             </p>
             <button
               onClick={loadData}
-              className="px-4 py-2 text-sm text-white rounded-lg transition-colors hover:opacity-90"
-              style={{ backgroundColor: "#232323" }}
+              className="px-4 py-2 text-sm text-white rounded-lg transition-colors bg-primary hover:bg-primary-hover"
             >
               Retry
             </button>
@@ -492,20 +517,22 @@ export default function JobDetailPage({
           <div className="flex items-center gap-4">
             <button
               onClick={onBack}
-              className="flex items-center gap-2 text-sm text-gray-600 hover:text-[#232323] transition-colors"
+              className="flex items-center gap-2 text-sm text-gray-600 hover:text-primary transition-colors"
               aria-label="Back to Jobs"
             >
               <ArrowLeft className="w-4 h-4" />
             </button>
             <div>
               <div className="flex items-center gap-3">
-                <h1 className="text-2xl font-semibold text-[#232323]">
+                <h1 className="text-2xl font-semibold text-primary">
                   {job.job_id}
                 </h1>
                 <span
                   className={`inline-flex items-center px-2.5 py-0.5 rounded-md text-xs font-medium ${getStatusBadge(job.status, job.delayed)}`}
                 >
-                  {job.delayed ? "Delayed" : (job.status ?? "unknown").replace(/_/g, " ")}
+                  {job.delayed
+                    ? "Delayed"
+                    : (job.status ?? "unknown").replace(/_/g, " ")}
                 </span>
                 <span
                   className={`inline-flex items-center px-2.5 py-0.5 rounded-md text-xs font-medium ${getPriorityBadge(job.priority)}`}
@@ -552,13 +579,15 @@ export default function JobDetailPage({
           <button
             onClick={handleReassign}
             disabled={reassigning || !reassignAssetId.trim()}
-            className="px-3 py-1.5 text-xs font-medium text-white rounded-lg disabled:opacity-50"
-            style={{ backgroundColor: "#232323" }}
+            className="px-3 py-1.5 text-xs font-medium text-white rounded-lg disabled:opacity-50 bg-primary hover:bg-primary-hover"
           >
             {reassigning ? "Reassigning..." : "Confirm"}
           </button>
           <button
-            onClick={() => { setShowReassign(false); setReassignAssetId(""); }}
+            onClick={() => {
+              setShowReassign(false);
+              setReassignAssetId("");
+            }}
             className="px-3 py-1.5 text-xs text-gray-500 hover:text-gray-700"
           >
             Cancel
@@ -569,7 +598,7 @@ export default function JobDetailPage({
       {/* Transition error */}
       {transitionError && (
         <div className="mx-8 mt-2 mb-0">
-          <p className="text-sm text-red-600 bg-red-50 px-4 py-3 rounded-lg">
+          <p className="text-sm text-error bg-error-light px-4 py-3 rounded-lg">
             {transitionError}
           </p>
         </div>
@@ -603,7 +632,9 @@ export default function JobDetailPage({
                   <span
                     className={`inline-flex items-center px-2.5 py-0.5 rounded-md text-xs font-medium ${getStatusBadge(job.status, job.delayed)}`}
                   >
-                    {job.delayed ? "Delayed" : (job.status ?? "unknown").replace(/_/g, " ")}
+                    {job.delayed
+                      ? "Delayed"
+                      : (job.status ?? "unknown").replace(/_/g, " ")}
                   </span>
                 }
               />
@@ -691,7 +722,7 @@ export default function JobDetailPage({
                   icon={<AlertTriangle className="w-4 h-4" />}
                   label="Failure Reason"
                   value={
-                    <span className="text-red-600">{job.failure_reason}</span>
+                    <span className="text-error">{job.failure_reason}</span>
                   }
                 />
               )}

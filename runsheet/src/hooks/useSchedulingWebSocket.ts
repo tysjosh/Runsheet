@@ -173,12 +173,14 @@ export interface UseSchedulingWebSocketReturn {
 export function useSchedulingWebSocket(
   options: SchedulingWebSocketOptions = {},
 ): UseSchedulingWebSocketReturn {
-  const [lastJobCreated, setLastJobCreated] =
-    useState<JobCreatedEvent | null>(null);
+  const [lastJobCreated, setLastJobCreated] = useState<JobCreatedEvent | null>(
+    null,
+  );
   const [lastStatusChanged, setLastStatusChanged] =
     useState<StatusChangedEvent | null>(null);
-  const [lastDelayAlert, setLastDelayAlert] =
-    useState<DelayAlertEvent | null>(null);
+  const [lastDelayAlert, setLastDelayAlert] = useState<DelayAlertEvent | null>(
+    null,
+  );
   const [lastCargoUpdate, setLastCargoUpdate] =
     useState<CargoUpdateEvent | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<string | null>(null);

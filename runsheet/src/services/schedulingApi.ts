@@ -1,14 +1,14 @@
-import { API_TIMEOUTS, ApiError, ApiTimeoutError } from "./api";
-import { getAuthToken } from "../utils/auth";
 import type {
+  CargoItemStatus,
   Job,
   JobEvent,
   JobStatus,
   JobType,
   Priority,
   SchedulingCargoItem,
-  CargoItemStatus,
 } from "../types/api";
+import { getAuthToken } from "../utils/auth";
+import { API_TIMEOUTS, ApiError, ApiTimeoutError } from "./api";
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -170,10 +170,10 @@ async function schedulingRequest<T>(
       "Content-Type": "application/json",
       ...(options?.headers as Record<string, string> | undefined),
     };
-    
+
     // Add Authorization header if token exists
     if (token) {
-      headers["Authorization"] = `Bearer ${token}`;
+      headers.Authorization = `Bearer ${token}`;
     }
 
     const response = await fetchWithTimeout(url, {
@@ -207,7 +207,9 @@ async function schedulingRequest<T>(
 export async function getJobs(
   filters: JobFilters = {},
 ): Promise<PaginatedResponse<Job>> {
-  const qs = buildQueryString(filters as Record<string, string | number | boolean | undefined>);
+  const qs = buildQueryString(
+    filters as Record<string, string | number | boolean | undefined>,
+  );
   return schedulingRequest<PaginatedResponse<Job>>(`/scheduling/jobs${qs}`);
 }
 
@@ -300,10 +302,12 @@ export async function updateCargoItemStatus(
 export async function searchCargo(
   filters: CargoSearchFilters = {},
 ): Promise<PaginatedResponse<SchedulingCargoItem & { job_id: string }>> {
-  const qs = buildQueryString(filters as Record<string, string | number | boolean | undefined>);
-  return schedulingRequest<PaginatedResponse<SchedulingCargoItem & { job_id: string }>>(
-    `/scheduling/cargo/search${qs}`,
+  const qs = buildQueryString(
+    filters as Record<string, string | number | boolean | undefined>,
   );
+  return schedulingRequest<
+    PaginatedResponse<SchedulingCargoItem & { job_id: string }>
+  >(`/scheduling/cargo/search${qs}`);
 }
 
 // ─── Metrics Endpoints ───────────────────────────────────────────────────────
@@ -312,7 +316,9 @@ export async function searchCargo(
 export async function getJobMetrics(
   filters: MetricsFilters = {},
 ): Promise<SingleResponse<JobMetricsBucket[]>> {
-  const qs = buildQueryString(filters as Record<string, string | number | boolean | undefined>);
+  const qs = buildQueryString(
+    filters as Record<string, string | number | boolean | undefined>,
+  );
   return schedulingRequest<SingleResponse<JobMetricsBucket[]>>(
     `/scheduling/metrics/jobs${qs}`,
   );
@@ -322,7 +328,9 @@ export async function getJobMetrics(
 export async function getCompletionMetrics(
   filters: MetricsFilters = {},
 ): Promise<SingleResponse<CompletionMetric[]>> {
-  const qs = buildQueryString(filters as Record<string, string | number | boolean | undefined>);
+  const qs = buildQueryString(
+    filters as Record<string, string | number | boolean | undefined>,
+  );
   return schedulingRequest<SingleResponse<CompletionMetric[]>>(
     `/scheduling/metrics/completion${qs}`,
   );
@@ -332,7 +340,9 @@ export async function getCompletionMetrics(
 export async function getAssetUtilization(
   filters: MetricsFilters = {},
 ): Promise<SingleResponse<AssetUtilizationMetric[]>> {
-  const qs = buildQueryString(filters as Record<string, string | number | boolean | undefined>);
+  const qs = buildQueryString(
+    filters as Record<string, string | number | boolean | undefined>,
+  );
   return schedulingRequest<SingleResponse<AssetUtilizationMetric[]>>(
     `/scheduling/metrics/assets${qs}`,
   );
@@ -342,19 +352,29 @@ export async function getAssetUtilization(
 export async function getDelayMetrics(
   filters: MetricsFilters = {},
 ): Promise<SingleResponse<DelayMetrics>> {
-  const qs = buildQueryString(filters as Record<string, string | number | boolean | undefined>);
+  const qs = buildQueryString(
+    filters as Record<string, string | number | boolean | undefined>,
+  );
   return schedulingRequest<SingleResponse<DelayMetrics>>(
     `/scheduling/metrics/delays${qs}`,
   );
 }
 
 /** GET /scheduling/jobs/:id/eta — get ETA for a job */
-export async function getJobEta(
-  jobId: string,
-): Promise<SingleResponse<{ eta_minutes: number; estimated_arrival: string; calculated_at: string }>> {
-  return schedulingRequest<SingleResponse<{ eta_minutes: number; estimated_arrival: string; calculated_at: string }>>(
-    `/scheduling/jobs/${encodeURIComponent(jobId)}/eta`,
-  );
+export async function getJobEta(jobId: string): Promise<
+  SingleResponse<{
+    eta_minutes: number;
+    estimated_arrival: string;
+    calculated_at: string;
+  }>
+> {
+  return schedulingRequest<
+    SingleResponse<{
+      eta_minutes: number;
+      estimated_arrival: string;
+      calculated_at: string;
+    }>
+  >(`/scheduling/jobs/${encodeURIComponent(jobId)}/eta`);
 }
 
 /** PATCH /scheduling/jobs/:id/reassign — reassign asset to a job */
@@ -370,4 +390,3 @@ export async function reassignAsset(
     },
   );
 }
-

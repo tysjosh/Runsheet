@@ -21,17 +21,23 @@ jest.mock("../../../services/commerceApi", () => ({
 }));
 
 import {
-  getAccount,
-  getAccountAging,
   applyCreditOverride,
   deleteCreditOverride,
+  getAccount,
+  getAccountAging,
 } from "../../../services/commerceApi";
 import AccountDetailPage from "../AccountDetailPage";
 
 const mockGetAccount = getAccount as jest.MockedFunction<typeof getAccount>;
-const mockGetAccountAging = getAccountAging as jest.MockedFunction<typeof getAccountAging>;
-const mockApplyCreditOverride = applyCreditOverride as jest.MockedFunction<typeof applyCreditOverride>;
-const mockDeleteCreditOverride = deleteCreditOverride as jest.MockedFunction<typeof deleteCreditOverride>;
+const mockGetAccountAging = getAccountAging as jest.MockedFunction<
+  typeof getAccountAging
+>;
+const mockApplyCreditOverride = applyCreditOverride as jest.MockedFunction<
+  typeof applyCreditOverride
+>;
+const mockDeleteCreditOverride = deleteCreditOverride as jest.MockedFunction<
+  typeof deleteCreditOverride
+>;
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -84,8 +90,14 @@ describe("AccountDetailPage", () => {
   });
 
   it("renders account details and aging buckets on successful fetch", async () => {
-    mockGetAccount.mockResolvedValue({ data: accountFixture(), request_id: "r1" } as any);
-    mockGetAccountAging.mockResolvedValue({ data: agingFixture(), request_id: "r2" } as any);
+    mockGetAccount.mockResolvedValue({
+      data: accountFixture(),
+      request_id: "r1",
+    } as any);
+    mockGetAccountAging.mockResolvedValue({
+      data: agingFixture(),
+      request_id: "r2",
+    } as any);
 
     render(<AccountDetailPage accountId="acc_001" />);
 
@@ -124,8 +136,14 @@ describe("AccountDetailPage", () => {
   });
 
   it("opens credit override drawer when button is clicked", async () => {
-    mockGetAccount.mockResolvedValue({ data: accountFixture(), request_id: "r1" } as any);
-    mockGetAccountAging.mockResolvedValue({ data: agingFixture(), request_id: "r2" } as any);
+    mockGetAccount.mockResolvedValue({
+      data: accountFixture(),
+      request_id: "r1",
+    } as any);
+    mockGetAccountAging.mockResolvedValue({
+      data: agingFixture(),
+      request_id: "r2",
+    } as any);
 
     render(<AccountDetailPage accountId="acc_001" />);
 
@@ -146,9 +164,18 @@ describe("AccountDetailPage", () => {
       credit_state: "override",
       credit_override_expires_at: "2024-07-01T00:00:00Z",
     });
-    mockGetAccount.mockResolvedValue({ data: accountFixture(), request_id: "r1" } as any);
-    mockGetAccountAging.mockResolvedValue({ data: agingFixture(), request_id: "r2" } as any);
-    mockApplyCreditOverride.mockResolvedValue({ data: updatedAccount, request_id: "r3" } as any);
+    mockGetAccount.mockResolvedValue({
+      data: accountFixture(),
+      request_id: "r1",
+    } as any);
+    mockGetAccountAging.mockResolvedValue({
+      data: agingFixture(),
+      request_id: "r2",
+    } as any);
+    mockApplyCreditOverride.mockResolvedValue({
+      data: updatedAccount,
+      request_id: "r3",
+    } as any);
 
     render(<AccountDetailPage accountId="acc_001" />);
 
@@ -185,9 +212,18 @@ describe("AccountDetailPage", () => {
     });
     const accountAfterExpire = accountFixture({ credit_state: "ok" });
 
-    mockGetAccount.mockResolvedValue({ data: accountWithOverride, request_id: "r1" } as any);
-    mockGetAccountAging.mockResolvedValue({ data: agingFixture(), request_id: "r2" } as any);
-    mockDeleteCreditOverride.mockResolvedValue({ data: accountAfterExpire, request_id: "r3" } as any);
+    mockGetAccount.mockResolvedValue({
+      data: accountWithOverride,
+      request_id: "r1",
+    } as any);
+    mockGetAccountAging.mockResolvedValue({
+      data: agingFixture(),
+      request_id: "r2",
+    } as any);
+    mockDeleteCreditOverride.mockResolvedValue({
+      data: accountAfterExpire,
+      request_id: "r3",
+    } as any);
 
     render(<AccountDetailPage accountId="acc_001" />);
 
@@ -203,17 +239,27 @@ describe("AccountDetailPage", () => {
   });
 
   it("calls onViewCustomer when parent customer link is clicked", async () => {
-    mockGetAccount.mockResolvedValue({ data: accountFixture(), request_id: "r1" } as any);
-    mockGetAccountAging.mockResolvedValue({ data: agingFixture(), request_id: "r2" } as any);
+    mockGetAccount.mockResolvedValue({
+      data: accountFixture(),
+      request_id: "r1",
+    } as any);
+    mockGetAccountAging.mockResolvedValue({
+      data: agingFixture(),
+      request_id: "r2",
+    } as any);
 
     const onViewCustomer = jest.fn();
-    render(<AccountDetailPage accountId="acc_001" onViewCustomer={onViewCustomer} />);
+    render(
+      <AccountDetailPage accountId="acc_001" onViewCustomer={onViewCustomer} />,
+    );
 
     await waitFor(() => {
       expect(screen.getByText("Acme Main Account")).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: /View Parent Customer/i }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /View Parent Customer/i }),
+    );
     expect(onViewCustomer).toHaveBeenCalledWith("cust_001");
   });
 });

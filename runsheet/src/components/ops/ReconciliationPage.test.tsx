@@ -7,7 +7,7 @@
  *     cell-color mapping are exercised directly so the UI tests can
  *     stay simple.
  *  2. **4-way variance table rendering** — rows with variances beyond
- *     the threshold render with the ``bg-red-50`` row class (alert
+ *     the threshold render with the ``bg-error-light`` row class (alert
  *     highlighting, Req 4.4.3 visualization) and safe rows do not.
  *  3. **BOL download link from POD detail** — opening a row fetches
  *     the BOL via :func:`getPodBol`; the ``generated`` state exposes a
@@ -144,12 +144,12 @@ describe("varianceCellClass", () => {
   });
 
   it("returns red styling at or above threshold", () => {
-    expect(varianceCellClass(3.0)).toContain("text-red-700");
-    expect(varianceCellClass(-5.0)).toContain("text-red-700");
+    expect(varianceCellClass(3.0)).toContain("text-error-dark");
+    expect(varianceCellClass(-5.0)).toContain("text-error-dark");
   });
 
   it("returns yellow styling between half and full threshold", () => {
-    expect(varianceCellClass(1.6)).toContain("text-yellow-700");
+    expect(varianceCellClass(1.6)).toContain("text-warning-dark");
   });
 
   it("returns default styling for small variances", () => {
@@ -233,8 +233,8 @@ describe("ReconciliationPage", () => {
 
     expect(highRow).not.toBeNull();
     expect(cleanRow).not.toBeNull();
-    expect(highRow?.className).toContain("bg-red-50");
-    expect(cleanRow?.className).not.toContain("bg-red-50");
+    expect(highRow?.className).toContain("bg-error-light");
+    expect(cleanRow?.className).not.toContain("bg-error-light");
   });
 
   it("renders an empty-state message when no records come back", async () => {

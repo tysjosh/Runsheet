@@ -1,12 +1,12 @@
 /**
  * FilterBar Component - Standardized search and filter controls
- * 
+ *
  * Provides consistent filter layout across all pages.
  * Replaces multiple filter implementations.
  */
 
-import React from 'react';
-import { Search, Filter } from 'lucide-react';
+import { Search } from "lucide-react";
+import type React from "react";
 
 export interface FilterBarProps {
   searchValue?: string;
@@ -20,10 +20,10 @@ export interface FilterBarProps {
 export const FilterBar: React.FC<FilterBarProps> = ({
   searchValue,
   onSearchChange,
-  searchPlaceholder = 'Search...',
+  searchPlaceholder = "Search...",
   filters,
   actions,
-  className = '',
+  className = "",
 }) => {
   return (
     <div className={`flex gap-4 ${className}`}>
@@ -32,6 +32,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
           <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
           <input
             type="text"
+            aria-label="Search"
             placeholder={searchPlaceholder}
             value={searchValue}
             onChange={(e) => onSearchChange(e.target.value)}
@@ -45,7 +46,8 @@ export const FilterBar: React.FC<FilterBarProps> = ({
   );
 };
 
-export interface FilterSelectProps extends React.SelectHTMLAttributes<HTMLSelectElement> {
+export interface FilterSelectProps
+  extends React.SelectHTMLAttributes<HTMLSelectElement> {
   icon?: React.ReactNode;
   label?: string;
 }
@@ -53,7 +55,7 @@ export interface FilterSelectProps extends React.SelectHTMLAttributes<HTMLSelect
 export const FilterSelect: React.FC<FilterSelectProps> = ({
   icon,
   label,
-  className = '',
+  className = "",
   children,
   ...props
 }) => {
@@ -65,7 +67,7 @@ export const FilterSelect: React.FC<FilterSelectProps> = ({
         </div>
       )}
       <select
-        className={`${icon ? 'pl-10' : 'pl-4'} pr-8 py-3 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-gray-200 focus:border-gray-300 focus:outline-none bg-white min-w-[140px] ${className}`}
+        className={`${icon ? "pl-10" : "pl-4"} pr-8 py-3 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-gray-200 focus:border-gray-300 focus:outline-none bg-white min-w-[140px] ${className}`}
         aria-label={label}
         {...props}
       >

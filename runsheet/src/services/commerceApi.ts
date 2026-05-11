@@ -1,5 +1,5 @@
-import { API_TIMEOUTS, ApiError, ApiTimeoutError } from "./api";
 import { getAuthToken } from "../utils/auth";
+import { API_TIMEOUTS, ApiError, ApiTimeoutError } from "./api";
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -33,6 +33,9 @@ export interface Customer {
   primary_email: string | null;
   tax_id: string | null;
   status: CustomerStatus;
+  account_count?: number;
+  open_balance_cents?: number;
+  lifetime_revenue_cents?: number;
   created_at: string;
   updated_at: string;
   external_refs: Record<string, string>;
@@ -329,14 +332,21 @@ export interface AgingSnapshot {
 export interface CustomerFilters {
   cursor?: string;
   limit?: number;
+  page?: number;
+  size?: number;
+  search?: string;
   status?: CustomerStatus;
 }
 
 export interface AccountFilters {
   customer_id?: string;
   status?: AccountStatus;
+  tier?: AccountTier;
+  credit_state?: CreditState;
   cursor?: string;
   limit?: number;
+  page?: number;
+  size?: number;
 }
 
 export interface InvoiceFilters {
@@ -346,6 +356,8 @@ export interface InvoiceFilters {
   qbo_push_state?: QboPushState;
   cursor?: string;
   limit?: number;
+  page?: number;
+  size?: number;
 }
 
 export interface PaymentFilters {
@@ -414,10 +426,10 @@ async function commerceRequest<T>(
       "Content-Type": "application/json",
       ...(options?.headers as Record<string, string> | undefined),
     };
-    
+
     // Add Authorization header if token exists
     if (token) {
-      headers["Authorization"] = `Bearer ${token}`;
+      headers.Authorization = `Bearer ${token}`;
     }
 
     const response = await fetchWithTimeout(url, {
@@ -749,7 +761,9 @@ export async function reversePayment(
 // ─── AR Aging Endpoints ──────────────────────────────────────────────────────
 
 /** GET /commerce/ar-aging — tenant-level AR aging with top accounts */
-export async function getArAging(): Promise<SingleResponse<TenantAgingResponse>> {
+export async function getArAging(): Promise<
+  SingleResponse<TenantAgingResponse>
+> {
   return commerceRequest<SingleResponse<TenantAgingResponse>>(
     "/commerce/ar-aging",
   );

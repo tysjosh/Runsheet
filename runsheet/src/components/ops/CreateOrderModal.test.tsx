@@ -10,7 +10,13 @@
  * - Modal open/close behavior
  */
 
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 
 jest.mock("../../services/ordersApi", () => ({
   createOrder: jest.fn(),
@@ -30,13 +36,18 @@ jest.mock("../../services/api", () => ({
 }));
 
 import { createOrder } from "../../services/ordersApi";
-import CreateOrderModal, { validateCreateOrderForm, type CreateOrderFormValues } from "./CreateOrderModal";
+import CreateOrderModal, {
+  type CreateOrderFormValues,
+  validateCreateOrderForm,
+} from "./CreateOrderModal";
 
 const mockCreateOrder = createOrder as jest.MockedFunction<typeof createOrder>;
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
 
-function validForm(overrides: Partial<CreateOrderFormValues> = {}): CreateOrderFormValues {
+function validForm(
+  overrides: Partial<CreateOrderFormValues> = {},
+): CreateOrderFormValues {
   return {
     customer_id: "CUST-001",
     customer_name: "Acme Fuel",
@@ -80,12 +91,16 @@ describe("validateCreateOrderForm", () => {
   });
 
   it("flags missing_volume when gallons <= 0 and not fill_to_full", () => {
-    const errors = validateCreateOrderForm(validForm({ gallons_requested: "0", fill_to_full: false }));
+    const errors = validateCreateOrderForm(
+      validForm({ gallons_requested: "0", fill_to_full: false }),
+    );
     expect(errors.gallons_requested).toMatch(/greater than 0/i);
   });
 
   it("accepts null gallons when fill_to_full is true", () => {
-    const errors = validateCreateOrderForm(validForm({ gallons_requested: "", fill_to_full: true }));
+    const errors = validateCreateOrderForm(
+      validForm({ gallons_requested: "", fill_to_full: true }),
+    );
     expect(errors.gallons_requested).toBeUndefined();
   });
 
@@ -101,7 +116,11 @@ describe("validateCreateOrderForm", () => {
 
   it("requires window for one_off call_type", () => {
     const errors = validateCreateOrderForm(
-      validForm({ call_type: "one_off", delivery_window_start: "", delivery_window_end: "" }),
+      validForm({
+        call_type: "one_off",
+        delivery_window_start: "",
+        delivery_window_end: "",
+      }),
     );
     expect(errors.delivery_window_start).toMatch(/required/i);
     expect(errors.delivery_window_end).toMatch(/required/i);
@@ -109,7 +128,11 @@ describe("validateCreateOrderForm", () => {
 
   it("allows null window for will_call", () => {
     const errors = validateCreateOrderForm(
-      validForm({ call_type: "will_call", delivery_window_start: "", delivery_window_end: "" }),
+      validForm({
+        call_type: "will_call",
+        delivery_window_start: "",
+        delivery_window_end: "",
+      }),
     );
     expect(errors.delivery_window_start).toBeUndefined();
     expect(errors.delivery_window_end).toBeUndefined();
@@ -117,14 +140,22 @@ describe("validateCreateOrderForm", () => {
 
   it("allows null window for auto_fill", () => {
     const errors = validateCreateOrderForm(
-      validForm({ call_type: "auto_fill", delivery_window_start: "", delivery_window_end: "" }),
+      validForm({
+        call_type: "auto_fill",
+        delivery_window_start: "",
+        delivery_window_end: "",
+      }),
     );
     expect(errors.delivery_window_start).toBeUndefined();
   });
 
   it("allows null window for keep_full", () => {
     const errors = validateCreateOrderForm(
-      validForm({ call_type: "keep_full", delivery_window_start: "", delivery_window_end: "" }),
+      validForm({
+        call_type: "keep_full",
+        delivery_window_start: "",
+        delivery_window_end: "",
+      }),
     );
     expect(errors.delivery_window_start).toBeUndefined();
   });
@@ -151,7 +182,9 @@ describe("CreateOrderModal — render", () => {
   it("renders the modal when isOpen is true", () => {
     render(<CreateOrderModal isOpen={true} onClose={jest.fn()} />);
     expect(screen.getByRole("dialog")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: /create order/i })).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: /create order/i }),
+    ).toBeInTheDocument();
   });
 });
 
@@ -185,18 +218,31 @@ describe("CreateOrderModal — submission", () => {
     );
 
     // Fill required fields using label associations
-    const getInput = (id: string) => document.getElementById(id) as HTMLInputElement;
+    const getInput = (id: string) =>
+      document.getElementById(id) as HTMLInputElement;
 
     await act(async () => {
-      fireEvent.change(getInput("co-customer-id"), { target: { value: "CUST-001" } });
-      fireEvent.change(getInput("co-customer-name"), { target: { value: "Acme" } });
-      fireEvent.change(getInput("co-address"), { target: { value: "123 Main" } });
+      fireEvent.change(getInput("co-customer-id"), {
+        target: { value: "CUST-001" },
+      });
+      fireEvent.change(getInput("co-customer-name"), {
+        target: { value: "Acme" },
+      });
+      fireEvent.change(getInput("co-address"), {
+        target: { value: "123 Main" },
+      });
       fireEvent.change(getInput("co-lat"), { target: { value: "40.7" } });
       fireEvent.change(getInput("co-lon"), { target: { value: "-74.0" } });
-      fireEvent.change(getInput("co-product"), { target: { value: "DIESEL_2" } });
+      fireEvent.change(getInput("co-product"), {
+        target: { value: "DIESEL_2" },
+      });
       fireEvent.change(getInput("co-gallons"), { target: { value: "500" } });
-      fireEvent.change(getInput("co-window-start"), { target: { value: "2024-06-01T08:00" } });
-      fireEvent.change(getInput("co-window-end"), { target: { value: "2024-06-01T17:00" } });
+      fireEvent.change(getInput("co-window-start"), {
+        target: { value: "2024-06-01T08:00" },
+      });
+      fireEvent.change(getInput("co-window-end"), {
+        target: { value: "2024-06-01T17:00" },
+      });
     });
 
     await act(async () => {
@@ -220,18 +266,31 @@ describe("CreateOrderModal — submission", () => {
 
     render(<CreateOrderModal isOpen={true} onClose={jest.fn()} />);
 
-    const getInput = (id: string) => document.getElementById(id) as HTMLInputElement;
+    const getInput = (id: string) =>
+      document.getElementById(id) as HTMLInputElement;
 
     await act(async () => {
-      fireEvent.change(getInput("co-customer-id"), { target: { value: "CUST-001" } });
-      fireEvent.change(getInput("co-customer-name"), { target: { value: "Acme" } });
-      fireEvent.change(getInput("co-address"), { target: { value: "123 Main" } });
+      fireEvent.change(getInput("co-customer-id"), {
+        target: { value: "CUST-001" },
+      });
+      fireEvent.change(getInput("co-customer-name"), {
+        target: { value: "Acme" },
+      });
+      fireEvent.change(getInput("co-address"), {
+        target: { value: "123 Main" },
+      });
       fireEvent.change(getInput("co-lat"), { target: { value: "40.7" } });
       fireEvent.change(getInput("co-lon"), { target: { value: "-74.0" } });
-      fireEvent.change(getInput("co-product"), { target: { value: "DIESEL_2" } });
+      fireEvent.change(getInput("co-product"), {
+        target: { value: "DIESEL_2" },
+      });
       fireEvent.change(getInput("co-gallons"), { target: { value: "500" } });
-      fireEvent.change(getInput("co-window-start"), { target: { value: "2024-06-01T08:00" } });
-      fireEvent.change(getInput("co-window-end"), { target: { value: "2024-06-01T17:00" } });
+      fireEvent.change(getInput("co-window-start"), {
+        target: { value: "2024-06-01T08:00" },
+      });
+      fireEvent.change(getInput("co-window-end"), {
+        target: { value: "2024-06-01T17:00" },
+      });
     });
 
     await act(async () => {

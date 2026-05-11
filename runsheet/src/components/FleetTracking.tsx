@@ -1,8 +1,26 @@
+import { FileText, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { type LocationUpdateData, useFleetWebSocket } from "../hooks";
 import { apiService } from "../services/api";
-import type { AssetSubtype, AssetSummary, AssetType, Truck } from "../types/api";
+import type {
+  AssetSubtype,
+  AssetSummary,
+  AssetType,
+  Truck,
+} from "../types/api";
 import LoadingSpinner from "./LoadingSpinner";
+import {
+  Badge,
+  type BadgeVariant,
+  Button,
+  type Column,
+  EmptyState,
+  FilterBar,
+  PageHeader,
+  Pagination,
+  StatsBar,
+  Table,
+} from "./ui";
 import { WebSocketStatusBadge } from "./WebSocketStatus";
 
 /** Filter options for the asset type dropdown */
@@ -32,7 +50,9 @@ export default function FleetTracking({ onTruckSelect }: FleetTrackingProps) {
   const [loading, setLoading] = useState(true);
   const [showInTransit, setShowInTransit] = useState(true);
   const [selectedTruck, setSelectedTruck] = useState<string | null>(null);
-  const [assetTypeFilter, setAssetTypeFilter] = useState<AssetType | "all">("all");
+  const [assetTypeFilter, setAssetTypeFilter] = useState<AssetType | "all">(
+    "all",
+  );
   const [page, setPage] = useState(1);
 
   /**
@@ -53,8 +73,12 @@ export default function FleetTracking({ onTruckSelect }: FleetTrackingProps) {
               },
             },
             lastUpdate: update.timestamp,
-            ...(update.asset_type ? { assetType: update.asset_type as AssetType } : {}),
-            ...(update.asset_subtype ? { assetSubtype: update.asset_subtype as AssetSubtype } : {}),
+            ...(update.asset_type
+              ? { assetType: update.asset_type as AssetType }
+              : {}),
+            ...(update.asset_subtype
+              ? { assetSubtype: update.asset_subtype as AssetSubtype }
+              : {}),
           };
         }
         return truck;
@@ -83,8 +107,12 @@ export default function FleetTracking({ onTruckSelect }: FleetTrackingProps) {
                 },
               },
               lastUpdate: update.timestamp,
-              ...(update.asset_type ? { assetType: update.asset_type as AssetType } : {}),
-              ...(update.asset_subtype ? { assetSubtype: update.asset_subtype as AssetSubtype } : {}),
+              ...(update.asset_type
+                ? { assetType: update.asset_type as AssetType }
+                : {}),
+              ...(update.asset_subtype
+                ? { assetSubtype: update.asset_subtype as AssetSubtype }
+                : {}),
             };
           }
           return truck;
@@ -132,7 +160,9 @@ export default function FleetTracking({ onTruckSelect }: FleetTrackingProps) {
       setFleetSummary(summaryResponse.data);
     } catch (err) {
       console.error("Failed to load fleet data:", err);
-      setError("Unable to connect to the fleet API. Make sure the backend is running.");
+      setError(
+        "Unable to connect to the fleet API. Make sure the backend is running.",
+      );
     } finally {
       setLoading(false);
     }
@@ -158,40 +188,27 @@ export default function FleetTracking({ onTruckSelect }: FleetTrackingProps) {
     onTruckSelect?.(truck);
   };
 
-  const getStatusColor = (status: string) => {
+  const getStatusVariant = (status: string): BadgeVariant => {
     switch (status) {
       case "on_time":
-        return "text-green-600";
+        return "success";
       case "delayed":
-        return "text-red-600";
+        return "error";
       case "stopped":
-        return "text-yellow-600";
+        return "warning";
       default:
-        return "text-gray-600";
-    }
-  };
-
-  const getStatusBg = (status: string) => {
-    switch (status) {
-      case "on_time":
-        return "bg-green-50";
-      case "delayed":
-        return "bg-red-50";
-      case "stopped":
-        return "bg-yellow-50";
-      default:
-        return "bg-gray-50";
+        return "neutral";
     }
   };
 
   const getStatusDot = (status: string) => {
     switch (status) {
       case "on_time":
-        return "bg-green-500";
+        return "bg-success-light0";
       case "delayed":
-        return "bg-red-500";
+        return "bg-error-light0";
       case "stopped":
-        return "bg-yellow-500";
+        return "bg-warning-light0";
       default:
         return "bg-gray-500";
     }
@@ -224,7 +241,83 @@ export default function FleetTracking({ onTruckSelect }: FleetTrackingProps) {
 
   const PAGE_SIZE = 20;
   const totalPages = Math.max(1, Math.ceil(filteredTrucks.length / PAGE_SIZE));
-  const paginatedTrucks = filteredTrucks.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  const paginatedTrucks = filteredTrucks.slice(
+    (page - 1) * PAGE_SIZE,
+    page * PAGE_SIZE,
+  );
+  const fleetColumns: Column<Truck>[] = [
+    {
+      key: "asset",
+      label: "Asset",
+      render: (truck) => (
+        <div className="flex items-center gap-2">
+          <div
+            className={`w-2 h-2 rounded-full ${getStatusDot(truck.status)}`}
+          />
+          <span className="font-medium text-gray-900 text-sm">
+            {truck.plateNumber || truck.name}
+          </span>
+        </div>
+      ),
+    },
+    {
+      key: "type",
+      label: "Type",
+      render: (truck) => (
+        <div className="text-xs">
+          <span className="text-gray-900">
+            {formatAssetLabel(truck.assetType ?? "vehicle")}
+          </span>
+          <span className="text-gray-400 ml-1">
+            / {formatAssetLabel(truck.assetSubtype ?? "truck")}
+          </span>
+        </div>
+      ),
+    },
+    {
+      key: "route",
+      label: "Route",
+      render: (truck) => (
+        <div className="text-xs text-gray-600">
+          {truck.route?.origin?.name} → {truck.route?.destination?.name}
+        </div>
+      ),
+    },
+    {
+      key: "status",
+      label: "Status",
+      render: (truck) => (
+        <Badge variant={getStatusVariant(truck.status)} size="sm">
+          {formatStatus(truck.status)}
+        </Badge>
+      ),
+    },
+    {
+      key: "eta",
+      label: "ETA",
+      render: (truck) => (
+        <span className="text-xs text-gray-900">
+          {truck.estimatedArrival
+            ? calculateTimeToArrival(truck.estimatedArrival)
+            : "—"}
+        </span>
+      ),
+    },
+    {
+      key: "destination",
+      label: "Destination",
+      render: (truck) => (
+        <div className="text-xs">
+          <div className="font-medium text-gray-900">
+            {truck.destination?.name ?? "—"}
+          </div>
+          <div className="text-gray-500 text-xs">
+            {truck.destination?.type ?? ""}
+          </div>
+        </div>
+      ),
+    },
+  ];
 
   if (loading) {
     return <LoadingSpinner message="Loading fleet data..." />;
@@ -234,14 +327,9 @@ export default function FleetTracking({ onTruckSelect }: FleetTrackingProps) {
     return (
       <div className="h-full flex items-center justify-center">
         <div className="text-center max-w-md">
-          <p className="text-red-600 font-medium mb-2">Connection Error</p>
+          <p className="text-error font-medium mb-2">Connection Error</p>
           <p className="text-gray-500 text-sm mb-4">{error}</p>
-          <button
-            onClick={loadFleetData}
-            className="px-4 py-2 bg-gray-900 text-white text-sm rounded-lg hover:bg-gray-800 transition-colors"
-          >
-            Retry
-          </button>
+          <Button onClick={loadFleetData}>Retry</Button>
         </div>
       </div>
     );
@@ -249,224 +337,117 @@ export default function FleetTracking({ onTruckSelect }: FleetTrackingProps) {
 
   return (
     <div className="h-full flex flex-col">
-      {/* Compact Header */}
-      <div className="border-b border-gray-200 px-4 py-2 flex-shrink-0">
-        <div className="flex items-center justify-between mb-2">
-          <div className="flex items-center gap-3">
-            <h1 className="text-lg font-bold text-gray-900">Fleet Tracking</h1>
-            <WebSocketStatusBadge
-              state={wsState}
-              reconnectAttempt={reconnectAttempt}
-            />
-          </div>
-          <div className="flex items-center gap-3">
-            <label className="flex items-center gap-2 text-sm">
-              <span className="text-gray-600">Asset type</span>
-              <select
-                value={assetTypeFilter}
-                onChange={(e) => { setAssetTypeFilter(e.target.value as AssetType | "all"); setPage(1); }}
-                className="text-sm border border-gray-300 rounded px-2 py-1 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-              >
-                {ASSET_TYPE_OPTIONS.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="flex items-center gap-2 text-sm">
-              <span className="text-gray-600">In transit only</span>
+      {/* Header with WebSocket Status */}
+      <PageHeader
+        title="Fleet Tracking"
+        badge={
+          <WebSocketStatusBadge
+            state={wsState}
+            reconnectAttempt={reconnectAttempt}
+          />
+        }
+        actions={
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={loadFleetData}
+            icon={<RefreshCw className="w-4 h-4" />}
+            title="Refresh"
+            aria-label="Refresh fleet data"
+          />
+        }
+      />
+
+      {/* Filters */}
+      <FilterBar
+        filters={
+          <>
+            <select
+              value={assetTypeFilter}
+              onChange={(e) => {
+                setAssetTypeFilter(e.target.value as AssetType | "all");
+                setPage(1);
+              }}
+              className="px-4 py-3 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-gray-200 focus:border-gray-300 focus:outline-none bg-white min-w-[140px]"
+              aria-label="Asset type"
+            >
+              {ASSET_TYPE_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+            <label className="flex items-center gap-2 px-4 py-3 text-sm border border-gray-200 rounded-xl bg-white cursor-pointer hover:bg-gray-50">
               <input
                 type="checkbox"
                 checked={showInTransit}
-                onChange={(e) => { setShowInTransit(e.target.checked); setPage(1); }}
-                className="w-4 h-4 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
+                onChange={(e) => {
+                  setShowInTransit(e.target.checked);
+                  setPage(1);
+                }}
+                className="rounded border-gray-300"
               />
+              <span>In transit only</span>
             </label>
-            <button
-              onClick={loadFleetData}
-              className="text-gray-400 hover:text-gray-600 p-1 rounded hover:bg-gray-100"
-              title="Refresh"
-            >
-              <svg
-                className="w-4 h-4"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
-                />
-              </svg>
-            </button>
-          </div>
-        </div>
+          </>
+        }
+      />
 
-        {/* Compact Fleet Summary */}
-        {fleetSummary && (
-          <div className="flex flex-col gap-1 text-xs">
-            <div className="flex gap-4">
-              <div className="flex items-center gap-1.5">
-                <span className="text-gray-600">Total:</span>
-                <span className="font-semibold text-gray-900">
-                  {fleetSummary.totalTrucks}
-                </span>
-              </div>
-              <div className="flex items-center gap-1.5">
-                <span className="text-gray-600">On Time:</span>
-                <span className="font-semibold text-green-600">
-                  {fleetSummary.onTimeTrucks}
-                </span>
-              </div>
-              <div className="flex items-center gap-1.5">
-                <span className="text-gray-600">Delayed:</span>
-                <span className="font-semibold text-red-600">
-                  {fleetSummary.delayedTrucks}
-                </span>
-              </div>
-              <div className="flex items-center gap-1.5">
-                <span className="text-gray-600">Active:</span>
-                <span className="font-semibold text-gray-900">
-                  {fleetSummary.activeTrucks}
-                </span>
-              </div>
-            </div>
-            {fleetSummary.byType && Object.keys(fleetSummary.byType).length > 0 && (
-              <div className="flex gap-3 text-gray-500">
-                {Object.entries(fleetSummary.byType).map(([type, count]) => {
+      {/* Fleet Summary */}
+      {fleetSummary && (
+        <StatsBar
+          variant="inline"
+          stats={[
+            { label: "Total", value: fleetSummary.totalTrucks },
+            {
+              label: "On Time",
+              value: fleetSummary.onTimeTrucks,
+              color: "success",
+            },
+            {
+              label: "Delayed",
+              value: fleetSummary.delayedTrucks,
+              color: "error",
+            },
+            { label: "Active", value: fleetSummary.activeTrucks },
+            ...(fleetSummary.byType &&
+            Object.keys(fleetSummary.byType).length > 0
+              ? Object.entries(fleetSummary.byType).map(([type, count]) => {
                   const meta = ASSET_TYPE_LABELS[type as AssetType];
-                  return (
-                    <div key={type} className="flex items-center gap-1">
-                      <span>{meta?.icon}</span>
-                      <span>{meta?.label ?? type}:</span>
-                      <span className="font-semibold text-gray-700">{count}</span>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        )}
-      </div>
+                  return {
+                    label: meta?.label ?? type,
+                    value: count,
+                    icon: meta?.icon,
+                  };
+                })
+              : []),
+          ]}
+        />
+      )}
 
-      {/* Table View - Maximum Space Efficiency */}
       <div className="flex-1 overflow-y-auto min-h-0">
-        <table className="w-full">
-          <thead className="bg-gray-50 sticky top-0 border-b border-gray-200 z-10">
-            <tr>
-              <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-600 uppercase">
-                Asset
-              </th>
-              <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-600 uppercase">
-                Type
-              </th>
-              <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-600 uppercase">
-                Route
-              </th>
-              <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-600 uppercase">
-                Status
-              </th>
-              <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-600 uppercase">
-                ETA
-              </th>
-              <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-600 uppercase">
-                Destination
-              </th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-gray-100">
-            {paginatedTrucks.map((truck) => (
-              <tr
-                key={truck.id}
-                className={`cursor-pointer transition-colors ${
-                  selectedTruck === truck.id ? "bg-blue-50" : "hover:bg-gray-50"
-                }`}
-                onClick={() => handleTruckClick(truck)}
-              >
-                <td className="px-3 py-2">
-                  <div className="flex items-center gap-2">
-                    <div
-                      className={`w-2 h-2 rounded-full ${getStatusDot(truck.status)}`}
-                    ></div>
-                    <span className="font-medium text-gray-900 text-sm">
-                      {truck.plateNumber || truck.name}
-                    </span>
-                  </div>
-                </td>
-                <td className="px-3 py-2">
-                  <div className="text-xs">
-                    <span className="text-gray-900">{formatAssetLabel(truck.assetType ?? "vehicle")}</span>
-                    <span className="text-gray-400 ml-1">/ {formatAssetLabel(truck.assetSubtype ?? "truck")}</span>
-                  </div>
-                </td>
-                <td className="px-3 py-2">
-                  <div className="text-xs text-gray-600">
-                    {truck.route?.origin?.name} → {truck.route?.destination?.name}
-                  </div>
-                </td>
-                <td className="px-3 py-2">
-                  <span
-                    className={`inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium ${getStatusBg(truck.status)} ${getStatusColor(truck.status)}`}
-                  >
-                    {formatStatus(truck.status)}
-                  </span>
-                </td>
-                <td className="px-3 py-2">
-                  <span className="text-xs text-gray-900">
-                    {truck.estimatedArrival
-                      ? calculateTimeToArrival(truck.estimatedArrival)
-                      : "—"}
-                  </span>
-                </td>
-                <td className="px-3 py-2">
-                  <div className="text-xs">
-                    <div className="font-medium text-gray-900">
-                      {truck.destination?.name ?? "—"}
-                    </div>
-                    <div className="text-gray-500 text-xs">
-                      {truck.destination?.type ?? ""}
-                    </div>
-                  </div>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-
-        {/* Pagination */}
-        {totalPages > 1 && (
-          <div className="flex items-center justify-between px-4 py-3 border-t border-gray-100">
-            <span className="text-xs text-gray-500">
-              Page {page} of {totalPages} ({filteredTrucks.length} items)
-            </span>
-            <div className="flex items-center gap-2">
-              <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page <= 1} className="px-3 py-1 text-xs border border-gray-200 rounded-lg disabled:opacity-30">Prev</button>
-              <button onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page >= totalPages} className="px-3 py-1 text-xs border border-gray-200 rounded-lg disabled:opacity-30">Next</button>
-            </div>
-          </div>
-        )}
-
-        {filteredTrucks.length === 0 && (
-          <div className="text-center py-12 text-gray-500">
-            <svg
-              className="w-12 h-12 mx-auto mb-4 text-gray-300"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
-              />
-            </svg>
-            <p>No {assetTypeFilter === "all" ? "assets" : assetTypeFilter + "s"} found</p>
-          </div>
-        )}
+        <Table
+          variant="compact"
+          columns={fleetColumns}
+          data={paginatedTrucks}
+          getRowId={(truck) => truck.id}
+          selectedId={selectedTruck ?? undefined}
+          onRowClick={handleTruckClick}
+          emptyState={
+            <EmptyState
+              icon={<FileText />}
+              title={`No ${assetTypeFilter === "all" ? "assets" : `${assetTypeFilter}s`} found`}
+            />
+          }
+        />
+        <Pagination
+          currentPage={page}
+          totalPages={totalPages}
+          totalItems={filteredTrucks.length}
+          onPageChange={setPage}
+          className="px-4"
+        />
       </div>
     </div>
   );

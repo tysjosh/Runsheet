@@ -12,15 +12,17 @@ interface InventoryHealthBadgeProps {
  *
  * Validates: Requirement 7.6
  */
-export default function InventoryHealthBadge({ alertCount }: InventoryHealthBadgeProps) {
+export default function InventoryHealthBadge({
+  alertCount,
+}: InventoryHealthBadgeProps) {
   const hasAlerts = alertCount > 0;
 
   return (
     <div
       className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium w-fit ${
         hasAlerts
-          ? "bg-orange-50 text-orange-700 border border-orange-200"
-          : "bg-green-50 text-green-700 border border-green-200"
+          ? "bg-warning-light text-warning-dark border border-warning-light"
+          : "bg-success-light text-success-dark border border-success-light"
       }`}
       aria-label={`Inventory health: ${alertCount} items need attention.`}
     >

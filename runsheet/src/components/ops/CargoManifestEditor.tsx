@@ -26,11 +26,11 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useState } from "react";
-import type { CargoItemStatus, SchedulingCargoItem } from "../../types/api";
 import {
   updateCargo,
   updateCargoItemStatus,
 } from "../../services/schedulingApi";
+import type { CargoItemStatus, SchedulingCargoItem } from "../../types/api";
 import CargoManifestView from "./CargoManifestView";
 
 // ─── Props ───────────────────────────────────────────────────────────────────
@@ -123,9 +123,7 @@ export default function CargoManifestEditor({
         // Also update edit items if currently editing
         if (editing) {
           setEditItems((prev) =>
-            prev.map((item) =>
-              item.item_id === itemId ? updatedItem : item,
-            ),
+            prev.map((item) => (item.item_id === itemId ? updatedItem : item)),
           );
         }
       } catch (err) {
@@ -168,8 +166,7 @@ export default function CargoManifestEditor({
               <button
                 onClick={handleSave}
                 disabled={saving}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm text-white rounded-lg disabled:opacity-50"
-                style={{ backgroundColor: "#232323" }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm text-white rounded-lg disabled:opacity-50 bg-primary hover:bg-primary-hover"
                 aria-label="Save cargo manifest"
               >
                 {saving ? (
@@ -196,7 +193,7 @@ export default function CargoManifestEditor({
       {/* Error banner */}
       {error && (
         <div className="mx-6 mt-3">
-          <p className="text-sm text-red-600 bg-red-50 px-3 py-2 rounded-lg">
+          <p className="text-sm text-error bg-error-light px-3 py-2 rounded-lg">
             {error}
           </p>
         </div>
@@ -227,13 +224,13 @@ function getStatusBadge(status: CargoItemStatus): string {
     case "pending":
       return "text-gray-700 bg-gray-100";
     case "loaded":
-      return "text-blue-700 bg-blue-100";
+      return "text-info-dark bg-info-light";
     case "in_transit":
-      return "text-yellow-700 bg-yellow-100";
+      return "text-warning-dark bg-warning-light";
     case "delivered":
-      return "text-green-700 bg-green-100";
+      return "text-success-dark bg-success-light";
     case "damaged":
-      return "text-red-700 bg-red-100";
+      return "text-error-dark bg-error-light";
     default:
       return "text-gray-700 bg-gray-100";
   }
@@ -346,7 +343,7 @@ function EditableCargoRow({
   return (
     <tr className="transition-colors hover:bg-gray-50">
       {/* Item ID — read-only */}
-      <td className="px-6 py-3 text-sm font-medium text-[#232323]">
+      <td className="px-6 py-3 text-sm font-medium text-primary">
         {item.item_id}
       </td>
 
@@ -441,25 +438,25 @@ const TARGET_STATUSES: {
     status: "loaded",
     label: "Loaded",
     icon: <Package className="w-3 h-3" />,
-    className: "text-blue-700 bg-blue-100 hover:bg-blue-200",
+    className: "text-info-dark bg-info-light hover:bg-info-light",
   },
   {
     status: "in_transit",
     label: "In Transit",
     icon: <Truck className="w-3 h-3" />,
-    className: "text-yellow-700 bg-yellow-100 hover:bg-yellow-200",
+    className: "text-warning-dark bg-warning-light hover:bg-warning-light",
   },
   {
     status: "delivered",
     label: "Delivered",
     icon: <CheckCircle className="w-3 h-3" />,
-    className: "text-green-700 bg-green-100 hover:bg-green-200",
+    className: "text-success-dark bg-success-light hover:bg-success-light",
   },
   {
     status: "damaged",
     label: "Damaged",
     icon: <AlertTriangle className="w-3 h-3" />,
-    className: "text-red-700 bg-red-100 hover:bg-red-200",
+    className: "text-error-dark bg-error-light hover:bg-error-light",
   },
 ];
 

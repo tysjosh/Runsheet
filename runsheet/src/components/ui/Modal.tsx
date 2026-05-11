@@ -1,13 +1,14 @@
 /**
  * Modal Component - Standardized modal dialog
- * 
+ *
  * Provides consistent modal styling across all pages.
  * Replaces multiple modal implementations.
  */
 
-import React, { useEffect } from 'react';
-import { X } from 'lucide-react';
-import { Button } from './Button';
+import { X } from "lucide-react";
+import type React from "react";
+import { useEffect } from "react";
+import { Button } from "./Button";
 
 export interface ModalProps {
   isOpen: boolean;
@@ -15,15 +16,15 @@ export interface ModalProps {
   title: string;
   children: React.ReactNode;
   footer?: React.ReactNode;
-  size?: 'sm' | 'md' | 'lg' | 'xl';
+  size?: "sm" | "md" | "lg" | "xl";
   className?: string;
 }
 
 const sizeStyles = {
-  sm: 'max-w-md',
-  md: 'max-w-lg',
-  lg: 'max-w-2xl',
-  xl: 'max-w-4xl',
+  sm: "max-w-md",
+  md: "max-w-lg",
+  lg: "max-w-2xl",
+  xl: "max-w-4xl",
 };
 
 export const Modal: React.FC<ModalProps> = ({
@@ -32,29 +33,29 @@ export const Modal: React.FC<ModalProps> = ({
   title,
   children,
   footer,
-  size = 'md',
-  className = '',
+  size = "md",
+  className = "",
 }) => {
   // Close on escape key
   useEffect(() => {
     const handleEscape = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && isOpen) {
+      if (e.key === "Escape" && isOpen) {
         onClose();
       }
     };
-    document.addEventListener('keydown', handleEscape);
-    return () => document.removeEventListener('keydown', handleEscape);
+    document.addEventListener("keydown", handleEscape);
+    return () => document.removeEventListener("keydown", handleEscape);
   }, [isOpen, onClose]);
 
   // Prevent body scroll when modal is open
   useEffect(() => {
     if (isOpen) {
-      document.body.style.overflow = 'hidden';
+      document.body.style.overflow = "hidden";
     } else {
-      document.body.style.overflow = '';
+      document.body.style.overflow = "";
     }
     return () => {
-      document.body.style.overflow = '';
+      document.body.style.overflow = "";
     };
   }, [isOpen]);
 
@@ -71,7 +72,7 @@ export const Modal: React.FC<ModalProps> = ({
       >
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-          <h2 className="text-lg font-semibold text-[#232323]">{title}</h2>
+          <h2 className="text-lg font-semibold text-primary">{title}</h2>
           <button
             onClick={onClose}
             className="p-1 text-gray-400 hover:text-gray-600 rounded transition-colors"
@@ -102,16 +103,16 @@ export interface ModalFooterProps {
   onConfirm?: () => void;
   cancelText?: string;
   confirmText?: string;
-  confirmVariant?: 'primary' | 'danger' | 'success';
+  confirmVariant?: "primary" | "danger" | "success";
   loading?: boolean;
 }
 
 export const ModalFooter: React.FC<ModalFooterProps> = ({
   onCancel,
   onConfirm,
-  cancelText = 'Cancel',
-  confirmText = 'Confirm',
-  confirmVariant = 'primary',
+  cancelText = "Cancel",
+  confirmText = "Confirm",
+  confirmVariant = "primary",
   loading = false,
 }) => {
   return (

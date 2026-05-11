@@ -171,10 +171,7 @@ export function useAgentWebSocket(
         }
 
         default:
-          console.warn(
-            "Unknown agent WebSocket message type:",
-            message.type,
-          );
+          console.warn("Unknown agent WebSocket message type:", message.type);
       }
     },
     [options],

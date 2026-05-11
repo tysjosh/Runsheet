@@ -89,5 +89,8 @@ export const HTTP_ERROR_MESSAGES: Record<number, string> = {
  * Get a user-friendly error message for an HTTP status code.
  */
 export function getUserFriendlyError(status: number): string {
-  return HTTP_ERROR_MESSAGES[status] ?? `Unexpected error (${status}). Please try again.`;
+  return (
+    HTTP_ERROR_MESSAGES[status] ??
+    `Unexpected error (${status}). Please try again.`
+  );
 }

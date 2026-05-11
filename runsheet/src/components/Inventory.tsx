@@ -7,7 +7,6 @@ import {
   Package,
   Pencil,
   Plus,
-  Search,
   Trash2,
   X,
 } from "lucide-react";
@@ -15,26 +14,39 @@ import { useCallback, useEffect, useState } from "react";
 import { apiService, type InventoryItem } from "../services/api";
 import {
   adjustStock,
+  type CreateInventoryItemPayload,
   createItem,
   deleteItem,
   getAlerts,
   getItemHistory,
   getSummary,
-  type CreateInventoryItemPayload,
-  type InventoryCategory,
   type InventoryItem as InvApiItem,
+  type InventoryCategory,
   type InventorySummary,
   type StockAdjustment,
   type StockMovementEvent,
 } from "../services/inventoryApi";
 
 import LoadingSpinner from "./LoadingSpinner";
+import {
+  Badge,
+  type BadgeVariant,
+  Button,
+  type Column,
+  EmptyState,
+  FilterBar,
+  PageHeader,
+  Pagination,
+  StatsBar,
+  Table,
+} from "./ui";
 
-const INVENTORY_STATUSES: { value: InventoryItem["status"]; label: string }[] = [
-  { value: "in_stock", label: "In Stock" },
-  { value: "low_stock", label: "Low Stock" },
-  { value: "out_of_stock", label: "Out of Stock" },
-];
+const INVENTORY_STATUSES: { value: InventoryItem["status"]; label: string }[] =
+  [
+    { value: "in_stock", label: "In Stock" },
+    { value: "low_stock", label: "Low Stock" },
+    { value: "out_of_stock", label: "Out of Stock" },
+  ];
 
 export default function Inventory() {
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
@@ -44,8 +56,12 @@ export default function Inventory() {
   const [filterStatus, setFilterStatus] = useState("all");
   const [page, setPage] = useState(1);
   const [editingItem, setEditingItem] = useState<InventoryItem | null>(null);
-  const [adjustingItem, setAdjustingItem] = useState<InventoryItem | null>(null);
-  const [adjustType, setAdjustType] = useState<"restock" | "consume">("restock");
+  const [adjustingItem, setAdjustingItem] = useState<InventoryItem | null>(
+    null,
+  );
+  const [adjustType, setAdjustType] = useState<"restock" | "consume">(
+    "restock",
+  );
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [deletingItem, setDeletingItem] = useState<InventoryItem | null>(null);
   const [historyItem, setHistoryItem] = useState<InventoryItem | null>(null);
@@ -89,16 +105,16 @@ export default function Inventory() {
     loadDashboardData();
   }, [loadInventoryData, loadDashboardData]);
 
-  const getStatusColor = (status: string) => {
+  const getStatusVariant = (status: string): BadgeVariant => {
     switch (status) {
       case "in_stock":
-        return "text-green-700 bg-green-50";
+        return "success";
       case "low_stock":
-        return "text-yellow-700 bg-yellow-50";
+        return "warning";
       case "out_of_stock":
-        return "text-red-700 bg-red-50";
+        return "error";
       default:
-        return "text-gray-700 bg-gray-50";
+        return "neutral";
     }
   };
 
@@ -129,8 +145,130 @@ export default function Inventory() {
     return matchesSearch && matchesCategory && matchesStatus;
   });
 
-  const totalPages = Math.max(1, Math.ceil(filteredInventory.length / PAGE_SIZE));
-  const paginatedInventory = filteredInventory.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  const totalPages = Math.max(
+    1,
+    Math.ceil(filteredInventory.length / PAGE_SIZE),
+  );
+  const paginatedInventory = filteredInventory.slice(
+    (page - 1) * PAGE_SIZE,
+    page * PAGE_SIZE,
+  );
+  const inventoryColumns: Column<InventoryItem>[] = [
+    {
+      key: "item",
+      label: "Item",
+      render: (item) => (
+        <div>
+          <div className="font-medium text-primary">{item.name}</div>
+          <div className="text-sm text-gray-500">{item.id}</div>
+        </div>
+      ),
+    },
+    {
+      key: "category",
+      label: "Category",
+      render: (item) => (
+        <span className="text-sm text-gray-700">{item.category}</span>
+      ),
+    },
+    {
+      key: "location",
+      label: "Location",
+      render: (item) => (
+        <span className="text-sm text-gray-700">{item.location}</span>
+      ),
+    },
+    {
+      key: "quantity",
+      label: "Quantity",
+      render: (item) => (
+        <div className="text-sm font-semibold text-primary">
+          {item.quantity.toLocaleString()} {item.unit}
+        </div>
+      ),
+    },
+    {
+      key: "status",
+      label: "Status",
+      render: (item) => (
+        <Badge variant={getStatusVariant(item.status)} size="sm">
+          {getStatusText(item.status)}
+        </Badge>
+      ),
+    },
+    {
+      key: "lastUpdated",
+      label: "Last Updated",
+      render: (item) => (
+        <span className="text-sm text-gray-600">
+          {new Date(item.lastUpdated).toLocaleDateString("en-US", {
+            month: "short",
+            day: "numeric",
+            year: "numeric",
+          })}
+        </span>
+      ),
+    },
+    {
+      key: "actions",
+      label: "Actions",
+      render: (item) => (
+        <div className="flex items-center gap-1">
+          <Button
+            type="button"
+            variant="success"
+            size="sm"
+            icon={<ArrowUpCircle className="w-3 h-3" />}
+            onClick={() => {
+              setAdjustingItem(item);
+              setAdjustType("restock");
+            }}
+            aria-label={`Restock ${item.name}`}
+            title="Restock"
+          />
+          <Button
+            type="button"
+            variant="warning"
+            size="sm"
+            icon={<ArrowDownCircle className="w-3 h-3" />}
+            onClick={() => {
+              setAdjustingItem(item);
+              setAdjustType("consume");
+            }}
+            aria-label={`Consume ${item.name}`}
+            title="Consume"
+          />
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            icon={<Pencil className="w-3 h-3" />}
+            onClick={() => setEditingItem(item)}
+            aria-label={`Edit ${item.name}`}
+            title="Edit"
+          />
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            icon={<Clock className="w-3 h-3" />}
+            onClick={() => setHistoryItem(item)}
+            aria-label={`View history for ${item.name}`}
+            title="History"
+          />
+          <Button
+            type="button"
+            variant="danger"
+            size="sm"
+            icon={<Trash2 className="w-3 h-3" />}
+            onClick={() => setDeletingItem(item)}
+            aria-label={`Delete ${item.name}`}
+            title="Delete"
+          />
+        </div>
+      ),
+    },
+  ];
 
   const categories = [
     "all",
@@ -177,134 +315,134 @@ export default function Inventory() {
   return (
     <div className="h-full flex flex-col bg-white">
       {/* Header */}
-      <div className="border-b border-gray-100 px-8 py-6">
-        <div className="flex items-center justify-between mb-6">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-[#232323] rounded-xl flex items-center justify-center">
-              <Package className="w-5 h-5 text-white" />
-            </div>
-            <div>
-              <h1 className="text-2xl font-semibold text-[#232323]">
-                Inventory Management
-              </h1>
-              <p className="text-gray-500">Track and manage inventory levels</p>
-            </div>
-          </div>
-          {alerts.length > 0 && (
-            <button
+      <PageHeader
+        title="Inventory Management"
+        subtitle="Track and manage inventory levels"
+        icon={<Package className="w-5 h-5" />}
+        badge={
+          alerts.length > 0 ? (
+            <Button
+              type="button"
+              variant="warning"
+              size="sm"
               onClick={() => setShowAlerts(!showAlerts)}
-              className="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded-lg hover:bg-amber-100 transition-colors"
+              icon={<AlertTriangle className="w-4 h-4" />}
             >
-              <AlertTriangle className="w-4 h-4" />
               {alerts.length} Alert{alerts.length !== 1 ? "s" : ""}
-            </button>
-          )}
-          <button
+            </Button>
+          ) : undefined
+        }
+        actions={
+          <Button
+            variant="primary"
+            size="md"
+            icon={<Plus className="w-4 h-4" />}
             onClick={() => setShowCreateModal(true)}
-            className="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium text-white rounded-lg transition-colors"
-            style={{ backgroundColor: "#232323" }}
           >
-            <Plus className="w-4 h-4" />
             Add Item
-          </button>
-        </div>
+          </Button>
+        }
+      />
 
-        {/* Search and Filters */}
-        <div className="flex gap-4">
-          <div className="flex-1 relative">
-            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
-            <input
-              type="text"
-              placeholder="Search inventory..."
-              value={searchTerm}
-              onChange={(e) => { setSearchTerm(e.target.value); setPage(1); }}
-              className="w-full pl-10 pr-4 py-3 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-gray-200 focus:border-gray-300"
-            />
-          </div>
-          <div className="relative">
-            <Filter className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
+      {/* Search and Filters */}
+      <FilterBar
+        searchPlaceholder="Search inventory..."
+        searchValue={searchTerm}
+        onSearchChange={(value) => {
+          setSearchTerm(value);
+          setPage(1);
+        }}
+        filters={
+          <>
+            <div className="relative">
+              <Filter className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
+              <select
+                value={filterCategory}
+                onChange={(e) => {
+                  setFilterCategory(e.target.value);
+                  setPage(1);
+                }}
+                className="pl-10 pr-8 py-3 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-gray-200 focus:border-gray-300 focus:outline-none bg-white min-w-[140px]"
+                aria-label="Category"
+              >
+                {categories.map((category) => (
+                  <option key={category} value={category}>
+                    {category === "all"
+                      ? "All Categories"
+                      : category.charAt(0).toUpperCase() + category.slice(1)}
+                  </option>
+                ))}
+              </select>
+            </div>
             <select
-              value={filterCategory}
-              onChange={(e) => { setFilterCategory(e.target.value); setPage(1); }}
-              className="pl-10 pr-8 py-3 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white min-w-[160px]"
-              aria-label="Filter by category"
+              value={filterStatus}
+              onChange={(e) => {
+                setFilterStatus(e.target.value);
+                setPage(1);
+              }}
+              className="px-4 py-3 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-gray-200 focus:border-gray-300 focus:outline-none bg-white min-w-[140px]"
+              aria-label="Status"
             >
-              {categories.map((category) => (
-                <option key={category} value={category}>
-                  {category === "all"
-                    ? "All Categories"
-                    : category.charAt(0).toUpperCase() + category.slice(1)}
+              <option value="all">All Statuses</option>
+              {INVENTORY_STATUSES.map((s) => (
+                <option key={s.value} value={s.value}>
+                  {s.label}
                 </option>
               ))}
             </select>
-          </div>
-          <select
-            value={filterStatus}
-            onChange={(e) => { setFilterStatus(e.target.value); setPage(1); }}
-            className="px-4 py-3 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white min-w-[140px]"
-            aria-label="Filter by status"
-          >
-            <option value="all">All Statuses</option>
-            {INVENTORY_STATUSES.map((s) => (
-              <option key={s.value} value={s.value}>
-                {s.label}
-              </option>
-            ))}
-          </select>
-        </div>
-      </div>
+          </>
+        }
+      />
 
       {/* Summary Stats Bar */}
-      <div className="border-b border-gray-100 px-8 py-4">
-        <div className="grid grid-cols-5 gap-6">
-          <div className="text-center">
-            <div className="text-2xl font-semibold text-[#232323]">
-              {summary?.total_items ?? inventory.length}
-            </div>
-            <div className="text-sm text-gray-500">Total Items</div>
-          </div>
-          <div className="text-center">
-            <div className="text-2xl font-semibold text-green-600">
-              {summary?.in_stock ??
-                inventory.filter((i) => i.status === "in_stock").length}
-            </div>
-            <div className="text-sm text-gray-500">In Stock</div>
-          </div>
-          <div className="text-center">
-            <div className="text-2xl font-semibold text-yellow-600">
-              {summary?.low_stock ??
-                inventory.filter((i) => i.status === "low_stock").length}
-            </div>
-            <div className="text-sm text-gray-500">Low Stock</div>
-          </div>
-          <div className="text-center">
-            <div className="text-2xl font-semibold text-red-600">
-              {summary?.out_of_stock ??
-                inventory.filter((i) => i.status === "out_of_stock").length}
-            </div>
-            <div className="text-sm text-gray-500">Out of Stock</div>
-          </div>
-          <div className="text-center">
-            <div className="text-2xl font-semibold text-[#232323]">
-              {summary?.total_value != null
+      <StatsBar
+        variant="grid"
+        stats={[
+          {
+            label: "Total Items",
+            value: summary?.total_items ?? inventory.length,
+          },
+          {
+            label: "In Stock",
+            value:
+              summary?.in_stock ??
+              inventory.filter((i) => i.status === "in_stock").length,
+            color: "success",
+          },
+          {
+            label: "Low Stock",
+            value:
+              summary?.low_stock ??
+              inventory.filter((i) => i.status === "low_stock").length,
+            color: "warning",
+          },
+          {
+            label: "Out of Stock",
+            value:
+              summary?.out_of_stock ??
+              inventory.filter((i) => i.status === "out_of_stock").length,
+            color: "error",
+          },
+          {
+            label: "Total Value",
+            value:
+              summary?.total_value != null
                 ? `$${summary.total_value.toLocaleString()}`
-                : "—"}
-            </div>
-            <div className="text-sm text-gray-500">Total Value</div>
-          </div>
-        </div>
-      </div>
+                : "—",
+          },
+        ]}
+      />
 
       {/* Alerts Panel (collapsible) */}
       {showAlerts && alerts.length > 0 && (
-        <div className="border-b border-amber-200 bg-amber-50 px-8 py-4">
+        <div className="border-b border-warning-light bg-warning-light px-8 py-4">
           <div className="flex items-center justify-between mb-3">
-            <h3 className="text-sm font-semibold text-amber-800">
+            <h3 className="text-sm font-semibold text-warning-dark">
               Low Stock Alerts
             </h3>
             <button
               onClick={() => setShowAlerts(false)}
-              className="text-amber-600 hover:text-amber-800"
+              className="text-warning hover:text-warning-dark"
             >
               <X className="w-4 h-4" />
             </button>
@@ -313,7 +451,7 @@ export default function Inventory() {
             {alerts.map((alert) => (
               <div
                 key={alert.item_id}
-                className="flex items-center justify-between bg-white rounded-lg px-3 py-2 border border-amber-100"
+                className="flex items-center justify-between bg-white rounded-lg px-3 py-2 border border-warning-light"
               >
                 <div>
                   <span className="text-sm font-medium text-gray-800">
@@ -323,157 +461,34 @@ export default function Inventory() {
                     {alert.category} · {alert.location}
                   </span>
                 </div>
-                <span
-                  className={`text-xs font-medium px-2 py-0.5 rounded ${
-                    alert.status === "out_of_stock"
-                      ? "text-red-700 bg-red-50"
-                      : "text-yellow-700 bg-yellow-50"
-                  }`}
-                >
+                <Badge variant={getStatusVariant(alert.status)} size="sm">
                   {alert.quantity} / {alert.min_threshold} min
-                </span>
+                </Badge>
               </div>
             ))}
           </div>
         </div>
       )}
 
-      {/* Table View */}
       <div className="flex-1 overflow-y-auto">
-        <table className="w-full">
-          <thead className="bg-gray-50 sticky top-0 border-b border-gray-100">
-            <tr>
-              <th className="px-8 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                Item
-              </th>
-              <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                Category
-              </th>
-              <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                Location
-              </th>
-              <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                Quantity
-              </th>
-              <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                Status
-              </th>
-              <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                Last Updated
-              </th>
-              <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                Actions
-              </th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-gray-100">
-            {paginatedInventory.map((item) => (
-              <tr key={item.id} className="hover:bg-gray-50 transition-colors">
-                <td className="px-8 py-4">
-                  <div className="font-medium text-[#232323]">{item.name}</div>
-                  <div className="text-sm text-gray-500">{item.id}</div>
-                </td>
-                <td className="px-6 py-4">
-                  <span className="text-sm text-gray-700">{item.category}</span>
-                </td>
-                <td className="px-6 py-4">
-                  <span className="text-sm text-gray-700">{item.location}</span>
-                </td>
-                <td className="px-6 py-4">
-                  <div className="text-sm font-semibold text-[#232323]">
-                    {item.quantity.toLocaleString()} {item.unit}
-                  </div>
-                </td>
-                <td className="px-6 py-4">
-                  <span
-                    className={`inline-flex items-center px-3 py-1 rounded-lg text-xs font-medium ${getStatusColor(item.status)}`}
-                  >
-                    {getStatusText(item.status)}
-                  </span>
-                </td>
-                <td className="px-6 py-4">
-                  <span className="text-sm text-gray-600">
-                    {new Date(item.lastUpdated).toLocaleDateString("en-US", {
-                      month: "short",
-                      day: "numeric",
-                      year: "numeric",
-                    })}
-                  </span>
-                </td>
-                <td className="px-6 py-4">
-                  <div className="flex items-center gap-1">
-                    <button
-                      onClick={() => {
-                        setAdjustingItem(item);
-                        setAdjustType("restock");
-                      }}
-                      className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded-md border border-green-200 text-green-700 hover:bg-green-50 transition-colors"
-                      title="Restock"
-                    >
-                      <ArrowUpCircle className="w-3 h-3" />
-                    </button>
-                    <button
-                      onClick={() => {
-                        setAdjustingItem(item);
-                        setAdjustType("consume");
-                      }}
-                      className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded-md border border-orange-200 text-orange-700 hover:bg-orange-50 transition-colors"
-                      title="Consume"
-                    >
-                      <ArrowDownCircle className="w-3 h-3" />
-                    </button>
-                    <button
-                      onClick={() => setEditingItem(item)}
-                      className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded-md border border-gray-200 text-gray-600 hover:bg-gray-100 transition-colors"
-                      title="Edit"
-                    >
-                      <Pencil className="w-3 h-3" />
-                    </button>
-                    <button
-                      onClick={() => setHistoryItem(item)}
-                      className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded-md border border-blue-200 text-blue-600 hover:bg-blue-50 transition-colors"
-                      title="History"
-                    >
-                      <Clock className="w-3 h-3" />
-                    </button>
-                    <button
-                      onClick={() => setDeletingItem(item)}
-                      className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded-md border border-red-200 text-red-600 hover:bg-red-50 transition-colors"
-                      title="Delete"
-                    >
-                      <Trash2 className="w-3 h-3" />
-                    </button>
-                  </div>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-
-        {/* Pagination */}
-        {totalPages > 1 && (
-          <div className="flex items-center justify-between px-8 py-3 border-t border-gray-100">
-            <span className="text-xs text-gray-500">
-              Page {page} of {totalPages} ({filteredInventory.length} items)
-            </span>
-            <div className="flex items-center gap-2">
-              <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page <= 1} className="px-3 py-1 text-xs border border-gray-200 rounded-lg disabled:opacity-30">Prev</button>
-              <button onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page >= totalPages} className="px-3 py-1 text-xs border border-gray-200 rounded-lg disabled:opacity-30">Next</button>
-            </div>
-          </div>
-        )}
-
-        {filteredInventory.length === 0 && (
-          <div className="text-center py-16 text-gray-500">
-            <Package className="w-16 h-16 mx-auto mb-4 text-gray-300" />
-            <p className="text-lg font-medium text-gray-400">
-              No inventory items found
-            </p>
-            <p className="text-sm text-gray-400 mt-1">
-              Try adjusting your search or filter criteria
-            </p>
-          </div>
-        )}
+        <Table
+          columns={inventoryColumns}
+          data={paginatedInventory}
+          getRowId={(item) => item.id}
+          emptyState={
+            <EmptyState
+              icon={<Package />}
+              title="No inventory items found"
+              description="Try adjusting your search or filter criteria"
+            />
+          }
+        />
+        <Pagination
+          currentPage={page}
+          totalPages={totalPages}
+          totalItems={filteredInventory.length}
+          onPageChange={setPage}
+        />
       </div>
 
       {/* Edit Inventory Modal */}
@@ -552,7 +567,7 @@ function StockAdjustmentModal({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const parsedQty = parseInt(quantity, 10);
-    if (isNaN(parsedQty) || parsedQty <= 0) {
+    if (Number.isNaN(parsedQty) || parsedQty <= 0) {
       setError("Quantity must be a positive number.");
       return;
     }
@@ -571,9 +586,7 @@ function StockAdjustmentModal({
         onComplete();
       }, 800);
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to adjust stock",
-      );
+      setError(err instanceof Error ? err.message : "Failed to adjust stock");
     } finally {
       setSubmitting(false);
     }
@@ -586,7 +599,7 @@ function StockAdjustmentModal({
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
       <div className="bg-white rounded-xl shadow-xl w-full max-w-md mx-4">
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-          <h2 className="text-lg font-semibold text-[#232323]">
+          <h2 className="text-lg font-semibold text-primary">
             {type === "restock" ? "Restock Item" : "Consume Stock"}
           </h2>
           <button
@@ -599,19 +612,19 @@ function StockAdjustmentModal({
 
         <form onSubmit={handleSubmit} className="px-6 py-4 space-y-4">
           {error && (
-            <p className="text-sm text-red-600 bg-red-50 px-3 py-2 rounded-lg">
+            <p className="text-sm text-error bg-error-light px-3 py-2 rounded-lg">
               {error}
             </p>
           )}
           {success && (
-            <p className="text-sm text-green-600 bg-green-50 px-3 py-2 rounded-lg">
+            <p className="text-sm text-success bg-success-light px-3 py-2 rounded-lg">
               Stock adjusted successfully!
             </p>
           )}
 
           {/* Item info */}
           <div className="bg-gray-50 px-3 py-2 rounded-lg">
-            <p className="text-sm font-medium text-[#232323]">{item.name}</p>
+            <p className="text-sm font-medium text-primary">{item.name}</p>
             <p className="text-xs text-gray-500">
               Current: {item.quantity} {item.unit} · {item.location}
             </p>
@@ -629,7 +642,6 @@ function StockAdjustmentModal({
               placeholder="Enter quantity"
               className={inputClass}
               required
-              autoFocus
             />
           </div>
 
@@ -650,7 +662,9 @@ function StockAdjustmentModal({
                 </>
               ) : (
                 <>
-                  <option value="used_for_maintenance">Used for Maintenance</option>
+                  <option value="used_for_maintenance">
+                    Used for Maintenance
+                  </option>
                   <option value="damaged">Damaged</option>
                   <option value="expired">Expired</option>
                   <option value="correction">Correction</option>
@@ -685,8 +699,8 @@ function StockAdjustmentModal({
               disabled={submitting || success}
               className={`px-4 py-2 text-sm text-white rounded-lg disabled:opacity-50 ${
                 type === "restock"
-                  ? "bg-green-600 hover:bg-green-700"
-                  : "bg-orange-600 hover:bg-orange-700"
+                  ? "bg-success hover:bg-success-dark"
+                  : "bg-warning hover:bg-warning-dark"
               }`}
             >
               {submitting
@@ -712,7 +726,11 @@ interface EditInventoryModalProps {
   onSaved: (updatedItem: InventoryItem) => void;
 }
 
-function EditInventoryModal({ item, onClose, onSaved }: EditInventoryModalProps) {
+function EditInventoryModal({
+  item,
+  onClose,
+  onSaved,
+}: EditInventoryModalProps) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [form, setForm] = useState({
@@ -725,7 +743,7 @@ function EditInventoryModal({ item, onClose, onSaved }: EditInventoryModalProps)
     e.preventDefault();
 
     const parsedQuantity = parseInt(form.quantity, 10);
-    if (isNaN(parsedQuantity) || parsedQuantity < 0) {
+    if (Number.isNaN(parsedQuantity) || parsedQuantity < 0) {
       setError("Quantity must be a non-negative number.");
       return;
     }
@@ -759,7 +777,7 @@ function EditInventoryModal({ item, onClose, onSaved }: EditInventoryModalProps)
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
       <div className="bg-white rounded-xl shadow-xl w-full max-w-lg mx-4">
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-          <h2 className="text-lg font-semibold text-[#232323]">
+          <h2 className="text-lg font-semibold text-primary">
             Edit Inventory Item
           </h2>
           <button
@@ -772,14 +790,14 @@ function EditInventoryModal({ item, onClose, onSaved }: EditInventoryModalProps)
 
         <form onSubmit={handleSubmit} className="px-6 py-4 space-y-4">
           {error && (
-            <p className="text-sm text-red-600 bg-red-50 px-3 py-2 rounded-lg">
+            <p className="text-sm text-error bg-error-light px-3 py-2 rounded-lg">
               {error}
             </p>
           )}
 
           {/* Read-only item info */}
           <div className="bg-gray-50 px-3 py-2 rounded-lg">
-            <p className="text-sm font-medium text-[#232323]">{item.name}</p>
+            <p className="text-sm font-medium text-primary">{item.name}</p>
             <p className="text-xs text-gray-500">
               {item.id} · {item.category}
             </p>
@@ -836,28 +854,18 @@ function EditInventoryModal({ item, onClose, onSaved }: EditInventoryModalProps)
           </div>
 
           <div className="flex justify-end gap-3 pt-2">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800 rounded-lg hover:bg-gray-50"
-            >
+            <Button type="button" onClick={onClose} variant="ghost">
               Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={submitting}
-              className="px-4 py-2 text-sm text-white rounded-lg disabled:opacity-50"
-              style={{ backgroundColor: "#232323" }}
-            >
+            </Button>
+            <Button type="submit" disabled={submitting} loading={submitting}>
               {submitting ? "Saving..." : "Save Changes"}
-            </button>
+            </Button>
           </div>
         </form>
       </div>
     </div>
   );
 }
-
 
 /* ------------------------------------------------------------------ */
 /* Create Inventory Item Modal                                         */
@@ -880,7 +888,10 @@ interface CreateInventoryModalProps {
   onCreated: () => void;
 }
 
-function CreateInventoryModal({ onClose, onCreated }: CreateInventoryModalProps) {
+function CreateInventoryModal({
+  onClose,
+  onCreated,
+}: CreateInventoryModalProps) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [form, setForm] = useState({
@@ -936,7 +947,7 @@ function CreateInventoryModal({ onClose, onCreated }: CreateInventoryModalProps)
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
       <div className="bg-white rounded-xl shadow-xl w-full max-w-lg mx-4 max-h-[90vh] overflow-y-auto">
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-          <h2 className="text-lg font-semibold text-[#232323]">
+          <h2 className="text-lg font-semibold text-primary">
             Add Inventory Item
           </h2>
           <button
@@ -949,7 +960,7 @@ function CreateInventoryModal({ onClose, onCreated }: CreateInventoryModalProps)
 
         <form onSubmit={handleSubmit} className="px-6 py-4 space-y-4">
           {error && (
-            <p className="text-sm text-red-600 bg-red-50 px-3 py-2 rounded-lg">
+            <p className="text-sm text-error bg-error-light px-3 py-2 rounded-lg">
               {error}
             </p>
           )}
@@ -965,7 +976,6 @@ function CreateInventoryModal({ onClose, onCreated }: CreateInventoryModalProps)
               placeholder="e.g. Bridgestone R260 Tire"
               className={inputClass}
               required
-              autoFocus
             />
           </div>
 
@@ -977,7 +987,10 @@ function CreateInventoryModal({ onClose, onCreated }: CreateInventoryModalProps)
               <select
                 value={form.category}
                 onChange={(e) =>
-                  setForm({ ...form, category: e.target.value as InventoryCategory })
+                  setForm({
+                    ...form,
+                    category: e.target.value as InventoryCategory,
+                  })
                 }
                 className={inputClass}
               >
@@ -1037,7 +1050,9 @@ function CreateInventoryModal({ onClose, onCreated }: CreateInventoryModalProps)
               <input
                 type="number"
                 value={form.min_threshold}
-                onChange={(e) => setForm({ ...form, min_threshold: e.target.value })}
+                onChange={(e) =>
+                  setForm({ ...form, min_threshold: e.target.value })
+                }
                 min="0"
                 className={inputClass}
               />
@@ -1049,7 +1064,9 @@ function CreateInventoryModal({ onClose, onCreated }: CreateInventoryModalProps)
               <input
                 type="number"
                 value={form.max_capacity}
-                onChange={(e) => setForm({ ...form, max_capacity: e.target.value })}
+                onChange={(e) =>
+                  setForm({ ...form, max_capacity: e.target.value })
+                }
                 min="1"
                 className={inputClass}
               />
@@ -1064,7 +1081,9 @@ function CreateInventoryModal({ onClose, onCreated }: CreateInventoryModalProps)
               <input
                 type="number"
                 value={form.unit_cost}
-                onChange={(e) => setForm({ ...form, unit_cost: e.target.value })}
+                onChange={(e) =>
+                  setForm({ ...form, unit_cost: e.target.value })
+                }
                 min="0"
                 step="0.01"
                 placeholder="Optional"
@@ -1086,21 +1105,12 @@ function CreateInventoryModal({ onClose, onCreated }: CreateInventoryModalProps)
           </div>
 
           <div className="flex justify-end gap-3 pt-2">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800 rounded-lg hover:bg-gray-50"
-            >
+            <Button type="button" onClick={onClose} variant="ghost">
               Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={submitting}
-              className="px-4 py-2 text-sm text-white rounded-lg disabled:opacity-50"
-              style={{ backgroundColor: "#232323" }}
-            >
+            </Button>
+            <Button type="submit" disabled={submitting} loading={submitting}>
               {submitting ? "Creating..." : "Create Item"}
-            </button>
+            </Button>
           </div>
         </form>
       </div>
@@ -1118,7 +1128,11 @@ interface DeleteConfirmModalProps {
   onConfirm: () => void;
 }
 
-function DeleteConfirmModal({ item, onClose, onConfirm }: DeleteConfirmModalProps) {
+function DeleteConfirmModal({
+  item,
+  onClose,
+  onConfirm,
+}: DeleteConfirmModalProps) {
   const [submitting, setSubmitting] = useState(false);
 
   const handleConfirm = async () => {
@@ -1132,23 +1146,21 @@ function DeleteConfirmModal({ item, onClose, onConfirm }: DeleteConfirmModalProp
       <div className="bg-white rounded-xl shadow-xl w-full max-w-sm mx-4">
         <div className="px-6 py-5">
           <div className="flex items-center gap-3 mb-4">
-            <div className="w-10 h-10 bg-red-50 rounded-full flex items-center justify-center">
-              <Trash2 className="w-5 h-5 text-red-600" />
+            <div className="w-10 h-10 bg-error-light rounded-full flex items-center justify-center">
+              <Trash2 className="w-5 h-5 text-error" />
             </div>
-            <h2 className="text-lg font-semibold text-[#232323]">
-              Delete Item
-            </h2>
+            <h2 className="text-lg font-semibold text-primary">Delete Item</h2>
           </div>
           <p className="text-sm text-gray-600 mb-1">
             Are you sure you want to delete this inventory item?
           </p>
           <div className="bg-gray-50 px-3 py-2 rounded-lg mt-3">
-            <p className="text-sm font-medium text-[#232323]">{item.name}</p>
+            <p className="text-sm font-medium text-primary">{item.name}</p>
             <p className="text-xs text-gray-500">
               {item.id} · {item.category} · {item.location}
             </p>
           </div>
-          <p className="text-xs text-red-500 mt-3">
+          <p className="text-xs text-error mt-3">
             This action cannot be undone.
           </p>
         </div>
@@ -1165,7 +1177,7 @@ function DeleteConfirmModal({ item, onClose, onConfirm }: DeleteConfirmModalProp
             type="button"
             onClick={handleConfirm}
             disabled={submitting}
-            className="px-4 py-2 text-sm text-white bg-red-600 rounded-lg hover:bg-red-700 disabled:opacity-50"
+            className="px-4 py-2 text-sm text-white bg-error rounded-lg hover:bg-error-dark disabled:opacity-50"
           >
             {submitting ? "Deleting..." : "Delete"}
           </button>
@@ -1215,13 +1227,68 @@ function StockHistoryModal({ item, onClose }: StockHistoryModalProps) {
     };
   }, [item.id]);
 
+  const historyColumns: Column<StockMovementEvent>[] = [
+    {
+      key: "timestamp",
+      label: "Timestamp",
+      render: (event) => (
+        <span className="text-xs text-gray-600">
+          {new Date(event.event_timestamp).toLocaleString()}
+        </span>
+      ),
+    },
+    {
+      key: "change",
+      label: "Change",
+      render: (event) => (
+        <span
+          className={`text-xs font-semibold ${
+            event.quantity_change > 0
+              ? "text-success"
+              : event.quantity_change < 0
+                ? "text-error"
+                : "text-gray-600"
+          }`}
+        >
+          {event.quantity_change > 0 ? "+" : ""}
+          {event.quantity_change}
+        </span>
+      ),
+    },
+    {
+      key: "reason",
+      label: "Reason",
+      render: (event) => (
+        <span className="text-xs text-gray-600">{event.reason}</span>
+      ),
+    },
+    {
+      key: "reference",
+      label: "Reference",
+      render: (event) => (
+        <span className="text-xs text-gray-500 font-mono">
+          {event.reference_id || "-"}
+        </span>
+      ),
+    },
+    {
+      key: "quantityAfter",
+      label: "Result Qty",
+      render: (event) => (
+        <span className="text-xs text-gray-700 font-medium">
+          {event.quantity_after}
+        </span>
+      ),
+    },
+  ];
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
       <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl mx-4 max-h-[80vh] flex flex-col">
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
           <div>
-            <h2 className="text-lg font-semibold text-[#232323]">
+            <h2 className="text-lg font-semibold text-primary">
               Stock History
             </h2>
             <p className="text-xs text-gray-500 mt-0.5">
@@ -1241,12 +1308,12 @@ function StockHistoryModal({ item, onClose }: StockHistoryModalProps) {
         <div className="flex-1 overflow-y-auto px-6 py-4">
           {loading && (
             <div className="flex items-center justify-center py-16">
-              <div className="w-6 h-6 border-2 border-gray-300 border-t-[#232323] rounded-full animate-spin" />
+              <div className="w-6 h-6 border-2 border-gray-300 border-t-primary rounded-full animate-spin" />
             </div>
           )}
 
           {error && (
-            <p className="text-sm text-red-600 bg-red-50 px-4 py-3 rounded-lg">
+            <p className="text-sm text-error bg-error-light px-4 py-3 rounded-lg">
               {error}
             </p>
           )}
@@ -1259,74 +1326,18 @@ function StockHistoryModal({ item, onClose }: StockHistoryModalProps) {
           )}
 
           {!loading && !error && events.length > 0 && (
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-gray-100">
-                  <th className="text-left px-3 py-2 text-xs font-medium text-gray-500">
-                    Timestamp
-                  </th>
-                  <th className="text-left px-3 py-2 text-xs font-medium text-gray-500">
-                    Change
-                  </th>
-                  <th className="text-left px-3 py-2 text-xs font-medium text-gray-500">
-                    Reason
-                  </th>
-                  <th className="text-left px-3 py-2 text-xs font-medium text-gray-500">
-                    Reference
-                  </th>
-                  <th className="text-left px-3 py-2 text-xs font-medium text-gray-500">
-                    Result Qty
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-50">
-                {events.map((event) => (
-                  <tr
-                    key={event.event_id}
-                    className="hover:bg-gray-50 transition-colors"
-                  >
-                    <td className="px-3 py-2.5 text-xs text-gray-600">
-                      {new Date(event.event_timestamp).toLocaleString()}
-                    </td>
-                    <td className="px-3 py-2.5">
-                      <span
-                        className={`text-xs font-semibold ${
-                          event.quantity_change > 0
-                            ? "text-green-600"
-                            : event.quantity_change < 0
-                              ? "text-red-600"
-                              : "text-gray-600"
-                        }`}
-                      >
-                        {event.quantity_change > 0 ? "+" : ""}
-                        {event.quantity_change}
-                      </span>
-                    </td>
-                    <td className="px-3 py-2.5 text-xs text-gray-600">
-                      {event.reason}
-                    </td>
-                    <td className="px-3 py-2.5 text-xs text-gray-500 font-mono">
-                      {event.reference_id || "—"}
-                    </td>
-                    <td className="px-3 py-2.5 text-xs text-gray-700 font-medium">
-                      {event.quantity_after}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <Table
+              variant="compact"
+              columns={historyColumns}
+              data={events}
+              getRowId={(event) => event.event_id}
+            />
           )}
         </div>
 
         {/* Footer */}
         <div className="flex justify-end px-6 py-4 border-t border-gray-100">
-          <button
-            onClick={onClose}
-            className="px-4 py-2 text-sm text-white rounded-lg"
-            style={{ backgroundColor: "#232323" }}
-          >
-            Close
-          </button>
+          <Button onClick={onClose}>Close</Button>
         </div>
       </div>
     </div>

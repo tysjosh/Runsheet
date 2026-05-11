@@ -13,12 +13,12 @@
 
 import { Loader2, X } from "lucide-react";
 import { useCallback, useState } from "react";
+import { ApiError } from "../../services/api";
 import {
-  createOrder,
   type CallType,
   type CreateOrderPayload,
+  createOrder,
 } from "../../services/ordersApi";
-import { ApiError } from "../../services/api";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -90,12 +90,12 @@ export function validateCreateOrderForm(
   }
 
   const lat = parseFloat(values.ship_to_lat);
-  if (isNaN(lat) || lat < -90 || lat > 90) {
+  if (Number.isNaN(lat) || lat < -90 || lat > 90) {
     errors.ship_to_lat = "Latitude must be between -90 and 90";
   }
 
   const lon = parseFloat(values.ship_to_lon);
-  if (isNaN(lon) || lon < -180 || lon > 180) {
+  if (Number.isNaN(lon) || lon < -180 || lon > 180) {
     errors.ship_to_lon = "Longitude must be between -180 and 180";
   }
 
@@ -106,7 +106,11 @@ export function validateCreateOrderForm(
   // Volume validation: missing_volume
   if (!values.fill_to_full) {
     const gallons = parseFloat(values.gallons_requested);
-    if (!values.gallons_requested.trim() || isNaN(gallons) || gallons <= 0) {
+    if (
+      !values.gallons_requested.trim() ||
+      Number.isNaN(gallons) ||
+      gallons <= 0
+    ) {
       errors.gallons_requested =
         "Gallons must be greater than 0 (or select Fill to Full)";
     }
@@ -128,8 +132,7 @@ export function validateCreateOrderForm(
     const start = new Date(values.delivery_window_start);
     const end = new Date(values.delivery_window_end);
     if (end <= start) {
-      errors.delivery_window_end =
-        "Delivery window end must be after start";
+      errors.delivery_window_end = "Delivery window end must be after start";
     }
   }
 
@@ -173,7 +176,11 @@ export default function CreateOrderModal({
     (field: keyof CreateOrderFormValues, value: string | boolean) => {
       setForm((prev) => ({ ...prev, [field]: value }));
       // Clear field error on change
-      setErrors((prev) => ({ ...prev, [field]: undefined, general: undefined }));
+      setErrors((prev) => ({
+        ...prev,
+        [field]: undefined,
+        general: undefined,
+      }));
     },
     [],
   );
@@ -211,9 +218,10 @@ export default function CreateOrderModal({
           delivery_window_end: form.delivery_window_end || undefined,
           po_number: form.po_number.trim() || undefined,
           special_instructions: form.special_instructions.trim() || undefined,
-          client_event_id: typeof crypto !== "undefined" && crypto.randomUUID
-            ? crypto.randomUUID()
-            : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          client_event_id:
+            typeof crypto !== "undefined" && crypto.randomUUID
+              ? crypto.randomUUID()
+              : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
         };
 
         const response = await createOrder(payload);
@@ -225,7 +233,8 @@ export default function CreateOrderModal({
           setErrors({ general: err.message });
         } else {
           setErrors({
-            general: err instanceof Error ? err.message : "Failed to create order",
+            general:
+              err instanceof Error ? err.message : "Failed to create order",
           });
         }
       } finally {
@@ -247,7 +256,10 @@ export default function CreateOrderModal({
       <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto mx-4">
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-          <h2 id="create-order-title" className="text-lg font-semibold text-[#232323]">
+          <h2
+            id="create-order-title"
+            className="text-lg font-semibold text-primary"
+          >
             Create Order
           </h2>
           <button
@@ -263,17 +275,25 @@ export default function CreateOrderModal({
         {/* Form */}
         <form onSubmit={handleSubmit} className="px-6 py-4 space-y-4">
           {errors.general && (
-            <div role="alert" className="rounded-lg bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-800">
+            <div
+              role="alert"
+              className="rounded-lg bg-error-light border border-error-light px-4 py-3 text-sm text-error-dark"
+            >
               {errors.general}
             </div>
           )}
 
           {/* Customer section */}
           <fieldset className="space-y-3">
-            <legend className="text-sm font-medium text-gray-700">Customer</legend>
+            <legend className="text-sm font-medium text-gray-700">
+              Customer
+            </legend>
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <label htmlFor="co-customer-id" className="block text-xs text-gray-600 mb-1">
+                <label
+                  htmlFor="co-customer-id"
+                  className="block text-xs text-gray-600 mb-1"
+                >
                   Customer ID *
                 </label>
                 <input
@@ -281,49 +301,68 @@ export default function CreateOrderModal({
                   type="text"
                   value={form.customer_id}
                   onChange={(e) => handleChange("customer_id", e.target.value)}
-                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-[#232323] focus:outline-none"
+                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-primary focus:outline-none"
                 />
                 {errors.customer_id && (
-                  <p className="text-xs text-red-600 mt-1">{errors.customer_id}</p>
+                  <p className="text-xs text-error mt-1">
+                    {errors.customer_id}
+                  </p>
                 )}
               </div>
               <div>
-                <label htmlFor="co-customer-name" className="block text-xs text-gray-600 mb-1">
+                <label
+                  htmlFor="co-customer-name"
+                  className="block text-xs text-gray-600 mb-1"
+                >
                   Customer Name *
                 </label>
                 <input
                   id="co-customer-name"
                   type="text"
                   value={form.customer_name}
-                  onChange={(e) => handleChange("customer_name", e.target.value)}
-                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-[#232323] focus:outline-none"
+                  onChange={(e) =>
+                    handleChange("customer_name", e.target.value)
+                  }
+                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-primary focus:outline-none"
                 />
                 {errors.customer_name && (
-                  <p className="text-xs text-red-600 mt-1">{errors.customer_name}</p>
+                  <p className="text-xs text-error mt-1">
+                    {errors.customer_name}
+                  </p>
                 )}
               </div>
               <div>
-                <label htmlFor="co-phone" className="block text-xs text-gray-600 mb-1">
+                <label
+                  htmlFor="co-phone"
+                  className="block text-xs text-gray-600 mb-1"
+                >
                   Phone
                 </label>
                 <input
                   id="co-phone"
                   type="tel"
                   value={form.customer_phone}
-                  onChange={(e) => handleChange("customer_phone", e.target.value)}
-                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-[#232323] focus:outline-none"
+                  onChange={(e) =>
+                    handleChange("customer_phone", e.target.value)
+                  }
+                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-primary focus:outline-none"
                 />
               </div>
               <div>
-                <label htmlFor="co-email" className="block text-xs text-gray-600 mb-1">
+                <label
+                  htmlFor="co-email"
+                  className="block text-xs text-gray-600 mb-1"
+                >
                   Email
                 </label>
                 <input
                   id="co-email"
                   type="email"
                   value={form.customer_email}
-                  onChange={(e) => handleChange("customer_email", e.target.value)}
-                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-[#232323] focus:outline-none"
+                  onChange={(e) =>
+                    handleChange("customer_email", e.target.value)
+                  }
+                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-primary focus:outline-none"
                 />
               </div>
             </div>
@@ -331,25 +370,37 @@ export default function CreateOrderModal({
 
           {/* Delivery location */}
           <fieldset className="space-y-3">
-            <legend className="text-sm font-medium text-gray-700">Delivery Location</legend>
+            <legend className="text-sm font-medium text-gray-700">
+              Delivery Location
+            </legend>
             <div>
-              <label htmlFor="co-address" className="block text-xs text-gray-600 mb-1">
+              <label
+                htmlFor="co-address"
+                className="block text-xs text-gray-600 mb-1"
+              >
                 Ship-to Address *
               </label>
               <input
                 id="co-address"
                 type="text"
                 value={form.ship_to_address}
-                onChange={(e) => handleChange("ship_to_address", e.target.value)}
-                className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-[#232323] focus:outline-none"
+                onChange={(e) =>
+                  handleChange("ship_to_address", e.target.value)
+                }
+                className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-primary focus:outline-none"
               />
               {errors.ship_to_address && (
-                <p className="text-xs text-red-600 mt-1">{errors.ship_to_address}</p>
+                <p className="text-xs text-error mt-1">
+                  {errors.ship_to_address}
+                </p>
               )}
             </div>
             <div className="grid grid-cols-3 gap-3">
               <div>
-                <label htmlFor="co-lat" className="block text-xs text-gray-600 mb-1">
+                <label
+                  htmlFor="co-lat"
+                  className="block text-xs text-gray-600 mb-1"
+                >
                   Latitude *
                 </label>
                 <input
@@ -358,14 +409,19 @@ export default function CreateOrderModal({
                   step="any"
                   value={form.ship_to_lat}
                   onChange={(e) => handleChange("ship_to_lat", e.target.value)}
-                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-[#232323] focus:outline-none"
+                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-primary focus:outline-none"
                 />
                 {errors.ship_to_lat && (
-                  <p className="text-xs text-red-600 mt-1">{errors.ship_to_lat}</p>
+                  <p className="text-xs text-error mt-1">
+                    {errors.ship_to_lat}
+                  </p>
                 )}
               </div>
               <div>
-                <label htmlFor="co-lon" className="block text-xs text-gray-600 mb-1">
+                <label
+                  htmlFor="co-lon"
+                  className="block text-xs text-gray-600 mb-1"
+                >
                   Longitude *
                 </label>
                 <input
@@ -374,22 +430,29 @@ export default function CreateOrderModal({
                   step="any"
                   value={form.ship_to_lon}
                   onChange={(e) => handleChange("ship_to_lon", e.target.value)}
-                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-[#232323] focus:outline-none"
+                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-primary focus:outline-none"
                 />
                 {errors.ship_to_lon && (
-                  <p className="text-xs text-red-600 mt-1">{errors.ship_to_lon}</p>
+                  <p className="text-xs text-error mt-1">
+                    {errors.ship_to_lon}
+                  </p>
                 )}
               </div>
               <div>
-                <label htmlFor="co-tank-id" className="block text-xs text-gray-600 mb-1">
+                <label
+                  htmlFor="co-tank-id"
+                  className="block text-xs text-gray-600 mb-1"
+                >
                   Tank ID
                 </label>
                 <input
                   id="co-tank-id"
                   type="text"
                   value={form.customer_tank_id}
-                  onChange={(e) => handleChange("customer_tank_id", e.target.value)}
-                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-[#232323] focus:outline-none"
+                  onChange={(e) =>
+                    handleChange("customer_tank_id", e.target.value)
+                  }
+                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-primary focus:outline-none"
                 />
               </div>
             </div>
@@ -397,10 +460,15 @@ export default function CreateOrderModal({
 
           {/* Product & Volume */}
           <fieldset className="space-y-3">
-            <legend className="text-sm font-medium text-gray-700">Product & Volume</legend>
+            <legend className="text-sm font-medium text-gray-700">
+              Product & Volume
+            </legend>
             <div className="grid grid-cols-3 gap-3">
               <div>
-                <label htmlFor="co-product" className="block text-xs text-gray-600 mb-1">
+                <label
+                  htmlFor="co-product"
+                  className="block text-xs text-gray-600 mb-1"
+                >
                   Product Code *
                 </label>
                 <input
@@ -408,14 +476,19 @@ export default function CreateOrderModal({
                   type="text"
                   value={form.product_code}
                   onChange={(e) => handleChange("product_code", e.target.value)}
-                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-[#232323] focus:outline-none"
+                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-primary focus:outline-none"
                 />
                 {errors.product_code && (
-                  <p className="text-xs text-red-600 mt-1">{errors.product_code}</p>
+                  <p className="text-xs text-error mt-1">
+                    {errors.product_code}
+                  </p>
                 )}
               </div>
               <div>
-                <label htmlFor="co-gallons" className="block text-xs text-gray-600 mb-1">
+                <label
+                  htmlFor="co-gallons"
+                  className="block text-xs text-gray-600 mb-1"
+                >
                   Gallons Requested
                 </label>
                 <input
@@ -423,12 +496,16 @@ export default function CreateOrderModal({
                   type="number"
                   step="any"
                   value={form.gallons_requested}
-                  onChange={(e) => handleChange("gallons_requested", e.target.value)}
+                  onChange={(e) =>
+                    handleChange("gallons_requested", e.target.value)
+                  }
                   disabled={form.fill_to_full}
-                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-[#232323] focus:outline-none disabled:bg-gray-100"
+                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-primary focus:outline-none disabled:bg-gray-100"
                 />
                 {errors.gallons_requested && (
-                  <p className="text-xs text-red-600 mt-1">{errors.gallons_requested}</p>
+                  <p className="text-xs text-error mt-1">
+                    {errors.gallons_requested}
+                  </p>
                 )}
               </div>
               <div className="flex items-end pb-2">
@@ -436,7 +513,9 @@ export default function CreateOrderModal({
                   <input
                     type="checkbox"
                     checked={form.fill_to_full}
-                    onChange={(e) => handleChange("fill_to_full", e.target.checked)}
+                    onChange={(e) =>
+                      handleChange("fill_to_full", e.target.checked)
+                    }
                     className="rounded border-gray-300"
                   />
                   Fill to Full
@@ -447,17 +526,22 @@ export default function CreateOrderModal({
 
           {/* Scheduling */}
           <fieldset className="space-y-3">
-            <legend className="text-sm font-medium text-gray-700">Scheduling</legend>
+            <legend className="text-sm font-medium text-gray-700">
+              Scheduling
+            </legend>
             <div className="grid grid-cols-3 gap-3">
               <div>
-                <label htmlFor="co-call-type" className="block text-xs text-gray-600 mb-1">
+                <label
+                  htmlFor="co-call-type"
+                  className="block text-xs text-gray-600 mb-1"
+                >
                   Call Type *
                 </label>
                 <select
                   id="co-call-type"
                   value={form.call_type}
                   onChange={(e) => handleChange("call_type", e.target.value)}
-                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-[#232323] focus:outline-none"
+                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-primary focus:outline-none"
                 >
                   <option value="one_off">One Off</option>
                   <option value="will_call">Will Call</option>
@@ -466,33 +550,47 @@ export default function CreateOrderModal({
                 </select>
               </div>
               <div>
-                <label htmlFor="co-window-start" className="block text-xs text-gray-600 mb-1">
+                <label
+                  htmlFor="co-window-start"
+                  className="block text-xs text-gray-600 mb-1"
+                >
                   Window Start {form.call_type === "one_off" ? "*" : ""}
                 </label>
                 <input
                   id="co-window-start"
                   type="datetime-local"
                   value={form.delivery_window_start}
-                  onChange={(e) => handleChange("delivery_window_start", e.target.value)}
-                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-[#232323] focus:outline-none"
+                  onChange={(e) =>
+                    handleChange("delivery_window_start", e.target.value)
+                  }
+                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-primary focus:outline-none"
                 />
                 {errors.delivery_window_start && (
-                  <p className="text-xs text-red-600 mt-1">{errors.delivery_window_start}</p>
+                  <p className="text-xs text-error mt-1">
+                    {errors.delivery_window_start}
+                  </p>
                 )}
               </div>
               <div>
-                <label htmlFor="co-window-end" className="block text-xs text-gray-600 mb-1">
+                <label
+                  htmlFor="co-window-end"
+                  className="block text-xs text-gray-600 mb-1"
+                >
                   Window End {form.call_type === "one_off" ? "*" : ""}
                 </label>
                 <input
                   id="co-window-end"
                   type="datetime-local"
                   value={form.delivery_window_end}
-                  onChange={(e) => handleChange("delivery_window_end", e.target.value)}
-                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-[#232323] focus:outline-none"
+                  onChange={(e) =>
+                    handleChange("delivery_window_end", e.target.value)
+                  }
+                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-primary focus:outline-none"
                 />
                 {errors.delivery_window_end && (
-                  <p className="text-xs text-red-600 mt-1">{errors.delivery_window_end}</p>
+                  <p className="text-xs text-error mt-1">
+                    {errors.delivery_window_end}
+                  </p>
                 )}
               </div>
             </div>
@@ -500,10 +598,15 @@ export default function CreateOrderModal({
 
           {/* Optional fields */}
           <fieldset className="space-y-3">
-            <legend className="text-sm font-medium text-gray-700">Additional</legend>
+            <legend className="text-sm font-medium text-gray-700">
+              Additional
+            </legend>
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <label htmlFor="co-po" className="block text-xs text-gray-600 mb-1">
+                <label
+                  htmlFor="co-po"
+                  className="block text-xs text-gray-600 mb-1"
+                >
                   PO Number
                 </label>
                 <input
@@ -511,19 +614,24 @@ export default function CreateOrderModal({
                   type="text"
                   value={form.po_number}
                   onChange={(e) => handleChange("po_number", e.target.value)}
-                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-[#232323] focus:outline-none"
+                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-primary focus:outline-none"
                 />
               </div>
               <div>
-                <label htmlFor="co-instructions" className="block text-xs text-gray-600 mb-1">
+                <label
+                  htmlFor="co-instructions"
+                  className="block text-xs text-gray-600 mb-1"
+                >
                   Special Instructions
                 </label>
                 <input
                   id="co-instructions"
                   type="text"
                   value={form.special_instructions}
-                  onChange={(e) => handleChange("special_instructions", e.target.value)}
-                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-[#232323] focus:outline-none"
+                  onChange={(e) =>
+                    handleChange("special_instructions", e.target.value)
+                  }
+                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-primary focus:outline-none"
                 />
               </div>
             </div>
@@ -541,8 +649,7 @@ export default function CreateOrderModal({
             <button
               type="submit"
               disabled={submitting}
-              className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-white rounded-lg disabled:opacity-50"
-              style={{ backgroundColor: "#232323" }}
+              className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-white rounded-lg disabled:opacity-50 bg-primary hover:bg-primary-hover"
               aria-label="Submit order"
             >
               {submitting && <Loader2 className="w-4 h-4 animate-spin" />}

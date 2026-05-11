@@ -8,12 +8,12 @@ interface JobQueuePanelProps {
 }
 
 const STATUS_BADGE: Record<JobStatus, { bg: string; text: string }> = {
-  scheduled: { bg: "bg-blue-100", text: "text-blue-700" },
-  assigned: { bg: "bg-orange-100", text: "text-orange-700" },
-  in_progress: { bg: "bg-green-100", text: "text-green-700" },
+  scheduled: { bg: "bg-info-light", text: "text-info-dark" },
+  assigned: { bg: "bg-warning-light", text: "text-warning-dark" },
+  in_progress: { bg: "bg-success-light", text: "text-success-dark" },
   completed: { bg: "bg-gray-100", text: "text-gray-600" },
   cancelled: { bg: "bg-gray-100", text: "text-gray-500" },
-  failed: { bg: "bg-red-100", text: "text-red-700" },
+  failed: { bg: "bg-error-light", text: "text-error-dark" },
 };
 
 function formatTime(iso: string): string {
@@ -48,8 +48,8 @@ export default function JobQueuePanel({ jobs }: JobQueuePanelProps) {
   return (
     <div className="bg-white rounded-xl border border-gray-100">
       <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-100">
-        <CalendarClock className="w-4 h-4 text-[#232323]" />
-        <h3 className="text-sm font-semibold text-[#232323]">Job Queue</h3>
+        <CalendarClock className="w-4 h-4 text-primary" />
+        <h3 className="text-sm font-semibold text-primary">Job Queue</h3>
         <span className="ml-auto text-xs text-gray-400">
           {queuedJobs.length} upcoming
         </span>
@@ -66,7 +66,7 @@ export default function JobQueuePanel({ jobs }: JobQueuePanelProps) {
             return (
               <div key={job.job_id} className="px-4 py-2.5 hover:bg-gray-50">
                 <div className="flex items-center justify-between">
-                  <span className="text-xs font-medium text-[#232323]">
+                  <span className="text-xs font-medium text-primary">
                     {job.job_id}
                   </span>
                   <span

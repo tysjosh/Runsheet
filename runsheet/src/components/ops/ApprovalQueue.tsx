@@ -11,13 +11,7 @@
  * - Requirement 9.3: Approval queue panel with approve/reject and impact summaries
  */
 
-import {
-  AlertTriangle,
-  Check,
-  Clock,
-  ShieldAlert,
-  X,
-} from "lucide-react";
+import { Check, Clock, ShieldAlert, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { useAgentWebSocket } from "../../hooks/useAgentWebSocket";
 import type { ApprovalEntry } from "../../services/agentApi";
@@ -39,7 +33,7 @@ function getAgentLabel(agentId: string): string {
   return AGENT_LABELS[agentId] ?? agentId;
 }
 
-function formatTimestamp(iso: string): string {
+function _formatTimestamp(iso: string): string {
   try {
     const date = new Date(iso);
     return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -84,7 +78,9 @@ export default function ApprovalQueue() {
       }
     }
     load();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Subscribe to real-time approval events
@@ -145,13 +141,13 @@ export default function ApprovalQueue() {
       {/* Header */}
       <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
         <div className="flex items-center gap-2">
-          <div className="w-8 h-8 bg-amber-500 rounded-lg flex items-center justify-center">
+          <div className="w-8 h-8 bg-warning-light0 rounded-lg flex items-center justify-center">
             <ShieldAlert className="w-4 h-4 text-white" />
           </div>
-          <h3 className="text-sm font-semibold text-[#232323]">Approval Queue</h3>
+          <h3 className="text-sm font-semibold text-primary">Approval Queue</h3>
         </div>
         {pendingApprovals.length > 0 && (
-          <span className="text-xs font-medium bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full">
+          <span className="text-xs font-medium bg-warning-light text-warning-dark px-2 py-0.5 rounded-full">
             {pendingApprovals.length} pending
           </span>
         )}
@@ -179,16 +175,16 @@ export default function ApprovalQueue() {
                 {/* Top row: agent + risk + time */}
                 <div className="flex items-center justify-between mb-2">
                   <div className="flex items-center gap-2">
-                    <span className="text-xs font-medium text-[#232323]">
+                    <span className="text-xs font-medium text-primary">
                       {getAgentLabel(approval.proposed_by)}
                     </span>
                     <span
                       className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
                         approval.risk_level === "high"
-                          ? "bg-red-50 text-red-600"
+                          ? "bg-error-light text-error"
                           : approval.risk_level === "medium"
-                            ? "bg-amber-50 text-amber-600"
-                            : "bg-emerald-50 text-emerald-600"
+                            ? "bg-warning-light text-warning"
+                            : "bg-success-light text-success"
                       }`}
                     >
                       {approval.risk_level}
@@ -216,7 +212,7 @@ export default function ApprovalQueue() {
                     onClick={() => handleApprove(approval.action_id)}
                     disabled={isProcessing}
                     aria-label={`Approve ${approval.tool_name} action`}
-                    className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-offset-1 focus:ring-emerald-500"
+                    className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-success hover:bg-success-dark rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-offset-1 focus:ring-success"
                   >
                     {isProcessing ? (
                       <div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />

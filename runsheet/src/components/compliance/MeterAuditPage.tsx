@@ -1,13 +1,14 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import type React from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
-  getMeters,
+  type CreateMeterPayload,
   createMeter,
   getMeterAuditTrail,
-  type MeterRegistration,
+  getMeters,
   type MeterAuditEntry,
-  type CreateMeterPayload,
+  type MeterRegistration,
 } from "../../services/complianceApi";
 
 // ─── Sub-view types ──────────────────────────────────────────────────────────
@@ -26,12 +27,15 @@ function calibrationStatusBadge(expiryDate: string): {
   const diffDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
 
   if (diffDays < 0) {
-    return { label: "Expired", className: "bg-red-100 text-red-800" };
+    return { label: "Expired", className: "bg-error-light text-error-dark" };
   }
   if (diffDays <= 30) {
-    return { label: `Expiring (${diffDays}d)`, className: "bg-yellow-100 text-yellow-800" };
+    return {
+      label: `Expiring (${diffDays}d)`,
+      className: "bg-warning-light text-warning-dark",
+    };
   }
-  return { label: "Valid", className: "bg-green-100 text-green-800" };
+  return { label: "Valid", className: "bg-success-light text-success-dark" };
 }
 
 function formatDate(dateStr: string | null): string {
@@ -44,7 +48,7 @@ function varianceBadge(flag: string | null): {
   className: string;
 } | null {
   if (!flag) return null;
-  return { label: flag, className: "bg-red-100 text-red-800" };
+  return { label: flag, className: "bg-error-light text-error-dark" };
 }
 
 // ─── Main Component ──────────────────────────────────────────────────────────
@@ -61,7 +65,9 @@ export default function MeterAuditPage() {
   const [truckIdFilter, setTruckIdFilter] = useState<string>("");
 
   // Audit trail state
-  const [selectedMeter, setSelectedMeter] = useState<MeterRegistration | null>(null);
+  const [selectedMeter, setSelectedMeter] = useState<MeterRegistration | null>(
+    null,
+  );
   const [auditEntries, setAuditEntries] = useState<MeterAuditEntry[]>([]);
   const [auditLoading, setAuditLoading] = useState(false);
   const [auditError, setAuditError] = useState<string | null>(null);
@@ -84,9 +90,7 @@ export default function MeterAuditPage() {
       setMeters(response.data ?? []);
       setTotalPages(response.pagination?.total_pages ?? 1);
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to load meters",
-      );
+      setError(err instanceof Error ? err.message : "Failed to load meters");
     } finally {
       setLoading(false);
     }
@@ -167,7 +171,7 @@ export default function MeterAuditPage() {
         {loading && (
           <div role="status" className="flex justify-center py-12">
             <span className="sr-only">Loading meters...</span>
-            <div className="animate-spin h-8 w-8 border-4 border-blue-600 border-t-transparent rounded-full" />
+            <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
           </div>
         )}
 
@@ -175,7 +179,7 @@ export default function MeterAuditPage() {
         {!loading && error && (
           <div
             role="alert"
-            className="bg-red-50 border border-red-200 text-red-700 p-4 rounded mb-4"
+            className="bg-error-light border border-error-light text-error-dark p-4 rounded mb-4"
           >
             {error}
           </div>
@@ -190,8 +194,12 @@ export default function MeterAuditPage() {
                   <tr className="border-b bg-gray-50">
                     <th className="text-left p-3 font-medium">Meter Number</th>
                     <th className="text-left p-3 font-medium">Truck ID</th>
-                    <th className="text-left p-3 font-medium">Calibration Cert #</th>
-                    <th className="text-left p-3 font-medium">Calibration Date</th>
+                    <th className="text-left p-3 font-medium">
+                      Calibration Cert #
+                    </th>
+                    <th className="text-left p-3 font-medium">
+                      Calibration Date
+                    </th>
                     <th className="text-left p-3 font-medium">Expiry Date</th>
                     <th className="text-left p-3 font-medium">Status</th>
                     <th className="text-left p-3 font-medium">W&M Authority</th>
@@ -200,17 +208,27 @@ export default function MeterAuditPage() {
                 </thead>
                 <tbody>
                   {meters.map((meter) => {
-                    const status = calibrationStatusBadge(meter.calibration_expiry_date);
+                    const status = calibrationStatusBadge(
+                      meter.calibration_expiry_date,
+                    );
                     return (
                       <tr
                         key={meter.meter_id}
                         className="border-b hover:bg-gray-50"
                       >
-                        <td className="p-3 font-medium">{meter.meter_number}</td>
+                        <td className="p-3 font-medium">
+                          {meter.meter_number}
+                        </td>
                         <td className="p-3">{meter.truck_id}</td>
-                        <td className="p-3">{meter.calibration_certificate_number}</td>
-                        <td className="p-3">{formatDate(meter.calibration_date)}</td>
-                        <td className="p-3">{formatDate(meter.calibration_expiry_date)}</td>
+                        <td className="p-3">
+                          {meter.calibration_certificate_number}
+                        </td>
+                        <td className="p-3">
+                          {formatDate(meter.calibration_date)}
+                        </td>
+                        <td className="p-3">
+                          {formatDate(meter.calibration_expiry_date)}
+                        </td>
                         <td className="p-3">
                           <span
                             className={`inline-block px-2 py-1 rounded text-xs font-medium ${status.className}`}
@@ -218,12 +236,14 @@ export default function MeterAuditPage() {
                             {status.label}
                           </span>
                         </td>
-                        <td className="p-3">{meter.weights_measures_authority}</td>
+                        <td className="p-3">
+                          {meter.weights_measures_authority}
+                        </td>
                         <td className="p-3">
                           <button
                             type="button"
                             onClick={() => handleViewAuditTrail(meter)}
-                            className="text-blue-600 hover:underline text-sm"
+                            className="text-info hover:underline text-sm"
                           >
                             Audit Trail
                           </button>
@@ -233,10 +253,7 @@ export default function MeterAuditPage() {
                   })}
                   {meters.length === 0 && (
                     <tr>
-                      <td
-                        colSpan={8}
-                        className="p-6 text-center text-gray-500"
-                      >
+                      <td colSpan={8} className="p-6 text-center text-gray-500">
                         No meters registered.
                       </td>
                     </tr>
@@ -281,7 +298,9 @@ export default function MeterAuditPage() {
   function renderAuditTrail() {
     if (!selectedMeter) return null;
 
-    const status = calibrationStatusBadge(selectedMeter.calibration_expiry_date);
+    const status = calibrationStatusBadge(
+      selectedMeter.calibration_expiry_date,
+    );
 
     return (
       <div>
@@ -317,7 +336,7 @@ export default function MeterAuditPage() {
         {auditLoading && (
           <div role="status" className="flex justify-center py-12">
             <span className="sr-only">Loading audit trail...</span>
-            <div className="animate-spin h-8 w-8 border-4 border-blue-600 border-t-transparent rounded-full" />
+            <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
           </div>
         )}
 
@@ -325,7 +344,7 @@ export default function MeterAuditPage() {
         {!auditLoading && auditError && (
           <div
             role="alert"
-            className="bg-red-50 border border-red-200 text-red-700 p-4 rounded mb-4"
+            className="bg-error-light border border-error-light text-error-dark p-4 rounded mb-4"
           >
             {auditError}
           </div>
@@ -356,7 +375,9 @@ export default function MeterAuditPage() {
                       >
                         <td className="p-3 font-medium">{entry.delivery_id}</td>
                         <td className="p-3">{entry.invoice_id}</td>
-                        <td className="p-3">{entry.gross_gallons.toFixed(1)}</td>
+                        <td className="p-3">
+                          {entry.gross_gallons.toFixed(1)}
+                        </td>
                         <td className="p-3">{entry.net_gallons.toFixed(1)}</td>
                         <td className="p-3">
                           {vBadge ? (
@@ -366,7 +387,9 @@ export default function MeterAuditPage() {
                               {vBadge.label}
                             </span>
                           ) : (
-                            <span className="text-green-600 text-xs font-medium">OK</span>
+                            <span className="text-success text-xs font-medium">
+                              OK
+                            </span>
                           )}
                         </td>
                         <td className="p-3">{formatDate(entry.timestamp)}</td>
@@ -375,10 +398,7 @@ export default function MeterAuditPage() {
                   })}
                   {auditEntries.length === 0 && (
                     <tr>
-                      <td
-                        colSpan={6}
-                        className="p-6 text-center text-gray-500"
-                      >
+                      <td colSpan={6} className="p-6 text-center text-gray-500">
                         No audit entries found for this meter.
                       </td>
                     </tr>
@@ -452,7 +472,8 @@ export default function MeterAuditPage() {
           <div>
             <h1 className="text-2xl font-bold">Meter Registry & Audit</h1>
             <p className="text-gray-600 mt-1">
-              Manage registered meters, track calibration status, and view per-meter delivery audit trails.
+              Manage registered meters, track calibration status, and view
+              per-meter delivery audit trails.
             </p>
           </div>
           <div className="flex gap-2">
@@ -472,7 +493,7 @@ export default function MeterAuditPage() {
               <button
                 type="button"
                 onClick={() => setViewMode("add")}
-                className="bg-blue-600 text-white px-4 py-2 rounded text-sm hover:bg-blue-700"
+                className="bg-primary text-white px-4 py-2 rounded text-sm hover:bg-primary-hover"
               >
                 Register Meter
               </button>
@@ -485,7 +506,7 @@ export default function MeterAuditPage() {
       {error && viewMode === "list" && (
         <div
           role="alert"
-          className="bg-red-50 border border-red-200 text-red-700 p-4 rounded mb-4"
+          className="bg-error-light border border-error-light text-error-dark p-4 rounded mb-4"
         >
           {error}
         </div>
@@ -507,7 +528,11 @@ interface RegisterMeterFormProps {
   loading: boolean;
 }
 
-function RegisterMeterForm({ onSubmit, onCancel, loading }: RegisterMeterFormProps) {
+function RegisterMeterForm({
+  onSubmit,
+  onCancel,
+  loading,
+}: RegisterMeterFormProps) {
   const [meterNumber, setMeterNumber] = useState("");
   const [truckId, setTruckId] = useState("");
   const [calibrationCertNumber, setCalibrationCertNumber] = useState("");
@@ -655,7 +680,7 @@ function RegisterMeterForm({ onSubmit, onCancel, loading }: RegisterMeterFormPro
         <button
           type="submit"
           disabled={loading}
-          className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 disabled:opacity-50"
+          className="bg-primary text-white px-4 py-2 rounded hover:bg-primary-hover disabled:opacity-50"
         >
           {loading ? "Registering..." : "Register Meter"}
         </button>

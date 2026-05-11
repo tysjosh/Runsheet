@@ -11,7 +11,13 @@
  * - Role gating (admin-only access implied by panel placement)
  */
 
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 
 jest.mock("../../services/intakeChannelsApi", () => ({
   listIntakeChannels: jest.fn(),
@@ -34,6 +40,10 @@ jest.mock("../../services/api", () => ({
   ApiTimeoutError: class extends Error {},
 }));
 
+import type {
+  IntakeChannel,
+  IntakeChannelWithSecret,
+} from "../../services/intakeChannelsApi";
 import {
   createIntakeChannel,
   deleteIntakeChannel,
@@ -41,14 +51,23 @@ import {
   rotateIntakeChannelSecret,
   updateIntakeChannel,
 } from "../../services/intakeChannelsApi";
-import type { IntakeChannel, IntakeChannelWithSecret } from "../../services/intakeChannelsApi";
 import IntakeChannelsAdminPanel from "../admin/IntakeChannelsAdminPanel";
 
-const mockList = listIntakeChannels as jest.MockedFunction<typeof listIntakeChannels>;
-const mockCreate = createIntakeChannel as jest.MockedFunction<typeof createIntakeChannel>;
-const mockRotate = rotateIntakeChannelSecret as jest.MockedFunction<typeof rotateIntakeChannelSecret>;
-const mockUpdate = updateIntakeChannel as jest.MockedFunction<typeof updateIntakeChannel>;
-const mockDelete = deleteIntakeChannel as jest.MockedFunction<typeof deleteIntakeChannel>;
+const mockList = listIntakeChannels as jest.MockedFunction<
+  typeof listIntakeChannels
+>;
+const mockCreate = createIntakeChannel as jest.MockedFunction<
+  typeof createIntakeChannel
+>;
+const mockRotate = rotateIntakeChannelSecret as jest.MockedFunction<
+  typeof rotateIntakeChannelSecret
+>;
+const mockUpdate = updateIntakeChannel as jest.MockedFunction<
+  typeof updateIntakeChannel
+>;
+const mockDelete = deleteIntakeChannel as jest.MockedFunction<
+  typeof deleteIntakeChannel
+>;
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -68,7 +87,9 @@ function channelFixture(overrides: Partial<IntakeChannel> = {}): IntakeChannel {
   };
 }
 
-function channelWithSecretFixture(overrides: Partial<IntakeChannelWithSecret> = {}): IntakeChannelWithSecret {
+function channelWithSecretFixture(
+  overrides: Partial<IntakeChannelWithSecret> = {},
+): IntakeChannelWithSecret {
   return {
     channel_id: "voice-provider-1",
     tenant_id: "tenant-a",
@@ -104,7 +125,11 @@ describe("IntakeChannelsAdminPanel — list", () => {
     mockList.mockResolvedValue({
       data: [
         channelFixture({ channel_id: "ch-1", display_name: "Voice Provider" }),
-        channelFixture({ channel_id: "ch-2", display_name: "EDI Feed", channel_type: "edi" }),
+        channelFixture({
+          channel_id: "ch-2",
+          display_name: "EDI Feed",
+          channel_type: "edi",
+        }),
       ],
       request_id: "r1",
     });
@@ -121,7 +146,9 @@ describe("IntakeChannelsAdminPanel — list", () => {
 
     render(<IntakeChannelsAdminPanel />);
 
-    expect(await screen.findByText(/no intake channels registered/i)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/no intake channels registered/i),
+    ).toBeInTheDocument();
   });
 
   it("renders error on fetch failure", async () => {
@@ -136,7 +163,9 @@ describe("IntakeChannelsAdminPanel — list", () => {
 describe("IntakeChannelsAdminPanel — create", () => {
   it("opens create form and submits successfully", async () => {
     mockList.mockResolvedValue({ data: [], request_id: "r1" });
-    mockCreate.mockResolvedValue(channelWithSecretFixture({ hmac_secret: "new-secret-xyz" }));
+    mockCreate.mockResolvedValue(
+      channelWithSecretFixture({ hmac_secret: "new-secret-xyz" }),
+    );
 
     render(<IntakeChannelsAdminPanel />);
 
@@ -146,8 +175,12 @@ describe("IntakeChannelsAdminPanel — create", () => {
     fireEvent.click(screen.getByRole("button", { name: /register channel/i }));
 
     // Fill form
-    fireEvent.change(screen.getByLabelText(/channel id/i), { target: { value: "my-channel" } });
-    fireEvent.change(screen.getByLabelText(/display name/i), { target: { value: "My Channel" } });
+    fireEvent.change(screen.getByLabelText(/channel id/i), {
+      target: { value: "my-channel" },
+    });
+    fireEvent.change(screen.getByLabelText(/display name/i), {
+      target: { value: "My Channel" },
+    });
 
     // Submit
     await act(async () => {
@@ -157,27 +190,37 @@ describe("IntakeChannelsAdminPanel — create", () => {
     await waitFor(() => expect(mockCreate).toHaveBeenCalledTimes(1));
 
     // Secret modal appears
-    expect(await screen.findByTestId("secret-value")).toHaveTextContent("new-secret-xyz");
+    expect(await screen.findByTestId("secret-value")).toHaveTextContent(
+      "new-secret-xyz",
+    );
   });
 
   it("shows secret exactly once with copy button", async () => {
     mockList.mockResolvedValue({ data: [], request_id: "r1" });
-    mockCreate.mockResolvedValue(channelWithSecretFixture({ hmac_secret: "one-time-secret" }));
+    mockCreate.mockResolvedValue(
+      channelWithSecretFixture({ hmac_secret: "one-time-secret" }),
+    );
 
     render(<IntakeChannelsAdminPanel />);
 
     await waitFor(() => expect(mockList).toHaveBeenCalled());
 
     fireEvent.click(screen.getByRole("button", { name: /register channel/i }));
-    fireEvent.change(screen.getByLabelText(/channel id/i), { target: { value: "ch-new" } });
-    fireEvent.change(screen.getByLabelText(/display name/i), { target: { value: "New" } });
+    fireEvent.change(screen.getByLabelText(/channel id/i), {
+      target: { value: "ch-new" },
+    });
+    fireEvent.change(screen.getByLabelText(/display name/i), {
+      target: { value: "New" },
+    });
 
     await act(async () => {
       fireEvent.click(screen.getByText("Create"));
     });
 
     await waitFor(() => {
-      expect(screen.getByTestId("secret-value")).toHaveTextContent("one-time-secret");
+      expect(screen.getByTestId("secret-value")).toHaveTextContent(
+        "one-time-secret",
+      );
     });
 
     // Copy button exists
@@ -188,7 +231,9 @@ describe("IntakeChannelsAdminPanel — create", () => {
       fireEvent.click(copyBtn);
     });
 
-    expect(navigator.clipboard.writeText).toHaveBeenCalledWith("one-time-secret");
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith(
+      "one-time-secret",
+    );
   });
 });
 
@@ -198,7 +243,9 @@ describe("IntakeChannelsAdminPanel — rotate secret", () => {
       data: [channelFixture({ channel_id: "ch-rotate" })],
       request_id: "r1",
     });
-    mockRotate.mockResolvedValue(channelWithSecretFixture({ hmac_secret: "rotated-secret-999" }));
+    mockRotate.mockResolvedValue(
+      channelWithSecretFixture({ hmac_secret: "rotated-secret-999" }),
+    );
 
     render(<IntakeChannelsAdminPanel />);
 
@@ -206,10 +253,14 @@ describe("IntakeChannelsAdminPanel — rotate secret", () => {
     expect(await screen.findByText("ch-rotate")).toBeInTheDocument();
 
     // Click rotate button
-    fireEvent.click(screen.getByRole("button", { name: /rotate secret for ch-rotate/i }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /rotate secret for ch-rotate/i }),
+    );
 
     await waitFor(() => expect(mockRotate).toHaveBeenCalledWith("ch-rotate"));
-    expect(await screen.findByTestId("secret-value")).toHaveTextContent("rotated-secret-999");
+    expect(await screen.findByTestId("secret-value")).toHaveTextContent(
+      "rotated-secret-999",
+    );
   });
 });
 
@@ -227,7 +278,9 @@ describe("IntakeChannelsAdminPanel — toggle enabled", () => {
     expect(await screen.findByText("ch-toggle")).toBeInTheDocument();
 
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /disable ch-toggle/i }));
+      fireEvent.click(
+        screen.getByRole("button", { name: /disable ch-toggle/i }),
+      );
     });
 
     await waitFor(() =>

@@ -87,24 +87,24 @@ export const SEVERITY_BADGE_CONFIG: Record<
   { color: string; bg: string; border: string }
 > = {
   minor: {
-    color: "text-yellow-800",
-    bg: "bg-yellow-100",
-    border: "border-yellow-200",
+    color: "text-warning-dark",
+    bg: "bg-warning-light",
+    border: "border-warning-light",
   },
   moderate: {
-    color: "text-orange-800",
-    bg: "bg-orange-100",
-    border: "border-orange-200",
+    color: "text-warning-dark",
+    bg: "bg-warning-light",
+    border: "border-warning-light",
   },
   severe: {
-    color: "text-red-800",
-    bg: "bg-red-100",
-    border: "border-red-200",
+    color: "text-error-dark",
+    bg: "bg-error-light",
+    border: "border-error-light",
   },
   extreme: {
-    color: "text-red-900",
-    bg: "bg-red-200",
-    border: "border-red-300",
+    color: "text-error-dark",
+    bg: "bg-error-light",
+    border: "border-error",
   },
 };
 
@@ -135,8 +135,8 @@ function ToastContainer({
           key={toast.id}
           className={`flex items-center gap-2 px-4 py-3 rounded-lg shadow-lg text-sm font-medium ${
             toast.type === "success"
-              ? "bg-green-600 text-white"
-              : "bg-red-600 text-white"
+              ? "bg-success text-white"
+              : "bg-error text-white"
           }`}
         >
           {toast.type === "success" ? (
@@ -304,12 +304,12 @@ function RestrictionCard({ restriction }: RestrictionCardProps) {
       <header className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
-            <h3 className="text-sm font-semibold text-[#232323] truncate">
+            <h3 className="text-sm font-semibold text-primary truncate">
               {restriction.reason?.trim() || "Untitled restriction"}
             </h3>
             <SeverityBadge severity={restriction.severity} />
             {isActive ? (
-              <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded font-medium bg-green-100 text-green-700">
+              <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded font-medium bg-success-light text-success-dark">
                 <Check className="w-3 h-3" aria-hidden="true" />
                 Active
               </span>
@@ -391,7 +391,7 @@ function UploadForm({ onSuccess, onError }: UploadFormProps) {
   const inputClass =
     "w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white";
   const errorInputClass =
-    "w-full px-3 py-2 text-sm border border-red-300 rounded-lg focus:ring-2 focus:ring-red-200 focus:border-red-400 bg-white";
+    "w-full px-3 py-2 text-sm border border-error rounded-lg focus:ring-2 focus:ring-error-light focus:border-error bg-white";
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -452,7 +452,7 @@ function UploadForm({ onSuccess, onError }: UploadFormProps) {
     >
       <div className="flex items-center gap-2">
         <Upload className="w-4 h-4 text-gray-500" aria-hidden="true" />
-        <h2 className="text-sm font-semibold text-[#232323]">
+        <h2 className="text-sm font-semibold text-primary">
           Upload a road restriction
         </h2>
       </div>
@@ -460,7 +460,7 @@ function UploadForm({ onSuccess, onError }: UploadFormProps) {
       {apiError && (
         <p
           role="alert"
-          className="text-sm text-red-600 bg-red-50 px-3 py-2 rounded-lg"
+          className="text-sm text-error bg-error-light px-3 py-2 rounded-lg"
           data-testid="road-restriction-api-error"
         >
           {apiError}
@@ -487,9 +487,7 @@ function UploadForm({ onSuccess, onError }: UploadFormProps) {
             placeholder="e.g. Broad St bridge closure"
             required
           />
-          {nameError && (
-            <p className="text-xs text-red-600 mt-1">{nameError}</p>
-          )}
+          {nameError && <p className="text-xs text-error mt-1">{nameError}</p>}
         </div>
 
         <div>
@@ -556,7 +554,7 @@ function UploadForm({ onSuccess, onError }: UploadFormProps) {
         />
         {polygonError && (
           <p
-            className="text-xs text-red-600 mt-1"
+            className="text-xs text-error mt-1"
             data-testid="road-restriction-polygon-error"
           >
             {polygonError}
@@ -572,7 +570,7 @@ function UploadForm({ onSuccess, onError }: UploadFormProps) {
         <button
           type="submit"
           disabled={submitting}
-          className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white rounded-lg bg-[#232323] hover:bg-[#1a1a1a] disabled:opacity-50"
+          className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white rounded-lg bg-primary hover:bg-primary-hover disabled:opacity-50"
         >
           {submitting ? (
             <>
@@ -667,7 +665,7 @@ export default function RoadRestrictionsPanel({
       <div className="max-w-5xl w-full mx-auto space-y-4">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h1 className="text-2xl font-semibold text-[#232323] mb-1 flex items-center gap-2">
+            <h1 className="text-2xl font-semibold text-primary mb-1 flex items-center gap-2">
               <MapIcon className="w-5 h-5" aria-hidden="true" />
               Road restrictions
             </h1>
@@ -716,7 +714,7 @@ export default function RoadRestrictionsPanel({
 
         <div className="bg-white border border-gray-200 rounded-xl p-4">
           <div className="flex items-center justify-between mb-3">
-            <h2 className="text-sm font-semibold text-[#232323]">
+            <h2 className="text-sm font-semibold text-primary">
               Active restrictions
             </h2>
             <span className="text-xs text-gray-500">
@@ -727,7 +725,7 @@ export default function RoadRestrictionsPanel({
           {error && (
             <p
               role="alert"
-              className="text-sm text-red-600 bg-red-50 px-3 py-2 rounded-lg mb-3"
+              className="text-sm text-error bg-error-light px-3 py-2 rounded-lg mb-3"
             >
               {error}
             </p>

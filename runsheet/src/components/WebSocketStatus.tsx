@@ -29,13 +29,13 @@ interface WebSocketStatusProps {
 function getStatusColor(state: WebSocketState): string {
   switch (state) {
     case "connected":
-      return "bg-green-500";
+      return "bg-success-light0";
     case "connecting":
-      return "bg-yellow-500 animate-pulse";
+      return "bg-warning-light0 animate-pulse";
     case "reconnecting":
-      return "bg-orange-500 animate-pulse";
+      return "bg-warning-light0 animate-pulse";
     case "disconnected":
-      return "bg-red-500";
+      return "bg-error-light0";
     default:
       return "bg-gray-500";
   }
@@ -122,8 +122,8 @@ export function WebSocketStatusBadge({
 
   if (isConnected) {
     return (
-      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
-        <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-success-light text-success-dark">
+        <span className="w-1.5 h-1.5 rounded-full bg-success-light0" />
         Live
       </span>
     );
@@ -131,16 +131,16 @@ export function WebSocketStatusBadge({
 
   if (isReconnecting) {
     return (
-      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-800">
-        <span className="w-1.5 h-1.5 rounded-full bg-orange-500 animate-pulse" />
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-warning-light text-warning-dark">
+        <span className="w-1.5 h-1.5 rounded-full bg-warning-light0 animate-pulse" />
         Reconnecting ({reconnectAttempt})
       </span>
     );
   }
 
   return (
-    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800">
-      <span className="w-1.5 h-1.5 rounded-full bg-red-500" />
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-error-light text-error-dark">
+      <span className="w-1.5 h-1.5 rounded-full bg-error-light0" />
       Offline
     </span>
   );

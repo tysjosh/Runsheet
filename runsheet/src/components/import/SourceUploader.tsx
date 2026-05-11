@@ -1,16 +1,17 @@
 import {
-  ArrowLeft,
   AlertCircle,
+  ArrowLeft,
+  CheckCircle,
   FileSpreadsheet,
   Link2,
   Loader2,
   RotateCcw,
   Upload,
-  CheckCircle,
 } from "lucide-react";
 import { useCallback, useRef, useState } from "react";
-import type { DataType, ParseResponse } from "../../types/import";
 import { importApi } from "../../services/importApi";
+import type { DataType, ParseResponse } from "../../types/import";
+import { type Tab, TabNavigation } from "../ui";
 
 // ─── Props ───────────────────────────────────────────────────────────────────
 
@@ -31,6 +32,19 @@ const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024; // 10MB
 const MAX_FILE_SIZE_LABEL = "10MB";
 
 type SourceTab = "csv" | "sheets";
+
+const SOURCE_TABS: Tab[] = [
+  {
+    id: "csv",
+    label: "CSV Upload",
+    icon: <FileSpreadsheet className="w-4 h-4" />,
+  },
+  {
+    id: "sheets",
+    label: "Google Sheets",
+    icon: <Link2 className="w-4 h-4" />,
+  },
+];
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
@@ -207,45 +221,24 @@ export default function SourceUploader({
     <div>
       {/* Header */}
       <div className="mb-6">
-        <h2 className="text-lg font-semibold text-[#232323] mb-1">
+        <h2 className="text-lg font-semibold text-primary mb-1">
           Upload Source Data
         </h2>
         <p className="text-sm text-gray-500">
           Upload a CSV file or connect a Google Sheet to import your{" "}
-          <span className="font-medium text-[#232323]">
+          <span className="font-medium text-primary">
             {dataType.replace(/_/g, " ")}
           </span>{" "}
           data.
         </p>
       </div>
 
-      {/* Tabs */}
-      <div className="flex border-b border-gray-200 mb-6">
-        <button
-          type="button"
-          onClick={() => handleTabSwitch("csv")}
-          className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
-            activeTab === "csv"
-              ? "border-[#232323] text-[#232323]"
-              : "border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"
-          }`}
-        >
-          <FileSpreadsheet className="w-4 h-4" />
-          CSV Upload
-        </button>
-        <button
-          type="button"
-          onClick={() => handleTabSwitch("sheets")}
-          className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
-            activeTab === "sheets"
-              ? "border-[#232323] text-[#232323]"
-              : "border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"
-          }`}
-        >
-          <Link2 className="w-4 h-4" />
-          Google Sheets
-        </button>
-      </div>
+      <TabNavigation
+        tabs={SOURCE_TABS}
+        activeTab={activeTab}
+        onChange={(id) => handleTabSwitch(id as SourceTab)}
+        className="!px-0 mb-6"
+      />
 
       {/* Tab content */}
       {!parseResult && !error && !loading && (
@@ -291,7 +284,7 @@ export default function SourceUploader({
         <button
           type="button"
           onClick={onBack}
-          className="flex items-center gap-2 px-4 py-2.5 text-sm font-medium text-gray-600 hover:text-[#232323] transition-colors"
+          className="flex items-center gap-2 px-4 py-2.5 text-sm font-medium text-gray-600 hover:text-primary transition-colors"
         >
           <ArrowLeft className="w-4 h-4" />
           Back
@@ -301,7 +294,7 @@ export default function SourceUploader({
           <button
             type="button"
             onClick={handleProceed}
-            className="px-6 py-2.5 text-sm font-medium rounded-xl bg-[#232323] text-white hover:bg-black transition-colors"
+            className="px-6 py-2.5 text-sm font-medium rounded-xl bg-primary text-white hover:bg-primary-hover transition-colors"
           >
             Continue to Field Mapping
           </button>
@@ -340,7 +333,7 @@ function CsvDropZone({
         onDrop={onDrop}
         className={`flex flex-col items-center justify-center rounded-xl border-2 border-dashed p-12 transition-colors cursor-pointer ${
           dragOver
-            ? "border-[#232323] bg-gray-50"
+            ? "border-primary bg-gray-50"
             : "border-gray-300 bg-white hover:border-gray-400 hover:bg-gray-50"
         }`}
         onClick={onBrowseClick}
@@ -355,9 +348,9 @@ function CsvDropZone({
         aria-label="Drop CSV file here or click to browse"
       >
         <Upload
-          className={`w-10 h-10 mb-4 ${dragOver ? "text-[#232323]" : "text-gray-400"}`}
+          className={`w-10 h-10 mb-4 ${dragOver ? "text-primary" : "text-gray-400"}`}
         />
-        <p className="text-sm font-medium text-[#232323] mb-1">
+        <p className="text-sm font-medium text-primary mb-1">
           {dragOver ? "Drop your file here" : "Drag and drop your CSV file"}
         </p>
         <p className="text-xs text-gray-500 mb-4">
@@ -377,7 +370,6 @@ function CsvDropZone({
         accept=".csv"
         onChange={onFileInputChange}
         className="hidden"
-        aria-hidden="true"
       />
 
       {/* Selected file indicator */}
@@ -418,7 +410,7 @@ function SheetsInput({
           <Link2 className="w-5 h-5" />
         </div>
         <div>
-          <h3 className="text-sm font-semibold text-[#232323] mb-1">
+          <h3 className="text-sm font-semibold text-primary mb-1">
             Google Sheets URL
           </h3>
           <p className="text-xs text-gray-500">
@@ -435,7 +427,7 @@ function SheetsInput({
           onChange={(e) => onUrlChange(e.target.value)}
           onKeyDown={handleKeyDown}
           placeholder="https://docs.google.com/spreadsheets/d/..."
-          className="flex-1 px-4 py-2.5 text-sm border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#232323] focus:border-transparent placeholder:text-gray-400"
+          className="flex-1 px-4 py-2.5 text-sm border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent placeholder:text-gray-400"
         />
         <button
           type="button"
@@ -443,7 +435,7 @@ function SheetsInput({
           disabled={!url.trim()}
           className={`px-5 py-2.5 text-sm font-medium rounded-xl transition-colors ${
             url.trim()
-              ? "bg-[#232323] text-white hover:bg-black"
+              ? "bg-primary text-white hover:bg-primary-hover"
               : "bg-gray-100 text-gray-400 cursor-not-allowed"
           }`}
         >
@@ -460,7 +452,7 @@ function LoadingState({ activeTab }: { activeTab: SourceTab }) {
   return (
     <div className="flex flex-col items-center justify-center py-16 text-gray-400">
       <Loader2 className="w-8 h-8 animate-spin mb-4" />
-      <p className="text-sm font-medium text-[#232323]">
+      <p className="text-sm font-medium text-primary">
         {activeTab === "csv"
           ? "Parsing CSV file…"
           : "Fetching Google Sheet data…"}
@@ -483,17 +475,15 @@ function ErrorDisplay({
 }) {
   return (
     <div className="flex flex-col items-center justify-center py-12 text-center">
-      <div className="flex items-center justify-center w-12 h-12 rounded-full bg-red-50 mb-4">
-        <AlertCircle className="w-6 h-6 text-red-500" />
+      <div className="flex items-center justify-center w-12 h-12 rounded-full bg-error-light mb-4">
+        <AlertCircle className="w-6 h-6 text-error" />
       </div>
-      <p className="text-sm font-medium text-[#232323] mb-2">
-        Upload Failed
-      </p>
+      <p className="text-sm font-medium text-primary mb-2">Upload Failed</p>
       <p className="text-xs text-gray-500 max-w-md mb-6">{message}</p>
       <button
         type="button"
         onClick={onTryAgain}
-        className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-gray-600 bg-gray-100 rounded-xl hover:bg-gray-200 hover:text-[#232323] transition-colors"
+        className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-gray-600 bg-gray-100 rounded-xl hover:bg-gray-200 hover:text-primary transition-colors"
       >
         <RotateCcw className="w-4 h-4" />
         Try Again
@@ -508,22 +498,22 @@ function ParsePreview({ result }: { result: ParseResponse }) {
   return (
     <div>
       {/* Success banner */}
-      <div className="flex items-center gap-3 mb-6 p-4 rounded-xl bg-green-50 border border-green-100">
-        <CheckCircle className="w-5 h-5 text-green-600 flex-shrink-0" />
+      <div className="flex items-center gap-3 mb-6 p-4 rounded-xl bg-success-light border border-success-light">
+        <CheckCircle className="w-5 h-5 text-success flex-shrink-0" />
         <div>
-          <p className="text-sm font-medium text-green-800">
+          <p className="text-sm font-medium text-success-dark">
             Source parsed successfully
           </p>
-          <p className="text-xs text-green-600">
-            {result.columns.length} columns detected •{" "}
-            {result.total_rows} total rows
+          <p className="text-xs text-success">
+            {result.columns.length} columns detected • {result.total_rows} total
+            rows
           </p>
         </div>
       </div>
 
       {/* Detected columns */}
       <div className="mb-6">
-        <h3 className="text-sm font-semibold text-[#232323] mb-3">
+        <h3 className="text-sm font-semibold text-primary mb-3">
           Detected Columns
         </h3>
         <div className="flex flex-wrap gap-2">
@@ -540,7 +530,7 @@ function ParsePreview({ result }: { result: ParseResponse }) {
 
       {/* Sample rows table */}
       <div>
-        <h3 className="text-sm font-semibold text-[#232323] mb-3">
+        <h3 className="text-sm font-semibold text-primary mb-3">
           Sample Preview{" "}
           <span className="font-normal text-gray-400">
             (first {result.sample_rows.length} rows)

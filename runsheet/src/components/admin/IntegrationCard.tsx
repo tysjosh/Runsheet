@@ -57,14 +57,14 @@ const STATUS_BADGE_CONFIG: Record<
   },
   connected: {
     label: "Connected",
-    fg: "text-green-700",
-    bg: "bg-green-100",
+    fg: "text-success-dark",
+    bg: "bg-success-light",
     Icon: CheckCircle2,
   },
   pending: {
     label: "Pending",
-    fg: "text-blue-700",
-    bg: "bg-blue-100",
+    fg: "text-info-dark",
+    bg: "bg-info-light",
     Icon: Loader2,
   },
   disabled: {
@@ -75,8 +75,8 @@ const STATUS_BADGE_CONFIG: Record<
   },
   error: {
     label: "Error",
-    fg: "text-red-700",
-    bg: "bg-red-100",
+    fg: "text-error-dark",
+    bg: "bg-error-light",
     Icon: AlertTriangle,
   },
 };
@@ -210,7 +210,7 @@ function ConnectModal({ provider, onCancel, onSubmit }: ConnectModalProps) {
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
           <h2
             id={`ic-connect-title-${provider.provider_name}`}
-            className="text-lg font-semibold text-[#232323]"
+            className="text-lg font-semibold text-primary"
           >
             Connect {formatProviderName(provider.provider_name)}
           </h2>
@@ -232,7 +232,7 @@ function ConnectModal({ provider, onCancel, onSubmit }: ConnectModalProps) {
                 href={provider.doc_url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="text-blue-600 hover:underline inline-flex items-center gap-0.5"
+                className="text-info hover:underline inline-flex items-center gap-0.5"
               >
                 Setup guide
                 <ExternalLink className="w-3 h-3" aria-hidden="true" />
@@ -243,7 +243,7 @@ function ConnectModal({ provider, onCancel, onSubmit }: ConnectModalProps) {
           {error && (
             <p
               role="alert"
-              className="text-sm text-red-600 bg-red-50 px-3 py-2 rounded-lg"
+              className="text-sm text-error bg-error-light px-3 py-2 rounded-lg"
             >
               {error}
             </p>
@@ -295,8 +295,7 @@ function ConnectModal({ provider, onCancel, onSubmit }: ConnectModalProps) {
             <button
               type="submit"
               disabled={submitting}
-              className="inline-flex items-center gap-1.5 px-4 py-2 text-sm text-white rounded-lg disabled:opacity-50"
-              style={{ backgroundColor: "#232323" }}
+              className="inline-flex items-center gap-1.5 px-4 py-2 text-sm text-white rounded-lg disabled:opacity-50 bg-primary hover:bg-primary-hover"
             >
               {submitting ? (
                 <Loader2
@@ -354,7 +353,7 @@ function DisconnectModal({
     >
       <div className="bg-white rounded-xl shadow-xl w-full max-w-md mx-4">
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-          <h2 className="text-lg font-semibold text-[#232323]">
+          <h2 className="text-lg font-semibold text-primary">
             Disconnect {providerDisplayName}?
           </h2>
           <button
@@ -374,7 +373,7 @@ function DisconnectModal({
           {error && (
             <p
               role="alert"
-              className="text-sm text-red-600 bg-red-50 px-3 py-2 rounded-lg"
+              className="text-sm text-error bg-error-light px-3 py-2 rounded-lg"
             >
               {error}
             </p>
@@ -392,7 +391,7 @@ function DisconnectModal({
             type="button"
             onClick={handleConfirm}
             disabled={submitting}
-            className="inline-flex items-center gap-1.5 px-4 py-2 text-sm text-white rounded-lg disabled:opacity-50 bg-red-600 hover:bg-red-700"
+            className="inline-flex items-center gap-1.5 px-4 py-2 text-sm text-white rounded-lg disabled:opacity-50 bg-error hover:bg-error-dark"
           >
             <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
             {submitting ? "Disconnecting..." : "Disconnect"}
@@ -409,10 +408,18 @@ const SYNC_STATUS_CONFIG: Record<
   SyncRun["status"],
   { label: string; fg: string; bg: string }
 > = {
-  running: { label: "Running", fg: "text-blue-700", bg: "bg-blue-100" },
-  success: { label: "Success", fg: "text-green-700", bg: "bg-green-100" },
-  partial: { label: "Partial", fg: "text-yellow-700", bg: "bg-yellow-100" },
-  error: { label: "Error", fg: "text-red-700", bg: "bg-red-100" },
+  running: { label: "Running", fg: "text-info-dark", bg: "bg-info-light" },
+  success: {
+    label: "Success",
+    fg: "text-success-dark",
+    bg: "bg-success-light",
+  },
+  partial: {
+    label: "Partial",
+    fg: "text-warning-dark",
+    bg: "bg-warning-light",
+  },
+  error: { label: "Error", fg: "text-error-dark", bg: "bg-error-light" },
 };
 
 function SyncRunSummary({
@@ -459,7 +466,7 @@ function SyncRunSummary({
       )}
       {run.status === "error" && run.error_details && (
         <p
-          className="text-red-600 truncate"
+          className="text-error truncate"
           title={run.error_details}
           data-testid="sync-run-error"
         >
@@ -562,9 +569,9 @@ export default function IntegrationCard({
 
   const buttonBase =
     "inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg border transition-colors disabled:opacity-50 disabled:cursor-not-allowed";
-  const primaryButton = `${buttonBase} bg-[#232323] text-white border-[#232323] hover:opacity-90`;
+  const primaryButton = `${buttonBase} bg-primary text-white border-primary hover:opacity-90`;
   const secondaryButton = `${buttonBase} bg-white text-gray-700 border-gray-200 hover:bg-gray-50`;
-  const dangerButton = `${buttonBase} bg-white text-red-600 border-red-200 hover:bg-red-50`;
+  const dangerButton = `${buttonBase} bg-white text-error border-error-light hover:bg-error-light`;
 
   return (
     <div
@@ -576,18 +583,18 @@ export default function IntegrationCard({
       <div className="flex items-start gap-3">
         <div
           className="w-9 h-9 rounded-lg flex items-center justify-center shrink-0"
-          style={{ backgroundColor: "#23232310" }}
+          style={{ backgroundColor: "var(--color-primary-soft)" }}
           aria-hidden="true"
         >
           {isOAuthProvider(provider) ? (
-            <Link2 className="w-4.5 h-4.5 text-[#232323]" />
+            <Link2 className="w-4.5 h-4.5 text-primary" />
           ) : (
-            <Key className="w-4.5 h-4.5 text-[#232323]" />
+            <Key className="w-4.5 h-4.5 text-primary" />
           )}
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
-            <h3 className="text-sm font-semibold text-[#232323] truncate">
+            <h3 className="text-sm font-semibold text-primary truncate">
               {displayName}
             </h3>
             <StatusBadge status={status} />
@@ -631,7 +638,7 @@ export default function IntegrationCard({
         <div
           role="alert"
           data-testid="integration-error"
-          className="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700"
+          className="flex items-start gap-2 rounded-lg border border-error-light bg-error-light px-3 py-2 text-xs text-error-dark"
         >
           <AlertTriangle
             className="w-3.5 h-3.5 mt-0.5 shrink-0"

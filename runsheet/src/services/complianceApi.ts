@@ -1,5 +1,5 @@
-import { API_TIMEOUTS, ApiError, ApiTimeoutError } from "./api";
 import { getAuthToken } from "../utils/auth";
+import { API_TIMEOUTS, ApiError, ApiTimeoutError } from "./api";
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -510,10 +510,10 @@ async function complianceRequest<T>(
       "Content-Type": "application/json",
       ...(options?.headers as Record<string, string> | undefined),
     };
-    
+
     // Add Authorization header if token exists
     if (token) {
-      headers["Authorization"] = `Bearer ${token}`;
+      headers.Authorization = `Bearer ${token}`;
     }
 
     const response = await fetchWithTimeout(url, {
@@ -544,13 +544,17 @@ async function complianceRequest<T>(
 // ─── Tax Endpoints ───────────────────────────────────────────────────────────
 
 /** GET /compliance/tax-jurisdictions — list jurisdiction rates */
-export async function getTaxJurisdictions(filters: {
-  fips_code?: string;
-  tax_type?: string;
-  page?: number;
-  size?: number;
-} = {}): Promise<PaginatedResponse<JurisdictionRate>> {
-  const qs = buildQueryString(filters as Record<string, string | number | boolean | undefined>);
+export async function getTaxJurisdictions(
+  filters: {
+    fips_code?: string;
+    tax_type?: string;
+    page?: number;
+    size?: number;
+  } = {},
+): Promise<PaginatedResponse<JurisdictionRate>> {
+  const qs = buildQueryString(
+    filters as Record<string, string | number | boolean | undefined>,
+  );
   return complianceRequest<PaginatedResponse<JurisdictionRate>>(
     `/compliance/tax-jurisdictions${qs}`,
   );
@@ -583,13 +587,17 @@ export async function computeTax(
 }
 
 /** GET /compliance/exemptions — list tax exemptions */
-export async function getTaxExemptions(filters: {
-  customer_id?: string;
-  exemption_type?: string;
-  page?: number;
-  size?: number;
-} = {}): Promise<PaginatedResponse<TaxExemption>> {
-  const qs = buildQueryString(filters as Record<string, string | number | boolean | undefined>);
+export async function getTaxExemptions(
+  filters: {
+    customer_id?: string;
+    exemption_type?: string;
+    page?: number;
+    size?: number;
+  } = {},
+): Promise<PaginatedResponse<TaxExemption>> {
+  const qs = buildQueryString(
+    filters as Record<string, string | number | boolean | undefined>,
+  );
   return complianceRequest<PaginatedResponse<TaxExemption>>(
     `/compliance/exemptions${qs}`,
   );
@@ -611,12 +619,12 @@ export async function createTaxExemption(
 // ─── Driver Qualification Endpoints ──────────────────────────────────────────
 
 /** GET /compliance/drivers — list all drivers */
-export async function getDrivers(filters: {
-  status?: DriverStatus;
-  page?: number;
-  size?: number;
-} = {}): Promise<PaginatedResponse<Driver>> {
-  const qs = buildQueryString(filters as Record<string, string | number | boolean | undefined>);
+export async function getDrivers(
+  filters: { status?: DriverStatus; page?: number; size?: number } = {},
+): Promise<PaginatedResponse<Driver>> {
+  const qs = buildQueryString(
+    filters as Record<string, string | number | boolean | undefined>,
+  );
   return complianceRequest<PaginatedResponse<Driver>>(
     `/compliance/drivers${qs}`,
   );
@@ -656,7 +664,9 @@ export async function updateDriver(
 }
 
 /** GET /compliance/drivers/dashboard — DQF compliance dashboard */
-export async function getDriversDashboard(): Promise<SingleResponse<DQFDashboard>> {
+export async function getDriversDashboard(): Promise<
+  SingleResponse<DQFDashboard>
+> {
   return complianceRequest<SingleResponse<DQFDashboard>>(
     "/compliance/drivers/dashboard",
   );
@@ -665,14 +675,18 @@ export async function getDriversDashboard(): Promise<SingleResponse<DQFDashboard
 // ─── Asset Certification Endpoints ───────────────────────────────────────────
 
 /** GET /compliance/asset-certifications — list certifications */
-export async function getAssetCertifications(filters: {
-  asset_id?: string;
-  certification_type?: CertificationType;
-  status?: CertificationStatus;
-  page?: number;
-  size?: number;
-} = {}): Promise<PaginatedResponse<AssetCertification>> {
-  const qs = buildQueryString(filters as Record<string, string | number | boolean | undefined>);
+export async function getAssetCertifications(
+  filters: {
+    asset_id?: string;
+    certification_type?: CertificationType;
+    status?: CertificationStatus;
+    page?: number;
+    size?: number;
+  } = {},
+): Promise<PaginatedResponse<AssetCertification>> {
+  const qs = buildQueryString(
+    filters as Record<string, string | number | boolean | undefined>,
+  );
   return complianceRequest<PaginatedResponse<AssetCertification>>(
     `/compliance/asset-certifications${qs}`,
   );
@@ -692,7 +706,9 @@ export async function createAssetCertification(
 }
 
 /** GET /compliance/asset-certifications/dashboard — fleet cert dashboard */
-export async function getAssetCertificationsDashboard(): Promise<SingleResponse<AssetCertificationDashboard>> {
+export async function getAssetCertificationsDashboard(): Promise<
+  SingleResponse<AssetCertificationDashboard>
+> {
   return complianceRequest<SingleResponse<AssetCertificationDashboard>>(
     "/compliance/asset-certifications/dashboard",
   );
@@ -701,12 +717,12 @@ export async function getAssetCertificationsDashboard(): Promise<SingleResponse<
 // ─── Meter Audit Endpoints ───────────────────────────────────────────────────
 
 /** GET /compliance/meters — list registered meters */
-export async function getMeters(filters: {
-  truck_id?: string;
-  page?: number;
-  size?: number;
-} = {}): Promise<PaginatedResponse<MeterRegistration>> {
-  const qs = buildQueryString(filters as Record<string, string | number | boolean | undefined>);
+export async function getMeters(
+  filters: { truck_id?: string; page?: number; size?: number } = {},
+): Promise<PaginatedResponse<MeterRegistration>> {
+  const qs = buildQueryString(
+    filters as Record<string, string | number | boolean | undefined>,
+  );
   return complianceRequest<PaginatedResponse<MeterRegistration>>(
     `/compliance/meters${qs}`,
   );
@@ -730,7 +746,9 @@ export async function getMeterAuditTrail(
   meterId: string,
   filters: { page?: number; size?: number } = {},
 ): Promise<PaginatedResponse<MeterAuditEntry>> {
-  const qs = buildQueryString(filters as Record<string, string | number | boolean | undefined>);
+  const qs = buildQueryString(
+    filters as Record<string, string | number | boolean | undefined>,
+  );
   return complianceRequest<PaginatedResponse<MeterAuditEntry>>(
     `/compliance/meters/${encodeURIComponent(meterId)}/audit-trail${qs}`,
   );
@@ -739,14 +757,18 @@ export async function getMeterAuditTrail(
 // ─── Terminal BOL Endpoints ──────────────────────────────────────────────────
 
 /** GET /compliance/terminal-bols — list terminal BOLs */
-export async function getTerminalBOLs(filters: {
-  status?: TerminalBOLStatus;
-  product_code?: string;
-  driver_id?: string;
-  page?: number;
-  size?: number;
-} = {}): Promise<PaginatedResponse<TerminalBOL>> {
-  const qs = buildQueryString(filters as Record<string, string | number | boolean | undefined>);
+export async function getTerminalBOLs(
+  filters: {
+    status?: TerminalBOLStatus;
+    product_code?: string;
+    driver_id?: string;
+    page?: number;
+    size?: number;
+  } = {},
+): Promise<PaginatedResponse<TerminalBOL>> {
+  const qs = buildQueryString(
+    filters as Record<string, string | number | boolean | undefined>,
+  );
   return complianceRequest<PaginatedResponse<TerminalBOL>>(
     `/compliance/terminal-bols${qs}`,
   );
@@ -803,13 +825,17 @@ export async function uploadTerminalBOL(
 // ─── Price Protection Endpoints ──────────────────────────────────────────────
 
 /** GET /commerce/price-protection-contracts — list contracts */
-export async function getPriceProtectionContracts(filters: {
-  customer_id?: string;
-  status?: ContractStatus;
-  page?: number;
-  size?: number;
-} = {}): Promise<PaginatedResponse<PriceProtectionContract>> {
-  const qs = buildQueryString(filters as Record<string, string | number | boolean | undefined>);
+export async function getPriceProtectionContracts(
+  filters: {
+    customer_id?: string;
+    status?: ContractStatus;
+    page?: number;
+    size?: number;
+  } = {},
+): Promise<PaginatedResponse<PriceProtectionContract>> {
+  const qs = buildQueryString(
+    filters as Record<string, string | number | boolean | undefined>,
+  );
   return complianceRequest<PaginatedResponse<PriceProtectionContract>>(
     `/commerce/price-protection-contracts${qs}`,
   );
@@ -845,14 +871,18 @@ export async function updatePriceProtectionContract(
 // ─── Pricing Rules Endpoints ─────────────────────────────────────────────────
 
 /** GET /commerce/pricing-rules — list pricing rules */
-export async function getPricingRules(filters: {
-  customer_id?: string;
-  product_code?: string;
-  strategy?: PricingStrategy;
-  page?: number;
-  size?: number;
-} = {}): Promise<PaginatedResponse<PricingRule>> {
-  const qs = buildQueryString(filters as Record<string, string | number | boolean | undefined>);
+export async function getPricingRules(
+  filters: {
+    customer_id?: string;
+    product_code?: string;
+    strategy?: PricingStrategy;
+    page?: number;
+    size?: number;
+  } = {},
+): Promise<PaginatedResponse<PricingRule>> {
+  const qs = buildQueryString(
+    filters as Record<string, string | number | boolean | undefined>,
+  );
   return complianceRequest<PaginatedResponse<PricingRule>>(
     `/commerce/pricing-rules${qs}`,
   );
@@ -934,7 +964,9 @@ export async function createMileageAdjustment(
 // ─── K-Factor Calibration Endpoints ──────────────────────────────────────────
 
 /** GET /compliance/kfactor/dashboard — K-factor calibration dashboard */
-export async function getKFactorDashboard(): Promise<SingleResponse<KFactorDashboard>> {
+export async function getKFactorDashboard(): Promise<
+  SingleResponse<KFactorDashboard>
+> {
   return complianceRequest<SingleResponse<KFactorDashboard>>(
     "/compliance/kfactor/dashboard",
   );
@@ -944,12 +976,23 @@ export async function getKFactorDashboard(): Promise<SingleResponse<KFactorDashb
 export async function approveKFactorAdjustment(
   tankId: string,
   payload: ApproveKFactorPayload,
-): Promise<SingleResponse<{ tank_id: string; old_kfactor: number; new_kfactor: number; approved_at: string }>> {
-  return complianceRequest<SingleResponse<{ tank_id: string; old_kfactor: number; new_kfactor: number; approved_at: string }>>(
-    `/compliance/kfactor/${encodeURIComponent(tankId)}/approve`,
-    {
-      method: "POST",
-      body: JSON.stringify(payload),
-    },
-  );
+): Promise<
+  SingleResponse<{
+    tank_id: string;
+    old_kfactor: number;
+    new_kfactor: number;
+    approved_at: string;
+  }>
+> {
+  return complianceRequest<
+    SingleResponse<{
+      tank_id: string;
+      old_kfactor: number;
+      new_kfactor: number;
+      approved_at: string;
+    }>
+  >(`/compliance/kfactor/${encodeURIComponent(tankId)}/approve`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 }

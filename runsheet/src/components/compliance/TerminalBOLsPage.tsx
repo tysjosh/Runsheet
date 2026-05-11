@@ -1,11 +1,12 @@
 "use client";
 
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import type React from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   getTerminalBOLs,
-  uploadTerminalBOL,
   type TerminalBOL,
   type TerminalBOLStatus,
+  uploadTerminalBOL,
 } from "../../services/complianceApi";
 
 // ─── View modes ──────────────────────────────────────────────────────────────
@@ -20,11 +21,17 @@ function statusBadge(status: TerminalBOLStatus): {
 } {
   switch (status) {
     case "ingested":
-      return { label: "Ingested", className: "bg-green-100 text-green-800" };
+      return {
+        label: "Ingested",
+        className: "bg-success-light text-success-dark",
+      };
     case "pending_confirmation":
-      return { label: "Pending Confirmation", className: "bg-yellow-100 text-yellow-800" };
+      return {
+        label: "Pending Confirmation",
+        className: "bg-warning-light text-warning-dark",
+      };
     case "linked":
-      return { label: "Linked", className: "bg-blue-100 text-blue-800" };
+      return { label: "Linked", className: "bg-info-light text-info-dark" };
     default:
       return { label: status, className: "bg-gray-100 text-gray-800" };
   }
@@ -210,7 +217,7 @@ export default function TerminalBOLsPage() {
         {loading && (
           <div role="status" className="flex justify-center py-12">
             <span className="sr-only">Loading terminal BOLs...</span>
-            <div className="animate-spin h-8 w-8 border-4 border-blue-600 border-t-transparent rounded-full" />
+            <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
           </div>
         )}
 
@@ -218,7 +225,7 @@ export default function TerminalBOLsPage() {
         {!loading && error && (
           <div
             role="alert"
-            className="bg-red-50 border border-red-200 text-red-700 p-4 rounded mb-4"
+            className="bg-error-light border border-error-light text-error-dark p-4 rounded mb-4"
           >
             {error}
           </div>
@@ -252,8 +259,12 @@ export default function TerminalBOLsPage() {
                       >
                         <td className="p-3 font-medium">{bol.load_number}</td>
                         <td className="p-3">{bol.product_code}</td>
-                        <td className="p-3">{formatGallons(bol.gross_gallons)}</td>
-                        <td className="p-3">{formatGallons(bol.net_gallons)}</td>
+                        <td className="p-3">
+                          {formatGallons(bol.gross_gallons)}
+                        </td>
+                        <td className="p-3">
+                          {formatGallons(bol.net_gallons)}
+                        </td>
                         <td className="p-3">{bol.supplier_name}</td>
                         <td className="p-3">{bol.terminal_name}</td>
                         <td className="p-3">{bol.driver_id}</td>
@@ -270,10 +281,7 @@ export default function TerminalBOLsPage() {
                   })}
                   {bols.length === 0 && (
                     <tr>
-                      <td
-                        colSpan={9}
-                        className="p-6 text-center text-gray-500"
-                      >
+                      <td colSpan={9} className="p-6 text-center text-gray-500">
                         No terminal BOLs found.
                       </td>
                     </tr>
@@ -328,10 +336,7 @@ export default function TerminalBOLsPage() {
         </p>
 
         <div className="mb-4">
-          <label
-            htmlFor="bol-file"
-            className="block text-sm font-medium mb-1"
-          >
+          <label htmlFor="bol-file" className="block text-sm font-medium mb-1">
             BOL Document
           </label>
           <input
@@ -351,7 +356,7 @@ export default function TerminalBOLsPage() {
         {uploadError && (
           <div
             role="alert"
-            className="bg-red-50 border border-red-200 text-red-700 p-3 rounded mb-4 text-sm"
+            className="bg-error-light border border-error-light text-error-dark p-3 rounded mb-4 text-sm"
           >
             {uploadError}
           </div>
@@ -361,7 +366,7 @@ export default function TerminalBOLsPage() {
         {uploadSuccess && (
           <div
             role="status"
-            className="bg-green-50 border border-green-200 text-green-700 p-3 rounded mb-4 text-sm"
+            className="bg-success-light border border-success-light text-success-dark p-3 rounded mb-4 text-sm"
           >
             BOL uploaded successfully. Returning to list...
           </div>
@@ -371,7 +376,7 @@ export default function TerminalBOLsPage() {
           <button
             type="submit"
             disabled={uploading || !uploadFile}
-            className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 disabled:opacity-50"
+            className="bg-primary text-white px-4 py-2 rounded hover:bg-primary-hover disabled:opacity-50"
           >
             {uploading ? "Uploading..." : "Upload BOL"}
           </button>
@@ -401,7 +406,8 @@ export default function TerminalBOLsPage() {
           <div>
             <h1 className="text-2xl font-bold">Terminal BOLs</h1>
             <p className="text-gray-600 mt-1">
-              View ingested terminal Bills of Lading and manually upload scanned BOL documents.
+              View ingested terminal Bills of Lading and manually upload scanned
+              BOL documents.
             </p>
           </div>
           <div className="flex gap-2">
@@ -423,7 +429,7 @@ export default function TerminalBOLsPage() {
               <button
                 type="button"
                 onClick={() => setViewMode("upload")}
-                className="bg-blue-600 text-white px-4 py-2 rounded text-sm hover:bg-blue-700"
+                className="bg-primary text-white px-4 py-2 rounded text-sm hover:bg-primary-hover"
               >
                 Upload BOL
               </button>

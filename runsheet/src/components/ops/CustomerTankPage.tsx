@@ -106,9 +106,9 @@ const STATUS_BADGE_CONFIG: Record<
   CustomerTankStatus,
   { color: string; bg: string }
 > = {
-  active: { color: "text-green-700", bg: "bg-green-100" },
+  active: { color: "text-success-dark", bg: "bg-success-light" },
   inactive: { color: "text-gray-700", bg: "bg-gray-100" },
-  maintenance: { color: "text-yellow-700", bg: "bg-yellow-100" },
+  maintenance: { color: "text-warning-dark", bg: "bg-warning-light" },
 };
 
 // Sentinel values used in filter <select> elements so "Any" can map to
@@ -140,8 +140,8 @@ function ToastContainer({
           key={toast.id}
           className={`flex items-center gap-2 px-4 py-3 rounded-lg shadow-lg text-sm font-medium ${
             toast.type === "success"
-              ? "bg-green-600 text-white"
-              : "bg-red-600 text-white"
+              ? "bg-success text-white"
+              : "bg-error text-white"
           }`}
         >
           {toast.type === "success" ? (
@@ -216,8 +216,8 @@ function formatKFactor(k: number | null | undefined): {
   if (k >= 0.6) {
     return {
       label,
-      color: "text-blue-700",
-      bg: "bg-blue-100",
+      color: "text-info-dark",
+      bg: "bg-info-light",
       title:
         "High consumption coefficient — likely commercial or heavy-use tank.",
     };
@@ -225,15 +225,15 @@ function formatKFactor(k: number | null | undefined): {
   if (k >= 0.3) {
     return {
       label,
-      color: "text-green-700",
-      bg: "bg-green-100",
+      color: "text-success-dark",
+      bg: "bg-success-light",
       title: "Typical residential K-factor range.",
     };
   }
   return {
     label,
-    color: "text-yellow-700",
-    bg: "bg-yellow-100",
+    color: "text-warning-dark",
+    bg: "bg-warning-light",
     title: "Low K-factor — tank may be under-used or seasonal.",
   };
 }
@@ -601,7 +601,7 @@ function CustomerTankFormModal({
   const inputClass =
     "w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white";
   const errorInputClass =
-    "w-full px-3 py-2 text-sm border border-red-300 rounded-lg focus:ring-2 focus:ring-red-200 focus:border-red-400 bg-white";
+    "w-full px-3 py-2 text-sm border border-error rounded-lg focus:ring-2 focus:ring-error-light focus:border-error bg-white";
 
   function updateField<K extends keyof CustomerTankFormValues>(
     key: K,
@@ -704,7 +704,7 @@ function CustomerTankFormModal({
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
       <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl mx-4 max-h-[90vh] overflow-y-auto">
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-          <h2 className="text-lg font-semibold text-[#232323]">{title}</h2>
+          <h2 className="text-lg font-semibold text-primary">{title}</h2>
           <button
             type="button"
             onClick={onClose}
@@ -717,7 +717,7 @@ function CustomerTankFormModal({
 
         <form onSubmit={handleSubmit} className="px-6 py-4 space-y-4">
           {apiError && (
-            <p className="text-sm text-red-600 bg-red-50 px-3 py-2 rounded-lg">
+            <p className="text-sm text-error bg-error-light px-3 py-2 rounded-lg">
               {apiError}
             </p>
           )}
@@ -742,7 +742,7 @@ function CustomerTankFormModal({
                 required
               />
               {fieldErrors.customer_id && (
-                <p className="text-xs text-red-600 mt-1">
+                <p className="text-xs text-error mt-1">
                   {fieldErrors.customer_id}
                 </p>
               )}
@@ -867,7 +867,7 @@ function CustomerTankFormModal({
                   </datalist>
                 )}
               {fieldErrors.fuel_product_code && (
-                <p className="text-xs text-red-600 mt-1">
+                <p className="text-xs text-error mt-1">
                   {fieldErrors.fuel_product_code}
                 </p>
               )}
@@ -928,7 +928,7 @@ function CustomerTankFormModal({
                 required
               />
               {fieldErrors.capacity_gallons && (
-                <p className="text-xs text-red-600 mt-1">
+                <p className="text-xs text-error mt-1">
                   {fieldErrors.capacity_gallons}
                 </p>
               )}
@@ -966,7 +966,7 @@ function CustomerTankFormModal({
                 required
               />
               {fieldErrors.current_level_gallons && (
-                <p className="text-xs text-red-600 mt-1">
+                <p className="text-xs text-error mt-1">
                   {fieldErrors.current_level_gallons}
                 </p>
               )}
@@ -1001,7 +1001,7 @@ function CustomerTankFormModal({
                 required
               />
               {fieldErrors.location_lat && (
-                <p className="text-xs text-red-600 mt-1">
+                <p className="text-xs text-error mt-1">
                   {fieldErrors.location_lat}
                 </p>
               )}
@@ -1034,7 +1034,7 @@ function CustomerTankFormModal({
                 required
               />
               {fieldErrors.location_lon && (
-                <p className="text-xs text-red-600 mt-1">
+                <p className="text-xs text-error mt-1">
                   {fieldErrors.location_lon}
                 </p>
               )}
@@ -1058,7 +1058,7 @@ function CustomerTankFormModal({
                 required
               />
               {fieldErrors.zip_code && (
-                <p className="text-xs text-red-600 mt-1">
+                <p className="text-xs text-error mt-1">
                   {fieldErrors.zip_code}
                 </p>
               )}
@@ -1089,7 +1089,7 @@ function CustomerTankFormModal({
                 placeholder="Auto-computed after 3+ deliveries"
               />
               {fieldErrors.k_factor && (
-                <p className="text-xs text-red-600 mt-1">
+                <p className="text-xs text-error mt-1">
                   {fieldErrors.k_factor}
                 </p>
               )}
@@ -1134,8 +1134,7 @@ function CustomerTankFormModal({
             <button
               type="submit"
               disabled={submitting}
-              className="px-4 py-2 text-sm text-white rounded-lg disabled:opacity-50"
-              style={{ backgroundColor: "#232323" }}
+              className="px-4 py-2 text-sm text-white rounded-lg disabled:opacity-50 bg-primary hover:bg-primary-hover"
             >
               {submitting ? submittingLabel : submitLabel}
             </button>
@@ -1245,7 +1244,7 @@ export default function CustomerTankPage({
         {/* Header */}
         <div className="flex items-start justify-between">
           <div>
-            <h1 className="text-xl font-semibold text-[#232323]">
+            <h1 className="text-xl font-semibold text-primary">
               Customer Tanks
             </h1>
             <p className="text-sm text-gray-500 mt-1">
@@ -1256,8 +1255,7 @@ export default function CustomerTankPage({
           <button
             type="button"
             onClick={() => setFormOpen({ mode: "create" })}
-            className="inline-flex items-center gap-1.5 px-4 py-2 text-sm text-white rounded-lg disabled:opacity-50"
-            style={{ backgroundColor: "#232323" }}
+            className="inline-flex items-center gap-1.5 px-4 py-2 text-sm text-white rounded-lg disabled:opacity-50 bg-primary hover:bg-primary-hover"
           >
             <Plus className="w-4 h-4" aria-hidden="true" />
             Add Tank
@@ -1277,12 +1275,9 @@ export default function CustomerTankPage({
 
         {/* Error banner */}
         {error && (
-          <div className="bg-red-50 border border-red-100 rounded-lg px-4 py-3 flex items-center gap-2">
-            <AlertTriangle
-              className="w-4 h-4 text-red-600"
-              aria-hidden="true"
-            />
-            <p className="text-sm text-red-700">{error}</p>
+          <div className="bg-error-light border border-error-light rounded-lg px-4 py-3 flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-error" aria-hidden="true" />
+            <p className="text-sm text-error-dark">{error}</p>
           </div>
         )}
 
@@ -1342,7 +1337,7 @@ export default function CustomerTankPage({
                         className="hover:bg-gray-50"
                       >
                         <td className="px-6 py-3 text-sm">
-                          <div className="font-medium text-[#232323]">
+                          <div className="font-medium text-primary">
                             {tank.customer_tank_id}
                           </div>
                           <div className="text-xs text-gray-500">
@@ -1371,7 +1366,7 @@ export default function CustomerTankPage({
                               aria-label={`Fill level ${Math.round(pct)}%`}
                             >
                               <div
-                                className="h-full rounded-full bg-blue-500"
+                                className="h-full rounded-full bg-info-light0"
                                 style={{ width: `${pct}%` }}
                               />
                             </div>

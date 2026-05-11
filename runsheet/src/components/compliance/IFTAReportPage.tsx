@@ -1,13 +1,14 @@
 "use client";
 
 import React, { useCallback, useEffect, useState } from "react";
+import { PageHeader } from "@/components/ui";
 import {
-  getIFTAReport,
-  createMileageAdjustment,
-  type IFTAReport,
-  type IFTATruckSummary,
-  type IFTAReportFilters,
   type CreateMileageAdjustmentPayload,
+  createMileageAdjustment,
+  getIFTAReport,
+  type IFTAReport,
+  type IFTAReportFilters,
+  type IFTATruckSummary,
 } from "../../services/complianceApi";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -46,16 +47,19 @@ export default function IFTAReportPage() {
   const [expandedTruck, setExpandedTruck] = useState<string | null>(null);
 
   // Manual adjustment form state
-  const [adjustmentForm, setAdjustmentForm] = useState<CreateMileageAdjustmentPayload>({
-    truck_id: "",
-    jurisdiction: "",
-    miles: 0,
-    quarter: getCurrentQuarter(),
-    reason: "",
-  });
+  const [adjustmentForm, setAdjustmentForm] =
+    useState<CreateMileageAdjustmentPayload>({
+      truck_id: "",
+      jurisdiction: "",
+      miles: 0,
+      quarter: getCurrentQuarter(),
+      reason: "",
+    });
   const [submittingAdjustment, setSubmittingAdjustment] = useState(false);
   const [adjustmentError, setAdjustmentError] = useState<string | null>(null);
-  const [adjustmentSuccess, setAdjustmentSuccess] = useState<string | null>(null);
+  const [adjustmentSuccess, setAdjustmentSuccess] = useState<string | null>(
+    null,
+  );
 
   // ─── Fetch report ──────────────────────────────────────────────────────────
 
@@ -181,23 +185,25 @@ export default function IFTAReportPage() {
 
   return (
     <div className="p-6">
-      <header className="mb-6">
-        <h1 className="text-2xl font-bold">IFTA Quarterly Report</h1>
-        <p className="text-gray-600 mt-1">
-          View per-truck mileage by jurisdiction, fleet MPG, and manage manual mileage adjustments for IFTA filing.
-        </p>
-      </header>
+      <PageHeader
+        title="IFTA Quarterly Report"
+        subtitle="View per-truck mileage by jurisdiction, fleet MPG, and manage manual mileage adjustments for IFTA filing.
+        "
+      />
 
       {/* Quarter selector */}
       <div className="mb-6 flex items-center gap-4">
-        <label htmlFor="quarter-select" className="text-sm font-medium text-gray-700">
+        <label
+          htmlFor="quarter-select"
+          className="text-sm font-medium text-gray-700"
+        >
           Quarter:
         </label>
         <select
           id="quarter-select"
           value={quarter}
           onChange={handleQuarterChange}
-          className="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+          className="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
         >
           {getQuarterOptions().map((q) => (
             <option key={q} value={q}>
@@ -211,7 +217,7 @@ export default function IFTAReportPage() {
       {loading && (
         <div role="status" className="flex justify-center py-12">
           <span className="sr-only">Loading IFTA report...</span>
-          <div className="animate-spin h-8 w-8 border-4 border-blue-600 border-t-transparent rounded-full" />
+          <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
         </div>
       )}
 
@@ -219,7 +225,7 @@ export default function IFTAReportPage() {
       {!loading && error && (
         <div
           role="alert"
-          className="bg-red-50 border border-red-200 text-red-700 p-4 rounded mb-4"
+          className="bg-error-light border border-error-light text-error-dark p-4 rounded mb-4"
         >
           {error}
         </div>
@@ -230,30 +236,36 @@ export default function IFTAReportPage() {
         <>
           {/* Summary cards */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-              <div className="text-sm text-blue-700 font-medium">Fleet MPG</div>
-              <div className="text-2xl font-bold text-blue-800 mt-1">
+            <div className="bg-info-light border border-info rounded-lg p-4">
+              <div className="text-sm text-info-dark font-medium">
+                Fleet MPG
+              </div>
+              <div className="text-2xl font-bold text-info-dark mt-1">
                 {formatNumber(report.fleet_mpg, 2)}
               </div>
-              <div className="text-xs text-blue-600 mt-1">
+              <div className="text-xs text-info mt-1">
                 Total miles / total gallons
               </div>
             </div>
-            <div className="bg-green-50 border border-green-200 rounded-lg p-4">
-              <div className="text-sm text-green-700 font-medium">Total Trucks</div>
-              <div className="text-2xl font-bold text-green-800 mt-1">
+            <div className="bg-success-light border border-success-light rounded-lg p-4">
+              <div className="text-sm text-success-dark font-medium">
+                Total Trucks
+              </div>
+              <div className="text-2xl font-bold text-success-dark mt-1">
                 {report.trucks.length}
               </div>
-              <div className="text-xs text-green-600 mt-1">
+              <div className="text-xs text-success mt-1">
                 Trucks with mileage data
               </div>
             </div>
-            <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
-              <div className="text-sm text-yellow-700 font-medium">Incomplete Trucks</div>
-              <div className="text-2xl font-bold text-yellow-800 mt-1">
+            <div className="bg-warning-light border border-warning-light rounded-lg p-4">
+              <div className="text-sm text-warning-dark font-medium">
+                Incomplete Trucks
+              </div>
+              <div className="text-2xl font-bold text-warning-dark mt-1">
                 {report.incomplete_trucks.length}
               </div>
-              <div className="text-xs text-yellow-600 mt-1">
+              <div className="text-xs text-warning mt-1">
                 Missing Geotab data — requires review
               </div>
             </div>
@@ -269,9 +281,13 @@ export default function IFTAReportPage() {
                     <th className="text-left p-3 font-medium">Truck ID</th>
                     <th className="text-left p-3 font-medium">Truck Name</th>
                     <th className="text-right p-3 font-medium">Total Miles</th>
-                    <th className="text-right p-3 font-medium">Total Gallons</th>
+                    <th className="text-right p-3 font-medium">
+                      Total Gallons
+                    </th>
                     <th className="text-right p-3 font-medium">MPG</th>
-                    <th className="text-center p-3 font-medium">Jurisdictions</th>
+                    <th className="text-center p-3 font-medium">
+                      Jurisdictions
+                    </th>
                     <th className="text-left p-3 font-medium">Details</th>
                   </tr>
                 </thead>
@@ -297,7 +313,7 @@ export default function IFTAReportPage() {
                           <button
                             type="button"
                             onClick={() => toggleTruckDetail(truck.truck_id)}
-                            className="text-blue-600 hover:text-blue-800 text-sm underline"
+                            className="text-info hover:text-info-dark text-sm underline"
                           >
                             {expandedTruck === truck.truck_id ? "Hide" : "View"}
                           </button>
@@ -311,19 +327,38 @@ export default function IFTAReportPage() {
                               <table className="w-full border-collapse text-sm">
                                 <thead>
                                   <tr className="border-b">
-                                    <th className="text-left p-2 font-medium">Jurisdiction</th>
-                                    <th className="text-right p-2 font-medium">Total Miles</th>
-                                    <th className="text-right p-2 font-medium">Taxable Miles</th>
-                                    <th className="text-right p-2 font-medium">Tax Paid Gallons</th>
-                                    <th className="text-right p-2 font-medium">Net Taxable Gallons</th>
-                                    <th className="text-right p-2 font-medium">Tax Rate</th>
-                                    <th className="text-right p-2 font-medium">Tax Due</th>
+                                    <th className="text-left p-2 font-medium">
+                                      Jurisdiction
+                                    </th>
+                                    <th className="text-right p-2 font-medium">
+                                      Total Miles
+                                    </th>
+                                    <th className="text-right p-2 font-medium">
+                                      Taxable Miles
+                                    </th>
+                                    <th className="text-right p-2 font-medium">
+                                      Tax Paid Gallons
+                                    </th>
+                                    <th className="text-right p-2 font-medium">
+                                      Net Taxable Gallons
+                                    </th>
+                                    <th className="text-right p-2 font-medium">
+                                      Tax Rate
+                                    </th>
+                                    <th className="text-right p-2 font-medium">
+                                      Tax Due
+                                    </th>
                                   </tr>
                                 </thead>
                                 <tbody>
                                   {truck.jurisdictions.map((j) => (
-                                    <tr key={j.jurisdiction} className="border-b">
-                                      <td className="p-2 font-medium">{j.jurisdiction}</td>
+                                    <tr
+                                      key={j.jurisdiction}
+                                      className="border-b"
+                                    >
+                                      <td className="p-2 font-medium">
+                                        {j.jurisdiction}
+                                      </td>
                                       <td className="p-2 text-right font-mono">
                                         {formatNumber(j.total_miles)}
                                       </td>
@@ -368,15 +403,16 @@ export default function IFTAReportPage() {
           {report.incomplete_trucks.length > 0 && (
             <div className="mb-8">
               <h2 className="text-lg font-semibold mb-3">Incomplete Trucks</h2>
-              <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
-                <p className="text-sm text-yellow-700 mb-3">
-                  The following trucks have incomplete Geotab data for {quarter}. Manual mileage adjustments may be required.
+              <div className="bg-warning-light border border-warning-light rounded-lg p-4">
+                <p className="text-sm text-warning-dark mb-3">
+                  The following trucks have incomplete Geotab data for {quarter}
+                  . Manual mileage adjustments may be required.
                 </p>
                 <div className="flex flex-wrap gap-2">
                   {report.incomplete_trucks.map((truckId) => (
                     <span
                       key={truckId}
-                      className="inline-block bg-yellow-100 text-yellow-800 px-3 py-1 rounded text-sm font-medium"
+                      className="inline-block bg-warning-light text-warning-dark px-3 py-1 rounded text-sm font-medium"
                     >
                       {truckId}
                     </span>
@@ -390,42 +426,59 @@ export default function IFTAReportPage() {
 
       {/* Manual adjustment form */}
       <div className="border-t pt-6 mt-6">
-        <h2 className="text-lg font-semibold mb-3">Manual Mileage Adjustment</h2>
+        <h2 className="text-lg font-semibold mb-3">
+          Manual Mileage Adjustment
+        </h2>
         <p className="text-sm text-gray-600 mb-4">
-          Record a manual mileage adjustment for a truck. Positive values add miles; negative values subtract. All adjustments are logged for audit purposes.
+          Record a manual mileage adjustment for a truck. Positive values add
+          miles; negative values subtract. All adjustments are logged for audit
+          purposes.
         </p>
 
         <form onSubmit={handleSubmitAdjustment} className="space-y-4 max-w-xl">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
-              <label htmlFor="adj-truck-id" className="block text-sm font-medium text-gray-700 mb-1">
+              <label
+                htmlFor="adj-truck-id"
+                className="block text-sm font-medium text-gray-700 mb-1"
+              >
                 Truck ID
               </label>
               <input
                 id="adj-truck-id"
                 type="text"
                 value={adjustmentForm.truck_id}
-                onChange={(e) => handleAdjustmentFieldChange("truck_id", e.target.value)}
+                onChange={(e) =>
+                  handleAdjustmentFieldChange("truck_id", e.target.value)
+                }
                 placeholder="e.g. truck_001"
-                className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
               />
             </div>
             <div>
-              <label htmlFor="adj-jurisdiction" className="block text-sm font-medium text-gray-700 mb-1">
+              <label
+                htmlFor="adj-jurisdiction"
+                className="block text-sm font-medium text-gray-700 mb-1"
+              >
                 Jurisdiction (State)
               </label>
               <input
                 id="adj-jurisdiction"
                 type="text"
                 value={adjustmentForm.jurisdiction}
-                onChange={(e) => handleAdjustmentFieldChange("jurisdiction", e.target.value)}
+                onChange={(e) =>
+                  handleAdjustmentFieldChange("jurisdiction", e.target.value)
+                }
                 placeholder="e.g. TX"
                 maxLength={2}
-                className="w-full border border-gray-300 rounded px-3 py-2 text-sm uppercase focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full border border-gray-300 rounded px-3 py-2 text-sm uppercase focus:outline-none focus:ring-2 focus:ring-primary"
               />
             </div>
             <div>
-              <label htmlFor="adj-miles" className="block text-sm font-medium text-gray-700 mb-1">
+              <label
+                htmlFor="adj-miles"
+                className="block text-sm font-medium text-gray-700 mb-1"
+              >
                 Miles (+/-)
               </label>
               <input
@@ -433,19 +486,29 @@ export default function IFTAReportPage() {
                 type="number"
                 step="0.1"
                 value={adjustmentForm.miles}
-                onChange={(e) => handleAdjustmentFieldChange("miles", parseFloat(e.target.value) || 0)}
-                className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                onChange={(e) =>
+                  handleAdjustmentFieldChange(
+                    "miles",
+                    parseFloat(e.target.value) || 0,
+                  )
+                }
+                className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
               />
             </div>
             <div>
-              <label htmlFor="adj-quarter" className="block text-sm font-medium text-gray-700 mb-1">
+              <label
+                htmlFor="adj-quarter"
+                className="block text-sm font-medium text-gray-700 mb-1"
+              >
                 Quarter
               </label>
               <select
                 id="adj-quarter"
                 value={adjustmentForm.quarter}
-                onChange={(e) => handleAdjustmentFieldChange("quarter", e.target.value)}
-                className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                onChange={(e) =>
+                  handleAdjustmentFieldChange("quarter", e.target.value)
+                }
+                className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
               >
                 {getQuarterOptions().map((q) => (
                   <option key={q} value={q}>
@@ -457,16 +520,21 @@ export default function IFTAReportPage() {
           </div>
 
           <div>
-            <label htmlFor="adj-reason" className="block text-sm font-medium text-gray-700 mb-1">
+            <label
+              htmlFor="adj-reason"
+              className="block text-sm font-medium text-gray-700 mb-1"
+            >
               Reason
             </label>
             <textarea
               id="adj-reason"
               value={adjustmentForm.reason}
-              onChange={(e) => handleAdjustmentFieldChange("reason", e.target.value)}
+              onChange={(e) =>
+                handleAdjustmentFieldChange("reason", e.target.value)
+              }
               placeholder="Explain the reason for this adjustment (required for audit trail)"
               rows={3}
-              className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
             />
           </div>
 
@@ -474,7 +542,7 @@ export default function IFTAReportPage() {
           {adjustmentError && (
             <div
               role="alert"
-              className="bg-red-50 border border-red-200 text-red-700 p-3 rounded text-sm"
+              className="bg-error-light border border-error-light text-error-dark p-3 rounded text-sm"
             >
               {adjustmentError}
             </div>
@@ -484,7 +552,7 @@ export default function IFTAReportPage() {
           {adjustmentSuccess && (
             <div
               role="status"
-              className="bg-green-50 border border-green-200 text-green-700 p-3 rounded text-sm"
+              className="bg-success-light border border-success-light text-success-dark p-3 rounded text-sm"
             >
               {adjustmentSuccess}
             </div>
@@ -493,7 +561,7 @@ export default function IFTAReportPage() {
           <button
             type="submit"
             disabled={submittingAdjustment}
-            className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 disabled:opacity-50 text-sm"
+            className="bg-primary text-white px-4 py-2 rounded hover:bg-primary-hover disabled:opacity-50 text-sm"
           >
             {submittingAdjustment ? "Submitting..." : "Record Adjustment"}
           </button>

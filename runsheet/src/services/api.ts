@@ -208,10 +208,10 @@ class ApiService {
         "Content-Type": "application/json",
         ...(options?.headers as Record<string, string> | undefined),
       };
-      
+
       // Add Authorization header if token exists
       if (token) {
-        headers["Authorization"] = `Bearer ${token}`;
+        headers.Authorization = `Bearer ${token}`;
       }
 
       const response = await fetchWithRetry(

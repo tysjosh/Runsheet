@@ -1,19 +1,8 @@
-import {
-  CheckCircle,
-  ChevronRight,
-  Database,
-  History,
-} from "lucide-react";
-import { useState } from "react";
-import type {
-  DataType,
-  ImportResult,
-  ValidationResult,
-} from "../types/import";
-
+import { CheckCircle, ChevronRight, Database, History } from "lucide-react";
 // Sub-components will be created in subsequent tasks (12.2–12.8).
 // Lazy-load them so the wizard compiles even before they exist.
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, useState } from "react";
+import type { DataType, ImportResult, ValidationResult } from "../types/import";
 
 const DataTypeSelector = lazy(() => import("./import/DataTypeSelector"));
 const SourceUploader = lazy(() => import("./import/SourceUploader"));
@@ -83,9 +72,9 @@ function StepIndicator({ currentStep }: { currentStep: WorkflowStep }) {
               <div
                 className={`flex items-center justify-center w-8 h-8 rounded-full text-sm font-medium transition-colors ${
                   isCompleted
-                    ? "bg-green-100 text-green-700"
+                    ? "bg-success-light text-success-dark"
                     : isCurrent
-                      ? "bg-[#232323] text-white"
+                      ? "bg-primary text-white"
                       : "bg-gray-100 text-gray-400"
                 }`}
               >
@@ -98,9 +87,9 @@ function StepIndicator({ currentStep }: { currentStep: WorkflowStep }) {
               <span
                 className={`text-sm hidden sm:inline ${
                   isCurrent
-                    ? "font-medium text-[#232323]"
+                    ? "font-medium text-primary"
                     : isCompleted
-                      ? "text-green-700"
+                      ? "text-success-dark"
                       : "text-gray-400"
                 }`}
               >
@@ -132,7 +121,7 @@ function StepPlaceholder({ name }: { name: string }) {
 function StepFallback() {
   return (
     <div className="flex items-center justify-center py-20">
-      <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900" />
+      <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary" />
     </div>
   );
 }
@@ -289,9 +278,7 @@ export default function DataImport() {
           <Suspense fallback={<StepFallback />}>
             <ImportProgress
               sessionId={state.sessionId!}
-              skipErrors={
-                (state.validationResult?.error_count ?? 0) > 0
-              }
+              skipErrors={(state.validationResult?.error_count ?? 0) > 0}
               onComplete={handleImportComplete}
             />
           </Suspense>
@@ -320,12 +307,12 @@ export default function DataImport() {
       <div className="border-b border-gray-100 px-8 py-6 flex-shrink-0">
         <div className="flex items-center justify-between mb-4">
           <div>
-            <h1 className="text-2xl font-semibold text-[#232323] mb-1">
+            <h1 className="text-2xl font-semibold text-primary mb-1">
               Data Import
             </h1>
             <p className="text-gray-500">
-              Migrate and onboard your data — import fleet records,
-              inventory, and more from CSV files or Google Sheets.
+              Migrate and onboard your data — import fleet records, inventory,
+              and more from CSV files or Google Sheets.
             </p>
           </div>
 
@@ -333,8 +320,8 @@ export default function DataImport() {
             onClick={() => setShowHistory(!showHistory)}
             className={`flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-xl transition-colors ${
               showHistory
-                ? "bg-[#232323] text-white"
-                : "text-gray-600 hover:text-[#232323] hover:bg-gray-50"
+                ? "bg-primary text-white"
+                : "text-gray-600 hover:text-primary hover:bg-gray-50"
             }`}
           >
             <History className="w-4 h-4" />

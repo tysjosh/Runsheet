@@ -2,15 +2,14 @@ import {
   AlertTriangle,
   ArrowLeft,
   CheckCircle2,
-  FileWarning,
-  Loader2,
-  XCircle,
   FileSpreadsheet,
+  Loader2,
   Upload,
+  XCircle,
 } from "lucide-react";
 import { useEffect, useState } from "react";
-import type { ValidationResult } from "../../types/import";
 import { importApi } from "../../services/importApi";
+import type { ValidationResult } from "../../types/import";
 
 // ─── Props ───────────────────────────────────────────────────────────────────
 
@@ -94,10 +93,8 @@ export default function ValidationPreview({
   if (error) {
     return (
       <div className="flex flex-col items-center justify-center py-20">
-        <XCircle className="w-10 h-10 text-red-500 mb-4" />
-        <p className="text-sm font-medium text-red-600 mb-2">
-          Validation Failed
-        </p>
+        <XCircle className="w-10 h-10 text-error mb-4" />
+        <p className="text-sm font-medium text-error mb-2">Validation Failed</p>
         <p className="text-xs text-gray-500 mb-6 max-w-md text-center">
           {error}
         </p>
@@ -105,14 +102,14 @@ export default function ValidationPreview({
           <button
             type="button"
             onClick={onBackToMapping}
-            className="px-4 py-2 text-sm font-medium text-gray-600 hover:text-[#232323] transition-colors"
+            className="px-4 py-2 text-sm font-medium text-gray-600 hover:text-primary transition-colors"
           >
             Back to Mapping
           </button>
           <button
             type="button"
             onClick={onCancel}
-            className="px-4 py-2 text-sm font-medium text-red-600 hover:text-red-700 transition-colors"
+            className="px-4 py-2 text-sm font-medium text-error hover:text-error-dark transition-colors"
           >
             Cancel Import
           </button>
@@ -133,7 +130,7 @@ export default function ValidationPreview({
     <div>
       {/* Header */}
       <div className="mb-6">
-        <h2 className="text-lg font-semibold text-[#232323] mb-1">
+        <h2 className="text-lg font-semibold text-primary mb-1">
           Validation Preview
         </h2>
         <p className="text-sm text-gray-500">
@@ -172,10 +169,10 @@ export default function ValidationPreview({
 
       {/* All valid banner */}
       {!hasErrors && !hasWarnings && (
-        <div className="mb-6 p-4 rounded-xl bg-green-50 border border-green-200">
+        <div className="mb-6 p-4 rounded-xl bg-success-light border border-success-light">
           <div className="flex items-center gap-3">
-            <CheckCircle2 className="w-5 h-5 text-green-600 flex-shrink-0" />
-            <p className="text-sm font-medium text-green-800">
+            <CheckCircle2 className="w-5 h-5 text-success flex-shrink-0" />
+            <p className="text-sm font-medium text-success-dark">
               All {result.total_rows} rows passed validation. Ready to import.
             </p>
           </div>
@@ -186,26 +183,26 @@ export default function ValidationPreview({
       {hasErrors && (
         <div className="mb-6">
           <div className="flex items-center gap-2 mb-3">
-            <XCircle className="w-4 h-4 text-red-500" />
-            <h3 className="text-sm font-semibold text-[#232323]">
+            <XCircle className="w-4 h-4 text-error" />
+            <h3 className="text-sm font-semibold text-primary">
               Errors ({result.error_count})
             </h3>
           </div>
-          <div className="rounded-xl border border-red-200 overflow-hidden">
+          <div className="rounded-xl border border-error-light overflow-hidden">
             <div className="max-h-64 overflow-y-auto">
               <table className="w-full text-sm">
-                <thead className="bg-red-50 sticky top-0">
+                <thead className="bg-error-light sticky top-0">
                   <tr>
-                    <th className="text-left px-4 py-2.5 text-xs font-medium text-red-700 uppercase tracking-wider w-20">
+                    <th className="text-left px-4 py-2.5 text-xs font-medium text-error-dark uppercase tracking-wider w-20">
                       Row
                     </th>
-                    <th className="text-left px-4 py-2.5 text-xs font-medium text-red-700 uppercase tracking-wider w-36">
+                    <th className="text-left px-4 py-2.5 text-xs font-medium text-error-dark uppercase tracking-wider w-36">
                       Field
                     </th>
-                    <th className="text-left px-4 py-2.5 text-xs font-medium text-red-700 uppercase tracking-wider">
+                    <th className="text-left px-4 py-2.5 text-xs font-medium text-error-dark uppercase tracking-wider">
                       Description
                     </th>
-                    <th className="text-left px-4 py-2.5 text-xs font-medium text-red-700 uppercase tracking-wider w-36">
+                    <th className="text-left px-4 py-2.5 text-xs font-medium text-error-dark uppercase tracking-wider w-36">
                       Value
                     </th>
                   </tr>
@@ -216,20 +213,20 @@ export default function ValidationPreview({
                       key={`err-${issue.row_number}-${issue.field_name}-${idx}`}
                       className={
                         idx < result.errors.length - 1
-                          ? "border-b border-red-100"
+                          ? "border-b border-error-light"
                           : ""
                       }
                     >
-                      <td className="px-4 py-2.5 text-red-700 font-medium">
+                      <td className="px-4 py-2.5 text-error-dark font-medium">
                         {issue.row_number}
                       </td>
-                      <td className="px-4 py-2.5 text-red-800 font-mono text-xs">
+                      <td className="px-4 py-2.5 text-error-dark font-mono text-xs">
                         {issue.field_name}
                       </td>
-                      <td className="px-4 py-2.5 text-red-600">
+                      <td className="px-4 py-2.5 text-error">
                         {issue.description}
                       </td>
-                      <td className="px-4 py-2.5 text-red-500 font-mono text-xs truncate max-w-[140px]">
+                      <td className="px-4 py-2.5 text-error font-mono text-xs truncate max-w-[140px]">
                         {issue.value ?? "—"}
                       </td>
                     </tr>
@@ -245,23 +242,23 @@ export default function ValidationPreview({
       {hasWarnings && (
         <div className="mb-6">
           <div className="flex items-center gap-2 mb-3">
-            <AlertTriangle className="w-4 h-4 text-amber-500" />
-            <h3 className="text-sm font-semibold text-[#232323]">
+            <AlertTriangle className="w-4 h-4 text-warning" />
+            <h3 className="text-sm font-semibold text-primary">
               Warnings ({result.warning_count})
             </h3>
           </div>
-          <div className="rounded-xl border border-amber-200 overflow-hidden">
+          <div className="rounded-xl border border-warning-light overflow-hidden">
             <div className="max-h-64 overflow-y-auto">
               <table className="w-full text-sm">
-                <thead className="bg-amber-50 sticky top-0">
+                <thead className="bg-warning-light sticky top-0">
                   <tr>
-                    <th className="text-left px-4 py-2.5 text-xs font-medium text-amber-700 uppercase tracking-wider w-20">
+                    <th className="text-left px-4 py-2.5 text-xs font-medium text-warning-dark uppercase tracking-wider w-20">
                       Row
                     </th>
-                    <th className="text-left px-4 py-2.5 text-xs font-medium text-amber-700 uppercase tracking-wider w-36">
+                    <th className="text-left px-4 py-2.5 text-xs font-medium text-warning-dark uppercase tracking-wider w-36">
                       Field
                     </th>
-                    <th className="text-left px-4 py-2.5 text-xs font-medium text-amber-700 uppercase tracking-wider">
+                    <th className="text-left px-4 py-2.5 text-xs font-medium text-warning-dark uppercase tracking-wider">
                       Description
                     </th>
                   </tr>
@@ -272,17 +269,17 @@ export default function ValidationPreview({
                       key={`warn-${issue.row_number}-${issue.field_name}-${idx}`}
                       className={
                         idx < result.warnings.length - 1
-                          ? "border-b border-amber-100"
+                          ? "border-b border-warning-light"
                           : ""
                       }
                     >
-                      <td className="px-4 py-2.5 text-amber-700 font-medium">
+                      <td className="px-4 py-2.5 text-warning-dark font-medium">
                         {issue.row_number}
                       </td>
-                      <td className="px-4 py-2.5 text-amber-800 font-mono text-xs">
+                      <td className="px-4 py-2.5 text-warning-dark font-mono text-xs">
                         {issue.field_name}
                       </td>
-                      <td className="px-4 py-2.5 text-amber-600">
+                      <td className="px-4 py-2.5 text-warning">
                         {issue.description}
                       </td>
                     </tr>
@@ -299,7 +296,7 @@ export default function ValidationPreview({
         <button
           type="button"
           onClick={onBackToMapping}
-          className="flex items-center gap-2 px-4 py-2.5 text-sm font-medium text-gray-600 hover:text-[#232323] transition-colors"
+          className="flex items-center gap-2 px-4 py-2.5 text-sm font-medium text-gray-600 hover:text-primary transition-colors"
         >
           <ArrowLeft className="w-4 h-4" />
           Back to Mapping
@@ -320,7 +317,7 @@ export default function ValidationPreview({
             disabled={!canImport}
             className={`flex items-center gap-2 px-6 py-2.5 text-sm font-medium rounded-xl transition-colors ${
               canImport
-                ? "bg-[#232323] text-white hover:bg-black"
+                ? "bg-primary text-white hover:bg-primary-hover"
                 : "bg-gray-100 text-gray-400 cursor-not-allowed"
             }`}
           >
@@ -353,29 +350,29 @@ function SummaryCard({
       bg: "bg-gray-50",
       border: "border-gray-200",
       icon: "text-gray-500",
-      value: "text-[#232323]",
+      value: "text-primary",
       label: "text-gray-500",
     },
     green: {
-      bg: "bg-green-50",
-      border: "border-green-200",
-      icon: "text-green-600",
-      value: "text-green-700",
-      label: "text-green-600",
+      bg: "bg-success-light",
+      border: "border-success-light",
+      icon: "text-success",
+      value: "text-success-dark",
+      label: "text-success",
     },
     red: {
-      bg: "bg-red-50",
-      border: "border-red-200",
-      icon: "text-red-500",
-      value: "text-red-700",
-      label: "text-red-500",
+      bg: "bg-error-light",
+      border: "border-error-light",
+      icon: "text-error",
+      value: "text-error-dark",
+      label: "text-error",
     },
     amber: {
-      bg: "bg-amber-50",
-      border: "border-amber-200",
-      icon: "text-amber-500",
-      value: "text-amber-700",
-      label: "text-amber-500",
+      bg: "bg-warning-light",
+      border: "border-warning-light",
+      icon: "text-warning",
+      value: "text-warning-dark",
+      label: "text-warning",
     },
   };
 

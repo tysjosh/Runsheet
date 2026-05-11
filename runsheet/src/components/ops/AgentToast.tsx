@@ -11,7 +11,7 @@
  * - Requirement 9.7: Toast notification with agent name, action summary, and outcome
  */
 
-import { CheckCircle2, X, XCircle, Clock, AlertTriangle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Clock, X, XCircle } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { useAgentWebSocket } from "../../hooks/useAgentWebSocket";
 import type { ActivityLogEntry } from "../../services/agentApi";
@@ -53,21 +53,21 @@ const OUTCOME_CONFIG: Record<
 > = {
   success: {
     icon: CheckCircle2,
-    color: "text-emerald-600",
-    bg: "bg-emerald-50",
-    border: "border-emerald-200",
+    color: "text-success",
+    bg: "bg-success-light",
+    border: "border-success-light",
   },
   failure: {
     icon: XCircle,
-    color: "text-red-600",
-    bg: "bg-red-50",
-    border: "border-red-200",
+    color: "text-error",
+    bg: "bg-error-light",
+    border: "border-error-light",
   },
   pending_approval: {
     icon: Clock,
-    color: "text-amber-600",
-    bg: "bg-amber-50",
-    border: "border-amber-200",
+    color: "text-warning",
+    bg: "bg-warning-light",
+    border: "border-warning-light",
   },
   rejected: {
     icon: AlertTriangle,
@@ -99,9 +99,7 @@ function ToastNotification({
     >
       <Icon className={`w-5 h-5 flex-shrink-0 mt-0.5 ${config.color}`} />
       <div className="flex-1 min-w-0">
-        <p className="text-xs font-semibold text-[#232323]">
-          {toast.agentName}
-        </p>
+        <p className="text-xs font-semibold text-primary">{toast.agentName}</p>
         <p className="text-xs text-gray-600 mt-0.5 truncate">
           {toast.actionSummary}
         </p>
@@ -153,20 +151,23 @@ export default function AgentToast() {
     });
   }, []);
 
-  const handleActivity = useCallback((entry: ActivityLogEntry) => {
-    // Also trigger toasts for mutation actions from autonomous agents
-    const autonomousAgents = [
-      "delay_response_agent",
-      "fuel_management_agent",
-      "sla_guardian_agent",
-    ];
-    if (
-      autonomousAgents.includes(entry.agent_id) &&
-      entry.action_type === "mutation"
-    ) {
-      handleAgentAction(entry);
-    }
-  }, [handleAgentAction]);
+  const handleActivity = useCallback(
+    (entry: ActivityLogEntry) => {
+      // Also trigger toasts for mutation actions from autonomous agents
+      const autonomousAgents = [
+        "delay_response_agent",
+        "fuel_management_agent",
+        "sla_guardian_agent",
+      ];
+      if (
+        autonomousAgents.includes(entry.agent_id) &&
+        entry.action_type === "mutation"
+      ) {
+        handleAgentAction(entry);
+      }
+    },
+    [handleAgentAction],
+  );
 
   useAgentWebSocket({
     onAgentAction: handleAgentAction,

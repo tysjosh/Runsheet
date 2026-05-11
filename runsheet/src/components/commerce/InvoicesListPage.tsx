@@ -1,7 +1,18 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
-import type { Invoice, CursorPaginatedResponse } from "../../services/commerceApi";
+import { useCallback, useEffect, useState } from "react";
+import {
+  Badge,
+  Button,
+  EmptyState,
+  FilterBar,
+  PageHeader,
+  Table,
+} from "@/components/ui";
+import type {
+  CursorPaginatedResponse,
+  Invoice,
+} from "../../services/commerceApi";
 import { getInvoices, type InvoiceFilters } from "../../services/commerceApi";
 
 interface InvoicesListPageProps {
@@ -17,29 +28,34 @@ export default function InvoicesListPage({
   const [cursor, setCursor] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const [statusFilter, setStatusFilter] = useState<string>("");
-  const [customerFilter, setCustomerFilter] = useState<string>("");
+  const [customerFilter, _setCustomerFilter] = useState<string>("");
 
-  const fetchInvoices = useCallback(async (nextCursor?: string | null) => {
-    setLoading(true);
-    setError(null);
-    try {
-      const filters: InvoiceFilters = { limit: 20 };
-      if (statusFilter) filters.status = statusFilter as InvoiceFilters["status"];
-      if (customerFilter) filters.customer_id = customerFilter;
-      if (nextCursor) filters.cursor = nextCursor;
+  const fetchInvoices = useCallback(
+    async (nextCursor?: string | null) => {
+      setLoading(true);
+      setError(null);
+      try {
+        const filters: InvoiceFilters = { limit: 20 };
+        if (statusFilter)
+          filters.status = statusFilter as InvoiceFilters["status"];
+        if (customerFilter) filters.customer_id = customerFilter;
+        if (nextCursor) filters.cursor = nextCursor;
 
-      const response: CursorPaginatedResponse<Invoice> = await getInvoices(filters);
-      setInvoices(response.data);
-      setCursor(response.cursor);
-      setHasMore(response.has_more);
-    } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to load invoices",
-      );
-    } finally {
-      setLoading(false);
-    }
-  }, [statusFilter, customerFilter]);
+        const response: CursorPaginatedResponse<Invoice> =
+          await getInvoices(filters);
+        setInvoices(response.data);
+        setCursor(response.cursor);
+        setHasMore(response.has_more);
+      } catch (err) {
+        setError(
+          err instanceof Error ? err.message : "Failed to load invoices",
+        );
+      } finally {
+        setLoading(false);
+      }
+    },
+    [statusFilter, customerFilter],
+  );
 
   useEffect(() => {
     fetchInvoices();
@@ -48,49 +64,52 @@ export default function InvoicesListPage({
   const formatCents = (cents: number) =>
     `$${(cents / 100).toLocaleString(undefined, { minimumFractionDigits: 2 })}`;
 
-  const statusColor = (status: string) => {
+  const getStatusVariant = (
+    status: string,
+  ): "success" | "info" | "warning" | "error" | "default" => {
     switch (status) {
       case "paid":
-        return "bg-green-100 text-green-800";
+        return "success";
       case "open":
-        return "bg-blue-100 text-blue-800";
+        return "info";
       case "partial":
-        return "bg-yellow-100 text-yellow-800";
+        return "warning";
       case "overdue":
-        return "bg-red-100 text-red-800";
+        return "error";
       case "void":
-        return "bg-gray-100 text-gray-800";
+        return "default";
       case "draft":
-        return "bg-purple-100 text-purple-800";
+        return "default";
       default:
-        return "bg-gray-100 text-gray-800";
+        return "default";
     }
+  };
+
+  const getQboStateVariant = (
+    state: string,
+  ): "success" | "error" | "default" => {
+    if (state === "pushed") return "success";
+    if (state === "dead_letter") return "error";
+    return "default";
   };
 
   return (
     <div className="p-6">
-      <header className="mb-6">
-        <h1 className="text-2xl font-bold">Invoices</h1>
-        <p className="text-gray-600 mt-1">
-          View and manage invoices across all accounts.
-        </p>
-      </header>
+      <PageHeader
+        title="Invoices"
+        subtitle="View and manage invoices across all accounts."
+      />
 
-      {/* Filters */}
-      <div className="flex gap-4 mb-6 flex-wrap">
-        <div>
-          <label htmlFor="invoice-status-filter" className="block text-sm font-medium mb-1">
-            Status
-          </label>
+      <FilterBar
+        filters={
           <select
-            id="invoice-status-filter"
             value={statusFilter}
             onChange={(e) => {
               setStatusFilter(e.target.value);
-              setCursor(null);
               fetchInvoices();
             }}
-            className="border rounded px-3 py-2"
+            className="px-4 py-3 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-gray-200 focus:border-gray-300 focus:outline-none bg-white min-w-[140px]"
+            aria-label="Status"
           >
             <option value="">All</option>
             <option value="draft">Draft</option>
@@ -100,28 +119,15 @@ export default function InvoicesListPage({
             <option value="overdue">Overdue</option>
             <option value="void">Void</option>
           </select>
-        </div>
-        <div>
-          <label htmlFor="invoice-customer-filter" className="block text-sm font-medium mb-1">
-            Customer ID
-          </label>
-          <input
-            id="invoice-customer-filter"
-            type="text"
-            value={customerFilter}
-            onChange={(e) => {
-              setCustomerFilter(e.target.value);
-              setCursor(null);
-            }}
-            placeholder="Filter by customer..."
-            className="border rounded px-3 py-2"
-          />
-        </div>
-      </div>
+        }
+      />
 
       {/* Error state */}
       {error && (
-        <div role="alert" className="bg-red-50 border border-red-200 text-red-700 p-4 rounded mb-4">
+        <div
+          role="alert"
+          className="bg-error-light border border-error-light text-error-dark p-4 rounded mb-4"
+        >
           {error}
         </div>
       )}
@@ -130,86 +136,90 @@ export default function InvoicesListPage({
       {loading && (
         <div role="status" className="flex justify-center py-12">
           <span className="sr-only">Loading invoices...</span>
-          <div className="animate-spin h-8 w-8 border-4 border-blue-600 border-t-transparent rounded-full" />
+          <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
         </div>
       )}
 
       {/* Invoices table */}
-      {!loading && !error && (
-        <>
-          <table className="w-full border-collapse" role="table">
-            <thead>
-              <tr className="border-b bg-gray-50">
-                <th className="text-left p-3 font-medium">Invoice #</th>
-                <th className="text-left p-3 font-medium">Status</th>
-                <th className="text-left p-3 font-medium">Total</th>
-                <th className="text-left p-3 font-medium">Remaining</th>
-                <th className="text-left p-3 font-medium">Due Date</th>
-                <th className="text-left p-3 font-medium">QBO State</th>
-                <th className="text-left p-3 font-medium">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {invoices.map((invoice) => (
-                <tr key={invoice.invoice_id} className="border-b hover:bg-gray-50">
-                  <td className="p-3 font-mono text-sm">{invoice.invoice_number}</td>
-                  <td className="p-3">
-                    <span
-                      className={`inline-block px-2 py-1 rounded text-xs font-medium ${statusColor(invoice.status)}`}
-                    >
+      {!loading &&
+        !error &&
+        (invoices.length === 0 ? (
+          <EmptyState
+            icon={<span className="text-4xl">📄</span>}
+            title="No invoices found"
+            description="Try adjusting your filters"
+          />
+        ) : (
+          <>
+            <Table
+              columns={[
+                {
+                  key: "invoice_number",
+                  label: "Invoice #",
+                  render: (invoice) => (
+                    <span className="font-mono text-sm">
+                      {invoice.invoice_number}
+                    </span>
+                  ),
+                },
+                {
+                  key: "status",
+                  label: "Status",
+                  render: (invoice) => (
+                    <Badge variant={getStatusVariant(invoice.status)}>
                       {invoice.status}
-                    </span>
-                  </td>
-                  <td className="p-3">{formatCents(invoice.total_cents)}</td>
-                  <td className="p-3">{formatCents(invoice.remaining_cents)}</td>
-                  <td className="p-3">{invoice.due_date}</td>
-                  <td className="p-3">
-                    <span
-                      className={`inline-block px-2 py-1 rounded text-xs ${
-                        invoice.qbo_push_state === "pushed"
-                          ? "bg-green-100 text-green-800"
-                          : invoice.qbo_push_state === "dead_letter"
-                            ? "bg-red-100 text-red-800"
-                            : "bg-gray-100 text-gray-800"
-                      }`}
-                    >
+                    </Badge>
+                  ),
+                },
+                {
+                  key: "total_cents",
+                  label: "Total",
+                  render: (invoice) => formatCents(invoice.total_cents),
+                },
+                {
+                  key: "remaining_cents",
+                  label: "Remaining",
+                  render: (invoice) => formatCents(invoice.remaining_cents),
+                },
+                { key: "due_date", label: "Due Date" },
+                {
+                  key: "qbo_push_state",
+                  label: "QBO State",
+                  render: (invoice) => (
+                    <Badge variant={getQboStateVariant(invoice.qbo_push_state)}>
                       {invoice.qbo_push_state}
-                    </span>
-                  </td>
-                  <td className="p-3">
-                    <button
-                      type="button"
+                    </Badge>
+                  ),
+                },
+                {
+                  key: "actions",
+                  label: "Actions",
+                  render: (invoice) => (
+                    <Button
+                      variant="ghost"
+                      size="sm"
                       onClick={() => onSelectInvoice?.(invoice.invoice_id)}
-                      className="text-blue-600 hover:underline"
                     >
                       View
-                    </button>
-                  </td>
-                </tr>
-              ))}
-              {invoices.length === 0 && (
-                <tr>
-                  <td colSpan={7} className="p-6 text-center text-gray-500">
-                    No invoices found.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
+                    </Button>
+                  ),
+                },
+              ]}
+              data={invoices}
+              keyExtractor={(invoice) => invoice.invoice_id}
+            />
 
-          {/* Pagination */}
-          <nav aria-label="Pagination" className="flex justify-end items-center mt-4">
-            <button
-              type="button"
-              disabled={!hasMore}
-              onClick={() => fetchInvoices(cursor)}
-              className="px-3 py-1 border rounded disabled:opacity-50"
-            >
-              Load More
-            </button>
-          </nav>
-        </>
-      )}
+            <div className="flex justify-end mt-4">
+              <Button
+                variant="secondary"
+                disabled={!hasMore}
+                onClick={() => fetchInvoices(cursor)}
+              >
+                Load More
+              </Button>
+            </div>
+          </>
+        ))}
     </div>
   );
 }

@@ -20,7 +20,9 @@ jest.mock("../../../services/commerceApi", () => ({
 import { getCustomers } from "../../../services/commerceApi";
 import CustomersListPage from "../CustomersListPage";
 
-const mockGetCustomers = getCustomers as jest.MockedFunction<typeof getCustomers>;
+const mockGetCustomers = getCustomers as jest.MockedFunction<
+  typeof getCustomers
+>;
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -30,10 +32,10 @@ function customerFixture(overrides: Record<string, unknown> = {}) {
     tenant_id: "tenant-a",
     display_name: "Acme Fuel Corp",
     legal_name: "Acme Fuel Corporation LLC",
-    email: "billing@acme.com",
+    primary_email: "billing@acme.com",
     phone: "555-0100",
     status: "active",
-    account_ids: ["acc_001", "acc_002"],
+    account_count: 2,
     tags: ["enterprise"],
     created_at: "2024-01-15T10:00:00Z",
     updated_at: "2024-06-01T08:00:00Z",
@@ -44,7 +46,14 @@ function customerFixture(overrides: Record<string, unknown> = {}) {
 function paginatedResponse(customers: unknown[], page = 1, totalPages = 1) {
   return {
     data: customers,
-    pagination: { page, size: 20, total: customers.length, total_pages: totalPages },
+    pagination: {
+      page,
+      size: 20,
+      total: customers.length,
+      total_pages: totalPages,
+    },
+    cursor: null,
+    has_more: page < totalPages,
     request_id: "req-123",
   };
 }
@@ -60,7 +69,10 @@ describe("CustomersListPage", () => {
     mockGetCustomers.mockResolvedValue(
       paginatedResponse([
         customerFixture(),
-        customerFixture({ customer_id: "cust_002", display_name: "Beta Energy" }),
+        customerFixture({
+          customer_id: "cust_002",
+          display_name: "Beta Energy",
+        }),
       ]) as any,
     );
 
@@ -93,7 +105,7 @@ describe("CustomersListPage", () => {
     render(<CustomersListPage />);
 
     await waitFor(() => {
-      expect(screen.getByText("No customers found.")).toBeInTheDocument();
+      expect(screen.getByText("No customers found")).toBeInTheDocument();
     });
   });
 
@@ -113,7 +125,9 @@ describe("CustomersListPage", () => {
   });
 
   it("filters by status when dropdown changes", async () => {
-    mockGetCustomers.mockResolvedValue(paginatedResponse([customerFixture()]) as any);
+    mockGetCustomers.mockResolvedValue(
+      paginatedResponse([customerFixture()]) as any,
+    );
     render(<CustomersListPage />);
 
     await waitFor(() => {
@@ -143,7 +157,7 @@ describe("CustomersListPage", () => {
     const nextBtn = screen.getByRole("button", { name: /Next/i });
     expect(nextBtn).not.toBeDisabled();
 
-    const prevBtn = screen.getByRole("button", { name: /Previous/i });
+    const prevBtn = screen.getByRole("button", { name: /Prev/i });
     expect(prevBtn).toBeDisabled();
 
     fireEvent.click(nextBtn);
@@ -156,7 +170,9 @@ describe("CustomersListPage", () => {
   });
 
   it("submits search form and resets page", async () => {
-    mockGetCustomers.mockResolvedValue(paginatedResponse([customerFixture()]) as any);
+    mockGetCustomers.mockResolvedValue(
+      paginatedResponse([customerFixture()]) as any,
+    );
     render(<CustomersListPage />);
 
     await waitFor(() => {
@@ -165,9 +181,6 @@ describe("CustomersListPage", () => {
 
     const searchInput = screen.getByLabelText("Search");
     fireEvent.change(searchInput, { target: { value: "beta" } });
-
-    const searchBtn = screen.getByRole("button", { name: /Search/i });
-    fireEvent.click(searchBtn);
 
     await waitFor(() => {
       expect(mockGetCustomers).toHaveBeenCalledWith(

@@ -61,11 +61,11 @@ const scrollbarStyles = `
     background: transparent;
   }
   .custom-scrollbar::-webkit-scrollbar-thumb {
-    background-color: #d1d5db;
+    background-color: var(--color-gray-300);
     border-radius: 3px;
   }
   .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-    background-color: #9ca3af;
+    background-color: var(--color-gray-400);
   }
   @keyframes slide-in-right {
     from { transform: translateX(100%); opacity: 0; }
@@ -135,7 +135,10 @@ export default function CommandInterfacePage() {
 
   // ─── Inline confirmation handler (Requirement 9.4) ──────────────────────
 
-  const handleInlineConfirm = (messageId: string, decision: "approved" | "rejected") => {
+  const handleInlineConfirm = (
+    messageId: string,
+    decision: "approved" | "rejected",
+  ) => {
     setMessages((prev) =>
       prev.map((msg) => {
         if (msg.id === messageId && msg.confirmationData) {
@@ -174,7 +177,10 @@ export default function CommandInterfacePage() {
   const streamChatResponse = async (userMessage: string) => {
     const AI_STREAMING_TIMEOUT = 120000;
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), AI_STREAMING_TIMEOUT);
+    const timeoutId = setTimeout(
+      () => controller.abort(),
+      AI_STREAMING_TIMEOUT,
+    );
 
     try {
       const API_BASE_URL =
@@ -269,7 +275,8 @@ export default function CommandInterfacePage() {
                       actionId: data.action.action_id || "",
                       toolName: data.action.tool_name || "",
                       riskLevel: data.action.risk_level || "medium",
-                      summary: data.action.summary || data.action.impact_summary || "",
+                      summary:
+                        data.action.summary || data.action.impact_summary || "",
                     },
                   },
                 ]);
@@ -358,7 +365,8 @@ export default function CommandInterfacePage() {
         const updated = [...prev];
         const lastMsg = updated[updated.length - 1];
         if (lastMsg.role === "assistant") {
-          lastMsg.content = "❌ Sorry, I encountered an error. Please try again.";
+          lastMsg.content =
+            "❌ Sorry, I encountered an error. Please try again.";
         }
         return updated;
       });
@@ -414,11 +422,11 @@ export default function CommandInterfacePage() {
           {/* Header */}
           <div className="bg-white border-b border-gray-200/50 px-6 py-4 flex items-center justify-between flex-shrink-0">
             <div className="flex items-center gap-3">
-              <div className="w-10 h-10 bg-[#232323] rounded-xl flex items-center justify-center">
+              <div className="w-10 h-10 bg-primary rounded-xl flex items-center justify-center">
                 <Terminal className="w-5 h-5 text-white" />
               </div>
               <div>
-                <h1 className="text-lg font-semibold text-[#232323]">
+                <h1 className="text-lg font-semibold text-primary">
                   Command Interface
                 </h1>
                 <p className="text-xs text-gray-500">
@@ -429,14 +437,14 @@ export default function CommandInterfacePage() {
             <div className="flex items-center gap-2">
               <button
                 onClick={clearChat}
-                className="text-gray-400 hover:text-red-500 p-2 rounded-lg hover:bg-red-50 transition-all"
+                className="text-gray-400 hover:text-error p-2 rounded-lg hover:bg-error-light transition-all"
                 title="Clear chat"
               >
                 <Trash2 className="w-4 h-4" />
               </button>
               <button
                 onClick={() => setSidebarOpen(!sidebarOpen)}
-                className="text-gray-400 hover:text-[#232323] p-2 rounded-lg hover:bg-gray-100 transition-all"
+                className="text-gray-400 hover:text-primary p-2 rounded-lg hover:bg-gray-100 transition-all"
                 title={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
               >
                 {sidebarOpen ? (
@@ -453,7 +461,7 @@ export default function CommandInterfacePage() {
             className="flex-1 overflow-y-auto px-6 py-4 space-y-4 custom-scrollbar"
             style={{
               scrollbarWidth: "thin",
-              scrollbarColor: "#d1d5db transparent",
+              scrollbarColor: "var(--color-gray-300) transparent",
             }}
           >
             {messages.map((msg) => (
@@ -465,7 +473,10 @@ export default function CommandInterfacePage() {
                   <div className="max-w-[85%] my-1">
                     <span
                       className="inline-block px-2 py-1 text-xs text-white rounded border"
-                      style={{ backgroundColor: "#232323", borderColor: "#232323" }}
+                      style={{
+                        backgroundColor: "var(--color-primary)",
+                        borderColor: "var(--color-primary)",
+                      }}
                     >
                       {getToolIcon(msg.toolName)} {msg.toolName || "tool"}
                     </span>
@@ -477,20 +488,20 @@ export default function CommandInterfacePage() {
                       className={`border rounded-xl p-4 ${
                         msg.confirmationData.resolved
                           ? msg.confirmationData.decision === "approved"
-                            ? "border-emerald-200 bg-emerald-50/50"
+                            ? "border-success-light bg-success-light/50"
                             : "border-gray-200 bg-gray-50/50"
-                          : "border-amber-200 bg-amber-50/50"
+                          : "border-warning-light bg-warning-light/50"
                       }`}
                     >
                       <div className="flex items-center gap-2 mb-2">
-                        <span className="text-xs font-semibold text-amber-700">
+                        <span className="text-xs font-semibold text-warning-dark">
                           ⚡ Action Confirmation
                         </span>
                         <span
                           className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
                             msg.confirmationData.riskLevel === "high"
-                              ? "bg-red-100 text-red-600"
-                              : "bg-amber-100 text-amber-600"
+                              ? "bg-error-light text-error"
+                              : "bg-warning-light text-warning"
                           }`}
                         >
                           {msg.confirmationData.riskLevel} risk
@@ -505,13 +516,17 @@ export default function CommandInterfacePage() {
                       {!msg.confirmationData.resolved ? (
                         <div className="flex gap-2">
                           <button
-                            onClick={() => handleInlineConfirm(msg.id, "approved")}
-                            className="flex-1 px-3 py-1.5 text-xs font-medium text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg transition-colors"
+                            onClick={() =>
+                              handleInlineConfirm(msg.id, "approved")
+                            }
+                            className="flex-1 px-3 py-1.5 text-xs font-medium text-white bg-success hover:bg-success-dark rounded-lg transition-colors"
                           >
                             ✓ Approve
                           </button>
                           <button
-                            onClick={() => handleInlineConfirm(msg.id, "rejected")}
+                            onClick={() =>
+                              handleInlineConfirm(msg.id, "rejected")
+                            }
                             className="flex-1 px-3 py-1.5 text-xs font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
                           >
                             ✕ Reject
@@ -521,7 +536,7 @@ export default function CommandInterfacePage() {
                         <p
                           className={`text-xs font-medium ${
                             msg.confirmationData.decision === "approved"
-                              ? "text-emerald-600"
+                              ? "text-success"
                               : "text-gray-500"
                           }`}
                         >
@@ -537,17 +552,14 @@ export default function CommandInterfacePage() {
                     <div className="text-sm text-gray-800 leading-relaxed prose prose-sm max-w-none prose-headings:text-gray-900 prose-p:text-gray-800 prose-strong:text-gray-900 prose-ul:text-gray-800 prose-li:text-gray-800">
                       <ReactMarkdown>{msg.content}</ReactMarkdown>
                       {msg.isStreaming && (
-                        <span
-                          className="inline-block w-1.5 h-4 ml-1 animate-pulse rounded"
-                          style={{ backgroundColor: "#232323" }}
-                        />
+                        <span className="inline-block w-1.5 h-4 ml-1 animate-pulse rounded bg-primary" />
                       )}
                     </div>
                     {isReport(msg.content) && !msg.isStreaming && (
                       <div className="mt-3 flex gap-2">
                         <button
                           onClick={() => setReportContent(msg.content)}
-                          className="px-3 py-1.5 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors flex items-center gap-1"
+                          className="px-3 py-1.5 text-xs bg-primary hover:bg-primary-hover text-white rounded-lg transition-colors flex items-center gap-1"
                         >
                           📊 View Report
                         </button>
@@ -556,10 +568,7 @@ export default function CommandInterfacePage() {
                   </div>
                 ) : (
                   <div className="max-w-[75%]">
-                    <div
-                      className="text-white rounded-2xl px-4 py-2.5 shadow-lg"
-                      style={{ backgroundColor: "#232323" }}
-                    >
+                    <div className="text-white rounded-2xl px-4 py-2.5 shadow-lg bg-primary">
                       <div className="whitespace-pre-wrap text-sm leading-relaxed">
                         {msg.content}
                       </div>

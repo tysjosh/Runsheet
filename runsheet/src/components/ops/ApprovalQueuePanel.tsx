@@ -11,9 +11,9 @@ import {
 import { getCurrentTenantId } from "../../services/tenant";
 
 const RISK_CONFIG: Record<RiskLevel, { bg: string; text: string }> = {
-  low: { bg: "bg-green-100", text: "text-green-700" },
-  medium: { bg: "bg-yellow-100", text: "text-yellow-700" },
-  high: { bg: "bg-red-100", text: "text-red-700" },
+  low: { bg: "bg-success-light", text: "text-success-dark" },
+  medium: { bg: "bg-warning-light", text: "text-warning-dark" },
+  high: { bg: "bg-error-light", text: "text-error-dark" },
 };
 
 const REFRESH_INTERVAL_MS = 30_000;
@@ -87,7 +87,7 @@ export default function ApprovalQueuePanel() {
     <div className="bg-white rounded-xl border border-gray-100">
       <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-100">
         <Bot className="w-4 h-4 text-violet-600" />
-        <h3 className="text-sm font-semibold text-[#232323]">
+        <h3 className="text-sm font-semibold text-primary">
           Agent Proposals{" "}
           {approvals.length > 0 && (
             <span className="ml-1 inline-flex items-center justify-center px-1.5 py-0.5 rounded-full bg-violet-100 text-violet-700 text-xs font-medium">
@@ -114,7 +114,7 @@ export default function ApprovalQueuePanel() {
               >
                 {/* Tool name + risk badge */}
                 <div className="flex items-center justify-between">
-                  <span className="text-xs font-medium text-[#232323]">
+                  <span className="text-xs font-medium text-primary">
                     {formatToolName(entry.tool_name)}
                   </span>
                   <span
@@ -143,7 +143,7 @@ export default function ApprovalQueuePanel() {
                     type="button"
                     disabled={isProcessing}
                     onClick={() => handleApprove(entry.action_id)}
-                    className="flex-1 px-2 py-1 rounded text-xs font-medium bg-green-100 text-green-700 hover:bg-green-200 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    className="flex-1 px-2 py-1 rounded text-xs font-medium bg-success-light text-success-dark hover:bg-success-light disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                   >
                     {isProcessing ? "…" : "Approve"}
                   </button>
@@ -151,7 +151,7 @@ export default function ApprovalQueuePanel() {
                     type="button"
                     disabled={isProcessing}
                     onClick={() => handleReject(entry.action_id)}
-                    className="flex-1 px-2 py-1 rounded text-xs font-medium bg-red-100 text-red-700 hover:bg-red-200 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    className="flex-1 px-2 py-1 rounded text-xs font-medium bg-error-light text-error-dark hover:bg-error-light disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                   >
                     {isProcessing ? "…" : "Reject"}
                   </button>

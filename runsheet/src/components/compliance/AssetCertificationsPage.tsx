@@ -1,16 +1,23 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useState } from "react";
 import {
-  getAssetCertifications,
-  getAssetCertificationsDashboard,
-  createAssetCertification,
+  Badge,
+  type BadgeVariant,
+  Button,
+  PageHeader,
+  Pagination,
+} from "@/components/ui";
+import {
   type AssetCertification,
   type AssetCertificationDashboard,
+  type CertificationStatus,
   type CertificationSummary,
   type CertificationType,
-  type CertificationStatus,
   type CreateAssetCertificationPayload,
+  createAssetCertification,
+  getAssetCertifications,
+  getAssetCertificationsDashboard,
 } from "../../services/complianceApi";
 
 // ─── Sub-view types ──────────────────────────────────────────────────────────
@@ -31,16 +38,16 @@ const CERT_TYPE_LABELS: Record<CertificationType, string> = {
 
 // ─── Status color mapping ────────────────────────────────────────────────────
 
-function certStatusBadge(status: CertificationStatus) {
+function certStatusVariant(status: CertificationStatus): BadgeVariant {
   switch (status) {
     case "valid":
-      return "bg-green-100 text-green-800";
+      return "success";
     case "expiring_soon":
-      return "bg-yellow-100 text-yellow-800";
+      return "warning";
     case "expired":
-      return "bg-red-100 text-red-800";
+      return "error";
     default:
-      return "bg-gray-100 text-gray-800";
+      return "neutral";
   }
 }
 
@@ -85,11 +92,14 @@ export default function AssetCertificationsPage() {
   const [error, setError] = useState<string | null>(null);
 
   // Dashboard state
-  const [dashboard, setDashboard] = useState<AssetCertificationDashboard | null>(null);
+  const [dashboard, setDashboard] =
+    useState<AssetCertificationDashboard | null>(null);
 
   // Asset detail state
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
-  const [assetCertifications, setAssetCertifications] = useState<AssetCertification[]>([]);
+  const [assetCertifications, setAssetCertifications] = useState<
+    AssetCertification[]
+  >([]);
   const [assetCertsPage, setAssetCertsPage] = useState(1);
   const [assetCertsTotalPages, setAssetCertsTotalPages] = useState(1);
 
@@ -103,7 +113,9 @@ export default function AssetCertificationsPage() {
       setDashboard(response.data);
     } catch (err) {
       setError(
-        err instanceof Error ? err.message : "Failed to load fleet certification dashboard",
+        err instanceof Error
+          ? err.message
+          : "Failed to load fleet certification dashboard",
       );
     } finally {
       setLoading(false);
@@ -132,7 +144,9 @@ export default function AssetCertificationsPage() {
       setAssetCertsTotalPages(response.pagination?.total_pages ?? 1);
     } catch (err) {
       setError(
-        err instanceof Error ? err.message : "Failed to load asset certifications",
+        err instanceof Error
+          ? err.message
+          : "Failed to load asset certifications",
       );
     } finally {
       setLoading(false);
@@ -167,19 +181,19 @@ export default function AssetCertificationsPage() {
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
         <div className="bg-white border border-gray-200 rounded-lg p-4 shadow-sm">
           <p className="text-sm text-gray-500">Valid Certifications</p>
-          <p className="text-2xl font-bold text-green-700">
+          <p className="text-2xl font-bold text-success-dark">
             {dashboard.total_valid}
           </p>
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4 shadow-sm">
           <p className="text-sm text-gray-500">Expiring Soon</p>
-          <p className="text-2xl font-bold text-yellow-700">
+          <p className="text-2xl font-bold text-warning-dark">
             {dashboard.total_expiring_soon}
           </p>
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4 shadow-sm">
           <p className="text-sm text-gray-500">Expired</p>
-          <p className="text-2xl font-bold text-red-700">
+          <p className="text-2xl font-bold text-error-dark">
             {dashboard.total_expired}
           </p>
         </div>
@@ -193,8 +207,10 @@ export default function AssetCertificationsPage() {
     if (loading) {
       return (
         <div role="status" className="flex justify-center py-12">
-          <span className="sr-only">Loading fleet certification dashboard...</span>
-          <div className="animate-spin h-8 w-8 border-4 border-blue-600 border-t-transparent rounded-full" />
+          <span className="sr-only">
+            Loading fleet certification dashboard...
+          </span>
+          <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
         </div>
       );
     }
@@ -223,28 +239,26 @@ export default function AssetCertificationsPage() {
           </thead>
           <tbody>
             {sortedAssets.map((asset: CertificationSummary) => (
-              <tr
-                key={asset.asset_id}
-                className="border-b hover:bg-gray-50"
-              >
+              <tr key={asset.asset_id} className="border-b hover:bg-gray-50">
                 <td className="p-3 font-medium">
                   {asset.asset_name || asset.asset_id}
                 </td>
                 <td className="p-3">
-                  <span
-                    className={`inline-block px-2 py-1 rounded text-xs font-medium ${certStatusBadge(asset.overall_status)}`}
+                  <Badge
+                    variant={certStatusVariant(asset.overall_status)}
+                    size="sm"
                   >
                     {certStatusLabel(asset.overall_status)}
-                  </span>
+                  </Badge>
                 </td>
                 <td className="p-3">{formatDate(asset.next_expiry_date)}</td>
                 <td className="p-3">
                   <span
                     className={`font-medium ${
                       asset.days_until_next_expiry <= 7
-                        ? "text-red-700"
+                        ? "text-error-dark"
                         : asset.days_until_next_expiry <= 30
-                          ? "text-yellow-700"
+                          ? "text-warning-dark"
                           : "text-gray-700"
                     }`}
                   >
@@ -258,22 +272,27 @@ export default function AssetCertificationsPage() {
                     {asset.certifications.map((cert) => (
                       <span
                         key={cert.cert_id}
-                        className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${certStatusBadge(cert.status)}`}
                         title={`${CERT_TYPE_LABELS[cert.certification_type]}: expires ${formatDate(cert.expiry_date)}`}
                       >
-                        {cert.certification_type.replace(/_/g, " ")}
+                        <Badge
+                          variant={certStatusVariant(cert.status)}
+                          size="sm"
+                        >
+                          {cert.certification_type.replace(/_/g, " ")}
+                        </Badge>
                       </span>
                     ))}
                   </div>
                 </td>
                 <td className="p-3">
-                  <button
+                  <Button
                     type="button"
                     onClick={() => handleViewAsset(asset.asset_id)}
-                    className="text-blue-600 hover:underline text-sm"
+                    variant="ghost"
+                    size="sm"
                   >
                     View Details
-                  </button>
+                  </Button>
                 </td>
               </tr>
             ))}
@@ -297,7 +316,7 @@ export default function AssetCertificationsPage() {
       return (
         <div role="status" className="flex justify-center py-12">
           <span className="sr-only">Loading certifications...</span>
-          <div className="animate-spin h-8 w-8 border-4 border-blue-600 border-t-transparent rounded-full" />
+          <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
         </div>
       );
     }
@@ -325,14 +344,13 @@ export default function AssetCertificationsPage() {
             {assetCertifications.map((cert) => (
               <tr key={cert.cert_id} className="border-b hover:bg-gray-50">
                 <td className="p-3 font-medium">
-                  {CERT_TYPE_LABELS[cert.certification_type] || cert.certification_type}
+                  {CERT_TYPE_LABELS[cert.certification_type] ||
+                    cert.certification_type}
                 </td>
                 <td className="p-3">
-                  <span
-                    className={`inline-block px-2 py-1 rounded text-xs font-medium ${certStatusBadge(cert.status)}`}
-                  >
+                  <Badge variant={certStatusVariant(cert.status)} size="sm">
                     {certStatusLabel(cert.status)}
-                  </span>
+                  </Badge>
                 </td>
                 <td className="p-3">{formatDate(cert.certification_date)}</td>
                 <td className="p-3">{formatDate(cert.expiry_date)}</td>
@@ -352,30 +370,12 @@ export default function AssetCertificationsPage() {
 
         {/* Pagination */}
         {assetCertifications.length > 0 && (
-          <nav
-            aria-label="Pagination"
-            className="flex justify-between items-center mt-4"
-          >
-            <button
-              type="button"
-              disabled={assetCertsPage <= 1}
-              onClick={() => setAssetCertsPage((p) => p - 1)}
-              className="px-3 py-1 border rounded disabled:opacity-50"
-            >
-              Previous
-            </button>
-            <span className="text-sm text-gray-600">
-              Page {assetCertsPage} of {assetCertsTotalPages}
-            </span>
-            <button
-              type="button"
-              disabled={assetCertsPage >= assetCertsTotalPages}
-              onClick={() => setAssetCertsPage((p) => p + 1)}
-              className="px-3 py-1 border rounded disabled:opacity-50"
-            >
-              Next
-            </button>
-          </nav>
+          <Pagination
+            currentPage={assetCertsPage}
+            totalPages={assetCertsTotalPages}
+            onPageChange={setAssetCertsPage}
+            className="px-0 mt-4"
+          />
         )}
       </div>
     );
@@ -396,7 +396,9 @@ export default function AssetCertificationsPage() {
             setViewMode("dashboard");
           } catch (err) {
             setError(
-              err instanceof Error ? err.message : "Failed to create certification",
+              err instanceof Error
+                ? err.message
+                : "Failed to create certification",
             );
           } finally {
             setLoading(false);
@@ -417,28 +419,25 @@ export default function AssetCertificationsPage() {
   // ─── Main Render ─────────────────────────────────────────────────────────
 
   return (
-    <div className="p-6">
-      <header className="mb-6">
-        <div className="flex justify-between items-center">
-          <div>
-            <h1 className="text-2xl font-bold">Fleet Certifications</h1>
-            <p className="text-gray-600 mt-1">
-              Track DOT cargo tank inspections, meter seals, and fire extinguisher certifications.
-            </p>
-          </div>
-          <div className="flex gap-2">
+    <div className="h-full flex flex-col bg-white">
+      <PageHeader
+        title="Fleet Certifications"
+        subtitle="Track DOT cargo tank inspections, meter seals, and fire extinguisher certifications."
+        actions={
+          <>
             {viewMode === "asset-detail" && (
-              <button
+              <Button
                 type="button"
+                variant="secondary"
                 onClick={handleBackToDashboard}
-                className="px-4 py-2 border rounded text-sm hover:bg-gray-50"
               >
                 Back to Dashboard
-              </button>
+              </Button>
             )}
             {viewMode === "add" && (
-              <button
+              <Button
                 type="button"
+                variant="secondary"
                 onClick={() => {
                   if (selectedAssetId) {
                     setViewMode("asset-detail");
@@ -446,38 +445,35 @@ export default function AssetCertificationsPage() {
                     setViewMode("dashboard");
                   }
                 }}
-                className="px-4 py-2 border rounded text-sm hover:bg-gray-50"
               >
                 Cancel
-              </button>
+              </Button>
             )}
             {(viewMode === "dashboard" || viewMode === "asset-detail") && (
-              <button
-                type="button"
-                onClick={() => setViewMode("add")}
-                className="bg-blue-600 text-white px-4 py-2 rounded text-sm hover:bg-blue-700"
-              >
+              <Button type="button" onClick={() => setViewMode("add")}>
                 Add Certification
-              </button>
+              </Button>
             )}
-          </div>
-        </div>
-      </header>
+          </>
+        }
+      />
 
       {/* Error state */}
       {error && (
         <div
           role="alert"
-          className="bg-red-50 border border-red-200 text-red-700 p-4 rounded mb-4"
+          className="mx-8 mt-6 bg-error-light border border-error/20 text-error-dark p-4 rounded mb-4"
         >
           {error}
         </div>
       )}
 
       {/* View content */}
-      {viewMode === "dashboard" && renderDashboard()}
-      {viewMode === "asset-detail" && renderAssetDetail()}
-      {viewMode === "add" && renderAddForm()}
+      <div className="flex-1 overflow-auto px-8 py-6">
+        {viewMode === "dashboard" && renderDashboard()}
+        {viewMode === "asset-detail" && renderAssetDetail()}
+        {viewMode === "add" && renderAddForm()}
+      </div>
     </div>
   );
 }
@@ -498,13 +494,14 @@ function CertificationForm({
   loading,
 }: CertificationFormProps) {
   const [assetId, setAssetId] = useState(prefilledAssetId ?? "");
-  const [certificationType, setCertificationType] = useState<CertificationType>("V_test");
+  const [certificationType, setCertificationType] =
+    useState<CertificationType>("V_test");
   const [certificationDate, setCertificationDate] = useState("");
   const [expiryDate, setExpiryDate] = useState("");
   const [inspectorName, setInspectorName] = useState("");
   const [certificateNumber, setCertificateNumber] = useState("");
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     const data: CreateAssetCertificationPayload = {
       asset_id: assetId,
@@ -546,7 +543,9 @@ function CertificationForm({
           <select
             id="cert-type"
             value={certificationType}
-            onChange={(e) => setCertificationType(e.target.value as CertificationType)}
+            onChange={(e) =>
+              setCertificationType(e.target.value as CertificationType)
+            }
             className="w-full border rounded px-3 py-2"
           >
             {Object.entries(CERT_TYPE_LABELS).map(([value, label]) => (
@@ -570,7 +569,10 @@ function CertificationForm({
           />
         </div>
         <div>
-          <label htmlFor="expiry-date" className="block text-sm font-medium mb-1">
+          <label
+            htmlFor="expiry-date"
+            className="block text-sm font-medium mb-1"
+          >
             Expiry Date
           </label>
           <input
@@ -583,7 +585,10 @@ function CertificationForm({
           />
         </div>
         <div>
-          <label htmlFor="inspector-name" className="block text-sm font-medium mb-1">
+          <label
+            htmlFor="inspector-name"
+            className="block text-sm font-medium mb-1"
+          >
             Inspector Name
           </label>
           <input
@@ -596,7 +601,10 @@ function CertificationForm({
           />
         </div>
         <div>
-          <label htmlFor="cert-number" className="block text-sm font-medium mb-1">
+          <label
+            htmlFor="cert-number"
+            className="block text-sm font-medium mb-1"
+          >
             Certificate Number
           </label>
           <input
@@ -611,20 +619,12 @@ function CertificationForm({
       </div>
 
       <div className="flex gap-3 mt-6">
-        <button
-          type="submit"
-          disabled={loading}
-          className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 disabled:opacity-50"
-        >
+        <Button type="submit" disabled={loading} loading={loading}>
           {loading ? "Saving..." : "Add Certification"}
-        </button>
-        <button
-          type="button"
-          onClick={onCancel}
-          className="px-4 py-2 border rounded hover:bg-gray-50"
-        >
+        </Button>
+        <Button type="button" onClick={onCancel} variant="secondary">
           Cancel
-        </button>
+        </Button>
       </div>
     </form>
   );

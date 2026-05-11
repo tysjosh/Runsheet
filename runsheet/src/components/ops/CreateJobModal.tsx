@@ -1,10 +1,14 @@
 "use client";
 
-import { X, AlertTriangle } from "lucide-react";
+import { AlertTriangle, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import type { Job, JobType, Priority } from "../../types/api";
+import {
+  type AssetReadinessIndicator,
+  getAssetReadiness,
+  type ReadinessStatus,
+} from "../../services/inventoryApi";
 import { createJob } from "../../services/schedulingApi";
-import { getAssetReadiness, type AssetReadinessIndicator, type ReadinessStatus } from "../../services/inventoryApi";
+import type { Job, JobType, Priority } from "../../types/api";
 
 const JOB_TYPES: { value: JobType; label: string }[] = [
   { value: "cargo_transport", label: "Cargo Transport" },
@@ -55,12 +59,16 @@ interface ReadinessIndicatorProps {
   lowParts: { name: string }[];
 }
 
-function ReadinessIndicator({ status, missingParts, lowParts }: ReadinessIndicatorProps) {
+function ReadinessIndicator({
+  status,
+  missingParts,
+  lowParts,
+}: ReadinessIndicatorProps) {
   const colorMap: Record<ReadinessStatus, string> = {
-    ready: "bg-green-500",
-    warning: "bg-yellow-500",
-    critical: "bg-red-500",
-    blocked: "bg-red-500",
+    ready: "bg-success-light0",
+    warning: "bg-warning-light0",
+    critical: "bg-error-light0",
+    blocked: "bg-error-light0",
   };
 
   const labelMap: Record<ReadinessStatus, string> = {
@@ -77,7 +85,8 @@ function ReadinessIndicator({ status, missingParts, lowParts }: ReadinessIndicat
   if (lowParts.length > 0) {
     tooltipParts.push(`Low: ${lowParts.map((p) => p.name).join(", ")}`);
   }
-  const tooltipText = tooltipParts.length > 0 ? tooltipParts.join(" | ") : labelMap[status];
+  const tooltipText =
+    tooltipParts.length > 0 ? tooltipParts.join(" | ") : labelMap[status];
 
   return (
     <span
@@ -107,7 +116,13 @@ interface ToastNotification {
   type: "warning" | "error";
 }
 
-function ToastContainer({ toasts, onDismiss }: { toasts: ToastNotification[]; onDismiss: (id: string) => void }) {
+function ToastContainer({
+  toasts,
+  onDismiss,
+}: {
+  toasts: ToastNotification[];
+  onDismiss: (id: string) => void;
+}) {
   if (toasts.length === 0) return null;
 
   return (
@@ -117,8 +132,8 @@ function ToastContainer({ toasts, onDismiss }: { toasts: ToastNotification[]; on
           key={toast.id}
           className={`flex items-start gap-2 px-4 py-3 rounded-lg shadow-lg text-sm max-w-sm ${
             toast.type === "error"
-              ? "bg-red-50 text-red-800 border border-red-200"
-              : "bg-yellow-50 text-yellow-800 border border-yellow-200"
+              ? "bg-error-light text-error-dark border border-error-light"
+              : "bg-warning-light text-warning-dark border border-warning-light"
           }`}
           role="alert"
         >
@@ -144,11 +159,16 @@ interface CreateJobModalProps {
   onCreated: (job: Job) => void;
 }
 
-export default function CreateJobModal({ onClose, onCreated }: CreateJobModalProps) {
+export default function CreateJobModal({
+  onClose,
+  onCreated,
+}: CreateJobModalProps) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [toasts, setToasts] = useState<ToastNotification[]>([]);
-  const [readinessMap, setReadinessMap] = useState<Record<string, AssetReadinessIndicator>>({});
+  const [readinessMap, setReadinessMap] = useState<
+    Record<string, AssetReadinessIndicator>
+  >({});
   const [form, setForm] = useState({
     job_type: "cargo_transport" as JobType,
     origin: "",
@@ -166,7 +186,7 @@ export default function CreateJobModal({ onClose, onCreated }: CreateJobModalPro
 
     const results: Record<string, AssetReadinessIndicator> = {};
     const settled = await Promise.allSettled(
-      assets.map((asset) => getAssetReadiness(asset.value))
+      assets.map((asset) => getAssetReadiness(asset.value)),
     );
 
     settled.forEach((result, index) => {
@@ -222,15 +242,22 @@ export default function CreateJobModal({ onClose, onCreated }: CreateJobModalPro
         const flags = responseData.readiness_flags;
         const parts: string[] = [];
         if (flags.missing_parts?.length) {
-          parts.push(`Out of stock: ${flags.missing_parts.map((p: any) => p.name).join(", ")}`);
+          parts.push(
+            `Out of stock: ${flags.missing_parts.map((p: any) => p.name).join(", ")}`,
+          );
         }
         if (flags.low_parts?.length) {
-          parts.push(`Low stock: ${flags.low_parts.map((p: any) => p.name).join(", ")}`);
+          parts.push(
+            `Low stock: ${flags.low_parts.map((p: any) => p.name).join(", ")}`,
+          );
         }
         if (parts.length > 0) {
           const location = flags.depot_location || flags.location || "";
           const locationStr = location ? ` at ${location}` : "";
-          addToast(`Assignment risk${locationStr}: ${parts.join(" | ")}`, "warning");
+          addToast(
+            `Assignment risk${locationStr}: ${parts.join(" | ")}`,
+            "warning",
+          );
         }
       }
 
@@ -253,46 +280,69 @@ export default function CreateJobModal({ onClose, onCreated }: CreateJobModalPro
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
         <div className="bg-white rounded-xl shadow-xl w-full max-w-lg mx-4">
           <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-            <h2 className="text-lg font-semibold text-[#232323]">Create Job</h2>
-            <button onClick={onClose} className="p-1 text-gray-400 hover:text-gray-600 rounded">
+            <h2 className="text-lg font-semibold text-primary">Create Job</h2>
+            <button
+              onClick={onClose}
+              className="p-1 text-gray-400 hover:text-gray-600 rounded"
+            >
               <X className="w-5 h-5" />
             </button>
           </div>
 
           <form onSubmit={handleSubmit} className="px-6 py-4 space-y-4">
             {error && (
-              <p className="text-sm text-red-600 bg-red-50 px-3 py-2 rounded-lg">{error}</p>
+              <p className="text-sm text-error bg-error-light px-3 py-2 rounded-lg">
+                {error}
+              </p>
             )}
 
             <div className="grid grid-cols-2 gap-4">
               <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Job Type</label>
+                <label className="block text-xs font-medium text-gray-600 mb-1">
+                  Job Type
+                </label>
                 <select
                   value={form.job_type}
-                  onChange={(e) => setForm({ ...form, job_type: e.target.value as JobType, asset_assigned: "" })}
+                  onChange={(e) =>
+                    setForm({
+                      ...form,
+                      job_type: e.target.value as JobType,
+                      asset_assigned: "",
+                    })
+                  }
                   className={inputClass}
                 >
                   {JOB_TYPES.map((t) => (
-                    <option key={t.value} value={t.value}>{t.label}</option>
+                    <option key={t.value} value={t.value}>
+                      {t.label}
+                    </option>
                   ))}
                 </select>
               </div>
               <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Priority</label>
+                <label className="block text-xs font-medium text-gray-600 mb-1">
+                  Priority
+                </label>
                 <select
                   value={form.priority}
-                  onChange={(e) => setForm({ ...form, priority: e.target.value as Priority })}
+                  onChange={(e) =>
+                    setForm({ ...form, priority: e.target.value as Priority })
+                  }
                   className={inputClass}
                 >
                   {PRIORITIES.map((p) => (
-                    <option key={p.value} value={p.value}>{p.label}</option>
+                    <option key={p.value} value={p.value}>
+                      {p.label}
+                    </option>
                   ))}
                 </select>
               </div>
             </div>
 
             <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">Origin</label>
+              <label className="block text-xs font-medium text-gray-600 mb-1">
+                Origin
+              </label>
               <input
                 type="text"
                 value={form.origin}
@@ -304,11 +354,15 @@ export default function CreateJobModal({ onClose, onCreated }: CreateJobModalPro
             </div>
 
             <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">Destination</label>
+              <label className="block text-xs font-medium text-gray-600 mb-1">
+                Destination
+              </label>
               <input
                 type="text"
                 value={form.destination}
-                onChange={(e) => setForm({ ...form, destination: e.target.value })}
+                onChange={(e) =>
+                  setForm({ ...form, destination: e.target.value })
+                }
                 placeholder="e.g. Dallas Depot"
                 className={inputClass}
                 required
@@ -317,21 +371,29 @@ export default function CreateJobModal({ onClose, onCreated }: CreateJobModalPro
 
             <div className="grid grid-cols-2 gap-4">
               <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Scheduled Time</label>
+                <label className="block text-xs font-medium text-gray-600 mb-1">
+                  Scheduled Time
+                </label>
                 <input
                   type="datetime-local"
                   value={form.scheduled_time}
-                  onChange={(e) => setForm({ ...form, scheduled_time: e.target.value })}
+                  onChange={(e) =>
+                    setForm({ ...form, scheduled_time: e.target.value })
+                  }
                   className={inputClass}
                   required
                 />
               </div>
               <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Asset (optional)</label>
+                <label className="block text-xs font-medium text-gray-600 mb-1">
+                  Asset (optional)
+                </label>
                 <div className="relative">
                   <select
                     value={form.asset_assigned}
-                    onChange={(e) => setForm({ ...form, asset_assigned: e.target.value })}
+                    onChange={(e) =>
+                      setForm({ ...form, asset_assigned: e.target.value })
+                    }
                     className={inputClass}
                   >
                     <option value="">— None —</option>
@@ -357,7 +419,9 @@ export default function CreateJobModal({ onClose, onCreated }: CreateJobModalPro
                   <div className="mt-1.5 flex items-center gap-1.5">
                     <ReadinessIndicator
                       status={readinessMap[form.asset_assigned].status}
-                      missingParts={readinessMap[form.asset_assigned].missing_parts}
+                      missingParts={
+                        readinessMap[form.asset_assigned].missing_parts
+                      }
                       lowParts={readinessMap[form.asset_assigned].low_parts}
                     />
                     <span className="text-[10px] text-gray-500">
@@ -373,13 +437,15 @@ export default function CreateJobModal({ onClose, onCreated }: CreateJobModalPro
             </div>
 
             <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">Notes (optional)</label>
+              <label className="block text-xs font-medium text-gray-600 mb-1">
+                Notes (optional)
+              </label>
               <textarea
                 value={form.notes}
                 onChange={(e) => setForm({ ...form, notes: e.target.value })}
                 placeholder="Any additional details..."
                 rows={2}
-                className={inputClass + " resize-none"}
+                className={`${inputClass} resize-none`}
               />
             </div>
 
@@ -394,8 +460,7 @@ export default function CreateJobModal({ onClose, onCreated }: CreateJobModalPro
               <button
                 type="submit"
                 disabled={submitting}
-                className="px-4 py-2 text-sm text-white rounded-lg disabled:opacity-50"
-                style={{ backgroundColor: "#232323" }}
+                className="px-4 py-2 text-sm text-white rounded-lg disabled:opacity-50 bg-primary hover:bg-primary-hover"
               >
                 {submitting ? "Creating..." : "Create Job"}
               </button>

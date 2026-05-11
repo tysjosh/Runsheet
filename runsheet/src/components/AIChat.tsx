@@ -33,11 +33,11 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
       background: transparent;
     }
     .custom-scrollbar::-webkit-scrollbar-thumb {
-      background-color: #d1d5db;
+      background-color: var(--color-gray-300);
       border-radius: 3px;
     }
     .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-      background-color: #9ca3af;
+      background-color: var(--color-gray-400);
     }
   `;
   const [messages, setMessages] = useState<ChatMessage[]>([
@@ -65,9 +65,12 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
     if (!content.includes("##")) return false;
     const hasReportHeader = /^# .*(Report|Analysis)/m.test(content);
     const hasGeneratedMeta =
-      content.includes("Generated") && (content.includes("|") || content.includes("*"));
+      content.includes("Generated") &&
+      (content.includes("|") || content.includes("*"));
     const hasReportKeyword =
-      /Report\b|Analysis\b|Productivity\b|Violations\b|Dispatch\b|Operations\b/i.test(content);
+      /Report\b|Analysis\b|Productivity\b|Violations\b|Dispatch\b|Operations\b/i.test(
+        content,
+      );
     return (hasReportHeader || hasGeneratedMeta) && hasReportKeyword;
   };
 
@@ -447,7 +450,7 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
             <div className="flex items-center space-x-2">
               <button
                 onClick={clearChat}
-                className="text-gray-400 hover:text-red-500 p-2 rounded-lg hover:bg-red-50 transition-all duration-200"
+                className="text-gray-400 hover:text-error p-2 rounded-lg hover:bg-error-light transition-all duration-200"
                 title="Clear chat"
               >
                 <Trash2 className="w-4 h-4" />
@@ -470,7 +473,7 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
           className="flex-1 overflow-y-auto p-4 space-y-4 min-h-0 custom-scrollbar"
           style={{
             scrollbarWidth: "thin",
-            scrollbarColor: "#d1d5db transparent",
+            scrollbarColor: "var(--color-gray-300) transparent",
           }}
         >
           {messages.map((msg) => (
@@ -483,8 +486,8 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
                   <span
                     className="inline-block px-2 py-1 text-xs text-white rounded border"
                     style={{
-                      backgroundColor: "#232323",
-                      borderColor: "#232323",
+                      backgroundColor: "var(--color-primary)",
+                      borderColor: "var(--color-primary)",
                     }}
                   >
                     {getToolIcon(msg.toolName)} {msg.toolName || "tool"}
@@ -497,24 +500,35 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
                       remarkPlugins={[remarkGfm]}
                       components={{
                         strong: ({ children, ...props }) => {
-                          const text = typeof children === "string"
-                            ? children
-                            : Array.isArray(children)
-                              ? children.map((c: any) => (typeof c === "string" ? c : "")).join("")
-                              : String(children || "");
+                          const text =
+                            typeof children === "string"
+                              ? children
+                              : Array.isArray(children)
+                                ? children
+                                    .map((c: any) =>
+                                      typeof c === "string" ? c : "",
+                                    )
+                                    .join("")
+                                : String(children || "");
                           const trimmed = text.trim();
-                          const isClickable = !msg.isStreaming && trimmed.length > 5 && trimmed.length < 80 && (
-                            /report|analysis|summary|status|overview|productivity|violations|dispatch/i.test(trimmed)
-                          );
+                          const isClickable =
+                            !msg.isStreaming &&
+                            trimmed.length > 5 &&
+                            trimmed.length < 80 &&
+                            /report|analysis|summary|status|overview|productivity|violations|dispatch/i.test(
+                              trimmed,
+                            );
                           if (isClickable) {
                             return (
                               <button
                                 type="button"
-                                onClick={() => sendMessage(`Generate ${trimmed}`)}
-                                className="w-full text-left px-3 py-2 my-1 rounded-lg text-xs font-semibold border border-gray-200 bg-white hover:bg-blue-50 hover:border-blue-300 transition-all cursor-pointer flex items-center gap-2 shadow-sm"
-                                style={{ color: "#232323" }}
+                                onClick={() =>
+                                  sendMessage(`Generate ${trimmed}`)
+                                }
+                                className="w-full text-left px-3 py-2 my-1 rounded-lg text-xs font-semibold border border-gray-200 bg-white hover:bg-info-light hover:border-info transition-all cursor-pointer flex items-center gap-2 shadow-sm"
+                                style={{ color: "var(--color-primary)" }}
                               >
-                                <span className="text-blue-500 text-sm">▸</span>
+                                <span className="text-info text-sm">▸</span>
                                 {trimmed}
                               </button>
                             );
@@ -522,25 +536,38 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
                           return <strong {...props}>{children}</strong>;
                         },
                         li: ({ children, ...props }) => {
-                          const text = typeof children === "string"
-                            ? children
-                            : Array.isArray(children)
-                              ? children.map((c: any) => (typeof c === "string" ? c : c?.props?.children || "")).join("")
-                              : "";
+                          const text =
+                            typeof children === "string"
+                              ? children
+                              : Array.isArray(children)
+                                ? children
+                                    .map((c: any) =>
+                                      typeof c === "string"
+                                        ? c
+                                        : c?.props?.children || "",
+                                    )
+                                    .join("")
+                                : "";
                           const trimmed = text.replace(/\*\*/g, "").trim();
-                          const isClickable = !msg.isStreaming && trimmed.length > 5 && trimmed.length < 80 && (
-                            /report|analysis|summary|status|overview|productivity|violations|dispatch/i.test(trimmed)
-                          );
+                          const isClickable =
+                            !msg.isStreaming &&
+                            trimmed.length > 5 &&
+                            trimmed.length < 80 &&
+                            /report|analysis|summary|status|overview|productivity|violations|dispatch/i.test(
+                              trimmed,
+                            );
                           if (isClickable) {
                             return (
                               <li {...props} className="list-none -ml-4 my-1">
                                 <button
                                   type="button"
-                                  onClick={() => sendMessage(`Generate ${trimmed}`)}
-                                  className="text-left w-full px-3 py-2 rounded-lg text-xs font-semibold border border-gray-200 bg-white hover:bg-blue-50 hover:border-blue-300 transition-all cursor-pointer flex items-center gap-2 shadow-sm"
-                                  style={{ color: "#232323" }}
+                                  onClick={() =>
+                                    sendMessage(`Generate ${trimmed}`)
+                                  }
+                                  className="text-left w-full px-3 py-2 rounded-lg text-xs font-semibold border border-gray-200 bg-white hover:bg-info-light hover:border-info transition-all cursor-pointer flex items-center gap-2 shadow-sm"
+                                  style={{ color: "var(--color-primary)" }}
                                 >
-                                  <span className="text-blue-500 text-sm">▸</span>
+                                  <span className="text-info text-sm">▸</span>
                                   {trimmed}
                                 </button>
                               </li>
@@ -550,31 +577,43 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
                         },
                         table: ({ children, ...props }) => (
                           <div className="overflow-x-auto my-2">
-                            <table {...props} className="w-full text-xs border border-gray-200 rounded">{children}</table>
+                            <table
+                              {...props}
+                              className="w-full text-xs border border-gray-200 rounded"
+                            >
+                              {children}
+                            </table>
                           </div>
                         ),
                         th: ({ children, ...props }) => (
-                          <th {...props} className="bg-gray-100 text-left px-2 py-1.5 border-b border-gray-200 font-semibold text-gray-700">{children}</th>
+                          <th
+                            {...props}
+                            className="bg-gray-100 text-left px-2 py-1.5 border-b border-gray-200 font-semibold text-gray-700"
+                          >
+                            {children}
+                          </th>
                         ),
                         td: ({ children, ...props }) => (
-                          <td {...props} className="px-2 py-1 border-b border-gray-100 text-gray-600">{children}</td>
+                          <td
+                            {...props}
+                            className="px-2 py-1 border-b border-gray-100 text-gray-600"
+                          >
+                            {children}
+                          </td>
                         ),
                       }}
                     >
                       {msg.content}
                     </ReactMarkdown>
                     {msg.isStreaming && (
-                      <span
-                        className="inline-block w-1.5 h-4 ml-1 animate-pulse rounded"
-                        style={{ backgroundColor: "#232323" }}
-                      />
+                      <span className="inline-block w-1.5 h-4 ml-1 animate-pulse rounded bg-primary" />
                     )}
                   </div>
                   {isReport(msg.content) && !msg.isStreaming && (
                     <div className="mt-3 flex gap-2">
                       <button
                         onClick={() => setReportContent(msg.content)}
-                        className="px-3 py-1.5 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors flex items-center gap-1"
+                        className="px-3 py-1.5 text-xs bg-primary hover:bg-primary-hover text-white rounded-lg transition-colors flex items-center gap-1"
                       >
                         📊 View Report
                       </button>
@@ -583,10 +622,7 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
                 </div>
               ) : (
                 <div className="max-w-[75%]">
-                  <div
-                    className="text-white rounded-2xl px-4 py-2.5 shadow-lg"
-                    style={{ backgroundColor: "#232323" }}
-                  >
+                  <div className="text-white rounded-2xl px-4 py-2.5 shadow-lg bg-primary">
                     <div className="whitespace-pre-wrap text-sm leading-relaxed">
                       {msg.content}
                     </div>
@@ -605,11 +641,16 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
           {showDatePicker && (
             <div className="mb-3 p-3 bg-white rounded-xl border border-gray-200 shadow-sm">
               <div className="flex items-center justify-between mb-2">
-                <span className="text-xs font-semibold text-gray-600">Date Range</span>
+                <span className="text-xs font-semibold text-gray-600">
+                  Date Range
+                </span>
                 {(startDate || endDate) && (
                   <button
-                    onClick={() => { setStartDate(""); setEndDate(""); }}
-                    className="text-xs text-red-500 hover:text-red-600 transition-colors"
+                    onClick={() => {
+                      setStartDate("");
+                      setEndDate("");
+                    }}
+                    className="text-xs text-error hover:text-error transition-colors"
                   >
                     Clear
                   </button>
@@ -632,7 +673,10 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
                   return (
                     <button
                       key={label}
-                      onClick={() => { setStartDate(startISO); setEndDate(endISO); }}
+                      onClick={() => {
+                        setStartDate(startISO);
+                        setEndDate(endISO);
+                      }}
                       className={`px-2.5 py-1 text-[10px] font-medium rounded-md border transition-all ${
                         isActive
                           ? "bg-gray-800 text-white border-gray-800"
@@ -646,7 +690,9 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
               </div>
               <div className="flex items-center gap-2">
                 <div className="flex-1">
-                  <label className="block text-[10px] text-gray-400 mb-0.5">From</label>
+                  <label className="block text-[10px] text-gray-400 mb-0.5">
+                    From
+                  </label>
                   <input
                     type="date"
                     value={startDate}
@@ -656,7 +702,9 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
                 </div>
                 <span className="text-gray-300 mt-3">→</span>
                 <div className="flex-1">
-                  <label className="block text-[10px] text-gray-400 mb-0.5">To</label>
+                  <label className="block text-[10px] text-gray-400 mb-0.5">
+                    To
+                  </label>
                   <input
                     type="date"
                     value={endDate}
@@ -678,14 +726,18 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
                 onClick={() => setShowDatePicker(!showDatePicker)}
                 className={`p-2.5 rounded-xl border-2 transition-all duration-200 flex-shrink-0 ${
                   showDatePicker || (startDate && endDate)
-                    ? "border-blue-400 bg-blue-50 text-blue-600"
+                    ? "border-info bg-info-light text-info"
                     : "border-gray-200 bg-white text-gray-400 hover:text-gray-600 hover:border-gray-300"
                 }`}
-                title={startDate && endDate ? `${startDate} → ${endDate}` : "Set date range"}
+                title={
+                  startDate && endDate
+                    ? `${startDate} → ${endDate}`
+                    : "Set date range"
+                }
               >
                 <CalendarDays className="w-4 h-4" />
                 {startDate && endDate && (
-                  <span className="absolute -top-1 -right-1 w-2 h-2 bg-blue-500 rounded-full" />
+                  <span className="absolute -top-1 -right-1 w-2 h-2 bg-info-light0 rounded-full" />
                 )}
               </button>
               <div className="relative flex-1">

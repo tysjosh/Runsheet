@@ -22,13 +22,13 @@ export default function JobSummaryBar({ jobs }: JobSummaryBarProps) {
   const delayed = jobs.filter((j) => j.delayed).length;
 
   const stats = [
-    { label: "Total", value: total, color: "text-[#232323]" },
-    { label: "Scheduled", value: scheduled, color: "text-blue-600" },
-    { label: "Assigned", value: assigned, color: "text-orange-600" },
-    { label: "In Progress", value: inProgress, color: "text-green-600" },
+    { label: "Total", value: total, color: "text-primary" },
+    { label: "Scheduled", value: scheduled, color: "text-info" },
+    { label: "Assigned", value: assigned, color: "text-warning" },
+    { label: "In Progress", value: inProgress, color: "text-success" },
     { label: "Completed", value: completed, color: "text-gray-600" },
-    { label: "Failed", value: failed, color: "text-red-600" },
-    { label: "Delayed", value: delayed, color: "text-orange-600" },
+    { label: "Failed", value: failed, color: "text-error" },
+    { label: "Delayed", value: delayed, color: "text-warning" },
   ];
 
   return (

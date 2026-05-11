@@ -2,7 +2,10 @@
 
 import { AlertTriangle, BarChart3, Search } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import type { EfficiencyFilters, EfficiencyMetric } from "../../services/fuelApi";
+import type {
+  EfficiencyFilters,
+  EfficiencyMetric,
+} from "../../services/fuelApi";
 import { getEfficiencyMetrics } from "../../services/fuelApi";
 
 /**
@@ -18,9 +21,21 @@ function efficiencyTier(value: number): "good" | "average" | "poor" {
 }
 
 const TIER_STYLES: Record<string, { text: string; bg: string; bar: string }> = {
-  good:    { text: "text-emerald-700", bg: "bg-emerald-50", bar: "bg-emerald-500" },
-  average: { text: "text-amber-700",   bg: "bg-amber-50",   bar: "bg-amber-500" },
-  poor:    { text: "text-red-700",     bg: "bg-red-50",     bar: "bg-red-500" },
+  good: {
+    text: "text-success-dark",
+    bg: "bg-success-light",
+    bar: "bg-success-light0",
+  },
+  average: {
+    text: "text-warning-dark",
+    bg: "bg-warning-light",
+    bar: "bg-warning-light0",
+  },
+  poor: {
+    text: "text-error-dark",
+    bg: "bg-error-light",
+    bar: "bg-error-light0",
+  },
 };
 
 function formatNumber(n: number, decimals = 1): string {
@@ -61,7 +76,9 @@ export default function FuelEfficiencyChart() {
       setData(res.data);
     } catch (err) {
       const message =
-        err instanceof Error ? err.message : "Failed to load efficiency metrics";
+        err instanceof Error
+          ? err.message
+          : "Failed to load efficiency metrics";
       setError(message);
     } finally {
       setLoading(false);
@@ -72,9 +89,10 @@ export default function FuelEfficiencyChart() {
     loadData();
   }, [loadData]);
 
-  const maxEfficiency = data.length > 0
-    ? Math.max(...data.map((m) => m.efficiency_km_per_liter ?? 0), 1)
-    : 1;
+  const maxEfficiency =
+    data.length > 0
+      ? Math.max(...data.map((m) => m.efficiency_km_per_liter ?? 0), 1)
+      : 1;
 
   return (
     <div className="space-y-4">
@@ -126,7 +144,7 @@ export default function FuelEfficiencyChart() {
 
       {/* Error state */}
       {error && (
-        <div className="flex items-center gap-2 px-4 py-3 bg-red-50 text-red-700 rounded-lg text-sm">
+        <div className="flex items-center gap-2 px-4 py-3 bg-error-light text-error-dark rounded-lg text-sm">
           <AlertTriangle className="w-4 h-4 flex-shrink-0" aria-hidden="true" />
           <span>{error}</span>
           <button
@@ -142,7 +160,7 @@ export default function FuelEfficiencyChart() {
       {/* Loading state */}
       {loading && !error && (
         <div className="flex items-center justify-center py-8 text-gray-400 text-sm">
-          <div className="w-5 h-5 border-2 border-gray-300 border-t-[#232323] rounded-full animate-spin mr-2" />
+          <div className="w-5 h-5 border-2 border-gray-300 border-t-primary rounded-full animate-spin mr-2" />
           Loading efficiency data...
         </div>
       )}
@@ -150,7 +168,10 @@ export default function FuelEfficiencyChart() {
       {/* Empty state */}
       {!loading && !error && data.length === 0 && (
         <div className="text-center py-8 text-gray-400 text-sm">
-          <BarChart3 className="w-8 h-8 mx-auto mb-2 opacity-40" aria-hidden="true" />
+          <BarChart3
+            className="w-8 h-8 mx-auto mb-2 opacity-40"
+            aria-hidden="true"
+          />
           No efficiency data available for the selected filters
         </div>
       )}
@@ -158,7 +179,10 @@ export default function FuelEfficiencyChart() {
       {/* Data table with inline bars */}
       {!loading && !error && data.length > 0 && (
         <div className="overflow-x-auto">
-          <table className="w-full text-sm" aria-label="Fuel efficiency metrics">
+          <table
+            className="w-full text-sm"
+            aria-label="Fuel efficiency metrics"
+          >
             <thead>
               <tr className="border-b border-gray-200 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                 <th className="px-3 py-2">Asset ID</th>
@@ -180,7 +204,7 @@ export default function FuelEfficiencyChart() {
                     key={metric.asset_id}
                     className="hover:bg-gray-50 transition-colors"
                   >
-                    <td className="px-3 py-2.5 font-medium text-[#232323]">
+                    <td className="px-3 py-2.5 font-medium text-primary">
                       {metric.asset_id}
                     </td>
                     <td className="px-3 py-2.5 text-right text-gray-600">

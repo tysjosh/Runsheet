@@ -9,6 +9,12 @@ import FuelStationDetail from "../../../components/ops/FuelStationDetail";
 import FuelStationForm from "../../../components/ops/FuelStationForm";
 import FuelStationList from "../../../components/ops/FuelStationList";
 import FuelSummaryBar from "../../../components/ops/FuelSummaryBar";
+import {
+  Button,
+  PageHeader,
+  type Tab,
+  TabNavigation,
+} from "../../../components/ui";
 import { useOpsWebSocket } from "../../../hooks/useOpsWebSocket";
 import type {
   ConsumptionMetric,
@@ -16,8 +22,8 @@ import type {
   FuelStation,
   FuelStationDetail as FuelStationDetailType,
   FuelType,
-  StationStatus,
   StationFilters,
+  StationStatus,
 } from "../../../services/fuelApi";
 import {
   getConsumptionMetrics,
@@ -57,6 +63,21 @@ const EMPTY_SUMMARY: FuelNetworkSummary = {
   active_alerts: 0,
 };
 
+const TABS: Tab[] = [
+  {
+    id: "efficiency",
+    label: "Fuel Efficiency",
+    icon: <BarChart3 className="w-4 h-4" />,
+  },
+  {
+    id: "stations",
+    label: "Fuel Stations",
+    icon: <Fuel className="w-4 h-4" />,
+  },
+];
+
+type TabId = string;
+
 /**
  * Fuel Monitoring Dashboard page.
  *
@@ -69,9 +90,14 @@ const EMPTY_SUMMARY: FuelNetworkSummary = {
 export default function FuelDashboardPage() {
   const [stations, setStations] = useState<FuelStation[]>([]);
   const [summary, setSummary] = useState<FuelNetworkSummary>(EMPTY_SUMMARY);
-  const [consumptionData, setConsumptionData] = useState<ConsumptionMetric[]>([]);
-  const [selectedStationId, setSelectedStationId] = useState<string | null>(null);
-  const [stationDetail, setStationDetail] = useState<FuelStationDetailType | null>(null);
+  const [consumptionData, setConsumptionData] = useState<ConsumptionMetric[]>(
+    [],
+  );
+  const [selectedStationId, setSelectedStationId] = useState<string | null>(
+    null,
+  );
+  const [stationDetail, setStationDetail] =
+    useState<FuelStationDetailType | null>(null);
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
 
@@ -82,11 +108,15 @@ export default function FuelDashboardPage() {
 
   // Station form modal state
   const [showStationForm, setShowStationForm] = useState(false);
-  const [stationFormMode, setStationFormMode] = useState<"create" | "edit">("create");
-  const [editingStation, setEditingStation] = useState<FuelStation | null>(null);
+  const [stationFormMode, setStationFormMode] = useState<"create" | "edit">(
+    "create",
+  );
+  const [editingStation, setEditingStation] = useState<FuelStation | null>(
+    null,
+  );
 
   // Tab state
-  const [activeTab, setActiveTab] = useState<"efficiency" | "stations">("efficiency");
+  const [activeTab, setActiveTab] = useState<TabId>("efficiency");
 
   const loadData = useCallback(async () => {
     try {
@@ -200,11 +230,19 @@ export default function FuelDashboardPage() {
    * Validates: Requirements 6.5
    */
   const handleFuelAlert = useCallback(
-    (alert: { station_id: string; status: string; current_stock_liters: number }) => {
+    (alert: {
+      station_id: string;
+      status: string;
+      current_stock_liters: number;
+    }) => {
       setStations((prev) =>
         prev.map((s) =>
           s.station_id === alert.station_id
-            ? { ...s, status: alert.status as StationStatus, current_stock_liters: alert.current_stock_liters }
+            ? {
+                ...s,
+                status: alert.status as StationStatus,
+                current_stock_liters: alert.current_stock_liters,
+              }
             : s,
         ),
       );
@@ -227,33 +265,20 @@ export default function FuelDashboardPage() {
 
   return (
     <div className="h-full flex flex-col bg-white">
-      {/* Header */}
-      <div className="border-b border-gray-100 px-8 py-6">
-        <div className="flex items-center gap-3 mb-6">
-          <div className="w-10 h-10 bg-[#232323] rounded-xl flex items-center justify-center">
-            <Fuel className="w-5 h-5 text-white" />
-          </div>
-          <div className="flex-1">
-            <h1 className="text-2xl font-semibold text-[#232323]">
-              Fuel Monitoring
-            </h1>
-            <p className="text-gray-500">
-              Track fuel stock levels, alerts, and consumption trends
-            </p>
-          </div>
-          <button
+      <PageHeader
+        title="Fuel Monitoring"
+        subtitle="Track fuel stock levels, alerts, and consumption trends"
+        icon={<Fuel className="w-5 h-5" />}
+        actions={
+          <Button
             type="button"
             onClick={handleAddStation}
-            className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-white rounded-lg hover:opacity-90 transition-opacity"
-            style={{ backgroundColor: "#232323" }}
+            icon={<Plus className="w-4 h-4" aria-hidden="true" />}
           >
-            <Plus className="w-4 h-4" aria-hidden="true" />
             Add Station
-          </button>
-        </div>
-
-        {/* Filters removed from header — now inside Fuel Stations tab */}
-      </div>
+          </Button>
+        }
+      />
 
       {/* Summary Bar — Validates: Requirement 6.2 */}
       <div className="border-b border-gray-100 px-8 py-4">
@@ -262,31 +287,12 @@ export default function FuelDashboardPage() {
 
       {/* Main content area */}
       <div className="flex-1 overflow-hidden flex flex-col">
-        {/* Tab bar */}
-        <div className="px-8 pt-4 pb-0 flex items-center gap-1">
-          <button
-            onClick={() => setActiveTab("efficiency")}
-            className={`flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-t-lg transition-colors ${
-              activeTab === "efficiency"
-                ? "bg-white text-[#232323] border border-gray-200 border-b-white -mb-px z-10"
-                : "text-gray-500 hover:text-gray-700 hover:bg-gray-100"
-            }`}
-          >
-            <BarChart3 className="w-4 h-4" />
-            Fuel Efficiency
-          </button>
-          <button
-            onClick={() => setActiveTab("stations")}
-            className={`flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-t-lg transition-colors ${
-              activeTab === "stations"
-                ? "bg-white text-[#232323] border border-gray-200 border-b-white -mb-px z-10"
-                : "text-gray-500 hover:text-gray-700 hover:bg-gray-100"
-            }`}
-          >
-            <Fuel className="w-4 h-4" />
-            Fuel Stations
-          </button>
-        </div>
+        <TabNavigation
+          tabs={TABS}
+          activeTab={activeTab}
+          onChange={setActiveTab}
+          className="!px-8 pt-4"
+        />
 
         {/* Tab content */}
         <div className="flex-1 overflow-hidden flex border-t border-gray-200">
@@ -303,7 +309,10 @@ export default function FuelDashboardPage() {
               {/* Efficiency Chart — Validates: Requirements 9.1, 9.2, 9.3, 9.4, 9.5, 9.6 */}
               <div className="px-8 py-6">
                 <div className="flex items-center gap-2 mb-3">
-                  <BarChart3 className="w-4 h-4 text-gray-500" aria-hidden="true" />
+                  <BarChart3
+                    className="w-4 h-4 text-gray-500"
+                    aria-hidden="true"
+                  />
                   <h2 className="text-sm font-medium text-gray-700">
                     Fuel Efficiency by Asset
                   </h2>
@@ -316,13 +325,17 @@ export default function FuelDashboardPage() {
           {activeTab === "stations" && (
             <div className="flex-1 overflow-hidden flex">
               {/* Left: Station list */}
-              <div className={`flex-1 overflow-y-auto ${stationDetail ? "lg:w-3/5" : "w-full"}`}>
+              <div
+                className={`flex-1 overflow-y-auto ${stationDetail ? "lg:w-3/5" : "w-full"}`}
+              >
                 <div className="px-8 py-6">
                   {/* Filters — Validates: Requirement 6.4 */}
                   <div className="flex flex-wrap items-center gap-3 mb-4">
                     <select
                       value={fuelTypeFilter}
-                      onChange={(e) => setFuelTypeFilter(e.target.value as "" | FuelType)}
+                      onChange={(e) =>
+                        setFuelTypeFilter(e.target.value as "" | FuelType)
+                      }
                       className="px-3 py-1.5 text-sm border border-gray-200 rounded-lg bg-white focus:ring-2 focus:ring-gray-200 focus:border-gray-300"
                       aria-label="Filter by fuel type"
                     >
@@ -335,7 +348,9 @@ export default function FuelDashboardPage() {
 
                     <select
                       value={statusFilter}
-                      onChange={(e) => setStatusFilter(e.target.value as "" | StationStatus)}
+                      onChange={(e) =>
+                        setStatusFilter(e.target.value as "" | StationStatus)
+                      }
                       className="px-3 py-1.5 text-sm border border-gray-200 rounded-lg bg-white focus:ring-2 focus:ring-gray-200 focus:border-gray-300"
                       aria-label="Filter by status"
                     >
@@ -347,7 +362,10 @@ export default function FuelDashboardPage() {
                     </select>
 
                     <div className="relative">
-                      <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" aria-hidden="true" />
+                      <Search
+                        className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400"
+                        aria-hidden="true"
+                      />
                       <input
                         type="text"
                         value={locationFilter}
@@ -378,7 +396,8 @@ export default function FuelDashboardPage() {
                       detail={stationDetail}
                       onClose={handleCloseDetail}
                       onEventRecorded={() => {
-                        if (selectedStationId) loadStationDetail(selectedStationId);
+                        if (selectedStationId)
+                          loadStationDetail(selectedStationId);
                         loadData();
                       }}
                     />

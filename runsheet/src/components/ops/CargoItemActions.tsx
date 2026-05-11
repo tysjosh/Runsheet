@@ -1,6 +1,6 @@
 "use client";
 
-import { Package, Truck, CheckCircle, AlertTriangle } from "lucide-react";
+import { AlertTriangle, CheckCircle, Package, Truck } from "lucide-react";
 import { useState } from "react";
 import type { CargoItemStatus } from "../../types/api";
 
@@ -17,25 +17,25 @@ const TARGET_STATUSES: {
     status: "loaded",
     label: "Loaded",
     icon: <Package className="w-3 h-3" />,
-    className: "text-blue-700 bg-blue-100 hover:bg-blue-200",
+    className: "text-info-dark bg-info-light hover:bg-info-light",
   },
   {
     status: "in_transit",
     label: "In Transit",
     icon: <Truck className="w-3 h-3" />,
-    className: "text-yellow-700 bg-yellow-100 hover:bg-yellow-200",
+    className: "text-warning-dark bg-warning-light hover:bg-warning-light",
   },
   {
     status: "delivered",
     label: "Delivered",
     icon: <CheckCircle className="w-3 h-3" />,
-    className: "text-green-700 bg-green-100 hover:bg-green-200",
+    className: "text-success-dark bg-success-light hover:bg-success-light",
   },
   {
     status: "damaged",
     label: "Damaged",
     icon: <AlertTriangle className="w-3 h-3" />,
-    className: "text-red-700 bg-red-100 hover:bg-red-200",
+    className: "text-error-dark bg-error-light hover:bg-error-light",
   },
 ];
 

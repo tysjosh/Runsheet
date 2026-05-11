@@ -1,7 +1,11 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
-import type { TenantAgingResponse, AgingSnapshot } from "../../services/commerceApi";
+import { useCallback, useEffect, useState } from "react";
+import { Button, PageHeader, Table } from "@/components/ui";
+import type {
+  AgingSnapshot,
+  TenantAgingResponse,
+} from "../../services/commerceApi";
 import { getArAging, getArAgingHistory } from "../../services/commerceApi";
 
 interface ARAgingDashboardProps {
@@ -46,7 +50,7 @@ export default function ARAgingDashboard({
     return (
       <div role="status" className="flex justify-center py-12">
         <span className="sr-only">Loading AR aging data...</span>
-        <div className="animate-spin h-8 w-8 border-4 border-blue-600 border-t-transparent rounded-full" />
+        <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
       </div>
     );
   }
@@ -54,7 +58,7 @@ export default function ARAgingDashboard({
   if (error) {
     return (
       <div role="alert" className="p-6">
-        <div className="bg-red-50 border border-red-200 text-red-700 p-4 rounded">
+        <div className="bg-error-light border border-error-light text-error-dark p-4 rounded">
           {error}
         </div>
       </div>
@@ -66,20 +70,35 @@ export default function ARAgingDashboard({
   // Calculate bucket percentages for the chart
   const totalCents = aging.total_open_cents || 1;
   const buckets = [
-    { label: "0–30 Days", cents: aging.bucket_0_30_cents, color: "bg-green-500" },
-    { label: "31–60 Days", cents: aging.bucket_31_60_cents, color: "bg-yellow-500" },
-    { label: "61–90 Days", cents: aging.bucket_61_90_cents, color: "bg-orange-500" },
-    { label: "90+ Days", cents: aging.bucket_90_plus_cents, color: "bg-red-500" },
+    {
+      label: "0–30 Days",
+      cents: aging.bucket_0_30_cents,
+      color: "bg-success-light0",
+    },
+    {
+      label: "31–60 Days",
+      cents: aging.bucket_31_60_cents,
+      color: "bg-warning-light0",
+    },
+    {
+      label: "61–90 Days",
+      cents: aging.bucket_61_90_cents,
+      color: "bg-warning-light0",
+    },
+    {
+      label: "90+ Days",
+      cents: aging.bucket_90_plus_cents,
+      color: "bg-error-light0",
+    },
   ];
 
   return (
     <div className="p-6">
-      <header className="mb-6">
-        <h1 className="text-2xl font-bold">AR Aging Dashboard</h1>
-        <p className="text-gray-600 mt-1">
-          Accounts receivable aging overview with top outstanding accounts.
-        </p>
-      </header>
+      <PageHeader
+        title="AR Aging Dashboard"
+        subtitle="Accounts receivable aging overview with top outstanding accounts.
+        "
+      />
 
       {/* Summary stats */}
       <section aria-labelledby="summary-heading" className="mb-8">
@@ -89,7 +108,9 @@ export default function ARAgingDashboard({
         <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
           <div className="border rounded p-4">
             <p className="text-sm text-gray-600">Total Outstanding</p>
-            <p className="text-2xl font-bold">{formatCents(aging.total_open_cents)}</p>
+            <p className="text-2xl font-bold">
+              {formatCents(aging.total_open_cents)}
+            </p>
           </div>
           <div className="border rounded p-4">
             <p className="text-sm text-gray-600">Accounts with Balance</p>
@@ -97,7 +118,9 @@ export default function ARAgingDashboard({
           </div>
           <div className="border rounded p-4">
             <p className="text-sm text-gray-600">90+ Days Outstanding</p>
-            <p className="text-2xl font-bold text-red-700">{formatCents(aging.bucket_90_plus_cents)}</p>
+            <p className="text-2xl font-bold text-error-dark">
+              {formatCents(aging.bucket_90_plus_cents)}
+            </p>
           </div>
         </div>
       </section>
@@ -137,7 +160,9 @@ export default function ARAgingDashboard({
                 <span className={`w-3 h-3 rounded ${bucket.color}`} />
                 <div>
                   <p className="text-xs text-gray-600">{bucket.label}</p>
-                  <p className="text-sm font-medium">{formatCents(bucket.cents)}</p>
+                  <p className="text-sm font-medium">
+                    {formatCents(bucket.cents)}
+                  </p>
                 </div>
               </div>
             ))}
@@ -151,30 +176,42 @@ export default function ARAgingDashboard({
           <h2 id="history-heading" className="text-lg font-semibold mb-3">
             Aging History
           </h2>
-          <table className="w-full border-collapse" role="table">
-            <thead>
-              <tr className="border-b bg-gray-50">
-                <th className="text-left p-3 font-medium">Date</th>
-                <th className="text-left p-3 font-medium">0–30</th>
-                <th className="text-left p-3 font-medium">31–60</th>
-                <th className="text-left p-3 font-medium">61–90</th>
-                <th className="text-left p-3 font-medium">90+</th>
-                <th className="text-left p-3 font-medium">Total</th>
-              </tr>
-            </thead>
-            <tbody>
-              {history.slice(0, 14).map((snap) => (
-                <tr key={snap.snapshot_id} className="border-b">
-                  <td className="p-3">{snap.snapshot_date}</td>
-                  <td className="p-3">{formatCents(snap.bucket_0_30_cents)}</td>
-                  <td className="p-3">{formatCents(snap.bucket_31_60_cents)}</td>
-                  <td className="p-3">{formatCents(snap.bucket_61_90_cents)}</td>
-                  <td className="p-3">{formatCents(snap.bucket_90_plus_cents)}</td>
-                  <td className="p-3 font-medium">{formatCents(snap.total_open_cents)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <Table
+            columns={[
+              { key: "snapshot_date", label: "Date" },
+              {
+                key: "bucket_0_30_cents",
+                label: "0–30",
+                render: (snap) => formatCents(snap.bucket_0_30_cents),
+              },
+              {
+                key: "bucket_31_60_cents",
+                label: "31–60",
+                render: (snap) => formatCents(snap.bucket_31_60_cents),
+              },
+              {
+                key: "bucket_61_90_cents",
+                label: "61–90",
+                render: (snap) => formatCents(snap.bucket_61_90_cents),
+              },
+              {
+                key: "bucket_90_plus_cents",
+                label: "90+",
+                render: (snap) => formatCents(snap.bucket_90_plus_cents),
+              },
+              {
+                key: "total_open_cents",
+                label: "Total",
+                render: (snap) => (
+                  <span className="font-medium">
+                    {formatCents(snap.total_open_cents)}
+                  </span>
+                ),
+              },
+            ]}
+            data={history.slice(0, 14)}
+            keyExtractor={(snap) => snap.snapshot_id}
+          />
         </section>
       )}
 
@@ -184,46 +221,63 @@ export default function ARAgingDashboard({
           Top Accounts by Outstanding Balance
         </h2>
         {aging.by_account.length === 0 ? (
-          <p className="text-gray-500">No accounts with outstanding balances.</p>
+          <p className="text-gray-500">
+            No accounts with outstanding balances.
+          </p>
         ) : (
-          <table className="w-full border-collapse" role="table">
-            <thead>
-              <tr className="border-b bg-gray-50">
-                <th className="text-left p-3 font-medium">Account</th>
-                <th className="text-left p-3 font-medium">0–30</th>
-                <th className="text-left p-3 font-medium">31–60</th>
-                <th className="text-left p-3 font-medium">61–90</th>
-                <th className="text-left p-3 font-medium">90+</th>
-                <th className="text-left p-3 font-medium">Total</th>
-                <th className="text-left p-3 font-medium">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {aging.by_account.slice(0, 50).map((acct) => (
-                <tr key={acct.account_id} className="border-b hover:bg-gray-50">
-                  <td className="p-3">{acct.display_name}</td>
-                  <td className="p-3">{formatCents(acct.bucket_0_30_cents)}</td>
-                  <td className="p-3">{formatCents(acct.bucket_31_60_cents)}</td>
-                  <td className="p-3">{formatCents(acct.bucket_61_90_cents)}</td>
-                  <td className="p-3 text-red-700 font-medium">
+          <Table
+            columns={[
+              { key: "display_name", label: "Account" },
+              {
+                key: "bucket_0_30_cents",
+                label: "0–30",
+                render: (acct) => formatCents(acct.bucket_0_30_cents),
+              },
+              {
+                key: "bucket_31_60_cents",
+                label: "31–60",
+                render: (acct) => formatCents(acct.bucket_31_60_cents),
+              },
+              {
+                key: "bucket_61_90_cents",
+                label: "61–90",
+                render: (acct) => formatCents(acct.bucket_61_90_cents),
+              },
+              {
+                key: "bucket_90_plus_cents",
+                label: "90+",
+                render: (acct) => (
+                  <span className="text-error-dark font-medium">
                     {formatCents(acct.bucket_90_plus_cents)}
-                  </td>
-                  <td className="p-3 font-bold">
+                  </span>
+                ),
+              },
+              {
+                key: "total_open_cents",
+                label: "Total",
+                render: (acct) => (
+                  <span className="font-bold">
                     {formatCents(acct.total_open_cents)}
-                  </td>
-                  <td className="p-3">
-                    <button
-                      type="button"
-                      onClick={() => onViewAccount?.(acct.account_id)}
-                      className="text-blue-600 hover:underline"
-                    >
-                      View
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+                  </span>
+                ),
+              },
+              {
+                key: "actions",
+                label: "Actions",
+                render: (acct) => (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => onViewAccount?.(acct.account_id)}
+                  >
+                    View
+                  </Button>
+                ),
+              },
+            ]}
+            data={aging.by_account.slice(0, 50)}
+            keyExtractor={(acct) => acct.account_id}
+          />
         )}
       </section>
     </div>

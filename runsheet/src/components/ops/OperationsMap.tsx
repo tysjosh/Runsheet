@@ -1,7 +1,7 @@
 "use client";
 
 import { MapPin } from "lucide-react";
-import type { Job, JobStatus } from "../../types/api";
+import type { JobStatus } from "../../types/api";
 
 interface AssetLocation {
   asset_id: string;
@@ -17,13 +17,28 @@ interface OperationsMapProps {
 }
 
 /** Color-coded markers by job status */
-const STATUS_COLORS: Record<JobStatus | "unassigned", { bg: string; text: string; label: string }> = {
-  scheduled: { bg: "bg-blue-100", text: "text-blue-700", label: "Scheduled" },
-  assigned: { bg: "bg-orange-100", text: "text-orange-700", label: "Assigned" },
-  in_progress: { bg: "bg-green-100", text: "text-green-700", label: "In Progress" },
+const STATUS_COLORS: Record<
+  JobStatus | "unassigned",
+  { bg: string; text: string; label: string }
+> = {
+  scheduled: {
+    bg: "bg-info-light",
+    text: "text-info-dark",
+    label: "Scheduled",
+  },
+  assigned: {
+    bg: "bg-warning-light",
+    text: "text-warning-dark",
+    label: "Assigned",
+  },
+  in_progress: {
+    bg: "bg-success-light",
+    text: "text-success-dark",
+    label: "In Progress",
+  },
   completed: { bg: "bg-gray-100", text: "text-gray-600", label: "Completed" },
   cancelled: { bg: "bg-gray-100", text: "text-gray-500", label: "Cancelled" },
-  failed: { bg: "bg-red-100", text: "text-red-700", label: "Failed" },
+  failed: { bg: "bg-error-light", text: "text-error-dark", label: "Failed" },
   unassigned: { bg: "bg-gray-50", text: "text-gray-400", label: "Unassigned" },
 };
 
@@ -39,26 +54,30 @@ export default function OperationsMap({ assets }: OperationsMapProps) {
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
         <div className="flex items-center gap-2">
-          <MapPin className="w-4 h-4 text-[#232323]" />
-          <h3 className="text-sm font-semibold text-[#232323]">Asset Locations</h3>
+          <MapPin className="w-4 h-4 text-primary" />
+          <h3 className="text-sm font-semibold text-primary">
+            Asset Locations
+          </h3>
         </div>
         <span className="text-xs text-gray-400">{assets.length} assets</span>
       </div>
 
       {/* Legend */}
       <div className="flex flex-wrap gap-2 px-4 py-2 border-b border-gray-50">
-        {(["in_progress", "assigned", "scheduled", "unassigned"] as const).map((status) => {
-          const config = STATUS_COLORS[status];
-          return (
-            <span
-              key={status}
-              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium ${config.bg} ${config.text}`}
-            >
-              <span className="w-2 h-2 rounded-full bg-current" />
-              {config.label}
-            </span>
-          );
-        })}
+        {(["in_progress", "assigned", "scheduled", "unassigned"] as const).map(
+          (status) => {
+            const config = STATUS_COLORS[status];
+            return (
+              <span
+                key={status}
+                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium ${config.bg} ${config.text}`}
+              >
+                <span className="w-2 h-2 rounded-full bg-current" />
+                {config.label}
+              </span>
+            );
+          },
+        )}
       </div>
 
       {/* Map placeholder with asset markers */}
@@ -78,8 +97,10 @@ export default function OperationsMap({ assets }: OperationsMapProps) {
                   className={`${config.bg} rounded-lg px-3 py-2 border border-gray-100`}
                 >
                   <div className="flex items-center gap-1.5">
-                    <span className={`w-2 h-2 rounded-full ${config.text} bg-current`} />
-                    <span className="text-xs font-medium text-[#232323] truncate">
+                    <span
+                      className={`w-2 h-2 rounded-full ${config.text} bg-current`}
+                    />
+                    <span className="text-xs font-medium text-primary truncate">
                       {asset.name}
                     </span>
                   </div>

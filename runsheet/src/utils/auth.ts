@@ -29,7 +29,7 @@ export async function generateDevToken(payload: TokenPayload): Promise<string> {
 
   // Create a proper JWT using jose library with HS256 signing
   const secret = new TextEncoder().encode(JWT_SECRET);
-  
+
   const token = await new jose.SignJWT(fullPayload)
     .setProtectedHeader({ alg: "HS256", typ: "JWT" })
     .setIssuedAt(now)
@@ -44,13 +44,13 @@ export async function generateDevToken(payload: TokenPayload): Promise<string> {
  */
 export async function getAuthToken(): Promise<string | null> {
   if (typeof window === "undefined") return null;
-  
+
   const isAuthenticated = sessionStorage.getItem("isAuthenticated");
   if (isAuthenticated !== "true") return null;
 
   // Check if we have a stored token
   let token = sessionStorage.getItem("authToken");
-  
+
   if (!token) {
     // Generate a development token for the demo user
     const payload: TokenPayload = {
@@ -60,7 +60,7 @@ export async function getAuthToken(): Promise<string | null> {
       has_pii_access: true,
       roles: ["admin", "ops_manager"],
     };
-    
+
     token = await generateDevToken(payload);
     sessionStorage.setItem("authToken", token);
   }
@@ -83,12 +83,12 @@ export function clearAuthToken(): void {
  */
 export async function setAuthenticated(email: string): Promise<void> {
   if (typeof window === "undefined") return;
-  
+
   const tenantId = "demo-tenant";
-  
+
   sessionStorage.setItem("isAuthenticated", "true");
   sessionStorage.setItem("tenant_id", tenantId); // Store tenant_id for tenant service
-  
+
   // Generate token for the user
   const payload: TokenPayload = {
     tenant_id: tenantId,
@@ -97,7 +97,7 @@ export async function setAuthenticated(email: string): Promise<void> {
     has_pii_access: true,
     roles: ["admin", "ops_manager"],
   };
-  
+
   const token = await generateDevToken(payload);
   sessionStorage.setItem("authToken", token);
 }

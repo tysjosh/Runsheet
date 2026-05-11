@@ -1,12 +1,12 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
-import { AlertTriangle, Shield, User, ChevronRight } from "lucide-react";
+import { AlertTriangle, ChevronRight, Shield, User } from "lucide-react";
+import { useEffect, useState } from "react";
 import {
-  getDriversDashboard,
-  getAssetCertificationsDashboard,
-  type DQFDashboard,
   type AssetCertificationDashboard,
+  type DQFDashboard,
+  getAssetCertificationsDashboard,
+  getDriversDashboard,
 } from "../../services/complianceApi";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -70,9 +70,9 @@ function AlertBadge({
   if (count === 0) return null;
 
   const styles = {
-    critical: "bg-red-100 text-red-800 border-red-200",
-    urgent: "bg-orange-100 text-orange-800 border-orange-200",
-    warning: "bg-yellow-100 text-yellow-800 border-yellow-200",
+    critical: "bg-error-light text-error-dark border-error-light",
+    urgent: "bg-warning-light text-warning-dark border-warning-light",
+    warning: "bg-warning-light text-warning-dark border-warning-light",
   };
 
   const labels = {
@@ -125,10 +125,7 @@ export default function ExpiryAlertWidget({
         }
 
         // Only show error if both failed
-        if (
-          driverRes.status === "rejected" &&
-          assetRes.status === "rejected"
-        ) {
+        if (driverRes.status === "rejected" && assetRes.status === "rejected") {
           setError("Unable to load compliance alerts");
         }
       } catch {
@@ -151,20 +148,19 @@ export default function ExpiryAlertWidget({
 
   const totalCritical =
     (driverAlerts?.critical ?? 0) + (assetAlerts?.critical ?? 0);
-  const totalUrgent =
-    (driverAlerts?.urgent ?? 0) + (assetAlerts?.urgent ?? 0);
+  const totalUrgent = (driverAlerts?.urgent ?? 0) + (assetAlerts?.urgent ?? 0);
   const totalWarning =
     (driverAlerts?.warning ?? 0) + (assetAlerts?.warning ?? 0);
   const totalAlerts = totalCritical + totalUrgent + totalWarning;
 
   const headerColor =
     totalCritical > 0
-      ? "text-red-700"
+      ? "text-error-dark"
       : totalUrgent > 0
-        ? "text-orange-700"
+        ? "text-warning-dark"
         : totalWarning > 0
-          ? "text-yellow-700"
-          : "text-green-700";
+          ? "text-warning-dark"
+          : "text-success-dark";
 
   return (
     <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
@@ -200,8 +196,8 @@ export default function ExpiryAlertWidget({
           {/* All clear state */}
           {totalAlerts === 0 && (
             <div className="flex items-center gap-2 py-2">
-              <div className="w-2 h-2 rounded-full bg-green-500" />
-              <span className="text-sm text-green-700 font-medium">
+              <div className="w-2 h-2 rounded-full bg-success-light0" />
+              <span className="text-sm text-success-dark font-medium">
                 All qualifications and certifications current
               </span>
             </div>
