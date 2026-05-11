@@ -383,7 +383,11 @@ function AgentHealthSection() {
       const result = await getAgentHealth();
       // The response has agents as a Record<string, AgentHealthEntry>
       const agentList = Object.values(result.agents ?? {});
-      setAgents(agentList);
+      // Only show autonomous agents (ones that can be paused/resumed)
+      const autonomousAgents = agentList.filter(
+        (agent) => (agent as any).type === "autonomous"
+      );
+      setAgents(autonomousAgents);
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "Failed to load agent health",
@@ -508,42 +512,35 @@ function AgentHealthSection() {
                 </div>
               </div>
               <div className="flex items-center gap-2">
-                {(agent as any).type === "autonomous" &&
-                  agent.status === "running" && (
-                    <button
-                      onClick={() => handlePause(agent.agent_id)}
-                      disabled={actionLoading === agent.agent_id}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-yellow-200 text-yellow-700 hover:bg-yellow-50 disabled:opacity-50 transition-colors"
-                      title="Pause agent"
-                    >
-                      {actionLoading === agent.agent_id ? (
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      ) : (
-                        <Pause className="w-3.5 h-3.5" />
-                      )}
-                      Pause
-                    </button>
-                  )}
-                {(agent as any).type === "autonomous" &&
-                  agent.status === "stopped" && (
-                    <button
-                      onClick={() => handleResume(agent.agent_id)}
-                      disabled={actionLoading === agent.agent_id}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-green-200 text-green-700 hover:bg-green-50 disabled:opacity-50 transition-colors"
-                      title="Resume agent"
-                    >
-                      {actionLoading === agent.agent_id ? (
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      ) : (
-                        <Play className="w-3.5 h-3.5" />
-                      )}
-                      Resume
-                    </button>
-                  )}
-                {(agent as any).type === "overlay" && (
-                  <span className="text-[10px] text-gray-400 px-2 py-1">
-                    Event-driven
-                  </span>
+                {agent.status === "running" && (
+                  <button
+                    onClick={() => handlePause(agent.agent_id)}
+                    disabled={actionLoading === agent.agent_id}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-yellow-200 text-yellow-700 hover:bg-yellow-50 disabled:opacity-50 transition-colors"
+                    title="Pause agent"
+                  >
+                    {actionLoading === agent.agent_id ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Pause className="w-3.5 h-3.5" />
+                    )}
+                    Pause
+                  </button>
+                )}
+                {agent.status === "stopped" && (
+                  <button
+                    onClick={() => handleResume(agent.agent_id)}
+                    disabled={actionLoading === agent.agent_id}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-green-200 text-green-700 hover:bg-green-50 disabled:opacity-50 transition-colors"
+                    title="Resume agent"
+                  >
+                    {actionLoading === agent.agent_id ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Play className="w-3.5 h-3.5" />
+                    )}
+                    Resume
+                  </button>
                 )}
               </div>
             </div>

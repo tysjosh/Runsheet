@@ -1,6 +1,6 @@
 "use client";
 import { useState, lazy, Suspense } from "react";
-import { Fuel, Gauge, SprayCan, Building2, Database, Map as MapIcon } from "lucide-react";
+import { Fuel, Gauge, SprayCan, Building2, Database, Map as MapIcon, Droplets } from "lucide-react";
 import LoadingSpinner from "./LoadingSpinner";
 
 const FuelDashboard = lazy(() => import("../app/ops/fuel/page"));
@@ -9,6 +9,7 @@ const TruckCompartmentsPage = lazy(() => import("./ops/TruckCompartmentsPage"));
 const SourcingPage = lazy(() => import("./ops/SourcingPage"));
 const DepotsPage = lazy(() => import("./admin/DepotsPage"));
 const RoadRestrictionsPanel = lazy(() => import("./admin/RoadRestrictionsPanel"));
+const FuelDistributionPage = lazy(() => import("./ops/FuelDistributionPage"));
 
 const TABS = [
   { id: "stations", label: "Fuel Stations", icon: Fuel },
@@ -17,6 +18,7 @@ const TABS = [
   { id: "sourcing", label: "Sourcing", icon: Building2 },
   { id: "depots", label: "Depots", icon: Database },
   { id: "road-restrictions", label: "Restrictions", icon: MapIcon },
+  { id: "distribution", label: "Distribution", icon: Droplets },
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"];
@@ -57,6 +59,7 @@ export default function FuelOpsPage() {
           {activeTab === "sourcing" && <SourcingPage />}
           {activeTab === "depots" && <DepotsPage />}
           {activeTab === "road-restrictions" && <RoadRestrictionsPanel />}
+          {activeTab === "distribution" && <FuelDistributionPage />}
         </Suspense>
       </div>
     </div>

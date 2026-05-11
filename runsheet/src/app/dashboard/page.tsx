@@ -18,11 +18,12 @@ const MapView = dynamic(() => import("../../components/MapView"), {
 // Lazy-load content components
 const FleetDashboard = lazy(() => import("../../components/FleetDashboard"));
 const AIChat = lazy(() => import("../../components/AIChat"));
-const CommerceBillingPage = lazy(() => import("../commerce/page"));
 
 // New grouped hub pages
 const DispatchPage = lazy(() => import("../../components/DispatchPage"));
 const FuelOpsPage = lazy(() => import("../../components/FuelOpsPage"));
+const ComplianceHub = lazy(() => import("../../components/ComplianceHub"));
+const CommerceHub = lazy(() => import("../../components/CommerceHub"));
 const ReconciliationHub = lazy(() => import("../../components/ReconciliationHub"));
 const AnalyticsHub = lazy(() => import("../../components/AnalyticsHub"));
 const SettingsPage = lazy(() => import("../../components/SettingsPage"));
@@ -144,12 +145,23 @@ export default function Home() {
           </div>
         );
 
+      case "compliance":
+        return (
+          <div className="flex-1 bg-gray-50">
+            <ErrorBoundary componentName="Compliance">
+              <Suspense fallback={<ComponentLoadingPlaceholder />}>
+                <ComplianceHub />
+              </Suspense>
+            </ErrorBoundary>
+          </div>
+        );
+
       case "billing":
         return (
           <div className="flex-1 bg-gray-50">
             <ErrorBoundary componentName="Billing">
               <Suspense fallback={<ComponentLoadingPlaceholder />}>
-                <CommerceBillingPage />
+                <CommerceHub />
               </Suspense>
             </ErrorBoundary>
           </div>
