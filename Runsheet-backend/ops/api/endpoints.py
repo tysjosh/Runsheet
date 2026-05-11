@@ -12,6 +12,7 @@ Validates: Requirements 8.1-8.6
 
 import logging
 import math
+import os
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -77,8 +78,14 @@ async def require_ops_enabled(
     Raises HTTPException(404) with TENANT_DISABLED code when the Ops
     Intelligence Layer is disabled for the requesting tenant.
 
+    In development mode (ENVIRONMENT=development), all tenants are allowed.
+
     Validates: Requirement 27.3
     """
+    # In development, bypass feature flag check
+    if os.environ.get("ENVIRONMENT", "").lower() == "development":
+        return tenant
+    
     if _feature_flag_service is not None:
         enabled = await _feature_flag_service.is_enabled(tenant.tenant_id)
         if not enabled:

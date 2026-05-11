@@ -11,6 +11,7 @@
  */
 
 import { API_TIMEOUTS, ApiError, ApiTimeoutError } from "./api";
+import { getAuthToken } from "../utils/auth";
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -230,12 +231,21 @@ async function ordersRequest<T>(
 ): Promise<T> {
   const url = `${API_BASE_URL}${endpoint}`;
   try {
+    // Get auth token if available (async)
+    const token = await getAuthToken();
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...(options?.headers as Record<string, string> | undefined),
+    };
+    
+    // Add Authorization header if token exists
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
+
     const response = await fetchWithTimeout(url, {
-      headers: {
-        "Content-Type": "application/json",
-        ...options?.headers,
-      },
       ...options,
+      headers,
     });
 
     if (!response.ok) {

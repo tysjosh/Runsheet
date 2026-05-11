@@ -5,7 +5,7 @@ import type React from "react";
 import { useState } from "react";
 
 interface SignInProps {
-  onSignIn?: (email: string, password: string) => void;
+  onSignIn?: (email: string, password: string) => Promise<void>;
 }
 
 export default function SignIn({ onSignIn }: SignInProps) {

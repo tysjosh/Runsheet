@@ -289,6 +289,28 @@ async def initialize(app, container: ServiceContainer) -> None:
             exc,
         )
 
+    # ── DriverQualificationService REST endpoints (Task 6.9 / Req 5.1–5.8) ──
+    # Instantiate the DriverQualificationService and wire it into
+    # ``compliance.api.driver_endpoints`` so the CRUD and dashboard
+    # handlers can delegate to the service. Router inclusion is
+    # performed by ``main.py``.
+    try:
+        from compliance.services.driver_qualification_service import (
+            DriverQualificationService,
+        )
+        from compliance.api.driver_endpoints import configure_driver_api
+
+        driver_service = DriverQualificationService(es_service=es_service)
+        container.driver_qualification_service = driver_service
+
+        # Configure the REST API endpoints
+        configure_driver_api(driver_service=driver_service)
+        logger.info("Driver Qualification API configured")
+    except Exception as exc:
+        logger.warning(
+            "Driver Qualification API wiring failed (task 6.9): %s", exc
+        )
+
     # ── Driver Qualification Expiry Cron (Task 6.10 / Req 5.2–5.4, 5.8) ──
     # Daily autonomous agent that runs check_expiry_alerts(),
     # auto_suspend_expired_drivers(), and check_drug_test_overdue()
@@ -439,9 +461,18 @@ async def initialize(app, container: ServiceContainer) -> None:
         from compliance.services.asset_certification_service import (
             AssetCertificationService,
         )
+        from compliance.api.asset_certification_endpoints import (
+            configure_asset_certification_api,
+        )
 
         asset_cert_service = AssetCertificationService(es_service=es_service)
         container.asset_certification_service = asset_cert_service
+
+        # Configure the REST API endpoints
+        configure_asset_certification_api(
+            asset_certification_service=asset_cert_service
+        )
+        logger.info("Asset Certification API configured")
 
         # Inject into Route_Planning_Agent if available
         if container.has("route_planning_agent"):

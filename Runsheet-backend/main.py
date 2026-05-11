@@ -88,6 +88,12 @@ from compliance.api.ifta_endpoints import (
 from compliance.api.kfactor_endpoints import (
     router as compliance_kfactor_router,
 )
+from compliance.api.driver_endpoints import (
+    router as compliance_driver_router,
+)
+from compliance.api.asset_certification_endpoints import (
+    router as compliance_asset_cert_router,
+)
 from commerce.api.price_protection_endpoints import (
     router as commerce_price_protection_router,
 )
@@ -165,6 +171,8 @@ for _router in (
     compliance_terminal_bol_router,
     compliance_ifta_router,
     compliance_kfactor_router,
+    compliance_driver_router,
+    compliance_asset_cert_router,
     commerce_price_protection_router,
     commerce_pricing_rules_router,
     mvp_fuel_router,

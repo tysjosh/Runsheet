@@ -277,9 +277,18 @@ async def get_fleet_certification_dashboard(
             },
         )
 
+    # Calculate summary counts
+    total_valid = sum(1 for item in dashboard if item.status == "valid")
+    total_expiring_soon = sum(1 for item in dashboard if item.status == "expiring_soon")
+    total_expired = sum(1 for item in dashboard if item.status == "expired")
+
     return {
-        "data": [item.model_dump(mode="json") for item in dashboard],
-        "count": len(dashboard),
+        "data": {
+            "assets": [item.model_dump(mode="json") for item in dashboard],
+            "total_valid": total_valid,
+            "total_expiring_soon": total_expiring_soon,
+            "total_expired": total_expired,
+        },
         "request_id": _get_request_id(request),
     }
 
