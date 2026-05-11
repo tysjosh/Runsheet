@@ -104,9 +104,7 @@ router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 
 # Auth policy parity with the other fuel-ops routers. Every handler
 # depends on :func:`get_tenant_context`, which rejects unauthenticated
-# requests in production. In development the tenant guard returns a
-# ``dev-tenant`` fallback — the same treatment used across the rest of
-# the backend.
+# requests in every environment.
 ROUTER_AUTH_POLICY = "jwt_required"
 
 

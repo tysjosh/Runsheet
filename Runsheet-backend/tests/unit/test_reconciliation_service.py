@@ -27,6 +27,7 @@ from services.reconciliation_service import (
     _derive_alert_flags,
     _percent_variance,
 )
+from compliance.services.vcf_calculator import VCFCalculator
 
 
 # ---------------------------------------------------------------------------
@@ -246,6 +247,34 @@ class TestReconciliationServiceCompute:
         assert record.invoiced_gallons == 505.0
         # |505 - 500| / 500 * 100 = 1.0
         assert record.variance_invoiced_vs_delivered_pct == pytest.approx(1.0)
+
+    @pytest.mark.asyncio
+    async def test_compute_uses_vcf_corrected_net_gallons_when_measurements_present(self):
+        svc = ReconciliationService(es_service=_FakeES())
+        calculator = VCFCalculator()
+        expected_loaded = calculator.compute_net_gallons(
+            gross_gallons=500.0,
+            temperature_f=72.0,
+            api_gravity=35.0,
+        )
+
+        record = await svc.compute(
+            pod=_pod(
+                delivered_gallons=expected_loaded,
+                delivered_unit="gallons",
+            ),
+            order=_order(ordered_gallons=expected_loaded, ordered_unit="gal"),
+            loading_plan=_plan(
+                loaded_gallons=500.0,
+                loaded_unit="gallons",
+                loaded_temperature_f=72.0,
+                loaded_api_gravity=35.0,
+            ),
+        )
+
+        assert record.loaded_gallons == expected_loaded
+        assert record.variance_load_vs_order_pct == 0.0
+        assert record.variance_delivered_vs_loaded_pct == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -558,3 +587,26 @@ class TestReconciliationServiceValidation:
         assert record.invoice_id is None
         assert record.invoiced_gallons is None
         assert record.variance_invoiced_vs_delivered_pct is None
+
+    @pytest.mark.asyncio
+    async def test_explicit_liter_unit_rejected_before_variance_calculation(self):
+        svc = ReconciliationService(es_service=_FakeES())
+        with pytest.raises(ValueError, match="gallons"):
+            await svc.compute(
+                pod=_pod(delivered_gallons=500.0),
+                order=_order(ordered_gallons=1892.7, ordered_unit="liters"),
+                loading_plan=_plan(loaded_gallons=500.0),
+            )
+
+    @pytest.mark.asyncio
+    async def test_partial_vcf_metadata_is_rejected(self):
+        svc = ReconciliationService(es_service=_FakeES())
+        with pytest.raises(ValueError, match="temperature_f and api_gravity"):
+            await svc.compute(
+                pod=_pod(delivered_gallons=500.0),
+                order=_order(ordered_gallons=500.0),
+                loading_plan=_plan(
+                    loaded_gallons=500.0,
+                    loaded_temperature_f=72.0,
+                ),
+            )

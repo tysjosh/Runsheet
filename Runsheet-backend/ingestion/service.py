@@ -625,11 +625,15 @@ class DataIngestionService:
             sanitized_data = sanitize_location_update(update)
             asset_id = sanitized_data["asset_id"]
             tenant_id = sanitized_data.get("tenant_id")
+            if not tenant_id:
+                raise validation_error(
+                    message="tenant_id is required for location updates",
+                    details={"asset_id": asset_id, "reason": "missing_tenant_id"},
+                )
 
-            # Verify asset exists, tenant-scoped when the caller provided a
-            # tenant. Rejecting cross-tenant asset ids prevents a caller for
-            # tenant A from writing location history against an asset that
-            # belongs to tenant B just by guessing its ID.
+            # Verify asset exists within the authenticated tenant. Rejecting
+            # cross-tenant asset ids prevents a caller for tenant A from
+            # writing location history against tenant B by guessing an ID.
             asset_exists = await self.validate_asset_exists(asset_id, tenant_id=tenant_id)
             if not asset_exists:
                 self._logger.warning(
@@ -652,11 +656,7 @@ class DataIngestionService:
                 },
                 "last_update": sanitized_data["timestamp"],
             }
-            if tenant_id:
-                # Keep the tenant_id on the asset doc stable — if the asset
-                # is already scoped this is a no-op; if the asset is a
-                # legacy doc with no tenant_id, this brings it in scope.
-                location_data["tenant_id"] = tenant_id
+            location_data["tenant_id"] = tenant_id
 
             # Add optional fields if present
             if sanitized_data.get("speed_kmh") is not None:
@@ -683,8 +683,7 @@ class DataIngestionService:
                 "heading": sanitized_data.get("heading"),
                 "accuracy_meters": sanitized_data.get("accuracy_meters"),
             }
-            if tenant_id:
-                location_history["tenant_id"] = tenant_id
+            location_history["tenant_id"] = tenant_id
 
             # Generate a unique ID for the location history entry
             history_id = f"{asset_id}_{sanitized_data['timestamp']}"

@@ -4,10 +4,8 @@ import {
   Database,
   Loader2,
   Truck,
-  Users,
   Fuel,
   Boxes,
-  HeadsetIcon,
   CalendarClock,
 } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -29,7 +27,6 @@ const DATA_TYPE_CONFIG: Record<
   fleet: { label: "Fleet", icon: Truck },
   fuel_stations: { label: "Fuel Stations", icon: Fuel },
   inventory: { label: "Inventory", icon: Boxes },
-  support_tickets: { label: "Support Tickets", icon: HeadsetIcon },
   jobs: { label: "Jobs / Scheduling", icon: CalendarClock },
 };
 
@@ -37,7 +34,6 @@ const ALL_DATA_TYPES: DataType[] = [
   "fleet",
   "fuel_stations",
   "inventory",
-  "support_tickets",
   "jobs",
 ];
 
@@ -49,7 +45,7 @@ export default function DataTypeSelector({ onSelect }: DataTypeSelectorProps) {
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<DataType | null>(null);
 
-  // Fetch all 7 schemas on mount
+  // Fetch current import schemas on mount.
   useEffect(() => {
     let cancelled = false;
 

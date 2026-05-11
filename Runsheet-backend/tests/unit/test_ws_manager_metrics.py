@@ -253,8 +253,8 @@ class TestSchedulingManagerMetrics:
         manager = SchedulingWebSocketManager()
         ws = _make_websocket()
 
-        await manager.connect(ws)
-        count = await manager.broadcast_job_created({"job_id": "J-1"})
+        await manager.connect(ws, tenant_id="tenant_a")
+        count = await manager.broadcast_job_created({"job_id": "J-1", "tenant_id": "tenant_a"})
 
         assert count == 1
         metrics = manager.get_metrics()
@@ -265,10 +265,10 @@ class TestSchedulingManagerMetrics:
         manager = SchedulingWebSocketManager(max_pending_messages=3)
         ws = _make_websocket()
 
-        await manager.connect(ws)
+        await manager.connect(ws, tenant_id="tenant_a")
         manager._clients[ws]["pending_count"] = 3
 
-        count = await manager.broadcast_job_created({"job_id": "J-1"})
+        count = await manager.broadcast_job_created({"job_id": "J-1", "tenant_id": "tenant_a"})
 
         assert count == 0
         assert manager.get_metrics()["messages_dropped_total"] == 1
@@ -279,18 +279,18 @@ class TestSchedulingManagerMetrics:
         ws_alive = _make_websocket()
         ws_dead = _make_websocket(fail_send=True)
 
-        await manager.connect(ws_alive)
+        await manager.connect(ws_alive, tenant_id="tenant_a")
         manager._clients[ws_dead] = {
             "connected_at": datetime.now(timezone.utc),
             "last_send": None,
-            "tenant_id": "",
+            "tenant_id": "tenant_a",
             "pending_count": 0,
             "subscriptions": set(),
             "_alive": True,
         }
 
         count = await manager.broadcast_status_changed(
-            {"job_id": "J-1"}, "pending", "in_progress"
+            {"job_id": "J-1", "tenant_id": "tenant_a"}, "pending", "in_progress"
         )
 
         assert count == 1

@@ -50,8 +50,8 @@ def _make_mock_settings(environment="development", jwt_secret="test-secret", jwt
 class TestWsAuthenticateDriver:
     """Tests for the _ws_authenticate_driver helper. Validates: Req 9.1, 9.2"""
 
-    def test_no_token_dev_mode_returns_defaults(self):
-        """In development mode, missing token returns dev defaults."""
+    def test_no_token_dev_mode_returns_none(self):
+        """Missing tokens are rejected even in development mode."""
         from main import _ws_authenticate_driver
 
         ws = MagicMock()
@@ -60,7 +60,7 @@ class TestWsAuthenticateDriver:
         with patch("config.settings.get_settings", return_value=_make_mock_settings("development")):
             result = _ws_authenticate_driver(ws)
 
-        assert result == ("dev-tenant", "dev-driver")
+        assert result is None
 
     def test_no_token_production_returns_none(self):
         """In production mode, missing token returns None."""

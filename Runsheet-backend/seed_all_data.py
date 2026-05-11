@@ -3,14 +3,15 @@
 Standalone seed script for ALL Elasticsearch indices needed by the Runsheet frontend.
 
 Usage:
-    python seed_all_data.py          # Seed only empty indices
-    python seed_all_data.py --force  # Re-seed all indices (deletes existing data first)
+    SEED_TENANT_ID=tenant-a python seed_all_data.py
+    SEED_TENANT_ID=tenant-a python seed_all_data.py --force
 
 Uses the existing elasticsearch_service singleton and the sync client.index() / client.bulk()
 methods directly.
 """
 
 import sys
+import os
 import uuid
 import random
 import logging
@@ -29,7 +30,7 @@ ES = elasticsearch_service.client
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-TENANT = "dev-tenant"
+TENANT = os.environ.get("SEED_TENANT_ID", "").strip()
 SCHEMA_VERSION = "1.0"
 
 US_CITIES = {
@@ -811,6 +812,12 @@ def seed_poison_queue(force: bool = False):
 # Main
 # ---------------------------------------------------------------------------
 def main():
+    if not TENANT:
+        raise SystemExit(
+            "SEED_TENANT_ID is required; refusing to seed records with a "
+            "hardcoded/default tenant."
+        )
+
     force = "--force" in sys.argv
 
     print("=" * 60)

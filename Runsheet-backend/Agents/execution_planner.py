@@ -500,7 +500,9 @@ class ExecutionPlanner:
     # Plan rollback
     # ------------------------------------------------------------------
 
-    async def rollback_plan(self, plan: ExecutionPlan) -> ExecutionPlan:
+    async def rollback_plan(
+        self, plan: ExecutionPlan, tenant_id: Optional[str] = None
+    ) -> ExecutionPlan:
         """Rollback completed steps in reverse completion order.
 
         Only steps with status COMPLETED and a defined rollback_tool are
@@ -509,6 +511,8 @@ class ExecutionPlanner:
 
         Args:
             plan: The execution plan to roll back.
+            tenant_id: Tenant scope for rollback mutations. Required when a
+                confirmation protocol is wired.
 
         Returns:
             The updated ExecutionPlan with rolled-back step statuses.
@@ -527,12 +531,16 @@ class ExecutionPlanner:
                 try:
                     rollback_params = step.rollback_params or {}
                     if self._confirmation_protocol:
+                        if not tenant_id:
+                            raise ValueError(
+                                "tenant_id is required for rollback mutations"
+                            )
                         from Agents.confirmation_protocol import MutationRequest
 
                         request = MutationRequest(
                             tool_name=step.rollback_tool,
                             parameters=rollback_params,
-                            tenant_id="default",
+                            tenant_id=tenant_id,
                             agent_id=step.agent,
                         )
                         await self._confirmation_protocol.process_mutation(

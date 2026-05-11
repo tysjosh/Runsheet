@@ -5,7 +5,7 @@ endpoints on ``data_endpoints.py``.
 These tests boot a minimal FastAPI app with the ``data_endpoints.router``
 mounted, override ``get_tenant_context`` to return a deterministic tenant,
 and install a thin fake ES service that captures every request body.
-For each ``/api/analytics/*`` and ``/api/search`` endpoint we assert the
+For each active ``/api/analytics/*`` and ``/api/search`` endpoint we assert the
 captured query body contains ``{"term": {"tenant_id": <tenant>}}`` in the
 top-level ``bool.filter`` clause, and that swapping the tenant context
 changes the embedded tenant_id accordingly. This guards against future
@@ -214,9 +214,6 @@ def _build_app(tenant_id: str) -> Tuple[FastAPI, _FakeESService]:
     [
         "/api/analytics/metrics",
         "/api/analytics/routes",
-        "/api/analytics/delay-causes",
-        "/api/analytics/regional",
-        "/api/analytics/time-series",
     ],
 )
 def test_analytics_endpoints_emit_tenant_filter(path: str) -> None:
@@ -253,6 +250,16 @@ def test_analytics_endpoints_respect_tenant_switch() -> None:
     # Guard against leakage: tenant-a's captured bodies never carry tenant-b's id.
     assert not any(_find_tenant_filter(body, "tenant-b") for body in _collect_bodies(fake_a))
     assert not any(_find_tenant_filter(body, "tenant-a") for body in _collect_bodies(fake_b))
+
+
+def test_static_analytics_mock_routes_are_not_registered() -> None:
+    """The retired static/mock analytics routes should stay off the router."""
+    import data_endpoints
+
+    paths = {route.path for route in data_endpoints.router.routes}
+    assert "/api/analytics/delay-causes" not in paths
+    assert "/api/analytics/regional" not in paths
+    assert "/api/analytics/time-series" not in paths
 
 
 # ---------------------------------------------------------------------------

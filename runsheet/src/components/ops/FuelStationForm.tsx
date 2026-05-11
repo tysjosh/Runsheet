@@ -11,7 +11,7 @@
  * Exports `validateStationForm` for independent testing (Property 2).
  *
  * Validates:
- * - Requirement 8.1: Creation form with name, fuel_type, capacity_liters, location, alert_threshold_pct
+ * - Requirement 8.1: Creation form with name, fuel_type, capacity_gallons, location, alert_threshold_pct
  * - Requirement 8.2: Calls POST /fuel/stations on create
  * - Requirement 8.3: Pre-populated edit form with current values
  * - Requirement 8.4: Calls PATCH /fuel/stations/{id} on edit
@@ -43,7 +43,7 @@ const FUEL_TYPES: { value: FuelType; label: string }[] = [
   { value: "GASOLINE_REG", label: "GASOLINE_REG (Regular Unleaded)" },
   { value: "GASOLINE_PREM", label: "GASOLINE_PREM (Premium Unleaded)" },
   { value: "HEATING_OIL", label: "HEATING_OIL (No. 2 Heating Oil)" },
-  { value: "PROPANE", label: "PROPANE (LPG)" },
+  { value: "PROPANE", label: "PROPANE (Propane)" },
   { value: "KEROSENE", label: "KEROSENE (K-1)" },
   { value: "OFF_ROAD_DIESEL", label: "OFF_ROAD_DIESEL (Dyed Diesel)" },
   { value: "DEF", label: "DEF (Diesel Exhaust Fluid)" },
@@ -127,7 +127,8 @@ export default function FuelStationForm({
   const [form, setForm] = useState<StationFormValues>({
     name: station?.name ?? "",
     fuel_type: station?.fuel_type ?? "DIESEL_2",
-    capacity_gallons: station?.capacity_liters ?? 0,
+    capacity_gallons:
+      station?.capacity_gallons ?? station?.capacity_liters ?? 0,
     initial_stock_gallons: 0,
     location_name: station?.location_name ?? "",
     alert_threshold_pct: station?.alert_threshold_pct ?? 20,
@@ -142,7 +143,8 @@ export default function FuelStationForm({
     return (
       form.name === station.name &&
       form.fuel_type === station.fuel_type &&
-      form.capacity_gallons === station.capacity_liters &&
+      form.capacity_gallons ===
+        (station.capacity_gallons ?? station.capacity_liters) &&
       form.location_name === (station.location_name ?? "") &&
       form.alert_threshold_pct !== station.alert_threshold_pct
     );
@@ -169,8 +171,8 @@ export default function FuelStationForm({
           station_id: `FS-${Date.now().toString(36).toUpperCase()}`,
           name: form.name.trim(),
           fuel_type: form.fuel_type,
-          capacity_liters: form.capacity_gallons,
-          initial_stock_liters: form.initial_stock_gallons,
+          capacity_gallons: form.capacity_gallons,
+          initial_stock_gallons: form.initial_stock_gallons,
           alert_threshold_pct: form.alert_threshold_pct,
         };
         if (form.location_name.trim()) {
@@ -189,7 +191,7 @@ export default function FuelStationForm({
         const payload: UpdateStationPayload = {
           name: form.name.trim(),
           fuel_type: form.fuel_type,
-          capacity_liters: form.capacity_gallons,
+          capacity_gallons: form.capacity_gallons,
           alert_threshold_pct: form.alert_threshold_pct,
         };
         if (form.location_name.trim()) {
@@ -298,13 +300,13 @@ export default function FuelStationForm({
 
             <div>
               <label
-                htmlFor="capacity-liters"
+                htmlFor="capacity-gallons"
                 className="block text-xs font-medium text-gray-600 mb-1"
               >
                 Capacity (Gallons)
               </label>
               <input
-                id="capacity-liters"
+                id="capacity-gallons"
                 type="number"
                 value={form.capacity_gallons || ""}
                 onChange={(e) => {

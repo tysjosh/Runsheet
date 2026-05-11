@@ -19,8 +19,8 @@ Endpoints registered:
 
 Auth helpers (:func:`_authenticate_tenant` / :func:`_authenticate_driver`)
 extract the tenant/driver ID from a JWT supplied via the ``token`` query
-parameter. In ``development`` mode, a missing token yields a dev
-default so local smoke tests work without JWT provisioning.
+parameter. Missing, malformed, or incomplete tokens are rejected for every
+environment.
 
 Logging: the module emits warnings and errors via the ``main`` logger
 so tests that ``patch("main.logger")`` continue to see every WS-layer
@@ -71,7 +71,7 @@ def _authenticate_tenant(websocket: WebSocket) -> Optional[str]:
     settings = get_settings()
     token = websocket.query_params.get("token", "")
     if not token:
-        return "dev-tenant" if settings.environment.value == "development" else None
+        return None
     try:
         payload = jose_jwt.decode(
             token, settings.jwt_secret, algorithms=[settings.jwt_algorithm]
@@ -90,8 +90,6 @@ def _authenticate_driver(websocket: WebSocket) -> Optional[Tuple[str, str]]:
     settings = get_settings()
     token = websocket.query_params.get("token", "")
     if not token:
-        if settings.environment.value == "development":
-            return ("dev-tenant", "dev-driver")
         return None
     try:
         payload = jose_jwt.decode(

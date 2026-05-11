@@ -34,7 +34,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
 SUPPORTED_DATA_TYPES = [
     "fleet", "orders", "fuel_stations",
-    "inventory", "support_tickets", "jobs",
+    "inventory", "jobs",
 ]
 
 DATA_TYPE_INDEX_MAP = {
@@ -42,7 +42,6 @@ DATA_TYPE_INDEX_MAP = {
     "orders": "orders",
     "fuel_stations": "fuel_stations",
     "inventory": "inventory",
-    "support_tickets": "support_tickets",
     "jobs": "jobs",
 }
 

@@ -2,7 +2,7 @@
 Notifications domain bootstrap module.
 
 Initializes: NotificationService, NotificationWSManager, channel dispatchers
-(real Twilio/SendGrid when credentials are present, stub otherwise),
+(real Twilio/SendGrid in production, stubs only outside production),
 notification API endpoints, and ES indices.
 
 Requirements: 1.5, 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 5.6, 7.4
@@ -15,21 +15,33 @@ from bootstrap.container import ServiceContainer
 logger = logging.getLogger(__name__)
 
 
-def _create_dispatchers():
+def _is_production_environment(environment) -> bool:
+    return getattr(environment, "value", environment) == "production"
+
+
+def _create_dispatchers(environment=None):
     """Build the list of channel dispatchers.
 
     For each channel, attempt to instantiate the real provider-backed
-    dispatcher.  If the required environment variables are missing (the
-    real dispatcher raises ``ValueError``) or the provider SDK is not
-    installed (``ImportError``), fall back to the log-only stub.
+    dispatcher. In production, missing credentials or unavailable provider SDKs
+    are fatal so startup cannot silently pretend notifications were sent. In
+    non-production environments we retain the log-only stubs for local tests.
     """
     from notifications.services.channel_dispatchers import (
         StubSmsDispatcher,
         StubEmailDispatcher,
         StubWhatsAppDispatcher,
+        NotificationDispatcherConfigurationError,
     )
 
     dispatchers = []
+    production = _is_production_environment(environment)
+
+    def _fallback_or_raise(message: str, stub_factory):
+        if production:
+            raise NotificationDispatcherConfigurationError(message)
+        logger.info("%s — using stub dispatcher", message)
+        dispatchers.append(stub_factory())
 
     # --- SMS (Twilio) ---
     _twilio_sms_vars = all([
@@ -45,11 +57,12 @@ def _create_dispatchers():
             dispatchers.append(TwilioSmsDispatcher())
             logger.info("Registered REAL Twilio SMS dispatcher")
         except (ValueError, ImportError) as exc:
-            logger.warning("Twilio SMS dispatcher unavailable (%s), using stub", exc)
-            dispatchers.append(StubSmsDispatcher())
+            _fallback_or_raise(
+                f"Twilio SMS dispatcher unavailable: {exc}",
+                StubSmsDispatcher,
+            )
     else:
-        logger.info("Twilio SMS env vars not set — using stub SMS dispatcher")
-        dispatchers.append(StubSmsDispatcher())
+        _fallback_or_raise("Twilio SMS env vars not set", StubSmsDispatcher)
 
     # --- WhatsApp (Twilio) ---
     _twilio_wa_vars = all([
@@ -65,11 +78,15 @@ def _create_dispatchers():
             dispatchers.append(TwilioWhatsAppDispatcher())
             logger.info("Registered REAL Twilio WhatsApp dispatcher")
         except (ValueError, ImportError) as exc:
-            logger.warning("Twilio WhatsApp dispatcher unavailable (%s), using stub", exc)
-            dispatchers.append(StubWhatsAppDispatcher())
+            _fallback_or_raise(
+                f"Twilio WhatsApp dispatcher unavailable: {exc}",
+                StubWhatsAppDispatcher,
+            )
     else:
-        logger.info("Twilio WhatsApp env vars not set — using stub WhatsApp dispatcher")
-        dispatchers.append(StubWhatsAppDispatcher())
+        _fallback_or_raise(
+            "Twilio WhatsApp env vars not set",
+            StubWhatsAppDispatcher,
+        )
 
     # --- Email (SendGrid) ---
     _sendgrid_vars = all([
@@ -84,11 +101,12 @@ def _create_dispatchers():
             dispatchers.append(SendGridEmailDispatcher())
             logger.info("Registered REAL SendGrid email dispatcher")
         except (ValueError, ImportError) as exc:
-            logger.warning("SendGrid email dispatcher unavailable (%s), using stub", exc)
-            dispatchers.append(StubEmailDispatcher())
+            _fallback_or_raise(
+                f"SendGrid email dispatcher unavailable: {exc}",
+                StubEmailDispatcher,
+            )
     else:
-        logger.info("SendGrid env vars not set — using stub email dispatcher")
-        dispatchers.append(StubEmailDispatcher())
+        _fallback_or_raise("SendGrid env vars not set", StubEmailDispatcher)
 
     return dispatchers
 
@@ -187,7 +205,7 @@ async def initialize(app, container: ServiceContainer) -> None:
 
     # Register channel dispatchers — real when credentials are present,
     # stub (log-only) otherwise.
-    for dispatcher in _create_dispatchers():
+    for dispatcher in _create_dispatchers(environment=container.settings.environment):
         notification_service.register_dispatcher(
             dispatcher.channel_name, dispatcher
         )
@@ -223,13 +241,21 @@ async def initialize(app, container: ServiceContainer) -> None:
     )
     logger.info("Communication metrics API configured")
 
-    # Seed default notification rules and templates for the dev tenant.
-    # The seed function is idempotent — existing records are left untouched.
+    # Optionally seed default notification rules and templates for an explicit
+    # tenant. The seed function is idempotent, but there is no safe implicit
+    # tenant in production, so startup skips this unless SEED_TENANT_ID is set.
     try:
         from notifications.services.seed_data import seed_default_data
 
-        await seed_default_data(es_service)
-        logger.info("Default notification seed data applied")
+        seed_tenant_id = os.environ.get("SEED_TENANT_ID", "").strip()
+        if seed_tenant_id:
+            await seed_default_data(es_service, tenant_id=seed_tenant_id)
+            logger.info(
+                "Default notification seed data applied for tenant_id=%s",
+                seed_tenant_id,
+            )
+        else:
+            logger.info("Default notification seed data skipped; SEED_TENANT_ID not set")
     except Exception as e:
         logger.warning("Failed to seed default notification data: %s", e)
 

@@ -131,9 +131,9 @@ class TestWebSocketReceivesJobCreated:
         mgr = SchedulingWebSocketManager()
         ws = FakeWebSocket()
 
-        await mgr.connect(ws, subscriptions=["delay_alert"])
+        await mgr.connect(ws, subscriptions=["delay_alert"], tenant_id="tenant_a")
 
-        sent = await mgr.broadcast_job_created({"job_id": "JOB_101"})
+        sent = await mgr.broadcast_job_created({"job_id": "JOB_101", "tenant_id": "tenant_a"})
 
         assert sent == 0
         # Only the connection message, no broadcast
@@ -148,11 +148,11 @@ class TestWebSocketReceivesJobCreated:
         mgr = SchedulingWebSocketManager()
         ws = FakeWebSocket()
 
-        await mgr.connect(ws, subscriptions=None)
+        await mgr.connect(ws, subscriptions=None, tenant_id="tenant_a")
 
-        await mgr.broadcast_job_created({"job_id": "JOB_102"})
-        await mgr.broadcast("status_changed", {"job_id": "JOB_102"})
-        await mgr.broadcast("delay_alert", {"job_id": "JOB_102"})
+        await mgr.broadcast_job_created({"job_id": "JOB_102", "tenant_id": "tenant_a"})
+        await mgr.broadcast("status_changed", {"job_id": "JOB_102"}, tenant_id="tenant_a")
+        await mgr.broadcast("delay_alert", {"job_id": "JOB_102"}, tenant_id="tenant_a")
 
         # connection + 3 broadcasts
         assert len(ws.messages) == 4
@@ -175,10 +175,10 @@ class TestWebSocketReceivesStatusChanged:
         mgr = SchedulingWebSocketManager()
         ws = FakeWebSocket()
 
-        await mgr.connect(ws, subscriptions=["status_changed"])
+        await mgr.connect(ws, subscriptions=["status_changed"], tenant_id="tenant_a")
 
         sent = await mgr.broadcast_status_changed(
-            job_data={"job_id": "JOB_200", "status": "in_progress"},
+            job_data={"job_id": "JOB_200", "status": "in_progress", "tenant_id": "tenant_a"},
             old_status="assigned",
             new_status="in_progress",
         )
@@ -200,11 +200,11 @@ class TestWebSocketReceivesStatusChanged:
         ws1 = FakeWebSocket()
         ws2 = FakeWebSocket()
 
-        await mgr.connect(ws1, subscriptions=["status_changed"])
-        await mgr.connect(ws2, subscriptions=["status_changed"])
+        await mgr.connect(ws1, subscriptions=["status_changed"], tenant_id="tenant_a")
+        await mgr.connect(ws2, subscriptions=["status_changed"], tenant_id="tenant_a")
 
         sent = await mgr.broadcast_status_changed(
-            job_data={"job_id": "JOB_201"},
+            job_data={"job_id": "JOB_201", "tenant_id": "tenant_a"},
             old_status="scheduled",
             new_status="assigned",
         )
@@ -542,10 +542,12 @@ class TestWebSocketSubscriptionFiltering:
         ws_cargo = FakeWebSocket()
         ws_status = FakeWebSocket()
 
-        await mgr.connect(ws_cargo, subscriptions=["cargo_update"])
-        await mgr.connect(ws_status, subscriptions=["status_changed"])
+        await mgr.connect(ws_cargo, subscriptions=["cargo_update"], tenant_id="tenant_a")
+        await mgr.connect(ws_status, subscriptions=["status_changed"], tenant_id="tenant_a")
 
-        sent = await mgr.broadcast_cargo_update("JOB_400", "ITEM_1", "delivered")
+        sent = await mgr.broadcast_cargo_update(
+            "JOB_400", "ITEM_1", "delivered", tenant_id="tenant_a"
+        )
 
         assert sent == 1
         # ws_cargo got connection + cargo_update
@@ -563,11 +565,17 @@ class TestWebSocketSubscriptionFiltering:
         mgr = SchedulingWebSocketManager()
         ws = FakeWebSocket()
 
-        await mgr.connect(ws, subscriptions=["cargo_complete"])
+        await mgr.connect(ws, subscriptions=["cargo_complete"], tenant_id="tenant_a")
 
         sent = await mgr.broadcast_cargo_complete(
             "JOB_500",
-            {"job_type": "cargo_transport", "origin": "A", "destination": "B", "asset_assigned": "T1"},
+            {
+                "job_type": "cargo_transport",
+                "origin": "A",
+                "destination": "B",
+                "asset_assigned": "T1",
+                "tenant_id": "tenant_a",
+            },
         )
 
         assert sent == 1

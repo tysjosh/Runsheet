@@ -73,9 +73,9 @@ import {
 /**
  * Seeded product suggestions shown in the product_code dropdown. The
  * full catalog lives in the backend (``FUEL_PRODUCT_CATALOG``) and is
- * exposed via ``GET /api/fuel/products``; the UI still accepts a free
- * form entry so legacy aliases (AGO, PMS) continue to work — the
- * backend canonicalizes them before ranking.
+   * exposed via ``GET /api/fuel/products``; the UI still accepts a free
+   * form entry so newly added catalog codes do not require a frontend
+   * deploy before dispatchers can rank them.
  */
 const COMMON_PRODUCT_CODES: ReadonlyArray<{ code: string; label: string }> = [
   { code: "DIESEL_2", label: "Diesel #2" },
@@ -1374,7 +1374,7 @@ export default function SourcingPage({ initialQuery }: SourcingPageProps = {}) {
     }
 
     // Refresh rack prices + contracts using the canonical product_code
-    // the backend returned (legacy aliases like AGO were canonicalized).
+    // the backend returned after product catalog canonicalization.
     const productCode = persisted?.product_code ?? query.product_code;
     const brandedFilter = query.branded;
 

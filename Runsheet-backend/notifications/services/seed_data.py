@@ -26,10 +26,6 @@ from services.elasticsearch_service import ElasticsearchService
 
 logger = logging.getLogger(__name__)
 
-# Default tenant used when no specific tenant is provided at bootstrap time.
-# Matches the ``TENANT`` constant in ``seed_all_data.py``.
-DEFAULT_TENANT_ID = "dev-tenant"
-
 # ---------------------------------------------------------------------------
 # Fuel notification rule definitions
 # Each rule wires a fuel template_key to its trigger event and channels.
@@ -74,7 +70,7 @@ FUEL_NOTIFICATION_RULES: list[dict] = [
 
 async def seed_fuel_notification_rules(
     es_service: ElasticsearchService,
-    tenant_id: str = DEFAULT_TENANT_ID,
+    tenant_id: str,
 ) -> None:
     """Seed fuel-specific notification rules wiring templates to trigger events.
 
@@ -89,6 +85,9 @@ async def seed_fuel_notification_rules(
         tenant_id: Tenant scope to seed data for.
     """
     from notifications.services.rule_engine import RuleEngine
+
+    if not tenant_id:
+        raise ValueError("tenant_id is required to seed notification rules")
 
     rule_engine = RuleEngine(es_service)
     existing_rules = await rule_engine.list_rules(tenant_id)
@@ -138,7 +137,7 @@ async def seed_fuel_notification_rules(
 
 async def seed_default_data(
     es_service: ElasticsearchService,
-    tenant_id: str = DEFAULT_TENANT_ID,
+    tenant_id: str,
 ) -> None:
     """Seed default notification rules and templates for *tenant_id*.
 
@@ -157,11 +156,13 @@ async def seed_default_data(
 
     Args:
         es_service: The shared Elasticsearch service instance.
-        tenant_id: Tenant scope to seed data for.  Defaults to
-            ``"dev-tenant"`` for local development.
+        tenant_id: Tenant scope to seed data for.
     """
     from notifications.services.rule_engine import RuleEngine
     from notifications.services.template_renderer import TemplateRenderer
+
+    if not tenant_id:
+        raise ValueError("tenant_id is required to seed notification data")
 
     logger.info(
         "Seeding default notification data for tenant_id=%s …", tenant_id

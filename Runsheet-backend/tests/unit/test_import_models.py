@@ -18,10 +18,10 @@ from services.schema_templates import FieldType
 class TestDataTypeEnum:
     """Tests for DataTypeEnum values (Requirement 2.1)."""
 
-    def test_all_six_data_types_present(self):
+    def test_supported_data_types_present(self):
         expected = {
             "fleet", "orders", "fuel_stations",
-            "inventory", "support_tickets", "jobs",
+            "inventory", "jobs",
         }
         assert {dt.value for dt in DataTypeEnum} == expected
 

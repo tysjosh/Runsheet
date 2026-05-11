@@ -21,11 +21,13 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 from strands import tool
 from services.elasticsearch_service import elasticsearch_service
+from ._tenant_context import get_current_tenant
 from .logging_wrapper import get_telemetry_service
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TENANT_ID = "dev-tenant"
+def _resolve_tenant_id(tenant_id: str | None) -> str:
+    return tenant_id or get_current_tenant()
 
 JOBS_CURRENT_INDEX = "jobs_current"
 JOB_EVENTS_INDEX = "job_events"
@@ -61,7 +63,7 @@ def _log_tool_invocation(tool_name: str, input_params: dict, start_time: float,
 async def search_jobs(job_type: str = None, status: str = None,
                       asset: str = None, origin: str = None,
                       destination: str = None, start_date: str = None,
-                      end_date: str = None, tenant_id: str = DEFAULT_TENANT_ID) -> str:
+                      end_date: str = None, tenant_id: str | None = None) -> str:
     """
     Search logistics jobs by type, status, asset, location, or time range.
     All queries are tenant-scoped and read-only.
@@ -86,6 +88,7 @@ async def search_jobs(job_type: str = None, status: str = None,
     error_msg = None
 
     try:
+        tenant_id = _resolve_tenant_id(tenant_id)
         logger.info(
             f"📋 Searching jobs"
             + (f" job_type={job_type}" if job_type else "")
@@ -172,7 +175,7 @@ async def search_jobs(job_type: str = None, status: str = None,
 
 
 @tool
-async def get_job_details(job_id: str, tenant_id: str = DEFAULT_TENANT_ID) -> str:
+async def get_job_details(job_id: str, tenant_id: str | None = None) -> str:
     """
     Get full details of a logistics job including event history and cargo manifest.
     Read-only and tenant-scoped.
@@ -189,6 +192,7 @@ async def get_job_details(job_id: str, tenant_id: str = DEFAULT_TENANT_ID) -> st
     error_msg = None
 
     try:
+        tenant_id = _resolve_tenant_id(tenant_id)
         logger.info(f"📋 Fetching job details for: {job_id}")
 
         # Fetch the job document
@@ -302,7 +306,7 @@ async def get_job_details(job_id: str, tenant_id: str = DEFAULT_TENANT_ID) -> st
 @tool
 async def find_available_assets(asset_type: str = None, start_time_range: str = None,
                                  end_time_range: str = None,
-                                 tenant_id: str = DEFAULT_TENANT_ID) -> str:
+                                 tenant_id: str | None = None) -> str:
     """
     Find assets not assigned to active jobs within a specified time window.
     Queries the assets index for all assets of the given type, then checks
@@ -323,6 +327,7 @@ async def find_available_assets(asset_type: str = None, start_time_range: str = 
     error_msg = None
 
     try:
+        tenant_id = _resolve_tenant_id(tenant_id)
         logger.info(
             f"🔍 Finding available assets"
             + (f" type={asset_type}" if asset_type else "")
@@ -423,7 +428,7 @@ async def find_available_assets(asset_type: str = None, start_time_range: str = 
 
 
 @tool
-async def get_scheduling_summary(tenant_id: str = DEFAULT_TENANT_ID) -> str:
+async def get_scheduling_summary(tenant_id: str | None = None) -> str:
     """
     Get a summary of scheduling operations: active jobs count, delayed count,
     available assets, and upcoming scheduled jobs. Read-only and tenant-scoped.
@@ -439,6 +444,7 @@ async def get_scheduling_summary(tenant_id: str = DEFAULT_TENANT_ID) -> str:
     error_msg = None
 
     try:
+        tenant_id = _resolve_tenant_id(tenant_id)
         logger.info("📊 Fetching scheduling summary")
 
         # Aggregation query for job counts by status
@@ -554,7 +560,7 @@ async def get_scheduling_summary(tenant_id: str = DEFAULT_TENANT_ID) -> str:
 
 
 @tool
-async def generate_dispatch_report(days: int = 7, tenant_id: str = DEFAULT_TENANT_ID, intake_channel: Optional[str] = None) -> str:
+async def generate_dispatch_report(days: int = 7, tenant_id: str | None = None, intake_channel: Optional[str] = None) -> str:
     """
     Generate a markdown dispatch report covering job completion rates,
     delay analysis, asset utilization, and recommendations for a specified
@@ -577,6 +583,7 @@ async def generate_dispatch_report(days: int = 7, tenant_id: str = DEFAULT_TENAN
     error_msg = None
 
     try:
+        tenant_id = _resolve_tenant_id(tenant_id)
         logger.info(f"📋 Generating dispatch report for last {days} days")
 
         now = datetime.now(timezone.utc)

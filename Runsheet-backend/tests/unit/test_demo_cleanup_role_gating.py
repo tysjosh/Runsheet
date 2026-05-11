@@ -1,7 +1,6 @@
 """
 Regression tests for the admin-only / production-forbidden gating on
-``POST /api/data/cleanup``, ``POST /api/demo/reset``, and (ambient)
-``GET /api/demo/status``.
+``POST /api/data/cleanup`` and removal of the dangerous demo endpoints.
 
 Before the security sprint both destructive handlers took only a bare
 ``TenantContext`` dependency, which meant any authenticated caller —
@@ -145,80 +144,20 @@ class TestDataCleanupGating:
 # ---------------------------------------------------------------------------
 
 
-class TestDemoEndpointsGating:
-    """``POST /api/demo/reset`` requires admin + non-production.
-    ``GET /api/demo/status`` requires an authenticated tenant but no role."""
+class TestDemoEndpointsRemoved:
+    """The destructive demo reset/status endpoints must not be mounted."""
 
-    def _patch_environment(self, environment: Environment):
-        """Patch the settings factory the demo handlers call lazily so
-        both endpoints see the requested environment."""
-        stub_settings = MagicMock(environment=environment)
-        return patch(
-            "config.settings.get_settings",
-            return_value=stub_settings,
-        )
-
-    def test_non_admin_reset_returns_403(self):
+    def test_demo_reset_is_not_registered(self):
         import inline_endpoints
 
-        app = _build_app(inline_endpoints, roles=["dispatcher"])
-        with self._patch_environment(Environment.DEVELOPMENT):
-            with TestClient(app) as client:
-                resp = client.post("/api/demo/reset")
+        paths = {route.path for route in inline_endpoints.router.routes}
+        assert "/api/demo/reset" not in paths
 
-        assert resp.status_code == 403, resp.text
-
-    def test_admin_reset_in_production_returns_403(self):
+    def test_demo_status_is_not_registered(self):
         import inline_endpoints
 
-        app = _build_app(inline_endpoints, roles=["admin"])
-        with self._patch_environment(Environment.PRODUCTION):
-            with TestClient(app) as client:
-                resp = client.post("/api/demo/reset")
-
-        assert resp.status_code == 403, resp.text
-
-    def test_admin_reset_in_development_succeeds(self):
-        import inline_endpoints
-
-        fake_seeder = MagicMock()
-        fake_seeder.clear_all_data = AsyncMock()
-        fake_seeder.seed_baseline_data = AsyncMock()
-
-        with patch.dict(
-            sys.modules,
-            {"services.data_seeder": MagicMock(data_seeder=fake_seeder)},
-            clear=False,
-        ), self._patch_environment(Environment.DEVELOPMENT):
-            app = _build_app(inline_endpoints, roles=["admin"])
-            with TestClient(app) as client:
-                resp = client.post("/api/demo/reset")
-
-        assert resp.status_code == 200, resp.text
-        fake_seeder.clear_all_data.assert_awaited_once()
-        fake_seeder.seed_baseline_data.assert_awaited_once_with(operational_time="09:00")
-
-    def test_demo_status_requires_authenticated_tenant(self):
-        """``/api/demo/status`` now carries a tenant dependency. When the
-        tenant override is installed the handler returns 200 for any role,
-        since the payload carries no tenant-sensitive data."""
-        import inline_endpoints
-
-        fake_seeder = MagicMock()
-        fake_seeder.es_service = MagicMock()
-        fake_seeder.es_service.get_all_documents = AsyncMock(return_value=[])
-
-        with patch.dict(
-            sys.modules,
-            {"services.data_seeder": MagicMock(data_seeder=fake_seeder)},
-            clear=False,
-        ):
-            # Any role works for status — the handler does not gate on role.
-            app = _build_app(inline_endpoints, roles=["dispatcher"])
-            with TestClient(app) as client:
-                resp = client.get("/api/demo/status")
-
-        assert resp.status_code == 200, resp.text
+        paths = {route.path for route in inline_endpoints.router.routes}
+        assert "/api/demo/status" not in paths
 
 
 # ---------------------------------------------------------------------------

@@ -28,6 +28,7 @@ def _make_update(**overrides):
         "latitude": 25.276987,
         "longitude": 55.296249,
         "timestamp": NOW.isoformat(),
+        "tenant_id": "tenant-a",
     }
     data.update(overrides)
     return data

@@ -1,7 +1,7 @@
 """
 Inline endpoints extracted from main.py to keep it under 200 lines.
 
-Contains: chat, demo, upload, and location endpoints plus CSV helpers.
+Contains: chat, upload, and location endpoints plus CSV helpers.
 """
 import csv
 import io
@@ -139,64 +139,6 @@ async def clear_chat_endpoint(
     from Agents.mainagent import LogisticsAgent
     LogisticsAgent().clear_memory(session_id=request.session_id)
     return {"message": "Chat memory cleared successfully", "session_id": request.session_id}
-
-
-# ---------------------------------------------------------------------------
-# Demo endpoints
-# ---------------------------------------------------------------------------
-#
-# These endpoints wipe + reseed the shared indices with synthetic demo
-# data. They are admin-only and refuse to run in production — a stray
-# call would otherwise nuke every tenant's fleet, inventory, and
-# analytics history in one POST. The seeded docs themselves are
-# tenant-stamped with ``tenant_id="demo"`` by the ``DataSeeder`` so
-# real tenant queries (which always filter on a specific tenant id)
-# cannot resolve them.
-
-@router.post("/api/demo/reset")
-async def reset_demo(
-    tenant: TenantContext = Depends(get_tenant_context),
-):
-    from config.settings import Environment, get_settings as _get_settings
-    from errors.exceptions import forbidden
-    from services.data_seeder import data_seeder
-
-    _settings = _get_settings()
-    if _settings.environment == Environment.PRODUCTION:
-        raise forbidden(
-            message="Demo reset is not available in production",
-            details={"environment": _settings.environment.value},
-        )
-    if "admin" not in (tenant.roles or []):
-        raise forbidden(
-            message="Demo reset requires the admin role",
-            details={"required_role": "admin"},
-        )
-    await data_seeder.clear_all_data()
-    await data_seeder.seed_baseline_data(operational_time="09:00")
-    return {"success": True, "message": "Demo reset to baseline morning operations",
-            "timestamp": utcnow().isoformat(), "state": "morning_baseline"}
-
-@router.get("/api/demo/status")
-async def get_demo_status(
-    tenant: TenantContext = Depends(get_tenant_context),
-):
-    # Demo status reads from the shared ``trucks`` index but only returns
-    # the synthetic batch label + row count, neither of which is tenant-
-    # sensitive. We still require an authenticated tenant so an anonymous
-    # caller cannot learn whether demo data has been loaded.
-    from services.data_seeder import data_seeder
-    trucks = await data_seeder.es_service.get_all_documents("trucks")
-    current_state = "unknown"
-    if trucks:
-        batch_id = trucks[0].get("batch_id", "morning_baseline")
-        for period in ("afternoon", "evening", "night"):
-            if period in batch_id.lower():
-                current_state = period; break
-        else:
-            current_state = "morning_baseline"
-    return {"success": True, "current_state": current_state, "total_trucks": len(trucks),
-            "timestamp": utcnow().isoformat()}
 
 
 # ---------------------------------------------------------------------------

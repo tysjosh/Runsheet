@@ -28,10 +28,12 @@ import {
 
 const FUEL_TYPE_OPTIONS: { value: "" | FuelType; label: string }[] = [
   { value: "", label: "All Fuel Types" },
-  { value: "AGO", label: "AGO (Diesel)" },
-  { value: "PMS", label: "PMS (Petrol)" },
-  { value: "ATK", label: "ATK (Aviation)" },
-  { value: "LPG", label: "LPG (Gas)" },
+  { value: "DIESEL_2", label: "Diesel #2" },
+  { value: "GASOLINE_REG", label: "Regular Unleaded" },
+  { value: "GASOLINE_PREM", label: "Premium Unleaded" },
+  { value: "PROPANE", label: "Propane" },
+  { value: "KEROSENE", label: "Kerosene" },
+  { value: "DEF", label: "DEF" },
 ];
 
 const STATUS_OPTIONS: { value: "" | StationStatus; label: string }[] = [

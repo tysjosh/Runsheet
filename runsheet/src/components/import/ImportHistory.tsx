@@ -12,7 +12,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import type { DataType, ImportSessionRecord, ImportStatus } from "../../types/import";
+import type { ImportSessionRecord, ImportStatus } from "../../types/import";
 import { importApi } from "../../services/importApi";
 
 // ─── Props ───────────────────────────────────────────────────────────────────
@@ -26,10 +26,8 @@ interface ImportHistoryProps {
 const DATA_TYPE_OPTIONS: { value: string; label: string }[] = [
   { value: "", label: "All Data Types" },
   { value: "fleet", label: "Fleet" },
-  { value: "riders", label: "Riders" },
   { value: "fuel_stations", label: "Fuel Stations" },
   { value: "inventory", label: "Inventory" },
-  { value: "support_tickets", label: "Support Tickets" },
   { value: "jobs", label: "Jobs / Scheduling" },
 ];
 
@@ -42,10 +40,8 @@ const STATUS_OPTIONS: { value: string; label: string }[] = [
 
 const DATA_TYPE_LABELS: Record<string, string> = {
   fleet: "Fleet",
-  riders: "Riders",
   fuel_stations: "Fuel Stations",
   inventory: "Inventory",
-  support_tickets: "Support Tickets",
   jobs: "Jobs / Scheduling",
 };
 

@@ -34,6 +34,8 @@ export interface FuelStation {
   station_id: string;
   name: string;
   fuel_type: FuelType;
+  capacity_gallons?: number;
+  current_stock_gallons?: number;
   capacity_liters: number;
   current_stock_liters: number;
   daily_consumption_rate: number;
@@ -88,6 +90,7 @@ export interface FuelAlert {
 
 export interface ConsumptionMetric {
   timestamp: string;
+  total_gallons?: number;
   total_liters: number;
   event_count: number;
   station_id?: string | null;
@@ -286,8 +289,10 @@ export interface CreateStationPayload {
   station_id: string;
   name: string;
   fuel_type: FuelType;
-  capacity_liters: number;
-  initial_stock_liters: number;
+  capacity_gallons: number;
+  initial_stock_gallons: number;
+  capacity_liters?: number;
+  initial_stock_liters?: number;
   location?: GeoPoint;
   location_name?: string;
   alert_threshold_pct: number;
@@ -296,6 +301,7 @@ export interface CreateStationPayload {
 export interface UpdateStationPayload {
   name?: string;
   fuel_type?: FuelType;
+  capacity_gallons?: number;
   capacity_liters?: number;
   location?: GeoPoint;
   location_name?: string;

@@ -1,6 +1,6 @@
 // Data Import / Migration Types
 
-export type DataType = 'fleet' | 'riders' | 'fuel_stations' | 'inventory' | 'support_tickets' | 'jobs';
+export type DataType = "fleet" | "fuel_stations" | "inventory" | "jobs";
 
 export type ImportStatus = 'parsing' | 'mapped' | 'validating' | 'validated' | 'importing' | 'completed' | 'partial' | 'failed';
 

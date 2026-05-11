@@ -80,10 +80,6 @@ ROUTE_FIXTURES: Dict[str, RouteFixture] = {
         json={"session_id": "smoke-test"},
     ),
 
-    # ---- Demo endpoints ----
-    "GET /api/demo/status": RouteFixture(),
-    "POST /api/demo/reset": RouteFixture(method="POST"),
-
     # ---- Fleet / Data endpoints ----
     "GET /api/fleet/summary": RouteFixture(),
     "GET /api/fleet/trucks": RouteFixture(),
@@ -114,9 +110,6 @@ ROUTE_FIXTURES: Dict[str, RouteFixture] = {
     # ---- Analytics endpoints ----
     "GET /api/analytics/metrics": RouteFixture(),
     "GET /api/analytics/routes": RouteFixture(),
-    "GET /api/analytics/delay-causes": RouteFixture(),
-    "GET /api/analytics/regional": RouteFixture(),
-    "GET /api/analytics/time-series": RouteFixture(),
     "GET /api/search": RouteFixture(params={"q": "test"}),
 
     # ---- Upload endpoints ----

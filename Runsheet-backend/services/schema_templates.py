@@ -97,9 +97,9 @@ class SchemaTemplates:
                 FieldDef(name="location", type=FieldType.STRING, required=False, description="Station address or location description"),
                 FieldDef(name="coordinates", type=FieldType.GEO_POINT, required=False, description="GPS coordinates (lat,lon)"),
                 FieldDef(name="fuel_types", type=FieldType.STRING, required=False, description="Available fuel types (comma-separated)"),
-                FieldDef(name="capacity_liters", type=FieldType.NUMBER, required=False, description="Total fuel storage capacity in liters"),
-                FieldDef(name="current_stock_liters", type=FieldType.NUMBER, required=False, description="Current fuel stock in liters"),
-                FieldDef(name="price_per_liter", type=FieldType.NUMBER, required=False, description="Current price per liter"),
+                FieldDef(name="capacity_gallons", type=FieldType.NUMBER, required=False, description="Total fuel storage capacity in gallons"),
+                FieldDef(name="current_stock_gallons", type=FieldType.NUMBER, required=False, description="Current fuel stock in gallons"),
+                FieldDef(name="price_per_gallon", type=FieldType.NUMBER, required=False, description="Current price per gallon"),
                 FieldDef(name="status", type=FieldType.ENUM, required=True, description="Station operational status", enum_values=["open", "closed", "maintenance"]),
                 FieldDef(name="operating_hours", type=FieldType.STRING, required=False, description="Operating hours (e.g. 06:00-22:00)"),
                 FieldDef(name="last_restocked", type=FieldType.DATE, required=False, description="Last restock timestamp", date_format="ISO8601"),
@@ -118,23 +118,6 @@ class SchemaTemplates:
                 FieldDef(name="location", type=FieldType.STRING, required=False, description="Storage location"),
                 FieldDef(name="status", type=FieldType.ENUM, required=False, description="Item status", enum_values=["in_stock", "low_stock", "out_of_stock", "discontinued"]),
                 FieldDef(name="last_updated", type=FieldType.DATE, required=False, description="Last inventory update timestamp", date_format="ISO8601"),
-            ],
-        ),
-        "support_tickets": SchemaTemplate(
-            data_type="support_tickets",
-            description="Customer support ticket records including issue details, priority, and resolution status",
-            es_index="support_tickets",
-            fields=[
-                FieldDef(name="ticket_id", type=FieldType.STRING, required=True, description="Unique ticket identifier"),
-                FieldDef(name="customer", type=FieldType.STRING, required=True, description="Customer name"),
-                FieldDef(name="customer_id", type=FieldType.STRING, required=False, description="Customer identifier"),
-                FieldDef(name="issue", type=FieldType.STRING, required=True, description="Brief issue summary"),
-                FieldDef(name="description", type=FieldType.STRING, required=False, description="Detailed issue description"),
-                FieldDef(name="priority", type=FieldType.ENUM, required=False, description="Ticket priority", enum_values=["low", "medium", "high", "critical"]),
-                FieldDef(name="status", type=FieldType.ENUM, required=True, description="Ticket status", enum_values=["open", "in_progress", "resolved", "closed"]),
-                FieldDef(name="assigned_to", type=FieldType.STRING, required=False, description="Assigned support agent"),
-                FieldDef(name="related_order", type=FieldType.STRING, required=False, description="Related order identifier"),
-                FieldDef(name="created_at", type=FieldType.DATE, required=False, description="Ticket creation timestamp", date_format="ISO8601"),
             ],
         ),
         "jobs": SchemaTemplate(
@@ -162,7 +145,6 @@ class SchemaTemplates:
         "fleet": "trucks",
         "orders": "orders",
         "inventory": "inventory",
-        "support_tickets": "support_tickets",
         "fuel_stations": "fuel_stations",
         "jobs": "jobs",
     }
@@ -181,19 +163,14 @@ class SchemaTemplates:
         ],
 
         "fuel_stations": [
-            {"station_id": "FS-001", "name": "Central Depot Fuel Station", "location": "4500 Industrial Blvd, Houston, TX 77001", "coordinates": "29.7604,-95.3698", "fuel_types": "diesel,gasoline", "capacity_liters": "50000", "current_stock_liters": "35000", "price_per_liter": "1.45", "status": "open", "operating_hours": "06:00-22:00", "last_restocked": "2024-03-14T06:00:00Z"},
-            {"station_id": "FS-002", "name": "I-10 Corridor Stop", "location": "Mile 45, I-10 Corridor, TX", "coordinates": "29.8500,-95.8000", "fuel_types": "diesel", "capacity_liters": "30000", "current_stock_liters": "8000", "price_per_liter": "1.50", "status": "open", "operating_hours": "00:00-23:59", "last_restocked": "2024-03-10T08:00:00Z"},
-            {"station_id": "FS-003", "name": "Port Area Station", "location": "1200 Dock Rd, Houston, TX 77015", "coordinates": "29.7350,-95.2800", "fuel_types": "diesel,gasoline,propane", "capacity_liters": "75000", "current_stock_liters": "60000", "price_per_liter": "1.42", "status": "maintenance", "operating_hours": "06:00-20:00", "last_restocked": "2024-03-12T10:00:00Z"},
+            {"station_id": "FS-001", "name": "Central Depot Fuel Station", "location": "4500 Industrial Blvd, Houston, TX 77001", "coordinates": "29.7604,-95.3698", "fuel_types": "diesel,gasoline", "capacity_gallons": "50000", "current_stock_gallons": "35000", "price_per_gallon": "3.85", "status": "open", "operating_hours": "06:00-22:00", "last_restocked": "2024-03-14T06:00:00Z"},
+            {"station_id": "FS-002", "name": "I-10 Corridor Stop", "location": "Mile 45, I-10 Corridor, TX", "coordinates": "29.8500,-95.8000", "fuel_types": "diesel", "capacity_gallons": "30000", "current_stock_gallons": "8000", "price_per_gallon": "3.95", "status": "open", "operating_hours": "00:00-23:59", "last_restocked": "2024-03-10T08:00:00Z"},
+            {"station_id": "FS-003", "name": "Port Area Station", "location": "1200 Dock Rd, Houston, TX 77015", "coordinates": "29.7350,-95.2800", "fuel_types": "diesel,gasoline,propane", "capacity_gallons": "75000", "current_stock_gallons": "60000", "price_per_gallon": "3.79", "status": "maintenance", "operating_hours": "06:00-20:00", "last_restocked": "2024-03-12T10:00:00Z"},
         ],
         "inventory": [
             {"item_id": "INV-001", "name": "Brake Pads Set", "category": "spare_parts", "quantity": "150", "unit": "sets", "location": "Warehouse A, Shelf 3", "status": "in_stock", "last_updated": "2024-03-15T08:00:00Z"},
             {"item_id": "INV-002", "name": "Engine Oil 5W-30", "category": "fluids", "quantity": "5", "unit": "liters", "location": "Warehouse B, Bay 1", "status": "low_stock", "last_updated": "2024-03-14T16:00:00Z"},
             {"item_id": "INV-003", "name": "Tire 295/80R22.5", "category": "tires", "quantity": "0", "unit": "units", "location": "Warehouse A, Shelf 7", "status": "out_of_stock", "last_updated": "2024-03-13T12:00:00Z"},
-        ],
-        "support_tickets": [
-            {"ticket_id": "TKT-001", "customer": "Acme Corp", "customer_id": "CUST-100", "issue": "Delayed delivery", "description": "Order ORD-001 has not arrived by the expected date", "priority": "high", "status": "open", "assigned_to": "agent-sarah", "related_order": "ORD-001", "created_at": "2024-03-15T09:00:00Z"},
-            {"ticket_id": "TKT-002", "customer": "Global Logistics", "customer_id": "CUST-200", "issue": "Damaged goods", "description": "Items received in damaged packaging", "priority": "medium", "status": "in_progress", "assigned_to": "agent-mike", "related_order": "ORD-002", "created_at": "2024-03-13T14:00:00Z"},
-            {"ticket_id": "TKT-003", "customer": "Fresh Foods Ltd", "customer_id": "CUST-300", "issue": "Invoice discrepancy", "description": "Billed amount does not match the agreed price", "priority": "low", "status": "resolved", "assigned_to": "agent-sarah", "related_order": "ORD-003", "created_at": "2024-03-10T11:00:00Z"},
         ],
         "jobs": [
             {"job_id": "JOB-001", "title": "Fuel pickup from Houston Terminal", "job_type": "pickup", "assigned_truck": "TRK-001", "assigned_driver": "DRV-010", "origin": "Houston Terminal", "destination": "Dallas Depot", "scheduled_at": "2024-03-15T07:00:00Z", "completed_at": "", "status": "in_progress", "priority": "high", "notes": "HAZMAT load, handle with care"},

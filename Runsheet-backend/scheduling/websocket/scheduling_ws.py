@@ -127,9 +127,10 @@ class SchedulingWebSocketManager(BaseWSManager):
     async def broadcast(self, event_type: str, data: dict, tenant_id: str = "") -> int:
         """Send data to clients whose subscriptions include event_type.
 
-        When *tenant_id* is provided, only clients whose
-        ``meta.tenant_id == tenant_id`` receive the message. This prevents
-        cross-tenant data leakage over WebSocket broadcasts.
+        The caller must provide *tenant_id*; only clients whose
+        ``meta.tenant_id == tenant_id`` receive the message. Refusing
+        tenantless broadcasts prevents cross-tenant data leakage over
+        WebSocket fanout.
 
         Applies backpressure from BaseWSManager.
 
@@ -138,6 +139,14 @@ class SchedulingWebSocketManager(BaseWSManager):
         Returns:
             Number of clients that successfully received the message.
         """
+        if not tenant_id:
+            logger.warning(
+                "Scheduling WS refused tenantless broadcast event_type=%s",
+                event_type,
+            )
+            self._metrics["messages_dropped_total"] += 1
+            return 0
+
         message = {
             "type": event_type,
             "data": data,

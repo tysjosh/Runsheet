@@ -22,6 +22,7 @@ import logging
 import time
 from strands import tool
 from Agents.confirmation_protocol import MutationRequest
+from ._tenant_context import get_current_tenant
 from .logging_wrapper import get_telemetry_service
 
 logger = logging.getLogger(__name__)
@@ -56,6 +57,10 @@ def _get_protocol():
             "Call configure_mutation_tools() during startup."
         )
     return _confirmation_protocol
+
+
+def _resolve_tenant_id(tenant_id: str | None) -> str:
+    return tenant_id or get_current_tenant()
 
 
 def _log_tool_invocation(tool_name: str, input_params: dict, start_time: float,
@@ -113,7 +118,7 @@ def _format_mutation_result(result) -> str:
 
 @tool
 async def assign_asset_to_job(job_id: str, asset_id: str,
-                              tenant_id: str = "dev-tenant") -> str:
+                              tenant_id: str | None = None) -> str:
     """
     Assign an asset to a job. Risk: medium.
 
@@ -133,6 +138,7 @@ async def assign_asset_to_job(job_id: str, asset_id: str,
     error_msg = None
 
     try:
+        tenant_id = _resolve_tenant_id(tenant_id)
         protocol = _get_protocol()
         request = MutationRequest(
             tool_name="assign_asset_to_job",
@@ -157,7 +163,7 @@ async def assign_asset_to_job(job_id: str, asset_id: str,
 
 @tool
 async def update_job_status(job_id: str, new_status: str, reason: str,
-                            tenant_id: str = "dev-tenant") -> str:
+                            tenant_id: str | None = None) -> str:
     """
     Update job status with valid transition check. Risk: medium.
 
@@ -179,6 +185,7 @@ async def update_job_status(job_id: str, new_status: str, reason: str,
     error_msg = None
 
     try:
+        tenant_id = _resolve_tenant_id(tenant_id)
         protocol = _get_protocol()
         request = MutationRequest(
             tool_name="update_job_status",
@@ -208,7 +215,7 @@ async def update_job_status(job_id: str, new_status: str, reason: str,
 
 @tool
 async def cancel_job(job_id: str, reason: str,
-                     tenant_id: str = "dev-tenant") -> str:
+                     tenant_id: str | None = None) -> str:
     """
     Cancel a job. Risk: high.
 
@@ -228,6 +235,7 @@ async def cancel_job(job_id: str, reason: str,
     error_msg = None
 
     try:
+        tenant_id = _resolve_tenant_id(tenant_id)
         protocol = _get_protocol()
         request = MutationRequest(
             tool_name="cancel_job",
@@ -254,7 +262,7 @@ async def cancel_job(job_id: str, reason: str,
 async def create_job(job_type: str, origin: str, destination: str,
                      scheduled_time: str, asset_id: str = None,
                      cargo_manifest: list = None,
-                     tenant_id: str = "dev-tenant") -> str:
+                     tenant_id: str | None = None) -> str:
     """
     Create a new logistics job. Risk: medium.
 
@@ -279,6 +287,7 @@ async def create_job(job_type: str, origin: str, destination: str,
     error_msg = None
 
     try:
+        tenant_id = _resolve_tenant_id(tenant_id)
         protocol = _get_protocol()
         parameters = {
             "job_type": job_type,
@@ -320,7 +329,7 @@ async def create_job(job_type: str, origin: str, destination: str,
 
 @tool
 async def reassign_rider(shipment_id: str, new_rider_id: str, reason: str,
-                         tenant_id: str) -> str:
+                         tenant_id: str | None = None) -> str:
     """
     Reassign a shipment to a different rider. Risk: high.
 
@@ -341,6 +350,7 @@ async def reassign_rider(shipment_id: str, new_rider_id: str, reason: str,
     error_msg = None
 
     try:
+        tenant_id = _resolve_tenant_id(tenant_id)
         protocol = _get_protocol()
         request = MutationRequest(
             tool_name="reassign_rider",
@@ -370,7 +380,7 @@ async def reassign_rider(shipment_id: str, new_rider_id: str, reason: str,
 
 @tool
 async def escalate_shipment(shipment_id: str, priority: str, reason: str,
-                            tenant_id: str) -> str:
+                            tenant_id: str | None = None) -> str:
     """
     Escalate shipment priority. Risk: medium.
 
@@ -391,6 +401,7 @@ async def escalate_shipment(shipment_id: str, priority: str, reason: str,
     error_msg = None
 
     try:
+        tenant_id = _resolve_tenant_id(tenant_id)
         protocol = _get_protocol()
         request = MutationRequest(
             tool_name="escalate_shipment",
@@ -425,7 +436,7 @@ async def escalate_shipment(shipment_id: str, priority: str, reason: str,
 @tool
 async def request_fuel_refill(station_id: str, quantity_liters: float,
                               priority: str,
-                              tenant_id: str = "dev-tenant") -> str:
+                              tenant_id: str | None = None) -> str:
     """
     Request a fuel refill for a station. Risk: medium.
 
@@ -447,6 +458,7 @@ async def request_fuel_refill(station_id: str, quantity_liters: float,
     error_msg = None
 
     try:
+        tenant_id = _resolve_tenant_id(tenant_id)
         protocol = _get_protocol()
         request = MutationRequest(
             tool_name="request_fuel_refill",
@@ -476,7 +488,7 @@ async def request_fuel_refill(station_id: str, quantity_liters: float,
 
 @tool
 async def update_fuel_threshold(station_id: str, threshold_pct: float,
-                                tenant_id: str = "dev-tenant") -> str:
+                                tenant_id: str | None = None) -> str:
     """
     Update fuel alert threshold. Risk: low.
 
@@ -496,6 +508,7 @@ async def update_fuel_threshold(station_id: str, threshold_pct: float,
     error_msg = None
 
     try:
+        tenant_id = _resolve_tenant_id(tenant_id)
         protocol = _get_protocol()
         request = MutationRequest(
             tool_name="update_fuel_threshold",

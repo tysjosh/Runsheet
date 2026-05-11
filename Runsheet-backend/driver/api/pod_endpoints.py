@@ -305,6 +305,22 @@ async def _get_job_destination(job_id: str, tenant_id: str) -> Optional[dict]:
     return None
 
 
+def _extract_customer_identity(job_doc: Optional[dict]) -> Optional[str]:
+    """Return the customer/account id a POD signature must bind to, if known."""
+    if not isinstance(job_doc, dict):
+        return None
+    for key in ("customer_id", "destination_customer_id", "account_id"):
+        value = job_doc.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    customer = job_doc.get("customer")
+    if isinstance(customer, dict):
+        value = customer.get("customer_id") or customer.get("id")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
 def _validate_geotag(
     geotag_lat: float,
     geotag_lng: float,
@@ -513,6 +529,7 @@ async def _broadcast_pod_event(
     event_type: str,
     event_data: dict,
     driver_id: Optional[str] = None,
+    tenant_id: str = "",
 ) -> None:
     """Broadcast a POD event through both WS managers.
 
@@ -521,7 +538,11 @@ async def _broadcast_pod_event(
     # Broadcast through scheduling WS (for dispatchers)
     if _scheduling_ws_manager is not None:
         try:
-            await _scheduling_ws_manager.broadcast(event_type, event_data)
+            await _scheduling_ws_manager.broadcast(
+                event_type,
+                event_data,
+                tenant_id=tenant_id or event_data.get("tenant_id", ""),
+            )
         except Exception as exc:
             logger.warning(
                 "Scheduling WS broadcast failed for %s on job %s: %s",
@@ -673,6 +694,7 @@ async def submit_pod(
     pod_id = str(uuid.uuid4())
 
     # Access control: reject requests from non-assigned driver (Req 11.2)
+    job_doc: Optional[dict] = None
     if _job_service is not None:
         try:
             job_doc = await _job_service._get_job_doc(job_id, tenant.tenant_id)
@@ -688,8 +710,13 @@ async def submit_pod(
                 )
         except AppException:
             raise
-        except Exception:
-            pass  # If job lookup fails for other reasons, proceed (non-blocking)
+        except Exception as exc:
+            logger.warning(
+                "Failed to fetch job %s for POD access checks tenant=%s: %s",
+                job_id,
+                tenant.tenant_id,
+                exc,
+            )
 
     # Resolve artifact references. file_refs are preferred; raw URLs are
     # accepted for backward compatibility but marked deprecated (Req 4.1.4).
@@ -699,7 +726,31 @@ async def submit_pod(
     legacy_signature_url = (body.signature_url or "").strip() or None
     legacy_photo_urls = [p for p in (body.photo_urls or []) if p]
 
-    if not signature_ref and not legacy_signature_url:
+    is_refusal = bool(body.refused_delivery)
+    refusal_reason_code = (
+        body.refusal_reason_code.value if body.refusal_reason_code is not None else None
+    )
+    refusal_note = (body.refusal_note or "").strip() or None
+
+    if is_refusal and not refusal_reason_code:
+        raise invalid_request(
+            message="refusal_reason_code is required for refused deliveries",
+            details={
+                "missing": ["refusal_reason_code"],
+                "allowed_reason_codes": [
+                    "customer_refused",
+                    "customer_unavailable",
+                    "access_denied",
+                    "unsafe_site",
+                    "wrong_product",
+                    "insufficient_capacity",
+                    "payment_hold",
+                    "other",
+                ],
+            },
+        )
+
+    if not is_refusal and not signature_ref and not legacy_signature_url:
         raise invalid_request(
             message="signature is required",
             details={"missing": ["signature_ref"]},
@@ -709,6 +760,29 @@ async def submit_pod(
             message="at least one photo is required",
             details={"missing": ["photo_refs"]},
         )
+
+    expected_customer_id = _extract_customer_identity(job_doc)
+    submitted_customer_id = (body.customer_id or "").strip() or None
+    signature_customer_validated = False
+    if signature_ref and expected_customer_id:
+        if not submitted_customer_id:
+            raise invalid_request(
+                message="customer_id is required when submitting a signature_ref",
+                details={
+                    "missing": ["customer_id"],
+                    "reason": "signature_customer_identity_required",
+                },
+            )
+        if submitted_customer_id != expected_customer_id:
+            raise forbidden(
+                message="Signature customer identity mismatch",
+                details={
+                    "reason": "signature_customer_identity_mismatch",
+                    "expected_customer_id": expected_customer_id,
+                    "submitted_customer_id": submitted_customer_id,
+                },
+            )
+        signature_customer_validated = True
 
     # Validate every supplied file_ref belongs to the submitting tenant.
     # FileStorageService raises PermissionError on cross-tenant refs, which
@@ -824,7 +898,9 @@ async def submit_pod(
     # canonicalization emits a single ISO 8601 ``Z``-terminated value.
     pod_order_id = ""
     try:
-        if _job_service is not None:
+        if job_doc is not None:
+            pod_order_id = str(job_doc.get("order_id") or "")
+        elif _job_service is not None:
             job_doc_for_hash = await _job_service._get_job_doc(
                 job_id, tenant.tenant_id
             )
@@ -832,12 +908,17 @@ async def submit_pod(
     except Exception:  # pragma: no cover - defensive
         pod_order_id = ""
     delivered_at_value = body.timestamp
+    pod_status = "refused" if is_refusal else "submitted"
+    pod_event_type = "delivery_refused" if is_refusal else "pod_submitted"
 
     pod_doc = {
         "pod_id": pod_id,
         "job_id": job_id,
         "order_id": pod_order_id,
         "recipient_name": body.recipient_name,
+        "customer_id": submitted_customer_id,
+        "expected_customer_id": expected_customer_id,
+        "signature_customer_validated": signature_customer_validated,
         "signature_ref": signature_ref,
         "photo_refs": photo_refs_list,
         "meter_ticket_ref": meter_ticket_ref,
@@ -854,7 +935,10 @@ async def submit_pod(
         "timestamp": body.timestamp,
         "otp_verified": otp_verified,
         "location_mismatch": location_mismatch,
-        "status": "submitted",
+        "status": pod_status,
+        "refused_delivery": is_refusal,
+        "refusal_reason_code": refusal_reason_code,
+        "refusal_note": refusal_note,
         "tenant_id": tenant.tenant_id,
     }
 
@@ -948,7 +1032,7 @@ async def submit_pod(
         try:
             await _job_service._append_event(
                 job_id=job_id,
-                event_type="pod_submitted",
+                event_type=pod_event_type,
                 tenant_id=tenant.tenant_id,
                 actor_id=tenant.user_id,
                 payload={
@@ -956,6 +1040,9 @@ async def submit_pod(
                     "recipient_name": body.recipient_name,
                     "location_mismatch": location_mismatch,
                     "otp_verified": otp_verified,
+                    "status": pod_status,
+                    "refused_delivery": is_refusal,
+                    "refusal_reason_code": refusal_reason_code,
                     "timestamp": now,
                 },
             )
@@ -973,14 +1060,17 @@ async def submit_pod(
         "recipient_name": body.recipient_name,
         "location_mismatch": location_mismatch,
         "otp_verified": otp_verified,
-        "status": "submitted",
+        "status": pod_status,
+        "refused_delivery": is_refusal,
+        "refusal_reason_code": refusal_reason_code,
         "timestamp": now,
         "tenant_id": tenant.tenant_id,
     }
     await _broadcast_pod_event(
-        "pod_submitted",
+        pod_event_type,
         pod_event_data,
         driver_id=tenant.user_id,
+        tenant_id=tenant.tenant_id,
     )
 
     result = {

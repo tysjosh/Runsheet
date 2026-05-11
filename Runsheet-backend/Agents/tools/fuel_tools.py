@@ -19,11 +19,13 @@ import time
 from datetime import datetime, timedelta, timezone
 from strands import tool
 from services.elasticsearch_service import elasticsearch_service
+from ._tenant_context import get_current_tenant
 from .logging_wrapper import get_telemetry_service
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TENANT_ID = "dev-tenant"
+def _resolve_tenant_id(tenant_id: str | None) -> str:
+    return tenant_id or get_current_tenant()
 
 
 def _log_tool_invocation(tool_name: str, input_params: dict, start_time: float,
@@ -53,7 +55,7 @@ def _log_tool_invocation(tool_name: str, input_params: dict, start_time: float,
 
 @tool
 async def search_fuel_stations(query: str, fuel_type: str = None, status: str = None,
-                                tenant_id: str = DEFAULT_TENANT_ID) -> str:
+                                tenant_id: str | None = None) -> str:
     """
     Search fuel stations by name, type, location, or stock status.
 
@@ -72,6 +74,7 @@ async def search_fuel_stations(query: str, fuel_type: str = None, status: str = 
     error_msg = None
 
     try:
+        tenant_id = _resolve_tenant_id(tenant_id)
         logger.info(
             f"⛽ Searching fuel stations for: {query}"
             + (f" (fuel_type={fuel_type})" if fuel_type else "")
@@ -153,7 +156,7 @@ async def search_fuel_stations(query: str, fuel_type: str = None, status: str = 
 
 
 @tool
-async def get_fuel_summary(tenant_id: str = DEFAULT_TENANT_ID) -> str:
+async def get_fuel_summary(tenant_id: str | None = None) -> str:
     """
     Get network-wide fuel summary including total stock, capacity, alerts,
     and days until empty across all stations.
@@ -169,6 +172,7 @@ async def get_fuel_summary(tenant_id: str = DEFAULT_TENANT_ID) -> str:
     error_msg = None
 
     try:
+        tenant_id = _resolve_tenant_id(tenant_id)
         logger.info("⛽ Fetching network-wide fuel summary")
 
         es_query = {
@@ -237,7 +241,7 @@ async def get_fuel_summary(tenant_id: str = DEFAULT_TENANT_ID) -> str:
 @tool
 async def get_fuel_consumption_history(station_id: str = None, asset_id: str = None,
                                         days: int = 7,
-                                        tenant_id: str = DEFAULT_TENANT_ID) -> str:
+                                        tenant_id: str | None = None) -> str:
     """
     Get fuel consumption events for a specific station or asset over a date range.
 
@@ -255,6 +259,7 @@ async def get_fuel_consumption_history(station_id: str = None, asset_id: str = N
     error_msg = None
 
     try:
+        tenant_id = _resolve_tenant_id(tenant_id)
         logger.info(
             f"⛽ Fetching fuel consumption history"
             + (f" for station={station_id}" if station_id else "")
@@ -331,7 +336,7 @@ async def get_fuel_consumption_history(station_id: str = None, asset_id: str = N
 
 
 @tool
-async def generate_fuel_report(days: int = 7, tenant_id: str = DEFAULT_TENANT_ID) -> str:
+async def generate_fuel_report(days: int = 7, tenant_id: str | None = None) -> str:
     """
     Generate a markdown fuel operations report covering stock levels,
     consumption trends, alert history, and refill recommendations.
@@ -348,6 +353,7 @@ async def generate_fuel_report(days: int = 7, tenant_id: str = DEFAULT_TENANT_ID
     error_msg = None
 
     try:
+        tenant_id = _resolve_tenant_id(tenant_id)
         logger.info(f"⛽ Generating fuel report for last {days} days")
 
         now = datetime.now(timezone.utc)

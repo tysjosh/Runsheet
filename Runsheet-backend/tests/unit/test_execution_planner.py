@@ -591,7 +591,7 @@ class TestRollbackPlan:
         steps[0].status = StepStatus.COMPLETED
 
         plan = ExecutionPlan(plan_id="p1", goal="Test", steps=steps)
-        await planner.rollback_plan(plan)
+        await planner.rollback_plan(plan, tenant_id="t1")
 
         assert steps[0].status == StepStatus.ROLLED_BACK
         cp.process_mutation.assert_called_once()
@@ -620,7 +620,7 @@ class TestRollbackPlan:
         steps[0].status = StepStatus.COMPLETED
 
         plan = ExecutionPlan(plan_id="p1", goal="Test", steps=steps)
-        result = await planner.rollback_plan(plan)
+        result = await planner.rollback_plan(plan, tenant_id="t1")
 
         # Should not raise, but step result should indicate failure
         assert "Rollback failed" in steps[0].result

@@ -7,11 +7,17 @@ interface FuelConsumptionChartProps {
   data: ConsumptionMetric[];
 }
 
+const LITERS_PER_GALLON = 3.785411784;
+
 const FUEL_TYPE_COLORS: Record<FuelType, { bar: string; label: string }> = {
-  AGO: { bar: "bg-blue-500",   label: "AGO (Diesel)" },
-  PMS: { bar: "bg-amber-500",  label: "PMS (Petrol)" },
-  ATK: { bar: "bg-purple-500", label: "ATK (Aviation)" },
-  LPG: { bar: "bg-emerald-500", label: "LPG (Gas)" },
+  DIESEL_2: { bar: "bg-blue-500", label: "Diesel #2" },
+  GASOLINE_REG: { bar: "bg-amber-500", label: "Regular Unleaded" },
+  GASOLINE_PREM: { bar: "bg-red-500", label: "Premium Unleaded" },
+  HEATING_OIL: { bar: "bg-orange-500", label: "Heating Oil" },
+  PROPANE: { bar: "bg-emerald-500", label: "Propane" },
+  KEROSENE: { bar: "bg-purple-500", label: "Kerosene" },
+  OFF_ROAD_DIESEL: { bar: "bg-slate-500", label: "Off-Road Diesel" },
+  DEF: { bar: "bg-cyan-500", label: "DEF" },
 };
 
 const DEFAULT_COLOR = { bar: "bg-gray-400", label: "Other" };
@@ -30,7 +36,9 @@ function groupByDay(data: ConsumptionMetric[]): DayBucket[] {
     if (!map.has(date)) map.set(date, {});
     const bucket = map.get(date)!;
     const fuelType = metric.fuel_type ?? "Other";
-    bucket[fuelType] = (bucket[fuelType] ?? 0) + metric.total_liters;
+    const gallons =
+      metric.total_gallons ?? metric.total_liters / LITERS_PER_GALLON;
+    bucket[fuelType] = (bucket[fuelType] ?? 0) + gallons;
   }
 
   return Array.from(map.entries())
@@ -48,9 +56,9 @@ function formatDateLabel(dateStr: string): string {
   return date.toLocaleDateString([], { month: "short", day: "numeric" });
 }
 
-function formatLiters(liters: number): string {
-  if (liters >= 1_000) return `${(liters / 1_000).toFixed(1)}K`;
-  return liters.toFixed(0);
+function formatGallons(gallons: number): string {
+  if (gallons >= 1_000) return `${(gallons / 1_000).toFixed(1)}K`;
+  return gallons.toFixed(0);
 }
 
 /**
@@ -99,7 +107,7 @@ export default function FuelConsumptionChart({ data }: FuelConsumptionChartProps
 
       {/* Y-axis max label */}
       <div className="flex items-end gap-2 text-xs text-gray-400">
-        <span className="w-12 text-right">{formatLiters(maxTotal)}</span>
+        <span className="w-12 text-right">{formatGallons(maxTotal)}</span>
         <div className="flex-1 border-b border-dashed border-gray-200" />
       </div>
 
@@ -118,7 +126,7 @@ export default function FuelConsumptionChart({ data }: FuelConsumptionChartProps
               className="flex flex-col items-center flex-1 min-w-[28px] max-w-[56px]"
             >
               <span className="text-[10px] text-gray-500 mb-1">
-                {bucket.total > 0 ? formatLiters(bucket.total) : ""}
+                {bucket.total > 0 ? formatGallons(bucket.total) : ""}
               </span>
               <div
                 className="w-full flex flex-col-reverse rounded-t overflow-hidden"
@@ -126,19 +134,19 @@ export default function FuelConsumptionChart({ data }: FuelConsumptionChartProps
                   height: `${Math.max(heightPct, bucket.total > 0 ? 4 : 0)}px`,
                   maxHeight: 120,
                 }}
-                title={`${formatDateLabel(bucket.date)}: ${formatLiters(bucket.total)} L total`}
+                title={`${formatDateLabel(bucket.date)}: ${formatGallons(bucket.total)} gal total`}
               >
                 {fuelTypes.map((ft) => {
-                  const liters = bucket.byFuelType[ft] ?? 0;
-                  if (liters <= 0) return null;
-                  const segPct = (liters / bucket.total) * 100;
+                  const gallons = bucket.byFuelType[ft] ?? 0;
+                  if (gallons <= 0) return null;
+                  const segPct = (gallons / bucket.total) * 100;
                   const cfg = FUEL_TYPE_COLORS[ft as FuelType] ?? DEFAULT_COLOR;
                   return (
                     <div
                       key={ft}
                       className={`w-full ${cfg.bar} transition-all`}
                       style={{ height: `${segPct}%` }}
-                      title={`${cfg.label}: ${formatLiters(liters)} L`}
+                      title={`${cfg.label}: ${formatGallons(gallons)} gal`}
                     />
                   );
                 })}

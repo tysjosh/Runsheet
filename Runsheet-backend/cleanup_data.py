@@ -6,7 +6,9 @@ Clears duplicate data and reseeds with fresh data
 
 import asyncio
 import logging
+import os
 import sys
+from config.settings import Environment, get_settings
 from services.data_seeder import data_seeder
 
 # Setup logging
@@ -19,6 +21,12 @@ logger = logging.getLogger(__name__)
 async def main():
     """Main cleanup function"""
     try:
+        settings = get_settings()
+        if settings.environment == Environment.PRODUCTION:
+            raise RuntimeError(
+                "cleanup_data.py is disabled in production; use tenant-scoped "
+                "administrative tooling instead."
+            )
         print("🧹 Starting Elasticsearch data cleanup...")
         print("=" * 50)
         
@@ -39,13 +47,17 @@ async def main():
         print("💡 Use the Data Upload component to simulate operational changes")
         
     except Exception as e:
-        logger.error(f"❌ Cleanup failed: {e}")
+        logger.exception("Cleanup failed")
         print(f"\n💥 Error during cleanup: {e}")
         sys.exit(1)
 
 if __name__ == "__main__":
     print("Runsheet Logistics - Data Cleanup Script")
     print("This will clear all existing data and reseed with fresh data.")
+
+    if os.environ.get("ENVIRONMENT", "").lower() == "production":
+        print("❌ Cleanup refused: ENVIRONMENT=production")
+        sys.exit(1)
     
     # Confirm with user
     confirm = input("\nDo you want to continue? (y/N): ").lower().strip()

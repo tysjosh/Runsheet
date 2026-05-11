@@ -346,8 +346,8 @@ class TestWebSocketNoAuthRejection:
         """
         client = test_app["client"]
 
-        # Simulate a non-development environment so the dev-tenant fallback
-        # is not active (matching production behaviour).
+        # Use production settings while verifying anonymous WebSockets are
+        # rejected.
         mock_settings = MagicMock()
         mock_settings.environment.value = "production"
         mock_settings.jwt_secret = JWT_SECRET

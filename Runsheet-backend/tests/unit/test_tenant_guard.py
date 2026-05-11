@@ -206,69 +206,6 @@ class TestMissingOrInvalidJWT:
 
 
 # ---------------------------------------------------------------------------
-# Dev-tenant JWT bypass (two-flag posture) — Validates: security sprint #4
-# ---------------------------------------------------------------------------
-
-
-class TestDevTenantBypass:
-    """The dev-tenant bypass now requires BOTH
-    ``ENVIRONMENT=development`` AND ``allow_dev_tenant_bypass=True``.
-
-    A single misconfigured env var is no longer enough to hand out
-    anonymous super-admin access in a shared preview / staging
-    environment.
-    """
-
-    def _patch_settings(self, *, environment: str, allow_bypass: bool):
-        """Return a context manager patching ``get_settings`` with a
-        MagicMock that reports the requested environment / bypass flag."""
-        stub = MagicMock(
-            jwt_secret=JWT_SECRET,
-            jwt_algorithm=JWT_ALGORITHM,
-            allow_dev_tenant_bypass=allow_bypass,
-        )
-        # ``.environment.value`` is read by the middleware.
-        stub.environment = MagicMock(value=environment)
-        return patch(
-            "ops.middleware.tenant_guard.get_settings",
-            return_value=stub,
-        )
-
-    def test_development_without_flag_rejects_unauthenticated_request(self):
-        """ENVIRONMENT=development alone is NOT enough to bypass auth."""
-        _, client = _build_app()
-        with self._patch_settings(environment="development", allow_bypass=False):
-            resp = client.get("/test")
-        assert resp.status_code == 403, resp.text
-
-    def test_development_with_flag_allows_unauthenticated_request(self):
-        """Both flags on: the middleware returns the super-admin dev-tenant context."""
-        _, client = _build_app()
-        with self._patch_settings(environment="development", allow_bypass=True):
-            resp = client.get("/test")
-        assert resp.status_code == 200, resp.text
-        body = resp.json()
-        assert body["tenant_id"] == "dev-tenant"
-        assert body["user_id"] == "dev-user"
-        assert body["has_pii_access"] is True
-
-    def test_production_with_flag_still_rejects(self):
-        """Even if the bypass flag is accidentally True, a production
-        environment must not honour it — defence in depth."""
-        _, client = _build_app()
-        with self._patch_settings(environment="production", allow_bypass=True):
-            resp = client.get("/test")
-        assert resp.status_code == 403, resp.text
-
-    def test_staging_with_flag_still_rejects(self):
-        """Staging must never honour the bypass regardless of the flag."""
-        _, client = _build_app()
-        with self._patch_settings(environment="staging", allow_bypass=True):
-            resp = client.get("/test")
-        assert resp.status_code == 403, resp.text
-
-
-# ---------------------------------------------------------------------------
 # Spoofed Query Param Tests — Validates: Req 9.8
 # ---------------------------------------------------------------------------
 

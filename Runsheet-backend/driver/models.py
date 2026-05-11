@@ -37,6 +37,19 @@ class ExceptionType(str, Enum):
     OTHER = "other"
 
 
+class DeliveryRefusalReason(str, Enum):
+    """Reason codes for a refused delivery workflow."""
+
+    CUSTOMER_REFUSED = "customer_refused"
+    CUSTOMER_UNAVAILABLE = "customer_unavailable"
+    ACCESS_DENIED = "access_denied"
+    UNSAFE_SITE = "unsafe_site"
+    WRONG_PRODUCT = "wrong_product"
+    INSUFFICIENT_CAPACITY = "insufficient_capacity"
+    PAYMENT_HOLD = "payment_hold"
+    OTHER = "other"
+
+
 # ---------------------------------------------------------------------------
 # Shared models
 # ---------------------------------------------------------------------------
@@ -129,6 +142,7 @@ class PODRequest(BaseModel):
     """
 
     recipient_name: str
+    customer_id: Optional[str] = None
     # Preferred: tenant-scoped file_refs returned by the presign endpoint.
     signature_ref: Optional[str] = None
     photo_refs: Optional[list[str]] = None
@@ -142,6 +156,9 @@ class PODRequest(BaseModel):
     geotag: GeoPoint
     timestamp: str  # ISO 8601
     otp: Optional[str] = None
+    refused_delivery: bool = False
+    refusal_reason_code: Optional[DeliveryRefusalReason] = None
+    refusal_note: Optional[str] = None
 
 
 class PODPresignUploadRequest(BaseModel):

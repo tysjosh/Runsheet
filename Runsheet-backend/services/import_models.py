@@ -17,10 +17,8 @@ class DataTypeEnum(str, Enum):
     """Supported data types for import operations."""
     FLEET = "fleet"
     ORDERS = "orders"
-    RIDERS = "riders"
     FUEL_STATIONS = "fuel_stations"
     INVENTORY = "inventory"
-    SUPPORT_TICKETS = "support_tickets"
     JOBS = "jobs"
 
 

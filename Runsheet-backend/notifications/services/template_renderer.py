@@ -72,8 +72,11 @@ DEFAULT_TEMPLATES: list[dict] = [
         "event_type": "delivery_confirmation",
         "channel": "sms",
         "subject_template": "Delivery Confirmed — Order {order_id}",
-        "body_template": "Your order {order_id} has been delivered. Thank you for choosing our service!",
-        "placeholders": ["order_id"],
+        "body_template": (
+            "Your order {order_id} has been delivered: {delivered_gallons} gal "
+            "at {price}. BOL: {bol_link}"
+        ),
+        "placeholders": ["order_id", "delivered_gallons", "price", "bol_link"],
     },
     {
         "event_type": "delivery_confirmation",
@@ -82,24 +85,47 @@ DEFAULT_TEMPLATES: list[dict] = [
         "body_template": (
             "Dear {customer_name},\n\n"
             "Your order {order_id} has been delivered successfully.\n\n"
+            "Delivered gallons: {delivered_gallons}\n"
+            "Price: {price}\n"
+            "Bill of Lading: {bol_link}\n\n"
             "Thank you for choosing our service!"
         ),
-        "placeholders": ["order_id", "customer_name"],
+        "placeholders": [
+            "order_id",
+            "customer_name",
+            "delivered_gallons",
+            "price",
+            "bol_link",
+        ],
     },
     {
         "event_type": "delivery_confirmation",
         "channel": "whatsapp",
         "subject_template": "Delivery Confirmed — Order {order_id}",
-        "body_template": "Your order {order_id} has been delivered. Thank you for choosing our service!",
-        "placeholders": ["order_id"],
+        "body_template": (
+            "Your order {order_id} has been delivered: {delivered_gallons} gal "
+            "at {price}. BOL: {bol_link}"
+        ),
+        "placeholders": ["order_id", "delivered_gallons", "price", "bol_link"],
     },
     # --- delay_alert ---
     {
         "event_type": "delay_alert",
         "channel": "sms",
         "subject_template": "Delivery Delayed — Order {order_id}",
-        "body_template": "Your delivery {order_id} is delayed by {delay_minutes} minutes. New ETA: {new_eta}",
-        "placeholders": ["order_id", "delay_minutes", "new_eta"],
+        "body_template": (
+            "Your delivery {order_id} is delayed by {delay_minutes} minutes. "
+            "New ETA: {new_eta}. Planned gallons: {delivered_gallons}. "
+            "Price: {price}. BOL: {bol_link}"
+        ),
+        "placeholders": [
+            "order_id",
+            "delay_minutes",
+            "new_eta",
+            "delivered_gallons",
+            "price",
+            "bol_link",
+        ],
     },
     {
         "event_type": "delay_alert",
@@ -108,17 +134,39 @@ DEFAULT_TEMPLATES: list[dict] = [
         "body_template": (
             "Dear {customer_name},\n\n"
             "Your delivery for order {order_id} is delayed by {delay_minutes} minutes.\n"
-            "New estimated arrival: {new_eta}\n\n"
+            "New estimated arrival: {new_eta}\n"
+            "Planned gallons: {delivered_gallons}\n"
+            "Price: {price}\n"
+            "Bill of Lading: {bol_link}\n\n"
             "We apologize for the inconvenience."
         ),
-        "placeholders": ["order_id", "delay_minutes", "new_eta", "customer_name"],
+        "placeholders": [
+            "order_id",
+            "delay_minutes",
+            "new_eta",
+            "customer_name",
+            "delivered_gallons",
+            "price",
+            "bol_link",
+        ],
     },
     {
         "event_type": "delay_alert",
         "channel": "whatsapp",
         "subject_template": "Delivery Delayed — Order {order_id}",
-        "body_template": "Your delivery {order_id} is delayed by {delay_minutes} minutes. New ETA: {new_eta}",
-        "placeholders": ["order_id", "delay_minutes", "new_eta"],
+        "body_template": (
+            "Your delivery {order_id} is delayed by {delay_minutes} minutes. "
+            "New ETA: {new_eta}. Planned gallons: {delivered_gallons}. "
+            "Price: {price}. BOL: {bol_link}"
+        ),
+        "placeholders": [
+            "order_id",
+            "delay_minutes",
+            "new_eta",
+            "delivered_gallons",
+            "price",
+            "bol_link",
+        ],
     },
     # --- eta_change ---
     {

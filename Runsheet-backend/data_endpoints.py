@@ -786,47 +786,6 @@ async def get_route_performance(request: Request, tenant: TenantContext = Depend
         "timestamp": utcnow().isoformat()
     }
 
-@router.get("/analytics/delay-causes")
-@limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
-async def get_delay_causes(request: Request, tenant: TenantContext = Depends(get_tenant_context)):
-    try:
-        causes = await elasticsearch_service.get_delay_causes_data(tenant.tenant_id)
-    except Exception:
-        causes = []
-    return {
-        "data": causes,
-        "success": True,
-        "timestamp": utcnow().isoformat()
-    }
-
-@router.get("/analytics/regional")
-@limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
-async def get_regional_performance(request: Request, tenant: TenantContext = Depends(get_tenant_context)):
-    try:
-        regions = await elasticsearch_service.get_regional_performance_data(tenant.tenant_id)
-    except Exception:
-        regions = []
-    return {
-        "data": regions,
-        "success": True,
-        "timestamp": utcnow().isoformat()
-    }
-
-@router.get("/analytics/time-series")
-@limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
-async def get_time_series_data(request: Request, tenant: TenantContext = Depends(get_tenant_context), metric: str = "delivery_performance_pct", timeRange: str = "7d"):
-    """Get time-series data for trending charts"""
-    event_type = "hourly_metrics" if timeRange == "24h" else "daily_performance"
-    data = await elasticsearch_service.get_time_series_data(tenant.tenant_id, event_type, metric, timeRange)
-    
-    return {
-        "data": data,
-        "metric": metric,
-        "timeRange": timeRange,
-        "success": True,
-        "timestamp": utcnow().isoformat()
-    }
-
 # Semantic Search
 @router.get("/search")
 @limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")

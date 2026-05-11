@@ -14,6 +14,10 @@ from abc import ABC, abstractmethod
 logger = logging.getLogger(__name__)
 
 
+class NotificationDispatcherConfigurationError(RuntimeError):
+    """Raised when production notification delivery is not fully configured."""
+
+
 class ChannelDispatcher(ABC):
     """Abstract base class for notification channel dispatchers.
 

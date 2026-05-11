@@ -52,6 +52,15 @@ logging.getLogger('opentelemetry.context').setLevel(logging.CRITICAL)
 _orchestrator = None
 
 
+def _require_tenant_id(tenant_id: Optional[str]) -> str:
+    if not tenant_id:
+        raise ValueError(
+            "tenant_id is required for AI agent execution; refusing to use a "
+            "hardcoded/default tenant."
+        )
+    return tenant_id
+
+
 def configure_orchestrator(orchestrator) -> None:
     """Wire the AgentOrchestrator for multi-agent request routing.
 
@@ -230,7 +239,7 @@ class LogisticsAgent:
             mutations through the dedicated UI action endpoints.
 
             **Fuel Monitoring Tools (read-only):**
-            - `search_fuel_stations(query, fuel_type=None, status=None)` - Search fuel stations by name, type, location, or stock status. Filter by fuel_type (AGO, PMS, ATK, LPG) and status (normal, low, critical, empty).
+            - `search_fuel_stations(query, fuel_type=None, status=None)` - Search fuel stations by name, type, location, or stock status. Filter by canonical fuel_type (DIESEL_2, GASOLINE_REG, KEROSENE, PROPANE, DEF) and status (normal, low, critical, empty).
             - `get_fuel_summary()` - Get network-wide fuel summary including total capacity, current stock, daily consumption, average days until empty, and station counts by status.
             - `get_fuel_consumption_history(station_id=None, asset_id=None, days=7)` - Get fuel consumption events for a specific station or asset over a date range.
             - `generate_fuel_report(days=7)` - Generate a comprehensive markdown fuel operations report covering stock levels, consumption trends, alert history, and refill recommendations.
@@ -241,11 +250,11 @@ class LogisticsAgent:
             present the suggestion to the user as a recommendation but do NOT execute it.
 
             **Scheduling & Dispatch Tools (read-only):**
-            - `search_jobs(job_type=None, status=None, asset=None, origin=None, destination=None, start_date=None, end_date=None, tenant_id="dev-tenant")` - Search logistics jobs by type, status, asset, location, or time range. Job types: cargo_transport, passenger_transport, vessel_movement, airport_transfer, crane_booking. Statuses: scheduled, assigned, in_progress, completed, cancelled, failed.
-            - `get_job_details(job_id, tenant_id="dev-tenant")` - Get full details of a job including event history and cargo manifest.
-            - `find_available_assets(asset_type=None, start_time_range=None, end_time_range=None, tenant_id="dev-tenant")` - Find assets not assigned to active jobs within a time window. Filter by asset_type: vehicle, vessel, equipment, container.
-            - `get_scheduling_summary(tenant_id="dev-tenant")` - Get summary of active jobs, delayed jobs, available assets, and upcoming scheduled jobs.
-            - `generate_dispatch_report(days=7, tenant_id="dev-tenant", intake_channel=None)` - Generate a markdown dispatch report with completion rates, delay analysis, asset utilization, and recommendations. Filter by intake_channel (voice, web_portal, dispatcher, csv, edi, api_partner, legacy) to see channel-specific dispatch metrics.
+            - `search_jobs(job_type=None, status=None, asset=None, origin=None, destination=None, start_date=None, end_date=None, tenant_id=None)` - Search logistics jobs by type, status, asset, location, or time range using the authenticated tenant context. Job types: cargo_transport, passenger_transport, vessel_movement, airport_transfer, crane_booking. Statuses: scheduled, assigned, in_progress, completed, cancelled, failed.
+            - `get_job_details(job_id, tenant_id=None)` - Get full details of a job including event history and cargo manifest using the authenticated tenant context.
+            - `find_available_assets(asset_type=None, start_time_range=None, end_time_range=None, tenant_id=None)` - Find assets not assigned to active jobs within a time window using the authenticated tenant context. Filter by asset_type: vehicle, vessel, equipment, container.
+            - `get_scheduling_summary(tenant_id=None)` - Get summary of active jobs, delayed jobs, available assets, and upcoming scheduled jobs using the authenticated tenant context.
+            - `generate_dispatch_report(days=7, tenant_id=None, intake_channel=None)` - Generate a markdown dispatch report with completion rates, delay analysis, asset utilization, and recommendations using the authenticated tenant context. Filter by intake_channel (voice, web_portal, dispatcher, csv, edi, api_partner, legacy) to see channel-specific dispatch metrics.
 
             **IMPORTANT - Scheduling Tools Read-Only Guardrail:**
             All scheduling tools are strictly read-only. You must NEVER modify job data, assignments, or status.
@@ -614,10 +623,8 @@ class LogisticsAgent:
             try:
                 logger.info("🔀 Routing request through AgentOrchestrator")
                 # Tenant id comes from the caller (injected by the /api/chat
-                # handler from the authenticated ``TenantContext``). Fall back
-                # to the legacy ``dev-tenant`` if the caller did not provide
-                # one — defence-in-depth rather than a blanket accept.
-                effective_tenant_id = tenant_id or "dev-tenant"
+                # handler from the authenticated ``TenantContext``).
+                effective_tenant_id = _require_tenant_id(tenant_id)
                 orchestrator_response = await _orchestrator.route(
                     user_message=message,
                     tenant_id=effective_tenant_id,
@@ -686,9 +693,8 @@ class LogisticsAgent:
                 
                 # Wrap the streaming call with circuit breaker tracking and
                 # with the tenant ContextVar bound so tools see the caller's
-                # tenant. Fall back to dev-tenant only when the caller did
-                # not provide one (legacy path).
-                effective_tenant_id = tenant_id or "dev-tenant"
+                # tenant.
+                effective_tenant_id = _require_tenant_id(tenant_id)
 
                 async def _stream_with_tracking():
                     nonlocal got_response, first_token_time
@@ -869,7 +875,7 @@ class LogisticsAgent:
             
             # Use non-streaming completion. Bind the tenant ContextVar for the
             # duration of the call so ES-reading tools are tenant-scoped.
-            effective_tenant_id = tenant_id or "dev-tenant"
+            effective_tenant_id = _require_tenant_id(tenant_id)
             with set_current_tenant(effective_tenant_id):
                 response = await self.agent.run_async(message)
             

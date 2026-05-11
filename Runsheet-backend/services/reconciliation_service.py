@@ -62,6 +62,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from compliance.services.vcf_calculator import VCFCalculator
 from config.settings import get_settings
 from fuel.services.fuel_ops_es_mappings import MVP_RECONCILIATION_INDEX
 
@@ -84,6 +85,12 @@ VARIANCE_ALERT_FLAG: str = "variance_exceeds_threshold"
 
 #: Redis key pattern for the tenant-configurable variance threshold.
 _VARIANCE_THRESHOLD_KEY_PATTERN: str = "variance_alert_pct:{tenant_id}"
+
+_GALLON_UNIT_ALIASES: frozenset[str] = frozenset(
+    {"gal", "gals", "gallon", "gallons", "us_gal", "us_gallon", "us_gallons"}
+)
+
+_VCF_CALCULATOR = VCFCalculator()
 
 
 # ---------------------------------------------------------------------------
@@ -218,18 +225,16 @@ class ReconciliationService:
             loading_plan, "plan_id", "loading_plan", fallback=pod.get("plan_id")
         )
 
-        ordered_gallons = _require_non_negative_float(order, "ordered_gallons", "order")
-        loaded_gallons = _require_non_negative_float(
+        ordered_gallons = _normalize_gallons(order, "ordered_gallons", "order")
+        loaded_gallons = _normalize_gallons(
             loading_plan, "loaded_gallons", "loading_plan"
         )
-        delivered_gallons = _require_non_negative_float(
-            pod, "delivered_gallons", "pod"
-        )
+        delivered_gallons = _normalize_gallons(pod, "delivered_gallons", "pod")
 
         # Optional invoice inputs may already be attached to the order (rare
         # at POD-finalization time). When present, compute the third
         # variance so the record is complete in a single write.
-        invoiced_gallons = _optional_non_negative_float(order, "invoiced_gallons")
+        invoiced_gallons = _optional_normalized_gallons(order, "invoiced_gallons", "order")
         invoice_id = order.get("invoice_id") or None
         if invoiced_gallons is None and invoice_id:
             # invoice_id without a gallons value is not actionable for the
@@ -369,6 +374,9 @@ class ReconciliationService:
         invoice_id: str,
         invoiced_gallons: float,
         payment_status: Optional[str] = None,
+        invoiced_unit: Optional[str] = None,
+        temperature_f: Optional[float] = None,
+        api_gravity: Optional[float] = None,
     ) -> ReconciliationRecord:
         """Attach invoice data from QuickBooks Online to an existing record.
 
@@ -431,16 +439,16 @@ class ReconciliationService:
             )
         if not isinstance(invoice_id, str) or not invoice_id:
             raise ValueError("invoice_id is required and must be a non-empty string")
-        try:
-            numeric_gallons = float(invoiced_gallons)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(
-                f"invoiced_gallons must be numeric, got {invoiced_gallons!r}"
-            ) from exc
-        if numeric_gallons < 0 or numeric_gallons != numeric_gallons:  # NaN check
-            raise ValueError(
-                f"invoiced_gallons must be a finite non-negative float, got {numeric_gallons}"
-            )
+        invoice_input: Dict[str, Any] = {"invoiced_gallons": invoiced_gallons}
+        if invoiced_unit is not None:
+            invoice_input["invoiced_unit"] = invoiced_unit
+        if temperature_f is not None:
+            invoice_input["invoiced_temperature_f"] = temperature_f
+        if api_gravity is not None:
+            invoice_input["invoiced_api_gravity"] = api_gravity
+        numeric_gallons = _normalize_gallons(
+            invoice_input, "invoiced_gallons", "invoice"
+        )
 
         # Fetch the record so we can recompute the variance against the
         # stored ``delivered_gallons`` and honour tenant isolation.
@@ -477,7 +485,7 @@ class ReconciliationService:
                 f"different tenant"
             )
 
-        delivered_gallons = _require_non_negative_float(
+        delivered_gallons = _normalize_gallons(
             source, "delivered_gallons", "reconciliation"
         )
 
@@ -893,7 +901,103 @@ def _require_non_negative_float(
         raise ValueError(f"{label}.{key} must be numeric, got {value!r}") from exc
     if numeric < 0:
         raise ValueError(f"{label}.{key} must be >= 0, got {numeric}")
+    if numeric != numeric:  # NaN check
+        raise ValueError(f"{label}.{key} must be finite, got {numeric}")
     return numeric
+
+
+def _normalize_gallons(mapping: Mapping[str, Any], key: str, label: str) -> float:
+    """Return gallons normalized onto the 60 F net-gallon basis.
+
+    Reconciliation percentages are only meaningful when every source is on the
+    same unit basis. The service accepts absent unit metadata as gallons because
+    the canonical field names are ``*_gallons``, but any explicit unit must be a
+    gallon alias. If observed temperature/API gravity are provided, the gross
+    gallon value is converted to net gallons using ASTM/API VCF before the
+    variance is computed.
+    """
+    gallons = _require_non_negative_float(mapping, key, label)
+    _require_gallon_unit(mapping, key, label)
+    temperature_f, api_gravity = _extract_vcf_inputs(mapping, key, label)
+    if temperature_f is None and api_gravity is None:
+        return gallons
+    if temperature_f is None or api_gravity is None:
+        raise ValueError(
+            f"{label}.{key} VCF correction requires both temperature_f and api_gravity"
+        )
+    return _VCF_CALCULATOR.compute_net_gallons(
+        gross_gallons=gallons,
+        temperature_f=temperature_f,
+        api_gravity=api_gravity,
+    )
+
+
+def _optional_normalized_gallons(
+    mapping: Mapping[str, Any], key: str, label: str
+) -> Optional[float]:
+    if key not in mapping or mapping.get(key) is None:
+        return None
+    return _normalize_gallons(mapping, key, label)
+
+
+def _require_gallon_unit(mapping: Mapping[str, Any], key: str, label: str) -> None:
+    """Reject explicit non-gallon units before percentage math runs."""
+    prefix = key.removesuffix("_gallons")
+    for unit_key in (f"{key}_unit", f"{prefix}_unit", "volume_unit", "unit"):
+        raw = mapping.get(unit_key)
+        if raw in (None, ""):
+            continue
+        normalized = str(raw).strip().lower().replace("-", "_").replace(" ", "_")
+        if normalized in _GALLON_UNIT_ALIASES:
+            return
+        raise ValueError(
+            f"{label}.{key} must be provided in gallons before reconciliation; "
+            f"got unit {raw!r}"
+        )
+
+
+def _extract_vcf_inputs(
+    mapping: Mapping[str, Any], key: str, label: str
+) -> tuple[Optional[float], Optional[float]]:
+    prefix = key.removesuffix("_gallons")
+    temperature_f = _first_present_float(
+        mapping,
+        (
+            f"{prefix}_observed_temperature_f",
+            f"{prefix}_temperature_f",
+            "observed_temperature_f",
+            "temperature_f",
+        ),
+        label,
+    )
+    api_gravity = _first_present_float(
+        mapping,
+        (
+            f"{prefix}_api_gravity",
+            "api_gravity",
+        ),
+        label,
+    )
+    return temperature_f, api_gravity
+
+
+def _first_present_float(
+    mapping: Mapping[str, Any],
+    keys: Iterable[str],
+    label: str,
+) -> Optional[float]:
+    for key in keys:
+        value = mapping.get(key)
+        if value in (None, ""):
+            continue
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{label}.{key} must be numeric, got {value!r}") from exc
+        if numeric != numeric:  # NaN check
+            raise ValueError(f"{label}.{key} must be finite, got {numeric}")
+        return numeric
+    return None
 
 
 def _optional_non_negative_float(

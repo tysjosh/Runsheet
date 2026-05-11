@@ -111,7 +111,10 @@ def _make_es_service(tenant_policies: dict = None) -> MagicMock:
     return es
 
 
-def _make_job_service(destination_location: dict = None) -> MagicMock:
+def _make_job_service(
+    destination_location: dict = None,
+    customer_id: Optional[str] = None,
+) -> MagicMock:
     """Create a mock JobService with _append_event and _get_job_doc."""
     svc = MagicMock()
     svc._append_event = AsyncMock(return_value="evt-123")
@@ -123,6 +126,8 @@ def _make_job_service(destination_location: dict = None) -> MagicMock:
     }
     if destination_location:
         job_doc["destination_location"] = destination_location
+    if customer_id:
+        job_doc["customer_id"] = customer_id
     svc._get_job_doc = AsyncMock(return_value=job_doc)
 
     return svc
@@ -184,6 +189,10 @@ def _pod_payload(
     # Deprecated raw-URL fields kept for backward-compat coverage.
     signature_url: Optional[str] = None,
     photo_urls: Optional[list] = None,
+    customer_id: Optional[str] = None,
+    refused_delivery: bool = False,
+    refusal_reason_code: Optional[str] = None,
+    refusal_note: Optional[str] = None,
 ) -> dict:
     """Build a POD request payload exercising the file_ref path by default.
 
@@ -212,6 +221,14 @@ def _pod_payload(
         payload["otp"] = otp
     if delivered_gallons is not None:
         payload["delivered_gallons"] = delivered_gallons
+    if customer_id is not None:
+        payload["customer_id"] = customer_id
+    if refused_delivery:
+        payload["refused_delivery"] = True
+    if refusal_reason_code is not None:
+        payload["refusal_reason_code"] = refusal_reason_code
+    if refusal_note is not None:
+        payload["refusal_note"] = refusal_note
     return payload
 
 
@@ -307,6 +324,87 @@ class TestSubmitPod:
         assert call_kwargs["job_id"] == "JOB_1"
         assert call_kwargs["tenant_id"] == TENANT_ID
         assert "pod_id" in call_kwargs["payload"]
+
+    def test_signature_ref_requires_matching_customer_identity_when_job_has_customer(self):
+        job_svc = _make_job_service(customer_id="cust-123")
+        app = _make_app(es_service=_make_es_service(), job_service=job_svc)
+
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.post(
+                "/api/driver/jobs/JOB_1/pod",
+                json=_pod_payload(customer_id="cust-123"),
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 200
+        doc = resp.json()["data"]
+        assert doc["customer_id"] == "cust-123"
+        assert doc["expected_customer_id"] == "cust-123"
+        assert doc["signature_customer_validated"] is True
+
+    def test_signature_ref_customer_identity_mismatch_returns_403(self):
+        job_svc = _make_job_service(customer_id="cust-123")
+        app = _make_app(es_service=_make_es_service(), job_service=job_svc)
+
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.post(
+                "/api/driver/jobs/JOB_1/pod",
+                json=_pod_payload(customer_id="cust-999"),
+                headers=_auth_headers(),
+        )
+
+        assert resp.status_code == 403
+        body = resp.json()
+        details = body.get("details") or body.get("error", {}).get("details") or {}
+        assert details["reason"] == "signature_customer_identity_mismatch"
+
+    def test_refused_delivery_records_reason_and_refusal_event_without_signature(self):
+        es = _make_es_service()
+        job_svc = _make_job_service()
+        app = _make_app(es_service=es, job_service=job_svc)
+
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.post(
+                "/api/driver/jobs/JOB_1/pod",
+                json=_pod_payload(
+                    signature_ref=None,
+                    photo_refs=[_PHOTO_REF_1],
+                    refused_delivery=True,
+                    refusal_reason_code="customer_refused",
+                    refusal_note="Customer declined the delivery.",
+                ),
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 200
+        doc = resp.json()["data"]
+        assert doc["status"] == "refused"
+        assert doc["refused_delivery"] is True
+        assert doc["refusal_reason_code"] == "customer_refused"
+        assert doc["signature_ref"] is None
+
+        call_kwargs = job_svc._append_event.call_args.kwargs
+        assert call_kwargs["event_type"] == "delivery_refused"
+        assert call_kwargs["payload"]["refusal_reason_code"] == "customer_refused"
+
+    def test_refused_delivery_requires_reason_code(self):
+        app = _make_app(es_service=_make_es_service(), job_service=_make_job_service())
+
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.post(
+                "/api/driver/jobs/JOB_1/pod",
+                json=_pod_payload(refused_delivery=True),
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 400
+        body = resp.json()
+        details = body.get("details") or body.get("error", {}).get("details") or {}
+        assert "refusal_reason_code" in details["missing"]
 
     def test_returns_pod_data(self):
         """Response contains the stored POD document. Validates: Req 8.1"""
@@ -862,6 +960,7 @@ class TestPodBroadcast:
         assert call_args.args[0] == "pod_submitted"
         assert call_args.args[1]["job_id"] == "JOB_1"
         assert call_args.args[1]["status"] == "submitted"
+        assert call_args.kwargs["tenant_id"] == TENANT_ID
 
     def test_broadcasts_pod_event_through_driver_ws(self):
         """POD event is broadcast through driver WS. Validates: Req 8.4"""
