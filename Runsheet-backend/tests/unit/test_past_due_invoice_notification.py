@@ -18,7 +18,7 @@ Tests cover:
 """
 
 import pytest
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime, timezone
 from unittest.mock import AsyncMock
 
 from commerce.models.invoice import InvoiceStatus
@@ -64,7 +64,7 @@ def _make_invoice_doc(
 ):
     """Create a mock invoice document."""
     if due_date is None:
-        due_date = (date.today() - timedelta(days=5)).isoformat()
+        due_date = (datetime.now(timezone.utc).date() - timedelta(days=5)).isoformat()
 
     return {
         "invoice_id": invoice_id,
@@ -217,7 +217,7 @@ class TestPastDueInvoiceNotification:
             customer_id="cust-abc",
             invoice_number="INV-2025-0099",
             remaining_cents=25050,
-            due_date=(date.today() - timedelta(days=7)).isoformat(),
+            due_date=(datetime.now(timezone.utc).date() - timedelta(days=7)).isoformat(),
             status="open",
         )
         service.get = AsyncMock(return_value=invoice_doc)
@@ -256,7 +256,7 @@ class TestPastDueInvoiceNotification:
         service = _make_invoice_service(notification_service=notification_service)
 
         invoice_doc = _make_invoice_doc(
-            due_date=(date.today() - timedelta(days=10)).isoformat(),
+            due_date=(datetime.now(timezone.utc).date() - timedelta(days=10)).isoformat(),
             status="open",
         )
         service.get = AsyncMock(return_value=invoice_doc)

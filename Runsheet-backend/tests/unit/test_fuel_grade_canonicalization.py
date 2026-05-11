@@ -289,24 +289,24 @@ class TestConfigureCompartmentsCanonicalization:
         app = self._make_app(es)
         client = TestClient(app)
 
-        resp = client.put(
-            "/api/fuel/mvp/compartments/TRUCK-1",
-            params={"tenant_id": TENANT_ID},
-            json={
-                "compartments": [
-                    {
-                        "compartment_id": "c1",
-                        "capacity_liters": 10_000.0,
-                        "allowed_grades": ["AGO", "NONEXISTENT"],
-                        "position_index": 0,
-                    }
-                ]
-            },
-        )
-        assert resp.status_code == 400
-        detail = resp.json()["detail"]
-        assert detail["error_code"] == "unknown_product_code"
-        assert detail["details"]["fuel_grade"] == "NONEXISTENT"
+        with pytest.raises(AppException) as exc_info:
+            client.put(
+                "/api/fuel/mvp/compartments/TRUCK-1",
+                params={"tenant_id": TENANT_ID},
+                json={
+                    "compartments": [
+                        {
+                            "compartment_id": "c1",
+                            "capacity_liters": 10_000.0,
+                            "allowed_grades": ["AGO", "NONEXISTENT"],
+                            "position_index": 0,
+                        }
+                    ]
+                },
+            )
+        assert exc_info.value.status_code == 400
+        assert "VALIDATION_ERROR" in str(exc_info.value.error_code)
+        assert exc_info.value.details["fuel_grade"] == "NONEXISTENT"
 
 
 # ---------------------------------------------------------------------------

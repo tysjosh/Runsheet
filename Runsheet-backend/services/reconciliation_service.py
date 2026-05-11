@@ -117,6 +117,9 @@ class ReconciliationRecord(BaseModel):
     variance_load_vs_order_pct: float = Field(..., ge=0.0)
     variance_delivered_vs_loaded_pct: float = Field(..., ge=0.0)
     variance_invoiced_vs_delivered_pct: Optional[float] = Field(default=None, ge=0.0)
+    canonical_invoice_id: Optional[str] = None
+    qbo_invoice_id: Optional[str] = None
+    external_refs: Optional[Dict[str, Any]] = None
     alert_flags: List[str] = Field(default_factory=list)
     generated_at: datetime
 

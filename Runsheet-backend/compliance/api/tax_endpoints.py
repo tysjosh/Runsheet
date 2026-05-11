@@ -71,7 +71,7 @@ logger = logging.getLogger(__name__)
 
 _es_service: Optional[Any] = None
 
-router = APIRouter(prefix="/api/compliance", tags=["compliance-tax"])
+router = APIRouter(prefix="/api/compliance", tags=["Compliance"])
 
 
 def configure_tax_api(*, es_service: Any) -> None:

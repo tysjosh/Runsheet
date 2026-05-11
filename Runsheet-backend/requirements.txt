@@ -18,9 +18,9 @@ redis==5.2.0
 slowapi==0.1.9
 
 # OpenTelemetry for distributed tracing (Requirement 5.3)
-opentelemetry-api==1.28.0
-opentelemetry-sdk==1.28.0
-opentelemetry-exporter-otlp==1.28.0
+opentelemetry-api>=1.28.0
+opentelemetry-sdk>=1.28.0
+opentelemetry-exporter-otlp>=1.28.0
 
 # Testing infrastructure (Requirement 11.6)
 pytest==8.3.0

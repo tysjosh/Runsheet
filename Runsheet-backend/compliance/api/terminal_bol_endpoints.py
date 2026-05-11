@@ -62,7 +62,7 @@ _bol_service: Optional[TerminalBOLIngestionService] = None
 _es_service: Optional[Any] = None
 
 router = APIRouter(
-    prefix="/api/compliance/terminal-bols", tags=["compliance-terminal-bols"]
+    prefix="/api/compliance/terminal-bols", tags=["Compliance"]
 )
 
 

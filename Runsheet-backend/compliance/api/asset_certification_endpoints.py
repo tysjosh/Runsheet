@@ -56,7 +56,7 @@ _asset_cert_service: Optional[AssetCertificationService] = None
 
 router = APIRouter(
     prefix="/api/compliance/asset-certifications",
-    tags=["compliance-asset-certifications"],
+    tags=["Compliance"],
 )
 
 

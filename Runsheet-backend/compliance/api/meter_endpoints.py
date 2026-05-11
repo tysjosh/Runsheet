@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 
 _meter_service: Optional[MeterAuditService] = None
 
-router = APIRouter(prefix="/api/compliance/meters", tags=["compliance-meters"])
+router = APIRouter(prefix="/api/compliance/meters", tags=["Compliance"])
 
 
 def configure_meter_api(*, meter_service: MeterAuditService) -> None:

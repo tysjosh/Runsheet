@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 
 _kfactor_service: Optional[KFactorCalibrationService] = None
 
-router = APIRouter(prefix="/api/compliance/kfactor", tags=["compliance-kfactor"])
+router = APIRouter(prefix="/api/compliance/kfactor", tags=["Compliance"])
 
 
 def configure_kfactor_api(*, kfactor_service: KFactorCalibrationService) -> None:

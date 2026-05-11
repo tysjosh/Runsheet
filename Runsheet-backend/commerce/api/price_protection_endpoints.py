@@ -78,7 +78,7 @@ _es_service: Optional[Any] = None
 
 router = APIRouter(
     prefix="/api/commerce/price-protection-contracts",
-    tags=["commerce-price-protection"],
+    tags=["Commerce - Price Protection"],
 )
 
 

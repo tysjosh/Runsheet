@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 
 _ifta_reporter: Optional[IFTAReporter] = None
 
-router = APIRouter(prefix="/api/compliance/ifta", tags=["compliance-ifta"])
+router = APIRouter(prefix="/api/compliance/ifta", tags=["Compliance"])
 
 
 # Quarter format regex: YYYY-Q[1-4]

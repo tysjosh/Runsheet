@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 
 _driver_service: Optional[DriverQualificationService] = None
 
-router = APIRouter(prefix="/api/compliance/drivers", tags=["compliance-drivers"])
+router = APIRouter(prefix="/api/compliance/drivers", tags=["Compliance"])
 
 
 def configure_driver_api(*, driver_service: DriverQualificationService) -> None:

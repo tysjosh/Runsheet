@@ -136,6 +136,8 @@ Runsheet-backend/
 │   ├── middleware.py              # Middleware registration
 │   ├── agents.py                  # Agent subsystem bootstrap
 │   ├── ops.py                     # Ops domain bootstrap
+│   ├── compliance.py              # Compliance domain bootstrap
+│   ├── commerce.py                # Commerce domain bootstrap
 │   ├── fuel.py                    # Fuel domain bootstrap
 │   ├── scheduling.py              # Scheduling domain bootstrap
 │   └── agent_scheduler.py         # Autonomous agent scheduler
@@ -426,6 +428,22 @@ erDiagram
     
     TRUCKS ||--o{ ORDERS : assigned
     ORDERS ||--o{ SUPPORT_TICKETS : related
+
+    %% Compliance & Commerce Backbone (11 indices)
+    PRICE_PROTECTION_CONTRACTS {
+        string contract_id
+        string status
+        float remaining_gallons
+    }
+    TAX_JURISDICTIONS {
+        string fips_code
+        float rate_cents
+    }
+    INVOICES {
+        string invoice_id
+        float total_cents
+        string status
+    }
 ```
 
 ### API Endpoints
@@ -516,6 +534,23 @@ GET  /api/fuel/mvp/plan/{plan_id}               # Get a distribution plan
 POST /api/fuel/mvp/plan/{plan_id}/replan        # Replan with exception handling
 GET  /api/fuel/mvp/forecasts                    # Get tank level forecasts
 GET  /api/fuel/mvp/priorities                   # Get delivery priorities
+```
+
+#### Compliance & Commerce Backbone (`/api/compliance/*`, `/api/commerce/*`)
+
+```
+GET   /api/compliance/tax/breakdown             # Compute multi-jurisdiction tax breakdown
+GET   /api/compliance/drivers/certifications    # Driver hazmat/CDL certifications
+GET   /api/compliance/asset-certifications      # Vehicle state/federal certifications
+GET   /api/compliance/meters/calibrations       # Meter calibration status
+GET   /api/compliance/kfactor/trends            # K-Factor drift trend analysis
+GET   /api/compliance/terminal-bols/reconciliation  # BOL reconciliation reports
+GET   /api/compliance/ifta/quarterly            # IFTA quarterly aggregation (Req 7.4)
+
+GET   /api/commerce/price-protection-contracts  # List price protection contracts
+POST  /api/commerce/price-protection-contracts  # Create contract (Req 3.1)
+GET   /api/commerce/pricing-rules               # Priority-based pricing rules
+POST  /api/commerce/pricing/resolve             # Resolve effective price per delivery
 ```
 
 #### Scheduling & Dispatch (`/api/scheduling/*` — `scheduling/api/endpoints.py`)

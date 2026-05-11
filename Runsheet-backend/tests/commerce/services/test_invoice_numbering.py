@@ -99,7 +99,7 @@ class TestNextNumber:
         assert result == 11
         # Redis.set should have been called during reseed
         redis.set.assert_called_once_with(
-            f"commerce:invoice_seq:{TENANT_ID}", "10"
+            f"commerce:invoice_seq:{TENANT_ID}", "10", ex=7776000
         )
         redis.incr.assert_called_once()
 
@@ -126,7 +126,7 @@ class TestNextNumber:
         assert result == 108
         # Reseed should set to 100 + 7 = 107
         redis.set.assert_called_once_with(
-            f"commerce:invoice_seq:{TENANT_ID}", "107"
+            f"commerce:invoice_seq:{TENANT_ID}", "107", ex=7776000
         )
 
     @pytest.mark.asyncio
@@ -322,7 +322,7 @@ class TestReseedFromCheckpoint:
 
         assert result == 215  # 200 + 15
         redis.set.assert_called_once_with(
-            f"commerce:invoice_seq:{TENANT_ID}", "215"
+            f"commerce:invoice_seq:{TENANT_ID}", "215", ex=7776000
         )
 
     @pytest.mark.asyncio
@@ -343,7 +343,7 @@ class TestReseedFromCheckpoint:
 
         assert result == 30
         redis.set.assert_called_once_with(
-            f"commerce:invoice_seq:{TENANT_ID}", "30"
+            f"commerce:invoice_seq:{TENANT_ID}", "30", ex=7776000
         )
 
     @pytest.mark.asyncio
@@ -364,7 +364,7 @@ class TestReseedFromCheckpoint:
 
         assert result == 50
         redis.set.assert_called_once_with(
-            f"commerce:invoice_seq:{TENANT_ID}", "50"
+            f"commerce:invoice_seq:{TENANT_ID}", "50", ex=7776000
         )
 
     @pytest.mark.asyncio
