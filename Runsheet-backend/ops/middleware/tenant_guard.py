@@ -10,6 +10,7 @@ Validates: Requirements 9.1, 9.2, 9.4, 9.6, 9.8, 6.1.5, 6.3.1
 """
 
 import logging
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
@@ -28,8 +29,9 @@ from services.tenant_settings import (
 
 logger = logging.getLogger(__name__)
 
-# Default tenant context for development mode (no JWT required)
-_DEV_TENANT = None
+request_tenant_id_var: ContextVar[str] = ContextVar(
+    "request_tenant_id", default=""
+)
 
 # Module-level tenant settings service — configured once at bootstrap via
 # ``configure_tenant_guard``. Remains None in tests that never wire it, in
@@ -180,6 +182,7 @@ async def get_tenant_context(request: Request) -> TenantContext:
             details={"reason": "JWT must contain a tenant_id claim"},
         )
 
+    request_tenant_id_var.set(tenant_id)
     user_id: str = payload.get("sub", payload.get("user_id", "unknown"))
     has_pii_access: bool = payload.get("has_pii_access", False)
     roles: list[str] = payload.get("roles", [])

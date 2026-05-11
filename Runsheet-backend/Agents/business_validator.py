@@ -170,8 +170,8 @@ class BusinessValidator:
             resp = await self._es.search_documents("jobs_current", query, 1)
             hits = [h["_source"] for h in resp["hits"]["hits"]]
             return hits[0] if hits else None
-        except Exception as e:
-            logger.error(f"Failed to fetch job {job_id}: {e}")
+        except Exception:
+            logger.exception("Failed to fetch job %s", job_id)
             return None
 
     async def _fetch_asset(
@@ -207,6 +207,6 @@ class BusinessValidator:
             resp = await self._es.search_documents("trucks", query, 1)
             hits = [h["_source"] for h in resp["hits"]["hits"]]
             return hits[0] if hits else None
-        except Exception as e:
-            logger.error(f"Failed to fetch asset {asset_id}: {e}")
+        except Exception:
+            logger.exception("Failed to fetch asset %s", asset_id)
             return None

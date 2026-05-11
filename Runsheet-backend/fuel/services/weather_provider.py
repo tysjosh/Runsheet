@@ -267,6 +267,7 @@ class WeatherProvider(ABC):
         self._es = es_service
         self._redis = redis_client
         self._http_client = http_client
+        self._owns_http_client = http_client is None
         self._timeout = timeout_seconds
         self._cache_ttl = cache_ttl_seconds
         # ``circuit_breaker`` defaults to the process-wide shared
@@ -456,20 +457,24 @@ class WeatherProvider(ABC):
     async def _get_http_client(self) -> httpx.AsyncClient:
         """Return the injected client or lazily create a new one.
 
-        A client created here is scoped to the call — we close it at the end
-        of :meth:`_fetch_raw` to avoid leaking connections. When the caller
-        injects a client, the caller owns its lifecycle.
+        A client created here is owned by the provider instance and reused
+        across calls so production sync loops get connection pooling instead
+        of creating a new TCP/TLS session for every weather fetch. When the
+        caller injects a client, the caller owns its lifecycle.
         """
 
         if self._http_client is not None:
             return self._http_client
-        # Lazy per-call client. Callers that want connection pooling should
-        # inject a long-lived client via the constructor.
-        logger.warning(
-            "WeatherProvider: creating per-call httpx client (no pooling). "
-            "Inject a shared client at construction for production use."
-        )
-        return httpx.AsyncClient(timeout=self._timeout)
+        self._http_client = httpx.AsyncClient(timeout=self._timeout)
+        self._owns_http_client = True
+        return self._http_client
+
+    async def aclose(self) -> None:
+        """Close the provider-owned HTTP client, if one was created lazily."""
+
+        if self._owns_http_client and self._http_client is not None:
+            await self._http_client.aclose()
+            self._http_client = None
 
     async def _cache_get(
         self, cache_key: str, *, tenant_id: str
@@ -646,27 +651,22 @@ class NOAAWeatherProvider(WeatherProvider):
             )
             return []
 
-        client_supplied = self._http_client is not None
         client = await self._get_http_client()
-        try:
-            response = await client.get(
-                f"{self.base_url}/data",
-                headers={"token": self._token},
-                params={
-                    "datasetid": self._dataset_id,
-                    "datatypeid": self._datatype_id,
-                    "locationid": f"ZIP:{zip_code}",
-                    "startdate": start_date.isoformat(),
-                    "enddate": end_date.isoformat(),
-                    "units": "metric",  # tenths of °C
-                    "limit": 1000,
-                },
-            )
-            response.raise_for_status()
-            payload = response.json()
-        finally:
-            if not client_supplied:
-                await client.aclose()
+        response = await client.get(
+            f"{self.base_url}/data",
+            headers={"token": self._token},
+            params={
+                "datasetid": self._dataset_id,
+                "datatypeid": self._datatype_id,
+                "locationid": f"ZIP:{zip_code}",
+                "startdate": start_date.isoformat(),
+                "enddate": end_date.isoformat(),
+                "units": "metric",  # tenths of °C
+                "limit": 1000,
+            },
+        )
+        response.raise_for_status()
+        payload = response.json()
 
         results = payload.get("results") or []
         return self._parse_cdo_results(
@@ -843,32 +843,27 @@ class OpenWeatherProvider(WeatherProvider):
             )
             return []
 
-        client_supplied = self._http_client is not None
         client = await self._get_http_client()
-        try:
-            lat, lon = await self._resolve_lat_lon(client, zip_code, api_key)
-            if lat is None or lon is None:
-                return []
-            days = _daterange(start_date, end_date)
-            retrieved_at = _utcnow()
-            rows: List[DailyWeather] = []
-            for day in days:
-                row = await self._fetch_day_summary(
-                    client=client,
-                    lat=lat,
-                    lon=lon,
-                    day=day,
-                    api_key=api_key,
-                    zip_code=zip_code,
-                    tenant_id=tenant_id,
-                    retrieved_at=retrieved_at,
-                )
-                if row is not None:
-                    rows.append(row)
-            return rows
-        finally:
-            if not client_supplied:
-                await client.aclose()
+        lat, lon = await self._resolve_lat_lon(client, zip_code, api_key)
+        if lat is None or lon is None:
+            return []
+        days = _daterange(start_date, end_date)
+        retrieved_at = _utcnow()
+        rows: List[DailyWeather] = []
+        for day in days:
+            row = await self._fetch_day_summary(
+                client=client,
+                lat=lat,
+                lon=lon,
+                day=day,
+                api_key=api_key,
+                zip_code=zip_code,
+                tenant_id=tenant_id,
+                retrieved_at=retrieved_at,
+            )
+            if row is not None:
+                rows.append(row)
+        return rows
 
     async def _resolve_lat_lon(
         self,

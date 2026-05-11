@@ -108,8 +108,8 @@ class AutonomousAgentBase(ABC):
                         len(actions),
                         duration_ms,
                     )
-            except Exception as e:
-                self.logger.error(f"Monitor cycle error: {e}", exc_info=True)
+            except Exception:
+                self.logger.exception("Monitor cycle error")
             await asyncio.sleep(self.poll_interval)
 
     # ------------------------------------------------------------------

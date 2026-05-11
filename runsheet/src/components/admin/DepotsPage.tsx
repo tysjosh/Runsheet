@@ -788,8 +788,7 @@ function DepotFormModal({
                 </p>
               )}
               <p className="text-xs text-gray-400 mt-1">
-                Pick every product this depot can load. Legacy aliases (AGO,
-                LPG, PMS, ATK) are canonicalized on save.
+                Pick every canonical product this depot can load.
               </p>
             </fieldset>
           </div>

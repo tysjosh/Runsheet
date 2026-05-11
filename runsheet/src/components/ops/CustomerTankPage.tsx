@@ -1223,8 +1223,8 @@ export default function CustomerTankPage({
           : `Updated tank ${tank.customer_tank_id}.`,
         "success",
       );
-      // Reload so the new/updated record reflects any backend-side
-      // canonicalization (e.g. LPG → PROPANE on fuel_product_code).
+      // Reload so the new/updated record reflects backend-side product
+      // canonicalization on fuel_product_code.
       loadTanks();
     },
     [addToast, loadTanks],

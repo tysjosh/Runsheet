@@ -82,6 +82,8 @@ import type {
 import {
   approvePlan,
   generatePlan,
+  getAssignmentCapacityGallons,
+  getAssignmentQuantityGallons,
   getForecasts,
   getPlan,
   getPlanCosts,
@@ -97,13 +99,17 @@ import {
   replan,
   updateCostConfig,
 } from "../../services/fuelApi";
+import { getCurrentTenantId } from "../../services/tenant";
 import StormModeBanner from "./StormModeBanner";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const TENANT_ID = "dev-tenant";
 const DISPATCHER_ID = "dispatcher-001";
 const PAGE_SIZE = 10;
+
+function activeTenantId(): string {
+  return getCurrentTenantId();
+}
 
 const TABS = [
   { id: "plans", label: "Plans", icon: Truck },
@@ -306,7 +312,7 @@ function CostConfigPanel({ onClose, onSave, addToast }: CostConfigPanelProps) {
   const handleSave = async () => {
     setSaving(true);
     try {
-      await updateCostConfig(TENANT_ID, config);
+      await updateCostConfig(activeTenantId(), config);
       addToast("Cost configuration saved", "success");
       onSave();
       onClose();
@@ -516,7 +522,7 @@ function OutcomeComparison({ planId }: OutcomeComparisonProps) {
       setLoading(true);
       setError("");
       try {
-        const result = await getPlanOutcomes(planId, TENANT_ID);
+        const result = await getPlanOutcomes(planId, activeTenantId());
         if (!cancelled) setOutcome(result.data);
       } catch (err) {
         if (!cancelled)
@@ -679,7 +685,7 @@ function CostBreakdownSection({
       setLoading(true);
       setError("");
       try {
-        const result = await getPlanCosts(planId, TENANT_ID);
+        const result = await getPlanCosts(planId, activeTenantId());
         if (!cancelled) setCosts(result.data);
       } catch (err) {
         if (!cancelled)
@@ -870,7 +876,7 @@ function ReplanForm({ planId, onClose, onSuccess }: ReplanFormProps) {
     setError("");
     setSubmitting(true);
     try {
-      const res = await replan(planId, form, TENANT_ID);
+      const res = await replan(planId, form, activeTenantId());
       onSuccess(res);
       onClose();
     } catch (err) {
@@ -936,7 +942,7 @@ function ReplanForm({ planId, onClose, onSuccess }: ReplanFormProps) {
               }
               placeholder="Describe the disruption..."
               rows={3}
-              className={inputClass + " resize-none"}
+              className={`${inputClass} resize-none`}
               required
             />
           </div>
@@ -1677,7 +1683,7 @@ function PlanDetailView({
       setLoading(true);
       setError("");
       try {
-        const result = await getPlan(planId, TENANT_ID);
+        const result = await getPlan(planId, activeTenantId());
         if (!cancelled) setPlan(result);
       } catch (err) {
         if (!cancelled) {
@@ -1827,10 +1833,10 @@ function PlanDetailView({
                       Fuel Grade
                     </th>
                     <th className="px-3 py-2 text-right text-gray-600 font-medium">
-                      Quantity (L)
+                      Quantity (gal)
                     </th>
                     <th className="px-3 py-2 text-right text-gray-600 font-medium">
-                      Capacity (L)
+                      Capacity (gal)
                     </th>
                   </tr>
                 </thead>
@@ -1848,10 +1854,10 @@ function PlanDetailView({
                           {a.fuel_grade}
                         </td>
                         <td className="px-3 py-2 text-right text-gray-700">
-                          {a.quantity_liters.toLocaleString()}
+                          {getAssignmentQuantityGallons(a).toLocaleString()}
                         </td>
                         <td className="px-3 py-2 text-right text-gray-700">
-                          {a.compartment_capacity_liters.toLocaleString()}
+                          {getAssignmentCapacityGallons(a).toLocaleString()}
                         </td>
                       </tr>
                     ),
@@ -2055,16 +2061,19 @@ function PlansTab() {
   const { toasts, addToast, dismissToast } = useToasts();
 
   // WebSocket for real-time execution updates
-  const { lastUpdate: executionUpdate } = usePlanExecutionSocket(TENANT_ID, {
-    autoConnect: true,
-  });
+  const { lastUpdate: executionUpdate } = usePlanExecutionSocket(
+    activeTenantId(),
+    {
+      autoConnect: true,
+    },
+  );
 
   // Fetch plan list from backend
   const loadPlanList = useCallback(async () => {
     setListLoading(true);
     try {
       const result = await listPlans(
-        TENANT_ID,
+        activeTenantId(),
         planPage,
         PAGE_SIZE,
         statusFilter || undefined,
@@ -2093,7 +2102,7 @@ function PlansTab() {
     setGenerating(true);
     setError("");
     try {
-      await generatePlan(TENANT_ID);
+      await generatePlan(activeTenantId());
       addToast("Plan generated successfully", "success");
       refreshPlanList();
     } catch (err) {
@@ -2109,7 +2118,7 @@ function PlansTab() {
     async (planId: string) => {
       setApproveLoading(planId);
       try {
-        await approvePlan(planId, TENANT_ID, DISPATCHER_ID);
+        await approvePlan(planId, activeTenantId(), DISPATCHER_ID);
         addToast(`Plan ${planId} approved and dispatched`, "success");
         refreshPlanList();
         if (selectedPlanId === planId) {
@@ -2135,7 +2144,7 @@ function PlansTab() {
       try {
         await rejectPlan(
           showRejectDialog,
-          TENANT_ID,
+          activeTenantId(),
           DISPATCHER_ID,
           reason || undefined,
         );
@@ -2438,7 +2447,7 @@ function ForecastsTab() {
     setError("");
     try {
       const result = await getForecasts({
-        tenant_id: TENANT_ID,
+        tenant_id: activeTenantId(),
         station_id: stationFilter || undefined,
         fuel_grade: gradeFilter || undefined,
         page,
@@ -2489,10 +2498,10 @@ function ForecastsTab() {
           className={inputClass}
         >
           <option value="">All fuel grades</option>
-          <option value="AGO">AGO (Diesel)</option>
-          <option value="PMS">PMS (Petrol)</option>
-          <option value="ATK">ATK (Aviation)</option>
-          <option value="LPG">LPG (Gas)</option>
+          <option value="DIESEL_2">Diesel #2</option>
+          <option value="GASOLINE_REG">Regular Unleaded</option>
+          <option value="KEROSENE">Kerosene</option>
+          <option value="PROPANE">Propane</option>
         </select>
       </div>
 
@@ -3004,7 +3013,7 @@ function PrioritiesTab() {
 //     (Req 3.2.4).
 //
 // Tenant stamping: both helpers accept tenant context from the JWT
-// server-side, but we also pass ``tenant_id: TENANT_ID`` on the query
+// server-side, but the query also carries the active tenant id
 // so the test harness can assert the shape and any dev-only proxies
 // that require an explicit tenant get one.
 
@@ -3025,7 +3034,7 @@ function PriorityClustersPanel({ addError }: PriorityClustersPanelProps) {
       setError("");
       try {
         const result = await listPriorityClusters({
-          tenant_id: TENANT_ID,
+          tenant_id: activeTenantId(),
           eps_miles: eps,
           min_samples: samples,
         } as Parameters<typeof listPriorityClusters>[0]);
@@ -3247,7 +3256,7 @@ function CombinableGroupsPanel({ addError }: CombinableGroupsPanelProps) {
       setError("");
       try {
         const payload = {
-          tenant_id: TENANT_ID,
+          tenant_id: activeTenantId(),
           ...(filters.run_id ? { run_id: filters.run_id } : {}),
           ...(filters.fuel_grade ? { fuel_grade: filters.fuel_grade } : {}),
           min_members: filters.min_members,
@@ -3356,7 +3365,7 @@ function CombinableGroupsPanel({ addError }: CombinableGroupsPanelProps) {
             type="text"
             value={fuelGrade}
             onChange={(e) => setFuelGrade(e.target.value)}
-            placeholder="DIESEL_2 / PMS / ..."
+            placeholder="DIESEL_2 / PROPANE / ..."
             className={inputClass}
           />
         </div>

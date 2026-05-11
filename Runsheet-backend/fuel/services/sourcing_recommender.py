@@ -61,6 +61,7 @@ import logging
 import math
 from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
+from decimal import Decimal, InvalidOperation
 from typing import (
     Any,
     Awaitable,
@@ -139,6 +140,8 @@ WAIT_WARNING_REDIS_KEY: str = "terminal_wait_warning_minutes:{tenant_id}"
 #: reasons list enumerates them. Keeping a tuple makes iteration and
 #: test assertions explicit.
 _NEGATIVE_SIGNALS: Tuple[str, ...] = ("price", "wait", "distance")
+
+_MONEY_QUANT = Decimal("0.000001")
 
 
 #: Short codes for terminal day-of-week lookup — must match
@@ -266,7 +269,7 @@ class _ScoringInputs:
     """Raw (pre-normalisation) signals collected for one terminal."""
 
     terminal: Terminal
-    price: float
+    price: Decimal
     wait: float
     distance_km: float
     contract: Optional[SupplierContract]
@@ -642,7 +645,7 @@ class SourcingRecommender:
         product_code: str,
         as_of: datetime,
         tenant_id: str,
-    ) -> Tuple[Dict[str, float], bool]:
+    ) -> Tuple[Dict[str, Decimal], bool]:
         """Fetch live prices for the remaining candidate set.
 
         Returns a ``(prices_map, fallback_flag)`` tuple:
@@ -713,14 +716,15 @@ class SourcingRecommender:
                 )
                 return ({}, False)
 
-        best: Dict[str, Tuple[datetime, float]] = {}
+        best: Dict[str, Tuple[datetime, Decimal]] = {}
         for row in rows or ():
             terminal_id = getattr(row, "terminal_id", None)
             row_product = getattr(row, "product_code", None)
-            price = getattr(row, "price_per_gallon_usd", None)
+            raw_price = getattr(row, "price_per_gallon_usd", None)
             effective_at = getattr(row, "effective_at", None)
             if not terminal_id or row_product != product_code:
                 continue
+            price = _money_decimal(raw_price)
             if price is None or price < 0:
                 continue
             when = _ensure_utc(effective_at) if isinstance(effective_at, datetime) else _ensure_utc(as_of)
@@ -729,7 +733,7 @@ class SourcingRecommender:
             # return multiple observations when its cache bucket happens
             # to straddle two prints.
             if current is None or when > current[0]:
-                best[terminal_id] = (when, float(price))
+                best[terminal_id] = (when, price)
         return ({tid: price for tid, (_, price) in best.items()}, fallback)
 
     async def _fetch_waits(
@@ -958,9 +962,9 @@ def _resolve_price(
     *,
     terminal: Terminal,
     contract: Optional[SupplierContract],
-    rack_prices: Mapping[str, float],
+    rack_prices: Mapping[str, Decimal],
     product_code: str,
-) -> Optional[float]:
+) -> Optional[Decimal]:
     """Return the effective price per gallon for a terminal.
 
     When a matching contract specifies ``contract_price_per_gallon_usd``
@@ -974,11 +978,12 @@ def _resolve_price(
         and contract.contract_price_per_gallon_usd is not None
         and contract.product_code == product_code
     ):
-        return float(contract.contract_price_per_gallon_usd)
+        contract_price = _money_decimal(contract.contract_price_per_gallon_usd)
+        return contract_price if contract_price is not None and contract_price >= 0 else None
     price = rack_prices.get(terminal.terminal_id)
     if price is None:
         return None
-    return float(price)
+    return price
 
 
 def _rank_candidates(
@@ -1006,7 +1011,7 @@ def _rank_candidates(
 
     candidates: List[TerminalCandidate] = []
     for item in inputs:
-        norm_price = _normalise(item.price, price_range)
+        norm_price = _normalise_decimal(item.price, price_range)
         norm_wait = _normalise(item.wait, wait_range)
         norm_distance = _normalise(item.distance_km, distance_range)
         contract_component = 1.0 if item.contract is not None else 0.0
@@ -1036,7 +1041,7 @@ def _rank_candidates(
         candidates.append(
             TerminalCandidate(
                 terminal_id=item.terminal.terminal_id,
-                price_per_gallon_usd=round(item.price, 6),
+                price_per_gallon_usd=float(item.price.quantize(_MONEY_QUANT)),
                 branded_flag=item.terminal.branded,
                 contract_id=item.contract.contract_id if item.contract else None,
                 avg_wait_minutes=round(item.wait, 2),
@@ -1069,6 +1074,29 @@ def _normalise(value: float, value_range: Tuple[float, float]) -> float:
     if high <= low:
         return 0.0
     return (value - low) / (high - low)
+
+
+def _normalise_decimal(value: Decimal, value_range: Tuple[Decimal, Decimal]) -> float:
+    """Min-max normalise a Decimal money value to ``[0, 1]``."""
+
+    low, high = value_range
+    if high <= low:
+        return 0.0
+    return float((value - low) / (high - low))
+
+
+def _money_decimal(value: Any) -> Optional[Decimal]:
+    """Convert a price-like value into Decimal without binary-float drift."""
+
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        price = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    if not price.is_finite():
+        return None
+    return price
 
 
 def _build_reasons(

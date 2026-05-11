@@ -161,7 +161,7 @@ class ApprovalQueueService:
                 )
                 entry.update(exec_update)
             except Exception as e:
-                logger.error(f"Failed to execute approved action {action_id}: {e}")
+                logger.exception("Failed to execute approved action %s", action_id)
                 exec_update = {
                     "status": "executed",
                     "execution_result": {
@@ -292,8 +292,8 @@ class ApprovalQueueService:
                     })
 
                 expired_count += 1
-            except Exception as e:
-                logger.error(f"Failed to expire action {action_id}: {e}")
+            except Exception:
+                logger.exception("Failed to expire action %s", action_id)
 
         if expired_count > 0:
             logger.info(f"Expired {expired_count} stale approval(s)")

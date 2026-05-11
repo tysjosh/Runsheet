@@ -261,12 +261,19 @@ class OverlayAgentBase(AutonomousAgentBase):
     def _group_by_tenant(self, signals) -> Dict[str, List]:
         """Group signals by tenant_id.
 
-        Signals without a ``tenant_id`` attribute are grouped under
-        the key ``'default'``.
+        Signals without a ``tenant_id`` attribute are skipped so overlay
+        actions never run under an implicit tenant.
         """
         groups: Dict[str, List] = {}
         for sig in signals:
-            tid = getattr(sig, "tenant_id", "default")
+            tid = getattr(sig, "tenant_id", None)
+            if not tid:
+                self.logger.warning(
+                    "Skipping signal without tenant_id in %s: entity_id=%s",
+                    self.agent_id,
+                    getattr(sig, "entity_id", None),
+                )
+                continue
             groups.setdefault(tid, []).append(sig)
         return groups
 

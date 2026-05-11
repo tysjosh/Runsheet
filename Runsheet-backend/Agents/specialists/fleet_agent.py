@@ -23,7 +23,7 @@ from Agents.tools import (
     get_all_locations,
     assign_asset_to_job,
 )
-from Agents.tools._tenant_context import set_current_tenant
+from Agents.tools._tenant_context import require_tenant_id, set_current_tenant
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +94,7 @@ class FleetAgent:
             The agent's response as a string.
         """
         prompt = task
-        tenant_id = (context or {}).get("tenant_id")
+        tenant_id = require_tenant_id((context or {}).get("tenant_id"))
         if context:
             ctx_parts = []
             if tenant_id:

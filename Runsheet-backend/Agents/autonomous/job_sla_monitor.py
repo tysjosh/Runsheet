@@ -121,16 +121,24 @@ class JobSLAMonitor(AutonomousAgentBase):
 
         try:
             resp = await self._es.search_documents(JOBS_CURRENT_INDEX, query, 200)
-        except Exception as e:
+        except Exception:
             # Log error and continue without crashing (follows Req 1.8 pattern)
-            self.logger.error(f"Failed to query jobs_current index: {e}")
+            self.logger.exception("Failed to query jobs_current index")
             return detections, actions
 
         at_risk_jobs = [h["_source"] for h in resp.get("hits", {}).get("hits", [])]
 
         for job in at_risk_jobs:
             job_id = job.get("job_id")
-            tenant_id = job.get("tenant_id", "default")
+            tenant_id = job.get("tenant_id")
+            if not job_id or not tenant_id:
+                self.logger.warning(
+                    "JobSLAMonitor: skipping at-risk job missing job_id "
+                    "or tenant_id: job_id=%s tenant_id=%s",
+                    job_id,
+                    tenant_id,
+                )
+                continue
 
             # Skip if estimated_arrival is None (Req 4.8)
             estimated_arrival_str = job.get("estimated_arrival")
@@ -188,8 +196,8 @@ class JobSLAMonitor(AutonomousAgentBase):
                         },
                     )
                     await self._signal_bus.publish(signal)
-                except Exception as e:
-                    self.logger.error(f"Failed to publish RiskSignal: {e}")
+                except Exception:
+                    self.logger.exception("Failed to publish RiskSignal")
 
             # Broadcast WebSocket event (Req 4.4)
             await self._ws.broadcast_event("job_sla_warning", {

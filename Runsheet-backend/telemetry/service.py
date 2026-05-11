@@ -23,6 +23,13 @@ except ImportError:
     # Fallback if middleware not available (e.g., during testing)
     request_id_var: ContextVar[str] = ContextVar("request_id", default="")
 
+try:
+    from ops.middleware.tenant_guard import request_tenant_id_var
+except ImportError:
+    request_tenant_id_var: ContextVar[str] = ContextVar(
+        "request_tenant_id", default=""
+    )
+
 from services.time_utils import utcnow
 
 
@@ -61,6 +68,7 @@ class JSONFormatter(logging.Formatter):
             "message": record.getMessage(),
             "logger": record.name,
             "request_id": request_id_var.get(""),
+            "tenant_id": request_tenant_id_var.get(""),
         }
         
         # Add module and function information for debugging

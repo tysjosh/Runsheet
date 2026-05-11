@@ -127,7 +127,7 @@ async def search_fleet_data(query: str, asset_type: str = None) -> str:
         return response_text
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"Error searching fleet data: {e}")
+        logger.exception("Error searching fleet data")
         return f"Error searching fleet data: {str(e)}"
     finally:
         _log_tool_invocation("search_fleet_data", {"query": query, "asset_type": asset_type}, start_time, success, error_msg)
@@ -171,7 +171,7 @@ async def search_orders(query: str) -> str:
         return response
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"Error searching orders: {e}")
+        logger.exception("Error searching orders")
         return f"Error searching orders: {str(e)}"
     finally:
         _log_tool_invocation("search_orders", {"query": query}, start_time, success, error_msg)
@@ -200,8 +200,11 @@ async def search_support_tickets(query: str) -> str:
         # First try semantic search
         try:
             results = await elasticsearch_service.semantic_search(tenant_id, "support_tickets", query, ["issue", "description"], 5)
-        except Exception as search_error:
-            logger.warning(f"Semantic search failed, trying tenant-scoped fallback: {search_error}")
+        except Exception:
+            logger.warning(
+                "Semantic search failed, trying tenant-scoped fallback",
+                exc_info=True,
+            )
             # Fallback: run a tenant-scoped match_all and filter in Python so we
             # still avoid leaking data from other tenants if semantic search is
             # unavailable (missing index / circuit open).
@@ -234,7 +237,7 @@ async def search_support_tickets(query: str) -> str:
         return response
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"Error searching support tickets: {e}")
+        logger.exception("Error searching support tickets")
         return f"Error searching support tickets: {str(e)}"
     finally:
         _log_tool_invocation("search_support_tickets", {"query": query}, start_time, success, error_msg)
@@ -263,8 +266,11 @@ async def search_inventory(query: str) -> str:
         # First try semantic search
         try:
             results = await elasticsearch_service.semantic_search(tenant_id, "inventory", query, ["name"], 10)
-        except Exception as search_error:
-            logger.warning(f"Semantic search failed, trying tenant-scoped fallback: {search_error}")
+        except Exception:
+            logger.warning(
+                "Semantic search failed, trying tenant-scoped fallback",
+                exc_info=True,
+            )
             # Fallback: run a tenant-scoped match_all and filter in Python so
             # results are still tenant-isolated when semantic search is down.
             fallback_query = inject_tenant_filter({"query": {"match_all": {}}}, tenant_id)
@@ -290,7 +296,7 @@ async def search_inventory(query: str) -> str:
         return response
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"Error searching inventory: {e}")
+        logger.exception("Error searching inventory")
         return f"Error searching inventory: {str(e)}"
     finally:
         _log_tool_invocation("search_inventory", {"query": query}, start_time, success, error_msg)

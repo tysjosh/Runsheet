@@ -12,6 +12,7 @@
  */
 
 import { API_TIMEOUTS, ApiError, ApiTimeoutError } from "./api";
+import { getCurrentTenantId } from "./tenant";
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -167,7 +168,7 @@ async function agentRequest<T>(
 
 /** GET /agent/approvals — list pending approvals for a tenant */
 export async function getApprovals(
-  tenantId: string = "default",
+  tenantId: string = getCurrentTenantId(),
   page: number = 1,
   size: number = 20,
 ): Promise<PaginatedApprovals> {
@@ -221,7 +222,7 @@ export async function getActivityLog(
   filters: ActivityFilters = {},
 ): Promise<PaginatedActivity> {
   const qs = buildQueryString({
-    tenant_id: filters.tenant_id ?? "default",
+    tenant_id: filters.tenant_id ?? getCurrentTenantId(),
     agent_id: filters.agent_id,
     action_type: filters.action_type,
     outcome: filters.outcome,
@@ -302,7 +303,7 @@ export interface PaginatedMemories {
 
 /** GET /agent/config/autonomy — get current autonomy level for a tenant */
 export async function getAutonomyLevel(
-  tenantId: string = "default",
+  tenantId: string = getCurrentTenantId(),
 ): Promise<{ level: AutonomyLevel }> {
   const qs = buildQueryString({ tenant_id: tenantId });
   return agentRequest<{ level: AutonomyLevel }>(`/config/autonomy${qs}`);
@@ -311,7 +312,7 @@ export async function getAutonomyLevel(
 /** PATCH /agent/config/autonomy — update the autonomy level for a tenant */
 export async function updateAutonomyLevel(
   level: string,
-  tenantId: string = "default",
+  tenantId: string = getCurrentTenantId(),
 ): Promise<AutonomyUpdateResponse> {
   const qs = buildQueryString({ tenant_id: tenantId });
   return agentRequest<AutonomyUpdateResponse>(`/config/autonomy${qs}`, {
@@ -327,7 +328,7 @@ export async function getMemories(
   filters: MemoryFilters = {},
 ): Promise<PaginatedMemories> {
   const qs = buildQueryString({
-    tenant_id: filters.tenant_id ?? "default",
+    tenant_id: filters.tenant_id ?? getCurrentTenantId(),
     memory_type: filters.memory_type,
     tags: filters.tags,
     page: filters.page ?? 1,
@@ -339,7 +340,7 @@ export async function getMemories(
 /** DELETE /agent/memory/{id} — delete a specific memory entry */
 export async function deleteMemory(
   memoryId: string,
-  tenantId: string = "default",
+  tenantId: string = getCurrentTenantId(),
 ): Promise<{ deleted: boolean }> {
   const qs = buildQueryString({ tenant_id: tenantId });
   return agentRequest<{ deleted: boolean }>(
@@ -395,7 +396,7 @@ export async function getFeedback(
   filters: FeedbackFilters = {},
 ): Promise<PaginatedFeedback> {
   const qs = buildQueryString({
-    tenant_id: filters.tenant_id ?? "default",
+    tenant_id: filters.tenant_id ?? getCurrentTenantId(),
     feedback_type: filters.feedback_type,
     start_date: filters.start_date,
     end_date: filters.end_date,
@@ -407,7 +408,7 @@ export async function getFeedback(
 
 /** GET /agent/feedback/stats — feedback statistics */
 export async function getFeedbackStats(
-  tenantId: string = "default",
+  tenantId: string = getCurrentTenantId(),
 ): Promise<FeedbackStats> {
   const qs = buildQueryString({ tenant_id: tenantId });
   return agentRequest<FeedbackStats>(`/feedback/stats${qs}`);

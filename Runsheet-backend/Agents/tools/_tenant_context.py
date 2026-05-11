@@ -67,6 +67,16 @@ def get_current_tenant_or_none() -> Optional[str]:
     return current_tenant_id_var.get()
 
 
+def require_tenant_id(tenant_id: Optional[str]) -> str:
+    """Return ``tenant_id`` or raise a loud error before tool execution."""
+    if not tenant_id:
+        raise RuntimeError(
+            "tenant_id is required for AI agent execution; refusing to run "
+            "against an implicit or default tenant."
+        )
+    return tenant_id
+
+
 @contextlib.contextmanager
 def set_current_tenant(tenant_id: Optional[str]) -> Iterator[None]:
     """Bind ``tenant_id`` to the current task/thread for the block's duration.

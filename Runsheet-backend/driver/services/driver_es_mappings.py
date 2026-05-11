@@ -172,5 +172,5 @@ def setup_driver_indices(es_service):
                 logger.info(f"✅ Created driver index: {index_name}")
             else:
                 logger.info(f"📋 Driver index already exists: {index_name}")
-        except Exception as e:
-            logger.error(f"❌ Failed to create driver index {index_name}: {e}")
+        except Exception:
+            logger.exception("Failed to create driver index %s", index_name)

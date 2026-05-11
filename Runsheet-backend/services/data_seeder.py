@@ -74,8 +74,8 @@ class DataSeeder:
 
             logger.info("✅ Data seeding completed successfully!")
 
-        except Exception as e:
-            logger.error(f"❌ Data seeding failed: {e}")
+        except Exception:
+            logger.exception("Data seeding failed")
             raise
     
     # Tenant id stamped on every document produced by ``seed_baseline_data``
@@ -128,8 +128,8 @@ class DataSeeder:
             
             logger.info("✅ Baseline data seeding completed!")
             
-        except Exception as e:
-            logger.error(f"❌ Baseline data seeding failed: {e}")
+        except Exception:
+            logger.exception("Baseline data seeding failed")
             raise
     
     async def upsert_batch_data(self, data_type: str, documents: list, batch_id: str, operational_time: str, tenant_id: str = None):
@@ -176,8 +176,8 @@ class DataSeeder:
             logger.info(f"✅ Successfully upserted {len(documents)} {data_type} documents")
             return {"status": "success", "recordCount": len(documents)}
             
-        except Exception as e:
-            logger.error(f"❌ Batch upsert failed: {e}")
+        except Exception:
+            logger.exception("Batch upsert failed")
             raise
     
     async def seed_locations(self, batch_metadata=None):

@@ -347,6 +347,7 @@ class TrafficProvider(ABC):
             raise ValueError("cache_ttl_seconds must be positive")
         self._redis = redis_client
         self._http_client = http_client
+        self._owns_http_client = http_client is None
         self._timeout = timeout_seconds
         self._cache_ttl = cache_ttl_seconds
         # Share a process-wide circuit breaker by default so every
@@ -565,22 +566,21 @@ class TrafficProvider(ABC):
         """Return ``(client, owned_by_caller)``.
 
         When the adapter was constructed with an injected ``http_client`` we
-        reuse it and do *not* close it. Otherwise we create a short-lived
-        client per call and the caller-side ``finally`` closes it.
-
-        Creating a per-call client is a fallback for non-injected usage.
-        In production, prefer injecting a shared client at construction
-        time for connection pooling and warm TLS.
+        reuse it and do *not* close it. Otherwise we lazily create one
+        instance-owned client so repeated calls reuse connection pooling.
         """
 
         if self._http_client is not None:
             return self._http_client, False
-        logger.warning(
-            "TrafficProvider[%s]: creating per-call httpx client (no pooling). "
-            "Inject a shared client at construction for production use.",
-            self.name,
-        )
-        return httpx.AsyncClient(timeout=self._timeout), True
+        self._http_client = httpx.AsyncClient(timeout=self._timeout)
+        return self._http_client, False
+
+    async def aclose(self) -> None:
+        """Close the lazily owned HTTP client, if this provider created one."""
+
+        if self._owns_http_client and self._http_client is not None:
+            await self._http_client.aclose()
+            self._http_client = None
 
     # ---------- cache ----------
 
@@ -748,7 +748,12 @@ class TrafficProvider(ABC):
                 current = await incr(key)
             else:  # pragma: no cover - alternative clients
                 current = (await self._load_budget_counter(tenant_id, month)) + 1
-                await self._redis.set(key, str(current))
+                try:
+                    await self._redis.set(
+                        key, str(current), ex=BUDGET_COUNTER_TTL_SECONDS
+                    )
+                except TypeError:
+                    await self._redis.set(key, str(current))
             # Always refresh TTL so the key rolls off after the month ends.
             expire = getattr(self._redis, "expire", None)
             if expire is not None:
@@ -835,25 +840,21 @@ class MapboxTrafficProvider(TrafficProvider):
         sources = ";".join(str(i) for i in range(n_o))
         dests = ";".join(str(n_o + j) for j in range(n_d))
 
-        client, owned = await self._get_http_client()
-        try:
-            response = await client.get(
-                f"{self.base_url}/{coord_str}",
-                params={
-                    "access_token": self._access_token,
-                    "annotations": "distance,duration",
-                    "sources": sources,
-                    "destinations": dests,
-                    "depart_at": depart_at.astimezone(timezone.utc).strftime(
-                        "%Y-%m-%dT%H:%MZ"
-                    ),
-                },
-            )
-            response.raise_for_status()
-            payload = response.json()
-        finally:
-            if owned:
-                await client.aclose()
+        client, _ = await self._get_http_client()
+        response = await client.get(
+            f"{self.base_url}/{coord_str}",
+            params={
+                "access_token": self._access_token,
+                "annotations": "distance,duration",
+                "sources": sources,
+                "destinations": dests,
+                "depart_at": depart_at.astimezone(timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%MZ"
+                ),
+            },
+        )
+        response.raise_for_status()
+        payload = response.json()
 
         code = payload.get("code")
         if code and code != "Ok":
@@ -937,18 +938,14 @@ class HERETrafficProvider(TrafficProvider):
             "matrixAttributes": ["travelTimes", "distances"],
         }
 
-        client, owned = await self._get_http_client()
-        try:
-            response = await client.post(
-                self.base_url,
-                params={"apiKey": self._api_key, "async": "false"},
-                json=body,
-            )
-            response.raise_for_status()
-            payload = response.json()
-        finally:
-            if owned:
-                await client.aclose()
+        client, _ = await self._get_http_client()
+        response = await client.post(
+            self.base_url,
+            params={"apiKey": self._api_key, "async": "false"},
+            json=body,
+        )
+        response.raise_for_status()
+        payload = response.json()
 
         matrix = payload.get("matrix") or payload
         distances_flat = matrix.get("distances") or []
@@ -1053,14 +1050,10 @@ class GoogleDirectionsTrafficProvider(TrafficProvider):
             "key": self._api_key,
         }
 
-        client, owned = await self._get_http_client()
-        try:
-            response = await client.get(self.base_url, params=params)
-            response.raise_for_status()
-            payload = response.json()
-        finally:
-            if owned:
-                await client.aclose()
+        client, _ = await self._get_http_client()
+        response = await client.get(self.base_url, params=params)
+        response.raise_for_status()
+        payload = response.json()
 
         status = payload.get("status")
         if status and status != "OK":

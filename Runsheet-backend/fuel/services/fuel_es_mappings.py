@@ -137,8 +137,8 @@ def setup_fuel_indices(es_client, es_service=None):
                 logger.info(f"✅ Created fuel index: {index_name}")
             else:
                 logger.info(f"📋 Fuel index already exists: {index_name}")
-        except Exception as e:
-            logger.error(f"❌ Failed to create fuel index {index_name}: {e}")
+        except Exception:
+            logger.exception("Failed to create fuel index %s", index_name)
 
     # Apply ILM policy for fuel_events
     try:

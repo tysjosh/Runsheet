@@ -2,15 +2,19 @@
 
 import { AlertTriangle, Droplets, Fuel, Timer } from "lucide-react";
 import type { FuelNetworkSummary } from "../../services/fuelApi";
+import {
+  getNetworkCapacityGallons,
+  getNetworkCurrentStockGallons,
+} from "../../services/fuelApi";
 
 interface FuelSummaryBarProps {
   summary: FuelNetworkSummary;
 }
 
-function formatLiters(liters: number): string {
-  if (liters >= 1_000_000) return `${(liters / 1_000_000).toFixed(1)}M L`;
-  if (liters >= 1_000) return `${(liters / 1_000).toFixed(1)}K L`;
-  return `${liters.toFixed(0)} L`;
+function formatGallons(gallons: number): string {
+  if (gallons >= 1_000_000) return `${(gallons / 1_000_000).toFixed(1)}M gal`;
+  if (gallons >= 1_000) return `${(gallons / 1_000).toFixed(1)}K gal`;
+  return `${gallons.toFixed(0)} gal`;
 }
 
 /**
@@ -20,22 +24,23 @@ function formatLiters(liters: number): string {
  * Validates: Requirements 6.1, 6.2
  */
 export default function FuelSummaryBar({ summary }: FuelSummaryBarProps) {
+  const totalCapacityGallons = getNetworkCapacityGallons(summary);
+  const totalCurrentStockGallons = getNetworkCurrentStockGallons(summary);
   const stockPct =
-    summary.total_capacity_liters > 0
-      ? (summary.total_current_stock_liters / summary.total_capacity_liters) *
-        100
+    totalCapacityGallons > 0
+      ? (totalCurrentStockGallons / totalCapacityGallons) * 100
       : 0;
 
   const stats = [
     {
       label: "Total Capacity",
-      value: formatLiters(summary.total_capacity_liters),
+      value: formatGallons(totalCapacityGallons),
       icon: Fuel,
       color: "text-[#232323]",
     },
     {
       label: "Current Stock",
-      value: `${formatLiters(summary.total_current_stock_liters)} (${stockPct.toFixed(1)}%)`,
+      value: `${formatGallons(totalCurrentStockGallons)} (${stockPct.toFixed(1)}%)`,
       icon: Droplets,
       color: "text-blue-600",
     },

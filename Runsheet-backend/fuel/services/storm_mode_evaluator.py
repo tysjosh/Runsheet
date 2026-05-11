@@ -131,6 +131,11 @@ DEFAULT_SIGNAL_CONFIDENCE: float = 0.99
 #: ``expected_end_at`` when the triggering alert has no end time.
 STATE_KEY_PATTERN: str = "storm_mode_state:{tenant_id}"
 
+#: State is refreshed whenever the evaluator observes a transition. The TTL
+#: prevents orphaned tenant state from accumulating indefinitely while still
+#: preserving recent storm status for operational dashboards.
+STATE_KEY_TTL_SECONDS: int = 30 * 24 * 60 * 60
+
 #: Numeric severity rank so ``severity >= threshold`` comparisons don't
 #: depend on string ordering. ``extreme`` outranks ``severe`` which
 #: outranks ``moderate`` which outranks ``minor``. Any unrecognised bucket
@@ -900,7 +905,9 @@ class StormModeEvaluator:
 
         try:
             await self._redis.set(
-                self._state_key(tenant_id), state.to_json()
+                self._state_key(tenant_id),
+                state.to_json(),
+                ex=STATE_KEY_TTL_SECONDS,
             )
         except Exception as exc:
             logger.warning(
@@ -1066,6 +1073,7 @@ __all__ = [
     "DEFAULT_SIGNAL_TTL_SECONDS",
     "DEFAULT_SIGNAL_CONFIDENCE",
     "STATE_KEY_PATTERN",
+    "STATE_KEY_TTL_SECONDS",
     "ACTIVE",
     "INACTIVE",
     # Helpers

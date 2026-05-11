@@ -31,6 +31,7 @@ from ops.services.ops_es_service import OpsElasticsearchService
 from ops.services.ops_metrics import ops_drift_percentage, REGISTRY
 
 logger = logging.getLogger(__name__)
+ES_SEARCH_TIMEOUT_SECONDS = 10
 
 
 # ---------------------------------------------------------------------------
@@ -641,7 +642,12 @@ class DriftDetector:
 
         try:
             body = {**query, "size": page_size}
-            resp = es.search(index=index, body=body, scroll="2m")
+            resp = es.search(
+                index=index,
+                body=body,
+                scroll="2m",
+                request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
+            )
             scroll_id = resp.get("_scroll_id")
             hits = resp.get("hits", {}).get("hits", [])
 
@@ -653,7 +659,11 @@ class DriftDetector:
 
                 if not scroll_id:
                     break
-                resp = es.scroll(scroll_id=scroll_id, scroll="2m")
+                resp = es.scroll(
+                    scroll_id=scroll_id,
+                    scroll="2m",
+                    request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
+                )
                 hits = resp.get("hits", {}).get("hits", [])
 
             # Clean up scroll context
@@ -661,7 +671,7 @@ class DriftDetector:
                 try:
                     es.clear_scroll(scroll_id=scroll_id)
                 except Exception:
-                    pass  # best-effort cleanup
+                    logger.exception("Failed to clear ES scroll context")
 
         except Exception as exc:
             logger.error(

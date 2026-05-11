@@ -303,7 +303,10 @@ async def get_fleet_summary(request: Request, tenant: TenantContext = Depends(ge
                 for bucket in aggs.get("by_subtype", {}).get("buckets", [])
             }
         except Exception as agg_err:
-            logger.warning(f"Failed to fetch asset aggregations, returning zeros: {agg_err}")
+            logger.warning(
+                "Failed to fetch asset aggregations, returning zeros: %s",
+                agg_err,
+            )
             total_assets = 0
             active_assets = 0
             delayed_assets = 0
@@ -323,7 +326,7 @@ async def get_fleet_summary(request: Request, tenant: TenantContext = Depends(ge
             "timestamp": utcnow().isoformat()
         }
     except Exception as e:
-        logger.error(f"Error getting fleet summary: {e}")
+        logger.exception("Error getting fleet summary")
         raise internal_error(message="Failed to fetch fleet summary", details={"error": str(e)})
 
 
@@ -388,7 +391,7 @@ async def get_trucks(request: Request, tenant: TenantContext = Depends(get_tenan
             "timestamp": utcnow().isoformat()
         }
     except Exception as e:
-        logger.error(f"Error getting trucks: {e}")
+        logger.exception("Error getting trucks")
         raise internal_error(message="Failed to fetch trucks", details={"error": str(e)})
 
 
@@ -445,7 +448,7 @@ async def get_truck_by_id(truck_id: str, request: Request, tenant: TenantContext
     except AppException:
         raise
     except Exception as e:
-        logger.error(f"Error getting truck {truck_id}: {e}")
+        logger.exception("Error getting truck %s", truck_id)
         raise internal_error(message="Failed to fetch truck", details={"truck_id": truck_id, "error": str(e)})
 
 def _format_asset(doc: dict) -> dict:
@@ -554,7 +557,7 @@ async def get_fleet_assets(
             "timestamp": utcnow().isoformat(),
         }
     except Exception as e:
-        logger.error(f"Error getting fleet assets: {e}")
+        logger.exception("Error getting fleet assets")
         raise internal_error(message="Failed to fetch fleet assets", details={"error": str(e)})
 
 
@@ -582,7 +585,7 @@ async def get_asset_by_id(asset_id: str, request: Request, tenant: TenantContext
     except AppException:
         raise
     except Exception as e:
-        logger.error(f"Error getting asset {asset_id}: {e}")
+        logger.exception("Error getting asset %s", asset_id)
         raise internal_error(message="Failed to fetch asset", details={"asset_id": asset_id, "error": str(e)})
 
 @router.post("/fleet/assets")
@@ -638,7 +641,7 @@ async def create_fleet_asset(body: CreateAsset, request: Request, tenant: Tenant
             "timestamp": now,
         }
     except Exception as e:
-        logger.error(f"Error creating asset: {e}")
+        logger.exception("Error creating asset")
         raise internal_error(message="Failed to create asset", details={"error": str(e)})
 
 
@@ -716,7 +719,7 @@ async def update_fleet_asset(asset_id: str, body: UpdateAsset, request: Request,
     except AppException:
         raise
     except Exception as e:
-        logger.error(f"Error updating asset {asset_id}: {e}")
+        logger.exception("Error updating asset %s", asset_id)
         raise internal_error(message="Failed to update asset", details={"asset_id": asset_id, "error": str(e)})
 
 
@@ -756,7 +759,7 @@ async def get_support_tickets(request: Request, tenant: TenantContext = Depends(
             "timestamp": utcnow().isoformat()
         }
     except Exception as e:
-        logger.error(f"Error getting support tickets: {e}")
+        logger.exception("Error getting support tickets")
         raise internal_error(message="Failed to fetch support tickets", details={"error": str(e)})
 
 # Analytics
@@ -858,7 +861,7 @@ async def semantic_search(request: Request, q: str, tenant: TenantContext = Depe
                 "success": True,
                 "timestamp": utcnow().isoformat()
             }
-        logger.error(f"Error in semantic search: {e}")
+        logger.exception("Error in semantic search")
         raise internal_error(message="Failed to perform semantic search", details={"error": str(e)})
 
 # Data Management
@@ -916,17 +919,5 @@ async def cleanup_duplicate_data(request: Request, tenant: TenantContext = Depen
         # status code instead of being re-wrapped as 500.
         raise
     except Exception as e:
-        logger.error(f"Error during data cleanup: {e}")
+        logger.exception("Error during data cleanup: %s", e)
         raise internal_error(message="Failed to clean up data", details={"error": str(e)})
-
-# The legacy ``/api/data/upload/csv`` and ``/api/data/upload/sheets`` handlers
-# were demo stubs that ignored the payload entirely and returned a
-# ``random.randint`` count as the "recordCount". Customers hitting those
-# URLs got a success envelope back while nothing was ingested. The real
-# import pipeline lives under ``/api/import/*`` (``import_endpoints.py``)
-# and the demo-data ingestion path is ``/api/upload/*``
-# (``inline_endpoints.py``), both of which write real documents. The fake
-# handlers have been removed; the frontend helpers that still reference
-# them (``runsheet/src/services/api.ts::uploadFromSheets`` / ``uploadCSV``)
-# are legacy compat shims and their callers should be redirected at
-# ``/api/import/upload/*`` as part of the import-flow consolidation.

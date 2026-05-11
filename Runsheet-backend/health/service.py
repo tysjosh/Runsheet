@@ -138,7 +138,10 @@ class HealthCheckService:
         for result in results:
             if isinstance(result, Exception):
                 # This shouldn't happen as we handle exceptions in individual checks
-                logger.error(f"Unexpected exception in health check: {result}")
+                logger.error(
+                    "Unexpected exception in health check",
+                    exc_info=(type(result), result, result.__traceback__),
+                )
                 dependencies.append(DependencyHealth(
                     name="unknown",
                     healthy=False,

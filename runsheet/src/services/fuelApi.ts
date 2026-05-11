@@ -5,6 +5,18 @@ import { API_TIMEOUTS, ApiError, ApiTimeoutError } from "./api";
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
 
+export const LITERS_PER_GALLON = 3.785411784;
+
+export function litersToGallons(liters: number | null | undefined): number {
+  if (liters == null || Number.isNaN(liters)) return 0;
+  return liters / LITERS_PER_GALLON;
+}
+
+export function gallonsToLiters(gallons: number | null | undefined): number {
+  if (gallons == null || Number.isNaN(gallons)) return 0;
+  return gallons * LITERS_PER_GALLON;
+}
+
 // ─── Shared Types ────────────────────────────────────────────────────────────
 
 export interface GeoPoint {
@@ -27,7 +39,15 @@ export interface PaginatedResponse<T> {
 
 // ─── Fuel Station Types ──────────────────────────────────────────────────────
 
-export type FuelType = "DIESEL_2" | "GASOLINE_REG" | "GASOLINE_PREM" | "HEATING_OIL" | "PROPANE" | "KEROSENE" | "OFF_ROAD_DIESEL" | "DEF";
+export type FuelType =
+  | "DIESEL_2"
+  | "GASOLINE_REG"
+  | "GASOLINE_PREM"
+  | "HEATING_OIL"
+  | "PROPANE"
+  | "KEROSENE"
+  | "OFF_ROAD_DIESEL"
+  | "DEF";
 export type StationStatus = "normal" | "low" | "critical" | "empty";
 
 export interface FuelStation {
@@ -36,6 +56,7 @@ export interface FuelStation {
   fuel_type: FuelType;
   capacity_gallons?: number;
   current_stock_gallons?: number;
+  daily_consumption_rate_gallons?: number;
   capacity_liters: number;
   current_stock_liters: number;
   daily_consumption_rate: number;
@@ -57,6 +78,7 @@ export interface FuelStationDetail {
 export interface ConsumptionEvent {
   station_id: string;
   fuel_type: FuelType;
+  quantity_gallons?: number;
   quantity_liters: number;
   asset_id: string;
   operator_id: string;
@@ -66,6 +88,7 @@ export interface ConsumptionEvent {
 export interface RefillEvent {
   station_id: string;
   fuel_type: FuelType;
+  quantity_gallons?: number;
   quantity_liters: number;
   supplier: string;
   delivery_reference?: string | null;
@@ -79,6 +102,8 @@ export interface FuelAlert {
   name: string;
   fuel_type: FuelType;
   status: "low" | "critical" | "empty";
+  current_stock_gallons?: number;
+  capacity_gallons?: number;
   current_stock_liters: number;
   capacity_liters: number;
   stock_percentage: number;
@@ -99,6 +124,9 @@ export interface ConsumptionMetric {
 
 export interface FuelNetworkSummary {
   total_stations: number;
+  total_capacity_gallons?: number;
+  total_current_stock_gallons?: number;
+  total_daily_consumption_gallons?: number;
   total_capacity_liters: number;
   total_current_stock_liters: number;
   total_daily_consumption: number;
@@ -108,6 +136,90 @@ export interface FuelNetworkSummary {
   stations_critical: number;
   stations_empty: number;
   active_alerts: number;
+}
+
+export function getFuelStationCapacityGallons(
+  station:
+    | Pick<FuelStation, "capacity_gallons" | "capacity_liters">
+    | null
+    | undefined,
+): number {
+  if (!station) return 0;
+  return station.capacity_gallons ?? litersToGallons(station.capacity_liters);
+}
+
+export function getFuelStationCurrentStockGallons(
+  station:
+    | Pick<FuelStation, "current_stock_gallons" | "current_stock_liters">
+    | null
+    | undefined,
+): number {
+  if (!station) return 0;
+  return (
+    station.current_stock_gallons ??
+    litersToGallons(station.current_stock_liters)
+  );
+}
+
+export function getFuelStationDailyConsumptionGallons(
+  station:
+    | Pick<
+        FuelStation,
+        "daily_consumption_rate_gallons" | "daily_consumption_rate"
+      >
+    | null
+    | undefined,
+): number {
+  if (!station) return 0;
+  return (
+    station.daily_consumption_rate_gallons ??
+    litersToGallons(station.daily_consumption_rate)
+  );
+}
+
+export function getEventQuantityGallons(
+  event:
+    | Pick<
+        ConsumptionEvent | RefillEvent,
+        "quantity_gallons" | "quantity_liters"
+      >
+    | null
+    | undefined,
+): number {
+  if (!event) return 0;
+  return event.quantity_gallons ?? litersToGallons(event.quantity_liters);
+}
+
+export function getNetworkCapacityGallons(
+  summary:
+    | Pick<
+        FuelNetworkSummary,
+        "total_capacity_gallons" | "total_capacity_liters"
+      >
+    | null
+    | undefined,
+): number {
+  if (!summary) return 0;
+  return (
+    summary.total_capacity_gallons ??
+    litersToGallons(summary.total_capacity_liters)
+  );
+}
+
+export function getNetworkCurrentStockGallons(
+  summary:
+    | Pick<
+        FuelNetworkSummary,
+        "total_current_stock_gallons" | "total_current_stock_liters"
+      >
+    | null
+    | undefined,
+): number {
+  if (!summary) return 0;
+  return (
+    summary.total_current_stock_gallons ??
+    litersToGallons(summary.total_current_stock_liters)
+  );
 }
 
 // ─── Efficiency Types ─────────────────────────────────────────────────────────
@@ -399,8 +511,38 @@ export interface CompartmentAssignment {
   compartment_id: string;
   station_id: string;
   fuel_grade: string;
+  quantity_gallons?: number;
+  compartment_capacity_gallons?: number;
   quantity_liters: number;
   compartment_capacity_liters: number;
+}
+
+export function getAssignmentQuantityGallons(
+  assignment:
+    | Pick<CompartmentAssignment, "quantity_gallons" | "quantity_liters">
+    | null
+    | undefined,
+): number {
+  if (!assignment) return 0;
+  return (
+    assignment.quantity_gallons ?? litersToGallons(assignment.quantity_liters)
+  );
+}
+
+export function getAssignmentCapacityGallons(
+  assignment:
+    | Pick<
+        CompartmentAssignment,
+        "compartment_capacity_gallons" | "compartment_capacity_liters"
+      >
+    | null
+    | undefined,
+): number {
+  if (!assignment) return 0;
+  return (
+    assignment.compartment_capacity_gallons ??
+    litersToGallons(assignment.compartment_capacity_liters)
+  );
 }
 
 export interface LoadingPlan {
@@ -878,9 +1020,9 @@ export async function updateCustomerTank(
  * ``POST /api/fuel/mvp/routes/{route_id}/emergency-stop``.
  *
  * Exactly one of ``station_id`` / ``customer_tank_id`` is required. The
- * backend canonicalizes ``fuel_grade`` via the fuel product catalog so
- * legacy aliases (``AGO`` → ``DIESEL_2`` etc.) resolve to the same key
- * the persisted route stores. ``SLA_by`` is optional ISO-8601.
+ * backend canonicalizes ``fuel_grade`` via the US fuel product catalog so
+ * supported supplier and terminal codes resolve to the persisted route key.
+ * ``SLA_by`` is optional ISO-8601.
  */
 export interface EmergencyStopRequest {
   station_id?: string;
@@ -1090,8 +1232,7 @@ export type DepotStatus = "active" | "inactive";
  * ``JSON.stringify(depot)`` round-trips through the API without loss.
  *
  * ``fuel_types_supported`` always holds *canonical* US product codes
- * (e.g. ``DIESEL_2``, ``PROPANE``) — the backend canonicalizes legacy
- * aliases (``AGO``, ``LPG``) on write so the UI can treat this list as
+ * (e.g. ``DIESEL_2``, ``PROPANE``) so the UI can treat this list as
  * already-normalized.
  */
 export interface Depot {
@@ -1624,8 +1765,7 @@ export interface SourcingRecommendationsQuery {
 /**
  * A single rack-price observation for a (tenant, terminal, product)
  * tuple. Mirrors :class:`integrations.rack_price_provider_base.RackPrice`
- * including the canonical ``product_code`` (legacy aliases like ``AGO``
- * are canonicalized server-side).
+ * including the canonical ``product_code`` returned by the rack provider.
  */
 export interface RackPrice {
   rack_price_id: string;
@@ -1945,14 +2085,15 @@ export type CleaningMethod = "flush" | "purge" | "sanitize";
  * One row returned by
  * ``GET /api/fuel/mvp/trucks/{truck_id}/compartments``.
  *
- * Combines the static compartment configuration (``capacity_liters``,
- * ``allowed_grades``, ``position_index``) with the lifecycle state
+ * Combines the static compartment configuration (capacity, ``allowed_grades``,
+ * ``position_index``) with the lifecycle state
  * (``state``, ``last_loaded_product``, ``last_loaded_at``,
  * ``last_cleaned_at``). Timestamps are ISO-8601 UTC strings.
  */
 export interface TruckCompartmentState {
   compartment_id: string;
   truck_id: string;
+  capacity_gallons?: number;
   capacity_liters: number;
   allowed_grades: string[];
   position_index: number;
@@ -1960,6 +2101,18 @@ export interface TruckCompartmentState {
   last_loaded_product?: string | null;
   last_loaded_at?: string | null;
   last_cleaned_at?: string | null;
+}
+
+export function getTruckCompartmentCapacityGallons(
+  compartment:
+    | Pick<TruckCompartmentState, "capacity_gallons" | "capacity_liters">
+    | null
+    | undefined,
+): number {
+  if (!compartment) return 0;
+  return (
+    compartment.capacity_gallons ?? litersToGallons(compartment.capacity_liters)
+  );
 }
 
 /** Envelope for ``GET /api/fuel/mvp/trucks/{truck_id}/compartments``. */
@@ -2061,10 +2214,9 @@ export async function recordCleaningEvent(
 /**
  * One row in ``GET /api/fuel/products``. Mirrors the backend
  * :class:`FuelProductItem` Pydantic response 1:1 so the admin UI can
- * render the catalog without post-processing. ``aliases`` includes
- * legacy codes (``AGO``, ``PMS``, ...) that resolve to
- * ``product_code`` server-side via the fuel product catalog
- * canonicalizer.
+ * render the catalog without post-processing. ``aliases`` includes alternate
+ * supplier and terminal codes that resolve to ``product_code`` server-side via
+ * the fuel product catalog canonicalizer.
  */
 export interface FuelProductItem {
   product_code: string;
@@ -2078,7 +2230,7 @@ export interface FuelProductItem {
 
 /** Envelope returned by ``GET /api/fuel/products``. */
 export interface FuelProductsResponse {
-  /** Tenant Region (e.g. ``"US"``, ``"NG"``) echoed from the JWT context. */
+  /** Tenant region echoed from the JWT context. */
   region: string;
   items: FuelProductItem[];
   total: number;

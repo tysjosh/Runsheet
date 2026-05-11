@@ -24,7 +24,7 @@ from Agents.tools import (
     request_fuel_refill,
     update_fuel_threshold,
 )
-from Agents.tools._tenant_context import set_current_tenant
+from Agents.tools._tenant_context import require_tenant_id, set_current_tenant
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +51,8 @@ class FuelAgent:
         "Your role is to monitor fuel station levels, track consumption patterns, "
         "generate fuel reports, and handle fuel mutations such as refill requests "
         "and threshold updates.\n\n"
-        "**Fuel Types:** AGO (diesel), PMS (petrol), ATK (aviation), LPG\n"
+        "**Fuel Types:** DIESEL_2, GASOLINE_REG, GASOLINE_PREM, HEATING_OIL, "
+        "PROPANE, KEROSENE, OFF_ROAD_DIESEL, DEF\n"
         "**Station Statuses:** normal, low, critical, empty\n\n"
         "**Your Tools:**\n"
         "- `search_fuel_stations(query, fuel_type, status)` - Search fuel stations "
@@ -100,7 +101,7 @@ class FuelAgent:
             The agent's response as a string.
         """
         prompt = task
-        tenant_id = (context or {}).get("tenant_id")
+        tenant_id = require_tenant_id((context or {}).get("tenant_id"))
         if context:
             ctx_parts = []
             if tenant_id:

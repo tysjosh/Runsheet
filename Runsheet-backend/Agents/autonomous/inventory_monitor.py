@@ -106,17 +106,22 @@ class InventoryMonitorAgent(AutonomousAgentBase):
 
             resp = await self._es.search_documents(INVENTORY_INDEX, query, 200)
             degraded_items = [h["_source"] for h in resp["hits"]["hits"]]
-        except Exception as e:
+        except Exception:
             # Req 2.8: Never crash on ES query failure
-            self.logger.error(
-                f"Failed to query inventory for degraded items: {e}",
-                exc_info=True,
-            )
+            self.logger.exception("Failed to query inventory for degraded items")
             return detections, actions
 
         for item in degraded_items:
             item_id = item.get("item_id")
-            tenant_id = item.get("tenant_id", "default")
+            tenant_id = item.get("tenant_id")
+            if not item_id or not tenant_id:
+                self.logger.warning(
+                    "InventoryMonitor: skipping item missing item_id or tenant_id: "
+                    "item_id=%s tenant_id=%s",
+                    item_id,
+                    tenant_id,
+                )
+                continue
 
             # Respect tenant feature flags (Req 2.7)
             if self._feature_flags:
@@ -124,10 +129,12 @@ class InventoryMonitorAgent(AutonomousAgentBase):
                     enabled = await self._feature_flags.is_enabled(tenant_id)
                     if not enabled:
                         continue
-                except Exception as e:
+                except Exception:
                     # Fail-open: if feature flag check fails, process the item
                     self.logger.warning(
-                        f"Feature flag check failed for tenant {tenant_id}: {e}"
+                        "Feature flag check failed for tenant %s",
+                        tenant_id,
+                        exc_info=True,
                     )
 
             detections.append(item_id)

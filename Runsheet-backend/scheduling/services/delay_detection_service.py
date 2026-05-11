@@ -16,11 +16,10 @@ Requirements covered:
 
 import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 from scheduling.models import JobStatus
 from scheduling.services.scheduling_es_mappings import JOBS_CURRENT_INDEX
-from services.elasticsearch_service import ElasticsearchService
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +30,7 @@ class DelayDetectionService:
     Validates: Requirements 7.1-7.6
     """
 
-    def __init__(self, es_service: ElasticsearchService, ws_manager=None):
+    def __init__(self, es_service: Any, ws_manager=None):
         self._es = es_service
         self._ws = ws_manager
 

@@ -183,7 +183,7 @@ async def list_approvals(
             )
         return result
     except Exception as e:
-        logger.error(f"Failed to list approvals: {e}")
+        logger.exception("Failed to list approvals")
         raise internal_error(message="Failed to list approvals", details={"error": str(e)})
 
 
@@ -208,7 +208,7 @@ async def approve_action(
         # Concurrency conflict
         raise AppException(error_code=ErrorCode.VALIDATION_ERROR, message=str(e), status_code=409)
     except Exception as e:
-        logger.error(f"Failed to approve action {action_id}: {e}")
+        logger.exception("Failed to approve action %s", action_id)
         raise internal_error(message="Failed to approve action", details={"action_id": action_id, "error": str(e)})
 
 
@@ -236,7 +236,7 @@ async def reject_action(
     except RuntimeError as e:
         raise AppException(error_code=ErrorCode.VALIDATION_ERROR, message=str(e), status_code=409)
     except Exception as e:
-        logger.error(f"Failed to reject action {action_id}: {e}")
+        logger.exception("Failed to reject action %s", action_id)
         raise internal_error(message="Failed to reject action", details={"action_id": action_id, "error": str(e)})
 
 
@@ -303,7 +303,7 @@ async def list_activity(
             )
         return result
     except Exception as e:
-        logger.error(f"Failed to query activity log: {e}")
+        logger.exception("Failed to query activity log")
         raise internal_error(message="Failed to query activity log", details={"error": str(e)})
 
 
@@ -325,7 +325,7 @@ async def get_activity_stats(
         result = await svc.get_stats(tenant_id=tenant.tenant_id)
         return result
     except Exception as e:
-        logger.error(f"Failed to get activity stats: {e}")
+        logger.exception("Failed to get activity stats")
         raise internal_error(message="Failed to get activity stats", details={"error": str(e)})
 
 
@@ -348,8 +348,8 @@ async def get_autonomy_level(
     svc = _get_autonomy_config()
     try:
         level = await svc.get_level(tenant_id=tenant.tenant_id)
-    except Exception as e:
-        logger.error(f"Failed to get autonomy level: {e}")
+    except Exception:
+        logger.exception("Failed to get autonomy level")
         # Return a sensible default if the service fails
         level = "suggest-only"
 
@@ -385,7 +385,7 @@ async def update_autonomy_level(
     except ValueError as e:
         raise validation_error(message=str(e))
     except Exception as e:
-        logger.error(f"Failed to update autonomy level: {e}")
+        logger.exception("Failed to update autonomy level")
         raise internal_error(message="Failed to update autonomy level", details={"error": str(e)})
 
     # Log the change to the activity log (Requirement 10.5)
@@ -411,8 +411,8 @@ async def update_autonomy_level(
                 "new_level": body.level,
             },
         })
-    except Exception as e:
-        logger.warning(f"Failed to log autonomy level change: {e}")
+    except Exception:
+        logger.warning("Failed to log autonomy level change", exc_info=True)
 
     return {
         "tenant_id": tenant.tenant_id,
@@ -472,7 +472,7 @@ async def list_memories(
             )
         return result
     except Exception as e:
-        logger.error(f"Failed to list memories: {e}")
+        logger.exception("Failed to list memories")
         raise internal_error(message="Failed to list memories", details={"error": str(e)})
 
 
@@ -501,7 +501,7 @@ async def delete_memory(
     except AppException:
         raise
     except Exception as e:
-        logger.error(f"Failed to delete memory {memory_id}: {e}")
+        logger.exception("Failed to delete memory %s", memory_id)
         raise internal_error(message="Failed to delete memory", details={"memory_id": memory_id, "error": str(e)})
 
 
@@ -566,7 +566,7 @@ async def list_feedback(
             )
         return result
     except Exception as e:
-        logger.error(f"Failed to list feedback: {e}")
+        logger.exception("Failed to list feedback")
         raise internal_error(message="Failed to list feedback", details={"error": str(e)})
 
 
@@ -588,7 +588,7 @@ async def get_feedback_stats(
         result = await svc.get_stats(tenant_id=tenant.tenant_id)
         return result
     except Exception as e:
-        logger.error(f"Failed to get feedback stats: {e}")
+        logger.exception("Failed to get feedback stats")
         raise internal_error(message="Failed to get feedback stats", details={"error": str(e)})
 
 
@@ -664,7 +664,7 @@ async def pause_agent(agent_id: str, request: Request):
             "details": {"action": "pause"},
         })
     except Exception as e:
-        logger.error(f"Failed to pause agent {agent_id}: {e}")
+        logger.exception("Failed to pause agent %s", agent_id)
         raise internal_error(message="Failed to pause agent", details={"agent_id": agent_id, "error": str(e)})
 
     return {"agent_id": agent_id, "status": "stopped"}
@@ -708,7 +708,7 @@ async def resume_agent(agent_id: str, request: Request):
             "details": {"action": "resume"},
         })
     except Exception as e:
-        logger.error(f"Failed to resume agent {agent_id}: {e}")
+        logger.exception("Failed to resume agent %s", agent_id)
         raise internal_error(message="Failed to resume agent", details={"agent_id": agent_id, "error": str(e)})
 
     return {"agent_id": agent_id, "status": "running"}

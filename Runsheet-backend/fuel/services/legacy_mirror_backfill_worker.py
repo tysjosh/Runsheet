@@ -29,6 +29,7 @@ from services.metrics import FUELOPS_REGISTRY
 from services.time_utils import utcnow
 
 logger = logging.getLogger(__name__)
+ES_SEARCH_TIMEOUT_SECONDS = 10
 
 __all__ = ["LegacyMirrorBackfillWorker", "run_backfill_cycle"]
 
@@ -146,7 +147,9 @@ class LegacyMirrorBackfillWorker:
         }
         try:
             result = await self._es.client.search(
-                index=PENDING_LEGACY_MIRRORS_INDEX, body=body
+                index=PENDING_LEGACY_MIRRORS_INDEX,
+                body=body,
+                request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
             )
             hits = result.get("hits", {}).get("hits", [])
             return [h["_source"] for h in hits]

@@ -769,23 +769,20 @@ class TestMonitorCycleTenantId:
         assert request.tenant_id == "tenant-42"
 
     @pytest.mark.asyncio
-    async def test_defaults_to_default_tenant(self):
+    async def test_skips_shipments_missing_tenant_id(self):
         agent = _make_agent()
         shp = _breached_shipment()
-        del shp["tenant_id"]  # Remove tenant_id to test default
+        del shp["tenant_id"]
 
         agent._es.search_documents = AsyncMock(
-            side_effect=[
-                _es_response([shp]),
-                _es_count_response(1),
-            ]
+            return_value=_es_response([shp])
         )
 
-        await agent.monitor_cycle()
+        detections, actions = await agent.monitor_cycle()
 
-        calls = agent._confirmation_protocol.process_mutation.call_args_list
-        request = calls[0][0][0]
-        assert request.tenant_id == "default"
+        assert detections == []
+        assert actions == []
+        agent._confirmation_protocol.process_mutation.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

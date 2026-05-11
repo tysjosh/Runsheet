@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Mapping, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from fuel.emergency_declaration_models import FederalHOSExemption
 from services.time_utils import utcnow
 
 logger = logging.getLogger(__name__)
@@ -88,6 +89,8 @@ class HOSEligibility(BaseModel):
     eligible: bool
     reasons: List[str] = Field(default_factory=list)
     earliest_eligible_time: Optional[datetime] = None
+    active_hos_exemption_id: Optional[str] = None
+    hos_exemption_suspended_rules: List[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +213,7 @@ class HOSChecker:
         driver_id: str,
         estimated_drive_hours: float,
         estimated_total_hours: float,
+        hos_exemption: Optional[FederalHOSExemption] = None,
     ) -> HOSEligibility:
         """Check whether a driver has sufficient HOS hours for a route.
 
@@ -225,6 +229,10 @@ class HOSChecker:
             driver_id: The driver to evaluate.
             estimated_drive_hours: Estimated driving time for the route.
             estimated_total_hours: Estimated total on-duty time for the route.
+            hos_exemption: Optional active Federal emergency exemption.
+                When active, the checker suppresses only the specific HOS
+                rule checks listed in ``suspended_rules`` while recording the
+                exemption id on the result for auditability.
 
         Returns:
             HOSEligibility with eligible=True/False, reasons, and
@@ -249,10 +257,19 @@ class HOSChecker:
             )
 
         reasons: List[str] = []
+        active_exemption = (
+            hos_exemption
+            if hos_exemption and hos_exemption.applies_to(as_of=utcnow())
+            else None
+        )
+        suspended_rules = set(active_exemption.suspended_rules) if active_exemption else set()
 
         # Check 1: 11-hour drive limit with 30-minute buffer (Req 4.2)
         required_drive_hours = estimated_drive_hours + BUFFER_HOURS
-        if hos_status.available_drive_hours < required_drive_hours:
+        if (
+            "drive_limit" not in suspended_rules
+            and hos_status.available_drive_hours < required_drive_hours
+        ):
             reasons.append(
                 f"Insufficient drive hours: {hos_status.available_drive_hours:.1f}h "
                 f"available, need {required_drive_hours:.1f}h "
@@ -260,7 +277,10 @@ class HOSChecker:
             )
 
         # Check 2: 14-hour on-duty window remaining (Req 4.3)
-        if hos_status.available_window_hours < estimated_total_hours:
+        if (
+            "on_duty_window" not in suspended_rules
+            and hos_status.available_window_hours < estimated_total_hours
+        ):
             reasons.append(
                 f"Insufficient on-duty window: {hos_status.available_window_hours:.1f}h "
                 f"available, need {estimated_total_hours:.1f}h total route duration"
@@ -273,7 +293,10 @@ class HOSChecker:
             else CYCLE_8_DAY_LIMIT
         )
         projected_cycle_hours = hos_status.cumulative_cycle_hours + estimated_total_hours
-        if projected_cycle_hours > cycle_limit:
+        if (
+            "cycle_limit" not in suspended_rules
+            and projected_cycle_hours > cycle_limit
+        ):
             excess = projected_cycle_hours - cycle_limit
             reasons.append(
                 f"Cycle limit exceeded: {hos_status.cumulative_cycle_hours:.1f}h cumulative + "
@@ -290,15 +313,24 @@ class HOSChecker:
             candidate_times: List[datetime] = []
 
             # Drive-hours failure: driver needs a 10-hour rest to reset drive clock
-            if hos_status.available_drive_hours < required_drive_hours:
+            if (
+                "drive_limit" not in suspended_rules
+                and hos_status.available_drive_hours < required_drive_hours
+            ):
                 candidate_times.append(now + timedelta(hours=10))
 
             # Window failure: driver needs a 10-hour off-duty period to reset 14-hour window
-            if hos_status.available_window_hours < estimated_total_hours:
+            if (
+                "on_duty_window" not in suspended_rules
+                and hos_status.available_window_hours < estimated_total_hours
+            ):
                 candidate_times.append(now + timedelta(hours=10))
 
             # Cycle failure: driver needs a 34-hour restart to reset the cycle
-            if projected_cycle_hours > cycle_limit:
+            if (
+                "cycle_limit" not in suspended_rules
+                and projected_cycle_hours > cycle_limit
+            ):
                 candidate_times.append(now + timedelta(hours=34))
 
             # Use the LATEST (most restrictive) of all computed earliest times
@@ -319,6 +351,12 @@ class HOSChecker:
             eligible=eligible,
             reasons=reasons,
             earliest_eligible_time=earliest_eligible_time,
+            active_hos_exemption_id=(
+                active_exemption.exemption_id if active_exemption else None
+            ),
+            hos_exemption_suspended_rules=(
+                list(active_exemption.suspended_rules) if active_exemption else []
+            ),
         )
 
     async def log_route_assignment(

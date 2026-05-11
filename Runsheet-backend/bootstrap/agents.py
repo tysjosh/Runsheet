@@ -832,7 +832,12 @@ async def initialize(app, container: ServiceContainer) -> None:
                     return None
                 try:
                     return await self._client.get(key)
-                except Exception:  # pragma: no cover - defensive
+                except Exception as exc:
+                    logger.warning(
+                        "Sourcing tenant-config Redis read failed for key=%s: %s",
+                        key,
+                        exc,
+                    )
                     return None
 
         sourcing_tenant_config = _RedisTenantConfig(_agent_redis_client)

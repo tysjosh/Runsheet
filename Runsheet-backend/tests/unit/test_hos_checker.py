@@ -19,7 +19,7 @@ Validates: Requirements 4.1, 4.6
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -37,6 +37,7 @@ from compliance.services.hos_checker import (
     _build_cache_key,
     _parse_geotab_hos_response,
 )
+from fuel.emergency_declaration_models import FederalHOSExemption
 
 
 # ---------------------------------------------------------------------------
@@ -802,6 +803,82 @@ class TestIsEligibleDriveHours:
         assert result.driver_id == "driver_001"
         assert len(result.reasons) == 1
         assert "HOS data unavailable" in result.reasons[0]
+
+    @pytest.mark.asyncio
+    async def test_active_federal_hos_exemption_suspends_named_rules(self):
+        """Active exemptions suppress only the rules listed in suspended_rules."""
+        es_service, redis_client, geotab_connector = _make_dependencies()
+        cached_data = {
+            "driver_id": "driver_001",
+            "available_drive_hours": 0.0,
+            "available_window_hours": 1.0,
+            "cumulative_cycle_hours": 45.0,
+            "cycle_type": "7_day",
+            "last_updated": "2026-06-01T12:00:00+00:00",
+            "source": "geotab",
+        }
+        redis_client.get = AsyncMock(return_value=json.dumps(cached_data))
+        now = datetime.now(timezone.utc)
+        exemption = FederalHOSExemption(
+            exemption_id="hos-ex-001",
+            declaration_id="dec-001",
+            tenant_id="t1",
+            suspended_rules=["drive_limit", "on_duty_window"],
+            effective_at=now - timedelta(hours=1),
+            expires_at=now + timedelta(hours=12),
+        )
+
+        checker = HOSChecker(es_service, redis_client, geotab_connector, tenant_id="t1")
+        result = await checker.is_eligible(
+            "driver_001",
+            3.0,
+            5.0,
+            hos_exemption=exemption,
+        )
+
+        assert result.eligible is True
+        assert result.reasons == []
+        assert result.active_hos_exemption_id == "hos-ex-001"
+        assert result.hos_exemption_suspended_rules == [
+            "drive_limit",
+            "on_duty_window",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_expired_federal_hos_exemption_is_ignored(self):
+        """Expired exemptions do not suppress HOS failures."""
+        es_service, redis_client, geotab_connector = _make_dependencies()
+        cached_data = {
+            "driver_id": "driver_001",
+            "available_drive_hours": 0.0,
+            "available_window_hours": 10.0,
+            "cumulative_cycle_hours": 45.0,
+            "cycle_type": "7_day",
+            "last_updated": "2026-06-01T12:00:00+00:00",
+            "source": "geotab",
+        }
+        redis_client.get = AsyncMock(return_value=json.dumps(cached_data))
+        now = datetime.now(timezone.utc)
+        exemption = FederalHOSExemption(
+            exemption_id="hos-ex-expired",
+            declaration_id="dec-001",
+            tenant_id="t1",
+            suspended_rules=["drive_limit"],
+            effective_at=now - timedelta(hours=12),
+            expires_at=now - timedelta(hours=1),
+        )
+
+        checker = HOSChecker(es_service, redis_client, geotab_connector, tenant_id="t1")
+        result = await checker.is_eligible(
+            "driver_001",
+            3.0,
+            5.0,
+            hos_exemption=exemption,
+        )
+
+        assert result.eligible is False
+        assert "Insufficient drive hours" in result.reasons[0]
+        assert result.active_hos_exemption_id is None
 
 
 # ---------------------------------------------------------------------------

@@ -180,8 +180,8 @@ class DelayResponseAgent(AutonomousAgentBase):
                         },
                     )
                     await self._signal_bus.publish(signal)
-                except Exception as e:
-                    self.logger.error(f"Failed to publish RiskSignal: {e}")
+                except Exception:
+                    self.logger.exception("Failed to publish RiskSignal")
 
             # Find a compatible available asset (Req 3.3)
             job_type = job.get("job_type")

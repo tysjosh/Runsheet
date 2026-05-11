@@ -49,10 +49,8 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { ApiError } from "../../services/api";
 import type {
   AgentHealthEntry,
-  AgentHealthResponse,
   AutonomyLevel,
   AutonomyUpdateResponse,
   FeedbackEntry,
@@ -60,8 +58,6 @@ import type {
   FeedbackStats,
   MemoryEntry,
   MemoryFilters,
-  PaginatedFeedback,
-  PaginatedMemories,
 } from "../../services/agentApi";
 import {
   deleteMemory,
@@ -74,11 +70,16 @@ import {
   resumeAgent,
   updateAutonomyLevel,
 } from "../../services/agentApi";
+import { ApiError } from "../../services/api";
+import { getCurrentTenantId } from "../../services/tenant";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const TENANT_ID = "default";
 const PAGE_SIZE = 10;
+
+function activeTenantId(): string {
+  return getCurrentTenantId();
+}
 
 const AUTONOMY_OPTIONS: {
   value: AutonomyLevel;
@@ -185,21 +186,20 @@ function AutonomySection({ isAdmin }: AutonomySectionProps) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-  const [successInfo, setSuccessInfo] =
-    useState<AutonomyUpdateResponse | null>(null);
+  const [successInfo, setSuccessInfo] = useState<AutonomyUpdateResponse | null>(
+    null,
+  );
 
   const loadLevel = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
-      const result = await getAutonomyLevel(TENANT_ID);
+      const result = await getAutonomyLevel(activeTenantId());
       setCurrentLevel(result.level);
       setSelectedLevel(result.level);
     } catch (err) {
       setError(
-        err instanceof Error
-          ? err.message
-          : "Failed to load autonomy level",
+        err instanceof Error ? err.message : "Failed to load autonomy level",
       );
     } finally {
       setLoading(false);
@@ -216,12 +216,14 @@ function AutonomySection({ isAdmin }: AutonomySectionProps) {
     setError("");
     setSuccessInfo(null);
     try {
-      const result = await updateAutonomyLevel(selectedLevel, TENANT_ID);
+      const result = await updateAutonomyLevel(selectedLevel, activeTenantId());
       setCurrentLevel(selectedLevel);
       setSuccessInfo(result);
     } catch (err) {
       if (err instanceof ApiError && err.status === 403) {
-        setError("Access denied. Admin privileges are required to change the autonomy level.");
+        setError(
+          "Access denied. Admin privileges are required to change the autonomy level.",
+        );
       } else {
         setError(
           err instanceof Error
@@ -275,7 +277,8 @@ function AutonomySection({ isAdmin }: AutonomySectionProps) {
             Autonomy level updated successfully.
           </p>
           <p className="text-xs text-green-600 mt-1">
-            Previous: <span className="font-medium">{successInfo.previous_level}</span>
+            Previous:{" "}
+            <span className="font-medium">{successInfo.previous_level}</span>
             {" → "}
             New: <span className="font-medium">{successInfo.new_level}</span>
           </p>
@@ -404,9 +407,7 @@ function AgentHealthSection() {
         ),
       );
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to pause agent",
-      );
+      setError(err instanceof Error ? err.message : "Failed to pause agent");
     } finally {
       setActionLoading(null);
     }
@@ -422,9 +423,7 @@ function AgentHealthSection() {
         ),
       );
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to resume agent",
-      );
+      setError(err instanceof Error ? err.message : "Failed to resume agent");
     } finally {
       setActionLoading(null);
     }
@@ -505,42 +504,42 @@ function AgentHealthSection() {
                   <p className="text-sm font-medium text-[#232323]">
                     {agent.agent_id}
                   </p>
-                  <div className="mt-0.5">
-                    {getStatusBadge(agent.status)}
-                  </div>
+                  <div className="mt-0.5">{getStatusBadge(agent.status)}</div>
                 </div>
               </div>
               <div className="flex items-center gap-2">
-                {(agent as any).type === "autonomous" && agent.status === "running" && (
-                  <button
-                    onClick={() => handlePause(agent.agent_id)}
-                    disabled={actionLoading === agent.agent_id}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-yellow-200 text-yellow-700 hover:bg-yellow-50 disabled:opacity-50 transition-colors"
-                    title="Pause agent"
-                  >
-                    {actionLoading === agent.agent_id ? (
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    ) : (
-                      <Pause className="w-3.5 h-3.5" />
-                    )}
-                    Pause
-                  </button>
-                )}
-                {(agent as any).type === "autonomous" && agent.status === "stopped" && (
-                  <button
-                    onClick={() => handleResume(agent.agent_id)}
-                    disabled={actionLoading === agent.agent_id}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-green-200 text-green-700 hover:bg-green-50 disabled:opacity-50 transition-colors"
-                    title="Resume agent"
-                  >
-                    {actionLoading === agent.agent_id ? (
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    ) : (
-                      <Play className="w-3.5 h-3.5" />
-                    )}
-                    Resume
-                  </button>
-                )}
+                {(agent as any).type === "autonomous" &&
+                  agent.status === "running" && (
+                    <button
+                      onClick={() => handlePause(agent.agent_id)}
+                      disabled={actionLoading === agent.agent_id}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-yellow-200 text-yellow-700 hover:bg-yellow-50 disabled:opacity-50 transition-colors"
+                      title="Pause agent"
+                    >
+                      {actionLoading === agent.agent_id ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Pause className="w-3.5 h-3.5" />
+                      )}
+                      Pause
+                    </button>
+                  )}
+                {(agent as any).type === "autonomous" &&
+                  agent.status === "stopped" && (
+                    <button
+                      onClick={() => handleResume(agent.agent_id)}
+                      disabled={actionLoading === agent.agent_id}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-green-200 text-green-700 hover:bg-green-50 disabled:opacity-50 transition-colors"
+                      title="Resume agent"
+                    >
+                      {actionLoading === agent.agent_id ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Play className="w-3.5 h-3.5" />
+                      )}
+                      Resume
+                    </button>
+                  )}
                 {(agent as any).type === "overlay" && (
                   <span className="text-[10px] text-gray-400 px-2 py-1">
                     Event-driven
@@ -566,9 +565,9 @@ function MemorySection() {
   const [deleteError, setDeleteError] = useState("");
 
   // Filters
-  const [typeFilter, setTypeFilter] = useState<
-    "" | "pattern" | "preference"
-  >("");
+  const [typeFilter, setTypeFilter] = useState<"" | "pattern" | "preference">(
+    "",
+  );
   const [tagsFilter, setTagsFilter] = useState("");
 
   // Delete confirmation
@@ -582,20 +581,18 @@ function MemorySection() {
     setError("");
     try {
       const filters: MemoryFilters = {
-        tenant_id: TENANT_ID,
+        tenant_id: activeTenantId(),
         page,
         size: PAGE_SIZE,
       };
       if (typeFilter) filters.memory_type = typeFilter;
       if (tagsFilter.trim()) filters.tags = tagsFilter.trim();
 
-      const result = await getMemories(filters) as any;
+      const result = (await getMemories(filters)) as any;
       setMemories(result.entries ?? result.items ?? result.data ?? []);
       setTotal(result.total ?? result.pagination?.total ?? 0);
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to load memories",
-      );
+      setError(err instanceof Error ? err.message : "Failed to load memories");
     } finally {
       setLoading(false);
     }
@@ -610,20 +607,16 @@ function MemorySection() {
     setDeleting(true);
     setDeleteError("");
     try {
-      await deleteMemory(deleteTarget, TENANT_ID);
+      await deleteMemory(deleteTarget, activeTenantId());
       // Remove from list without full reload (Requirement 4.4)
-      setMemories((prev) =>
-        prev.filter((m) => m.memory_id !== deleteTarget),
-      );
+      setMemories((prev) => prev.filter((m) => m.memory_id !== deleteTarget));
       setTotal((prev) => prev - 1);
       setDeleteTarget(null);
     } catch (err) {
       if (err instanceof ApiError && err.status === 404) {
         setDeleteError("Memory not found. It may have already been deleted.");
         // Also remove from list since it doesn't exist
-        setMemories((prev) =>
-          prev.filter((m) => m.memory_id !== deleteTarget),
-        );
+        setMemories((prev) => prev.filter((m) => m.memory_id !== deleteTarget));
         setTotal((prev) => prev - 1);
       } else {
         setDeleteError(
@@ -659,9 +652,7 @@ function MemorySection() {
           <select
             value={typeFilter}
             onChange={(e) => {
-              setTypeFilter(
-                e.target.value as "" | "pattern" | "preference",
-              );
+              setTypeFilter(e.target.value as "" | "pattern" | "preference");
               setPage(1);
             }}
             className={inputClass}
@@ -825,7 +816,7 @@ function FeedbackSection() {
     setError("");
     try {
       const filters: FeedbackFilters = {
-        tenant_id: TENANT_ID,
+        tenant_id: activeTenantId(),
         page,
         size: FEEDBACK_PAGE_SIZE,
       };
@@ -835,7 +826,7 @@ function FeedbackSection() {
 
       const [feedbackResult, statsResult] = await Promise.allSettled([
         getFeedback(filters),
-        getFeedbackStats(TENANT_ID),
+        getFeedbackStats(activeTenantId()),
       ]);
 
       if (feedbackResult.status === "fulfilled") {
@@ -850,9 +841,7 @@ function FeedbackSection() {
       }
       // Stats failure is non-critical — we still show entries
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to load feedback",
-      );
+      setError(err instanceof Error ? err.message : "Failed to load feedback");
     } finally {
       setLoading(false);
     }
@@ -905,9 +894,7 @@ function FeedbackSection() {
     <div className="space-y-4">
       <div className="flex items-center gap-2">
         <BarChart3 className="w-4 h-4 text-gray-500" />
-        <h3 className="text-sm font-semibold text-[#232323]">
-          Feedback
-        </h3>
+        <h3 className="text-sm font-semibold text-[#232323]">Feedback</h3>
       </div>
 
       {/* Stats Cards */}
@@ -923,7 +910,9 @@ function FeedbackSection() {
             <p className="text-xs text-gray-500 mb-1">Approval Rate</p>
             <p className="text-xl font-semibold text-green-700">
               {(() => {
-                const rate = stats.approval_rate ?? (stats.total_feedback > 0 ? (1 - stats.rejection_rate) : 0);
+                const rate =
+                  stats.approval_rate ??
+                  (stats.total_feedback > 0 ? 1 - stats.rejection_rate : 0);
                 return Number.isFinite(rate) ? (rate * 100).toFixed(1) : "0.0";
               })()}%
             </p>
@@ -931,7 +920,10 @@ function FeedbackSection() {
           <div className="bg-red-50 rounded-lg p-4">
             <p className="text-xs text-gray-500 mb-1">Rejection Rate</p>
             <p className="text-xl font-semibold text-red-700">
-              {Number.isFinite(stats.rejection_rate) ? (stats.rejection_rate * 100).toFixed(1) : "0.0"}%
+              {Number.isFinite(stats.rejection_rate)
+                ? (stats.rejection_rate * 100).toFixed(1)
+                : "0.0"}
+              %
             </p>
           </div>
         </div>
@@ -1100,7 +1092,8 @@ export default function AgentSettingsPage() {
               Agent Settings
             </h2>
             <p className="text-xs text-gray-500">
-              Configure autonomy levels, manage agent memory, and review feedback
+              Configure autonomy levels, manage agent memory, and review
+              feedback
             </p>
           </div>
         </div>

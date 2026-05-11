@@ -1,9 +1,8 @@
 """
 Agent tools package.
 
-Exports all tools available to the AI agent system. Legacy ops tools
-(search_shipments, search_riders, reassign_rider, escalate_shipment)
-have been removed — use order_tools for fuel order operations.
+Exports all tools available to the AI agent system. Ops search now uses
+order_tools for fuel order and driver operations.
 """
 
 from .search_tools import (
@@ -38,7 +37,7 @@ from .ops_search_tools import (
 from .ops_report_tools import (
     generate_sla_report,
     generate_failure_report,
-    generate_rider_productivity_report as generate_driver_productivity_report,
+    generate_driver_productivity_report,
 )
 
 from .order_tools import (

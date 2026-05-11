@@ -89,8 +89,8 @@ class ElasticsearchService:
             else:
                 raise ConnectionError("Failed to ping Elasticsearch")
                 
-        except Exception as e:
-            logger.error(f"❌ Failed to connect to Elasticsearch: {e}")
+        except Exception:
+            logger.exception("Failed to connect to Elasticsearch")
             raise
     
     def _check_ilm_available(self) -> bool:
@@ -477,8 +477,8 @@ class ElasticsearchService:
             self.client.ilm.put_lifecycle(name=policy_name, body=policy_body)
             logger.info(f"✅ Updated ILM policy: {policy_name}")
             return True
-        except Exception as e:
-            logger.error(f"❌ Failed to update ILM policy {policy_name}: {e}")
+        except Exception:
+            logger.exception("Failed to update ILM policy %s", policy_name)
             return False
     
     def remove_ilm_policy_from_index(self, index_name: str) -> bool:
@@ -507,8 +507,8 @@ class ElasticsearchService:
             )
             logger.info(f"✅ Removed ILM policy from index: {index_name}")
             return True
-        except Exception as e:
-            logger.error(f"❌ Failed to remove ILM policy from {index_name}: {e}")
+        except Exception:
+            logger.exception("Failed to remove ILM policy from %s", index_name)
             return False
     
     @property
@@ -557,7 +557,7 @@ class ElasticsearchService:
         Raises:
             AppException: With ELASTICSEARCH_UNAVAILABLE error code
         """
-        logger.error(f"Elasticsearch {operation} failed: {error}")
+        logger.error("Elasticsearch %s failed: %s", operation, error)
         raise elasticsearch_unavailable(
             message=f"Database operation failed: {operation}",
             details={
@@ -590,8 +590,8 @@ class ElasticsearchService:
                     logger.info(f"📋 Index already exists: {index_name}")
                     # Update mapping with any new fields (existing fields are unchanged)
                     self._update_index_mapping(index_name, mapping)
-            except Exception as e:
-                logger.error(f"❌ Failed to create index {index_name}: {e}")
+            except Exception:
+                logger.exception("Failed to create index %s", index_name)
 
         # Create 'assets' alias pointing to 'trucks' index for multi-asset support
         try:
@@ -789,7 +789,7 @@ class ElasticsearchService:
         except Exception as e:
             result["valid"] = False
             result["mismatches"].append(f"Failed to validate index '{index_name}': {str(e)}")
-            logger.error(f"❌ Schema validation [{index_name}]: Failed to validate - {e}")
+            logger.exception("Schema validation [%s]: failed to validate", index_name)
         
         return result
     
@@ -922,8 +922,8 @@ class ElasticsearchService:
             
             response = self.client.indices.get_mapping(index=index_name)
             return response.get(index_name, {}).get("mappings", {})
-        except Exception as e:
-            logger.error(f"❌ Failed to get mapping for index '{index_name}': {e}")
+        except Exception:
+            logger.exception("Failed to get mapping for index %s", index_name)
             return None
     
     def get_schema_validation_summary(self) -> Dict[str, Any]:

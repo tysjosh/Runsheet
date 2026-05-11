@@ -485,6 +485,40 @@ class TestExecuteSync:
         assert len(connector.calls) == 1
 
     @pytest.mark.asyncio
+    async def test_success_persistence_failure_marks_instance_error_and_alerts(
+        self,
+        repository: IntegrationInstanceRepository,
+        es: _FakeESService,
+        signal_bus: _FakeSignalBus,
+    ):
+        """A successful upstream sync is not reported healthy if SyncRun
+        persistence failed; operators must see the durable-write outage."""
+
+        await repository.create("tenant-A", _base_instance())
+        stored = await repository.get("tenant-A", "integration_001")
+        assert stored is not None
+        connector = _RecordingConnector([_success_sync_run(stored)])
+        scheduler = _make_scheduler(
+            repository, es, connector=connector, signal_bus=signal_bus
+        )
+
+        es.raise_on_index = True
+        run = await scheduler._execute_sync(stored)
+
+        assert run.status == "error"
+        assert run.error_details is not None
+        assert "sync_run_persistence_failed" in run.error_details
+        refreshed = await repository.get("tenant-A", "integration_001")
+        assert refreshed is not None
+        assert refreshed.status == "error"
+        assert refreshed.last_error is not None
+        assert "sync_run_persistence_failed" in refreshed.last_error
+        assert len(signal_bus.published) == 1
+        assert signal_bus.published[0].context["signal_type"] == (
+            INTEGRATION_SYNC_FAILED_SIGNAL_TYPE
+        )
+
+    @pytest.mark.asyncio
     async def test_transient_failure_retries_and_eventually_succeeds(
         self,
         repository: IntegrationInstanceRepository,

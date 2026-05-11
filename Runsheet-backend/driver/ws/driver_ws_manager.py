@@ -468,8 +468,15 @@ class DriverWSManager(BaseWSManager):
             # Close the WebSocket
             try:
                 await ws.close(code=4002, reason="Heartbeat timeout")
-            except Exception:
-                pass
+            except Exception as exc:
+                self._metrics["send_failures_total"] += 1
+                logger.debug(
+                    "Driver WS heartbeat-timeout close failed for driver=%s "
+                    "tenant=%s: %s",
+                    driver_id,
+                    tenant_id,
+                    exc,
+                )
 
         if timed_out_drivers:
             logger.info(

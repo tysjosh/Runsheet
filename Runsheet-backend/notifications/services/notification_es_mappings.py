@@ -190,5 +190,5 @@ def setup_notification_indices(es_service):
                 logger.info(f"✅ Created notification index: {index_name}")
             else:
                 logger.info(f"📋 Notification index already exists: {index_name}")
-        except Exception as e:
-            logger.error(f"❌ Failed to create notification index {index_name}: {e}")
+        except Exception:
+            logger.exception("Failed to create notification index %s", index_name)

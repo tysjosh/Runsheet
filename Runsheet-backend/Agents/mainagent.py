@@ -483,7 +483,7 @@ class LogisticsAgent:
         Returns:
             dict: Error response with type "error" and appropriate message
         """
-        logger.error(f"Gemini API error: {error}")
+        logger.error("Gemini API error: %s", error)
         return {
             "type": "error",
             "content": f"❌ AI service error: {str(error)}",
@@ -517,8 +517,8 @@ class LogisticsAgent:
                 logger.warning("⚠️ No service account file found, using default credentials")
                 os.environ['GOOGLE_CLOUD_PROJECT'] = self.settings.google_cloud_project
                 
-        except Exception as e:
-            logger.error(f"Failed to setup Gemini credentials: {e}")
+        except Exception:
+            logger.exception("Failed to setup Gemini credentials")
             os.environ['GOOGLE_CLOUD_PROJECT'] = self.settings.google_cloud_project
 
     def clear_memory(self, session_id: Optional[str] = None):
@@ -547,8 +547,8 @@ class LogisticsAgent:
                 except RuntimeError:
                     # No running event loop, create one
                     asyncio.run(self._clear_session(session_id))
-        except Exception as e:
-            logger.error(f"Failed to clear agent memory: {e}")
+        except Exception:
+            logger.exception("Failed to clear agent memory")
 
     async def chat_streaming(
         self,
@@ -793,7 +793,7 @@ class LogisticsAgent:
                                 tags={"mode": mode, "success": "false", "error_type": "connection"}
                             )
                         
-                        logger.error(f"Error in streaming chat (final): {e}")
+                        logger.exception("Error in streaming chat (final)")
                         yield {
                             "type": "error", 
                             "content": f"❌ Connection failed after {max_retries} attempts. The AI service is having connectivity issues. Please try again in a moment.",
@@ -814,7 +814,7 @@ class LogisticsAgent:
                             tags={"mode": mode, "success": "false", "error_type": "other"}
                         )
                     
-                    logger.error(f"Error in streaming chat: {e}")
+                    logger.exception("Error in streaming chat")
                     yield self._handle_gemini_api_error(e)
                     return
 
@@ -923,5 +923,5 @@ class LogisticsAgent:
                     tags={"mode": mode, "success": "false", "method": "fallback"}
                 )
             
-            logger.error(f"Error in fallback chat: {e}")
+            logger.exception("Error in fallback chat")
             return f"❌ I'm having trouble connecting to the AI service right now. However, all the data tools are working fine. Please try again in a moment."

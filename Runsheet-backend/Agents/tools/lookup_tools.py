@@ -177,7 +177,7 @@ async def find_truck_by_id(truck_identifier: str) -> str:
         return response
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"Error finding asset: {e}")
+        logger.exception("Error finding asset")
         return f"Error finding asset: {str(e)}"
     finally:
         _log_tool_invocation("find_truck_by_id", {"truck_identifier": truck_identifier}, start_time, success, error_msg)
@@ -225,7 +225,7 @@ async def get_all_locations() -> str:
         return response
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"Error getting locations: {e}")
+        logger.exception("Error getting locations")
         return f"Error getting locations: {str(e)}"
     finally:
         _log_tool_invocation("get_all_locations", {}, start_time, success, error_msg)

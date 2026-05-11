@@ -2,7 +2,15 @@
 
 import { ChevronDown, ChevronUp, MapPin, Pencil } from "lucide-react";
 import { useCallback, useState } from "react";
-import type { FuelStation, FuelType, StationStatus } from "../../services/fuelApi";
+import type {
+  FuelStation,
+  FuelType,
+  StationStatus,
+} from "../../services/fuelApi";
+import {
+  getFuelStationCapacityGallons,
+  getFuelStationCurrentStockGallons,
+} from "../../services/fuelApi";
 
 type SortField =
   | "name"
@@ -23,14 +31,37 @@ interface FuelStationListProps {
   onEditStation?: (station: FuelStation) => void;
 }
 
-const STATUS_CONFIG: Record<StationStatus, { label: string; color: string; bg: string; barColor: string }> = {
-  normal:   { label: "Normal",   color: "text-green-700",  bg: "bg-green-100",  barColor: "bg-green-500" },
-  low:      { label: "Low",      color: "text-yellow-700", bg: "bg-yellow-100", barColor: "bg-yellow-500" },
-  critical: { label: "Critical", color: "text-red-700",    bg: "bg-red-100",    barColor: "bg-red-500" },
-  empty:    { label: "Empty",    color: "text-gray-700",   bg: "bg-gray-100",   barColor: "bg-gray-400" },
+const STATUS_CONFIG: Record<
+  StationStatus,
+  { label: string; color: string; bg: string; barColor: string }
+> = {
+  normal: {
+    label: "Normal",
+    color: "text-green-700",
+    bg: "bg-green-100",
+    barColor: "bg-green-500",
+  },
+  low: {
+    label: "Low",
+    color: "text-yellow-700",
+    bg: "bg-yellow-100",
+    barColor: "bg-yellow-500",
+  },
+  critical: {
+    label: "Critical",
+    color: "text-red-700",
+    bg: "bg-red-100",
+    barColor: "bg-red-500",
+  },
+  empty: {
+    label: "Empty",
+    color: "text-gray-700",
+    bg: "bg-gray-100",
+    barColor: "bg-gray-400",
+  },
 };
 
-const FUEL_TYPE_LABELS: Record<string, string> = {
+const FUEL_TYPE_LABELS: Record<FuelType, string> = {
   DIESEL_2: "Diesel #2 (ULSD)",
   GASOLINE_REG: "Regular Unleaded",
   GASOLINE_PREM: "Premium Unleaded",
@@ -39,22 +70,26 @@ const FUEL_TYPE_LABELS: Record<string, string> = {
   KEROSENE: "Kerosene",
   OFF_ROAD_DIESEL: "Off-Road Diesel",
   DEF: "DEF",
-  // Legacy aliases (canonicalized on backend)
-  AGO: "Diesel #2 (ULSD)",
-  PMS: "Regular Unleaded",
-  ATK: "Kerosene",
-  LPG: "Propane",
 };
 
-function getStockPercentage(station: FuelStation): number {
-  if (station.capacity_liters <= 0) return 0;
-  return (station.current_stock_liters / station.capacity_liters) * 100;
+function getCapacityGallons(station: FuelStation): number {
+  return getFuelStationCapacityGallons(station);
 }
 
-function formatLiters(liters: number): string {
-  if (liters == null || isNaN(liters)) return "0";
-  if (liters >= 1_000) return `${(liters / 1_000).toFixed(1)}K`;
-  return liters.toFixed(0);
+function getCurrentStockGallons(station: FuelStation): number {
+  return getFuelStationCurrentStockGallons(station);
+}
+
+function getStockPercentage(station: FuelStation): number {
+  const capacityGallons = getCapacityGallons(station);
+  if (capacityGallons <= 0) return 0;
+  return (getCurrentStockGallons(station) / capacityGallons) * 100;
+}
+
+function formatGallons(gallons: number): string {
+  if (gallons == null || Number.isNaN(gallons)) return "0";
+  if (gallons >= 1_000) return `${(gallons / 1_000).toFixed(1)}K`;
+  return gallons.toFixed(0);
 }
 
 const COLUMNS: { key: SortField; label: string }[] = [
@@ -103,7 +138,9 @@ export default function FuelStationList({
         cmp = a.days_until_empty - b.days_until_empty;
         break;
       default:
-        cmp = (String(a[sortField] ?? "")).localeCompare(String(b[sortField] ?? ""));
+        cmp = String(a[sortField] ?? "").localeCompare(
+          String(b[sortField] ?? ""),
+        );
     }
     return sortOrder === "asc" ? cmp : -cmp;
   });
@@ -158,7 +195,8 @@ export default function FuelStationList({
         <tbody className="divide-y divide-gray-100">
           {sorted.map((station) => {
             const stockPct = getStockPercentage(station);
-            const config = STATUS_CONFIG[station.status] ?? STATUS_CONFIG.normal;
+            const config =
+              STATUS_CONFIG[station.status] ?? STATUS_CONFIG.normal;
             const isSelected = selectedStationId === station.station_id;
 
             return (
@@ -204,7 +242,8 @@ export default function FuelStationList({
                     </span>
                   </div>
                   <div className="text-xs text-gray-400 mt-0.5">
-                    {formatLiters(station.current_stock_liters)} / {formatLiters(station.capacity_liters)} L
+                    {formatGallons(getCurrentStockGallons(station))} /{" "}
+                    {formatGallons(getCapacityGallons(station))} gal
                   </div>
                 </td>
                 <td className="px-6 py-3">
@@ -222,7 +261,10 @@ export default function FuelStationList({
                 <td className="px-6 py-3 text-sm text-gray-600">
                   {station.location_name ? (
                     <span className="flex items-center gap-1">
-                      <MapPin className="w-3 h-3 text-gray-400" aria-hidden="true" />
+                      <MapPin
+                        className="w-3 h-3 text-gray-400"
+                        aria-hidden="true"
+                      />
                       {station.location_name}
                     </span>
                   ) : (

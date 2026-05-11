@@ -66,8 +66,8 @@ import {
   updateCustomerTank,
 } from "../../services/fuelApi";
 import CustomerTankPage, {
-  validateCustomerTankForm,
   type CustomerTankFormValues,
+  validateCustomerTankForm,
 } from "./CustomerTankPage";
 
 const mockList = listCustomerTanks as jest.MockedFunction<
@@ -131,7 +131,7 @@ function productFixture(
     category: "propane",
     density_lbs_per_gallon: 4.24,
     tax_class: "propane",
-    aliases: ["LPG"],
+    aliases: ["LP_GAS"],
     region_availability: ["US"],
   };
   return { ...base, ...overrides };
@@ -339,9 +339,7 @@ describe("CustomerTankPage — filters and pagination", () => {
 
     await waitFor(() => expect(mockList).toHaveBeenCalledTimes(1));
 
-    fireEvent.click(
-      screen.getByRole("button", { name: /next page/i }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: /next page/i }));
 
     await waitFor(() => expect(mockList).toHaveBeenCalledTimes(2));
     const lastCall = mockList.mock.calls[mockList.mock.calls.length - 1][0];
@@ -424,9 +422,7 @@ describe("CustomerTankPage — create flow", () => {
     });
 
     await act(async () => {
-      fireEvent.click(
-        screen.getByRole("button", { name: /create tank/i }),
-      );
+      fireEvent.click(screen.getByRole("button", { name: /create tank/i }));
     });
 
     await waitFor(() => expect(mockCreate).toHaveBeenCalledTimes(1));
@@ -507,9 +503,7 @@ describe("CustomerTankPage — edit flow", () => {
     fireEvent.change(modalZip, { target: { value: "94105" } });
 
     await act(async () => {
-      fireEvent.click(
-        screen.getByRole("button", { name: /save changes/i }),
-      );
+      fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
     });
 
     await waitFor(() => expect(mockUpdate).toHaveBeenCalledTimes(1));
@@ -563,9 +557,7 @@ describe("CustomerTankPage — fuel product datalist", () => {
 
     // Wait for the effect-driven datalist to mount.
     const datalist = await waitFor(() => {
-      const node = container.querySelector(
-        "datalist#ct-product-code-options",
-      );
+      const node = container.querySelector("datalist#ct-product-code-options");
       if (!node) throw new Error("datalist not mounted yet");
       return node as HTMLDataListElement;
     });

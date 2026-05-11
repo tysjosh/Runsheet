@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 5
+ES_SEARCH_TIMEOUT_SECONDS = 10
 
 
 class PoisonQueueEntry(BaseModel):
@@ -94,7 +95,11 @@ class PoisonQueueService:
             "sort": [{"created_at": "desc"}],
         }
         es = self.ops_es.es_service
-        result = await es.client.search(index=self.INDEX_NAME, body=body)
+        result = await es.client.search(
+            index=self.INDEX_NAME,
+            body=body,
+            request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
+        )
         hits = result.get("hits", {})
         total = hits.get("total", {}).get("value", 0)
         docs = [h["_source"] for h in hits.get("hits", [])]

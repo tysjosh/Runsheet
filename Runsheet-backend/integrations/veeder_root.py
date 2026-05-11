@@ -554,7 +554,8 @@ class VeederRootConnector(IntegrationConnector):
         redis_client: Optional async Redis client used to look up the
             per-tenant water threshold override.
         http_client: Optional injected :class:`httpx.AsyncClient`. When
-            ``None`` every api-token call creates a short-lived client.
+            ``None`` api-token calls reuse a lazily created instance-owned
+            client.
         tcp_connector: Optional async factory returning
             ``(reader, writer)`` for TLS-401 mode. Defaults to
             :func:`asyncio.open_connection`. Injected by tests.
@@ -609,6 +610,7 @@ class VeederRootConnector(IntegrationConnector):
         self._signal_bus = signal_bus
         self._redis = redis_client
         self._http_client = http_client
+        self._owns_http_client = http_client is None
         self._tcp_connector = tcp_connector or asyncio.open_connection
         self._http_timeout = float(http_timeout_seconds)
         self._tcp_timeout = float(tcp_timeout_seconds)
@@ -887,20 +889,23 @@ class VeederRootConnector(IntegrationConnector):
         authoritative.
         """
 
-        if not self._credentials_ref:
-            return
         try:
-            await self._vault.delete(self._tenant_id, self._credentials_ref)
-        except Exception as exc:
-            logger.warning(
-                "VeederRootConnector.disconnect: vault delete failed "
-                "for tenant=%s ref=%s: %s",
-                self._tenant_id,
-                self._credentials_ref,
-                exc,
-            )
-        self._credentials_ref = None
-        self._cached_credentials = None
+            if not self._credentials_ref:
+                return
+            try:
+                await self._vault.delete(self._tenant_id, self._credentials_ref)
+            except Exception as exc:
+                logger.warning(
+                    "VeederRootConnector.disconnect: vault delete failed "
+                    "for tenant=%s ref=%s: %s",
+                    self._tenant_id,
+                    self._credentials_ref,
+                    exc,
+                )
+            self._credentials_ref = None
+            self._cached_credentials = None
+        finally:
+            await self._close_owned_http_client()
 
     # ------------------------------------------------------------------
     # Transport: api_token
@@ -965,16 +970,21 @@ class VeederRootConnector(IntegrationConnector):
 
         When the connector was constructed with an injected
         ``http_client`` we reuse it and leave ``aclose`` to the caller;
-        otherwise we mint a short-lived client per call.
+        otherwise we lazily create one instance-owned client.
         """
 
         if self._http_client is not None:
             return self._http_client, False
-        logger.warning(
-            "VeederRoot: creating per-call httpx client (no pooling). "
-            "Inject a shared client at construction for production use."
-        )
-        return httpx.AsyncClient(timeout=self._http_timeout), True
+        self._http_client = httpx.AsyncClient(timeout=self._http_timeout)
+        return self._http_client, False
+
+    async def _close_owned_http_client(self) -> None:
+        if self._owns_http_client and self._http_client is not None:
+            await self._http_client.aclose()
+            self._http_client = None
+
+    async def aclose(self) -> None:
+        await self._close_owned_http_client()
 
     # ------------------------------------------------------------------
     # Transport: tls_401_tcp

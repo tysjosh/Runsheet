@@ -231,5 +231,5 @@ def setup_overlay_indices(es_service) -> None:
                 logger.info(f"Created overlay index: {index_name}")
             else:
                 logger.info(f"Overlay index already exists: {index_name}")
-        except Exception as e:
-            logger.error(f"Failed to create overlay index {index_name}: {e}")
+        except Exception:
+            logger.exception("Failed to create overlay index %s", index_name)

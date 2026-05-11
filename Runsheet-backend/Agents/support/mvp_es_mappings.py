@@ -503,5 +503,5 @@ def setup_mvp_indices(es_service) -> None:
                 logger.info(f"Created MVP index: {index_name}")
             else:
                 logger.info(f"MVP index already exists: {index_name}")
-        except Exception as e:
-            logger.error(f"Failed to create MVP index {index_name}: {e}")
+        except Exception:
+            logger.exception("Failed to create MVP index %s", index_name)

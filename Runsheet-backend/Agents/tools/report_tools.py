@@ -136,7 +136,7 @@ async def generate_operations_report() -> str:
         
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"Error generating operations report: {e}")
+        logger.exception("Error generating operations report")
         return f"Error generating operations report: {str(e)}"
     finally:
         _log_tool_invocation("generate_operations_report", {}, start_time, success, error_msg)
@@ -222,7 +222,7 @@ async def generate_performance_report() -> str:
         
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"Error generating performance report: {e}")
+        logger.exception("Error generating performance report")
         return f"Error generating performance report: {str(e)}"
     finally:
         _log_tool_invocation("generate_performance_report", {}, start_time, success, error_msg)
@@ -307,7 +307,7 @@ async def generate_incident_analysis(issue_description: str = "") -> str:
         
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"Error generating incident analysis: {e}")
+        logger.exception("Error generating incident analysis")
         return f"Error generating incident analysis: {str(e)}"
     finally:
         _log_tool_invocation("generate_incident_analysis", {"issue_description": issue_description}, start_time, success, error_msg)

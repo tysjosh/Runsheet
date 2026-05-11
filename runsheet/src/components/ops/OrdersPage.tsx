@@ -11,14 +11,15 @@ import { Plus, RefreshCw, Search } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useOrdersWebSocket } from "../../hooks/useOrdersWebSocket";
 import {
-  listOrders,
   type CallType,
   type FuelOrder,
   type IntakeChannelType,
+  listOrders,
   type OrderListFilters,
   type OrderStatus,
   type PaginatedResponse,
 } from "../../services/ordersApi";
+import { getCurrentTenantId } from "../../services/tenant";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -128,10 +129,11 @@ export interface OrdersPageProps {
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export default function OrdersPage({
-  tenantId = "default",
+  tenantId,
   onCreateOrder,
   onOrderClick,
 }: OrdersPageProps) {
+  const resolvedTenantId = tenantId ?? getCurrentTenantId();
   // ── State ───────────────────────────────────────────────────────────────
   const [orders, setOrders] = useState<FuelOrder[]>([]);
   const [loading, setLoading] = useState(true);
@@ -220,7 +222,7 @@ export default function OrdersPage({
     [page],
   );
 
-  useOrdersWebSocket(tenantId, {
+  useOrdersWebSocket(resolvedTenantId, {
     onOrderPlaced: handleOrderUpdate,
     onOrderStatusChanged: handleOrderUpdate,
     onOrderAssigned: handleOrderUpdate,
@@ -408,7 +410,10 @@ export default function OrdersPage({
 
         {/* Error */}
         {error && (
-          <div role="alert" className="rounded-lg bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-800">
+          <div
+            role="alert"
+            className="rounded-lg bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-800"
+          >
             {error}
           </div>
         )}

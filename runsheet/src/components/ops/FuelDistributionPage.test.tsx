@@ -179,6 +179,7 @@ function groupsListFixture(
 
 describe("FuelDistributionPage — Clusters tab", () => {
   beforeEach(() => {
+    window.localStorage.setItem("tenant_id", "dev-tenant");
     mockListPriorityClusters.mockReset();
     mockListCombinableGroups.mockReset();
     mockListPlans.mockReset();

@@ -30,13 +30,13 @@ import type {
 } from "../../services/fuelApi";
 import {
   createStation,
+  getFuelStationCapacityGallons,
   updateStation,
   updateStationThreshold,
 } from "../../services/fuelApi";
+import { getCurrentTenantId } from "../../services/tenant";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
-
-const TENANT_ID = "default";
 
 const FUEL_TYPES: { value: FuelType; label: string }[] = [
   { value: "DIESEL_2", label: "DIESEL_2 (Ultra Low Sulfur Diesel)" },
@@ -48,6 +48,10 @@ const FUEL_TYPES: { value: FuelType; label: string }[] = [
   { value: "OFF_ROAD_DIESEL", label: "OFF_ROAD_DIESEL (Dyed Diesel)" },
   { value: "DEF", label: "DEF (Diesel Exhaust Fluid)" },
 ];
+
+function stationCapacityGallons(station?: FuelStation | null): number {
+  return getFuelStationCapacityGallons(station);
+}
 
 // ─── Validation ──────────────────────────────────────────────────────────────
 
@@ -75,7 +79,9 @@ export interface ValidationErrors {
  * - capacity_gallons must be a positive number (> 0)
  * - alert_threshold_pct must be between 0 and 100 (inclusive)
  */
-export function validateStationForm(values: StationFormValues): ValidationErrors {
+export function validateStationForm(
+  values: StationFormValues,
+): ValidationErrors {
   const errors: ValidationErrors = {};
 
   if (!values.name || values.name.trim() === "") {
@@ -85,7 +91,7 @@ export function validateStationForm(values: StationFormValues): ValidationErrors
   if (
     values.capacity_gallons === null ||
     values.capacity_gallons === undefined ||
-    isNaN(values.capacity_gallons) ||
+    Number.isNaN(values.capacity_gallons) ||
     values.capacity_gallons <= 0
   ) {
     errors.capacity_gallons = "Capacity must be a positive number.";
@@ -94,7 +100,7 @@ export function validateStationForm(values: StationFormValues): ValidationErrors
   if (
     values.alert_threshold_pct === null ||
     values.alert_threshold_pct === undefined ||
-    isNaN(values.alert_threshold_pct) ||
+    Number.isNaN(values.alert_threshold_pct) ||
     values.alert_threshold_pct < 0 ||
     values.alert_threshold_pct > 100
   ) {
@@ -123,12 +129,12 @@ export default function FuelStationForm({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [fieldErrors, setFieldErrors] = useState<ValidationErrors>({});
+  const tenantId = getCurrentTenantId();
 
   const [form, setForm] = useState<StationFormValues>({
     name: station?.name ?? "",
     fuel_type: station?.fuel_type ?? "DIESEL_2",
-    capacity_gallons:
-      station?.capacity_gallons ?? station?.capacity_liters ?? 0,
+    capacity_gallons: stationCapacityGallons(station),
     initial_stock_gallons: 0,
     location_name: station?.location_name ?? "",
     alert_threshold_pct: station?.alert_threshold_pct ?? 20,
@@ -143,8 +149,7 @@ export default function FuelStationForm({
     return (
       form.name === station.name &&
       form.fuel_type === station.fuel_type &&
-      form.capacity_gallons ===
-        (station.capacity_gallons ?? station.capacity_liters) &&
+      form.capacity_gallons === stationCapacityGallons(station) &&
       form.location_name === (station.location_name ?? "") &&
       form.alert_threshold_pct !== station.alert_threshold_pct
     );
@@ -178,15 +183,21 @@ export default function FuelStationForm({
         if (form.location_name.trim()) {
           payload.location_name = form.location_name.trim();
         }
-        result = await createStation(payload, TENANT_ID);
+        result = await createStation(payload, tenantId);
       } else if (isThresholdOnlyChange()) {
+        if (!station) {
+          throw new Error("Station data is required for edit mode.");
+        }
         // Threshold-only edit uses the dedicated endpoint
         result = await updateStationThreshold(
-          station!.station_id,
+          station.station_id,
           form.alert_threshold_pct,
-          TENANT_ID,
+          tenantId,
         );
       } else {
+        if (!station) {
+          throw new Error("Station data is required for edit mode.");
+        }
         // Full edit
         const payload: UpdateStationPayload = {
           name: form.name.trim(),
@@ -197,7 +208,7 @@ export default function FuelStationForm({
         if (form.location_name.trim()) {
           payload.location_name = form.location_name.trim();
         }
-        result = await updateStation(station!.station_id, payload, TENANT_ID);
+        result = await updateStation(station.station_id, payload, tenantId);
       }
 
       onSuccess(result);
@@ -310,7 +321,8 @@ export default function FuelStationForm({
                 type="number"
                 value={form.capacity_gallons || ""}
                 onChange={(e) => {
-                  const val = e.target.value === "" ? 0 : Number(e.target.value);
+                  const val =
+                    e.target.value === "" ? 0 : Number(e.target.value);
                   setForm({ ...form, capacity_gallons: val });
                   if (fieldErrors.capacity_gallons) {
                     setFieldErrors({
@@ -347,7 +359,8 @@ export default function FuelStationForm({
                   type="number"
                   value={form.initial_stock_gallons || ""}
                   onChange={(e) => {
-                    const val = e.target.value === "" ? 0 : Number(e.target.value);
+                    const val =
+                      e.target.value === "" ? 0 : Number(e.target.value);
                     setForm({ ...form, initial_stock_gallons: val });
                   }}
                   placeholder="e.g. 30000"
@@ -393,8 +406,7 @@ export default function FuelStationForm({
               type="number"
               value={form.alert_threshold_pct}
               onChange={(e) => {
-                const val =
-                  e.target.value === "" ? 0 : Number(e.target.value);
+                const val = e.target.value === "" ? 0 : Number(e.target.value);
                 setForm({ ...form, alert_threshold_pct: val });
                 if (fieldErrors.alert_threshold_pct) {
                   setFieldErrors({

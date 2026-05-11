@@ -39,6 +39,7 @@ _pii_masker = PIIMasker()
 _settings = get_settings()
 _ops_rate = f"{_settings.ops_api_rate_limit}/minute"
 _metrics_rate = f"{_settings.ops_metrics_rate_limit}/minute"
+ES_SEARCH_TIMEOUT_SECONDS = 10
 
 # Module-level service references, wired via configure_ops_api()
 _ops_es_service: Optional[OpsElasticsearchService] = None
@@ -225,7 +226,9 @@ async def get_sla_breaches(
     query["sort"] = [{"estimated_delivery": {"order": "asc"}}]
 
     result = es.client.search(
-        index=OpsElasticsearchService.SHIPMENTS_CURRENT, body=query
+        index=OpsElasticsearchService.SHIPMENTS_CURRENT,
+        body=query,
+        request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
     )
 
     hits = result["hits"]["hits"]
@@ -288,7 +291,9 @@ async def get_shipment_failures(
     query["sort"] = [{"updated_at": {"order": "desc"}}]
 
     result = es.client.search(
-        index=OpsElasticsearchService.SHIPMENTS_CURRENT, body=query
+        index=OpsElasticsearchService.SHIPMENTS_CURRENT,
+        body=query,
+        request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
     )
 
     hits = result["hits"]["hits"]
@@ -313,7 +318,9 @@ async def get_shipment_failures(
                 event_query["size"] = 1
                 event_query["sort"] = [{"event_timestamp": {"order": "desc"}}]
                 event_result = es.client.search(
-                    index=OpsElasticsearchService.SHIPMENT_EVENTS, body=event_query
+                    index=OpsElasticsearchService.SHIPMENT_EVENTS,
+                    body=event_query,
+                    request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
                 )
                 if event_result["hits"]["hits"]:
                     latest_event = event_result["hits"]["hits"][0]["_source"]
@@ -383,7 +390,11 @@ async def list_shipments(
     query["size"] = size
     query["sort"] = [{sort_by: {"order": sort_order}}]
 
-    result = es.client.search(index=OpsElasticsearchService.SHIPMENTS_CURRENT, body=query)
+    result = es.client.search(
+        index=OpsElasticsearchService.SHIPMENTS_CURRENT,
+        body=query,
+        request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
+    )
 
     hits = result["hits"]["hits"]
     total = result["hits"]["total"]["value"]
@@ -420,7 +431,9 @@ async def get_shipment(
     shipment_query["size"] = 1
 
     shipment_result = es.client.search(
-        index=OpsElasticsearchService.SHIPMENTS_CURRENT, body=shipment_query
+        index=OpsElasticsearchService.SHIPMENTS_CURRENT,
+        body=shipment_query,
+        request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
     )
 
     if not shipment_result["hits"]["hits"]:
@@ -438,7 +451,9 @@ async def get_shipment(
     events_query["sort"] = [{"event_timestamp": {"order": "asc"}}]
 
     events_result = es.client.search(
-        index=OpsElasticsearchService.SHIPMENT_EVENTS, body=events_query
+        index=OpsElasticsearchService.SHIPMENT_EVENTS,
+        body=events_query,
+        request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
     )
 
     events = [hit["_source"] for hit in events_result["hits"]["hits"]]
@@ -488,7 +503,9 @@ async def get_rider_utilization(
     query["sort"] = [{"last_seen": {"order": "desc"}}]
 
     result = es.client.search(
-        index=OpsElasticsearchService.RIDERS_CURRENT, body=query
+        index=OpsElasticsearchService.RIDERS_CURRENT,
+        body=query,
+        request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
     )
 
     hits = result["hits"]["hits"]
@@ -561,7 +578,9 @@ async def list_riders(
     query["sort"] = [{"last_seen": {"order": "desc"}}]
 
     result = es.client.search(
-        index=OpsElasticsearchService.RIDERS_CURRENT, body=query
+        index=OpsElasticsearchService.RIDERS_CURRENT,
+        body=query,
+        request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
     )
 
     hits = result["hits"]["hits"]
@@ -599,7 +618,9 @@ async def get_rider(
     rider_query["size"] = 1
 
     rider_result = es.client.search(
-        index=OpsElasticsearchService.RIDERS_CURRENT, body=rider_query
+        index=OpsElasticsearchService.RIDERS_CURRENT,
+        body=rider_query,
+        request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
     )
 
     if not rider_result["hits"]["hits"]:
@@ -620,7 +641,9 @@ async def get_rider(
     shipments_query["sort"] = [{"updated_at": {"order": "desc"}}]
 
     shipments_result = es.client.search(
-        index=OpsElasticsearchService.SHIPMENTS_CURRENT, body=shipments_query
+        index=OpsElasticsearchService.SHIPMENTS_CURRENT,
+        body=shipments_query,
+        request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
     )
 
     rider_data["assigned_shipments"] = [
@@ -679,7 +702,9 @@ async def list_events(
     query["sort"] = [{"event_timestamp": {"order": "desc"}}]
 
     result = es.client.search(
-        index=OpsElasticsearchService.SHIPMENT_EVENTS, body=query
+        index=OpsElasticsearchService.SHIPMENT_EVENTS,
+        body=query,
+        request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
     )
 
     hits = result["hits"]["hits"]
@@ -793,7 +818,9 @@ async def get_shipment_metrics(
     }
 
     result = es.client.search(
-        index=OpsElasticsearchService.SHIPMENTS_CURRENT, body=query
+        index=OpsElasticsearchService.SHIPMENTS_CURRENT,
+        body=query,
+        request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
     )
 
     from ops.models import MetricsBucket, MetricsResponse
@@ -871,7 +898,9 @@ async def get_sla_metrics(
     }
 
     result = es.client.search(
-        index=OpsElasticsearchService.SHIPMENTS_CURRENT, body=query
+        index=OpsElasticsearchService.SHIPMENTS_CURRENT,
+        body=query,
+        request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
     )
 
     from ops.models import MetricsBucket, MetricsResponse
@@ -957,7 +986,9 @@ async def get_rider_metrics(
     }
 
     result = es.client.search(
-        index=OpsElasticsearchService.RIDERS_CURRENT, body=query
+        index=OpsElasticsearchService.RIDERS_CURRENT,
+        body=query,
+        request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
     )
 
     from ops.models import MetricsBucket, MetricsResponse
@@ -1024,7 +1055,9 @@ async def get_failure_metrics(
     }
 
     result = es.client.search(
-        index=OpsElasticsearchService.SHIPMENTS_CURRENT, body=query
+        index=OpsElasticsearchService.SHIPMENTS_CURRENT,
+        body=query,
+        request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
     )
 
     from ops.models import MetricsBucket, MetricsResponse
@@ -1110,7 +1143,9 @@ async def get_ingestion_metrics(
     }
 
     events_result = es.client.search(
-        index=OpsElasticsearchService.SHIPMENT_EVENTS, body=events_query
+        index=OpsElasticsearchService.SHIPMENT_EVENTS,
+        body=events_query,
+        request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
     )
 
     total_events = events_result["hits"]["total"]["value"]
@@ -1122,7 +1157,9 @@ async def get_ingestion_metrics(
         "size": 0,
     }
     poison_result = es.client.search(
-        index=OpsElasticsearchService.POISON_QUEUE, body=poison_query
+        index=OpsElasticsearchService.POISON_QUEUE,
+        body=poison_query,
+        request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
     )
     failed_events = poison_result["hits"]["total"]["value"]
 
@@ -1182,7 +1219,11 @@ async def get_indexing_metrics(
             },
         }
         try:
-            result = es.client.search(index=index_name, body=count_query)
+            result = es.client.search(
+                index=index_name,
+                body=count_query,
+                request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
+            )
             count = result["hits"]["total"]["value"]
             avg_lat = result.get("aggregations", {}).get("avg_latency", {}).get("value")
             total_indexed += count
@@ -1208,7 +1249,9 @@ async def get_indexing_metrics(
     }
     try:
         poison_result = es.client.search(
-            index=OpsElasticsearchService.POISON_QUEUE, body=poison_query
+            index=OpsElasticsearchService.POISON_QUEUE,
+            body=poison_query,
+            request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
         )
         indexing_errors = poison_result["hits"]["total"]["value"]
     except Exception as exc:
@@ -1267,7 +1310,9 @@ async def get_poison_queue_metrics(
     }
 
     result = es.client.search(
-        index=OpsElasticsearchService.POISON_QUEUE, body=depth_query
+        index=OpsElasticsearchService.POISON_QUEUE,
+        body=depth_query,
+        request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
     )
 
     total_depth = result["hits"]["total"]["value"]

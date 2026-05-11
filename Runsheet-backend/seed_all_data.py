@@ -89,7 +89,7 @@ def _bulk(actions: list):
         for item in resp["items"]:
             for op, detail in item.items():
                 if detail.get("error"):
-                    logger.error(f"  Bulk error: {detail['error']}")
+                    logger.error("Bulk error: %s", detail["error"])
 
 
 def _single(index: str, doc_id: str, body: dict):
@@ -858,7 +858,7 @@ def main():
             print(f"  Seeding: {name}")
             fn(force=force)
         except Exception as e:
-            logger.error(f"❌ Failed to seed {name}: {e}")
+            logger.exception("Failed to seed %s", name)
             print(f"  ❌ Error seeding {name}: {e}")
 
     print(f"\n{'=' * 60}")

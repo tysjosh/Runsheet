@@ -29,7 +29,7 @@ Design points:
   atomically — but the expected production posture is a single call.
 
 * **Deterministic order.** The Marketplace UI sorts the response by
-  insertion order; registering in a fixed order (QBO → Veeder-Root →
+  insertion order; registering in a fixed order (QBO → tank monitors →
   Geotab → Stripe) keeps the UI stable across deploys and keeps
   integration tests predictable.
 
@@ -80,6 +80,7 @@ def _default_registrations() -> List[_DefaultRegistration]:
     """
 
     from integrations import (
+        additional_tank_monitors,
         geotab,
         quickbooks_online,
         stripe_connector,
@@ -89,6 +90,13 @@ def _default_registrations() -> List[_DefaultRegistration]:
     return [
         ("quickbooks_online", quickbooks_online.register_catalog_entry),
         ("veeder_root", veeder_root.register_catalog_entry),
+        ("otodata", additional_tank_monitors.register_otodata_catalog_entry),
+        ("silverlink", additional_tank_monitors.register_silverlink_catalog_entry),
+        ("gasboy", additional_tank_monitors.register_gasboy_catalog_entry),
+        (
+            "franklin_fueling",
+            additional_tank_monitors.register_franklin_fueling_catalog_entry,
+        ),
         ("geotab", geotab.register_catalog_entry),
         ("stripe", stripe_connector.register_catalog_entry),
     ]
@@ -112,7 +120,7 @@ def register_all_providers(
             registration tuple list. Unit tests pass a smaller list
             to exercise ordering / idempotency behaviour without
             touching every connector module. Production callers omit
-            this argument and the default QBO → Veeder-Root → Geotab
+            this argument and the default QBO → tank monitors → Geotab
             → Stripe order is used.
 
     Returns:

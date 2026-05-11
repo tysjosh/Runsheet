@@ -197,8 +197,8 @@ def setup_agent_indices(es_service):
                         )
                 except Exception as e:
                     logger.warning(f"⚠️ Failed to update mapping for agent index '{index_name}': {e}")
-        except Exception as e:
-            logger.error(f"❌ Failed to create agent index {index_name}: {e}")
+        except Exception:
+            logger.exception("Failed to create agent index %s", index_name)
 
     # Apply ILM policy for agent_activity_log
     try:

@@ -45,6 +45,7 @@ from fuel.services.storm_mode_evaluator import (
     SIGNAL_TYPE_ACTIVATED,
     SIGNAL_TYPE_CLEARED,
     STATE_KEY_PATTERN,
+    STATE_KEY_TTL_SECONDS,
     STORM_MODE_ENTITY_TYPE,
     STORM_MODE_EVALUATOR_AGENT_ID,
     StormModeEvaluator,
@@ -170,6 +171,7 @@ class _FakeRedis:
 
     def __init__(self) -> None:
         self.store: Dict[str, str] = {}
+        self.ttls: Dict[str, int] = {}
         self.get_error: Optional[Exception] = None
         self.set_error: Optional[Exception] = None
 
@@ -181,10 +183,14 @@ class _FakeRedis:
             return None
         return raw.encode("utf-8")
 
-    async def set(self, key: str, value: str) -> None:
+    async def set(
+        self, key: str, value: str, *, ex: Optional[int] = None
+    ) -> None:
         if self.set_error is not None:
             raise self.set_error
         self.store[key] = value
+        if ex is not None:
+            self.ttls[key] = ex
 
 
 class _RecordingSignalBus:
@@ -686,6 +692,10 @@ class TestPersistence:
         payload = json.loads(raw)
         assert payload["state"] == ACTIVE
         assert payload["triggering_alert_ids"] == ["alert-001"]
+        assert (
+            redis.ttls[STATE_KEY_PATTERN.format(tenant_id="tenant-A")]
+            == STATE_KEY_TTL_SECONDS
+        )
 
     @pytest.mark.asyncio
     async def test_in_memory_fallback_when_no_redis(self):

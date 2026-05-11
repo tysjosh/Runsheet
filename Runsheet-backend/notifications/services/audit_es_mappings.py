@@ -66,5 +66,5 @@ def setup_audit_indices(es_service):
                 logger.info(f"✅ Created audit index: {index_name}")
             else:
                 logger.info(f"📋 Audit index already exists: {index_name}")
-        except Exception as e:
-            logger.error(f"❌ Failed to create audit index {index_name}: {e}")
+        except Exception:
+            logger.exception("Failed to create audit index %s", index_name)

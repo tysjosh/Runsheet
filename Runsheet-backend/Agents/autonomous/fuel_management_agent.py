@@ -122,7 +122,15 @@ class FuelManagementAgent(AutonomousAgentBase):
 
         for station in flagged_stations:
             station_id = station.get("station_id")
-            tenant_id = station.get("tenant_id", "default")
+            tenant_id = station.get("tenant_id")
+            if not station_id or not tenant_id:
+                self.logger.warning(
+                    "FuelManagementAgent: skipping station missing station_id "
+                    "or tenant_id: station_id=%s tenant_id=%s",
+                    station_id,
+                    tenant_id,
+                )
+                continue
 
             detections.append(station_id)
 

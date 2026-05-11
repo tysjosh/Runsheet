@@ -173,7 +173,12 @@ class JobPriorityEngine(OverlayAgentBase):
         Returns:
             Empty list — priorities are published directly to SignalBus.
         """
-        tenant_id = signals[0].tenant_id if signals else "default"
+        if not signals or not signals[0].tenant_id:
+            logger.warning(
+                "JobPriorityEngine: skipping evaluation without tenant-scoped signals"
+            )
+            return []
+        tenant_id = signals[0].tenant_id
 
         # Step 1: Query active jobs (Req 3.2)
         active_jobs = await self._query_active_jobs(tenant_id)

@@ -236,11 +236,17 @@ class DriverNudgeAgent(OverlayAgentBase):
 
         for job in unacked_jobs:
             job_id = job.get("job_id", "")
-            tenant_id = job.get("tenant_id", "default")
+            tenant_id = job.get("tenant_id")
             driver_id = job.get("asset_assigned", job.get("driver_id", ""))
             assigned_at_str = job.get("assigned_at", "")
 
-            if not assigned_at_str or not job_id:
+            if not assigned_at_str or not job_id or not tenant_id:
+                logger.warning(
+                    "DriverNudgeAgent: skipping unacknowledged job missing "
+                    "job_id, tenant_id, or assigned_at: job_id=%s tenant_id=%s",
+                    job_id,
+                    tenant_id,
+                )
                 continue
 
             try:

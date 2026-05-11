@@ -185,7 +185,13 @@ class OpsWebSocketManager(BaseWSManager):
             try:
                 await ws.close(code=4403, reason="tenant_disabled")
                 disconnected += 1
-            except Exception:
+            except Exception as exc:
+                self._metrics["send_failures_total"] += 1
+                logger.debug(
+                    "Ops WS tenant-disable close failed for tenant_id=%s: %s",
+                    tenant_id,
+                    exc,
+                )
                 disconnected += 1
 
         if disconnected:

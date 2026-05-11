@@ -162,7 +162,7 @@ async def search_jobs(job_type: str = None, status: str = None,
         return response_text
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"Error searching jobs: {e}")
+        logger.exception("Error searching jobs")
         return f"Error searching jobs: {str(e)}"
     finally:
         _log_tool_invocation(
@@ -293,7 +293,7 @@ async def get_job_details(job_id: str, tenant_id: str | None = None) -> str:
         return response_text
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"Error fetching job details: {e}")
+        logger.exception("Error fetching job details")
         return f"Error fetching job details: {str(e)}"
     finally:
         _log_tool_invocation(
@@ -416,7 +416,7 @@ async def find_available_assets(asset_type: str = None, start_time_range: str = 
         return response_text
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"Error finding available assets: {e}")
+        logger.exception("Error finding available assets")
         return f"Error finding available assets: {str(e)}"
     finally:
         _log_tool_invocation(
@@ -549,7 +549,7 @@ async def get_scheduling_summary(tenant_id: str | None = None) -> str:
         return response_text
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"Error fetching scheduling summary: {e}")
+        logger.exception("Error fetching scheduling summary")
         return f"Error fetching scheduling summary: {str(e)}"
     finally:
         _log_tool_invocation(
@@ -789,7 +789,7 @@ async def generate_dispatch_report(days: int = 7, tenant_id: str | None = None, 
         return report
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"Error generating dispatch report: {e}")
+        logger.exception("Error generating dispatch report")
         return f"Error generating dispatch report: {str(e)}"
     finally:
         _log_tool_invocation(

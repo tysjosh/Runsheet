@@ -60,8 +60,8 @@ describe("listFuelProducts", () => {
           category: "diesel",
           density_lbs_per_gallon: 7.079,
           tax_class: "federal_highway",
-          aliases: ["AGO"],
-          region_availability: ["US", "NG"],
+          aliases: ["ULSD"],
+          region_availability: ["US"],
         },
       ],
       total: 1,
@@ -130,13 +130,13 @@ describe("checkCompartmentLoadEligibility", () => {
     };
     mockFetchOnce({ ok: true, body: envelope });
 
-    const result = await checkCompartmentLoadEligibility("comp/1", "AGO");
+    const result = await checkCompartmentLoadEligibility("comp/1", "DIESEL_2");
 
     expect(result).toEqual(envelope);
     const [url] = (global.fetch as jest.Mock).mock.calls[0];
     // Path segment slash is URL-encoded to ``%2F``.
     expect(url).toBe(
-      `${API_BASE_URL}/fuel/mvp/compartments/comp%2F1/load-eligibility?product_code=AGO`,
+      `${API_BASE_URL}/fuel/mvp/compartments/comp%2F1/load-eligibility?product_code=DIESEL_2`,
     );
   });
 });

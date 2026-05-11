@@ -1,5 +1,5 @@
 import { Activity, BarChart3, Download, TrendingUp } from "lucide-react";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { type AnalyticsMetrics, apiService } from "../services/api";
 import LoadingSpinner from "./LoadingSpinner";
 
@@ -16,6 +16,27 @@ interface GoogleChartProps {
   options: any;
   width?: string;
   height?: string;
+}
+
+interface RoutePerformance {
+  name: string;
+  performance: number;
+}
+
+function getMetricLabel(metric: string) {
+  const labels = {
+    delivery_performance: "Performance (%)",
+    average_delay: "Delay (minutes)",
+    fleet_utilization: "Utilization (%)",
+    customer_satisfaction: "Rating (1-5)",
+  };
+  return labels[metric as keyof typeof labels] || "Value";
+}
+
+function parseMetricValue(value?: string): number {
+  if (!value) return 0;
+  const numeric = Number.parseFloat(value.replace(/[^0-9.-]/g, ""));
+  return Number.isFinite(numeric) ? numeric : 0;
 }
 
 function GoogleChart({
@@ -62,7 +83,9 @@ function GoogleChart({
     if (!data || data.length < 2) return; // Need header + at least one data row
     try {
       const dataTable = window.google.visualization.arrayToDataTable(data);
-      const chart = new window.google.visualization[chartType](chartRef.current);
+      const chart = new window.google.visualization[chartType](
+        chartRef.current,
+      );
       chart.draw(dataTable, options);
     } catch (e) {
       console.error("Failed to draw chart:", e);
@@ -71,7 +94,10 @@ function GoogleChart({
 
   if (!ready) {
     return (
-      <div style={{ width, height }} className="flex items-center justify-center text-gray-400 text-sm">
+      <div
+        style={{ width, height }}
+        className="flex items-center justify-center text-gray-400 text-sm"
+      >
         Loading chart...
       </div>
     );
@@ -84,30 +110,21 @@ export default function Analytics() {
   const [timeRange, setTimeRange] = useState("7d");
   const [selectedMetric, setSelectedMetric] = useState("delivery_performance");
   const [metrics, setMetrics] = useState<AnalyticsMetrics | null>(null);
-  const [routePerformance, setRoutePerformance] = useState<any[]>([]);
-  const [delayCauses, setDelayCauses] = useState<any[]>([]);
-  const [regionalPerformance, setRegionalPerformance] = useState<any[]>([]);
+  const [routePerformance, setRoutePerformance] = useState<RoutePerformance[]>(
+    [],
+  );
   const [loading, setLoading] = useState(true);
-  const [chartData, setChartData] = useState<any>(null);
 
   const loadAnalyticsData = async () => {
     try {
       setLoading(true);
-      const [metricsResponse, routesResponse, delayResponse, regionalResponse] =
-        await Promise.all([
-          apiService.getAnalyticsMetrics(timeRange),
-          apiService.getAnalyticsRoutePerformance(),
-          apiService.getAnalyticsDelayCauses(),
-          apiService.getAnalyticsRegionalPerformance(),
-        ]);
+      const [metricsResponse, routesResponse] = await Promise.all([
+        apiService.getAnalyticsMetrics(timeRange),
+        apiService.getAnalyticsRoutePerformance(),
+      ]);
 
       setMetrics(metricsResponse.data);
       setRoutePerformance(routesResponse.data);
-      setDelayCauses(delayResponse.data);
-      setRegionalPerformance(regionalResponse.data);
-
-      // Prepare chart data based on selected metric and time range
-      prepareChartData(selectedMetric, timeRange);
     } catch (error) {
       console.error("Failed to load analytics data:", error);
     } finally {
@@ -118,74 +135,50 @@ export default function Analytics() {
   useEffect(() => {
     loadAnalyticsData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [timeRange]);
 
-  const getMetricLabel = (metric: string) => {
-    const labels = {
-      delivery_performance: "Performance (%)",
-      average_delay: "Delay (minutes)",
-      fleet_utilization: "Utilization (%)",
-      customer_satisfaction: "Rating (1-5)",
-    };
-    return labels[metric as keyof typeof labels] || "Value";
-  };
+  const chartData = useMemo(() => {
+    const metric = metrics?.[selectedMetric as keyof AnalyticsMetrics];
+    const currentValue = parseMetricValue(metric?.value);
+    const changeValue = parseMetricValue(metric?.change);
+    const previousValue =
+      metric?.trend === "down"
+        ? currentValue + changeValue
+        : currentValue - changeValue;
 
-  const prepareChartData = async (metric: string, range: string) => {
-    const metricFieldMap = {
-      delivery_performance: "delivery_performance_pct",
-      average_delay: "average_delay_minutes",
-      fleet_utilization: "fleet_utilization_pct",
-      customer_satisfaction: "customer_satisfaction",
-    };
-
-    const metricField = metricFieldMap[metric as keyof typeof metricFieldMap];
-    const API_BASE_URL =
-      process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
-
-    let timeSeriesPoints: any[] = [];
-    try {
-      const response = await fetch(
-        `${API_BASE_URL}/analytics/time-series?metric=${metricField}&timeRange=${range}`,
-      );
-      if (response.ok) {
-        const result = await response.json();
-        timeSeriesPoints = Array.isArray(result.data) ? result.data : [];
-      }
-    } catch (e) {
-      console.error("Failed to fetch time series:", e);
-    }
-
-    setChartData({
+    return {
       timeSeriesData: [
-        [{ type: "string", label: "Time" }, { type: "number", label: getMetricLabel(metric) }],
-        ...timeSeriesPoints.map((point: any) => [
-          new Date(point.timestamp).toLocaleDateString(),
-          Number(point.value) || 0,
-        ]),
+        [
+          { type: "string", label: "Period" },
+          { type: "number", label: getMetricLabel(selectedMetric) },
+        ],
+        ["Previous", Math.max(0, previousValue)],
+        ["Current", Math.max(0, currentValue)],
       ],
       pieChartData: [
-        ["Cause", "Percentage"],
-        ...delayCauses.map((cause) => [
-          cause.name,
-          Number(cause.percentage) || 0,
-        ]),
-      ],
-      barChartData: [
-        [{ type: "string", label: "Route" }, { type: "number", label: "Performance" }],
+        ["Route", "Performance"],
         ...routePerformance.map((route) => [
           String(route.name),
           Number(route.performance) || 0,
         ]),
       ],
-    });
-  };
+      barChartData: [
+        [
+          { type: "string", label: "Route" },
+          { type: "number", label: "Performance" },
+        ],
+        ...routePerformance.map((route) => [
+          String(route.name),
+          Number(route.performance) || 0,
+        ]),
+      ],
+    };
+  }, [metrics, routePerformance, selectedMetric]);
 
-  // Update chart data when metric or time range changes
-  useEffect(() => {
-    if (metrics && selectedMetric) {
-      prepareChartData(selectedMetric, timeRange);
-    }
-  }, [selectedMetric, timeRange, metrics, prepareChartData]);
+  const sortedRoutes = useMemo(
+    () => [...routePerformance].sort((a, b) => b.performance - a.performance),
+    [routePerformance],
+  );
 
   const getChartOptions = (type: string) => {
     const baseOptions = {
@@ -342,44 +335,49 @@ export default function Analytics() {
         )}
 
         {/* Interactive Charts */}
-        {!loading && metrics && Object.keys(metrics).length > 0 && chartData && (
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
-            {/* Time Series Chart */}
-            <div className="bg-white rounded-2xl p-6 border border-gray-200 hover:border-gray-300 transition-colors">
-              <div className="flex items-center gap-3 mb-6">
-                <div className="w-2 h-2 bg-[#232323] rounded-full"></div>
-                <h3 className="text-lg font-semibold text-[#232323]">
-                  {metrics[selectedMetric as keyof typeof metrics]?.title ?? "Analytics"} Trend
-                </h3>
-                <span className="text-sm text-gray-500 bg-gray-100 px-3 py-1 rounded-lg">
-                  {timeRange}
-                </span>
+        {!loading &&
+          metrics &&
+          Object.keys(metrics).length > 0 &&
+          chartData && (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+              {/* Time Series Chart */}
+              <div className="bg-white rounded-2xl p-6 border border-gray-200 hover:border-gray-300 transition-colors">
+                <div className="flex items-center gap-3 mb-6">
+                  <div className="w-2 h-2 bg-[#232323] rounded-full"></div>
+                  <h3 className="text-lg font-semibold text-[#232323]">
+                    {metrics[selectedMetric as keyof typeof metrics]?.title ??
+                      "Analytics"}{" "}
+                    Trend
+                  </h3>
+                  <span className="text-sm text-gray-500 bg-gray-100 px-3 py-1 rounded-lg">
+                    {timeRange}
+                  </span>
+                </div>
+                <GoogleChart
+                  chartType="LineChart"
+                  data={chartData.timeSeriesData}
+                  options={getChartOptions("line")}
+                  height="280px"
+                />
               </div>
-              <GoogleChart
-                chartType="LineChart"
-                data={chartData.timeSeriesData}
-                options={getChartOptions("line")}
-                height="280px"
-              />
-            </div>
 
-            {/* Delay Causes Pie Chart */}
-            <div className="bg-white rounded-2xl p-6 border border-gray-200 hover:border-gray-300 transition-colors">
-              <div className="flex items-center gap-3 mb-6">
-                <div className="w-2 h-2 bg-[#232323] rounded-full"></div>
-                <h3 className="text-lg font-semibold text-[#232323]">
-                  Delay Causes Distribution
-                </h3>
+              {/* Route Mix Pie Chart */}
+              <div className="bg-white rounded-2xl p-6 border border-gray-200 hover:border-gray-300 transition-colors">
+                <div className="flex items-center gap-3 mb-6">
+                  <div className="w-2 h-2 bg-[#232323] rounded-full"></div>
+                  <h3 className="text-lg font-semibold text-[#232323]">
+                    Route Performance Mix
+                  </h3>
+                </div>
+                <GoogleChart
+                  chartType="PieChart"
+                  data={chartData.pieChartData}
+                  options={getChartOptions("pie")}
+                  height="280px"
+                />
               </div>
-              <GoogleChart
-                chartType="PieChart"
-                data={chartData.pieChartData}
-                options={getChartOptions("pie")}
-                height="280px"
-              />
             </div>
-          </div>
-        )}
+          )}
 
         {/* Route Performance Bar Chart */}
         {!loading && chartData && (
@@ -401,7 +399,7 @@ export default function Analytics() {
 
         {/* Additional Analytics Charts */}
         {!loading && chartData && (
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
             {/* Fleet Utilization Gauge */}
             <div className="bg-white border border-gray-200 rounded-2xl p-6 hover:border-gray-300 transition-colors">
               <div className="flex items-center gap-3 mb-6">
@@ -476,38 +474,11 @@ export default function Analytics() {
                 }}
               />
             </div>
-
-            {/* Regional Performance Donut */}
-            <div className="bg-white border border-gray-200 rounded-2xl p-6 hover:border-gray-300 transition-colors">
-              <div className="flex items-center gap-3 mb-6">
-                <div className="w-2 h-2 bg-[#232323] rounded-full"></div>
-                <h3 className="text-lg font-semibold text-[#232323]">
-                  Regional Performance
-                </h3>
-              </div>
-              <GoogleChart
-                chartType="PieChart"
-                data={[
-                  ["Region", "On-Time %"],
-                  ...regionalPerformance.map((region) => [
-                    region.name,
-                    Number(region.onTimePercentage) || 0,
-                  ]),
-                ]}
-                options={{
-                  ...getChartOptions("pie"),
-                  pieHole: 0.4,
-                  height: 220,
-                  colors: ["#232323", "#6B7280", "#9CA3AF", "#D1D5DB"],
-                  animation: { duration: 1000, easing: "out" },
-                }}
-              />
-            </div>
           </div>
         )}
 
         {/* Key Insights */}
-        {!loading && routePerformance.length > 0 && delayCauses.length > 0 && (
+        {!loading && routePerformance.length > 0 && (
           <div className="bg-gray-50 border border-gray-200 rounded-2xl p-6">
             <div className="flex items-center gap-3 mb-6">
               <Activity className="w-5 h-5 text-[#232323]" />
@@ -522,19 +493,9 @@ export default function Analytics() {
                   <span className="text-sm font-medium text-gray-700">
                     Best route:{" "}
                     <span className="text-[#232323] font-semibold">
-                      {
-                        routePerformance.sort(
-                          (a, b) => b.performance - a.performance,
-                        )[0]?.name
-                      }
+                      {sortedRoutes[0]?.name}
                     </span>{" "}
-                    (
-                    {
-                      routePerformance.sort(
-                        (a, b) => b.performance - a.performance,
-                      )[0]?.performance
-                    }
-                    %)
+                    ({sortedRoutes[0]?.performance}%)
                   </span>
                 </div>
                 <div className="flex items-center gap-3 p-4 bg-white rounded-xl border border-gray-200">
@@ -542,19 +503,9 @@ export default function Analytics() {
                   <span className="text-sm font-medium text-gray-700">
                     Needs attention:{" "}
                     <span className="text-[#232323] font-semibold">
-                      {
-                        routePerformance.sort(
-                          (a, b) => a.performance - b.performance,
-                        )[0]?.name
-                      }
+                      {sortedRoutes[sortedRoutes.length - 1]?.name}
                     </span>{" "}
-                    (
-                    {
-                      routePerformance.sort(
-                        (a, b) => a.performance - b.performance,
-                      )[0]?.performance
-                    }
-                    %)
+                    ({sortedRoutes[sortedRoutes.length - 1]?.performance}%)
                   </span>
                 </div>
               </div>
@@ -562,20 +513,17 @@ export default function Analytics() {
                 <div className="flex items-center gap-3 p-4 bg-white rounded-xl border border-gray-200">
                   <div className="w-2 h-2 bg-orange-500 rounded-full"></div>
                   <span className="text-sm font-medium text-gray-700">
-                    Main delay cause:{" "}
+                    Average route performance:{" "}
                     <span className="text-[#232323] font-semibold">
-                      {
-                        delayCauses.sort(
-                          (a, b) => b.percentage - a.percentage,
-                        )[0]?.name
-                      }
-                    </span>{" "}
-                    (
-                    {
-                      delayCauses.sort((a, b) => b.percentage - a.percentage)[0]
-                        ?.percentage
-                    }
-                    %)
+                      {(
+                        routePerformance.reduce(
+                          (sum, route) =>
+                            sum + (Number(route.performance) || 0),
+                          0,
+                        ) / routePerformance.length
+                      ).toFixed(1)}
+                      %
+                    </span>
                   </span>
                 </div>
                 <div className="flex items-center gap-3 p-4 bg-white rounded-xl border border-gray-200">

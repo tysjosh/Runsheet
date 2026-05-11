@@ -58,13 +58,13 @@ import type {
 import {
   checkCompartmentLoadEligibility,
   listTruckCompartments,
+  litersToGallons,
   recordCleaningEvent,
 } from "../../services/fuelApi";
 import TruckCompartmentsPage, {
   CompartmentStateBadge,
   ELIGIBILITY_DECISION_CONFIG,
   formatCapacity,
-  litersToGallons,
   STATE_BADGE_CONFIG,
   validateCleaningForm,
 } from "./TruckCompartmentsPage";
@@ -192,9 +192,9 @@ describe("litersToGallons / formatCapacity", () => {
     expect(litersToGallons(3785.411784)).toBeCloseTo(1000, 5);
   });
 
-  it("formats capacity as liters + gallons", () => {
-    expect(formatCapacity(5000)).toMatch(/5000\s*L/);
-    expect(formatCapacity(5000)).toMatch(/gal/);
+  it("formats capacity as gallons", () => {
+    expect(formatCapacity(compartmentFixture())).toMatch(/gal/);
+    expect(formatCapacity(compartmentFixture())).not.toMatch(/\bL\b/);
   });
 
   it("returns em-dash for null capacity", () => {

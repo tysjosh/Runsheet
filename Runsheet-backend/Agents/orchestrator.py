@@ -341,8 +341,8 @@ class AgentOrchestrator:
             plan = await self._planner.create_plan(user_message, targets)
             executed_plan = await self._planner.execute_plan(plan, tenant_id)
             return self._format_plan_result(executed_plan)
-        except Exception as e:
-            logger.error(f"Complex request execution failed: {e}")
+        except Exception:
+            logger.exception("Complex request execution failed")
             # Fall back to simple sequential execution
             return await self._execute_simple_request(
                 user_message, targets, tenant_id, session_id,

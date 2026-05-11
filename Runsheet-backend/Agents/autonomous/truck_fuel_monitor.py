@@ -115,17 +115,25 @@ class TruckFuelMonitor(AutonomousAgentBase):
 
         try:
             resp = await self._es.search_documents(TRUCKS_INDEX, query, 100)
-        except Exception as e:
+        except Exception:
             # Req 1.8: log error and continue without crashing
-            self.logger.error(f"Failed to query trucks index: {e}")
+            self.logger.exception("Failed to query trucks index")
             return detections, actions
 
         flagged_trucks = [h["_source"] for h in resp.get("hits", {}).get("hits", [])]
 
         for truck in flagged_trucks:
             truck_id = truck.get("truck_id")
-            tenant_id = truck.get("tenant_id", "default")
+            tenant_id = truck.get("tenant_id")
             fuel_level_pct = truck.get("fuel_level_pct", 0.0)
+            if not truck_id or not tenant_id:
+                self.logger.warning(
+                    "TruckFuelMonitor: skipping truck missing truck_id or tenant_id: "
+                    "truck_id=%s tenant_id=%s",
+                    truck_id,
+                    tenant_id,
+                )
+                continue
 
             # Respect tenant feature flags (Req 1.7)
             if self._feature_flags:
@@ -159,8 +167,8 @@ class TruckFuelMonitor(AutonomousAgentBase):
                         },
                     )
                     await self._signal_bus.publish(signal)
-                except Exception as e:
-                    self.logger.error(f"Failed to publish RiskSignal: {e}")
+                except Exception:
+                    self.logger.exception("Failed to publish RiskSignal")
 
             # Create MutationRequest via Confirmation Protocol (Req 1.3)
             request = MutationRequest(

@@ -229,7 +229,7 @@ async def list_notifications(
     except AppException:
         raise
     except Exception as e:
-        logger.error(f"Failed to list notifications: {e}")
+        logger.exception("Failed to list notifications")
         raise internal_error(
             message="Failed to list notifications",
             details={"error": str(e)},
@@ -260,7 +260,7 @@ async def get_notification_summary(
     except AppException:
         raise
     except Exception as e:
-        logger.error(f"Failed to get notification summary: {e}")
+        logger.exception("Failed to get notification summary")
         raise internal_error(
             message="Failed to get notification summary",
             details={"error": str(e)},
@@ -293,7 +293,7 @@ async def list_rules(
     except AppException:
         raise
     except Exception as e:
-        logger.error(f"Failed to list notification rules: {e}")
+        logger.exception("Failed to list notification rules")
         raise internal_error(
             message="Failed to list notification rules",
             details={"error": str(e)},
@@ -326,7 +326,7 @@ async def update_rule(
     except AppException:
         raise
     except Exception as e:
-        logger.error(f"Failed to update notification rule {rule_id}: {e}")
+        logger.exception("Failed to update notification rule %s", rule_id)
         raise internal_error(
             message="Failed to update notification rule",
             details={"rule_id": rule_id, "error": str(e)},
@@ -365,7 +365,7 @@ async def list_preferences(
     except AppException:
         raise
     except Exception as e:
-        logger.error(f"Failed to list notification preferences: {e}")
+        logger.exception("Failed to list notification preferences")
         raise internal_error(
             message="Failed to list notification preferences",
             details={"error": str(e)},
@@ -391,7 +391,7 @@ async def get_preference(
     except AppException:
         raise
     except Exception as e:
-        logger.error(f"Failed to get preference for customer {customer_id}: {e}")
+        logger.exception("Failed to get preference for customer %s", customer_id)
         raise internal_error(
             message="Failed to get notification preference",
             details={"customer_id": customer_id, "error": str(e)},
@@ -419,7 +419,7 @@ async def upsert_preference(
     except AppException:
         raise
     except Exception as e:
-        logger.error(f"Failed to upsert preference for customer {customer_id}: {e}")
+        logger.exception("Failed to upsert preference for customer %s", customer_id)
         raise internal_error(
             message="Failed to upsert notification preference",
             details={"customer_id": customer_id, "error": str(e)},
@@ -452,8 +452,9 @@ async def update_template_opt_outs(
     except AppException:
         raise
     except Exception as e:
-        logger.error(
-            f"Failed to update template opt-outs for customer {customer_id}: {e}"
+        logger.exception(
+            "Failed to update template opt-outs for customer %s",
+            customer_id,
         )
         raise internal_error(
             message="Failed to update template opt-out preferences",
@@ -486,8 +487,9 @@ async def get_template_opt_outs(
     except AppException:
         raise
     except Exception as e:
-        logger.error(
-            f"Failed to get template opt-outs for customer {customer_id}: {e}"
+        logger.exception(
+            "Failed to get template opt-outs for customer %s",
+            customer_id,
         )
         raise internal_error(
             message="Failed to get template opt-out preferences",
@@ -525,7 +527,7 @@ async def list_templates(
     except AppException:
         raise
     except Exception as e:
-        logger.error(f"Failed to list notification templates: {e}")
+        logger.exception("Failed to list notification templates")
         raise internal_error(
             message="Failed to list notification templates",
             details={"error": str(e)},
@@ -558,7 +560,7 @@ async def update_template(
     except AppException:
         raise
     except Exception as e:
-        logger.error(f"Failed to update notification template {template_id}: {e}")
+        logger.exception("Failed to update notification template %s", template_id)
         raise internal_error(
             message="Failed to update notification template",
             details={"template_id": template_id, "error": str(e)},
@@ -590,7 +592,7 @@ async def get_notification(
     except AppException:
         raise
     except Exception as e:
-        logger.error(f"Failed to get notification {notification_id}: {e}")
+        logger.exception("Failed to get notification %s", notification_id)
         raise internal_error(
             message="Failed to get notification",
             details={"notification_id": notification_id, "error": str(e)},
@@ -627,7 +629,7 @@ async def retry_notification(
             )
         raise
     except Exception as e:
-        logger.error(f"Failed to retry notification {notification_id}: {e}")
+        logger.exception("Failed to retry notification %s", notification_id)
         raise internal_error(
             message="Failed to retry notification",
             details={"notification_id": notification_id, "error": str(e)},

@@ -367,9 +367,9 @@ class MeterTicketOCRService:
                 tenant_id,
                 file_ref,
             )
-        except Exception as exc:  # pragma: no cover - caught to emit failure record
+        except Exception as exc:
             error_details = f"textract_error:{type(exc).__name__}:{exc}"
-            logger.warning(
+            logger.exception(
                 "Textract call failed for tenant=%s file_ref=%s: %s",
                 tenant_id,
                 file_ref,
@@ -405,8 +405,8 @@ class MeterTicketOCRService:
         #    still consume the in-memory result and fall back to manual.
         try:
             await self._persist(result)
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.error(
+        except Exception as exc:
+            logger.exception(
                 "Failed to persist OCR result ocr_result_id=%s tenant=%s: %s",
                 result.ocr_result_id,
                 tenant_id,
@@ -457,8 +457,8 @@ class MeterTicketOCRService:
         key = _CONFIDENCE_THRESHOLD_KEY_PATTERN.format(tenant_id=tenant_id)
         try:
             raw = await self._redis.get(key)
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.warning(
+        except Exception as exc:
+            logger.exception(
                 "Redis lookup for ocr_confidence_threshold failed tenant=%s: %s",
                 tenant_id,
                 exc,

@@ -151,7 +151,7 @@ async def assign_asset_to_job(job_id: str, asset_id: str,
         return _format_mutation_result(result)
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"Error in assign_asset_to_job: {e}")
+        logger.exception("Error in assign_asset_to_job")
         return f"❌ Error assigning asset to job: {str(e)}"
     finally:
         _log_tool_invocation(
@@ -202,7 +202,7 @@ async def update_job_status(job_id: str, new_status: str, reason: str,
         return _format_mutation_result(result)
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"Error in update_job_status: {e}")
+        logger.exception("Error in update_job_status")
         return f"❌ Error updating job status: {str(e)}"
     finally:
         _log_tool_invocation(
@@ -248,7 +248,7 @@ async def cancel_job(job_id: str, reason: str,
         return _format_mutation_result(result)
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"Error in cancel_job: {e}")
+        logger.exception("Error in cancel_job")
         return f"❌ Error cancelling job: {str(e)}"
     finally:
         _log_tool_invocation(
@@ -311,7 +311,7 @@ async def create_job(job_type: str, origin: str, destination: str,
         return _format_mutation_result(result)
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"Error in create_job: {e}")
+        logger.exception("Error in create_job")
         return f"❌ Error creating job: {str(e)}"
     finally:
         _log_tool_invocation(
@@ -367,7 +367,7 @@ async def reassign_rider(shipment_id: str, new_rider_id: str, reason: str,
         return _format_mutation_result(result)
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"Error in reassign_rider: {e}")
+        logger.exception("Error in reassign_rider")
         return f"❌ Error reassigning rider: {str(e)}"
     finally:
         _log_tool_invocation(
@@ -418,7 +418,7 @@ async def escalate_shipment(shipment_id: str, priority: str, reason: str,
         return _format_mutation_result(result)
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"Error in escalate_shipment: {e}")
+        logger.exception("Error in escalate_shipment")
         return f"❌ Error escalating shipment: {str(e)}"
     finally:
         _log_tool_invocation(
@@ -475,7 +475,7 @@ async def request_fuel_refill(station_id: str, quantity_liters: float,
         return _format_mutation_result(result)
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"Error in request_fuel_refill: {e}")
+        logger.exception("Error in request_fuel_refill")
         return f"❌ Error requesting fuel refill: {str(e)}"
     finally:
         _log_tool_invocation(
@@ -524,7 +524,7 @@ async def update_fuel_threshold(station_id: str, threshold_pct: float,
         return _format_mutation_result(result)
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"Error in update_fuel_threshold: {e}")
+        logger.exception("Error in update_fuel_threshold")
         return f"❌ Error updating fuel threshold: {str(e)}"
     finally:
         _log_tool_invocation(

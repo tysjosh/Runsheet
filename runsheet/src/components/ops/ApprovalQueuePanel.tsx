@@ -1,13 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
 import { Bot } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import type { ApprovalEntry, RiskLevel } from "../../services/agentApi";
 import {
-  getApprovals,
   approveAction,
+  getApprovals,
   rejectAction,
 } from "../../services/agentApi";
-import type { ApprovalEntry, RiskLevel } from "../../services/agentApi";
+import { getCurrentTenantId } from "../../services/tenant";
 
 const RISK_CONFIG: Record<RiskLevel, { bg: string; text: string }> = {
   low: { bg: "bg-green-100", text: "text-green-700" },
@@ -28,18 +29,18 @@ const REFRESH_INTERVAL_MS = 30_000;
 export default function ApprovalQueuePanel() {
   const [approvals, setApprovals] = useState<ApprovalEntry[]>([]);
   const [processingIds, setProcessingIds] = useState<Set<string>>(new Set());
+  const tenantId = getCurrentTenantId();
 
   const fetchApprovals = useCallback(async () => {
     try {
-      const data = await getApprovals("dev-tenant");
+      const data = await getApprovals(tenantId);
       // API may return `entries` or `items` — handle both shapes
-      const list =
-        (data as any).entries ?? (data as any).items ?? [];
+      const list = (data as any).entries ?? (data as any).items ?? [];
       setApprovals(list.filter((e: ApprovalEntry) => e.status === "pending"));
     } catch (error) {
       console.error("Failed to fetch approvals:", error);
     }
-  }, []);
+  }, [tenantId]);
 
   useEffect(() => {
     fetchApprovals();

@@ -508,8 +508,8 @@ class GeotabConnector(IntegrationConnector):
         es_service: Required for persistence. Must expose
             :meth:`index_document` and :meth:`update_document`.
         http_client: Optional injected :class:`httpx.AsyncClient`.
-            When ``None`` every HTTP-fallback call creates a
-            short-lived client. Tests inject a mock here.
+            When ``None`` HTTP-fallback calls reuse a lazily created
+            instance-owned client. Tests inject a mock here.
         sdk_call: Optional zero-arg-free callable used to invoke the
             Geotab SDK (``MyGeotabAPI``-style). When ``None`` the
             connector probes for :mod:`mygeotab` and falls back to a
@@ -563,6 +563,7 @@ class GeotabConnector(IntegrationConnector):
         self._credentials_ref = credentials_ref
         self._es = es_service
         self._http_client = http_client
+        self._owns_http_client = http_client is None
         self._sdk_call = sdk_call
         self._freshness_seconds = int(freshness_seconds)
         self._http_timeout = float(http_timeout_seconds)
@@ -1122,20 +1123,23 @@ class GeotabConnector(IntegrationConnector):
         flow authoritative.
         """
 
-        if not self._credentials_ref:
-            return
         try:
-            await self._vault.delete(self._tenant_id, self._credentials_ref)
-        except Exception as exc:
-            logger.warning(
-                "GeotabConnector.disconnect: vault delete failed "
-                "tenant=%s ref=%s: %s",
-                self._tenant_id,
-                self._credentials_ref,
-                exc,
-            )
-        self._credentials_ref = None
-        self._cached_credentials = None
+            if not self._credentials_ref:
+                return
+            try:
+                await self._vault.delete(self._tenant_id, self._credentials_ref)
+            except Exception as exc:
+                logger.warning(
+                    "GeotabConnector.disconnect: vault delete failed "
+                    "tenant=%s ref=%s: %s",
+                    self._tenant_id,
+                    self._credentials_ref,
+                    exc,
+                )
+            self._credentials_ref = None
+            self._cached_credentials = None
+        finally:
+            await self._close_owned_http_client()
 
     # ------------------------------------------------------------------
     # Auth + call orchestration
@@ -1546,16 +1550,21 @@ class GeotabConnector(IntegrationConnector):
 
         When the connector was constructed with an injected
         ``http_client`` we reuse it and leave ``aclose`` to the caller;
-        otherwise we mint a short-lived client per call.
+        otherwise we lazily create one instance-owned client.
         """
 
         if self._http_client is not None:
             return self._http_client, False
-        logger.warning(
-            "Geotab: creating per-call httpx client (no pooling). "
-            "Inject a shared client at construction for production use."
-        )
-        return httpx.AsyncClient(timeout=self._http_timeout), True
+        self._http_client = httpx.AsyncClient(timeout=self._http_timeout)
+        return self._http_client, False
+
+    async def _close_owned_http_client(self) -> None:
+        if self._owns_http_client and self._http_client is not None:
+            await self._http_client.aclose()
+            self._http_client = None
+
+    async def aclose(self) -> None:
+        await self._close_owned_http_client()
 
     @staticmethod
     def _extract_result_list(payload: Any) -> List[Any]:

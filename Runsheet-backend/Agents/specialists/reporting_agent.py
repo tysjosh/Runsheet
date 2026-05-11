@@ -2,7 +2,7 @@
 Reporting Specialist Agent.
 
 Handles all report generation across domains: operations, performance, incidents,
-SLA, failures, rider productivity, fuel, and dispatch reports.
+SLA, failures, driver productivity, fuel, and dispatch reports.
 Wraps a Strands Agent instance with reporting-specific system prompt and tool set.
 
 Validates:
@@ -30,7 +30,7 @@ from Agents.tools import (
     # Scheduling report tools
     generate_dispatch_report,
 )
-from Agents.tools._tenant_context import set_current_tenant
+from Agents.tools._tenant_context import require_tenant_id, set_current_tenant
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,7 @@ class ReportingAgent:
     """Specialist agent for cross-domain reporting.
 
     Generates reports across all domains: operations, performance, incidents,
-    SLA compliance, failure analysis, rider productivity, fuel, and dispatch.
+    SLA compliance, failure analysis, driver productivity, fuel, and dispatch.
     """
 
     TOOLS = [
@@ -109,7 +109,7 @@ class ReportingAgent:
             The agent's response as a string.
         """
         prompt = task
-        tenant_id = (context or {}).get("tenant_id")
+        tenant_id = require_tenant_id((context or {}).get("tenant_id"))
         if context:
             ctx_parts = []
             if tenant_id:

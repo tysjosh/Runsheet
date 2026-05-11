@@ -124,14 +124,18 @@ async function fetchWithRetry(
       lastError = error instanceof Error ? error : new Error(String(error));
 
       // Don't retry non-transient errors
-      if (error instanceof ApiError && !RETRY_CONFIG.retryableStatuses.has(error.status)) {
+      if (
+        error instanceof ApiError &&
+        !RETRY_CONFIG.retryableStatuses.has(error.status)
+      ) {
         throw error;
       }
     }
 
     // Wait before retrying (skip delay on last attempt)
     if (attempt < RETRY_CONFIG.maxRetries) {
-      const delay = RETRY_CONFIG.initialDelayMs * (RETRY_CONFIG.backoffMultiplier ** attempt);
+      const delay =
+        RETRY_CONFIG.initialDelayMs * RETRY_CONFIG.backoffMultiplier ** attempt;
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }
@@ -261,7 +265,8 @@ class ApiService {
   async getAssets(filters?: AssetFilters): Promise<ApiResponse<Asset[]>> {
     const params = new URLSearchParams();
     if (filters?.asset_type) params.set("asset_type", filters.asset_type);
-    if (filters?.asset_subtype) params.set("asset_subtype", filters.asset_subtype);
+    if (filters?.asset_subtype)
+      params.set("asset_subtype", filters.asset_subtype);
     if (filters?.status) params.set("status", filters.status);
     const query = params.toString();
     return this.request<Asset[]>(`/fleet/assets${query ? `?${query}` : ""}`);
@@ -278,7 +283,10 @@ class ApiService {
     });
   }
 
-  async updateAsset(id: string, data: Partial<Asset>): Promise<ApiResponse<Asset>> {
+  async updateAsset(
+    id: string,
+    data: Partial<Asset>,
+  ): Promise<ApiResponse<Asset>> {
     return this.request<Asset>(`/fleet/assets/${id}`, {
       method: "PATCH",
       body: JSON.stringify(data),
@@ -292,7 +300,11 @@ class ApiService {
     response.data = (response.data || []).map((item: any) => ({
       ...item,
       id: item.id || item.item_id,
-      lastUpdated: item.lastUpdated || item.last_restocked || item.updated_at || new Date().toISOString(),
+      lastUpdated:
+        item.lastUpdated ||
+        item.last_restocked ||
+        item.updated_at ||
+        new Date().toISOString(),
     }));
     return response as ApiResponse<InventoryItem[]>;
   }
@@ -301,7 +313,11 @@ class ApiService {
     const response = await this.request<any>(`/inventory/items/${id}`);
     if (response.data) {
       response.data.id = response.data.id || response.data.item_id;
-      response.data.lastUpdated = response.data.lastUpdated || response.data.last_restocked || response.data.updated_at || new Date().toISOString();
+      response.data.lastUpdated =
+        response.data.lastUpdated ||
+        response.data.last_restocked ||
+        response.data.updated_at ||
+        new Date().toISOString();
     }
     return response as ApiResponse<InventoryItem>;
   }
@@ -355,14 +371,6 @@ class ApiService {
 
   async getAnalyticsRoutePerformance(): Promise<ApiResponse<any[]>> {
     return this.request<any[]>("/analytics/routes");
-  }
-
-  async getAnalyticsDelayCauses(): Promise<ApiResponse<any[]>> {
-    return this.request<any[]>("/analytics/delay-causes");
-  }
-
-  async getAnalyticsRegionalPerformance(): Promise<ApiResponse<any[]>> {
-    return this.request<any[]>("/analytics/regional");
   }
 
   // Data Upload - Legacy methods (keeping for compatibility)
@@ -517,39 +525,6 @@ class ApiService {
         operational_time: operationalTime,
       }),
     });
-  }
-
-  // Demo Management
-  async resetDemo(): Promise<ApiResponse<{ state: string; message: string }>> {
-    return this.request<{ state: string; message: string }>("/demo/reset", {
-      method: "POST",
-    });
-  }
-
-  async getDemoStatus(): Promise<{
-    current_state: string;
-    total_trucks: number;
-    success: boolean;
-    timestamp: string;
-  }> {
-    const response = await fetchWithRetry(
-      `${API_BASE_URL}/demo/status`,
-      {
-        headers: {
-          "Content-Type": "application/json",
-        },
-      },
-      API_TIMEOUTS.STANDARD,
-    );
-
-    if (!response.ok) {
-      throw new ApiError(
-        `HTTP error! status: ${response.status}`,
-        response.status,
-      );
-    }
-
-    return await response.json();
   }
 
   // Real-time updates

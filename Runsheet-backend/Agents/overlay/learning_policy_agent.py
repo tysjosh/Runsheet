@@ -149,7 +149,12 @@ class LearningPolicyAgent(OverlayAgentBase):
         if not signals:
             return []
 
-        tenant_id = getattr(signals[0], "tenant_id", "default")
+        tenant_id = getattr(signals[0], "tenant_id", None)
+        if not tenant_id:
+            logger.warning(
+                "LearningPolicyAgent: skipping evaluation without tenant-scoped signals"
+            )
+            return []
         proposals = []
 
         # Categorize incoming signals

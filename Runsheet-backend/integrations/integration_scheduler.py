@@ -163,6 +163,15 @@ PushPayloadBuilder = Callable[[IntegrationInstance], "Awaitable[Dict[str, Any]] 
 
 
 # ---------------------------------------------------------------------------
+# Errors
+# ---------------------------------------------------------------------------
+
+
+class SyncRunPersistenceError(RuntimeError):
+    """Raised when the scheduler cannot durably write a terminal SyncRun."""
+
+
+# ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
@@ -737,7 +746,23 @@ class IntegrationScheduler:
                 record_counts=record_counts,
                 duration_ms=duration_ms,
             )
-            await self._persist_sync_run(run)
+            try:
+                await self._persist_sync_run(run)
+            except SyncRunPersistenceError as exc:
+                err_text = str(exc)
+                exposed = run.model_copy(
+                    update={
+                        "status": "error",
+                        "error_details": err_text[:1000],
+                    }
+                )
+                await self._mark_instance_error(
+                    instance,
+                    last_error=err_text[:500],
+                    retry_count=instance.retry_count,
+                    raise_signal=True,
+                )
+                return exposed
             await self._mark_instance_success(
                 instance, finished_at=finished_at
             )
@@ -764,7 +789,13 @@ class IntegrationScheduler:
             error_details=err_text[:1000],  # bound unbounded tracebacks
             duration_ms=duration_ms,
         )
-        await self._persist_sync_run(run)
+        try:
+            await self._persist_sync_run(run)
+        except SyncRunPersistenceError as exc:
+            persist_error = str(exc)
+            combined = f"{err_text}; {persist_error}"
+            run = run.model_copy(update={"error_details": combined[:1000]})
+            err_text = combined
         await self._mark_instance_error(
             instance,
             last_error=err_text[:500],
@@ -886,8 +917,10 @@ class IntegrationScheduler:
     async def _persist_sync_run(self, run: SyncRun) -> None:
         """Index the SyncRun into :data:`INTEGRATION_SYNC_RUNS_INDEX`.
 
-        Failures here are logged but never raised — the scheduler's
-        job loop MUST NOT be torn down by an ES outage.
+        Failures are raised as :class:`SyncRunPersistenceError` so the caller
+        can expose the durable-write failure on the returned run and instance
+        health record. The APScheduler entry point still catches any leaked
+        exception, so a storage outage cannot tear down the job loop.
         """
 
         try:
@@ -895,12 +928,15 @@ class IntegrationScheduler:
             await self._es.index_document(
                 INTEGRATION_SYNC_RUNS_INDEX, run.run_id, payload
             )
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.error(
+        except Exception as exc:
+            logger.exception(
                 "IntegrationScheduler: failed to persist SyncRun %s: %s",
                 run.run_id,
                 exc,
             )
+            raise SyncRunPersistenceError(
+                f"sync_run_persistence_failed:{type(exc).__name__}:{exc}"
+            ) from exc
 
     async def _mark_instance_success(
         self,
@@ -1015,4 +1051,5 @@ __all__ = [
     "INTEGRATION_SCHEDULER_AGENT_ID",
     "INTEGRATION_SYNC_FAILED_SIGNAL_TYPE",
     "IntegrationScheduler",
+    "SyncRunPersistenceError",
 ]

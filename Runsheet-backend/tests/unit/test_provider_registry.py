@@ -3,16 +3,16 @@ Unit tests for :mod:`integrations.provider_registry` (Task 9.10).
 
 Covers:
 
-* :func:`register_all_providers` registers exactly four built-in
-  entries (QuickBooks Online, Veeder-Root, Geotab, Stripe).
+* :func:`register_all_providers` registers the built-in Marketplace
+  entries, including all supported tank-monitor providers.
 * Each registered entry exposes the Marketplace-level feature flag
   ``overlay.integration.{provider_name}`` via
   :meth:`ProviderCatalogEntry.effective_feature_flag_key` per
   Requirement 5.6.6.
 * Registration is deterministic: the order is
-  QBO → Veeder-Root → Geotab → Stripe.
+  QBO → tank monitors → Geotab → Stripe.
 * Calling :func:`register_all_providers` twice is idempotent — the
-  shared registry still contains exactly four entries, matching the
+  shared registry still contains exactly the built-in entries, matching the
   contract documented on the bootstrap helper.
 
 Validates: Requirements 5.6.2, 5.6.6.
@@ -30,7 +30,16 @@ from integrations.provider_catalog import (
 from integrations.provider_registry import register_all_providers
 
 
-_EXPECTED_ORDER = ("quickbooks_online", "veeder_root", "geotab", "stripe")
+_EXPECTED_ORDER = (
+    "quickbooks_online",
+    "veeder_root",
+    "otodata",
+    "silverlink",
+    "gasboy",
+    "franklin_fueling",
+    "geotab",
+    "stripe",
+)
 
 
 @pytest.fixture(autouse=True)
@@ -45,11 +54,11 @@ def _reset_registry():
 
 
 class TestRegisterAllProviders:
-    def test_registers_exactly_four_entries(self):
+    def test_registers_all_builtin_entries(self):
         registered = register_all_providers()
 
-        assert len(registered) == 4
-        assert len(list_providers()) == 4
+        assert len(registered) == len(_EXPECTED_ORDER)
+        assert len(list_providers()) == len(_EXPECTED_ORDER)
 
     def test_registration_order_is_deterministic(self):
         registered = register_all_providers()
@@ -81,12 +90,12 @@ class TestRegisterAllProviders:
         first = register_all_providers()
         second = register_all_providers()
 
-        assert len(first) == 4
-        assert len(second) == 4
-        # After two calls the shared registry still only holds four
+        assert len(first) == len(_EXPECTED_ORDER)
+        assert len(second) == len(_EXPECTED_ORDER)
+        # After two calls the shared registry still only holds the built-in
         # entries — register_provider replaces entries atomically so
         # duplicates are impossible.
-        assert len(list_providers()) == 4
+        assert len(list_providers()) == len(_EXPECTED_ORDER)
         # The observed order is unchanged across the second call.
         assert [entry.provider_name for entry in list_providers()] == list(
             _EXPECTED_ORDER

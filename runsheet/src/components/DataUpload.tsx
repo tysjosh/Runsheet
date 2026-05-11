@@ -6,14 +6,13 @@ import {
   FileText,
   Moon,
   RefreshCw,
-  RotateCcw,
   Sun,
   Sunset,
   Upload,
   XCircle,
 } from "lucide-react";
 import type React from "react";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { apiService } from "../services/api";
 
 interface UploadResult {
@@ -24,11 +23,6 @@ interface UploadResult {
   breakdown?: Record<string, number>;
 }
 
-interface DemoStatus {
-  current_state: string;
-  total_trucks: number;
-}
-
 export default function DataUpload() {
   const [uploadMethod, setUploadMethod] = useState<"sheets" | "csv" | "batch">(
     "batch",
@@ -36,10 +30,8 @@ export default function DataUpload() {
   const [sheetsUrl, setSheetsUrl] = useState("");
   const [dataType, setDataType] = useState("fleet");
   const [uploading, setUploading] = useState(false);
-  const [resetting, setResetting] = useState(false);
   const [result, setResult] = useState<UploadResult | null>(null);
   const [dragActive, setDragActive] = useState(false);
-  const [demoStatus, setDemoStatus] = useState<DemoStatus | null>(null);
 
   // Batch upload options
   const [selectedDataTypes, setSelectedDataTypes] = useState<string[]>([
@@ -55,23 +47,6 @@ export default function DataUpload() {
   >("afternoon");
   const [batchId, setBatchId] = useState("afternoon_ops");
   const [operationalTime, setOperationalTime] = useState("14:00");
-
-  const loadDemoStatus = async () => {
-    try {
-      const response = await apiService.getDemoStatus();
-      setDemoStatus({
-        current_state: response.current_state,
-        total_trucks: response.total_trucks,
-      });
-    } catch (error) {
-      console.error("Failed to load demo status:", error);
-    }
-  };
-
-  useEffect(() => {
-    loadDemoStatus();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   const handleSheetsUpload = async () => {
     if (!sheetsUrl.trim()) return;
@@ -244,8 +219,6 @@ export default function DataUpload() {
           dataType,
         });
       }
-
-      await loadDemoStatus();
     } catch (_error) {
       setResult({
         status: "error",
@@ -254,61 +227,6 @@ export default function DataUpload() {
       });
     } finally {
       setUploading(false);
-    }
-  };
-
-  const handleResetDemo = async () => {
-    if (!confirm("This will reset all data to morning baseline. Continue?")) {
-      return;
-    }
-
-    setResetting(true);
-    try {
-      await apiService.resetDemo();
-      await loadDemoStatus();
-      setResult({
-        status: "success",
-        recordCount: 0,
-        dataType: "Demo reset to morning baseline",
-      });
-    } catch (_error) {
-      setResult({
-        status: "error",
-        errors: ["Failed to reset demo. Please try again."],
-        dataType: "reset",
-      });
-    } finally {
-      setResetting(false);
-    }
-  };
-
-  const getStateIcon = (state: string) => {
-    switch (state) {
-      case "morning_baseline":
-        return <Sun className="w-4 h-4" />;
-      case "afternoon":
-        return <Sun className="w-4 h-4" />;
-      case "evening":
-        return <Sunset className="w-4 h-4" />;
-      case "night":
-        return <Moon className="w-4 h-4" />;
-      default:
-        return <Clock className="w-4 h-4" />;
-    }
-  };
-
-  const getStateLabel = (state: string) => {
-    switch (state) {
-      case "morning_baseline":
-        return "Morning Baseline";
-      case "afternoon":
-        return "Afternoon Operations";
-      case "evening":
-        return "Evening Operations";
-      case "night":
-        return "Night Shift";
-      default:
-        return "Unknown State";
     }
   };
 
@@ -322,45 +240,8 @@ export default function DataUpload() {
               Data Management
             </h1>
             <p className="text-gray-500">
-              Simulate temporal data changes and manage demo state
+              Upload operational data for the active tenant
             </p>
-          </div>
-
-          {/* Demo Status and Reset */}
-          <div className="flex items-center gap-4">
-            <div className="flex items-center gap-2 px-4 py-2 bg-gray-50 rounded-xl">
-              {demoStatus ? (
-                <>
-                  {getStateIcon(demoStatus.current_state)}
-                  <span className="text-sm font-medium text-[#232323]">
-                    {getStateLabel(demoStatus.current_state)}
-                  </span>
-                  <span className="text-xs text-gray-500">
-                    ({demoStatus.total_trucks} trucks)
-                  </span>
-                </>
-              ) : (
-                <>
-                  <RefreshCw className="w-4 h-4 animate-spin text-gray-400" />
-                  <span className="text-sm text-gray-500">
-                    Loading status...
-                  </span>
-                </>
-              )}
-            </div>
-
-            <button
-              onClick={handleResetDemo}
-              disabled={resetting}
-              className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-gray-600 hover:text-[#232323] hover:bg-gray-50 rounded-xl transition-colors disabled:opacity-50"
-            >
-              {resetting ? (
-                <RefreshCw className="w-4 h-4 animate-spin" />
-              ) : (
-                <RotateCcw className="w-4 h-4" />
-              )}
-              Reset Demo
-            </button>
           </div>
         </div>
       </div>
@@ -715,14 +596,12 @@ export default function DataUpload() {
           )}
 
           {/* Upload Progress */}
-          {(uploading || resetting) && (
+          {uploading && (
             <div className="mb-6 p-6 bg-gray-50 rounded-2xl">
               <div className="flex items-center gap-3 mb-3">
                 <RefreshCw className="w-5 h-5 text-gray-600 animate-spin" />
                 <span className="text-sm text-[#232323] font-medium">
-                  {resetting
-                    ? "Resetting demo data..."
-                    : `Processing ${dataType} data...`}
+                  Processing {dataType} data...
                 </span>
               </div>
               <div className="w-full bg-gray-200 rounded-full h-2">
@@ -772,7 +651,6 @@ export default function DataUpload() {
                   <button
                     onClick={() => {
                       setResult(null);
-                      loadDemoStatus();
                     }}
                     className="px-6 py-2 bg-green-600 text-white text-sm rounded-xl hover:bg-green-700 font-medium transition-colors"
                   >

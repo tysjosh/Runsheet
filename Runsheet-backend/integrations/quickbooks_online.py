@@ -317,8 +317,8 @@ class QuickBooksOnlineConnector(IntegrationConnector):
             500 req/min counter. When ``None`` the throttle is
             disabled — production deployments MUST supply one.
         http_client: Optional injected :class:`httpx.AsyncClient`.
-            When ``None`` every call creates a short-lived client
-            with :data:`DEFAULT_HTTP_TIMEOUT_SECONDS`. Tests inject a
+            When ``None`` the connector lazily creates one instance-owned
+            client with :data:`DEFAULT_HTTP_TIMEOUT_SECONDS`. Tests inject a
             mock here.
         es_service: Optional ES service used to look up
             reconciliation records by ``invoice_id`` during
@@ -393,6 +393,7 @@ class QuickBooksOnlineConnector(IntegrationConnector):
         self._feature_flags = feature_flag_service
         self._redis = redis_client
         self._http_client = http_client
+        self._owns_http_client = http_client is None
         self._es = es_service
         self._reconciliation_index = reconciliation_index
         self._rate_limit = int(rate_limit_per_minute)
@@ -752,44 +753,47 @@ class QuickBooksOnlineConnector(IntegrationConnector):
         integration's posture on the platform.
         """
 
-        if not self._credentials_ref:
-            return
         try:
-            tokens = await self._load_tokens()
-        except Exception as exc:
-            logger.warning(
-                "QuickBooksOnlineConnector.disconnect: could not load "
-                "tokens for tenant=%s (ref=%s): %s",
-                self._tenant_id,
-                self._credentials_ref,
-                exc,
-            )
-            tokens = None
-
-        if tokens is not None:
+            if not self._credentials_ref:
+                return
             try:
-                await self._revoke_refresh_token(tokens)
+                tokens = await self._load_tokens()
             except Exception as exc:
                 logger.warning(
-                    "QuickBooksOnlineConnector.disconnect: revoke call "
-                    "failed for tenant=%s: %s — continuing with vault "
-                    "delete",
+                    "QuickBooksOnlineConnector.disconnect: could not load "
+                    "tokens for tenant=%s (ref=%s): %s",
                     self._tenant_id,
+                    self._credentials_ref,
                     exc,
                 )
+                tokens = None
 
-        try:
-            await self._vault.delete(self._tenant_id, self._credentials_ref)
-        except Exception as exc:
-            logger.warning(
-                "QuickBooksOnlineConnector.disconnect: vault delete "
-                "failed for tenant=%s ref=%s: %s",
-                self._tenant_id,
-                self._credentials_ref,
-                exc,
-            )
-        self._credentials_ref = None
-        self._cached_tokens = None
+            if tokens is not None:
+                try:
+                    await self._revoke_refresh_token(tokens)
+                except Exception as exc:
+                    logger.warning(
+                        "QuickBooksOnlineConnector.disconnect: revoke call "
+                        "failed for tenant=%s: %s — continuing with vault "
+                        "delete",
+                        self._tenant_id,
+                        exc,
+                    )
+
+            try:
+                await self._vault.delete(self._tenant_id, self._credentials_ref)
+            except Exception as exc:
+                logger.warning(
+                    "QuickBooksOnlineConnector.disconnect: vault delete "
+                    "failed for tenant=%s ref=%s: %s",
+                    self._tenant_id,
+                    self._credentials_ref,
+                    exc,
+                )
+            self._credentials_ref = None
+            self._cached_tokens = None
+        finally:
+            await self._close_owned_http_client()
 
     # ------------------------------------------------------------------
     # HTTP orchestration
@@ -916,17 +920,22 @@ class QuickBooksOnlineConnector(IntegrationConnector):
         """Return ``(client, owned_here)``.
 
         When the adapter was constructed with an injected ``http_client``
-        we reuse it and leave close to the caller. Otherwise we
-        create a short-lived client per call and close it on exit.
+        we reuse it and leave close to the caller. Otherwise we lazily
+        create one instance-owned client and close it during disconnect.
         """
 
         if self._http_client is not None:
             return self._http_client, False
-        logger.warning(
-            "QuickBooksOnline: creating per-call httpx client (no pooling). "
-            "Inject a shared client at construction for production use."
-        )
-        return httpx.AsyncClient(timeout=self._timeout), True
+        self._http_client = httpx.AsyncClient(timeout=self._timeout)
+        return self._http_client, False
+
+    async def _close_owned_http_client(self) -> None:
+        if self._owns_http_client and self._http_client is not None:
+            await self._http_client.aclose()
+            self._http_client = None
+
+    async def aclose(self) -> None:
+        await self._close_owned_http_client()
 
     @staticmethod
     def _parse_json(response: httpx.Response) -> Dict[str, Any]:

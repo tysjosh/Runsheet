@@ -543,5 +543,5 @@ def setup_compliance_indices(es_service) -> None:
                 logger.info(f"Created compliance index: {index_name}")
             else:
                 logger.info(f"Compliance index already exists: {index_name}")
-        except Exception as e:
-            logger.error(f"Failed to create compliance index {index_name}: {e}")
+        except Exception:
+            logger.exception("Failed to create compliance index %s", index_name)

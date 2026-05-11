@@ -139,8 +139,8 @@ def setup_scheduling_indices(es_service):
                 logger.info(f"✅ Created scheduling index: {index_name}")
             else:
                 logger.info(f"📋 Scheduling index already exists: {index_name}")
-        except Exception as e:
-            logger.error(f"❌ Failed to create scheduling index {index_name}: {e}")
+        except Exception:
+            logger.exception("Failed to create scheduling index %s", index_name)
 
     # Apply ILM policy for job_events
     try:

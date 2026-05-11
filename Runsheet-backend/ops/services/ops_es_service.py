@@ -94,8 +94,8 @@ class OpsElasticsearchService:
                     logger.info(f"✅ Created ops index: {index_name}")
                 else:
                     logger.info(f"📋 Ops index already exists: {index_name}")
-            except Exception as e:
-                logger.error(f"❌ Failed to create ops index {index_name}: {e}")
+            except Exception:
+                logger.exception("Failed to create ops index %s", index_name)
 
         # Set up shipment_events alias for time-based rollover
         self._setup_shipment_events_alias()
@@ -150,7 +150,7 @@ class OpsElasticsearchService:
             except Exception as e:
                 results["indices"][index_name] = {"valid": False, "error": str(e)}
                 results["valid"] = False
-                logger.error(f"❌ Failed to validate ops index {index_name}: {e}")
+                logger.exception("Failed to validate ops index %s", index_name)
 
         if results["valid"]:
             logger.info("✅ All ops index schemas validated successfully")

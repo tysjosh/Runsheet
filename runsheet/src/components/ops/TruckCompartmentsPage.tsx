@@ -58,6 +58,7 @@ import type {
 } from "../../services/fuelApi";
 import {
   checkCompartmentLoadEligibility,
+  getTruckCompartmentCapacityGallons,
   listTruckCompartments,
   recordCleaningEvent,
 } from "../../services/fuelApi";
@@ -176,18 +177,13 @@ function useToasts() {
 
 // ─── Formatters ──────────────────────────────────────────────────────────────
 
-/** Gallons approximation used only for display (canonical is liters). */
-const LITERS_PER_GALLON = 3.785411784;
-
-export function litersToGallons(liters: number | null | undefined): number {
-  if (liters == null || Number.isNaN(liters)) return 0;
-  return liters / LITERS_PER_GALLON;
-}
-
-export function formatCapacity(liters: number | null | undefined): string {
-  if (liters == null || Number.isNaN(liters)) return "—";
-  const gallons = litersToGallons(liters);
-  return `${liters.toFixed(0)} L · ${gallons.toFixed(0)} gal`;
+export function formatCapacity(
+  compartment: TruckCompartmentState | null | undefined,
+): string {
+  if (!compartment) return "—";
+  const gallons = getTruckCompartmentCapacityGallons(compartment);
+  if (Number.isNaN(gallons)) return "—";
+  return `${gallons.toFixed(0)} gal`;
 }
 
 export function formatTimestamp(iso: string | null | undefined): string {
@@ -794,8 +790,7 @@ function LoadEligibilityModal({
               required
             />
             <p className="text-[10px] text-gray-400 mt-1">
-              Accepts canonical codes and legacy aliases (AGO, PMS). The backend
-              canonicalizes before consulting the compatibility matrix.
+              Enter the canonical product code used by the compatibility matrix.
             </p>
           </div>
 
@@ -1102,7 +1097,7 @@ export default function TruckCompartmentsPage() {
                       <CompartmentStateBadge state={c.state} />
                     </td>
                     <td className="px-3 py-2 text-gray-600 text-xs">
-                      {formatCapacity(c.capacity_liters)}
+                      {formatCapacity(c)}
                     </td>
                     <td className="px-3 py-2 text-gray-600 text-xs">
                       {c.last_loaded_product ? (

@@ -126,14 +126,14 @@ async def get_fleet_summary() -> str:
                 for bucket in by_subtype_buckets:
                     response += f"• {bucket['key']}: {bucket['doc_count']}\n"
                 response += "\n"
-        except Exception as agg_err:
-            logger.warning(f"Could not fetch asset type aggregations: {agg_err}")
+        except Exception:
+            logger.warning("Could not fetch asset type aggregations", exc_info=True)
 
         success = True
         return response
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"Error getting fleet summary: {e}")
+        logger.exception("Error getting fleet summary")
         return f"Error getting fleet summary: {str(e)}"
     finally:
         _log_tool_invocation("get_fleet_summary", {}, start_time, success, error_msg)
@@ -192,7 +192,7 @@ async def get_inventory_summary() -> str:
         return response
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"Error getting inventory summary: {e}")
+        logger.exception("Error getting inventory summary")
         return f"Error getting inventory summary: {str(e)}"
     finally:
         _log_tool_invocation("get_inventory_summary", {}, start_time, success, error_msg)
@@ -242,7 +242,7 @@ async def get_analytics_overview() -> str:
         return response
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"Error getting analytics overview: {e}")
+        logger.exception("Error getting analytics overview")
         return f"Error getting analytics overview: {str(e)}"
     finally:
         _log_tool_invocation("get_analytics_overview", {}, start_time, success, error_msg)
@@ -300,7 +300,7 @@ async def get_performance_insights() -> str:
         return response
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"Error getting performance insights: {e}")
+        logger.exception("Error getting performance insights")
         return f"Error getting performance insights: {str(e)}"
     finally:
         _log_tool_invocation("get_performance_insights", {}, start_time, success, error_msg)

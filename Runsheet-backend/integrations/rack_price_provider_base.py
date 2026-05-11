@@ -347,6 +347,7 @@ class RackPriceProvider(ABC):
             raise ValueError("cache_bucket_minutes must be positive")
         self._redis = redis_client
         self._http_client = http_client
+        self._owns_http_client = http_client is None
         self._timeout = float(timeout_seconds)
         self._cache_ttl = int(cache_ttl_seconds)
         self._cache_bucket_minutes = int(cache_bucket_minutes)
@@ -582,18 +583,21 @@ class RackPriceProvider(ABC):
     async def _get_http_client(self) -> httpx.AsyncClient:
         """Return the injected client or lazily create a new one.
 
-        Creating a per-call client is a fallback for non-injected usage.
-        In production, prefer injecting a shared client at construction
-        time for connection pooling and warm TLS.
+        Non-injected usage lazily creates one instance-owned client so
+        repeated calls can reuse connection pooling and warm TLS.
         """
 
         if self._http_client is not None:
             return self._http_client
-        logger.warning(
-            "RackPriceProvider: creating per-call httpx client (no pooling). "
-            "Inject a shared client at construction for production use."
-        )
-        return httpx.AsyncClient(timeout=self._timeout)
+        self._http_client = httpx.AsyncClient(timeout=self._timeout)
+        return self._http_client
+
+    async def aclose(self) -> None:
+        """Close the lazily owned HTTP client, if this provider created one."""
+
+        if self._owns_http_client and self._http_client is not None:
+            await self._http_client.aclose()
+            self._http_client = None
 
     async def _cache_get(
         self,
@@ -830,19 +834,14 @@ class OPISRackPriceProvider(RackPriceProvider):
                 api_secret, params
             )
 
-        client_supplied = self._http_client is not None
         client = await self._get_http_client()
-        try:
-            response = await client.get(
-                f"{self._base_url}/rack/prices",
-                headers=headers,
-                params=params,
-            )
-            response.raise_for_status()
-            payload = response.json()
-        finally:
-            if not client_supplied:
-                await client.aclose()
+        response = await client.get(
+            f"{self._base_url}/rack/prices",
+            headers=headers,
+            params=params,
+        )
+        response.raise_for_status()
+        payload = response.json()
 
         return self._parse_opis_payload(
             payload=payload,

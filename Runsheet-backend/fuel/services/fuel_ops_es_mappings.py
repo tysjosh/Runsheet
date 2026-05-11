@@ -694,5 +694,5 @@ def setup_fuel_ops_indices(es_service) -> None:
                 logger.info(f"Created fuel-ops index: {index_name}")
             else:
                 logger.info(f"Fuel-ops index already exists: {index_name}")
-        except Exception as e:
-            logger.error(f"Failed to create fuel-ops index {index_name}: {e}")
+        except Exception:
+            logger.exception("Failed to create fuel-ops index %s", index_name)

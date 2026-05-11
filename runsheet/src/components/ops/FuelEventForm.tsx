@@ -2,8 +2,14 @@
 
 import { ArrowDown, ArrowUp, Loader2, X } from "lucide-react";
 import { useCallback, useState } from "react";
-import type { FuelStation, FuelType } from "../../services/fuelApi";
-import { recordConsumption, recordRefill } from "../../services/fuelApi";
+import type { FuelStation } from "../../services/fuelApi";
+import {
+  gallonsToLiters,
+  getFuelStationCapacityGallons,
+  getFuelStationCurrentStockGallons,
+  recordConsumption,
+  recordRefill,
+} from "../../services/fuelApi";
 
 type EventMode = "consumption" | "refill";
 
@@ -12,6 +18,14 @@ interface FuelEventFormProps {
   mode: EventMode;
   onClose: () => void;
   onSuccess: () => void;
+}
+
+function getCapacityGallons(station: FuelStation): number {
+  return getFuelStationCapacityGallons(station);
+}
+
+function getCurrentStockGallons(station: FuelStation): number {
+  return getFuelStationCurrentStockGallons(station);
 }
 
 /**
@@ -37,8 +51,8 @@ export default function FuelEventForm({
 
   const isConsumption = mode === "consumption";
   const maxQuantity = isConsumption
-    ? station.current_stock_liters
-    : station.capacity_liters - station.current_stock_liters;
+    ? getCurrentStockGallons(station)
+    : getCapacityGallons(station) - getCurrentStockGallons(station);
 
   const canSubmit =
     Number(quantity) > 0 &&
@@ -58,7 +72,7 @@ export default function FuelEventForm({
           await recordConsumption({
             station_id: station.station_id,
             fuel_type: station.fuel_type,
-            quantity_liters: Number(quantity),
+            quantity_liters: gallonsToLiters(Number(quantity)),
             asset_id: assetId.trim(),
             operator_id: operatorId.trim(),
             odometer_reading: odometer ? Number(odometer) : undefined,
@@ -67,7 +81,7 @@ export default function FuelEventForm({
           await recordRefill({
             station_id: station.station_id,
             fuel_type: station.fuel_type,
-            quantity_liters: Number(quantity),
+            quantity_liters: gallonsToLiters(Number(quantity)),
             supplier: supplier.trim(),
             operator_id: operatorId.trim(),
             delivery_reference: deliveryRef.trim() || undefined,
@@ -75,9 +89,7 @@ export default function FuelEventForm({
         }
         onSuccess();
       } catch (err) {
-        setError(
-          err instanceof Error ? err.message : "Failed to record event",
-        );
+        setError(err instanceof Error ? err.message : "Failed to record event");
       } finally {
         setSubmitting(false);
       }
@@ -130,7 +142,7 @@ export default function FuelEventForm({
             htmlFor="fuel-qty"
             className="block text-xs font-medium text-gray-600 mb-1"
           >
-            Quantity (liters) *
+            Quantity (gallons) *
           </label>
           <input
             id="fuel-qty"
@@ -140,7 +152,7 @@ export default function FuelEventForm({
             step="0.1"
             value={quantity}
             onChange={(e) => setQuantity(e.target.value)}
-            placeholder={`Max ${maxQuantity.toLocaleString()} L`}
+            placeholder={`Max ${maxQuantity.toLocaleString()} gal`}
             className="w-full px-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300"
             required
           />

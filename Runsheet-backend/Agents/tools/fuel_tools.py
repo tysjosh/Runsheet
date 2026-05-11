@@ -145,7 +145,7 @@ async def search_fuel_stations(query: str, fuel_type: str = None, status: str = 
         return response_text
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"Error searching fuel stations: {e}")
+        logger.exception("Error searching fuel stations")
         return f"Error searching fuel stations: {str(e)}"
     finally:
         _log_tool_invocation(
@@ -228,7 +228,7 @@ async def get_fuel_summary(tenant_id: str | None = None) -> str:
         return response_text
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"Error fetching fuel summary: {e}")
+        logger.exception("Error fetching fuel summary")
         return f"Error fetching fuel summary: {str(e)}"
     finally:
         _log_tool_invocation(
@@ -325,7 +325,7 @@ async def get_fuel_consumption_history(station_id: str = None, asset_id: str = N
         return response_text
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"Error fetching fuel consumption history: {e}")
+        logger.exception("Error fetching fuel consumption history")
         return f"Error fetching fuel consumption history: {str(e)}"
     finally:
         _log_tool_invocation(
@@ -558,7 +558,7 @@ async def generate_fuel_report(days: int = 7, tenant_id: str | None = None) -> s
         return report
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"Error generating fuel report: {e}")
+        logger.exception("Error generating fuel report")
         return f"Error generating fuel report: {str(e)}"
     finally:
         _log_tool_invocation(

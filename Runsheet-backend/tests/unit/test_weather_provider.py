@@ -230,6 +230,19 @@ class TestDailyWeatherModel:
 
 
 class TestWeatherProviderBase:
+    async def test_lazily_created_http_client_is_reused_until_closed(self):
+        provider = _StubProvider(rows_or_exc=[])
+
+        first = await provider._get_http_client()
+        second = await provider._get_http_client()
+
+        assert first is second
+        assert first.is_closed is False
+
+        await provider.aclose()
+
+        assert first.is_closed is True
+
     async def test_fetch_returns_rows_persists_es_and_caches(self):
         redis = _FakeRedis()
         es = _FakeES()

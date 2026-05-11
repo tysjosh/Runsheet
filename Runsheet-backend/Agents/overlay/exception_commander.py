@@ -139,7 +139,12 @@ class ExceptionCommander(OverlayAgentBase):
         Returns:
             List of InterventionProposals (one per new/updated incident).
         """
-        tenant_id = signals[0].tenant_id if signals else "default"
+        if not signals or not signals[0].tenant_id:
+            logger.warning(
+                "ExceptionCommander: skipping evaluation without tenant-scoped signals"
+            )
+            return []
+        tenant_id = signals[0].tenant_id
         proposals = []
 
         # Step 1: Correlate signals into incidents (Req 5.2)

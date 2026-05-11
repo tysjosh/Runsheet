@@ -142,8 +142,16 @@ class SLAGuardianAgent(AutonomousAgentBase):
 
         for shipment in at_risk_shipments:
             shipment_id = shipment.get("shipment_id")
-            tenant_id = shipment.get("tenant_id", "default")
+            tenant_id = shipment.get("tenant_id")
             rider_id = shipment.get("rider_id")
+            if not shipment_id or not tenant_id:
+                logger.warning(
+                    "SLAGuardianAgent: skipping at-risk shipment missing "
+                    "shipment_id or tenant_id: shipment_id=%s tenant_id=%s",
+                    shipment_id,
+                    tenant_id,
+                )
+                continue
 
             detections.append(shipment_id)
 
