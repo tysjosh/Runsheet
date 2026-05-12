@@ -369,7 +369,7 @@ class NotificationService:
 
         hits = response["hits"]["hits"]
         total = response["hits"]["total"]
-        total_count = total["value"] if isinstance(total, dict) else total
+        total_count = total["value"] if hasattr(total, "get") or isinstance(total, dict) else total
 
         return {
             "items": [hit["_source"] for hit in hits],
@@ -576,7 +576,8 @@ class NotificationService:
         )
 
         total_hits = response["hits"]["total"]
-        total = total_hits["value"] if isinstance(total_hits, dict) else total_hits
+        # Handle both dict and int (ObjectApiResponse can return either)
+        total = total_hits["value"] if hasattr(total_hits, 'get') else total_hits
 
         def _buckets_to_dict(agg_key: str) -> dict[str, int]:
             buckets = response.get("aggregations", {}).get(agg_key, {}).get("buckets", [])

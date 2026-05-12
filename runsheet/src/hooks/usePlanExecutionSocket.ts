@@ -11,6 +11,7 @@
  */
 
 import { useCallback, useMemo, useState } from "react";
+import { getAuthToken } from "../utils/auth";
 import {
   useWebSocket,
   type WebSocketOptions,
@@ -21,6 +22,15 @@ import {
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
 const WS_BASE_URL = API_BASE_URL.replace("http", "ws").replace("/api", "");
+const PLAN_EXECUTION_WS_BASE_URL = `${WS_BASE_URL}/ws/plan-execution`;
+
+/**
+ * Build WebSocket URL with JWT token for authentication
+ */
+async function buildPlanExecutionWebSocketUrl(): Promise<string> {
+  const token = await getAuthToken();
+  return token ? `${PLAN_EXECUTION_WS_BASE_URL}?token=${encodeURIComponent(token)}` : PLAN_EXECUTION_WS_BASE_URL;
+}
 
 /**
  * Stop data within an execution update
@@ -105,17 +115,16 @@ export interface UsePlanExecutionSocketReturn {
 /**
  * Custom hook for plan execution real-time updates via WebSocket.
  *
- * Connects to `/ws/plan-execution?tenant_id=...` and provides automatic
+ * Connects to `/ws/plan-execution?token=...` and provides automatic
  * reconnection with exponential backoff. Parses incoming execution_update
  * messages and exposes them as React state.
  *
- * @param tenantId - The tenant ID to scope the WebSocket connection
  * @param options - Configuration options
  * @returns Plan execution WebSocket state and control functions
  *
  * @example
  * ```tsx
- * const { state, isConnected, lastUpdate } = usePlanExecutionSocket("tenant-123", {
+ * const { state, isConnected, lastUpdate } = usePlanExecutionSocket({
  *   onExecutionUpdate: (update) => {
  *     console.log(`Plan ${update.plan_id}: ${update.completed_stops}/${update.total_stops} stops done`);
  *   },
@@ -123,20 +132,12 @@ export interface UsePlanExecutionSocketReturn {
  * ```
  */
 export function usePlanExecutionSocket(
-  tenantId: string,
   options: PlanExecutionSocketOptions = {},
 ): UsePlanExecutionSocketReturn {
   const [lastUpdate, setLastUpdate] = useState<ExecutionUpdateData | null>(
     null,
   );
   const [connectionStatus, setConnectionStatus] = useState<string | null>(null);
-
-  // Construct WebSocket URL with tenant_id query parameter
-  const wsUrl = useMemo(
-    () =>
-      `${WS_BASE_URL}/ws/plan-execution?tenant_id=${encodeURIComponent(tenantId)}`,
-    [tenantId],
-  );
 
   /**
    * Handle incoming WebSocket messages
@@ -190,6 +191,7 @@ export function usePlanExecutionSocket(
       maxReconnectDelay: 30000, // Max 30 seconds
       maxReconnectAttempts: 0, // Infinite attempts
       backoffMultiplier: 2, // Double each time
+      getUrl: buildPlanExecutionWebSocketUrl, // Refresh token on each connection
       onConnect: handleConnect,
       onDisconnect: handleDisconnect,
       onMessage: handleMessage,
@@ -208,7 +210,7 @@ export function usePlanExecutionSocket(
     error,
     connect,
     disconnect,
-  } = useWebSocket(wsUrl, wsOptions);
+  } = useWebSocket("", wsOptions);
 
   return {
     state,

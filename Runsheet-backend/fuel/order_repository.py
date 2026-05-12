@@ -100,13 +100,14 @@ def _extract_sources(resp: Any) -> List[Dict[str, Any]]:
     """Extract ``_source`` payloads from an ES search response."""
     if not resp:
         return []
-    hits_outer = resp.get("hits") if isinstance(resp, dict) else None
+    # Handle both dict and ObjectApiResponse (which has .get() but isn't a dict)
+    hits_outer = resp.get("hits") if hasattr(resp, 'get') else None
     if not hits_outer:
         return []
     hits = hits_outer.get("hits") or []
     out: List[Dict[str, Any]] = []
     for hit in hits:
-        if isinstance(hit, dict) and isinstance(hit.get("_source"), dict):
+        if hasattr(hit, 'get') and hit.get("_source"):
             out.append(hit["_source"])
     return out
 
@@ -115,11 +116,12 @@ def _extract_total(resp: Any) -> int:
     """Extract the total hit count from an ES search response."""
     if not resp:
         return 0
-    hits_outer = resp.get("hits") if isinstance(resp, dict) else None
+    # Handle both dict and ObjectApiResponse
+    hits_outer = resp.get("hits") if hasattr(resp, 'get') else None
     if not hits_outer:
         return 0
-    total = hits_outer.get("total")
-    if isinstance(total, dict):
+    total = hits_outer.get("total") if hasattr(hits_outer, 'get') else None
+    if hasattr(total, 'get'):
         return total.get("value", 0)
     if isinstance(total, int):
         return total

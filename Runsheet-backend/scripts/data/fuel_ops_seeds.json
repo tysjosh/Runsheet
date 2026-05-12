@@ -1,0 +1,725 @@
+{
+  "weather_observations": [
+    {
+      "zip_code": "77020",
+      "date": "2026-05-10T00:00:00Z",
+      "avg_temp_f": 78.5,
+      "hdd": 0.0,
+      "provider": "noaa",
+      "retrieved_at": "2026-05-11T06:00:00Z"
+    },
+    {
+      "zip_code": "77020",
+      "date": "2026-05-09T00:00:00Z",
+      "avg_temp_f": 76.2,
+      "hdd": 0.0,
+      "provider": "noaa",
+      "retrieved_at": "2026-05-10T06:00:00Z"
+    },
+    {
+      "zip_code": "60609",
+      "date": "2026-05-10T00:00:00Z",
+      "avg_temp_f": 58.3,
+      "hdd": 6.7,
+      "provider": "noaa",
+      "retrieved_at": "2026-05-11T06:00:00Z"
+    },
+    {
+      "zip_code": "60609",
+      "date": "2026-05-09T00:00:00Z",
+      "avg_temp_f": 55.1,
+      "hdd": 9.9,
+      "provider": "noaa",
+      "retrieved_at": "2026-05-10T06:00:00Z"
+    },
+    {
+      "zip_code": "80239",
+      "date": "2026-05-10T00:00:00Z",
+      "avg_temp_f": 62.4,
+      "hdd": 2.6,
+      "provider": "noaa",
+      "retrieved_at": "2026-05-11T06:00:00Z"
+    },
+    {
+      "zip_code": "80239",
+      "date": "2026-05-09T00:00:00Z",
+      "avg_temp_f": 59.8,
+      "hdd": 5.2,
+      "provider": "noaa",
+      "retrieved_at": "2026-05-10T06:00:00Z"
+    }
+  ],
+  "mvp_tank_forecasts": [
+    {
+      "forecast_id": "FCST-001",
+      "station_id": null,
+      "customer_tank_id": "TANK-001",
+      "customer_id": "CUST-001",
+      "customer_type": "residential",
+      "fuel_type": "HEATING_OIL",
+      "fuel_grade": "HEATING_OIL",
+      "hours_to_runout_p50": 453.6,
+      "hours_to_runout_p90": 380.0,
+      "runout_risk_24h": 0.02,
+      "confidence": 0.92,
+      "feature_version": "v2.1",
+      "anomaly_flags": [],
+      "run_id": "RUN-2026-05-11-001",
+      "timestamp": "2026-05-11T06:00:00Z"
+    },
+    {
+      "forecast_id": "FCST-002",
+      "station_id": null,
+      "customer_tank_id": "TANK-005",
+      "customer_id": "CUST-002",
+      "customer_type": "commercial",
+      "fuel_type": "DIESEL_2",
+      "fuel_grade": "DIESEL_2",
+      "hours_to_runout_p50": 48.0,
+      "hours_to_runout_p90": 40.0,
+      "runout_risk_24h": 0.15,
+      "confidence": 0.88,
+      "feature_version": "v2.1",
+      "anomaly_flags": ["high_consumption"],
+      "run_id": "RUN-2026-05-11-001",
+      "timestamp": "2026-05-11T06:00:00Z"
+    },
+    {
+      "forecast_id": "FCST-003",
+      "station_id": null,
+      "customer_tank_id": "TANK-010",
+      "customer_id": "CUST-003",
+      "customer_type": "commercial",
+      "fuel_type": "GASOLINE_REG",
+      "fuel_grade": "GASOLINE_REG",
+      "hours_to_runout_p50": 144.0,
+      "hours_to_runout_p90": 120.0,
+      "runout_risk_24h": 0.05,
+      "confidence": 0.85,
+      "feature_version": "v2.1",
+      "anomaly_flags": [],
+      "run_id": "RUN-2026-05-11-001",
+      "timestamp": "2026-05-11T06:00:00Z"
+    }
+  ],
+  "mvp_delivery_priorities": [
+    {
+      "priority_list_id": "PRIO-LIST-2026-05-11-001",
+      "run_id": "RUN-2026-05-11-001",
+      "priorities": [
+        {
+          "station_id": "TANK-005",
+          "fuel_grade": "DIESEL_2",
+          "priority_score": 95.5,
+          "priority_bucket": "critical",
+          "reasons": ["low_inventory", "high_consumption_rate"],
+          "safe_to_delay_days": 0,
+          "safe_to_delay_bucket": "cannot_delay",
+          "business_impact_score": 98.0,
+          "business_impact_reasons": ["customer_tier_premium", "contract_sla"]
+        },
+        {
+          "station_id": "TANK-010",
+          "fuel_grade": "GASOLINE_REG",
+          "priority_score": 72.3,
+          "priority_bucket": "high",
+          "reasons": ["moderate_inventory", "normal_consumption"],
+          "safe_to_delay_days": 2,
+          "safe_to_delay_bucket": "delay_2_days",
+          "business_impact_score": 75.0,
+          "business_impact_reasons": ["customer_tier_standard"]
+        },
+        {
+          "station_id": "TANK-001",
+          "fuel_grade": "HEATING_OIL",
+          "priority_score": 45.8,
+          "priority_bucket": "normal",
+          "reasons": ["adequate_inventory", "low_consumption"],
+          "safe_to_delay_days": 7,
+          "safe_to_delay_bucket": "delay_7_days",
+          "business_impact_score": 50.0,
+          "business_impact_reasons": ["customer_tier_standard", "seasonal_low_demand"]
+        }
+      ],
+      "scoring_weights": {
+        "inventory_level": 0.4,
+        "consumption_rate": 0.3,
+        "customer_tier": 0.2,
+        "sla_urgency": 0.1
+      },
+      "timestamp": "2026-05-11T06:00:00Z"
+    }
+  ],
+  "mvp_load_plans": [
+    {
+      "plan_id": "PLAN-001",
+      "run_id": "RUN-2026-05-11-001",
+      "truck_id": "FT-001",
+      "assignments": [
+        {
+          "compartment_id": "C1",
+          "station_id": "TANK-005",
+          "fuel_grade": "DIESEL_2",
+          "quantity_liters": 6435.0,
+          "compartment_capacity_liters": 7000.0
+        },
+        {
+          "compartment_id": "C2",
+          "station_id": "TANK-010",
+          "fuel_grade": "GASOLINE_REG",
+          "quantity_liters": 11355.0,
+          "compartment_capacity_liters": 12000.0
+        },
+        {
+          "compartment_id": "C3",
+          "station_id": "TANK-001",
+          "fuel_grade": "HEATING_OIL",
+          "quantity_liters": 4353.0,
+          "compartment_capacity_liters": 5000.0
+        }
+      ],
+      "total_utilization_pct": 91.4,
+      "unserved_demand_liters": 0.0,
+      "total_weight_kg": 18500.0,
+      "status": "optimized"
+    }
+  ],
+  "depots": [
+    {
+      "depot_id": "DEPOT-HOU",
+      "name": "Houston Main Depot",
+      "location": {
+        "lat": 29.7604,
+        "lon": -95.3698
+      },
+      "address": "1500 Industrial Blvd, Houston, TX 77020",
+      "timezone": "America/Chicago",
+      "fuel_types_supported": ["DIESEL_2", "GASOLINE_REG", "GASOLINE_PREM", "HEATING_OIL", "KEROSENE"],
+      "status": "active"
+    },
+    {
+      "depot_id": "DEPOT-DAL",
+      "name": "Dallas Distribution Center",
+      "location": {
+        "lat": 32.7767,
+        "lon": -96.7970
+      },
+      "address": "2200 Terminal Dr, Dallas, TX 75247",
+      "timezone": "America/Chicago",
+      "fuel_types_supported": ["DIESEL_2", "GASOLINE_REG", "GASOLINE_PREM", "KEROSENE"],
+      "status": "active"
+    },
+    {
+      "depot_id": "DEPOT-CHI",
+      "name": "Chicago Fuel Hub",
+      "location": {
+        "lat": 41.8781,
+        "lon": -87.6298
+      },
+      "address": "3400 Logistics Way, Chicago, IL 60609",
+      "timezone": "America/Chicago",
+      "fuel_types_supported": ["DIESEL_2", "GASOLINE_REG", "HEATING_OIL", "DEF"],
+      "status": "active"
+    }
+  ],
+  "terminals": [
+    {
+      "terminal_id": "TERM-001",
+      "name": "Houston Ship Channel Terminal",
+      "operator": "Marathon Petroleum",
+      "location": {
+        "lat": 29.7350,
+        "lon": -95.2650
+      },
+      "address": "8700 Manchester St, Houston, TX 77012",
+      "timezone": "America/Chicago",
+      "operating_hours": [
+        {"day_of_week": "monday", "open": "06:00", "close": "22:00"},
+        {"day_of_week": "tuesday", "open": "06:00", "close": "22:00"},
+        {"day_of_week": "wednesday", "open": "06:00", "close": "22:00"},
+        {"day_of_week": "thursday", "open": "06:00", "close": "22:00"},
+        {"day_of_week": "friday", "open": "06:00", "close": "22:00"},
+        {"day_of_week": "saturday", "open": "08:00", "close": "18:00"},
+        {"day_of_week": "sunday", "open": "closed", "close": "closed"}
+      ],
+      "supported_products": ["DIESEL_2", "GASOLINE_REG", "GASOLINE_PREM", "KEROSENE"],
+      "branded": true,
+      "supplier_brand": "Marathon",
+      "status": "active"
+    },
+    {
+      "terminal_id": "TERM-002",
+      "name": "Dallas Fort Worth Rack",
+      "operator": "Valero Energy",
+      "location": {
+        "lat": 32.8500,
+        "lon": -96.8500
+      },
+      "address": "5500 Refinery Rd, Dallas, TX 75212",
+      "timezone": "America/Chicago",
+      "operating_hours": [
+        {"day_of_week": "monday", "open": "05:00", "close": "23:00"},
+        {"day_of_week": "tuesday", "open": "05:00", "close": "23:00"},
+        {"day_of_week": "wednesday", "open": "05:00", "close": "23:00"},
+        {"day_of_week": "thursday", "open": "05:00", "close": "23:00"},
+        {"day_of_week": "friday", "open": "05:00", "close": "23:00"},
+        {"day_of_week": "saturday", "open": "07:00", "close": "19:00"},
+        {"day_of_week": "sunday", "open": "closed", "close": "closed"}
+      ],
+      "supported_products": ["DIESEL_2", "GASOLINE_REG", "GASOLINE_PREM"],
+      "branded": true,
+      "supplier_brand": "Valero",
+      "status": "active"
+    },
+    {
+      "terminal_id": "TERM-003",
+      "name": "Chicago Lemont Terminal",
+      "operator": "Phillips 66",
+      "location": {
+        "lat": 41.6700,
+        "lon": -87.9900
+      },
+      "address": "14500 S Bell Rd, Lemont, IL 60439",
+      "timezone": "America/Chicago",
+      "operating_hours": [
+        {"day_of_week": "monday", "open": "06:00", "close": "22:00"},
+        {"day_of_week": "tuesday", "open": "06:00", "close": "22:00"},
+        {"day_of_week": "wednesday", "open": "06:00", "close": "22:00"},
+        {"day_of_week": "thursday", "open": "06:00", "close": "22:00"},
+        {"day_of_week": "friday", "open": "06:00", "close": "22:00"},
+        {"day_of_week": "saturday", "open": "08:00", "close": "16:00"},
+        {"day_of_week": "sunday", "open": "closed", "close": "closed"}
+      ],
+      "supported_products": ["DIESEL_2", "GASOLINE_REG", "HEATING_OIL", "DEF"],
+      "branded": false,
+      "supplier_brand": null,
+      "status": "active"
+    }
+  ],
+  "rack_prices": [
+    {
+      "rack_price_id": "RACK-001",
+      "terminal_id": "TERM-001",
+      "product_code": "DIESEL_2",
+      "price_per_gallon_usd": 3.25,
+      "branded_flag": true,
+      "supplier_brand": "Marathon",
+      "provider": "opis",
+      "effective_at": "2026-05-11T06:00:00Z",
+      "retrieved_at": "2026-05-11T06:05:00Z"
+    },
+    {
+      "rack_price_id": "RACK-002",
+      "terminal_id": "TERM-001",
+      "product_code": "GASOLINE_REG",
+      "price_per_gallon_usd": 3.45,
+      "branded_flag": true,
+      "supplier_brand": "Marathon",
+      "provider": "opis",
+      "effective_at": "2026-05-11T06:00:00Z",
+      "retrieved_at": "2026-05-11T06:05:00Z"
+    },
+    {
+      "rack_price_id": "RACK-003",
+      "terminal_id": "TERM-002",
+      "product_code": "DIESEL_2",
+      "price_per_gallon_usd": 3.22,
+      "branded_flag": true,
+      "supplier_brand": "Valero",
+      "provider": "opis",
+      "effective_at": "2026-05-11T06:00:00Z",
+      "retrieved_at": "2026-05-11T06:05:00Z"
+    },
+    {
+      "rack_price_id": "RACK-004",
+      "terminal_id": "TERM-002",
+      "product_code": "GASOLINE_REG",
+      "price_per_gallon_usd": 3.42,
+      "branded_flag": true,
+      "supplier_brand": "Valero",
+      "provider": "opis",
+      "effective_at": "2026-05-11T06:00:00Z",
+      "retrieved_at": "2026-05-11T06:05:00Z"
+    },
+    {
+      "rack_price_id": "RACK-005",
+      "terminal_id": "TERM-003",
+      "product_code": "DIESEL_2",
+      "price_per_gallon_usd": 3.28,
+      "branded_flag": false,
+      "supplier_brand": null,
+      "provider": "opis",
+      "effective_at": "2026-05-11T06:00:00Z",
+      "retrieved_at": "2026-05-11T06:05:00Z"
+    }
+  ],
+  "supplier_contracts": [
+    {
+      "contract_id": "SUPP-001",
+      "supplier_name": "Marathon Petroleum",
+      "product_code": "DIESEL_2",
+      "preferred_terminal_ids": ["TERM-001"],
+      "contract_price_per_gallon_usd": 3.18,
+      "branded_required": true,
+      "minimum_lift_gallons_per_month": 100000.0,
+      "rebate_terms": "$0.02 per gallon rebate if monthly volume exceeds 150,000 gallons",
+      "effective_from": "2026-01-01T00:00:00Z",
+      "effective_to": "2026-12-31T23:59:59Z",
+      "status": "active"
+    },
+    {
+      "contract_id": "SUPP-002",
+      "supplier_name": "Valero Energy",
+      "product_code": "GASOLINE_REG",
+      "preferred_terminal_ids": ["TERM-002"],
+      "contract_price_per_gallon_usd": 3.35,
+      "branded_required": false,
+      "minimum_lift_gallons_per_month": 75000.0,
+      "rebate_terms": "$0.015 per gallon rebate if monthly volume exceeds 100,000 gallons",
+      "effective_from": "2026-03-01T00:00:00Z",
+      "effective_to": "2026-08-31T23:59:59Z",
+      "status": "active"
+    }
+  ],
+  "terminal_wait_reports": [
+    {
+      "report_id": "WAIT-001",
+      "terminal_id": "TERM-001",
+      "wait_minutes": 25.0,
+      "source": "driver_report",
+      "reporter_id": "DRV-001",
+      "truck_id": "TNK-001",
+      "observed_at": "2026-05-10T09:30:00Z",
+      "retrieved_at": "2026-05-10T10:00:00Z"
+    },
+    {
+      "report_id": "WAIT-002",
+      "terminal_id": "TERM-002",
+      "wait_minutes": 15.0,
+      "source": "driver_report",
+      "reporter_id": "DRV-002",
+      "truck_id": "TNK-002",
+      "observed_at": "2026-05-10T14:15:00Z",
+      "retrieved_at": "2026-05-10T14:45:00Z"
+    },
+    {
+      "report_id": "WAIT-003",
+      "terminal_id": "TERM-003",
+      "wait_minutes": 45.0,
+      "source": "driver_report",
+      "reporter_id": "DRV-003",
+      "truck_id": "FT-003",
+      "observed_at": "2026-05-09T11:00:00Z",
+      "retrieved_at": "2026-05-09T12:00:00Z"
+    }
+  ],
+  "weather_alerts": [
+    {
+      "alert_id": "ALERT-001",
+      "region_code": "TX-DFW",
+      "alert_type": "severe_thunderstorm",
+      "severity": "warning",
+      "headline": "Severe Thunderstorm Warning",
+      "description": "Severe thunderstorms with damaging winds, large hail, and heavy rain expected. Seek shelter immediately.",
+      "expected_start_at": "2026-05-08T05:00:00Z",
+      "expected_end_at": "2026-05-08T18:00:00Z",
+      "affected_zip_codes": ["75201", "75202", "75203", "75204", "75205"],
+      "source": "nws",
+      "ingested_at": "2026-05-08T04:30:00Z",
+      "activation_status": "active"
+    },
+    {
+      "alert_id": "ALERT-002",
+      "region_code": "IL-CHI",
+      "alert_type": "winter_storm",
+      "severity": "watch",
+      "headline": "Winter Storm Watch",
+      "description": "Heavy snow possible. 6-10 inches expected. Travel may become difficult.",
+      "expected_start_at": "2026-01-15T18:00:00Z",
+      "expected_end_at": "2026-01-16T12:00:00Z",
+      "affected_zip_codes": ["60601", "60602", "60603", "60604", "60605"],
+      "source": "nws",
+      "ingested_at": "2026-01-14T10:00:00Z",
+      "activation_status": "expired"
+    }
+  ],
+  "storm_mode_overrides": [
+    {
+      "override_id": "OVERRIDE-001",
+      "action": "force_enable",
+      "reason": "Hurricane approaching Gulf Coast. Enabling storm mode for all Texas operations.",
+      "actor_id": "ADMIN-001",
+      "expires_at": "2026-09-15T23:59:59Z"
+    }
+  ],
+  "integration_instances": [
+    {
+      "instance_id": "INT-001",
+      "provider_name": "veeder_root",
+      "category": "atg",
+      "status": "active",
+      "enabled": true,
+      "credentials_ref": "CRED-VR-001",
+      "schedule_cron": "*/15 * * * *",
+      "config": {},
+      "last_sync_at": "2026-05-11T14:15:00Z",
+      "last_error": null,
+      "retry_count": 0
+    },
+    {
+      "instance_id": "INT-002",
+      "provider_name": "geotab",
+      "category": "telematics",
+      "status": "active",
+      "enabled": true,
+      "credentials_ref": "CRED-GEO-001",
+      "schedule_cron": "*/5 * * * *",
+      "config": {},
+      "last_sync_at": "2026-05-11T14:25:00Z",
+      "last_error": null,
+      "retry_count": 0
+    },
+    {
+      "instance_id": "INT-003",
+      "provider_name": "quickbooks",
+      "category": "accounting",
+      "status": "active",
+      "enabled": true,
+      "credentials_ref": "CRED-QBO-001",
+      "schedule_cron": "0 */6 * * *",
+      "config": {},
+      "last_sync_at": "2026-05-11T12:00:00Z",
+      "last_error": null,
+      "retry_count": 0
+    }
+  ],
+  "atg_readings": [
+    {
+      "reading_id": "ATG-001",
+      "instance_id": "INT-001",
+      "tank_ref": "VR-TANK-001",
+      "customer_tank_id": "TANK-001",
+      "station_id": null,
+      "volume_gallons": 850.0,
+      "water_level_in": 0.0,
+      "temperature_f": 68.5,
+      "product_code": "HEATING_OIL",
+      "reading_at": "2026-05-11T14:00:00Z",
+      "retrieved_at": "2026-05-11T14:15:00Z"
+    },
+    {
+      "reading_id": "ATG-002",
+      "instance_id": "INT-001",
+      "tank_ref": "VR-TANK-005",
+      "customer_tank_id": "TANK-005",
+      "station_id": null,
+      "volume_gallons": 300.0,
+      "water_level_in": 0.0,
+      "temperature_f": 72.0,
+      "product_code": "DIESEL_2",
+      "reading_at": "2026-05-11T14:00:00Z",
+      "retrieved_at": "2026-05-11T14:15:00Z"
+    }
+  ],
+  "truck_telemetry": [
+    {
+      "telemetry_id": "TELEM-001",
+      "truck_id": "TRK-001",
+      "driver_id": "DRV-001",
+      "location": {
+        "lat": 29.7604,
+        "lon": -95.3698
+      },
+      "speed_kph": 65.0,
+      "engine_on": true,
+      "odometer_km": 125430.5,
+      "hos_status": "driving",
+      "recorded_at": "2026-05-11T14:30:00Z",
+      "retrieved_at": "2026-05-11T14:30:05Z"
+    },
+    {
+      "telemetry_id": "TELEM-002",
+      "truck_id": "TRK-002",
+      "driver_id": "DRV-002",
+      "location": {
+        "lat": 32.7767,
+        "lon": -96.7970
+      },
+      "speed_kph": 0.0,
+      "engine_on": false,
+      "odometer_km": 98765.2,
+      "hos_status": "off_duty",
+      "recorded_at": "2026-05-11T14:28:00Z",
+      "retrieved_at": "2026-05-11T14:28:05Z"
+    }
+  ],
+  "compartment_cleaning_events": [
+    {
+      "cleaning_event_id": "CLEAN-001",
+      "compartment_id": "C1",
+      "truck_id": "TNK-001",
+      "method": "triple_rinse",
+      "actor_id": "OP-001",
+      "notes": "Switched from diesel to gasoline. Performed triple rinse procedure.",
+      "evidence_refs": ["s3://cleaning/CLEAN-001-before.jpg", "s3://cleaning/CLEAN-001-after.jpg"],
+      "cleaned_at": "2026-05-10T16:00:00Z"
+    },
+    {
+      "cleaning_event_id": "CLEAN-002",
+      "compartment_id": "C2",
+      "truck_id": "TNK-002",
+      "method": "steam_clean",
+      "actor_id": "OP-002",
+      "notes": "Deep clean after contamination incident. Steam cleaned and inspected.",
+      "evidence_refs": ["s3://cleaning/CLEAN-002-inspection.jpg"],
+      "cleaned_at": "2026-05-09T10:00:00Z"
+    }
+  ],
+  "cross_contamination_events": [
+    {
+      "event_id": "CONTAM-001",
+      "compartment_id": "C1",
+      "truck_id": "TNK-001",
+      "previous_product": "DIESEL_2",
+      "attempted_product": "GASOLINE_REG",
+      "governing_rule": "diesel_to_gasoline_requires_cleaning",
+      "decision": "blocked",
+      "reason": "Compartment must be cleaned before switching from diesel to gasoline",
+      "actor_id": "SYSTEM",
+      "plan_id": "PLAN-045",
+      "timestamp": "2026-05-10T15:45:00Z"
+    }
+  ],
+  "storm_road_restrictions": [
+    {
+      "restriction_id": "RESTRICT-001",
+      "polygon": {
+        "type": "Polygon",
+        "coordinates": [[
+          [-96.8500, 32.7500],
+          [-96.7500, 32.7500],
+          [-96.7500, 32.8500],
+          [-96.8500, 32.8500],
+          [-96.8500, 32.7500]
+        ]]
+      },
+      "effective_from": "2026-05-08T05:00:00Z",
+      "effective_to": "2026-05-08T18:00:00Z",
+      "source": "nws",
+      "severity": "high",
+      "reason": "Severe thunderstorm warning - flooding and high winds"
+    }
+  ],
+  "integration_sync_runs": [
+    {
+      "run_id": "SYNC-001",
+      "instance_id": "INT-001",
+      "provider_name": "veeder_root",
+      "operation": "pull_atg_readings",
+      "started_at": "2026-05-11T14:15:00Z",
+      "finished_at": "2026-05-11T14:15:12Z",
+      "status": "success",
+      "record_counts": {
+        "fetched": 25,
+        "created": 2,
+        "updated": 23,
+        "failed": 0
+      },
+      "error_details": null,
+      "duration_ms": 12000
+    },
+    {
+      "run_id": "SYNC-002",
+      "instance_id": "INT-002",
+      "provider_name": "geotab",
+      "operation": "pull_telemetry",
+      "started_at": "2026-05-11T14:25:00Z",
+      "finished_at": "2026-05-11T14:25:08Z",
+      "status": "success",
+      "record_counts": {
+        "fetched": 150,
+        "created": 150,
+        "updated": 0,
+        "failed": 0
+      },
+      "error_details": null,
+      "duration_ms": 8000
+    },
+    {
+      "run_id": "SYNC-003",
+      "instance_id": "INT-003",
+      "provider_name": "quickbooks",
+      "operation": "push_invoices",
+      "started_at": "2026-05-11T12:00:00Z",
+      "finished_at": "2026-05-11T12:00:45Z",
+      "status": "partial_failure",
+      "record_counts": {
+        "attempted": 10,
+        "succeeded": 9,
+        "failed": 1
+      },
+      "error_details": "Invoice INV-0005 failed: Customer not found in QuickBooks",
+      "duration_ms": 45000
+    }
+  ],
+  "meter_ticket_ocr_results": [
+    {
+      "ocr_result_id": "OCR-001",
+      "pod_id": "POD-001",
+      "file_ref": "s3://meter-tickets/MT-001.jpg",
+      "extracted_gallons": 4980.0,
+      "confidence": 0.95,
+      "raw_text": "DELIVERY TICKET\nGROSS: 5000 GAL\nNET: 4980 GAL\nTEMP: 68.5F",
+      "requires_manual_review": false,
+      "provider": "textract",
+      "processed_at": "2026-05-01T14:35:00Z",
+      "error_details": null
+    },
+    {
+      "ocr_result_id": "OCR-002",
+      "pod_id": "POD-002",
+      "file_ref": "s3://meter-tickets/MT-002.jpg",
+      "extracted_gallons": 3475.0,
+      "confidence": 0.88,
+      "raw_text": "METER READING\nDELIVERED: 3475 GALLONS\nPRODUCT: DIESEL #2",
+      "requires_manual_review": false,
+      "provider": "textract",
+      "processed_at": "2026-05-02T10:20:00Z",
+      "error_details": null
+    },
+    {
+      "ocr_result_id": "OCR-003",
+      "pod_id": "POD-003",
+      "file_ref": "s3://meter-tickets/MT-003.jpg",
+      "extracted_gallons": null,
+      "confidence": 0.45,
+      "raw_text": "[ILLEGIBLE TEXT - POOR IMAGE QUALITY]",
+      "requires_manual_review": true,
+      "provider": "textract",
+      "processed_at": "2026-05-03T09:15:00Z",
+      "error_details": "Low confidence - image quality too poor for reliable extraction"
+    }
+  ],
+  "bill_of_lading": [
+    {
+      "bol_id": "BOL-001",
+      "pod_id": "POD-001",
+      "order_id": "ORD-0001",
+      "file_ref": "s3://bols/BOL-001.pdf",
+      "hash": "sha256:a1b2c3d4e5f6...",
+      "status": "generated",
+      "fields": {},
+      "generated_at": "2026-05-01T14:40:00Z"
+    },
+    {
+      "bol_id": "BOL-002",
+      "pod_id": "POD-002",
+      "order_id": "ORD-0002",
+      "file_ref": "s3://bols/BOL-002.pdf",
+      "hash": "sha256:f6e5d4c3b2a1...",
+      "status": "generated",
+      "fields": {},
+      "generated_at": "2026-05-02T10:25:00Z"
+    }
+  ]
+}

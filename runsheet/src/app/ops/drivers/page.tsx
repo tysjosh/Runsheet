@@ -8,6 +8,7 @@ import type {
   DriverUtilization,
 } from "../../../components/ops/DriverUtilizationList";
 import DriverUtilizationList from "../../../components/ops/DriverUtilizationList";
+import { getAuthToken } from "../../../utils/auth";
 
 /**
  * Drivers page — displays the DriverUtilizationList with data fetched
@@ -26,11 +27,23 @@ export default function DriversPage() {
       const params = new URLSearchParams();
       if (statusFilter) params.set("status", statusFilter);
       const url = `${baseUrl}/ops/drivers/utilization${params.toString() ? `?${params}` : ""}`;
-      const res = await fetch(url);
+      
+      // Get auth token and include in request
+      const token = await getAuthToken();
+      const headers: HeadersInit = {
+        "Content-Type": "application/json",
+      };
+      if (token) {
+        headers.Authorization = `Bearer ${token}`;
+      }
+      
+      const res = await fetch(url, { headers });
       if (res.ok) {
         const json = await res.json();
         const data = json.items ?? json.data ?? json;
         setDrivers(Array.isArray(data) ? data : []);
+      } else {
+        console.error(`Failed to load drivers: ${res.status} ${res.statusText}`);
       }
     } catch (error) {
       console.error("Failed to load driver utilization data:", error);

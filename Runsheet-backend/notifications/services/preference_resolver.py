@@ -188,7 +188,7 @@ class PreferenceResolver:
 
         hits = response["hits"]["hits"]
         total = response["hits"]["total"]
-        total_count = total["value"] if isinstance(total, dict) else total
+        total_count = total["value"] if hasattr(total, "get") or isinstance(total, dict) else total
 
         return {
             "items": [hit["_source"] for hit in hits],

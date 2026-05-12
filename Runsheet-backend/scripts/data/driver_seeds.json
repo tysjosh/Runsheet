@@ -1,0 +1,378 @@
+{
+  "driver_presence": [
+    {
+      "driver_id": "DRV-001",
+      "status": "online",
+      "last_seen": "2026-05-11T14:30:00Z",
+      "last_location": {
+        "lat": 29.7604,
+        "lon": -95.3698
+      },
+      "connected_at": "2026-05-11T08:00:00Z"
+    },
+    {
+      "driver_id": "DRV-002",
+      "status": "online",
+      "last_seen": "2026-05-11T14:28:00Z",
+      "last_location": {
+        "lat": 32.7767,
+        "lon": -96.7970
+      },
+      "connected_at": "2026-05-11T07:30:00Z"
+    },
+    {
+      "driver_id": "DRV-003",
+      "status": "online",
+      "last_seen": "2026-05-11T14:25:00Z",
+      "last_location": {
+        "lat": 41.8781,
+        "lon": -87.6298
+      },
+      "connected_at": "2026-05-11T09:00:00Z"
+    },
+    {
+      "driver_id": "DRV-004",
+      "status": "offline",
+      "last_seen": "2026-05-11T12:00:00Z",
+      "last_location": {
+        "lat": 39.7392,
+        "lon": -104.9903
+      },
+      "connected_at": "2026-05-11T06:00:00Z"
+    },
+    {
+      "driver_id": "DRV-005",
+      "status": "online",
+      "last_seen": "2026-05-11T14:29:00Z",
+      "last_location": {
+        "lat": 33.7490,
+        "lon": -84.3880
+      },
+      "connected_at": "2026-05-11T08:30:00Z"
+    }
+  ],
+  "driver_exceptions": [
+    {
+      "exception_id": "EXC-001",
+      "job_id": "JOB-005",
+      "exception_type": "address_not_found",
+      "severity": "high",
+      "note": "GPS coordinates led to empty lot. Customer provided incorrect address. Called dispatch for clarification.",
+      "location": {
+        "lat": 29.7520,
+        "lon": -95.3580
+      },
+      "media_refs": ["s3://exceptions/EXC-001-photo1.jpg", "s3://exceptions/EXC-001-photo2.jpg"],
+      "timestamp": "2026-05-10T11:30:00Z"
+    },
+    {
+      "exception_id": "EXC-002",
+      "job_id": "JOB-008",
+      "exception_type": "access_denied",
+      "severity": "medium",
+      "note": "Gate locked, no one on site. Customer not answering phone. Left message and returned to depot.",
+      "location": {
+        "lat": 32.7850,
+        "lon": -96.8050
+      },
+      "media_refs": ["s3://exceptions/EXC-002-photo1.jpg"],
+      "timestamp": "2026-05-09T14:15:00Z"
+    },
+    {
+      "exception_id": "EXC-003",
+      "job_id": "JOB-012",
+      "exception_type": "equipment_failure",
+      "severity": "critical",
+      "note": "Meter malfunction - reading stuck at 0. Completed delivery using tank stick measurement. Meter needs calibration.",
+      "location": {
+        "lat": 41.8900,
+        "lon": -87.6400
+      },
+      "media_refs": ["s3://exceptions/EXC-003-meter.jpg", "s3://exceptions/EXC-003-stick.jpg"],
+      "timestamp": "2026-05-08T10:45:00Z"
+    },
+    {
+      "exception_id": "EXC-004",
+      "job_id": "JOB-015",
+      "exception_type": "weather_delay",
+      "severity": "low",
+      "note": "Heavy rain and flooding on route. Delayed 45 minutes waiting for water to recede. Customer notified.",
+      "location": {
+        "lat": 33.7600,
+        "lon": -84.4000
+      },
+      "media_refs": ["s3://exceptions/EXC-004-flooding.jpg"],
+      "timestamp": "2026-05-07T13:20:00Z"
+    },
+    {
+      "exception_id": "EXC-005",
+      "job_id": "JOB-018",
+      "exception_type": "partial_delivery",
+      "severity": "medium",
+      "note": "Customer tank capacity only 3,500 gallons but order was for 5,000. Delivered 3,200 gallons (tank was not empty). Returning 1,800 gallons to depot.",
+      "location": {
+        "lat": 39.7500,
+        "lon": -104.9800
+      },
+      "media_refs": ["s3://exceptions/EXC-005-tank-gauge.jpg"],
+      "timestamp": "2026-05-06T15:00:00Z"
+    }
+  ],
+  "job_messages": [
+    {
+      "message_id": "MSG-001",
+      "job_id": "JOB-001",
+      "sender_id": "DRV-001",
+      "sender_role": "driver",
+      "body": "Arrived at customer site. Beginning delivery.",
+      "timestamp": "2026-05-11T10:00:00Z"
+    },
+    {
+      "message_id": "MSG-002",
+      "job_id": "JOB-001",
+      "sender_id": "DISPATCH-01",
+      "sender_role": "dispatcher",
+      "body": "Copy that. Customer is expecting you. Contact is John at the front office.",
+      "timestamp": "2026-05-11T10:01:00Z"
+    },
+    {
+      "message_id": "MSG-003",
+      "job_id": "JOB-001",
+      "sender_id": "DRV-001",
+      "sender_role": "driver",
+      "body": "Delivery complete. 5,000 gallons delivered. POD signed.",
+      "timestamp": "2026-05-11T11:30:00Z"
+    },
+    {
+      "message_id": "MSG-004",
+      "job_id": "JOB-005",
+      "sender_id": "DRV-002",
+      "sender_role": "driver",
+      "body": "Can't find the address. GPS showing empty lot. Need help.",
+      "timestamp": "2026-05-10T11:25:00Z"
+    },
+    {
+      "message_id": "MSG-005",
+      "job_id": "JOB-005",
+      "sender_id": "DISPATCH-01",
+      "sender_role": "dispatcher",
+      "body": "Checking with customer now. Stand by.",
+      "timestamp": "2026-05-10T11:26:00Z"
+    },
+    {
+      "message_id": "MSG-006",
+      "job_id": "JOB-005",
+      "sender_id": "DISPATCH-01",
+      "sender_role": "dispatcher",
+      "body": "Correct address is 1250 Industrial Blvd (not 1520). Customer apologizes for the error.",
+      "timestamp": "2026-05-10T11:32:00Z"
+    },
+    {
+      "message_id": "MSG-007",
+      "job_id": "JOB-005",
+      "sender_id": "DRV-002",
+      "sender_role": "driver",
+      "body": "Got it. On my way to correct address now. ETA 15 minutes.",
+      "timestamp": "2026-05-10T11:33:00Z"
+    },
+    {
+      "message_id": "MSG-008",
+      "job_id": "JOB-008",
+      "sender_id": "DRV-003",
+      "sender_role": "driver",
+      "body": "Gate is locked. No one answering phone. What should I do?",
+      "timestamp": "2026-05-09T14:10:00Z"
+    },
+    {
+      "message_id": "MSG-009",
+      "job_id": "JOB-008",
+      "sender_id": "DISPATCH-02",
+      "sender_role": "dispatcher",
+      "body": "Try calling the alternate contact: 555-0199. If no answer, return to depot and we'll reschedule.",
+      "timestamp": "2026-05-09T14:12:00Z"
+    },
+    {
+      "message_id": "MSG-010",
+      "job_id": "JOB-008",
+      "sender_id": "DRV-003",
+      "sender_role": "driver",
+      "body": "No answer on alternate either. Heading back to depot.",
+      "timestamp": "2026-05-09T14:18:00Z"
+    }
+  ],
+  "restock_requests": [
+    {
+      "request_id": "RESTOCK-001",
+      "item_category": "filters",
+      "compatible_asset_type": "fuel_truck",
+      "requested_quantity": 50,
+      "priority": "high",
+      "status": "pending",
+      "requested_by": "OP-001",
+      "depot_location": "Houston Depot"
+    },
+    {
+      "request_id": "RESTOCK-002",
+      "item_category": "brake_parts",
+      "compatible_asset_type": "fuel_truck",
+      "requested_quantity": 30,
+      "priority": "high",
+      "status": "fulfilled",
+      "requested_by": "OP-002",
+      "depot_location": "Dallas Depot",
+      "fulfilled_at": "2026-05-10T15:00:00Z"
+    },
+    {
+      "request_id": "RESTOCK-003",
+      "item_category": "fluids",
+      "compatible_asset_type": "fuel_truck",
+      "requested_quantity": 100,
+      "priority": "medium",
+      "status": "pending",
+      "requested_by": "OP-003",
+      "depot_location": "Chicago Depot"
+    }
+  ],
+  "intake_channels": [
+    {
+      "channel_id": "CHAN-001",
+      "channel_type": "email",
+      "display_name": "Email Orders",
+      "hmac_secret_ref": "HMAC-EMAIL-001",
+      "supported_schema_versions": ["v1", "v2"],
+      "rate_limit_per_minute": 60,
+      "secret_version": 1,
+      "enabled": true
+    },
+    {
+      "channel_id": "CHAN-002",
+      "channel_type": "api",
+      "display_name": "REST API",
+      "hmac_secret_ref": "HMAC-API-001",
+      "supported_schema_versions": ["v1", "v2"],
+      "rate_limit_per_minute": 120,
+      "secret_version": 1,
+      "enabled": true
+    },
+    {
+      "channel_id": "CHAN-003",
+      "channel_type": "phone",
+      "display_name": "Phone Orders",
+      "hmac_secret_ref": "HMAC-PHONE-001",
+      "supported_schema_versions": ["v1"],
+      "rate_limit_per_minute": 30,
+      "secret_version": 1,
+      "enabled": true
+    },
+    {
+      "channel_id": "CHAN-004",
+      "channel_type": "fax",
+      "display_name": "Fax Orders",
+      "hmac_secret_ref": "HMAC-FAX-001",
+      "supported_schema_versions": ["v1"],
+      "rate_limit_per_minute": 10,
+      "secret_version": 1,
+      "enabled": true
+    },
+    {
+      "channel_id": "CHAN-005",
+      "channel_type": "edi",
+      "display_name": "EDI X12",
+      "hmac_secret_ref": "HMAC-EDI-001",
+      "supported_schema_versions": ["v1"],
+      "rate_limit_per_minute": 30,
+      "secret_version": 1,
+      "enabled": true
+    }
+  ],
+  "locations": [
+    {
+      "location_id": "LOC-HOU",
+      "location_name": "Houston Depot",
+      "location_type": "depot",
+      "address": "1500 Industrial Blvd, Houston, TX 77020",
+      "coordinates": {
+        "lat": 29.7604,
+        "lon": -95.3698
+      },
+      "timezone": "America/Chicago",
+      "status": "active",
+      "capacity_trucks": 25,
+      "operating_hours": {
+        "monday": "06:00-22:00",
+        "tuesday": "06:00-22:00",
+        "wednesday": "06:00-22:00",
+        "thursday": "06:00-22:00",
+        "friday": "06:00-22:00",
+        "saturday": "08:00-18:00",
+        "sunday": "closed"
+      }
+    },
+    {
+      "location_id": "LOC-DAL",
+      "location_name": "Dallas Depot",
+      "location_type": "depot",
+      "address": "2200 Terminal Dr, Dallas, TX 75247",
+      "coordinates": {
+        "lat": 32.7767,
+        "lon": -96.7970
+      },
+      "timezone": "America/Chicago",
+      "status": "active",
+      "capacity_trucks": 20,
+      "operating_hours": {
+        "monday": "06:00-22:00",
+        "tuesday": "06:00-22:00",
+        "wednesday": "06:00-22:00",
+        "thursday": "06:00-22:00",
+        "friday": "06:00-22:00",
+        "saturday": "08:00-18:00",
+        "sunday": "closed"
+      }
+    },
+    {
+      "location_id": "LOC-CHI",
+      "location_name": "Chicago Depot",
+      "location_type": "depot",
+      "address": "3400 Logistics Way, Chicago, IL 60609",
+      "coordinates": {
+        "lat": 41.8781,
+        "lon": -87.6298
+      },
+      "timezone": "America/Chicago",
+      "status": "active",
+      "capacity_trucks": 18,
+      "operating_hours": {
+        "monday": "06:00-22:00",
+        "tuesday": "06:00-22:00",
+        "wednesday": "06:00-22:00",
+        "thursday": "06:00-22:00",
+        "friday": "06:00-22:00",
+        "saturday": "08:00-16:00",
+        "sunday": "closed"
+      }
+    },
+    {
+      "location_id": "LOC-DEN",
+      "location_name": "Denver Depot",
+      "location_type": "depot",
+      "address": "4500 Commerce Pkwy, Denver, CO 80239",
+      "coordinates": {
+        "lat": 39.7392,
+        "lon": -104.9903
+      },
+      "timezone": "America/Denver",
+      "status": "active",
+      "capacity_trucks": 15,
+      "operating_hours": {
+        "monday": "06:00-22:00",
+        "tuesday": "06:00-22:00",
+        "wednesday": "06:00-22:00",
+        "thursday": "06:00-22:00",
+        "friday": "06:00-22:00",
+        "saturday": "08:00-16:00",
+        "sunday": "closed"
+      }
+    }
+  ]
+}

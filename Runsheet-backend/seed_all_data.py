@@ -217,121 +217,7 @@ def seed_riders(force: bool = False):
 
 
 # ---------------------------------------------------------------------------
-# 2. shipments_current
-# ---------------------------------------------------------------------------
-def seed_shipments(force: bool = False):
-    index = "shipments_current"
-    if not force and _index_count(index) > 0:
-        logger.info(f"⏭️  {index} already has data — skipping")
-        return
-
-    rider_ids = [f"RDR-{i:03d}" for i in range(1, 9)]
-
-    shipments = []
-    # 5 delivered
-    for i in range(1, 6):
-        shipments.append(("delivered", None, random.choice(rider_ids)))
-    # 4 in_transit
-    for i in range(6, 10):
-        shipments.append(("in_transit", None, random.choice(rider_ids[:4])))
-    # 3 failed
-    failure_reasons = ["customer_unavailable", "address_not_found", "vehicle_breakdown"]
-    for i, reason in zip(range(10, 13), failure_reasons):
-        shipments.append(("failed", reason, random.choice(rider_ids)))
-    # 2 pending
-    for i in range(13, 15):
-        shipments.append(("pending", None, None))
-    # 1 returned
-    shipments.append(("returned", "customer_refused", random.choice(rider_ids)))
-
-    actions = []
-    for idx, (status, failure, rider) in enumerate(shipments, start=1):
-        sid = f"SHP-{idx:03d}"
-        origin_city = random.choice(CITY_NAMES)
-        dest_city = random.choice([c for c in CITY_NAMES if c != origin_city])
-        created = _ago(days=random.randint(1, 14))
-        doc = {
-            "shipment_id": sid,
-            "status": status,
-            "tenant_id": TENANT,
-            "rider_id": rider,
-            "origin": origin_city,
-            "destination": dest_city,
-            "created_at": created,
-            "updated_at": _ago(hours=random.randint(0, 48)),
-            "estimated_delivery": _future(days=random.randint(0, 3)),
-            "current_location": _geo(dest_city if status == "delivered" else origin_city),
-            "failure_reason": failure,
-            "last_event_timestamp": _ago(hours=random.randint(0, 72)),
-            "source_schema_version": SCHEMA_VERSION,
-            "trace_id": _uid(),
-            "ingested_at": _now(),
-        }
-        actions.append({"index": {"_index": index, "_id": sid}})
-        actions.append(doc)
-
-    _bulk(actions)
-    logger.info(f"✅ Seeded {len(shipments)} docs → {index}")
-
-
-# ---------------------------------------------------------------------------
-# 3. shipment_events
-# ---------------------------------------------------------------------------
-def seed_shipment_events(force: bool = False):
-    index = "shipment_events"
-    if not force and _index_count(index) > 0:
-        logger.info(f"⏭️  {index} already has data — skipping")
-        return
-
-    event_flows = {
-        "delivered": ["shipment_created", "shipment_assigned", "shipment_picked_up",
-                      "shipment_in_transit", "shipment_delivered"],
-        "in_transit": ["shipment_created", "shipment_assigned", "shipment_picked_up",
-                       "shipment_in_transit"],
-        "failed": ["shipment_created", "shipment_assigned", "shipment_picked_up",
-                    "shipment_failed"],
-        "pending": ["shipment_created"],
-        "returned": ["shipment_created", "shipment_assigned", "shipment_picked_up",
-                     "shipment_in_transit", "shipment_failed"],
-    }
-
-    # Build shipment statuses list matching seed_shipments order
-    statuses = (["delivered"] * 5 + ["in_transit"] * 4 + ["failed"] * 3
-                + ["pending"] * 2 + ["returned"] * 1)
-
-    actions = []
-    for s_idx, status in enumerate(statuses, start=1):
-        sid = f"SHP-{s_idx:03d}"
-        flow = event_flows[status]
-        # Use 3-4 events per shipment (trim flow if needed, but keep at least 3)
-        events_to_use = flow[:random.randint(3, len(flow))] if len(flow) >= 3 else flow
-        base_time = datetime.now(timezone.utc) - timedelta(days=random.randint(2, 10))
-
-        for e_idx, etype in enumerate(events_to_use):
-            eid = f"EVT-{sid}-{e_idx:02d}"
-            ts = (base_time + timedelta(hours=e_idx * random.randint(1, 6))).isoformat()
-            city = random.choice(CITY_NAMES)
-            doc = {
-                "event_id": eid,
-                "shipment_id": sid,
-                "event_type": etype,
-                "tenant_id": TENANT,
-                "event_timestamp": ts,
-                "event_payload": [],
-                "location": _geo(city),
-                "source_schema_version": SCHEMA_VERSION,
-                "trace_id": _uid(),
-                "ingested_at": _now(),
-            }
-            actions.append({"index": {"_index": index, "_id": eid}})
-            actions.append(doc)
-
-    _bulk(actions)
-    logger.info(f"✅ Seeded {len(actions) // 2} events → {index}")
-
-
-# ---------------------------------------------------------------------------
-# 4. jobs_current
+# 2. jobs_current
 # ---------------------------------------------------------------------------
 def seed_jobs(force: bool = False):
     index = "jobs_current"
@@ -421,7 +307,7 @@ def seed_jobs(force: bool = False):
 
 
 # ---------------------------------------------------------------------------
-# 5. fuel_stations
+# 3. fuel_stations
 # ---------------------------------------------------------------------------
 def seed_fuel_stations(force: bool = False):
     index = "fuel_stations"
@@ -490,7 +376,7 @@ def seed_fuel_stations(force: bool = False):
 
 
 # ---------------------------------------------------------------------------
-# 5b. truck_compartments (fuel tanker configuration)
+# 4. truck_compartments (fuel tanker configuration)
 # ---------------------------------------------------------------------------
 def seed_truck_compartments(force: bool = False):
     index = "truck_compartments"
@@ -548,7 +434,7 @@ def seed_truck_compartments(force: bool = False):
 
 
 # ---------------------------------------------------------------------------
-# 6. fuel_events
+# 5. fuel_events
 # ---------------------------------------------------------------------------
 def seed_fuel_events(force: bool = False):
     index = "fuel_events"
@@ -609,7 +495,7 @@ def seed_fuel_events(force: bool = False):
 
 
 # ---------------------------------------------------------------------------
-# 7. agent_memory
+# 6. agent_memory
 # ---------------------------------------------------------------------------
 def seed_agent_memory(force: bool = False):
     index = "agent_memory"
@@ -659,7 +545,7 @@ def seed_agent_memory(force: bool = False):
 
 
 # ---------------------------------------------------------------------------
-# 8. agent_approval_queue
+# 7. agent_approval_queue
 # ---------------------------------------------------------------------------
 def seed_approval_queue(force: bool = False):
     index = "agent_approval_queue"
@@ -752,7 +638,7 @@ def seed_approval_queue(force: bool = False):
 
 
 # ---------------------------------------------------------------------------
-# 9. ops_poison_queue
+# 8. ops_poison_queue
 # ---------------------------------------------------------------------------
 def seed_poison_queue(force: bool = False):
     index = "ops_poison_queue"
@@ -809,6 +695,504 @@ def seed_poison_queue(force: bool = False):
 
 
 # ---------------------------------------------------------------------------
+# 9. Fuel Orders
+# ---------------------------------------------------------------------------
+def seed_fuel_orders(force: bool = False):
+    index = "fuel_orders_current"
+    if not force and _index_count(index) > 0:
+        logger.info(f"⏭️  {index} already has data — skipping")
+        return
+
+    customer_ids = [f"CUST-{i:03d}" for i in range(1, 6)]
+    statuses = ["pending", "confirmed", "in_progress", "delivered", "cancelled"]
+    
+    actions = []
+    for i in range(1, 16):  # 15 orders
+        order_id = f"ORD-{i:04d}"
+        status = random.choice(statuses)
+        customer_id = random.choice(customer_ids)
+        city = random.choice(CITY_NAMES)
+        
+        doc = {
+            "order_id": order_id,
+            "tenant_id": TENANT,
+            "customer_id": customer_id,
+            "status": status,
+            "product_code": random.choice(["DIESEL_2", "GASOLINE_REG", "GASOLINE_PREM", "KEROSENE"]),
+            "quantity_gallons": round(random.uniform(500, 5000), 2),
+            "delivery_address": f"{random.randint(100, 9999)} {random.choice(['Main', 'Oak', 'Elm'])} St, {city}",
+            "delivery_date": _future(days=random.randint(1, 14)),
+            "created_at": _ago(days=random.randint(1, 30)),
+            "updated_at": _ago(hours=random.randint(0, 24)),
+        }
+        actions.append({"index": {"_index": index, "_id": order_id}})
+        actions.append(doc)
+    
+    _bulk(actions)
+    logger.info(f"✅ Seeded 15 orders → {index}")
+
+
+# ---------------------------------------------------------------------------
+# 10. Customer Tanks
+# ---------------------------------------------------------------------------
+def seed_customer_tanks(force: bool = False):
+    index = "customer_tanks"
+    if not force and _index_count(index) > 0:
+        logger.info(f"⏭️  {index} already has data — skipping")
+        return
+
+    customer_ids = [f"CUST-{i:03d}" for i in range(1, 6)]
+    
+    actions = []
+    for i in range(1, 21):  # 20 tanks
+        tank_id = f"TANK-{i:03d}"
+        customer_id = random.choice(customer_ids)
+        city = random.choice(CITY_NAMES)
+        capacity = random.choice([1000, 2000, 5000, 10000])
+        current_level = round(random.uniform(100, capacity * 0.8), 2)
+        
+        doc = {
+            "tank_id": tank_id,
+            "tenant_id": TENANT,
+            "customer_id": customer_id,
+            "product_code": random.choice(["DIESEL_2", "GASOLINE_REG", "HEATING_OIL"]),
+            "capacity_gallons": capacity,
+            "current_level_gallons": current_level,
+            "reorder_point_gallons": capacity * 0.2,
+            "location": _geo(city),
+            "last_reading_at": _ago(hours=random.randint(1, 48)),
+            "created_at": _ago(days=random.randint(90, 365)),
+            "updated_at": _ago(hours=random.randint(0, 24)),
+        }
+        actions.append({"index": {"_index": index, "_id": tank_id}})
+        actions.append(doc)
+    
+    _bulk(actions)
+    logger.info(f"✅ Seeded 20 tanks → {index}")
+
+
+# ---------------------------------------------------------------------------
+# 11. Drivers (Compliance)
+# ---------------------------------------------------------------------------
+def seed_drivers(force: bool = False):
+    index = "drivers"
+    if not force and _index_count(index) > 0:
+        logger.info(f"⏭️  {index} already has data — skipping")
+        return
+
+    driver_names = [
+        "Mike Johnson", "Sarah Williams", "James Rodriguez", "Emily Chen",
+        "David Thompson", "Maria Garcia", "Robert Kim", "Jennifer Davis",
+        "Michael Brown", "Lisa Anderson"
+    ]
+    
+    actions = []
+    for i, name in enumerate(driver_names, start=1):
+        driver_id = f"DRV-{i:03d}"
+        
+        doc = {
+            "driver_id": driver_id,
+            "tenant_id": TENANT,
+            "name": name,
+            "license_number": f"DL{random.randint(1000000, 9999999)}",
+            "license_state": random.choice(["TX", "IL", "CO", "GA"]),
+            "license_expiry": _future(days=random.randint(30, 730)),
+            "cdl_class": random.choice(["A", "B"]),
+            "hazmat_certified": random.choice([True, False]),
+            "hazmat_expiry": _future(days=random.randint(30, 365)) if random.random() > 0.5 else None,
+            "status": random.choice(["active", "active", "active", "inactive"]),
+            "hire_date": _ago(days=random.randint(365, 1825)),
+            "created_at": _ago(days=random.randint(365, 1825)),
+            "updated_at": _ago(days=random.randint(0, 30)),
+        }
+        actions.append({"index": {"_index": index, "_id": driver_id}})
+        actions.append(doc)
+    
+    _bulk(actions)
+    logger.info(f"✅ Seeded {len(driver_names)} drivers → {index}")
+
+
+# ---------------------------------------------------------------------------
+# 12. Proof of Delivery
+# ---------------------------------------------------------------------------
+def seed_proof_of_delivery(force: bool = False):
+    index = "proof_of_delivery"
+    if not force and _index_count(index) > 0:
+        logger.info(f"⏭️  {index} already has data — skipping")
+        return
+
+    actions = []
+    for i in range(1, 11):  # 10 PODs
+        pod_id = f"POD-{i:04d}"
+        order_id = f"ORD-{i:04d}"
+        driver_id = f"DRV-{random.randint(1, 10):03d}"
+        
+        doc = {
+            "pod_id": pod_id,
+            "tenant_id": TENANT,
+            "order_id": order_id,
+            "driver_id": driver_id,
+            "delivered_gallons": round(random.uniform(500, 5000), 2),
+            "signature_url": f"s3://pods/{pod_id}.png",
+            "photo_urls": [f"s3://pods/{pod_id}_photo1.jpg"],
+            "delivered_at": _ago(days=random.randint(1, 30)),
+            "created_at": _ago(days=random.randint(1, 30)),
+        }
+        actions.append({"index": {"_index": index, "_id": pod_id}})
+        actions.append(doc)
+    
+    _bulk(actions)
+    logger.info(f"✅ Seeded 10 PODs → {index}")
+
+
+# ---------------------------------------------------------------------------
+# 13. Price Books (Commerce)
+# ---------------------------------------------------------------------------
+def seed_price_books(force: bool = False):
+    index = "price_books_current"
+    if not force and _index_count(index) > 0:
+        logger.info(f"⏭️  {index} already has data — skipping")
+        return
+
+    price_books = [
+        ("PB-001", "Standard Fuel Pricing 2026", "active", 4),
+        ("PB-002", "Winter Heating Oil Rates", "active", 3),
+        ("PB-003", "Commercial Fleet Discount", "active", 5),
+    ]
+    
+    actions = []
+    for pb_id, name, status, rule_count in price_books:
+        doc = {
+            "price_book_id": pb_id,
+            "tenant_id": TENANT,
+            "name": name,
+            "description": f"{name} - Effective pricing rules",
+            "status": status,
+            "rule_count": rule_count,
+            "created_at": _ago(days=random.randint(30, 180)),
+            "updated_at": _ago(days=random.randint(0, 30)),
+        }
+        actions.append({"index": {"_index": index, "_id": pb_id}})
+        actions.append(doc)
+    
+    _bulk(actions)
+    logger.info(f"✅ Seeded {len(price_books)} price books → {index}")
+
+
+# ---------------------------------------------------------------------------
+# 14. Pricing Rules (Commerce)
+# ---------------------------------------------------------------------------
+def seed_pricing_rules(force: bool = False):
+    index = "pricing_rules_current"
+    if not force and _index_count(index) > 0:
+        logger.info(f"⏭️  {index} already has data — skipping")
+        return
+
+    actions = []
+    rule_id = 1
+    for pb_id in ["PB-001", "PB-002", "PB-003"]:
+        for product in ["DIESEL_2", "GASOLINE_REG", "GASOLINE_PREM"]:
+            rid = f"RULE-{rule_id:04d}"
+            doc = {
+                "rule_id": rid,
+                "tenant_id": TENANT,
+                "price_book_id": pb_id,
+                "product_code": product,
+                "scope_type": "default",
+                "scope_value": "default",
+                "effective_from": _ago(days=30),
+                "effective_to": _future(days=365),
+                "min_quantity_gallons": None,
+                "unit_price_cents": random.randint(250, 450),
+                "created_at": _ago(days=30),
+            }
+            actions.append({"index": {"_index": index, "_id": rid}})
+            actions.append(doc)
+            rule_id += 1
+    
+    _bulk(actions)
+    logger.info(f"✅ Seeded {rule_id - 1} pricing rules → {index}")
+
+
+# ---------------------------------------------------------------------------
+# 15. Inventory
+# ---------------------------------------------------------------------------
+def seed_inventory(force: bool = False):
+    index = "inventory"
+    if not force and _index_count(index) > 0:
+        logger.info(f"⏭️  {index} already has data — skipping")
+        return
+
+    items = [
+        ("Fuel Filter - Heavy Duty", "FILTER-HD-001", 45, 10),
+        ("Oil Filter - Standard", "FILTER-OIL-STD", 120, 25),
+        ("Air Filter - Truck", "FILTER-AIR-TRK", 67, 15),
+        ("Brake Pads - Commercial", "BRAKE-PAD-COM", 34, 8),
+        ("Wiper Blades - 24in", "WIPER-24", 89, 20),
+        ("Engine Oil 15W-40 (Gallon)", "OIL-15W40-GAL", 156, 30),
+        ("Coolant (Gallon)", "COOLANT-GAL", 78, 15),
+        ("DEF Fluid (2.5 Gal)", "DEF-2.5GAL", 234, 50),
+    ]
+    
+    actions = []
+    for i, (name, sku, qty, reorder) in enumerate(items, start=1):
+        item_id = f"INV-{i:04d}"
+        doc = {
+            "item_id": item_id,
+            "tenant_id": TENANT,
+            "name": name,
+            "sku": sku,
+            "quantity": qty,
+            "reorder_point": reorder,
+            "unit_cost_cents": random.randint(500, 5000),
+            "location": random.choice(CITY_NAMES),
+            "created_at": _ago(days=random.randint(90, 365)),
+            "updated_at": _ago(days=random.randint(0, 30)),
+        }
+        actions.append({"index": {"_index": index, "_id": item_id}})
+        actions.append(doc)
+    
+    _bulk(actions)
+    logger.info(f"✅ Seeded {len(items)} inventory items → {index}")
+
+
+# ---------------------------------------------------------------------------
+# 16. Commerce: customers_current
+# ---------------------------------------------------------------------------
+def seed_commerce_customers(force: bool = False):
+    index = "customers_current"
+    if not force and _index_count(index) > 0:
+        logger.info(f"⏭️  {index} already has data — skipping")
+        return
+
+    customers = [
+        ("CUST-001", "Acme Fuel Distribution", "Acme Fuel Distribution LLC", "acme@fuel.com", "12-3456789", "active"),
+        ("CUST-002", "Metro Transit Authority", "Metro Transit Authority", "billing@metro.gov", "98-7654321", "active"),
+        ("CUST-003", "Green Energy Co", "Green Energy Corporation", "accounts@greenenergy.com", "45-6789012", "active"),
+        ("CUST-004", "City Fleet Services", "City Fleet Services Inc", "fleet@cityservices.com", "78-9012345", "active"),
+        ("CUST-005", "Industrial Logistics", "Industrial Logistics Group", "billing@indlog.com", "23-4567890", "active"),
+    ]
+
+    actions = []
+    for cid, display, legal, email, tax_id, status in customers:
+        doc = {
+            "customer_id": cid,
+            "tenant_id": TENANT,
+            "display_name": display,
+            "legal_name": legal,
+            "primary_email": email,
+            "tax_id": tax_id,
+            "status": status,
+            "created_at": _ago(days=random.randint(180, 730)),
+            "updated_at": _ago(days=random.randint(1, 30)),
+            "external_refs": {},
+            "metadata": {},
+        }
+        actions.append({"index": {"_index": index, "_id": cid}})
+        actions.append(doc)
+
+    _bulk(actions)
+    logger.info(f"✅ Seeded {len(customers)} docs → {index}")
+
+
+# ---------------------------------------------------------------------------
+# 10. Commerce: accounts_current
+# ---------------------------------------------------------------------------
+def seed_commerce_accounts(force: bool = False):
+    index = "accounts_current"
+    if not force and _index_count(index) > 0:
+        logger.info(f"⏭️  {index} already has data — skipping")
+        return
+
+    # Create 2 accounts per customer
+    accounts = [
+        ("ACC-001", "CUST-001", "Acme Main Account", 5000000, 30, "active", "gold", "Houston"),
+        ("ACC-002", "CUST-001", "Acme Secondary", 2000000, 15, "active", "silver", "Dallas"),
+        ("ACC-003", "CUST-002", "Metro Transit Main", 10000000, 45, "active", "platinum", "Chicago"),
+        ("ACC-004", "CUST-002", "Metro Transit Backup", 3000000, 30, "active", "gold", "Chicago"),
+        ("ACC-005", "CUST-003", "Green Energy Primary", 4000000, 30, "active", "gold", "Denver"),
+        ("ACC-006", "CUST-003", "Green Energy West", 1500000, 15, "active", "bronze", "Phoenix"),
+        ("ACC-007", "CUST-004", "City Fleet Main", 6000000, 30, "active", "gold", "Atlanta"),
+        ("ACC-008", "CUST-004", "City Fleet Emergency", 2000000, 15, "active", "silver", "Atlanta"),
+        ("ACC-009", "CUST-005", "Industrial Logistics HQ", 8000000, 45, "active", "platinum", "Detroit"),
+        ("ACC-010", "CUST-005", "Industrial Logistics Regional", 3000000, 30, "active", "gold", "Charlotte"),
+    ]
+
+    actions = []
+    for aid, cid, name, credit_limit, net_terms, status, tier, city in accounts:
+        # Random open balance (0-50% of credit limit)
+        open_balance = random.randint(0, credit_limit // 2)
+        available_credit = credit_limit - open_balance
+        
+        doc = {
+            "account_id": aid,
+            "tenant_id": TENANT,
+            "customer_id": cid,
+            "display_name": name,
+            "status": status,
+            "credit_limit_cents": credit_limit,
+            "open_balance_cents": open_balance,
+            "available_credit_cents": available_credit,
+            "credit_balance_cents": 0,
+            "credit_state": "ok",
+            "credit_override_expires_at": None,
+            "net_terms_days": net_terms,
+            "tier": tier,
+            "billing_address": {
+                "line1": f"{random.randint(100, 9999)} {random.choice(['Main', 'Oak', 'Elm', 'Pine'])} St",
+                "city": city,
+                "state": "TX" if city == "Houston" else ("IL" if city == "Chicago" else "CO"),
+                "zip": f"{random.randint(10000, 99999)}",
+                "country": "US",
+            },
+            "payment_method_preference": random.choice(["invoice", "ach", "card"]),
+            "created_at": _ago(days=random.randint(180, 730)),
+            "updated_at": _ago(days=random.randint(1, 30)),
+            "external_refs": {},
+        }
+        actions.append({"index": {"_index": index, "_id": aid}})
+        actions.append(doc)
+
+    _bulk(actions)
+    logger.info(f"✅ Seeded {len(accounts)} docs → {index}")
+
+
+# ---------------------------------------------------------------------------
+# 11. Commerce: invoices_current
+# ---------------------------------------------------------------------------
+def seed_commerce_invoices(force: bool = False):
+    index = "invoices_current"
+    if not force and _index_count(index) > 0:
+        logger.info(f"⏭️  {index} already has data — skipping")
+        return
+
+    # Create 10 invoices across different accounts
+    account_ids = [f"ACC-{i:03d}" for i in range(1, 11)]
+    customer_ids = ["CUST-001", "CUST-001", "CUST-002", "CUST-002", "CUST-003", 
+                    "CUST-003", "CUST-004", "CUST-004", "CUST-005", "CUST-005"]
+    
+    statuses = ["open", "open", "open", "partial", "partial", "paid", "paid", "overdue", "overdue", "draft"]
+    
+    actions = []
+    for i in range(1, 11):
+        inv_id = f"INV-{i:04d}"
+        acc_id = account_ids[i-1]
+        cust_id = customer_ids[i-1]
+        status = statuses[i-1]
+        
+        # Generate 1-3 line items
+        line_items = []
+        subtotal = 0
+        for li in range(random.randint(1, 3)):
+            product = random.choice(["DIESEL_2", "GASOLINE_REG", "GASOLINE_PREM", "KEROSENE"])
+            quantity = round(random.uniform(500, 5000), 2)
+            unit_price = random.randint(250, 450)  # $2.50-$4.50 per gallon in cents
+            line_subtotal = int(quantity * unit_price)
+            subtotal += line_subtotal
+            
+            line_items.append({
+                "line_id": f"LINE-{inv_id}-{li+1}",
+                "product_code": product,
+                "quantity_gallons": quantity,
+                "unit_price_cents": unit_price,
+                "subtotal_cents": line_subtotal,
+            })
+        
+        tax = int(subtotal * 0.08)  # 8% tax
+        total = subtotal + tax
+        
+        # Determine payment amounts based on status
+        if status == "paid":
+            amount_paid = total
+            remaining = 0
+        elif status == "partial":
+            amount_paid = int(total * random.uniform(0.3, 0.7))
+            remaining = total - amount_paid
+        else:
+            amount_paid = 0
+            remaining = total
+        
+        issued_at = _ago(days=random.randint(1, 60))
+        due_date = _future(days=random.randint(-10, 30))  # Some overdue
+        
+        doc = {
+            "invoice_id": inv_id,
+            "tenant_id": TENANT,
+            "customer_id": cust_id,
+            "account_id": acc_id,
+            "order_id": f"ORD-{i:04d}" if random.random() > 0.3 else None,
+            "invoice_number": f"INV-2026-{i:04d}",
+            "status": status,
+            "total_cents": total,
+            "amount_paid_cents": amount_paid,
+            "remaining_cents": remaining,
+            "tax_cents": tax,
+            "subtotal_cents": subtotal,
+            "line_items": line_items,
+            "issued_at": issued_at,
+            "due_date": due_date,
+            "finalized_at": issued_at if status != "draft" else None,
+            "voided_at": None,
+            "void_reason": None,
+            "qbo_push_state": random.choice(["pending", "pushed", "pushed", "pushed"]),
+            "qbo_push_attempts": random.randint(0, 2),
+            "qbo_push_last_error": None,
+            "external_refs": {},
+            "created_at": _ago(days=random.randint(1, 60)),
+            "updated_at": _ago(days=random.randint(0, 5)),
+        }
+        actions.append({"index": {"_index": index, "_id": inv_id}})
+        actions.append(doc)
+
+    _bulk(actions)
+    logger.info(f"✅ Seeded 10 invoices → {index}")
+
+
+# ---------------------------------------------------------------------------
+# 12. Commerce: payments_current
+# ---------------------------------------------------------------------------
+def seed_commerce_payments(force: bool = False):
+    index = "payments_current"
+    if not force and _index_count(index) > 0:
+        logger.info(f"⏭️  {index} already has data — skipping")
+        return
+
+    # Create payments for invoices 4, 5, 6, 7 (partial and paid ones)
+    payments = [
+        ("PAY-001", "INV-0004", "ACC-004", 150000, "manual", "check", "CHK-12345", "applied"),
+        ("PAY-002", "INV-0005", "ACC-005", 200000, "stripe", "card", "ch_3abc123", "applied"),
+        ("PAY-003", "INV-0005", "ACC-005", 100000, "manual", "ach", "ACH-98765", "applied"),
+        ("PAY-004", "INV-0006", "ACC-006", 180000, "manual", "wire", "WIRE-54321", "applied"),
+        ("PAY-005", "INV-0007", "ACC-007", 250000, "qbo", "check", "QBO-INV-007", "applied"),
+        ("PAY-006", "INV-0008", "ACC-008", 120000, "manual", "check", "CHK-67890", "reversed"),
+    ]
+
+    actions = []
+    for pay_id, inv_id, acc_id, amount, source, method, ref, status in payments:
+        received_at = _ago(days=random.randint(1, 30))
+        doc = {
+            "payment_id": pay_id,
+            "tenant_id": TENANT,
+            "invoice_id": inv_id,
+            "account_id": acc_id,
+            "amount_cents": amount,
+            "source": source,
+            "method": method,
+            "external_id": ref if source != "manual" else None,
+            "reference": ref,
+            "status": status,
+            "received_at": received_at,
+            "applied_at": received_at,
+            "reversed_at": _ago(days=1) if status == "reversed" else None,
+        }
+        actions.append({"index": {"_index": index, "_id": pay_id}})
+        actions.append(doc)
+
+    _bulk(actions)
+    logger.info(f"✅ Seeded {len(payments)} payments → {index}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main():
@@ -841,8 +1225,6 @@ def main():
     seeders = [
         ("trucks",                seed_trucks),
         ("riders_current",        seed_riders),
-        ("shipments_current",     seed_shipments),
-        ("shipment_events",       seed_shipment_events),
         ("jobs_current",          seed_jobs),
         ("fuel_stations",         seed_fuel_stations),
         ("truck_compartments",    seed_truck_compartments),
@@ -850,6 +1232,10 @@ def main():
         ("agent_memory",          seed_agent_memory),
         ("agent_approval_queue",  seed_approval_queue),
         ("ops_poison_queue",      seed_poison_queue),
+        ("customers_current",     seed_commerce_customers),
+        ("accounts_current",      seed_commerce_accounts),
+        ("invoices_current",      seed_commerce_invoices),
+        ("payments_current",      seed_commerce_payments),
     ]
 
     for name, fn in seeders:

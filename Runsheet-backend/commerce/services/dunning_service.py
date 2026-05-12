@@ -338,7 +338,7 @@ class DunningService:
         )
 
         total = response.get("hits", {}).get("total", {})
-        if isinstance(total, dict):
+        if hasattr(total, "get") or isinstance(total, dict):
             count = total.get("value", 0)
         else:
             count = total

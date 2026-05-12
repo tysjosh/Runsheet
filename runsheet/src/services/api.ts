@@ -545,7 +545,11 @@ class ApiService {
   ): Promise<() => void> {
     // WebSocket connection for real-time updates with reconnection
     // For better reconnection handling, use the useFleetWebSocket hook in React components
-    const wsUrl = `${API_BASE_URL.replace("http", "ws")}/fleet/live`;
+    
+    // Get auth token for WebSocket connection
+    const token = await getAuthToken();
+    const baseWsUrl = `${API_BASE_URL.replace("http", "ws")}/fleet/live`;
+    const wsUrl = token ? `${baseWsUrl}?token=${encodeURIComponent(token)}` : baseWsUrl;
 
     let ws: WebSocket | null = null;
     let reconnectAttempt = 0;
@@ -572,11 +576,17 @@ class ApiService {
     /**
      * Connect to WebSocket with reconnection support
      */
-    const connect = () => {
+    const connect = async () => {
       if (!shouldReconnect) return;
 
       try {
-        ws = new WebSocket(wsUrl);
+        // Get fresh token on each reconnect attempt
+        const freshToken = await getAuthToken();
+        const reconnectWsUrl = freshToken 
+          ? `${API_BASE_URL.replace("http", "ws")}/fleet/live?token=${encodeURIComponent(freshToken)}`
+          : `${API_BASE_URL.replace("http", "ws")}/fleet/live`;
+        
+        ws = new WebSocket(reconnectWsUrl);
 
         ws.onopen = () => {
           console.log("Fleet WebSocket connected");

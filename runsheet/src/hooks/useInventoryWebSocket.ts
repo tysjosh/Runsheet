@@ -13,6 +13,7 @@
  */
 
 import { useCallback, useMemo, useState } from "react";
+import { getAuthToken } from "../utils/auth";
 import {
   useWebSocket,
   type WebSocketOptions,
@@ -24,6 +25,14 @@ const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
 const WS_BASE = API_BASE_URL.replace(/\/api$/, "").replace("http", "ws");
 const INVENTORY_WS_URL = `${WS_BASE}/ws/inventory`;
+
+/**
+ * Build WebSocket URL with JWT token for authentication
+ */
+async function buildInventoryWebSocketUrl(): Promise<string> {
+  const token = await getAuthToken();
+  return token ? `${INVENTORY_WS_URL}?token=${encodeURIComponent(token)}` : INVENTORY_WS_URL;
+}
 
 /**
  * Event types the inventory WebSocket can deliver
@@ -208,6 +217,7 @@ export function useInventoryWebSocket(
       maxReconnectDelay: 30000, // 30 seconds
       maxReconnectAttempts: 0, // Infinite attempts
       backoffMultiplier: 2,
+      getUrl: buildInventoryWebSocketUrl, // Refresh token on each connection
       onConnect: handleConnect,
       onDisconnect: handleDisconnect,
       onMessage: handleMessage,
@@ -226,7 +236,7 @@ export function useInventoryWebSocket(
     connect,
     disconnect,
     send,
-  } = useWebSocket(INVENTORY_WS_URL, wsOptions);
+  } = useWebSocket("", wsOptions);
 
   return {
     state,

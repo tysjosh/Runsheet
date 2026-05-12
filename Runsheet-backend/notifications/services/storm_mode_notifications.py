@@ -353,8 +353,9 @@ class StormModeNotificationResolver:
         hits = ((resp or {}).get("hits") or {}).get("hits") or []
         if not hits:
             return None
-        source = hits[0].get("_source") if isinstance(hits[0], dict) else None
-        if not isinstance(source, dict):
+        # Handle both dict and ObjectApiResponse
+        source = hits[0].get("_source") if hasattr(hits[0], 'get') else None
+        if not source:
             return None
         if source.get("tenant_id") != tenant_id:
             # Defensive: never leak cross-tenant data even if the ES

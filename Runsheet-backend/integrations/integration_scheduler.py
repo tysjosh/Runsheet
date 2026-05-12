@@ -445,12 +445,13 @@ class IntegrationScheduler:
             )
             return []
 
-        hits_outer = resp.get("hits") if isinstance(resp, dict) else None
+        # Handle both dict and ObjectApiResponse
+        hits_outer = resp.get("hits") if hasattr(resp, 'get') else None
         hits = (hits_outer or {}).get("hits") or []
         out: list[IntegrationInstance] = []
         for hit in hits:
-            source = (hit or {}).get("_source") if isinstance(hit, dict) else None
-            if not isinstance(source, dict):
+            source = (hit or {}).get("_source") if hasattr(hit, 'get') else None
+            if not source:
                 continue
             try:
                 out.append(IntegrationInstance(**source))

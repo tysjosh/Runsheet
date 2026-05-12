@@ -11,6 +11,7 @@
  */
 
 import { useCallback, useMemo, useState } from "react";
+import { getAuthToken } from "../utils/auth";
 import type { OpsRider, OpsShipment } from "../services/opsApi";
 import {
   useWebSocket,
@@ -22,7 +23,22 @@ import {
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
 const WS_BASE = API_BASE_URL.replace(/\/api$/, "").replace("http", "ws");
-const OPS_WS_URL = `${WS_BASE}/ws/ops`;
+const OPS_WS_BASE_URL = `${WS_BASE}/ws/ops`;
+
+/**
+ * Build WebSocket URL with JWT token for authentication
+ */
+async function buildOpsWebSocketUrl(subscriptions: OpsEventType[]): Promise<string> {
+  const token = await getAuthToken();
+  if (!token) return OPS_WS_BASE_URL;
+  
+  const params = new URLSearchParams();
+  params.set("token", token);
+  subscriptions.forEach((sub) => {
+    params.append("subscribe", sub);
+  });
+  return `${OPS_WS_BASE_URL}?${params.toString()}`;
+}
 
 /**
  * Event types the ops WebSocket can deliver
@@ -227,18 +243,6 @@ export function useOpsWebSocket(
     setConnectionStatus(null);
   }, [options]);
 
-  // Build the WebSocket URL with subscription query params
-  const wsUrl = useMemo(() => {
-    if (subscriptions.length === 0) {
-      return OPS_WS_URL;
-    }
-    const params = new URLSearchParams();
-    subscriptions.forEach((sub) => {
-      params.append("subscribe", sub);
-    });
-    return `${OPS_WS_URL}?${params.toString()}`;
-  }, [subscriptions]);
-
   // Configure the base WebSocket hook
   const wsOptions: WebSocketOptions = useMemo(
     () => ({
@@ -247,13 +251,14 @@ export function useOpsWebSocket(
       maxReconnectDelay: 30000, // 30 seconds
       maxReconnectAttempts: 0, // Infinite attempts
       backoffMultiplier: 2,
+      getUrl: () => buildOpsWebSocketUrl(subscriptions), // Refresh token on each connection
       onConnect: handleConnect,
       onDisconnect: handleDisconnect,
       onMessage: handleMessage,
       onReconnecting: options.onReconnecting,
       onMaxReconnectAttemptsReached: options.onMaxReconnectAttemptsReached,
     }),
-    [handleConnect, handleDisconnect, handleMessage, options],
+    [subscriptions, handleConnect, handleDisconnect, handleMessage, options],
   );
 
   const {
@@ -265,7 +270,7 @@ export function useOpsWebSocket(
     connect,
     disconnect,
     send,
-  } = useWebSocket(wsUrl, wsOptions);
+  } = useWebSocket("", wsOptions);
 
   return {
     state,

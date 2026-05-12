@@ -315,7 +315,7 @@ class InvoiceNumberingService:
                 INVOICES_CURRENT_INDEX, query, size=0
             )
             total = response.get("hits", {}).get("total", {})
-            if isinstance(total, dict):
+            if hasattr(total, "get") or isinstance(total, dict):
                 return int(total.get("value", 0))
             return int(total) if total else 0
         except Exception as exc:

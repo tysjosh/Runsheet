@@ -31,6 +31,8 @@ export interface WebSocketOptions {
   backoffMultiplier?: number;
   /** Whether to automatically connect on mount */
   autoConnect?: boolean;
+  /** Function to get fresh URL on reconnect (for token refresh) */
+  getUrl?: () => Promise<string> | string;
   /** Callback when connection is established */
   onConnect?: () => void;
   /** Callback when connection is closed */
@@ -226,7 +228,7 @@ export function useWebSocket(
    * Internal connect function that handles the WebSocket connection
    */
   const connectInternal = useCallback(
-    (currentAttempt: number = 0) => {
+    async (currentAttempt: number = 0) => {
       if (!mountedRef.current) {
         return;
       }
@@ -243,7 +245,9 @@ export function useWebSocket(
       setError(null);
 
       try {
-        const ws = new WebSocket(url);
+        // Get fresh URL if getUrl is provided (for token refresh)
+        const wsUrl = config.getUrl ? await config.getUrl() : url;
+        const ws = new WebSocket(wsUrl);
         wsRef.current = ws;
 
         ws.onopen = () => {
@@ -302,7 +306,7 @@ export function useWebSocket(
         }
       }
     },
-    [url, clearReconnectTimeout, options],
+    [url, config.getUrl, clearReconnectTimeout, options],
   );
 
   // Keep refs in sync with latest callbacks

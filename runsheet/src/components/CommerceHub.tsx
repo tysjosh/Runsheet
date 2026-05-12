@@ -11,6 +11,7 @@ import {
 import { lazy, Suspense, useState } from "react";
 import AccountsListPage from "./commerce/AccountsListPage";
 import InvoicesListPage from "./commerce/InvoicesListPage";
+import PaymentsListPage from "./commerce/PaymentsListPage";
 import PriceBookEditor from "./commerce/PriceBookEditor";
 import LoadingSpinner from "./LoadingSpinner";
 import { PageHeader, type Tab, TabNavigation } from "./ui";
@@ -61,14 +62,7 @@ export default function CommerceHub() {
         {activeTab === "accounts" && <AccountsListPage />}
         {activeTab === "invoices" && <InvoicesListPage />}
         {activeTab === "price-books" && <PriceBookEditor />}
-        {activeTab === "payments" && (
-          <div className="p-6">
-            <p className="text-gray-500 text-sm">
-              Payments are shown on each invoice detail. Use the Invoices tab to
-              view payment history per invoice.
-            </p>
-          </div>
-        )}
+        {activeTab === "payments" && <PaymentsListPage />}
         {activeTab === "ar-aging" && (
           <Suspense fallback={<LoadingSpinner message="Loading AR Aging..." />}>
             <ARAgingDashboard />

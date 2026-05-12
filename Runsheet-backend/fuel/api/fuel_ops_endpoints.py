@@ -1059,10 +1059,11 @@ async def list_rack_prices(
         )
         raise HTTPException(status_code=500, detail=str(exc))
 
-    hits_outer = resp.get("hits", {}) if isinstance(resp, dict) else {}
+    # Handle both dict and ObjectApiResponse
+    hits_outer = resp.get("hits", {}) if hasattr(resp, 'get') else {}
     hits = hits_outer.get("hits", []) or []
-    total_block = hits_outer.get("total", {}) if isinstance(hits_outer, dict) else {}
-    if isinstance(total_block, dict):
+    total_block = hits_outer.get("total", {}) if hasattr(hits_outer, 'get') else {}
+    if hasattr(total_block, 'get'):
         total_count = int(total_block.get("value", 0) or 0)
     else:
         try:
@@ -1072,7 +1073,7 @@ async def list_rack_prices(
 
     items: List[RackPrice] = []
     for hit in hits:
-        source = hit.get("_source") if isinstance(hit, dict) else None
+        source = hit.get("_source") if hasattr(hit, 'get') else None
         if not isinstance(source, dict):
             continue
         # Defense-in-depth: drop any row whose tenant_id does not match
@@ -3560,12 +3561,13 @@ async def list_reconciliation_records(
         )
         raise HTTPException(status_code=500, detail=str(exc))
 
-    hits_outer = resp.get("hits", {}) if isinstance(resp, dict) else {}
+    # Handle both dict and ObjectApiResponse
+    hits_outer = resp.get("hits", {}) if hasattr(resp, 'get') else {}
     hits = hits_outer.get("hits", []) or []
     total_block = (
-        hits_outer.get("total", {}) if isinstance(hits_outer, dict) else {}
+        hits_outer.get("total", {}) if hasattr(hits_outer, 'get') else {}
     )
-    if isinstance(total_block, dict):
+    if hasattr(total_block, 'get'):
         es_total = int(total_block.get("value", 0) or 0)
     else:
         try:
@@ -3575,8 +3577,8 @@ async def list_reconciliation_records(
 
     validated_rows: List[ReconciliationRecord] = []
     for hit in hits:
-        source = hit.get("_source") if isinstance(hit, dict) else None
-        if not isinstance(source, dict):
+        source = hit.get("_source") if hasattr(hit, 'get') else None
+        if not source:
             continue
         # Defense-in-depth: drop any row whose tenant_id does not match
         # the caller. The ES ``term`` clause should already exclude

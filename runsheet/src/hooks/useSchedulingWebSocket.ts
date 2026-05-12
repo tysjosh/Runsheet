@@ -11,6 +11,7 @@
  */
 
 import { useCallback, useMemo, useState } from "react";
+import { getAuthToken } from "../utils/auth";
 import type { Job, SchedulingCargoItem } from "../types/api";
 import {
   useWebSocket,
@@ -22,7 +23,22 @@ import {
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
 const WS_BASE = API_BASE_URL.replace(/\/api$/, "").replace("http", "ws");
-const SCHEDULING_WS_URL = `${WS_BASE}/ws/scheduling`;
+const SCHEDULING_WS_BASE_URL = `${WS_BASE}/ws/scheduling`;
+
+/**
+ * Build WebSocket URL with JWT token for authentication
+ */
+async function buildSchedulingWebSocketUrl(subscriptions: SchedulingEventType[]): Promise<string> {
+  const token = await getAuthToken();
+  if (!token) return SCHEDULING_WS_BASE_URL;
+  
+  const params = new URLSearchParams();
+  params.set("token", token);
+  subscriptions.forEach((sub) => {
+    params.append("subscribe", sub);
+  });
+  return `${SCHEDULING_WS_BASE_URL}?${params.toString()}`;
+}
 
 /**
  * Event types the scheduling WebSocket can deliver
@@ -255,18 +271,6 @@ export function useSchedulingWebSocket(
     setConnectionStatus(null);
   }, [options]);
 
-  // Build the WebSocket URL with subscription query params
-  const wsUrl = useMemo(() => {
-    if (subscriptions.length === 0) {
-      return SCHEDULING_WS_URL;
-    }
-    const params = new URLSearchParams();
-    subscriptions.forEach((sub) => {
-      params.append("subscribe", sub);
-    });
-    return `${SCHEDULING_WS_URL}?${params.toString()}`;
-  }, [subscriptions]);
-
   // Configure the base WebSocket hook
   const wsOptions: WebSocketOptions = useMemo(
     () => ({
@@ -275,13 +279,14 @@ export function useSchedulingWebSocket(
       maxReconnectDelay: 30000, // 30 seconds
       maxReconnectAttempts: 0, // Infinite attempts
       backoffMultiplier: 2,
+      getUrl: () => buildSchedulingWebSocketUrl(subscriptions), // Refresh token on each connection
       onConnect: handleConnect,
       onDisconnect: handleDisconnect,
       onMessage: handleMessage,
       onReconnecting: options.onReconnecting,
       onMaxReconnectAttemptsReached: options.onMaxReconnectAttemptsReached,
     }),
-    [handleConnect, handleDisconnect, handleMessage, options],
+    [subscriptions, handleConnect, handleDisconnect, handleMessage, options],
   );
 
   const {
@@ -293,7 +298,7 @@ export function useSchedulingWebSocket(
     connect,
     disconnect,
     send,
-  } = useWebSocket(wsUrl, wsOptions);
+  } = useWebSocket("", wsOptions);
 
   return {
     state,

@@ -461,7 +461,7 @@ async def get_forecasts(
         resp = await es.search_documents("mvp_tank_forecasts", query, size)
         hits = resp.get("hits", {}).get("hits", [])
         total = resp.get("hits", {}).get("total", {})
-        total_count = total.get("value", 0) if isinstance(total, dict) else total
+        total_count = total.get("value", 0) if hasattr(total, "get") or isinstance(total, dict) else total
 
         items = [hit["_source"] for hit in hits]
 
@@ -627,7 +627,7 @@ async def list_plans(
         resp = await es.search_documents("mvp_load_plans", query, size)
         hits = resp.get("hits", {}).get("hits", [])
         total = resp.get("hits", {}).get("total", {})
-        total_count = total.get("value", 0) if isinstance(total, dict) else total
+        total_count = total.get("value", 0) if hasattr(total, "get") or isinstance(total, dict) else total
 
         items = [hit["_source"] for hit in hits]
 

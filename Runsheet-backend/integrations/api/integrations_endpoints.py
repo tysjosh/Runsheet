@@ -1068,15 +1068,16 @@ def _extract_sources(resp: Any) -> List[Dict[str, Any]]:
     mock shapes used by tests.
     """
 
-    if not resp or not isinstance(resp, dict):
+    # Handle both dict and ObjectApiResponse
+    if not resp or not hasattr(resp, 'get'):
         return []
     hits_outer = resp.get("hits")
-    if not hits_outer or not isinstance(hits_outer, dict):
+    if not hits_outer or not hasattr(hits_outer, 'get'):
         return []
     hits = hits_outer.get("hits") or []
     out: List[Dict[str, Any]] = []
     for hit in hits:
-        if isinstance(hit, dict) and isinstance(hit.get("_source"), dict):
+        if hasattr(hit, 'get') and hit.get("_source"):
             out.append(hit["_source"])
     return out
 

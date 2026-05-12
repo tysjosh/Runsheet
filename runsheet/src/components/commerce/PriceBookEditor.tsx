@@ -15,6 +15,13 @@ import {
   resolvePricing,
   updatePriceBook,
 } from "../../services/commerceApi";
+import {
+  PageHeader,
+  Button,
+  Table,
+  Badge,
+  EmptyState,
+} from "@/components/ui";
 
 interface PriceBookEditorProps {
   priceBookId?: string;
@@ -239,23 +246,17 @@ export default function PriceBookEditor({
 
   return (
     <div className="p-6">
-      <header className="mb-6">
-        <div className="flex items-center gap-4 mb-2">
-          {onBack && (
-            <button
-              type="button"
-              onClick={onBack}
-              className="text-info hover:underline"
-            >
+      <PageHeader
+        title="Price Book Editor"
+        subtitle="Manage pricing rules and test resolution with the dry-run preview."
+        actions={
+          onBack ? (
+            <Button variant="ghost" onClick={onBack}>
               ← Back
-            </button>
-          )}
-        </div>
-        <h1 className="text-2xl font-bold">Price Book Editor</h1>
-        <p className="text-gray-600 mt-1">
-          Manage pricing rules and test resolution with the dry-run preview.
-        </p>
-      </header>
+            </Button>
+          ) : undefined
+        }
+      />
 
       {error && (
         <div
@@ -269,38 +270,66 @@ export default function PriceBookEditor({
       {/* Price book selector */}
       {!selectedBook && (
         <section aria-labelledby="books-heading" className="mb-8">
-          <h2 id="books-heading" className="text-lg font-semibold mb-3">
-            Select a Price Book
-          </h2>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {priceBooks.map((book) => (
-              <button
-                key={book.price_book_id}
-                type="button"
-                onClick={() => handleSelectBook(book.price_book_id)}
-                className="border rounded p-4 text-left hover:bg-gray-50"
-              >
-                <p className="font-medium">{book.name}</p>
-                <p className="text-sm text-gray-600">
-                  {book.description || "No description"}
-                </p>
-                <span
-                  className={`inline-block mt-2 px-2 py-1 rounded text-xs font-medium ${
-                    book.status === "active"
-                      ? "bg-success-light text-success-dark"
-                      : book.status === "draft"
-                        ? "bg-warning-light text-warning-dark"
-                        : "bg-gray-100 text-gray-800"
-                  }`}
-                >
-                  {book.status}
-                </span>
-              </button>
-            ))}
-            {priceBooks.length === 0 && (
-              <p className="text-gray-500 col-span-3">No price books found.</p>
-            )}
+          <div className="flex items-center justify-between mb-3">
+            <h2 id="books-heading" className="text-lg font-semibold">
+              Select a Price Book
+            </h2>
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={() => {
+                // TODO: Implement create price book modal
+                alert(
+                  "Create Price Book feature coming soon! For now, use the backend API to create price books.",
+                );
+              }}
+            >
+              Create Price Book
+            </Button>
           </div>
+          {priceBooks.length === 0 ? (
+            <EmptyState
+              title="No price books found."
+              description="Create a price book to get started with pricing rules."
+              action={{
+                label: "Create Price Book",
+                onClick: () => {
+                  alert(
+                    "Create Price Book feature coming soon! For now, use the backend API to create price books.",
+                  );
+                },
+              }}
+            />
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              {priceBooks.map((book) => (
+                <button
+                  key={book.price_book_id}
+                  type="button"
+                  onClick={() => handleSelectBook(book.price_book_id)}
+                  className="border rounded p-4 text-left hover:bg-gray-50"
+                >
+                  <p className="font-medium">{book.name}</p>
+                  <p className="text-sm text-gray-600">
+                    {book.description || "No description"}
+                  </p>
+                  <Badge
+                    variant={
+                      book.status === "active"
+                        ? "success"
+                        : book.status === "draft"
+                          ? "warning"
+                          : "neutral"
+                    }
+                    size="sm"
+                    className="mt-2"
+                  >
+                    {book.status}
+                  </Badge>
+                </button>
+              ))}
+            </div>
+          )}
         </section>
       )}
 
@@ -313,90 +342,92 @@ export default function PriceBookEditor({
                 {selectedBook.name} — Rules ({rules.length})
               </h2>
               <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={handleAddRule}
-                  className="bg-primary text-white px-3 py-1 rounded text-sm hover:bg-primary-hover"
-                >
+                <Button variant="primary" size="sm" onClick={handleAddRule}>
                   Add Rule
-                </button>
-                <button
-                  type="button"
+                </Button>
+                <Button
+                  variant="success"
+                  size="sm"
                   onClick={handleSaveBook}
                   disabled={saving}
-                  className="bg-success text-white px-3 py-1 rounded text-sm hover:bg-success-dark disabled:opacity-50"
+                  loading={saving}
                 >
-                  {saving ? "Saving..." : "Save"}
-                </button>
+                  Save
+                </Button>
                 {selectedBook.status === "draft" && (
-                  <button
-                    type="button"
+                  <Button
+                    variant="secondary"
+                    size="sm"
                     onClick={handleActivate}
                     disabled={saving}
-                    className="bg-brand-secondary text-white px-3 py-1 rounded text-sm hover:bg-brand-secondary disabled:opacity-50"
                   >
                     Activate
-                  </button>
+                  </Button>
                 )}
               </div>
             </div>
 
-            <table className="w-full border-collapse" role="table">
-              <thead>
-                <tr className="border-b bg-gray-50">
-                  <th className="text-left p-3 font-medium">Product</th>
-                  <th className="text-left p-3 font-medium">Scope</th>
-                  <th className="text-left p-3 font-medium">Price</th>
-                  <th className="text-left p-3 font-medium">Min Qty</th>
-                  <th className="text-left p-3 font-medium">Effective</th>
-                  <th className="text-left p-3 font-medium">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rules.map((rule, idx) => (
-                  <tr key={rule.rule_id} className="border-b hover:bg-gray-50">
-                    <td className="p-3">{rule.product_code}</td>
-                    <td className="p-3">
-                      {rule.scope_type}
-                      {rule.scope_value && `: ${rule.scope_value}`}
-                    </td>
-                    <td className="p-3">
-                      {formatCents(rule.unit_price_cents)}
-                    </td>
-                    <td className="p-3">
-                      {rule.min_quantity_gallons ?? "—"} gal+
-                    </td>
-                    <td className="p-3 text-sm">
-                      {rule.effective_from}
-                      {rule.effective_to && ` → ${rule.effective_to}`}
-                    </td>
-                    <td className="p-3 flex gap-2">
-                      <button
-                        type="button"
-                        onClick={() => handleEditRule(idx)}
-                        className="text-info hover:underline text-sm"
+            <Table
+              columns={[
+                { key: "product_code", label: "Product" },
+                {
+                  key: "scope",
+                  label: "Scope",
+                  render: (rule: PricingRule & { idx: number }) =>
+                    `${rule.scope_type}${rule.scope_value ? `: ${rule.scope_value}` : ""}`,
+                },
+                {
+                  key: "price",
+                  label: "Price",
+                  render: (rule: PricingRule & { idx: number }) =>
+                    formatCents(rule.unit_price_cents),
+                },
+                {
+                  key: "min_qty",
+                  label: "Min Qty",
+                  render: (rule: PricingRule & { idx: number }) =>
+                    `${rule.min_quantity_gallons ?? "—"} gal+`,
+                },
+                {
+                  key: "effective",
+                  label: "Effective",
+                  render: (rule: PricingRule & { idx: number }) =>
+                    `${rule.effective_from}${rule.effective_to ? ` → ${rule.effective_to}` : ""}`,
+                  className: "text-sm",
+                },
+                {
+                  key: "actions",
+                  label: "Actions",
+                  render: (rule: PricingRule & { idx: number }) => (
+                    <div className="flex gap-2">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => handleEditRule(rule.idx)}
                       >
                         Edit
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleDeleteRule(idx)}
-                        className="text-error hover:underline text-sm"
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => handleDeleteRule(rule.idx)}
+                        className="text-error hover:text-error-dark"
                       >
                         Delete
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-                {rules.length === 0 && (
-                  <tr>
-                    <td colSpan={6} className="p-6 text-center text-gray-500">
-                      No rules defined. Click "Add Rule" to create one.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
+                      </Button>
+                    </div>
+                  ),
+                },
+              ]}
+              data={rules.map((rule, idx) => ({ ...rule, idx }))}
+              keyExtractor={(item) => item.rule_id}
+              emptyState={
+                <EmptyState
+                  title="No rules defined"
+                  description='Click "Add Rule" to create one.'
+                />
+              }
+            />
           </section>
 
           {/* Rule edit form */}
@@ -542,23 +573,18 @@ export default function PriceBookEditor({
                 </div>
               </div>
               <div className="flex gap-3 mt-4">
-                <button
-                  type="button"
-                  onClick={handleSaveRule}
-                  className="bg-primary text-white px-4 py-2 rounded hover:bg-primary-hover"
-                >
+                <Button variant="primary" onClick={handleSaveRule}>
                   {editingIndex !== null ? "Update Rule" : "Add Rule"}
-                </button>
-                <button
-                  type="button"
+                </Button>
+                <Button
+                  variant="secondary"
                   onClick={() => {
                     setEditingRule(null);
                     setEditingIndex(null);
                   }}
-                  className="border px-4 py-2 rounded hover:bg-gray-100"
                 >
                   Cancel
-                </button>
+                </Button>
               </div>
             </section>
           )}
@@ -635,13 +661,14 @@ export default function PriceBookEditor({
                   className="border rounded px-3 py-2 w-28"
                 />
               </div>
-              <button
+              <Button
                 type="submit"
+                variant="secondary"
                 disabled={resolving}
-                className="bg-brand-secondary text-white px-4 py-2 rounded hover:bg-brand-secondary disabled:opacity-50"
+                loading={resolving}
               >
-                {resolving ? "Resolving..." : "Resolve Price"}
-              </button>
+                Resolve Price
+              </Button>
             </form>
 
             {resolveError && (

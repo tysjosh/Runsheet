@@ -1,0 +1,1775 @@
+{
+  "agent_activity_log": {
+    "log_id": "keyword",
+    "agent_id": "keyword",
+    "action_type": "keyword",
+    "tool_name": "keyword",
+    "parameters": {
+      "type": "object",
+      "enabled": true,
+      "dynamic": true
+    },
+    "risk_level": "keyword",
+    "outcome": "keyword",
+    "duration_ms": "float",
+    "tenant_id": "keyword",
+    "user_id": "keyword",
+    "session_id": "keyword",
+    "timestamp": "date",
+    "created_at": "date",
+    "updated_at": "date",
+    "details": {
+      "type": "object",
+      "enabled": true,
+      "dynamic": true
+    }
+  },
+  "agent_approval_queue": {
+    "action_id": "keyword",
+    "action_type": "keyword",
+    "tool_name": "keyword",
+    "parameters": {
+      "type": "object",
+      "enabled": true,
+      "dynamic": true
+    },
+    "risk_level": "keyword",
+    "proposed_by": "keyword",
+    "proposed_at": "date",
+    "status": "keyword",
+    "reviewed_by": "keyword",
+    "reviewed_at": "date",
+    "expiry_time": "date",
+    "impact_summary": "text",
+    "execution_result": {
+      "type": "object",
+      "enabled": true,
+      "dynamic": true
+    },
+    "rejection_reason": "text",
+    "tenant_id": "keyword",
+    "created_at": "date",
+    "updated_at": "date"
+  },
+  "agent_feedback": {
+    "feedback_id": "keyword",
+    "agent_id": "keyword",
+    "action_type": "keyword",
+    "original_proposal": {
+      "type": "object",
+      "enabled": true,
+      "dynamic": false
+    },
+    "user_action": {
+      "type": "object",
+      "enabled": true,
+      "dynamic": false
+    },
+    "feedback_type": "keyword",
+    "tenant_id": "keyword",
+    "user_id": "keyword",
+    "timestamp": "date",
+    "context": {
+      "type": "object",
+      "enabled": true,
+      "dynamic": false
+    },
+    "created_at": "date",
+    "updated_at": "date"
+  },
+  "agent_memory": {
+    "memory_id": "keyword",
+    "memory_type": "keyword",
+    "agent_id": "keyword",
+    "tenant_id": "keyword",
+    "content": "text",
+    "confidence_score": "float",
+    "created_at": "date",
+    "last_accessed": "date",
+    "access_count": "integer",
+    "tags": "keyword",
+    "updated_at": "date"
+  },
+  "agent_outcomes": {
+    "outcome_id": "keyword",
+    "intervention_id": "keyword",
+    "before_kpis": {
+      "type": "object",
+      "enabled": true,
+      "dynamic": false
+    },
+    "after_kpis": {
+      "type": "object",
+      "enabled": true,
+      "dynamic": false
+    },
+    "realized_delta": {
+      "type": "object",
+      "enabled": true,
+      "dynamic": false
+    },
+    "execution_duration_ms": "float",
+    "tenant_id": "keyword",
+    "timestamp": "date",
+    "status": "keyword",
+    "schema_version": "keyword",
+    "notification_ids": "keyword",
+    "confidence_score": "float",
+    "confidence_rationale": "keyword",
+    "updated_at": "date",
+    "created_at": "date"
+  },
+  "agent_policy_experiments": {
+    "experiment_id": "keyword",
+    "proposal_id": "keyword",
+    "parameter": "keyword",
+    "old_value": {
+      "type": "object",
+      "enabled": true,
+      "dynamic": false
+    },
+    "new_value": {
+      "type": "object",
+      "enabled": true,
+      "dynamic": false
+    },
+    "rollout_pct": "integer",
+    "status": "keyword",
+    "tenant_id": "keyword",
+    "created_at": "date",
+    "updated_at": "date",
+    "rollback_reason": "text"
+  },
+  "agent_revenue_reports": {
+    "report_type": "keyword",
+    "tenant_id": "keyword",
+    "period_start": "date",
+    "period_end": "date",
+    "total_routes_analyzed": "integer",
+    "leakage_patterns_detected": "integer",
+    "generated_at": "date",
+    "updated_at": "date",
+    "created_at": "date"
+  },
+  "agent_shadow_proposals": {
+    "proposal_id": "keyword",
+    "source_agent": "keyword",
+    "shadow_agent": "keyword",
+    "shadow_timestamp": "date",
+    "actions": {
+      "type": "object",
+      "enabled": true,
+      "dynamic": false
+    },
+    "expected_kpi_delta": {
+      "type": "object",
+      "enabled": true,
+      "dynamic": false
+    },
+    "risk_class": "keyword",
+    "confidence": "float",
+    "priority": "integer",
+    "tenant_id": "keyword",
+    "timestamp": "date",
+    "schema_version": "keyword",
+    "parameter": "keyword",
+    "old_value": {
+      "type": "object",
+      "enabled": true,
+      "dynamic": false
+    },
+    "new_value": {
+      "type": "object",
+      "enabled": true,
+      "dynamic": false
+    },
+    "evidence": "keyword",
+    "rollback_plan": {
+      "type": "object",
+      "enabled": true,
+      "dynamic": false
+    },
+    "updated_at": "date",
+    "created_at": "date"
+  },
+  "agent_signals": {
+    "signal_id": "keyword",
+    "_signal_type": "keyword",
+    "source_agent": "keyword",
+    "entity_id": "keyword",
+    "entity_type": "keyword",
+    "severity": "keyword",
+    "confidence": "float",
+    "ttl_seconds": "integer",
+    "timestamp": "date",
+    "context": {
+      "type": "object",
+      "enabled": true,
+      "dynamic": true
+    },
+    "tenant_id": "keyword",
+    "schema_version": "keyword",
+    "proposal_id": "keyword",
+    "actions": {
+      "type": "object",
+      "enabled": true,
+      "dynamic": false
+    },
+    "expected_kpi_delta": {
+      "type": "object",
+      "enabled": true,
+      "dynamic": false
+    },
+    "risk_class": "keyword",
+    "priority": "integer",
+    "outcome_id": "keyword",
+    "intervention_id": "keyword",
+    "before_kpis": {
+      "type": "object",
+      "enabled": true,
+      "dynamic": false
+    },
+    "after_kpis": {
+      "type": "object",
+      "enabled": true,
+      "dynamic": false
+    },
+    "realized_delta": {
+      "type": "object",
+      "enabled": true,
+      "dynamic": false
+    },
+    "execution_duration_ms": "float",
+    "status": "keyword",
+    "parameter": "keyword",
+    "old_value": {
+      "type": "object",
+      "enabled": true,
+      "dynamic": false
+    },
+    "new_value": {
+      "type": "object",
+      "enabled": true,
+      "dynamic": false
+    },
+    "evidence": "keyword",
+    "rollback_plan": {
+      "type": "object",
+      "enabled": true,
+      "dynamic": false
+    },
+    "updated_at": "date",
+    "created_at": "date"
+  },
+  "job_priorities": {
+    "priority_list_id": "keyword",
+    "priorities": {
+      "type": "nested",
+      "properties": {
+        "job_id": "keyword",
+        "job_type": "keyword",
+        "priority_score": "float",
+        "priority_bucket": "keyword",
+        "sla_urgency": "float",
+        "cargo_priority_score": "float",
+        "customer_tier_score": "float",
+        "reasons": "keyword"
+      }
+    },
+    "scoring_weights": {
+      "type": "object",
+      "enabled": true,
+      "dynamic": false
+    },
+    "tenant_id": "keyword",
+    "timestamp": "date"
+  },
+  "mvp_cost_configs": {
+    "tenant_id": "keyword",
+    "fuel_consumption_rate": "float",
+    "fuel_price_per_liter": "float",
+    "driver_hourly_rate": "float",
+    "currency": "keyword",
+    "created_at": "date",
+    "updated_at": "date"
+  },
+  "mvp_delivery_priorities": {
+    "priority_list_id": "keyword",
+    "priorities": {
+      "type": "nested",
+      "properties": {
+        "station_id": "keyword",
+        "fuel_grade": "keyword",
+        "priority_score": "float",
+        "priority_bucket": "keyword",
+        "reasons": "keyword",
+        "safe_to_delay_days": "integer",
+        "safe_to_delay_bucket": "keyword",
+        "business_impact_score": "float",
+        "business_impact_reasons": "keyword",
+        "cluster_id": "keyword",
+        "cluster_size": "integer",
+        "cluster_centroid": "object"
+      }
+    },
+    "scoring_weights": {
+      "type": "object",
+      "enabled": true,
+      "dynamic": false
+    },
+    "tenant_id": "keyword",
+    "run_id": "keyword",
+    "timestamp": "date",
+    "updated_at": "date",
+    "created_at": "date"
+  },
+  "mvp_load_plans": {
+    "plan_id": "keyword",
+    "truck_id": "keyword",
+    "assignments": {
+      "type": "nested",
+      "properties": {
+        "compartment_id": "keyword",
+        "station_id": "keyword",
+        "fuel_grade": "keyword",
+        "quantity_liters": "float",
+        "compartment_capacity_liters": "float"
+      }
+    },
+    "total_utilization_pct": "float",
+    "unserved_demand_liters": "float",
+    "total_weight_kg": "float",
+    "tenant_id": "keyword",
+    "run_id": "keyword",
+    "created_at": "date",
+    "updated_at": "date",
+    "status": "keyword",
+    "approved_by": "keyword",
+    "approved_at": "date",
+    "rejected_by": "keyword",
+    "rejected_at": "date",
+    "rejection_reason": "text",
+    "estimated_cost": {
+      "type": "object",
+      "enabled": true,
+      "dynamic": true
+    },
+    "actual_cost": {
+      "type": "object",
+      "enabled": true,
+      "dynamic": true
+    },
+    "cost_variance_pct": "float"
+  },
+  "mvp_plan_executions": {
+    "execution_id": "keyword",
+    "plan_id": "keyword",
+    "route_id": "keyword",
+    "tenant_id": "keyword",
+    "stops": {
+      "type": "nested",
+      "properties": {
+        "station_id": "keyword",
+        "sequence": "integer",
+        "status": "keyword",
+        "planned_eta": "date",
+        "actual_arrival": "date",
+        "planned_quantities": "object",
+        "actual_quantities": "object"
+      }
+    },
+    "completed_stops": "integer",
+    "total_stops": "integer",
+    "status": "keyword",
+    "created_at": "date",
+    "updated_at": "date"
+  },
+  "mvp_plan_outcomes": {
+    "outcome_id": "keyword",
+    "plan_id": "keyword",
+    "run_id": "keyword",
+    "before_kpis": {
+      "type": "object",
+      "enabled": true,
+      "dynamic": false
+    },
+    "after_kpis": {
+      "type": "object",
+      "enabled": true,
+      "dynamic": false
+    },
+    "realized_delta": {
+      "type": "object",
+      "enabled": true,
+      "dynamic": false
+    },
+    "stop_variances": {
+      "type": "nested",
+      "properties": {
+        "station_id": "keyword",
+        "sequence": "integer",
+        "quantity_variance_pct": "float",
+        "time_variance_minutes": "float",
+        "status": "keyword"
+      }
+    },
+    "aggregate_quantity_variance_pct": "float",
+    "aggregate_time_variance_minutes": "float",
+    "missed_stops_count": "integer",
+    "tenant_id": "keyword",
+    "timestamp": "date",
+    "status": "keyword",
+    "updated_at": "date",
+    "created_at": "date"
+  },
+  "mvp_replan_events": {
+    "event_id": "keyword",
+    "original_plan_id": "keyword",
+    "patched_plan_id": "keyword",
+    "trigger_signal_id": "keyword",
+    "replan_type": "keyword",
+    "diff": {
+      "type": "object",
+      "properties": {
+        "stops_reordered": "keyword",
+        "volumes_reallocated": "object",
+        "truck_swapped": "keyword",
+        "stations_deferred": "keyword",
+        "stations_added": "keyword"
+      },
+      "enabled": true
+    },
+    "replan_diff": {
+      "type": "object",
+      "properties": {
+        "diff_id": "keyword",
+        "original_route_id": "keyword",
+        "patched_route_id": "keyword",
+        "added_stops": "nested",
+        "removed_stops": "nested",
+        "reordered_stops": "nested",
+        "reassigned_stops": "nested",
+        "quantity_changes": "nested",
+        "eta_shifts": "nested",
+        "generated_at": "date"
+      },
+      "enabled": true
+    },
+    "status": "keyword",
+    "tenant_id": "keyword",
+    "run_id": "keyword",
+    "timestamp": "date",
+    "updated_at": "date",
+    "created_at": "date"
+  },
+  "mvp_routes": {
+    "route_id": "keyword",
+    "truck_id": "keyword",
+    "plan_id": "keyword",
+    "stops": {
+      "type": "nested",
+      "properties": {
+        "station_id": "keyword",
+        "eta": "date",
+        "drop": "object",
+        "sequence": "integer"
+      }
+    },
+    "distance_km": "float",
+    "eta_confidence": "float",
+    "objective_value": "float",
+    "tenant_id": "keyword",
+    "run_id": "keyword",
+    "timestamp": "date",
+    "status": "keyword",
+    "updated_at": "date",
+    "created_at": "date",
+    "traffic_provider": "keyword",
+    "traffic_fallback": "boolean",
+    "sourced_terminal_id": "keyword",
+    "sourced_terminal_reasons": "keyword",
+    "sourcing_recommendation_id": "keyword",
+    "start_position_source": "keyword",
+    "start_position_lat": "double",
+    "start_position_lon": "double",
+    "storm_mode_active": "boolean",
+    "storm_mode_max_stops_per_truck": "integer",
+    "storm_mode_delivery_window_start_hour": "float",
+    "storm_mode_delivery_window_end_hour": "float",
+    "deferred_stops": {
+      "type": "nested",
+      "properties": {
+        "station_id": "keyword",
+        "reason": "keyword",
+        "deferral_cause": "keyword",
+        "original_sequence": "integer",
+        "original_eta": "date",
+        "next_eligible_window_start": "date",
+        "next_eligible_window_end": "date"
+      }
+    }
+  },
+  "mvp_tank_forecasts": {
+    "forecast_id": "keyword",
+    "station_id": "keyword",
+    "fuel_grade": "keyword",
+    "hours_to_runout_p50": "float",
+    "hours_to_runout_p90": "float",
+    "runout_risk_24h": "float",
+    "confidence": "float",
+    "feature_version": "keyword",
+    "anomaly_flags": "keyword",
+    "tenant_id": "keyword",
+    "run_id": "keyword",
+    "timestamp": "date",
+    "updated_at": "date",
+    "created_at": "date",
+    "customer_tank_id": "keyword",
+    "customer_id": "keyword",
+    "customer_type": "keyword",
+    "fuel_type": "keyword",
+    "model_name": "keyword",
+    "customer_type_multiplier": "float",
+    "baseline_source": "keyword",
+    "weather_fallback": "boolean",
+    "scheduled_deliveries": {
+      "type": "nested",
+      "properties": {
+        "delivery_id": "keyword",
+        "scheduled_eta": "date",
+        "planned_gallons": "double"
+      }
+    }
+  },
+  "truck_compartments": {
+    "compartment_id": "keyword",
+    "truck_id": "keyword",
+    "capacity_liters": "float",
+    "allowed_grades": "keyword",
+    "position_index": "integer",
+    "depot_city": "keyword",
+    "depot_location": "geo_point",
+    "latitude": "float",
+    "longitude": "float",
+    "tenant_id": "keyword",
+    "updated_at": "date",
+    "created_at": "date",
+    "last_loaded_product": "keyword",
+    "last_loaded_at": "date",
+    "last_cleaned_at": "date",
+    "state": "keyword",
+    "dyed_compatible": "boolean"
+  },
+  "accounts_current": {
+    "account_id": "keyword",
+    "tenant_id": "keyword",
+    "customer_id": "keyword",
+    "display_name": "text",
+    "status": "keyword",
+    "credit_limit_cents": "long",
+    "open_balance_cents": "long",
+    "available_credit_cents": "long",
+    "credit_balance_cents": "long",
+    "credit_state": "keyword",
+    "credit_override_expires_at": "date",
+    "net_terms_days": "integer",
+    "tier": "keyword",
+    "billing_address": {
+      "type": "object",
+      "enabled": true,
+      "dynamic": false
+    },
+    "payment_method_preference": "keyword",
+    "created_at": "date",
+    "updated_at": "date",
+    "external_refs": {
+      "type": "object",
+      "enabled": true,
+      "dynamic": false
+    }
+  },
+  "account_events": {
+    "event_id": "keyword",
+    "account_id": "keyword",
+    "tenant_id": "keyword",
+    "event_type": "keyword",
+    "payload": {
+      "type": "object",
+      "enabled": true,
+      "dynamic": false
+    },
+    "occurred_at": "date",
+    "actor": "keyword",
+    "sequence_number": "long"
+  },
+  "ar_aging_snapshots": {
+    "snapshot_id": "keyword",
+    "tenant_id": "keyword",
+    "snapshot_date": "date",
+    "total_open_cents": "long",
+    "bucket_0_30_cents": "long",
+    "bucket_31_60_cents": "long",
+    "bucket_61_90_cents": "long",
+    "bucket_90_plus_cents": "long",
+    "account_count_with_balance": "integer"
+  },
+  "customers_current": {
+    "customer_id": "keyword",
+    "tenant_id": "keyword",
+    "display_name": "text",
+    "legal_name": "text",
+    "primary_email": "keyword",
+    "tax_id": "keyword",
+    "status": "keyword",
+    "created_at": "date",
+    "updated_at": "date",
+    "external_refs": {
+      "type": "object",
+      "enabled": true,
+      "dynamic": false
+    },
+    "metadata": {
+      "type": "object",
+      "enabled": false,
+      "dynamic": false
+    }
+  },
+  "dunning_events": {
+    "event_id": "keyword",
+    "invoice_id": "keyword",
+    "account_id": "keyword",
+    "tenant_id": "keyword",
+    "threshold_days": "integer",
+    "template_key": "keyword",
+    "queued_at": "date",
+    "cancelled_at": "date",
+    "cancellation_reason": "keyword"
+  },
+  "invoices_current": {
+    "invoice_id": "keyword",
+    "tenant_id": "keyword",
+    "customer_id": "keyword",
+    "account_id": "keyword",
+    "order_id": "keyword",
+    "invoice_number": "keyword",
+    "status": "keyword",
+    "total_cents": "long",
+    "amount_paid_cents": "long",
+    "remaining_cents": "long",
+    "tax_cents": "long",
+    "subtotal_cents": "long",
+    "line_items": {
+      "type": "nested",
+      "properties": {
+        "line_id": "keyword",
+        "product_code": "keyword",
+        "quantity_gallons": "double",
+        "unit_price_cents": "long",
+        "subtotal_cents": "long"
+      }
+    },
+    "tax_breakdown": {
+      "type": "object",
+      "enabled": false,
+      "dynamic": false
+    },
+    "exemptions_applied": "keyword",
+    "issued_at": "date",
+    "due_date": "date",
+    "finalized_at": "date",
+    "voided_at": "date",
+    "void_reason": "text",
+    "qbo_push_state": "keyword",
+    "qbo_push_attempts": "integer",
+    "qbo_push_last_error": "text",
+    "external_refs": {
+      "type": "object",
+      "enabled": true,
+      "dynamic": false
+    },
+    "created_at": "date",
+    "updated_at": "date"
+  },
+  "invoice_counter_checkpoints": {
+    "tenant_id": "keyword",
+    "max_seq": "long",
+    "checkpoint_date": "date",
+    "created_at": "date"
+  },
+  "invoice_events": {
+    "event_id": "keyword",
+    "invoice_id": "keyword",
+    "tenant_id": "keyword",
+    "event_type": "keyword",
+    "payload": {
+      "type": "object",
+      "enabled": true,
+      "dynamic": false
+    },
+    "occurred_at": "date",
+    "actor": "keyword"
+  },
+  "payments_current": {
+    "payment_id": "keyword",
+    "tenant_id": "keyword",
+    "invoice_id": "keyword",
+    "account_id": "keyword",
+    "amount_cents": "long",
+    "source": "keyword",
+    "method": "keyword",
+    "external_id": "keyword",
+    "reference": "text",
+    "status": "keyword",
+    "received_at": "date",
+    "applied_at": "date",
+    "reversed_at": "date"
+  },
+  "price_books_current": {
+    "price_book_id": "keyword",
+    "tenant_id": "keyword",
+    "name": "keyword",
+    "description": "text",
+    "status": "keyword",
+    "rule_count": "integer",
+    "created_at": "date",
+    "updated_at": "date"
+  },
+  "pricing_rules_current": {
+    "rule_id": "keyword",
+    "price_book_id": "keyword",
+    "tenant_id": "keyword",
+    "product_code": "keyword",
+    "scope_type": "keyword",
+    "scope_value": "keyword",
+    "effective_from": "date",
+    "effective_to": "date",
+    "min_quantity_gallons": "double",
+    "unit_price_cents": "long",
+    "created_at": "date",
+    "updated_at": "date"
+  },
+  "asset_certifications": {
+    "cert_id": "keyword",
+    "tenant_id": "keyword",
+    "asset_id": "keyword",
+    "certification_type": "keyword",
+    "certification_date": "date",
+    "expiry_date": "date",
+    "inspector_name": "text",
+    "certificate_number": "keyword",
+    "issuing_authority": "keyword",
+    "status": "keyword",
+    "retest_due_date": "date",
+    "document_ref": "keyword",
+    "updated_at": "date",
+    "created_at": "date"
+  },
+  "drivers": {
+    "driver_id": "keyword",
+    "tenant_id": "keyword",
+    "full_name": "text",
+    "cdl_number": "keyword",
+    "cdl_state": "keyword",
+    "cdl_class": "keyword",
+    "cdl_expiry_date": "date",
+    "medical_card_expiry_date": "date",
+    "hazmat_endorsement_expiry_date": "date",
+    "tanker_endorsement_expiry_date": "date",
+    "last_drug_test_date": "date",
+    "last_mvr_date": "date",
+    "status": "keyword",
+    "suspension_reason": "keyword",
+    "external_refs": {
+      "type": "object",
+      "enabled": true,
+      "dynamic": false
+    },
+    "updated_at": "date",
+    "created_at": "date"
+  },
+  "dyed_diesel_audit_log": {
+    "audit_id": "keyword",
+    "tenant_id": "keyword",
+    "customer_id": "keyword",
+    "certificate_id": "keyword",
+    "certificate_expiry": "date",
+    "gallons": "double",
+    "invoice_id": "keyword",
+    "product_code": "keyword",
+    "timestamp": "date",
+    "updated_at": "date",
+    "created_at": "date"
+  },
+  "ifta_mileage": {
+    "record_id": "keyword",
+    "tenant_id": "keyword",
+    "truck_id": "keyword",
+    "jurisdiction": "keyword",
+    "jurisdiction_fips": "keyword",
+    "quarter": "keyword",
+    "miles": "double",
+    "taxable_miles": "double",
+    "tax_paid_gallons": "double",
+    "net_taxable_gallons": "double",
+    "segment_start_at": "date",
+    "segment_end_at": "date",
+    "source": "keyword",
+    "adjustment_reason": "text",
+    "adjusted_by": "keyword",
+    "adjusted_at": "date",
+    "updated_at": "date",
+    "created_at": "date"
+  },
+  "kfactor_history": {
+    "adjustment_id": "keyword",
+    "tenant_id": "keyword",
+    "tank_id": "keyword",
+    "customer_id": "keyword",
+    "old_kfactor": "double",
+    "new_kfactor": "double",
+    "suggested_kfactor": "double",
+    "operator_id": "keyword",
+    "variance_percent": "float",
+    "accumulated_hdd": "float",
+    "actual_gallons": "double",
+    "predicted_gallons": "double",
+    "delivery_id": "keyword",
+    "action": "keyword",
+    "notes": "text",
+    "approved_at": "date",
+    "updated_at": "date",
+    "created_at": "date"
+  },
+  "meter_audit_trail": {
+    "audit_id": "keyword",
+    "tenant_id": "keyword",
+    "meter_id": "keyword",
+    "meter_ticket_id": "keyword",
+    "invoice_id": "keyword",
+    "delivery_id": "keyword",
+    "gross_gallons": "double",
+    "net_gallons": "double",
+    "pod_gallons": "double",
+    "variance_pct": "float",
+    "variance_flags": "keyword",
+    "event_type": "keyword",
+    "actor_id": "keyword",
+    "occurred_at": "date",
+    "updated_at": "date",
+    "created_at": "date"
+  },
+  "meter_registry": {
+    "meter_id": "keyword",
+    "tenant_id": "keyword",
+    "meter_number": "keyword",
+    "truck_id": "keyword",
+    "compartment_id": "keyword",
+    "calibration_certificate_number": "keyword",
+    "calibration_date": "date",
+    "calibration_expiry_date": "date",
+    "weights_measures_authority": "keyword",
+    "status": "keyword",
+    "manufacturer": "keyword",
+    "model": "keyword",
+    "serial_number": "keyword",
+    "updated_at": "date",
+    "created_at": "date"
+  },
+  "price_protection_contracts": {
+    "contract_id": "keyword",
+    "tenant_id": "keyword",
+    "customer_id": "keyword",
+    "account_id": "keyword",
+    "product_code": "keyword",
+    "contract_type": "keyword",
+    "start_date": "date",
+    "end_date": "date",
+    "contracted_gallons": "double",
+    "remaining_gallons": "double",
+    "price_cap_cents": "long",
+    "price_floor_cents": "long",
+    "fixed_price_cents": "long",
+    "status": "keyword",
+    "version": "long",
+    "notes": "text",
+    "updated_at": "date",
+    "created_at": "date"
+  },
+  "pricing_rules": {
+    "rule_id": "keyword",
+    "tenant_id": "keyword",
+    "customer_id": "keyword",
+    "account_id": "keyword",
+    "product_code": "keyword",
+    "strategy": "keyword",
+    "posted_price_cents": "long",
+    "margin_cents": "long",
+    "freight_rate_cents_per_mile": "long",
+    "terminal_id": "keyword",
+    "tier_thresholds": {
+      "type": "nested",
+      "properties": {
+        "min_gallons": "double",
+        "max_gallons": "double",
+        "unit_price_cents": "long"
+      }
+    },
+    "priority": "integer",
+    "effective_date": "date",
+    "expiry_date": "date",
+    "status": "keyword",
+    "updated_at": "date",
+    "created_at": "date"
+  },
+  "tax_exemptions": {
+    "exemption_id": "keyword",
+    "tenant_id": "keyword",
+    "customer_id": "keyword",
+    "account_id": "keyword",
+    "exemption_type": "keyword",
+    "certificate_number": "keyword",
+    "letter_suffix": "keyword",
+    "issuing_authority": "keyword",
+    "product_codes": "keyword",
+    "jurisdiction_fips": "keyword",
+    "issued_date": "date",
+    "expiry_date": "date",
+    "status": "keyword",
+    "document_ref": "keyword",
+    "updated_at": "date",
+    "created_at": "date"
+  },
+  "tax_jurisdictions": {
+    "jurisdiction_id": "keyword",
+    "tenant_id": "keyword",
+    "fips_code": "keyword",
+    "jurisdiction_level": "keyword",
+    "jurisdiction_name": "text",
+    "tax_type": "keyword",
+    "product_codes": "keyword",
+    "rate_cents_per_gallon": "long",
+    "effective_date": "date",
+    "expiry_date": "date",
+    "source": "keyword",
+    "updated_at": "date",
+    "created_at": "date"
+  },
+  "terminal_bols": {
+    "bol_id": "keyword",
+    "tenant_id": "keyword",
+    "load_number": "keyword",
+    "product_code": "keyword",
+    "gross_gallons": "double",
+    "net_gallons": "double",
+    "temperature_f": "float",
+    "api_gravity": "float",
+    "supplier_name": "keyword",
+    "terminal_id": "keyword",
+    "terminal_name": "keyword",
+    "driver_id": "keyword",
+    "truck_id": "keyword",
+    "load_plan_id": "keyword",
+    "compartment_id": "keyword",
+    "fuel_purchase_jurisdiction": "keyword",
+    "source": "keyword",
+    "source_format": "keyword",
+    "raw_payload_ref": "keyword",
+    "vcf_variance_pct": "float",
+    "status": "keyword",
+    "rejection_reason": "keyword",
+    "issued_at": "date",
+    "ingested_at": "date",
+    "updated_at": "date",
+    "created_at": "date"
+  },
+  "driver_exceptions": {
+    "exception_id": "keyword",
+    "job_id": "keyword",
+    "exception_type": "keyword",
+    "severity": "keyword",
+    "note": "text",
+    "location": "geo_point",
+    "media_refs": "keyword",
+    "tenant_id": "keyword",
+    "timestamp": "date"
+  },
+  "driver_presence": {
+    "driver_id": "keyword",
+    "tenant_id": "keyword",
+    "status": "keyword",
+    "last_seen": "date",
+    "last_location": "geo_point",
+    "connected_at": "date"
+  },
+  "idempotency_keys": {
+    "idempotency_key": "keyword",
+    "tenant_id": "keyword",
+    "response": {
+      "type": "object",
+      "enabled": false,
+      "dynamic": false
+    },
+    "created_at": "date",
+    "expires_at": "date"
+  },
+  "job_messages": {
+    "message_id": "keyword",
+    "job_id": "keyword",
+    "sender_id": "keyword",
+    "sender_role": "keyword",
+    "body": "text",
+    "timestamp": "date",
+    "tenant_id": "keyword"
+  },
+  "proof_of_delivery": {
+    "pod_id": "keyword",
+    "job_id": "keyword",
+    "order_id": "keyword",
+    "recipient_name": "text",
+    "signature_ref": "keyword",
+    "photo_refs": "keyword",
+    "meter_ticket_ref": "keyword",
+    "signature_url": "keyword",
+    "photo_urls": "keyword",
+    "delivered_gallons": "double",
+    "delivered_gallons_source": "keyword",
+    "delivered_at": "date",
+    "ocr_result_id": "keyword",
+    "ocr_confidence": "double",
+    "ocr_requires_manual_review": "boolean",
+    "ocr_error": "keyword",
+    "geotag": "geo_point",
+    "timestamp": "date",
+    "otp_verified": "boolean",
+    "location_mismatch": "boolean",
+    "status": "keyword",
+    "tenant_id": "keyword",
+    "pod_hash": "keyword",
+    "previous_pod_hash": "keyword",
+    "chain_sequence": "long",
+    "persisted_at": "date"
+  },
+  "fuel_events": {
+    "event_id": "keyword",
+    "station_id": "keyword",
+    "event_type": "keyword",
+    "fuel_type": "keyword",
+    "quantity_liters": "float",
+    "asset_id": "keyword",
+    "operator_id": "keyword",
+    "supplier": "keyword",
+    "delivery_reference": "keyword",
+    "odometer_reading": "float",
+    "tenant_id": "keyword",
+    "event_timestamp": "date",
+    "ingested_at": "date"
+  },
+  "fuel_stations": {
+    "station_id": "keyword",
+    "name": "text",
+    "fuel_type": "keyword",
+    "fuel_grade": "keyword",
+    "capacity_liters": "float",
+    "current_stock_liters": "float",
+    "daily_consumption_rate": "float",
+    "days_until_empty": "float",
+    "stock_level_pct": "float",
+    "alert_threshold_pct": "float",
+    "status": "keyword",
+    "location": "geo_point",
+    "latitude": "float",
+    "longitude": "float",
+    "location_name": "text",
+    "tenant_id": "keyword",
+    "created_at": "date",
+    "updated_at": "date",
+    "last_updated": "date"
+  },
+  "atg_readings": {
+    "reading_id": "keyword",
+    "tenant_id": "keyword",
+    "instance_id": "keyword",
+    "tank_ref": "keyword",
+    "customer_tank_id": "keyword",
+    "station_id": "keyword",
+    "volume_gallons": "double",
+    "water_level_in": "float",
+    "temperature_f": "float",
+    "product_code": "keyword",
+    "reading_at": "date",
+    "retrieved_at": "date",
+    "updated_at": "date",
+    "created_at": "date"
+  },
+  "bill_of_lading": {
+    "bol_id": "keyword",
+    "tenant_id": "keyword",
+    "pod_id": "keyword",
+    "order_id": "keyword",
+    "file_ref": "keyword",
+    "hash": "keyword",
+    "status": "keyword",
+    "fields": {
+      "type": "object",
+      "enabled": true,
+      "dynamic": false
+    },
+    "generated_at": "date",
+    "updated_at": "date",
+    "created_at": "date"
+  },
+  "compartment_cleaning_events": {
+    "cleaning_event_id": "keyword",
+    "tenant_id": "keyword",
+    "compartment_id": "keyword",
+    "truck_id": "keyword",
+    "method": "keyword",
+    "actor_id": "keyword",
+    "notes": "text",
+    "evidence_refs": "keyword",
+    "cleaned_at": "date",
+    "updated_at": "date",
+    "created_at": "date"
+  },
+  "cross_contamination_events": {
+    "event_id": "keyword",
+    "tenant_id": "keyword",
+    "compartment_id": "keyword",
+    "truck_id": "keyword",
+    "previous_product": "keyword",
+    "attempted_product": "keyword",
+    "governing_rule": "keyword",
+    "decision": "keyword",
+    "reason": "keyword",
+    "actor_id": "keyword",
+    "plan_id": "keyword",
+    "timestamp": "date",
+    "updated_at": "date",
+    "created_at": "date"
+  },
+  "customer_tanks": {
+    "customer_tank_id": "keyword",
+    "tenant_id": "keyword",
+    "customer_id": "keyword",
+    "customer_type": "keyword",
+    "fuel_type": "keyword",
+    "fuel_product_code": "keyword",
+    "capacity_gallons": "double",
+    "current_level_gallons": "double",
+    "last_reading_at": "date",
+    "location": "geo_point",
+    "location_lat": "double",
+    "location_lon": "double",
+    "zip_code": "keyword",
+    "k_factor": "double",
+    "use_case": "keyword",
+    "status": "keyword",
+    "updated_at": "date",
+    "created_at": "date"
+  },
+  "depots": {
+    "depot_id": "keyword",
+    "tenant_id": "keyword",
+    "name": "text",
+    "location": "geo_point",
+    "location_lat": "double",
+    "location_lon": "double",
+    "address": "text",
+    "timezone": "keyword",
+    "fuel_types_supported": "keyword",
+    "status": "keyword",
+    "updated_at": "date",
+    "created_at": "date"
+  },
+  "integration_instances": {
+    "instance_id": "keyword",
+    "tenant_id": "keyword",
+    "provider_name": "keyword",
+    "category": "keyword",
+    "status": "keyword",
+    "enabled": "boolean",
+    "credentials_ref": "keyword",
+    "schedule_cron": "keyword",
+    "config": {
+      "type": "object",
+      "enabled": true,
+      "dynamic": false
+    },
+    "last_sync_at": "date",
+    "last_error": "text",
+    "retry_count": "integer",
+    "updated_at": "date",
+    "created_at": "date"
+  },
+  "integration_sync_runs": {
+    "run_id": "keyword",
+    "tenant_id": "keyword",
+    "instance_id": "keyword",
+    "provider_name": "keyword",
+    "operation": "keyword",
+    "started_at": "date",
+    "finished_at": "date",
+    "status": "keyword",
+    "record_counts": {
+      "type": "object",
+      "enabled": true,
+      "dynamic": true
+    },
+    "error_details": "text",
+    "duration_ms": "integer",
+    "updated_at": "date",
+    "created_at": "date"
+  },
+  "meter_ticket_ocr_results": {
+    "ocr_result_id": "keyword",
+    "tenant_id": "keyword",
+    "pod_id": "keyword",
+    "file_ref": "keyword",
+    "extracted_gallons": "double",
+    "confidence": "float",
+    "raw_text": "text",
+    "requires_manual_review": "boolean",
+    "provider": "keyword",
+    "processed_at": "date",
+    "error_details": "text",
+    "updated_at": "date",
+    "created_at": "date"
+  },
+  "mvp_combinable_groups": {
+    "group_id": "keyword",
+    "tenant_id": "keyword",
+    "run_id": "keyword",
+    "members": {
+      "type": "nested",
+      "properties": {
+        "destination_type": "keyword",
+        "destination_id": "keyword",
+        "station_id": "keyword",
+        "customer_tank_id": "keyword",
+        "fuel_grade": "keyword",
+        "product_code": "keyword",
+        "estimated_gallons": "double",
+        "location": "geo_point"
+      }
+    },
+    "fuel_grades": "keyword",
+    "estimated_combined_gallons": "double",
+    "centroid": "geo_point",
+    "generated_at": "date",
+    "updated_at": "date",
+    "created_at": "date"
+  },
+  "mvp_reconciliation": {
+    "reconciliation_id": "keyword",
+    "tenant_id": "keyword",
+    "order_id": "keyword",
+    "plan_id": "keyword",
+    "pod_id": "keyword",
+    "invoice_id": "keyword",
+    "ordered_gallons": "double",
+    "loaded_gallons": "double",
+    "delivered_gallons": "double",
+    "invoiced_gallons": "double",
+    "variance_load_vs_order_pct": "float",
+    "variance_delivered_vs_loaded_pct": "float",
+    "variance_invoiced_vs_delivered_pct": "float",
+    "alert_flags": "keyword",
+    "payment_status": "keyword",
+    "payment_intent_id": "keyword",
+    "generated_at": "date",
+    "updated_at": "date",
+    "created_at": "date"
+  },
+  "rack_prices": {
+    "rack_price_id": "keyword",
+    "tenant_id": "keyword",
+    "terminal_id": "keyword",
+    "product_code": "keyword",
+    "price_per_gallon_usd": "double",
+    "branded_flag": "boolean",
+    "supplier_brand": "keyword",
+    "provider": "keyword",
+    "effective_at": "date",
+    "retrieved_at": "date",
+    "updated_at": "date",
+    "created_at": "date"
+  },
+  "sourcing_recommendations": {
+    "recommendation_id": "keyword",
+    "request_id": "keyword",
+    "tenant_id": "keyword",
+    "truck_id": "keyword",
+    "run_id": "keyword",
+    "product_code": "keyword",
+    "volume_gallons": "double",
+    "origin": "geo_point",
+    "origin_lat": "double",
+    "origin_lon": "double",
+    "candidates": {
+      "type": "nested",
+      "properties": {
+        "terminal_id": "keyword",
+        "price_per_gallon_usd": "double",
+        "branded_flag": "boolean",
+        "contract_id": "keyword",
+        "avg_wait_minutes": "float",
+        "distance_km_from_start": "float",
+        "score": "float",
+        "reasons": "keyword",
+        "wait_warning": "boolean"
+      }
+    },
+    "rack_price_fallback": "boolean",
+    "wait_warning_terminal_ids": "keyword",
+    "generated_at": "date",
+    "updated_at": "date",
+    "created_at": "date"
+  },
+  "storm_mode_overrides": {
+    "override_id": "keyword",
+    "tenant_id": "keyword",
+    "action": "keyword",
+    "reason": "text",
+    "actor_id": "keyword",
+    "expires_at": "date",
+    "updated_at": "date",
+    "created_at": "date"
+  },
+  "storm_road_restrictions": {
+    "restriction_id": "keyword",
+    "tenant_id": "keyword",
+    "polygon": "geo_shape",
+    "effective_from": "date",
+    "effective_to": "date",
+    "source": "keyword",
+    "severity": "keyword",
+    "reason": "text",
+    "updated_at": "date",
+    "created_at": "date"
+  },
+  "supplier_contracts": {
+    "contract_id": "keyword",
+    "tenant_id": "keyword",
+    "supplier_name": "keyword",
+    "product_code": "keyword",
+    "preferred_terminal_ids": "keyword",
+    "contract_price_per_gallon_usd": "double",
+    "branded_required": "boolean",
+    "minimum_lift_gallons_per_month": "double",
+    "rebate_terms": "text",
+    "effective_from": "date",
+    "effective_to": "date",
+    "status": "keyword",
+    "updated_at": "date",
+    "created_at": "date"
+  },
+  "tenant_credentials": {
+    "ref": "keyword",
+    "tenant_id": "keyword",
+    "key": "keyword",
+    "provider_name": "keyword",
+    "wrapped_dek": "binary",
+    "ciphertext": "binary",
+    "kms_key_id": "keyword",
+    "algorithm": "keyword",
+    "rotated_at": "date",
+    "updated_at": "date",
+    "created_at": "date"
+  },
+  "terminals": {
+    "terminal_id": "keyword",
+    "tenant_id": "keyword",
+    "name": "text",
+    "operator": "keyword",
+    "location": "geo_point",
+    "location_lat": "double",
+    "location_lon": "double",
+    "address": "text",
+    "timezone": "keyword",
+    "operating_hours": {
+      "type": "nested",
+      "properties": {
+        "day_of_week": "keyword",
+        "open": "keyword",
+        "close": "keyword"
+      }
+    },
+    "supported_products": "keyword",
+    "branded": "boolean",
+    "supplier_brand": "keyword",
+    "status": "keyword",
+    "updated_at": "date",
+    "created_at": "date"
+  },
+  "terminal_wait_reports": {
+    "report_id": "keyword",
+    "tenant_id": "keyword",
+    "terminal_id": "keyword",
+    "wait_minutes": "float",
+    "source": "keyword",
+    "reporter_id": "keyword",
+    "truck_id": "keyword",
+    "observed_at": "date",
+    "retrieved_at": "date",
+    "notes": "text",
+    "updated_at": "date",
+    "created_at": "date"
+  },
+  "truck_telemetry": {
+    "telemetry_id": "keyword",
+    "tenant_id": "keyword",
+    "truck_id": "keyword",
+    "driver_id": "keyword",
+    "location": "geo_point",
+    "location_lat": "double",
+    "location_lon": "double",
+    "speed_kph": "float",
+    "engine_on": "boolean",
+    "odometer_km": "double",
+    "hos_status": "keyword",
+    "recorded_at": "date",
+    "retrieved_at": "date",
+    "updated_at": "date",
+    "created_at": "date"
+  },
+  "weather_alerts": {
+    "alert_id": "keyword",
+    "tenant_id": "keyword",
+    "region_code": "keyword",
+    "alert_type": "keyword",
+    "severity": "keyword",
+    "headline": "text",
+    "description": "text",
+    "expected_start_at": "date",
+    "expected_end_at": "date",
+    "affected_zip_codes": "keyword",
+    "source": "keyword",
+    "ingested_at": "date",
+    "activation_status": "keyword",
+    "updated_at": "date",
+    "created_at": "date"
+  },
+  "weather_observations": {
+    "tenant_id": "keyword",
+    "zip_code": "keyword",
+    "date": "date",
+    "avg_temp_f": "float",
+    "hdd": "float",
+    "provider": "keyword",
+    "retrieved_at": "date",
+    "updated_at": "date",
+    "created_at": "date"
+  },
+  "drivers_current": {
+    "driver_id": "keyword",
+    "tenant_id": "keyword",
+    "driver_name": "text",
+    "phone": "keyword",
+    "status": "keyword",
+    "availability": "keyword",
+    "assigned_truck_id": "keyword",
+    "cdl_class": "keyword",
+    "hazmat_endorsement": "boolean",
+    "medical_card_expiry": "date",
+    "current_location": "geo_point",
+    "last_seen": "date",
+    "active_order_count": "integer",
+    "completed_today": "integer",
+    "last_event_timestamp": "date",
+    "source_schema_version": "keyword",
+    "trace_id": "keyword",
+    "created_at": "date",
+    "updated_at": "date",
+    "intake_metadata": "unknown"
+  },
+  "fuel_orders_current": {
+    "order_id": "keyword",
+    "tenant_id": "keyword",
+    "customer_id": "keyword",
+    "customer_name": "text",
+    "customer_phone": "keyword",
+    "customer_email": "keyword",
+    "ship_to_address": "text",
+    "ship_to_lat": "double",
+    "ship_to_lon": "double",
+    "ship_to_geo": "geo_point",
+    "customer_tank_id": "keyword",
+    "product_code": "keyword",
+    "gallons_requested": "double",
+    "fill_to_full": "boolean",
+    "call_type": "keyword",
+    "delivery_window_start": "date",
+    "delivery_window_end": "date",
+    "hold_reason": "keyword",
+    "po_number": "keyword",
+    "special_instructions": "text",
+    "intake_channel": "keyword",
+    "intake_channel_id": "keyword",
+    "intake_metadata": "unknown",
+    "status": "keyword",
+    "assigned_driver_id": "keyword",
+    "assigned_run_id": "keyword",
+    "legacy_origin_snapshot": "text",
+    "source_schema_version": "keyword",
+    "trace_id": "keyword",
+    "created_at": "date",
+    "updated_at": "date",
+    "last_event_timestamp": "date"
+  },
+  "fuel_order_events": {
+    "event_id": "keyword",
+    "order_id": "keyword",
+    "tenant_id": "keyword",
+    "event_type": "keyword",
+    "event_payload": {
+      "type": "nested",
+      "properties": {}
+    },
+    "event_timestamp": "date",
+    "ingested_at": "date",
+    "source_schema_version": "keyword",
+    "trace_id": "keyword",
+    "location": "geo_point",
+    "intake_metadata": "unknown"
+  },
+  "intake_channels": {
+    "channel_id": "keyword",
+    "tenant_id": "keyword",
+    "channel_type": "keyword",
+    "display_name": "text",
+    "hmac_secret_ref": "keyword",
+    "supported_schema_versions": "keyword",
+    "rate_limit_per_minute": "integer",
+    "secret_version": "integer",
+    "enabled": "boolean",
+    "created_at": "date",
+    "updated_at": "date",
+    "intake_metadata": "unknown"
+  },
+  "pending_legacy_mirrors": {
+    "entry_id": "keyword",
+    "tenant_id": "keyword",
+    "entity_type": "keyword",
+    "entity_id": "keyword",
+    "failure_reason": "text",
+    "retry_count": "integer",
+    "next_retry_at": "date",
+    "created_at": "date",
+    "updated_at": "date",
+    "intake_metadata": "unknown"
+  },
+  "job_audit_timeline": {
+    "timeline_event_id": "keyword",
+    "job_id": "keyword",
+    "event_type": "keyword",
+    "actor_type": "keyword",
+    "actor_id": "keyword",
+    "timestamp": "date",
+    "payload": {
+      "type": "object",
+      "enabled": false,
+      "dynamic": false
+    },
+    "tenant_id": "keyword"
+  },
+  "dead_letter_queue": {
+    "notification_id": "keyword",
+    "original_notification": {
+      "type": "object",
+      "enabled": false,
+      "dynamic": false
+    },
+    "failure_reasons": "text",
+    "moved_at": "date",
+    "tenant_id": "keyword"
+  },
+  "notifications_current": {
+    "notification_id": "keyword",
+    "notification_type": "keyword",
+    "channel": "keyword",
+    "recipient_reference": "keyword",
+    "recipient_name": "text",
+    "subject": "text",
+    "message_body": "text",
+    "related_entity_type": "keyword",
+    "related_entity_id": "keyword",
+    "delivery_status": "keyword",
+    "created_at": "date",
+    "updated_at": "date",
+    "sent_at": "date",
+    "delivered_at": "date",
+    "failed_at": "date",
+    "failure_reason": "text",
+    "retry_count": "integer",
+    "proposal_id": "keyword",
+    "provider_message_id": "keyword",
+    "scheduled_retry_at": "date",
+    "tenant_id": "keyword",
+    "storm_mode_active": "boolean",
+    "weather_alert_ref": {
+      "type": "object",
+      "properties": {
+        "alert_id": "keyword",
+        "alert_type": "keyword",
+        "severity": "keyword",
+        "headline": "text",
+        "source": "keyword",
+        "region_code": "keyword",
+        "expected_start_at": "date",
+        "expected_end_at": "date",
+        "affected_zip_codes": "keyword"
+      },
+      "enabled": true
+    },
+    "storm_variant_reason": "keyword"
+  },
+  "notification_preferences": {
+    "preference_id": "keyword",
+    "tenant_id": "keyword",
+    "customer_id": "keyword",
+    "customer_name": "text",
+    "channels": {
+      "type": "object",
+      "enabled": false,
+      "dynamic": false
+    },
+    "event_preferences": {
+      "type": "nested",
+      "properties": {
+        "event_type": "keyword",
+        "enabled_channels": "keyword"
+      }
+    },
+    "template_opt_outs": "keyword",
+    "created_at": "date",
+    "updated_at": "date"
+  },
+  "notification_rules": {
+    "rule_id": "keyword",
+    "tenant_id": "keyword",
+    "event_type": "keyword",
+    "enabled": "boolean",
+    "default_channels": "keyword",
+    "template_id": "keyword",
+    "created_at": "date",
+    "updated_at": "date"
+  },
+  "notification_templates": {
+    "template_id": "keyword",
+    "tenant_id": "keyword",
+    "event_type": "keyword",
+    "channel": "keyword",
+    "subject_template": "text",
+    "body_template": "text",
+    "placeholders": "keyword",
+    "created_at": "date",
+    "updated_at": "date"
+  },
+  "jobs_current": {
+    "job_id": "keyword",
+    "job_type": "keyword",
+    "status": "keyword",
+    "tenant_id": "keyword",
+    "asset_assigned": "keyword",
+    "origin": "text",
+    "destination": "text",
+    "origin_location": "geo_point",
+    "destination_location": "geo_point",
+    "scheduled_time": "date",
+    "estimated_arrival": "date",
+    "started_at": "date",
+    "completed_at": "date",
+    "created_at": "date",
+    "updated_at": "date",
+    "created_by": "keyword",
+    "priority": "keyword",
+    "delayed": "boolean",
+    "delay_duration_minutes": "integer",
+    "failure_reason": "text",
+    "notes": "text",
+    "cargo_manifest": {
+      "type": "nested",
+      "properties": {
+        "item_id": "keyword",
+        "description": "text",
+        "weight_kg": "float",
+        "container_number": "keyword",
+        "seal_number": "keyword",
+        "item_status": "keyword"
+      }
+    },
+    "readiness_flags": {
+      "type": "object",
+      "enabled": false,
+      "dynamic": false
+    }
+  },
+  "job_events": {
+    "event_id": "keyword",
+    "job_id": "keyword",
+    "event_type": "keyword",
+    "tenant_id": "keyword",
+    "actor_id": "keyword",
+    "event_timestamp": "date",
+    "event_payload": {
+      "type": "object",
+      "enabled": false,
+      "dynamic": false
+    }
+  },
+  "tenant_job_policies": {
+    "tenant_id": "keyword",
+    "pod_required": "boolean",
+    "pod_radius_meters": "integer",
+    "otp_required": "boolean",
+    "nudge_timeout_minutes": "integer"
+  },
+  "inventory_events": {
+    "event_id": "keyword",
+    "item_id": "keyword",
+    "quantity_change": "integer",
+    "quantity_before": "integer",
+    "quantity_after": "integer",
+    "reason": "keyword",
+    "reference_id": "keyword",
+    "notes": "text",
+    "actor_id": "keyword",
+    "status_before": "keyword",
+    "status_after": "keyword",
+    "tenant_id": "keyword",
+    "event_timestamp": "date",
+    "created_at": "date",
+    "updated_at": "date"
+  },
+  "inventory": {
+    "item_id": "keyword",
+    "name": "text",
+    "category": "keyword",
+    "quantity": "integer",
+    "unit": "keyword",
+    "min_threshold": "integer",
+    "max_capacity": "integer",
+    "location": "text",
+    "status": "keyword",
+    "unit_cost": "float",
+    "supplier": "text",
+    "compatible_assets": "keyword",
+    "last_restocked": "date",
+    "tenant_id": "keyword",
+    "created_at": "date",
+    "updated_at": "date"
+  },
+  "restock_requests": {
+    "request_id": "keyword",
+    "item_category": "keyword",
+    "compatible_asset_type": "keyword",
+    "requested_quantity": "integer",
+    "priority": "keyword",
+    "status": "keyword",
+    "requested_by": "keyword",
+    "depot_location": "text",
+    "tenant_id": "keyword",
+    "created_at": "date",
+    "fulfilled_at": "date"
+  }
+}

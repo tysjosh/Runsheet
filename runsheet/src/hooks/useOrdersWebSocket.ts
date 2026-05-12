@@ -8,6 +8,7 @@
  */
 
 import { useCallback, useMemo, useState } from "react";
+import { getAuthToken } from "../utils/auth";
 import type { FuelOrder } from "../services/ordersApi";
 import {
   useWebSocket,
@@ -19,7 +20,22 @@ import {
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
 const WS_BASE = API_BASE_URL.replace(/\/api$/, "").replace("http", "ws");
-const ORDERS_WS_URL = `${WS_BASE}/ws/orders`;
+const ORDERS_WS_BASE_URL = `${WS_BASE}/ws/orders`;
+
+/**
+ * Build WebSocket URL with JWT token for authentication
+ */
+async function buildOrdersWebSocketUrl(subscriptions: OrdersEventType[]): Promise<string> {
+  const token = await getAuthToken();
+  if (!token) return ORDERS_WS_BASE_URL;
+  
+  const params = new URLSearchParams();
+  params.set("token", token);
+  subscriptions.forEach((sub) => {
+    params.append("subscribe", sub);
+  });
+  return `${ORDERS_WS_BASE_URL}?${params.toString()}`;
+}
 
 /**
  * Event types the orders WebSocket can deliver
@@ -89,12 +105,10 @@ export interface UseOrdersWebSocketReturn {
  * for order events. Uses exponential backoff (1s initial, 30s max) for
  * auto-reconnection.
  *
- * @param tenantId - The tenant ID for scoping the WebSocket connection
  * @param options - Configuration options
  * @returns Orders WebSocket state and control functions
  */
 export function useOrdersWebSocket(
-  tenantId: string,
   options: OrdersWebSocketOptions = {},
 ): UseOrdersWebSocketReturn {
   const [lastOrderUpdate, setLastOrderUpdate] = useState<FuelOrder | null>(
@@ -154,16 +168,6 @@ export function useOrdersWebSocket(
     options.onConnectionStatusChange?.("disconnected");
   }, [options]);
 
-  // Build the WebSocket URL with subscription query params and tenant
-  const wsUrl = useMemo(() => {
-    const params = new URLSearchParams();
-    params.set("tenant_id", tenantId);
-    subscriptions.forEach((sub) => {
-      params.append("subscribe", sub);
-    });
-    return `${ORDERS_WS_URL}?${params.toString()}`;
-  }, [tenantId, subscriptions]);
-
   const wsOptions: WebSocketOptions = useMemo(
     () => ({
       autoConnect: options.autoConnect ?? true,
@@ -171,11 +175,12 @@ export function useOrdersWebSocket(
       maxReconnectDelay: 30000,
       maxReconnectAttempts: 0,
       backoffMultiplier: 2,
+      getUrl: () => buildOrdersWebSocketUrl(subscriptions), // Refresh token on each connection
       onConnect: handleConnect,
       onDisconnect: handleDisconnect,
       onMessage: handleMessage,
     }),
-    [handleConnect, handleDisconnect, handleMessage, options],
+    [subscriptions, handleConnect, handleDisconnect, handleMessage, options],
   );
 
   const {
@@ -186,7 +191,7 @@ export function useOrdersWebSocket(
     connect,
     disconnect,
     send,
-  } = useWebSocket(wsUrl, wsOptions);
+  } = useWebSocket("", wsOptions);
 
   return {
     state,

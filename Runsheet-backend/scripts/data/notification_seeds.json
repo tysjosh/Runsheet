@@ -1,0 +1,325 @@
+{
+  "notifications_current": [
+    {
+      "notification_id": "NOTIF-001",
+      "notification_type": "delivery_scheduled",
+      "channel": "sms",
+      "recipient_reference": "+1-555-0101",
+      "recipient_name": "Acme Fuel Distribution",
+      "subject": "Delivery Scheduled",
+      "message_body": "Your fuel delivery is scheduled for tomorrow at 10:00 AM. Order #ORD-0001. Reply CONFIRM to acknowledge.",
+      "related_entity_type": "order",
+      "related_entity_id": "ORD-0001",
+      "delivery_status": "delivered",
+      "sent_at": "2026-05-10T15:30:00Z",
+      "delivered_at": "2026-05-10T15:30:05Z",
+      "failed_at": null,
+      "failure_reason": null,
+      "retry_count": 0,
+      "provider_message_id": "twilio-msg-abc123",
+      "scheduled_retry_at": null,
+      "storm_mode_active": false,
+      "weather_alert_ref": null,
+      "storm_variant_reason": null
+    },
+    {
+      "notification_id": "NOTIF-002",
+      "notification_type": "delivery_completed",
+      "channel": "email",
+      "recipient_reference": "billing@metro.gov",
+      "recipient_name": "Metro Transit Authority",
+      "subject": "Delivery Completed - Order #ORD-0003",
+      "message_body": "Your fuel delivery has been completed. 5,000 gallons of Diesel #2 delivered. POD attached.",
+      "related_entity_type": "order",
+      "related_entity_id": "ORD-0003",
+      "delivery_status": "delivered",
+      "sent_at": "2026-05-09T14:20:00Z",
+      "delivered_at": "2026-05-09T14:20:12Z",
+      "failed_at": null,
+      "failure_reason": null,
+      "retry_count": 0,
+      "provider_message_id": "sendgrid-msg-xyz789",
+      "scheduled_retry_at": null,
+      "storm_mode_active": false,
+      "weather_alert_ref": null,
+      "storm_variant_reason": null
+    },
+    {
+      "notification_id": "NOTIF-003",
+      "notification_type": "low_tank_alert",
+      "channel": "sms",
+      "recipient_reference": "+1-555-0202",
+      "recipient_name": "Green Energy Co",
+      "subject": "Low Tank Alert",
+      "message_body": "ALERT: Tank #TANK-005 is at 15% capacity (300 gallons remaining). Estimated 2 days until empty.",
+      "related_entity_type": "tank",
+      "related_entity_id": "TANK-005",
+      "delivery_status": "delivered",
+      "sent_at": "2026-05-11T08:00:00Z",
+      "delivered_at": "2026-05-11T08:00:03Z",
+      "failed_at": null,
+      "failure_reason": null,
+      "retry_count": 0,
+      "provider_message_id": "twilio-msg-def456",
+      "scheduled_retry_at": null,
+      "storm_mode_active": false,
+      "weather_alert_ref": null,
+      "storm_variant_reason": null
+    },
+    {
+      "notification_id": "NOTIF-004",
+      "notification_type": "delivery_delayed",
+      "channel": "sms",
+      "recipient_reference": "+1-555-0303",
+      "recipient_name": "City Fleet Services",
+      "subject": "Delivery Delayed",
+      "message_body": "WEATHER ALERT: Your delivery scheduled for today has been delayed due to severe weather. New ETA: Tomorrow 2:00 PM. Stay safe!",
+      "related_entity_type": "order",
+      "related_entity_id": "ORD-0007",
+      "delivery_status": "delivered",
+      "sent_at": "2026-05-08T06:30:00Z",
+      "delivered_at": "2026-05-08T06:30:04Z",
+      "failed_at": null,
+      "failure_reason": null,
+      "retry_count": 0,
+      "provider_message_id": "twilio-msg-ghi789",
+      "scheduled_retry_at": null,
+      "storm_mode_active": true,
+      "weather_alert_ref": {
+        "alert_id": "ALERT-001",
+        "alert_type": "severe_thunderstorm",
+        "severity": "warning",
+        "headline": "Severe Thunderstorm Warning",
+        "source": "nws",
+        "region_code": "TX-DFW",
+        "expected_start_at": "2026-05-08T05:00:00Z",
+        "expected_end_at": "2026-05-08T18:00:00Z",
+        "affected_zip_codes": ["75201", "75202", "75203"]
+      },
+      "storm_variant_reason": "severe_weather_active"
+    },
+    {
+      "notification_id": "NOTIF-005",
+      "notification_type": "invoice_ready",
+      "channel": "email",
+      "recipient_reference": "accounts@greenenergy.com",
+      "recipient_name": "Green Energy Co",
+      "subject": "Invoice Ready - INV-2026-0005",
+      "message_body": "Your invoice INV-2026-0005 for $3,450.00 is ready. Due date: June 15, 2026. View invoice: https://portal.runsheet.com/invoices/INV-0005",
+      "related_entity_type": "invoice",
+      "related_entity_id": "INV-0005",
+      "delivery_status": "delivered",
+      "sent_at": "2026-05-10T17:00:00Z",
+      "delivered_at": "2026-05-10T17:00:08Z",
+      "failed_at": null,
+      "failure_reason": null,
+      "retry_count": 0,
+      "provider_message_id": "sendgrid-msg-jkl012",
+      "scheduled_retry_at": null,
+      "storm_mode_active": false,
+      "weather_alert_ref": null,
+      "storm_variant_reason": null
+    },
+    {
+      "notification_id": "NOTIF-006",
+      "notification_type": "delivery_scheduled",
+      "channel": "sms",
+      "recipient_reference": "+1-555-0404",
+      "recipient_name": "Industrial Logistics",
+      "subject": "Delivery Scheduled",
+      "message_body": "Your fuel delivery is scheduled for May 12 at 9:00 AM. Order #ORD-0010.",
+      "related_entity_type": "order",
+      "related_entity_id": "ORD-0010",
+      "delivery_status": "failed",
+      "sent_at": "2026-05-11T10:00:00Z",
+      "delivered_at": null,
+      "failed_at": "2026-05-11T10:00:15Z",
+      "failure_reason": "Invalid phone number",
+      "retry_count": 2,
+      "provider_message_id": null,
+      "scheduled_retry_at": "2026-05-11T11:00:00Z",
+      "storm_mode_active": false,
+      "weather_alert_ref": null,
+      "storm_variant_reason": null
+    }
+  ],
+  "notification_preferences": [
+    {
+      "preference_id": "PREF-001",
+      "customer_id": "CUST-001",
+      "customer_name": "Acme Fuel Distribution",
+      "channels": {
+        "sms": {
+          "enabled": true,
+          "phone": "+1-555-0101"
+        },
+        "email": {
+          "enabled": true,
+          "address": "acme@fuel.com"
+        }
+      },
+      "event_preferences": [
+        {
+          "event_type": "delivery_scheduled",
+          "enabled_channels": ["sms", "email"]
+        },
+        {
+          "event_type": "delivery_completed",
+          "enabled_channels": ["email"]
+        },
+        {
+          "event_type": "low_tank_alert",
+          "enabled_channels": ["sms"]
+        },
+        {
+          "event_type": "invoice_ready",
+          "enabled_channels": ["email"]
+        }
+      ],
+      "template_opt_outs": []
+    },
+    {
+      "preference_id": "PREF-002",
+      "customer_id": "CUST-002",
+      "customer_name": "Metro Transit Authority",
+      "channels": {
+        "sms": {
+          "enabled": false,
+          "phone": null
+        },
+        "email": {
+          "enabled": true,
+          "address": "billing@metro.gov"
+        }
+      },
+      "event_preferences": [
+        {
+          "event_type": "delivery_scheduled",
+          "enabled_channels": ["email"]
+        },
+        {
+          "event_type": "delivery_completed",
+          "enabled_channels": ["email"]
+        },
+        {
+          "event_type": "invoice_ready",
+          "enabled_channels": ["email"]
+        }
+      ],
+      "template_opt_outs": ["marketing"]
+    },
+    {
+      "preference_id": "PREF-003",
+      "customer_id": "CUST-003",
+      "customer_name": "Green Energy Co",
+      "channels": {
+        "sms": {
+          "enabled": true,
+          "phone": "+1-555-0202"
+        },
+        "email": {
+          "enabled": true,
+          "address": "accounts@greenenergy.com"
+        }
+      },
+      "event_preferences": [
+        {
+          "event_type": "delivery_scheduled",
+          "enabled_channels": ["sms"]
+        },
+        {
+          "event_type": "delivery_completed",
+          "enabled_channels": ["email"]
+        },
+        {
+          "event_type": "low_tank_alert",
+          "enabled_channels": ["sms", "email"]
+        },
+        {
+          "event_type": "delivery_delayed",
+          "enabled_channels": ["sms"]
+        }
+      ],
+      "template_opt_outs": []
+    }
+  ],
+  "notification_templates": [
+    {
+      "template_id": "TMPL-001",
+      "event_type": "delivery_scheduled",
+      "channel": "sms",
+      "subject_template": "Delivery Scheduled",
+      "body_template": "Your fuel delivery is scheduled for {{delivery_date}} at {{delivery_time}}. Order #{{order_id}}. Reply CONFIRM to acknowledge.",
+      "placeholders": ["delivery_date", "delivery_time", "order_id"]
+    },
+    {
+      "template_id": "TMPL-002",
+      "event_type": "delivery_completed",
+      "channel": "email",
+      "subject_template": "Delivery Completed - Order #{{order_id}}",
+      "body_template": "Your fuel delivery has been completed. {{quantity}} gallons of {{product_name}} delivered. POD attached.",
+      "placeholders": ["order_id", "quantity", "product_name"]
+    },
+    {
+      "template_id": "TMPL-003",
+      "event_type": "low_tank_alert",
+      "channel": "sms",
+      "subject_template": "Low Tank Alert",
+      "body_template": "ALERT: Tank #{{tank_id}} is at {{level_pct}}% capacity ({{gallons_remaining}} gallons remaining). Estimated {{days_until_empty}} days until empty.",
+      "placeholders": ["tank_id", "level_pct", "gallons_remaining", "days_until_empty"]
+    },
+    {
+      "template_id": "TMPL-004",
+      "event_type": "delivery_delayed",
+      "channel": "sms",
+      "subject_template": "Delivery Delayed",
+      "body_template": "WEATHER ALERT: Your delivery scheduled for {{original_date}} has been delayed due to {{reason}}. New ETA: {{new_eta}}. Stay safe!",
+      "placeholders": ["original_date", "reason", "new_eta"]
+    },
+    {
+      "template_id": "TMPL-005",
+      "event_type": "invoice_ready",
+      "channel": "email",
+      "subject_template": "Invoice Ready - {{invoice_number}}",
+      "body_template": "Your invoice {{invoice_number}} for ${{amount}} is ready. Due date: {{due_date}}. View invoice: {{invoice_url}}",
+      "placeholders": ["invoice_number", "amount", "due_date", "invoice_url"]
+    }
+  ],
+  "notification_rules": [
+    {
+      "rule_id": "RULE-001",
+      "event_type": "delivery_scheduled",
+      "enabled": true,
+      "default_channels": ["sms", "email"],
+      "template_id": "TMPL-001"
+    },
+    {
+      "rule_id": "RULE-002",
+      "event_type": "delivery_completed",
+      "enabled": true,
+      "default_channels": ["email"],
+      "template_id": "TMPL-002"
+    },
+    {
+      "rule_id": "RULE-003",
+      "event_type": "low_tank_alert",
+      "enabled": true,
+      "default_channels": ["sms"],
+      "template_id": "TMPL-003"
+    },
+    {
+      "rule_id": "RULE-004",
+      "event_type": "delivery_delayed",
+      "enabled": true,
+      "default_channels": ["sms"],
+      "template_id": "TMPL-004"
+    },
+    {
+      "rule_id": "RULE-005",
+      "event_type": "invoice_ready",
+      "enabled": true,
+      "default_channels": ["email"],
+      "template_id": "TMPL-005"
+    }
+  ]
+}

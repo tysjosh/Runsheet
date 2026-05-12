@@ -12,6 +12,7 @@
  */
 
 import { useCallback, useMemo, useState } from "react";
+import { getAuthToken } from "../utils/auth";
 import type { ActivityLogEntry, ApprovalEntry } from "../services/agentApi";
 import {
   useWebSocket,
@@ -24,6 +25,14 @@ const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
 const WS_BASE = API_BASE_URL.replace(/\/api$/, "").replace("http", "ws");
 const AGENT_WS_URL = `${WS_BASE}/ws/agent-activity`;
+
+/**
+ * Build WebSocket URL with JWT token for authentication
+ */
+async function buildAgentWebSocketUrl(): Promise<string> {
+  const token = await getAuthToken();
+  return token ? `${AGENT_WS_URL}?token=${encodeURIComponent(token)}` : AGENT_WS_URL;
+}
 
 /**
  * Event types the agent activity WebSocket can deliver
@@ -194,6 +203,7 @@ export function useAgentWebSocket(
       maxReconnectDelay: 30000,
       maxReconnectAttempts: 0, // Infinite attempts
       backoffMultiplier: 2,
+      getUrl: buildAgentWebSocketUrl, // Refresh token on each connection
       onConnect: handleConnect,
       onDisconnect: handleDisconnect,
       onMessage: handleMessage,
@@ -210,7 +220,7 @@ export function useAgentWebSocket(
     error,
     connect,
     disconnect,
-  } = useWebSocket(AGENT_WS_URL, wsOptions);
+  } = useWebSocket("", wsOptions);
 
   return {
     state,

@@ -9,7 +9,8 @@
  *   SHALL automatically attempt reconnection with exponential backoff
  */
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { getAuthToken } from "../utils/auth";
 import {
   useWebSocket,
   type WebSocketOptions,
@@ -19,7 +20,15 @@ import {
 // API base URL for WebSocket
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
-const WS_URL = `${API_BASE_URL.replace("http", "ws")}/fleet/live`;
+
+/**
+ * Build WebSocket URL with JWT token for authentication
+ */
+async function buildFleetWebSocketUrl(): Promise<string> {
+  const baseWsUrl = `${API_BASE_URL.replace("http", "ws")}/fleet/live`;
+  const token = await getAuthToken();
+  return token ? `${baseWsUrl}?token=${encodeURIComponent(token)}` : baseWsUrl;
+}
 
 /**
  * Message types from the backend WebSocket
@@ -208,6 +217,7 @@ export function useFleetWebSocket(
       maxReconnectDelay: 30000, // Max 30 seconds
       maxReconnectAttempts: 0, // Infinite attempts
       backoffMultiplier: 2, // Double each time
+      getUrl: buildFleetWebSocketUrl, // Refresh token on each connection
       onConnect: handleConnect,
       onDisconnect: handleDisconnect,
       onMessage: handleMessage,
@@ -217,7 +227,7 @@ export function useFleetWebSocket(
     [handleConnect, handleDisconnect, handleMessage, options],
   );
 
-  // Use the base WebSocket hook
+  // Use the base WebSocket hook with empty URL (getUrl will provide it)
   const {
     state,
     isConnected,
@@ -226,7 +236,7 @@ export function useFleetWebSocket(
     error,
     connect,
     disconnect,
-  } = useWebSocket(WS_URL, wsOptions);
+  } = useWebSocket("", wsOptions);
 
   return {
     state,

@@ -18,7 +18,8 @@
  *   navigating away.
  */
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { getAuthToken } from "../utils/auth";
 import type { Notification } from "../services/notificationApi";
 import {
   useWebSocket,
@@ -31,6 +32,14 @@ const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
 const WS_BASE = API_BASE_URL.replace(/\/api$/, "").replace("http", "ws");
 const NOTIFICATION_WS_URL = `${WS_BASE}/ws/notifications`;
+
+/**
+ * Build WebSocket URL with JWT token for authentication
+ */
+async function buildNotificationWebSocketUrl(): Promise<string> {
+  const token = await getAuthToken();
+  return token ? `${NOTIFICATION_WS_URL}?token=${encodeURIComponent(token)}` : NOTIFICATION_WS_URL;
+}
 
 /**
  * Event types the notification WebSocket can deliver
@@ -74,8 +83,6 @@ export interface NotificationStatusChangedEvent {
  * Options for the notification WebSocket hook
  */
 export interface NotificationWebSocketOptions {
-  /** JWT token for authentication (appended as query param) */
-  token?: string;
   /** Whether to automatically connect on mount */
   autoConnect?: boolean;
   /** Callback when a notification_created event is received */
@@ -131,7 +138,6 @@ export interface UseNotificationWebSocketReturn {
  * @example
  * ```tsx
  * const { isConnected, lastNotificationCreated, lastStatusChanged } = useNotificationWebSocket({
- *   token: 'my-jwt-token',
  *   onNotificationCreated: (event) => {
  *     console.log(`New notification: ${event.notification.notification_id}`);
  *   },
@@ -199,16 +205,6 @@ export function useNotificationWebSocket(
     setConnectionStatus(null);
   }, [options]);
 
-  // Build the WebSocket URL with JWT token query param
-  const wsUrl = useMemo(() => {
-    if (options.token) {
-      const params = new URLSearchParams();
-      params.set("token", options.token);
-      return `${NOTIFICATION_WS_URL}?${params.toString()}`;
-    }
-    return NOTIFICATION_WS_URL;
-  }, [options.token]);
-
   // Configure the base WebSocket hook with exponential backoff
   const wsOptions: WebSocketOptions = useMemo(
     () => ({
@@ -217,6 +213,7 @@ export function useNotificationWebSocket(
       maxReconnectDelay: 30000, // 30 seconds
       maxReconnectAttempts: 0, // Infinite attempts
       backoffMultiplier: 2,
+      getUrl: buildNotificationWebSocketUrl, // Refresh token on each connection
       onConnect: handleConnect,
       onDisconnect: handleDisconnect,
       onMessage: handleMessage,
@@ -235,7 +232,7 @@ export function useNotificationWebSocket(
     connect,
     disconnect,
     send,
-  } = useWebSocket(wsUrl, wsOptions);
+  } = useWebSocket("", wsOptions);
 
   return {
     state,
