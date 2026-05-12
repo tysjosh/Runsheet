@@ -232,7 +232,7 @@ export default function OrdersPage({
     [page],
   );
 
-  useOrdersWebSocket(resolvedTenantId, {
+  useOrdersWebSocket({
     onOrderPlaced: handleOrderUpdate,
     onOrderStatusChanged: handleOrderUpdate,
     onOrderAssigned: handleOrderUpdate,

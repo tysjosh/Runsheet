@@ -664,7 +664,7 @@ export default function LandingPage() {
   const navLinks = ["Platform", "Solutions", "Customers", "Pricing"];
 
   return (
-    <div className="min-h-screen bg-white font-[family-name:var(--font-geist-sans)]">
+    <div className="min-h-screen bg-white">
       <MarqueeStyles />
 
       {/* ═══════════════════════════════════════════════════════════════════

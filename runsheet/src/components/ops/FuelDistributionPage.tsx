@@ -2066,12 +2066,9 @@ function PlansTab() {
   const { toasts, addToast, dismissToast } = useToasts();
 
   // WebSocket for real-time execution updates
-  const { lastUpdate: executionUpdate } = usePlanExecutionSocket(
-    activeTenantId(),
-    {
-      autoConnect: true,
-    },
-  );
+  const { lastUpdate: executionUpdate } = usePlanExecutionSocket({
+    autoConnect: true,
+  });
 
   // Fetch plan list from backend
   const loadPlanList = useCallback(async () => {

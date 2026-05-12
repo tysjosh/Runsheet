@@ -9,7 +9,9 @@ import {
   TrendingUp,
 } from "lucide-react";
 import { lazy, Suspense, useState } from "react";
+import AccountDetailView from "./commerce/AccountDetailView";
 import AccountsListPage from "./commerce/AccountsListPage";
+import InvoiceDetailView from "./commerce/InvoiceDetailView";
 import InvoicesListPage from "./commerce/InvoicesListPage";
 import PaymentsListPage from "./commerce/PaymentsListPage";
 import PriceBookEditor from "./commerce/PriceBookEditor";
@@ -46,6 +48,28 @@ type TabId = string;
 
 export default function CommerceHub() {
   const [activeTab, setActiveTab] = useState<TabId>("accounts");
+  const [selectedAccountId, setSelectedAccountId] = useState<string | null>(
+    null,
+  );
+  const [selectedInvoiceId, setSelectedInvoiceId] = useState<string | null>(
+    null,
+  );
+
+  const handleSelectAccount = (accountId: string) => {
+    setSelectedAccountId(accountId);
+  };
+
+  const handleSelectInvoice = (invoiceId: string) => {
+    setSelectedInvoiceId(invoiceId);
+  };
+
+  const handleBackToAccountList = () => {
+    setSelectedAccountId(null);
+  };
+
+  const handleBackToInvoiceList = () => {
+    setSelectedInvoiceId(null);
+  };
 
   return (
     <div className="flex flex-col h-full">
@@ -56,15 +80,37 @@ export default function CommerceHub() {
       <TabNavigation
         tabs={TABS}
         activeTab={activeTab}
-        onChange={setActiveTab}
+        onChange={(tabId) => {
+          setActiveTab(tabId);
+          setSelectedAccountId(null); // Reset account selection when changing tabs
+          setSelectedInvoiceId(null); // Reset invoice selection when changing tabs
+        }}
       />
       <div className="flex-1 overflow-auto">
-        {activeTab === "accounts" && <AccountsListPage />}
-        {activeTab === "invoices" && <InvoicesListPage />}
+        {activeTab === "accounts" &&
+          (selectedAccountId ? (
+            <AccountDetailView
+              accountId={selectedAccountId}
+              onBack={handleBackToAccountList}
+            />
+          ) : (
+            <AccountsListPage onSelectAccount={handleSelectAccount} />
+          ))}
+        {activeTab === "invoices" &&
+          (selectedInvoiceId ? (
+            <InvoiceDetailView
+              invoiceId={selectedInvoiceId}
+              onBack={handleBackToInvoiceList}
+            />
+          ) : (
+            <InvoicesListPage onSelectInvoice={handleSelectInvoice} />
+          ))}
         {activeTab === "price-books" && <PriceBookEditor />}
         {activeTab === "payments" && <PaymentsListPage />}
         {activeTab === "ar-aging" && (
-          <Suspense fallback={<LoadingSpinner message="Loading AR Aging..." />}>
+          <Suspense
+            fallback={<LoadingSpinner message="Loading AR Aging..." />}
+          >
             <ARAgingDashboard />
           </Suspense>
         )}

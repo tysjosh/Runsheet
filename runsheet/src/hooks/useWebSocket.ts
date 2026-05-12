@@ -81,6 +81,7 @@ const DEFAULT_OPTIONS: Required<
     | "onMessage"
     | "onReconnecting"
     | "onMaxReconnectAttemptsReached"
+    | "getUrl"
   >
 > = {
   initialReconnectDelay: 1000, // 1 second

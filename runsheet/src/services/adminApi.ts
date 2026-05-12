@@ -1,0 +1,439 @@
+import { getAuthToken } from "../utils/auth";
+import { API_TIMEOUTS, ApiError, ApiTimeoutError } from "./api";
+
+// ─── Configuration ───────────────────────────────────────────────────────────
+
+const API_BASE_URL =
+  process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080/api";
+
+// ─── Communication Metrics Types ─────────────────────────────────────────────
+
+export interface MetricDataPoint {
+  timestamp: string;
+  value: number;
+}
+
+export interface CommunicationMetrics {
+  ack_latency: MetricDataPoint[];
+  notification_send_latency: MetricDataPoint[];
+  driver_response_latency: MetricDataPoint[];
+  failed_notification_rate: MetricDataPoint[];
+  request_id: string;
+}
+
+export interface MetricsFilters {
+  start_date?: string;
+  end_date?: string;
+  interval?: string; // '1h', '1d', etc.
+}
+
+// ─── Feature Flag Types ──────────────────────────────────────────────────────
+
+export type FeatureFlagState =
+  | "disabled"
+  | "shadow"
+  | "active_gated"
+  | "active_auto";
+
+export interface FeatureFlagResponse {
+  tenant_id: string;
+  flag_key: string;
+  previous_state: FeatureFlagState;
+  new_state: FeatureFlagState;
+  ws_broadcast: boolean;
+}
+
+// ─── Order Webhook Types ─────────────────────────────────────────────────────
+
+export interface IntakeChannel {
+  channel_id: string;
+  tenant_id: string;
+  channel_type: string;
+  display_name: string;
+  enabled: boolean;
+  hmac_secret_ref: string;
+  supported_schema_versions: string[];
+  rate_limit_per_minute?: number;
+  secret_version: number;
+  created_at: string;
+  updated_at: string;
+  last_webhook_at?: string | null;
+  webhook_count?: number;
+}
+
+export interface CreateChannelPayload {
+  channel_id: string;
+  channel_type: string;
+  display_name: string;
+  supported_schema_versions: string[];
+  rate_limit_per_minute?: number;
+  enabled?: boolean;
+}
+
+export interface CreateChannelResponse {
+  channel_id: string;
+  tenant_id: string;
+  channel_type: string;
+  display_name: string;
+  hmac_secret: string; // plaintext — returned ONCE, never again
+  hmac_secret_ref: string;
+  supported_schema_versions: string[];
+  rate_limit_per_minute?: number;
+  secret_version: number;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface UpdateChannelPayload {
+  display_name?: string;
+  channel_type?: string;
+  supported_schema_versions?: string[];
+  rate_limit_per_minute?: number;
+  enabled?: boolean;
+}
+
+// ─── Agent Monitoring Types ──────────────────────────────────────────────────
+
+export interface AgentHealth {
+  agent_id: string;
+  status: string;
+  type: "autonomous" | "overlay";
+}
+
+export interface AgentHealthResponse {
+  agents: Record<string, AgentHealth>;
+}
+
+export interface ActivityLogEntry {
+  agent_id: string;
+  action_type: string;
+  tool_name?: string | null;
+  parameters?: any;
+  risk_level?: string | null;
+  outcome: string;
+  duration_ms: number;
+  tenant_id: string;
+  user_id?: string | null;
+  session_id?: string | null;
+  details?: any;
+  timestamp?: string;
+}
+
+export interface ActivityLogResponse {
+  items: ActivityLogEntry[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface ActivityStats {
+  total_actions: number;
+  success_rate: number;
+  average_duration_ms: number;
+  actions_by_agent: Record<string, number>;
+  actions_by_type: Record<string, number>;
+}
+
+export interface ApprovalEntry {
+  action_id: string;
+  agent_id: string;
+  action_type: string;
+  tool_name?: string;
+  parameters?: any;
+  risk_level?: string;
+  proposed_at: string;
+  status: string;
+}
+
+export interface ApprovalsResponse {
+  items: ApprovalEntry[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+// ─── Stripe Integration Types ────────────────────────────────────────────────
+
+export interface StripePublicConfig {
+  publishable_key: string;
+}
+
+export interface StripePaymentItem {
+  id: string;
+  status?: string | null;
+  amount?: number | null;
+  currency?: string | null;
+  created?: number | null;
+  customer?: string | null;
+  description?: string | null;
+  metadata: Record<string, string>;
+}
+
+export interface StripePaymentsResponse {
+  items: StripePaymentItem[];
+  has_more: boolean;
+  next_starting_after?: string | null;
+}
+
+// ─── HTTP Helper ─────────────────────────────────────────────────────────────
+
+async function fetchWithTimeout(
+  url: string,
+  options: RequestInit = {},
+  timeout: number = API_TIMEOUTS.STANDARD,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+    return response;
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new ApiTimeoutError(
+        `Request timed out after ${timeout / 1000} seconds`,
+      );
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function buildQueryString(
+  params: Record<string, string | number | boolean | undefined | null>,
+): string {
+  const entries = Object.entries(params).filter(
+    ([, v]) => v !== undefined && v !== null && v !== "",
+  );
+  if (entries.length === 0) return "";
+  const searchParams = new URLSearchParams();
+  for (const [key, value] of entries) {
+    searchParams.set(key, String(value));
+  }
+  return `?${searchParams.toString()}`;
+}
+
+async function adminRequest<T>(
+  endpoint: string,
+  options?: RequestInit,
+): Promise<T> {
+  const url = `${API_BASE_URL}${endpoint}`;
+  try {
+    const token = await getAuthToken();
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...(options?.headers as Record<string, string> | undefined),
+    };
+
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+
+    const response = await fetchWithTimeout(url, {
+      ...options,
+      headers,
+    });
+
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new ApiError(
+        body.detail || body.message || `HTTP error! status: ${response.status}`,
+        response.status,
+      );
+    }
+
+    return await response.json();
+  } catch (error) {
+    if (error instanceof ApiTimeoutError || error instanceof ApiError) {
+      throw error;
+    }
+    throw new ApiError(
+      error instanceof Error ? error.message : "Unknown error",
+      0,
+    );
+  }
+}
+
+// ─── Communication Metrics Endpoints ─────────────────────────────────────────
+
+/** GET /api/metrics/communications — get all communication SLA metrics */
+export async function getCommunicationMetrics(
+  filters: MetricsFilters = {},
+): Promise<CommunicationMetrics> {
+  const qs = buildQueryString(
+    filters as Record<string, string | number | boolean | undefined | null>,
+  );
+  return adminRequest<CommunicationMetrics>(`/metrics/communications${qs}`);
+}
+
+// ─── Feature Flag Endpoints ──────────────────────────────────────────────────
+
+/** POST /api/ops/admin/feature-flags/{tenant_id}/order-intake-pipeline/{new_state} */
+export async function setOrderIntakePipelineState(
+  tenantId: string,
+  newState: FeatureFlagState,
+): Promise<{ data: FeatureFlagResponse; request_id: string }> {
+  return adminRequest<{ data: FeatureFlagResponse; request_id: string }>(
+    `/ops/admin/feature-flags/${encodeURIComponent(tenantId)}/order-intake-pipeline/${newState}`,
+    { method: "POST" },
+  );
+}
+
+// ─── Order Webhook Endpoints ─────────────────────────────────────────────────
+
+/** GET /api/integrations/intake-channels — list all intake channels */
+export async function getIntakeChannels(): Promise<{
+  items: IntakeChannel[];
+}> {
+  return adminRequest<{ items: IntakeChannel[] }>(
+    "/integrations/intake-channels",
+  );
+}
+
+/** POST /api/integrations/intake-channels — create a new intake channel */
+export async function createIntakeChannel(
+  payload: CreateChannelPayload,
+): Promise<CreateChannelResponse> {
+  return adminRequest<CreateChannelResponse>("/integrations/intake-channels", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+/** PATCH /api/integrations/intake-channels/{channel_id} — update an intake channel */
+export async function updateIntakeChannel(
+  channelId: string,
+  payload: UpdateChannelPayload,
+): Promise<IntakeChannel> {
+  return adminRequest<IntakeChannel>(
+    `/integrations/intake-channels/${encodeURIComponent(channelId)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+/** DELETE /api/integrations/intake-channels/{channel_id} — delete an intake channel */
+export async function deleteIntakeChannel(channelId: string): Promise<void> {
+  await adminRequest<void>(
+    `/integrations/intake-channels/${encodeURIComponent(channelId)}`,
+    {
+      method: "DELETE",
+    },
+  );
+}
+
+/** POST /api/integrations/intake-channels/{channel_id}/rotate-secret — rotate HMAC secret */
+export async function rotateChannelSecret(
+  channelId: string,
+): Promise<{ new_secret: string }> {
+  return adminRequest<{ new_secret: string }>(
+    `/integrations/intake-channels/${encodeURIComponent(channelId)}/rotate-secret`,
+    {
+      method: "POST",
+    },
+  );
+}
+
+// ─── Agent Monitoring Endpoints ──────────────────────────────────────────────
+
+/** GET /api/agent/health — get agent health status */
+export async function getAgentHealth(): Promise<AgentHealthResponse> {
+  return adminRequest<AgentHealthResponse>("/agent/health");
+}
+
+/** POST /api/agent/{agent_id}/pause — pause an agent */
+export async function pauseAgent(agentId: string): Promise<{ agent_id: string; status: string }> {
+  return adminRequest<{ agent_id: string; status: string }>(
+    `/agent/${encodeURIComponent(agentId)}/pause`,
+    { method: "POST" },
+  );
+}
+
+/** POST /api/agent/{agent_id}/resume — resume an agent */
+export async function resumeAgent(agentId: string): Promise<{ agent_id: string; status: string }> {
+  return adminRequest<{ agent_id: string; status: string }>(
+    `/agent/${encodeURIComponent(agentId)}/resume`,
+    { method: "POST" },
+  );
+}
+
+/** GET /api/agent/activity — get activity log */
+export async function getActivityLog(params: {
+  agent_id?: string;
+  action_type?: string;
+  outcome?: string;
+  time_from?: string;
+  time_to?: string;
+  page?: number;
+  size?: number;
+}): Promise<ActivityLogResponse> {
+  const qs = buildQueryString(params as Record<string, string | number | boolean | undefined | null>);
+  return adminRequest<ActivityLogResponse>(`/agent/activity${qs}`);
+}
+
+/** GET /api/agent/activity/stats — get activity statistics */
+export async function getActivityStats(): Promise<ActivityStats> {
+  return adminRequest<ActivityStats>("/agent/activity/stats");
+}
+
+/** GET /api/agent/approvals — get pending approvals */
+export async function getApprovals(params: {
+  page?: number;
+  size?: number;
+}): Promise<ApprovalsResponse> {
+  const qs = buildQueryString(params as Record<string, string | number | boolean | undefined | null>);
+  return adminRequest<ApprovalsResponse>(`/agent/approvals${qs}`);
+}
+
+/** POST /api/agent/approvals/{action_id}/approve — approve an action */
+export async function approveAction(
+  actionId: string,
+  reviewerId: string = "admin",
+): Promise<any> {
+  const qs = buildQueryString({ reviewer_id: reviewerId });
+  return adminRequest<any>(
+    `/agent/approvals/${encodeURIComponent(actionId)}/approve${qs}`,
+    { method: "POST" },
+  );
+}
+
+/** POST /api/agent/approvals/{action_id}/reject — reject an action */
+export async function rejectAction(
+  actionId: string,
+  reason: string = "",
+  reviewerId: string = "admin",
+): Promise<any> {
+  const qs = buildQueryString({ reviewer_id: reviewerId });
+  return adminRequest<any>(
+    `/agent/approvals/${encodeURIComponent(actionId)}/reject${qs}`,
+    {
+      method: "POST",
+      body: JSON.stringify({ reason }),
+    },
+  );
+}
+
+// ─── Stripe Integration Endpoints ────────────────────────────────────────────
+
+/** GET /api/integrations/stripe/public-config — get Stripe publishable key */
+export async function getStripePublicConfig(): Promise<StripePublicConfig> {
+  return adminRequest<StripePublicConfig>("/integrations/stripe/public-config");
+}
+
+/** GET /api/integrations/stripe/payments — list Stripe payments */
+export async function getStripePayments(params: {
+  limit?: number;
+  starting_after?: string;
+  created_gte?: string;
+  created_lte?: string;
+}): Promise<StripePaymentsResponse> {
+  const qs = buildQueryString(params as Record<string, string | number | boolean | undefined | null>);
+  return adminRequest<StripePaymentsResponse>(`/integrations/stripe/payments${qs}`);
+}

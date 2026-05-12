@@ -84,6 +84,29 @@ class DriverEligibility(BaseModel):
     reasons: List[str] = Field(default_factory=list)
 
 
+class QualificationAlert(BaseModel):
+    """Individual qualification alert for a driver."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    qualification_type: str  # cdl | medical_card | hazmat | tanker | drug_test
+    expiry_date: Optional[date] = None
+    days_until_expiry: Optional[int] = None
+    alert_level: str  # critical | urgent | warning | expired | ok
+    status: str  # valid | expiring_soon | expired | overdue
+
+
+class DriverDashboardEntry(BaseModel):
+    """Driver entry in the DQF dashboard."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    driver_id: str
+    full_name: str
+    status: str  # active | suspended | expired
+    qualifications: List[QualificationAlert] = Field(default_factory=list)
+
+
 class DQFDashboard(BaseModel):
     """Driver Qualification File compliance dashboard."""
 
@@ -98,6 +121,7 @@ class DQFDashboard(BaseModel):
     expiring_within_30_days: int = 0
     expiring_within_7_days: int = 0
     drug_test_overdue: int = 0
+    drivers: List[DriverDashboardEntry] = Field(default_factory=list)
     generated_at: datetime = Field(default_factory=utcnow)
 
 
@@ -904,6 +928,7 @@ class DriverQualificationService:
           (unique driver counts — a driver is counted once even if multiple
           qualifications are expiring)
         - drug_test_overdue (active drivers with overdue drug tests)
+        - drivers: detailed list of all drivers with their qualification alerts
 
         The expiry threshold counts only consider active drivers, since
         suspended/expired drivers are already flagged.
@@ -926,8 +951,12 @@ class DriverQualificationService:
         expiring_7: set = set()
         drug_test_overdue_count = 0
 
+        # Build detailed driver entries
+        driver_entries: List[DriverDashboardEntry] = []
+
         for driver_doc in all_drivers:
             driver_id = driver_doc.get("driver_id", "")
+            full_name = driver_doc.get("full_name", "")
             status = driver_doc.get("status", "active")
 
             # Count by status
@@ -938,11 +967,16 @@ class DriverQualificationService:
             elif status == "expired":
                 expired_drivers += 1
 
+            # Build qualification alerts for this driver
+            qualifications: List[QualificationAlert] = []
+
             # Only check expiry thresholds for active drivers
             if status == "active":
                 # Check qualification expiry dates
-                for field_name, _ in self._QUALIFICATION_FIELDS:
+                for field_name, qualification_type in self._QUALIFICATION_FIELDS:
                     expiry_raw = driver_doc.get(field_name)
+                    
+                    # Skip if field is not set (e.g., no HAZMAT endorsement)
                     if expiry_raw is None:
                         continue
 
@@ -952,6 +986,33 @@ class DriverQualificationService:
 
                     days_until_expiry = (expiry_date - today).days
 
+                    # Determine alert level
+                    if days_until_expiry < 0:
+                        alert_level = "expired"
+                        qual_status = "expired"
+                    elif days_until_expiry <= ALERT_THRESHOLD_CRITICAL_DAYS:
+                        alert_level = "critical"
+                        qual_status = "expiring_soon"
+                    elif days_until_expiry <= ALERT_THRESHOLD_URGENT_DAYS:
+                        alert_level = "urgent"
+                        qual_status = "expiring_soon"
+                    elif days_until_expiry <= ALERT_THRESHOLD_WARNING_DAYS:
+                        alert_level = "warning"
+                        qual_status = "expiring_soon"
+                    else:
+                        alert_level = "ok"
+                        qual_status = "valid"
+
+                    # Add to qualification alerts
+                    qualifications.append(QualificationAlert(
+                        qualification_type=qualification_type,
+                        expiry_date=expiry_date,
+                        days_until_expiry=days_until_expiry,
+                        alert_level=alert_level,
+                        status=qual_status,
+                    ))
+
+                    # Track for aggregate counts
                     if days_until_expiry <= ALERT_THRESHOLD_WARNING_DAYS:
                         expiring_60.add(driver_id)
                     if days_until_expiry <= ALERT_THRESHOLD_URGENT_DAYS:
@@ -961,18 +1022,56 @@ class DriverQualificationService:
 
                 # Check drug test overdue (same logic as check_drug_test_overdue)
                 last_drug_test_raw = driver_doc.get("last_drug_test_date")
+                is_drug_test_overdue = False
+                
                 if last_drug_test_raw is None:
                     # Never tested — overdue
+                    is_drug_test_overdue = True
                     drug_test_overdue_count += 1
                 else:
                     last_drug_test_date = self._parse_date(last_drug_test_raw)
                     if last_drug_test_date is None:
                         # Unparseable — treat as overdue
+                        is_drug_test_overdue = True
                         drug_test_overdue_count += 1
                     else:
                         days_since_test = (today - last_drug_test_date).days
                         if days_since_test > DEFAULT_DRUG_TEST_INTERVAL_DAYS:
+                            is_drug_test_overdue = True
                             drug_test_overdue_count += 1
+
+                # Add drug test alert if overdue
+                if is_drug_test_overdue:
+                    qualifications.append(QualificationAlert(
+                        qualification_type="drug_test",
+                        expiry_date=last_drug_test_date if last_drug_test_raw else None,
+                        days_until_expiry=None,
+                        alert_level="critical",
+                        status="overdue",
+                    ))
+
+            # Only include drivers with alerts in the detailed list
+            if qualifications:
+                driver_entries.append(DriverDashboardEntry(
+                    driver_id=driver_id,
+                    full_name=full_name,
+                    status=status,
+                    qualifications=qualifications,
+                ))
+
+        # Sort driver entries by most urgent alerts first
+        driver_entries.sort(key=lambda d: (
+            # Prioritize by worst alert level
+            min((
+                0 if any(q.alert_level == "expired" for q in d.qualifications) else
+                1 if any(q.alert_level == "critical" for q in d.qualifications) else
+                2 if any(q.alert_level == "urgent" for q in d.qualifications) else
+                3 if any(q.alert_level == "warning" for q in d.qualifications) else
+                4
+            ), 4),
+            # Then by driver name
+            d.full_name
+        ))
 
         dashboard = DQFDashboard(
             tenant_id=tenant_id,
@@ -984,11 +1083,13 @@ class DriverQualificationService:
             expiring_within_30_days=len(expiring_30),
             expiring_within_7_days=len(expiring_7),
             drug_test_overdue=drug_test_overdue_count,
+            drivers=driver_entries,
         )
 
         logger.info(
             "Generated DQF dashboard for tenant %s: %d total, %d active, "
-            "%d suspended, %d expired, %d expiring ≤60d, %d drug test overdue",
+            "%d suspended, %d expired, %d expiring ≤60d, %d drug test overdue, "
+            "%d drivers with alerts",
             tenant_id,
             total_drivers,
             active_drivers,
@@ -996,6 +1097,7 @@ class DriverQualificationService:
             expired_drivers,
             len(expiring_60),
             drug_test_overdue_count,
+            len(driver_entries),
         )
         return dashboard
 
