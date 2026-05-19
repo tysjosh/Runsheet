@@ -149,10 +149,11 @@ export interface UpdateDriverPayload {
 }
 
 export interface DriverQualificationStatus {
-  field: string;
-  expiry_date: string;
-  days_until_expiry: number;
+  qualification_type: string; // cdl | medical_card | hazmat | tanker | drug_test
+  expiry_date: string | null;
+  days_until_expiry: number | null;
   alert_level: "ok" | "warning" | "urgent" | "critical" | "expired";
+  status: string; // valid | expiring_soon | expired | overdue
 }
 
 export interface DQFDashboardEntry {

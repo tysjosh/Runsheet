@@ -395,6 +395,12 @@ class TankForecastingAgent(OverlayAgentBase):
 
         # Step 2: Query fuel stations (Req 1.2)
         stations = await self._query_fuel_stations(tenant_id)
+        
+        # Build station data cache for consumption rate lookups
+        self._station_data_cache = {
+            station.get("station_id"): station
+            for station in stations
+        }
 
         # Step 3: Query customer tanks (Req 1.1.2). Absence is fine: agents
         # without customer_tanks simply fall back to station-only output.
@@ -1269,16 +1275,44 @@ class TankForecastingAgent(OverlayAgentBase):
         anomaly_flags = self._anomaly_cache.get(station_id, [])
 
         # Handle zero historical data (Req 1.7)
+        # PERMANENT FIX: Use station's daily_consumption_rate and current_stock
+        # from fuel_stations index instead of returning zeros
         if not consumption_history:
+            # Try to get consumption rate from station data
+            consumption_rate = DEFAULT_CONSUMPTION_RATE / 24.0  # Convert daily to hourly
+            
+            # If we have station data with daily_consumption_rate, use it
+            if hasattr(self, '_station_data_cache') and station_id in self._station_data_cache:
+                station = self._station_data_cache[station_id]
+                if station.get('daily_consumption_rate'):
+                    consumption_rate = station['daily_consumption_rate'] / 24.0  # liters/hour
+                    
+            # Calculate hours to runout using DEFAULT_CONSUMPTION_RATE if no history
+            # This ensures we generate meaningful forecasts even without fuel_events
+            hours_p50 = current_stock / consumption_rate if consumption_rate > 0 else 720.0
+            hours_p90 = hours_p50 * P90_VARIANCE_MULTIPLIER
+            
+            # Cap at reasonable maximum
+            hours_p50 = min(hours_p50, 720.0)
+            hours_p90 = min(hours_p90, 720.0)
+            
+            # Compute risk based on hours to runout
+            if hours_p90 <= RISK_HORIZON_HOURS:
+                runout_risk_24h = 1.0
+            elif hours_p50 >= RISK_HORIZON_HOURS:
+                runout_risk_24h = 0.0
+            else:
+                runout_risk_24h = (RISK_HORIZON_HOURS - hours_p50) / (hours_p90 - hours_p50)
+            
             return TankForecast(
                 station_id=station_id,
                 fuel_grade=fuel_grade,
-                hours_to_runout_p50=0.0,
-                hours_to_runout_p90=0.0,
-                runout_risk_24h=0.5,
-                confidence=0.1,
+                hours_to_runout_p50=round(hours_p50, 2),
+                hours_to_runout_p90=round(hours_p90, 2),
+                runout_risk_24h=round(min(1.0, max(0.0, runout_risk_24h)), 4),
+                confidence=0.5,  # Medium confidence when using defaults
                 feature_version="v1.0",
-                anomaly_flags=anomaly_flags + ["insufficient_data"],
+                anomaly_flags=anomaly_flags + ["insufficient_data", "using_default_rate"],
                 tenant_id=tenant_id,
                 run_id=run_id,
             )

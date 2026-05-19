@@ -186,12 +186,17 @@ class CustomerService:
         cursor: Optional[str] = None,
         limit: int = _DEFAULT_PAGE_LIMIT,
         status: Optional[str] = None,
+        include_account_counts: bool = False,
     ) -> Dict[str, Any]:
         """List Customers for a tenant with cursor/limit pagination.
 
         Default limit is 50, max 200 (Req 1.3). Cursor is the
         ``customer_id`` of the last item on the previous page (keyset
         pagination via ``search_after``).
+
+        When ``include_account_counts=True``, adds an ``account_count``
+        field to each customer by performing a single aggregation query
+        against the accounts index.
 
         Validates: Requirements 1.3, C3
         """
@@ -230,6 +235,14 @@ class CustomerService:
 
         hits = response["hits"]["hits"]
         items = [hit["_source"] for hit in hits]
+
+        # Optionally enrich with account counts
+        if include_account_counts and items:
+            account_counts = await self._get_account_counts_for_customers(
+                tenant_id, [item["customer_id"] for item in items]
+            )
+            for item in items:
+                item["account_count"] = account_counts.get(item["customer_id"], 0)
 
         # Determine next cursor
         next_cursor: Optional[str] = None
@@ -370,6 +383,53 @@ class CustomerService:
         merged = {**existing, **partial}
         logger.info("Archived customer %s for tenant %s", customer_id, tenant_id)
         return merged
+
+    # ------------------------------------------------------------------
+    # Helper: Bulk account counts
+    # ------------------------------------------------------------------
+
+    async def _get_account_counts_for_customers(
+        self, tenant_id: str, customer_ids: List[str]
+    ) -> Dict[str, int]:
+        """Get account counts for multiple customers in a single ES query.
+
+        Returns a dict mapping customer_id -> account_count.
+        Uses a terms aggregation for efficiency.
+        """
+        if not customer_ids:
+            return {}
+
+        agg_query: Dict[str, Any] = {
+            "query": {
+                "bool": {
+                    "must": [
+                        {"terms": {"customer_id": customer_ids}},
+                    ]
+                }
+            },
+            "size": 0,
+            "aggs": {
+                "by_customer": {
+                    "terms": {
+                        "field": "customer_id",
+                        "size": len(customer_ids),
+                    }
+                }
+            },
+        }
+        agg_query = inject_tenant_filter(agg_query, tenant_id)
+
+        try:
+            response = await self._es.search_documents(
+                ACCOUNTS_CURRENT_INDEX, agg_query, size=0
+            )
+            buckets = response.get("aggregations", {}).get("by_customer", {}).get("buckets", [])
+            return {bucket["key"]: bucket["doc_count"] for bucket in buckets}
+        except Exception as exc:
+            logger.warning(
+                "Failed to fetch account counts for customers: %s", exc
+            )
+            return {}
 
     # ------------------------------------------------------------------
     # Get with projections

@@ -181,11 +181,15 @@ async def list_customers(
     cursor: Optional[str] = Query(default=None, description="Cursor for pagination (customer_id of last item)"),
     limit: int = Query(default=50, ge=1, le=200, description="Page size (default 50, max 200)"),
     status: Optional[str] = Query(default=None, description="Filter by status: active or archived"),
+    include_account_counts: bool = Query(default=True, description="Include account_count for each customer"),
 ) -> dict:
     """List Customers with cursor/limit pagination.
 
     Tenant-scoped via ``inject_tenant_filter``. Default limit is 50,
     max 200.
+
+    When ``include_account_counts=True`` (default), each customer record
+    includes an ``account_count`` field showing the number of linked accounts.
 
     Validates: Requirements 1.3, C3
     """
@@ -196,6 +200,7 @@ async def list_customers(
         cursor=cursor,
         limit=limit,
         status=status,
+        include_account_counts=include_account_counts,
     )
 
     return {

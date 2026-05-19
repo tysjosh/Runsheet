@@ -482,6 +482,8 @@ class DataSeeder:
                 "category": "Fuel",
                 "quantity": 15000,
                 "unit": "gallons",
+                "min_threshold": 5000,
+                "max_capacity": 50000,
                 "location": "Houston Terminal",
                 "status": "in_stock",
                 "last_updated": "2024-01-15T10:30:00Z"
@@ -492,6 +494,8 @@ class DataSeeder:
                 "category": "Parts",
                 "quantity": 25,
                 "unit": "pieces",
+                "min_threshold": 10,
+                "max_capacity": 100,
                 "location": "Dallas Depot",
                 "status": "low_stock",
                 "last_updated": "2024-01-15T09:15:00Z"
@@ -502,6 +506,8 @@ class DataSeeder:
                 "category": "Maintenance",
                 "quantity": 0,
                 "unit": "bottles",
+                "min_threshold": 20,
+                "max_capacity": 200,
                 "location": "Chicago Yard",
                 "status": "out_of_stock",
                 "last_updated": "2024-01-14T16:45:00Z"
@@ -512,6 +518,8 @@ class DataSeeder:
                 "category": "Parts",
                 "quantity": 120,
                 "unit": "sets",
+                "min_threshold": 30,
+                "max_capacity": 200,
                 "location": "Houston Terminal",
                 "status": "in_stock",
                 "last_updated": "2024-01-15T08:20:00Z"
@@ -522,6 +530,8 @@ class DataSeeder:
                 "category": "Maintenance",
                 "quantity": 8,
                 "unit": "bottles",
+                "min_threshold": 15,
+                "max_capacity": 150,
                 "location": "Dallas Depot",
                 "status": "low_stock",
                 "last_updated": "2024-01-15T11:00:00Z"
@@ -871,6 +881,8 @@ class DataSeeder:
                 "category": "Fuel",
                 "quantity": 15000,
                 "unit": "gallons",
+                "min_threshold": 5000,
+                "max_capacity": 50000,
                 "location": "Houston Terminal",
                 "status": "in_stock",
                 "last_updated": base_timestamp.isoformat()
@@ -881,6 +893,8 @@ class DataSeeder:
                 "category": "Parts",
                 "quantity": 50,
                 "unit": "pieces",
+                "min_threshold": 10,
+                "max_capacity": 100,
                 "location": "Dallas Depot",
                 "status": "in_stock",
                 "last_updated": base_timestamp.isoformat()
@@ -891,6 +905,8 @@ class DataSeeder:
                 "category": "Maintenance",
                 "quantity": 25,
                 "unit": "bottles",
+                "min_threshold": 20,
+                "max_capacity": 200,
                 "location": "Chicago Yard",
                 "status": "in_stock",
                 "last_updated": base_timestamp.isoformat()
@@ -901,6 +917,8 @@ class DataSeeder:
                 "category": "Parts",
                 "quantity": 120,
                 "unit": "sets",
+                "min_threshold": 30,
+                "max_capacity": 200,
                 "location": "Houston Terminal",
                 "status": "in_stock",
                 "last_updated": base_timestamp.isoformat()

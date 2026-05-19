@@ -35,6 +35,7 @@ jest.mock("../../services/fuelApi", () => {
     listPriorityClusters: jest.fn(),
     listCombinableGroups: jest.fn(),
     listPlans: jest.fn(),
+    generatePlan: jest.fn(),
     listDeliveryDestinations: jest.fn(),
   };
 });
@@ -81,6 +82,7 @@ import type {
   PriorityClustersResponse,
 } from "../../services/fuelApi";
 import {
+  generatePlan,
   listCombinableGroups,
   listDeliveryDestinations,
   listPlans,
@@ -96,6 +98,9 @@ const mockListCombinableGroups = listCombinableGroups as jest.MockedFunction<
 >;
 const mockListPlans = listPlans as unknown as jest.MockedFunction<
   typeof listPlans
+>;
+const mockGeneratePlan = generatePlan as jest.MockedFunction<
+  typeof generatePlan
 >;
 const mockListDeliveryDestinations =
   listDeliveryDestinations as jest.MockedFunction<
@@ -183,11 +188,17 @@ describe("FuelDistributionPage — Clusters tab", () => {
     mockListPriorityClusters.mockReset();
     mockListCombinableGroups.mockReset();
     mockListPlans.mockReset();
+    mockGeneratePlan.mockReset();
     mockListDeliveryDestinations.mockReset();
     mockListPlans.mockResolvedValue({
       data: [],
       pagination: { page: 1, size: 10, total: 0, total_pages: 1 },
       request_id: "req-plans",
+    });
+    mockGeneratePlan.mockResolvedValue({
+      run_id: "run-001",
+      plan_id: "plan-001",
+      status: "completed",
     });
     mockListPriorityClusters.mockResolvedValue(clustersFixture());
     mockListCombinableGroups.mockResolvedValue(groupsListFixture());
@@ -336,6 +347,82 @@ describe("FuelDistributionPage — Clusters tab", () => {
         page: 2,
       }),
     );
+  });
+});
+
+describe("FuelDistributionPage — Plans tab", () => {
+  beforeEach(() => {
+    window.localStorage.setItem("tenant_id", "dev-tenant");
+    mockListPriorityClusters.mockReset();
+    mockListCombinableGroups.mockReset();
+    mockListPlans.mockReset();
+    mockGeneratePlan.mockReset();
+    mockListDeliveryDestinations.mockReset();
+    mockListPriorityClusters.mockResolvedValue(clustersFixture());
+    mockListCombinableGroups.mockResolvedValue(groupsListFixture());
+    mockListDeliveryDestinations.mockResolvedValue({ items: [], total: 0 });
+  });
+
+  it("shows a newly generated plan after clearing stale list filters", async () => {
+    mockListPlans
+      .mockResolvedValueOnce({
+        data: [],
+        pagination: { page: 1, size: 10, total: 0, total_pages: 1 },
+        request_id: "req-initial",
+      })
+      .mockResolvedValueOnce({
+        data: [],
+        pagination: { page: 1, size: 10, total: 0, total_pages: 1 },
+        request_id: "req-filtered",
+      })
+      .mockResolvedValue({
+        data: [
+          {
+            plan_id: "plan-new",
+            run_id: "run-new",
+            status: "draft",
+            truck_id: "truck-17",
+            created_at: "2026-05-12T12:00:00Z",
+          },
+        ],
+        pagination: { page: 1, size: 10, total: 1, total_pages: 1 },
+        request_id: "req-generated",
+      });
+    mockGeneratePlan.mockResolvedValue({
+      run_id: "run-new",
+      plan_id: "plan-new",
+      status: "completed",
+    });
+
+    render(<FuelDistributionPage />);
+
+    await waitFor(() => {
+      expect(mockListPlans).toHaveBeenCalledTimes(1);
+    });
+
+    fireEvent.change(screen.getByRole("combobox"), {
+      target: { value: "completed" },
+    });
+
+    await waitFor(() => {
+      expect(mockListPlans).toHaveBeenCalledWith(
+        "dev-tenant",
+        1,
+        10,
+        "completed",
+      );
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Generate Plan/i }));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("plan-new")).toBeInTheDocument();
+      expect(screen.getByText("Run: run-new")).toBeInTheDocument();
+    });
+    expect(mockGeneratePlan).toHaveBeenCalledWith("dev-tenant");
+    expect(mockListPlans).toHaveBeenCalledWith("dev-tenant", 1, 10, undefined);
   });
 });
 

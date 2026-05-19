@@ -434,6 +434,7 @@ export interface UpdateStationPayload {
 
 export interface PlanListItem {
   plan_id: string;
+  run_id?: string | null;
   status: string;
   truck_id: string;
   created_at: string;
@@ -488,6 +489,7 @@ export interface CostConfig {
 
 export interface GeneratePlanResponse {
   run_id: string;
+  plan_id?: string | null;
   status: string;
 }
 

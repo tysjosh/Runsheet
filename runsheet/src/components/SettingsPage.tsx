@@ -1,12 +1,11 @@
 "use client";
 
-import { FileInput, HelpCircle, Radio, Settings } from "lucide-react";
+import { FileInput, HelpCircle, Settings } from "lucide-react";
 import { lazy, Suspense, useState } from "react";
 import LoadingSpinner from "./LoadingSpinner";
 import { PageHeader, type Tab, TabNavigation } from "./ui";
 
 const AgentSettingsPage = lazy(() => import("./ops/AgentSettingsPage"));
-const OperationsControl = lazy(() => import("../app/ops/control/page"));
 const DataImport = lazy(() => import("./DataImport"));
 const Support = lazy(() => import("./Support"));
 
@@ -15,11 +14,6 @@ const TABS: Tab[] = [
     id: "agents",
     label: "Agent Settings",
     icon: <Settings className="w-4 h-4" />,
-  },
-  {
-    id: "control",
-    label: "Control Center",
-    icon: <Radio className="w-4 h-4" />,
   },
   {
     id: "import",
@@ -49,7 +43,6 @@ export default function SettingsPage() {
       <div className="flex-1 overflow-auto">
         <Suspense fallback={<LoadingSpinner message="Loading..." />}>
           {activeTab === "agents" && <AgentSettingsPage />}
-          {activeTab === "control" && <OperationsControl />}
           {activeTab === "import" && <DataImport />}
           {activeTab === "support" && <Support />}
         </Suspense>

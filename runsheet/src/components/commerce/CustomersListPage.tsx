@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import {
   Badge,
   Button,
@@ -24,6 +25,7 @@ interface CustomersListPageProps {
 export default function CustomersListPage({
   onSelectCustomer,
 }: CustomersListPageProps) {
+  const router = useRouter();
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -153,7 +155,13 @@ export default function CustomersListPage({
                     <Button
                       variant="ghost"
                       size="sm"
-                      onClick={() => onSelectCustomer?.(customer.customer_id)}
+                      onClick={() => {
+                        if (onSelectCustomer) {
+                          onSelectCustomer(customer.customer_id);
+                        } else {
+                          router.push(`/commerce/customers/${customer.customer_id}`);
+                        }
+                      }}
                     >
                       View Details
                     </Button>

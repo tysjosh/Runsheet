@@ -7,7 +7,6 @@ import {
   Button,
   EmptyState,
   FilterBar,
-  PageHeader,
   Pagination,
   StatsBar,
   Table,
@@ -70,7 +69,7 @@ function formatDate(dateStr: string | null): string {
 
 // ─── Main Component ──────────────────────────────────────────────────────────
 
-export default function DriversPage() {
+export default function DriverQualificationsView() {
   const [viewMode, setViewMode] = useState<ViewMode>("list");
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [loading, setLoading] = useState(true);
@@ -174,17 +173,17 @@ export default function DriversPage() {
         stats={[
           {
             label: "Active Drivers",
-            value: dashboard.total_active.toString(),
+            value: (dashboard.total_active ?? 0).toString(),
             variant: "success",
           },
           {
             label: "Suspended",
-            value: dashboard.total_suspended.toString(),
+            value: (dashboard.total_suspended ?? 0).toString(),
             variant: "warning",
           },
           {
             label: "Expiring Soon",
-            value: dashboard.total_expiring_soon.toString(),
+            value: (dashboard.total_expiring_soon ?? 0).toString(),
             variant: "error",
           },
         ]}
@@ -236,17 +235,17 @@ export default function DriversPage() {
               label: "Qualifications",
               render: (entry: DQFDashboardEntry) => (
                 <div className="flex flex-wrap gap-1">
-                  {entry.qualifications.map((qual, idx) => (
+                  {(entry.qualifications ?? []).map((qual, idx) => (
                     <Badge
                       key={qual?.qualification_type ?? `qual-${idx}`}
                       variant={
-                        qual.alert_level === "ok"
+                        qual?.alert_level === "ok"
                           ? "success"
-                          : qual.alert_level === "warning"
+                          : qual?.alert_level === "warning"
                             ? "warning"
-                            : qual.alert_level === "urgent" ||
-                                qual.alert_level === "critical" ||
-                                qual.alert_level === "expired"
+                            : qual?.alert_level === "urgent" ||
+                                qual?.alert_level === "critical" ||
+                                qual?.alert_level === "expired"
                               ? "error"
                               : "default"
                       }
@@ -259,7 +258,7 @@ export default function DriversPage() {
               ),
             },
           ]}
-          data={dashboard.drivers}
+          data={dashboard.drivers ?? []}
           getRowId={(entry) => entry.driver_id}
           onRowClick={(entry) => handleViewDetail(entry.driver_id)}
           emptyState={
@@ -363,6 +362,7 @@ export default function DriversPage() {
               await createDriver(data as CreateDriverPayload);
             }
             setViewMode("list");
+            fetchDrivers();
           } catch (err) {
             setError(
               err instanceof Error ? err.message : "Failed to save driver",
@@ -495,18 +495,12 @@ export default function DriversPage() {
 
   return (
     <div className="p-6">
-      <PageHeader
-        title="Driver Qualification Files"
-        subtitle="Manage driver qualifications, certifications, and DQF compliance."
-        actions={
+      <div className="mb-6">
+        <div className="flex justify-between items-center">
+          <p className="text-gray-600">
+            Manage driver qualifications, certifications, and DQF compliance
+          </p>
           <div className="flex gap-2">
-            {viewMode !== "list" &&
-              viewMode !== "add" &&
-              viewMode !== "edit" && (
-                <Button variant="secondary" onClick={() => setViewMode("list")}>
-                  Back to List
-                </Button>
-              )}
             {viewMode === "list" && (
               <>
                 <Button
@@ -520,19 +514,14 @@ export default function DriversPage() {
                 </Button>
               </>
             )}
-            {viewMode === "dashboard" && (
-              <Button variant="secondary" onClick={() => setViewMode("list")}>
-                Back to List
-              </Button>
-            )}
-            {viewMode === "detail" && (
+            {(viewMode === "dashboard" || viewMode === "detail") && (
               <Button variant="secondary" onClick={() => setViewMode("list")}>
                 Back to List
               </Button>
             )}
           </div>
-        }
-      />
+        </div>
+      </div>
 
       {/* Error state */}
       {error && (

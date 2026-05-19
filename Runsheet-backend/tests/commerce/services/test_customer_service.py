@@ -350,6 +350,94 @@ class TestCustomerServiceList:
 
         assert result["next_cursor"] is None
 
+    @pytest.mark.asyncio
+    async def test_list_with_account_counts(self):
+        """When include_account_counts=True, each customer includes account_count."""
+        es = _make_es_service()
+        customers = [
+            _make_customer_doc(customer_id="cust_001"),
+            _make_customer_doc(customer_id="cust_002"),
+            _make_customer_doc(customer_id="cust_003"),
+        ]
+        
+        # Mock account aggregation response
+        account_agg_response = {
+            "hits": {"hits": [], "total": {"value": 0}},
+            "aggregations": {
+                "by_customer": {
+                    "buckets": [
+                        {"key": "cust_001", "doc_count": 2},
+                        {"key": "cust_002", "doc_count": 3},
+                        {"key": "cust_003", "doc_count": 1},
+                    ]
+                }
+            },
+        }
+        
+        es.search_documents = AsyncMock(
+            side_effect=[
+                _es_search_response(customers),  # list query
+                account_agg_response,  # account counts aggregation
+            ]
+        )
+        service = CustomerService(es)
+
+        result = await service.list(_TENANT_ID, include_account_counts=True)
+
+        assert len(result["items"]) == 3
+        assert result["items"][0]["account_count"] == 2
+        assert result["items"][1]["account_count"] == 3
+        assert result["items"][2]["account_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_list_without_account_counts(self):
+        """When include_account_counts=False, no account_count field is added."""
+        es = _make_es_service()
+        customers = [_make_customer_doc(customer_id="cust_001")]
+        es.search_documents = AsyncMock(return_value=_es_search_response(customers))
+        service = CustomerService(es)
+
+        result = await service.list(_TENANT_ID, include_account_counts=False)
+
+        assert len(result["items"]) == 1
+        assert "account_count" not in result["items"][0]
+        # Only one ES call (no account aggregation)
+        assert es.search_documents.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_list_account_counts_defaults_to_zero_when_missing(self):
+        """Customers with no accounts get account_count=0."""
+        es = _make_es_service()
+        customers = [
+            _make_customer_doc(customer_id="cust_001"),
+            _make_customer_doc(customer_id="cust_002"),
+        ]
+        
+        # Only cust_001 has accounts in the aggregation
+        account_agg_response = {
+            "hits": {"hits": [], "total": {"value": 0}},
+            "aggregations": {
+                "by_customer": {
+                    "buckets": [
+                        {"key": "cust_001", "doc_count": 5},
+                    ]
+                }
+            },
+        }
+        
+        es.search_documents = AsyncMock(
+            side_effect=[
+                _es_search_response(customers),
+                account_agg_response,
+            ]
+        )
+        service = CustomerService(es)
+
+        result = await service.list(_TENANT_ID, include_account_counts=True)
+
+        assert result["items"][0]["account_count"] == 5
+        assert result["items"][1]["account_count"] == 0  # defaults to 0
+
 
 # ---------------------------------------------------------------------------
 # Tests: Update

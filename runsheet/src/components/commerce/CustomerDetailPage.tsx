@@ -1,49 +1,33 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Badge, Button, EmptyState, StatsBar, Table } from "@/components/ui";
+import { useRouter } from "next/navigation";
+import { Badge, Button } from "@/components/ui";
 import {
-  type Account,
-  type CustomerWithProjections,
-  getAccounts,
   getCustomer,
-  getInvoices,
-  type Invoice,
+  type CustomerWithProjections,
 } from "../../services/commerceApi";
 
 interface CustomerDetailPageProps {
   customerId: string;
-  onBack?: () => void;
-  onViewFuelOrders?: (customerId: string) => void;
-  onViewAccount?: (accountId: string) => void;
 }
 
 export default function CustomerDetailPage({
   customerId,
-  onBack,
-  onViewFuelOrders,
-  onViewAccount,
 }: CustomerDetailPageProps) {
+  const router = useRouter();
   const [customer, setCustomer] = useState<CustomerWithProjections | null>(
     null,
   );
-  const [accounts, setAccounts] = useState<Account[]>([]);
-  const [recentInvoices, setRecentInvoices] = useState<Invoice[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const fetchData = useCallback(async () => {
+  const fetchCustomer = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const [customerRes, accountsRes, invoicesRes] = await Promise.all([
-        getCustomer(customerId),
-        getAccounts({ customer_id: customerId, size: 50 }),
-        getInvoices({ customer_id: customerId, size: 5 }),
-      ]);
-      setCustomer(customerRes.data);
-      setAccounts(accountsRes.data);
-      setRecentInvoices(invoicesRes.data);
+      const response = await getCustomer(customerId);
+      setCustomer(response.data);
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "Failed to load customer details",
@@ -54,8 +38,27 @@ export default function CustomerDetailPage({
   }, [customerId]);
 
   useEffect(() => {
-    fetchData();
-  }, [fetchData]);
+    fetchCustomer();
+  }, [fetchCustomer]);
+
+  const getStatusVariant = (
+    status: string,
+  ): "success" | "warning" | "default" => {
+    if (status === "active") return "success";
+    if (status === "suspended") return "warning";
+    return "default";
+  };
+
+  const formatCents = (cents: number) =>
+    `$${(cents / 100).toLocaleString(undefined, { minimumFractionDigits: 2 })}`;
+
+  const formatDate = (dateString: string) => {
+    return new Date(dateString).toLocaleDateString("en-US", {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+    });
+  };
 
   if (loading) {
     return (
@@ -78,168 +81,143 @@ export default function CustomerDetailPage({
 
   if (!customer) return null;
 
-  const totalOpenBalance = accounts.reduce(
-    (sum, a) => sum + a.open_balance_cents,
-    0,
-  );
-
   return (
     <div className="p-6">
       {/* Header */}
-      <div className="mb-6">
+      <header className="mb-6">
         <div className="flex items-center gap-4 mb-2">
-          {onBack && (
-            <Button variant="ghost" size="sm" onClick={onBack}>
-              ← Back to Customers
-            </Button>
-          )}
+          <Button
+            variant="ghost"
+            onClick={() => router.push("/commerce/customers")}
+          >
+            ← Back to Customers
+          </Button>
         </div>
         <div className="flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-bold">{customer.display_name}</h1>
-            <p className="text-gray-600">
-              {customer.legal_name && `${customer.legal_name} · `}
-              {customer.primary_email || "No email"}
-            </p>
+            {customer.legal_name && (
+              <p className="text-gray-600">{customer.legal_name}</p>
+            )}
           </div>
-          <Badge variant={customer.status === "active" ? "success" : "default"}>
+          <Badge variant={getStatusVariant(customer.status)}>
             {customer.status}
           </Badge>
         </div>
-      </div>
+      </header>
 
-      {/* Summary */}
-      <section aria-labelledby="projections-heading" className="mb-8">
-        <h2 id="projections-heading" className="text-lg font-semibold mb-3">
-          Summary
+      {/* Summary cards */}
+      <section aria-labelledby="summary-heading" className="mb-8">
+        <h2 id="summary-heading" className="text-lg font-semibold mb-3">
+          Customer Summary
         </h2>
-        <StatsBar
-          stats={[
-            { label: "Accounts", value: accounts.length.toString() },
-            {
-              label: "Open Balance",
-              value: `$${(totalOpenBalance / 100).toLocaleString(undefined, { minimumFractionDigits: 2 })}`,
-            },
-            {
-              label: "Recent Invoices",
-              value: recentInvoices.length.toString(),
-            },
-          ]}
-        />
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+          <div className="border rounded p-4">
+            <p className="text-sm text-gray-600">Accounts</p>
+            <p className="text-2xl font-bold">{customer.account_count}</p>
+          </div>
+          <div className="border rounded p-4">
+            <p className="text-sm text-gray-600">Open Invoices</p>
+            <p className="text-2xl font-bold">{customer.open_invoice_count}</p>
+          </div>
+          <div className="border rounded p-4">
+            <p className="text-sm text-gray-600">Open Balance</p>
+            <p className="text-2xl font-bold">
+              {formatCents(customer.open_balance_cents)}
+            </p>
+          </div>
+          <div className="border rounded p-4">
+            <p className="text-sm text-gray-600">Lifetime Revenue</p>
+            <p className="text-2xl font-bold">
+              {formatCents(customer.lifetime_revenue_cents)}
+            </p>
+          </div>
+        </div>
       </section>
 
-      {/* Cross-link to fuel order history */}
-      <section aria-labelledby="fuel-orders-heading" className="mb-8">
-        <h2 id="fuel-orders-heading" className="text-lg font-semibold mb-3">
-          Fuel Order History
+      {/* Customer Information */}
+      <section aria-labelledby="info-heading" className="mb-8">
+        <h2 id="info-heading" className="text-lg font-semibold mb-3">
+          Customer Information
         </h2>
-        <Button
-          variant="secondary"
-          onClick={() => onViewFuelOrders?.(customerId)}
-        >
-          View Fuel Orders for this Customer →
-        </Button>
+        <div className="border rounded p-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div>
+              <p className="text-sm text-gray-600 mb-1">Display Name</p>
+              <p className="font-medium">{customer.display_name}</p>
+            </div>
+
+            {customer.legal_name && (
+              <div>
+                <p className="text-sm text-gray-600 mb-1">Legal Name</p>
+                <p className="font-medium">{customer.legal_name}</p>
+              </div>
+            )}
+
+            {customer.primary_email && (
+              <div>
+                <p className="text-sm text-gray-600 mb-1">Primary Email</p>
+                <p className="font-medium">{customer.primary_email}</p>
+              </div>
+            )}
+
+            {customer.tax_id && (
+              <div>
+                <p className="text-sm text-gray-600 mb-1">Tax ID</p>
+                <p className="font-medium">{customer.tax_id}</p>
+              </div>
+            )}
+
+            <div>
+              <p className="text-sm text-gray-600 mb-1">Customer ID</p>
+              <p className="font-mono text-sm">{customer.customer_id}</p>
+            </div>
+
+            <div>
+              <p className="text-sm text-gray-600 mb-1">Status</p>
+              <Badge variant={getStatusVariant(customer.status)}>
+                {customer.status}
+              </Badge>
+            </div>
+
+            <div>
+              <p className="text-sm text-gray-600 mb-1">Created</p>
+              <p className="font-medium">{formatDate(customer.created_at)}</p>
+            </div>
+
+            <div>
+              <p className="text-sm text-gray-600 mb-1">Last Updated</p>
+              <p className="font-medium">{formatDate(customer.updated_at)}</p>
+            </div>
+          </div>
+        </div>
       </section>
 
-      {/* Accounts list */}
-      <section aria-labelledby="accounts-heading" className="mb-8">
-        <h2 id="accounts-heading" className="text-lg font-semibold mb-3">
-          Accounts
+      {/* Related Records */}
+      <section aria-labelledby="related-heading" className="mb-8">
+        <h2 id="related-heading" className="text-lg font-semibold mb-3">
+          Related Records
         </h2>
-        {accounts.length === 0 ? (
-          <EmptyState
-            icon={<span className="text-4xl">📊</span>}
-            title="No accounts"
-            description="No accounts linked to this customer."
-          />
-        ) : (
-          <Table
-            columns={[
-              { key: "display_name", label: "Account" },
-              {
-                key: "tier",
-                label: "Tier",
-                render: (account) => (
-                  <span className="capitalize">{account.tier}</span>
-                ),
-              },
-              {
-                key: "credit_state",
-                label: "Credit State",
-                render: (account) => (
-                  <Badge
-                    variant={
-                      account.credit_state === "ok"
-                        ? "success"
-                        : account.credit_state === "hold"
-                          ? "error"
-                          : "warning"
-                    }
-                  >
-                    {account.credit_state.replace(/_/g, " ")}
-                  </Badge>
-                ),
-              },
-              {
-                key: "open_balance_cents",
-                label: "Open Balance",
-                render: (account) =>
-                  `$${(account.open_balance_cents / 100).toLocaleString(undefined, { minimumFractionDigits: 2 })}`,
-              },
-              {
-                key: "actions",
-                label: "Actions",
-                render: (account) => (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => onViewAccount?.(account.account_id)}
-                  >
-                    View
-                  </Button>
-                ),
-              },
-            ]}
-            data={accounts}
-            getRowId={(account) => account.account_id}
-          />
-        )}
-      </section>
-
-      {/* Recent invoices */}
-      <section aria-labelledby="recent-invoices-heading">
-        <h2 id="recent-invoices-heading" className="text-lg font-semibold mb-3">
-          Recent Invoices
-        </h2>
-        {recentInvoices.length === 0 ? (
-          <EmptyState
-            icon={<span className="text-4xl">📄</span>}
-            title="No invoices"
-            description="No invoices yet."
-          />
-        ) : (
-          <Table
-            columns={[
-              { key: "invoice_number", label: "Invoice #" },
-              {
-                key: "status",
-                label: "Status",
-                render: (inv) => (
-                  <span className="capitalize">{inv.status}</span>
-                ),
-              },
-              {
-                key: "total_cents",
-                label: "Total",
-                render: (inv) =>
-                  `$${(inv.total_cents / 100).toLocaleString(undefined, { minimumFractionDigits: 2 })}`,
-              },
-              { key: "due_date", label: "Due Date" },
-            ]}
-            data={recentInvoices}
-            getRowId={(inv) => inv.invoice_id}
-          />
-        )}
+        <div className="border rounded p-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div>
+              <p className="text-sm text-gray-600 mb-1">Accounts</p>
+              <p className="text-2xl font-bold">{customer.account_count}</p>
+              <p className="text-xs text-gray-500 mt-1">
+                Total accounts for this customer
+              </p>
+            </div>
+            <div>
+              <p className="text-sm text-gray-600 mb-1">Open Invoices</p>
+              <p className="text-2xl font-bold">
+                {customer.open_invoice_count}
+              </p>
+              <p className="text-xs text-gray-500 mt-1">
+                Invoices pending payment
+              </p>
+            </div>
+          </div>
+        </div>
       </section>
     </div>
   );

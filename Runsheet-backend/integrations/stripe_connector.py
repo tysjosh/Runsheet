@@ -709,6 +709,33 @@ class StripeConnector(IntegrationConnector):
         if bounded_limit > 100:
             bounded_limit = 100
 
+        # Check if we should use mock data from Elasticsearch (demo mode)
+        use_mock_data = self._tenant_id == "demo-tenant"
+        
+        if use_mock_data:
+            # Read from Elasticsearch mock data instead of calling Stripe API
+            items = await self._list_payments_from_es(
+                limit=bounded_limit,
+                starting_after=starting_after,
+                created_gte=created_gte,
+                created_lte=created_lte,
+            )
+            
+            # Determine if there are more results
+            has_more = len(items) == bounded_limit
+            next_starting_after: Optional[str] = None
+            if has_more and items:
+                last_id = items[-1].get("id")
+                if isinstance(last_id, str) and last_id:
+                    next_starting_after = last_id
+            
+            return {
+                "items": items,
+                "has_more": has_more,
+                "next_starting_after": next_starting_after,
+            }
+        
+        # Production path: call real Stripe API
         stripe_sdk = await self._get_stripe_module()
         envelope = await self._load_envelope()
         stripe_sdk.api_key = envelope["secret_key"]
@@ -748,6 +775,118 @@ class StripeConnector(IntegrationConnector):
             "has_more": has_more,
             "next_starting_after": next_starting_after,
         }
+
+    async def _list_payments_from_es(
+        self,
+        limit: int,
+        starting_after: Optional[str] = None,
+        created_gte: Optional[datetime] = None,
+        created_lte: Optional[datetime] = None,
+    ) -> List[Dict[str, Any]]:
+        """Read mock payment data from Elasticsearch for demo mode.
+        
+        Args:
+            limit: Maximum number of payments to return
+            starting_after: Payment ID to start after (for pagination)
+            created_gte: Lower bound on created timestamp
+            created_lte: Upper bound on created timestamp
+            
+        Returns:
+            List of redacted payment intent dictionaries
+        """
+        from datetime import datetime, timezone
+        
+        # Build Elasticsearch query
+        must_clauses = [
+            {"term": {"tenant_id": self._tenant_id}}
+        ]
+        
+        # Add date range filter if provided
+        if created_gte or created_lte:
+            range_filter = {}
+            if created_gte:
+                range_filter["gte"] = created_gte.isoformat()
+            if created_lte:
+                range_filter["lte"] = created_lte.isoformat()
+            must_clauses.append({"range": {"created": range_filter}})
+        
+        # Build search query
+        query = {
+            "query": {
+                "bool": {
+                    "must": must_clauses
+                }
+            },
+            "sort": [
+                {"created": {"order": "desc"}}
+            ]
+        }
+        
+        # Add search_after for pagination if provided
+        if starting_after:
+            # Find the document with starting_after ID to get its sort values
+            try:
+                doc = await self._es.get_document(
+                    "stripe_payment_intents",
+                    starting_after
+                )
+                if doc and "created" in doc:
+                    created_ts = doc.get("created")
+                    if created_ts:
+                        query["search_after"] = [created_ts]
+            except Exception as e:
+                logger.warning(
+                    "Failed to find starting_after document %s: %s",
+                    starting_after,
+                    e
+                )
+        
+        # Execute search
+        try:
+            result = await self._es.search_documents(
+                "stripe_payment_intents",
+                query,
+                size=limit
+            )
+            
+            hits = result.get("hits", {}).get("hits", [])
+            items = []
+            
+            for hit in hits:
+                source = hit.get("_source", {})
+                # Convert our ES format to Stripe-like format for redaction
+                payment_intent = {
+                    "id": source.get("payment_id"),
+                    "amount": source.get("amount"),
+                    "currency": source.get("currency"),
+                    "status": source.get("status"),
+                    "customer": source.get("customer_id"),
+                    "description": source.get("description"),
+                    "payment_method": source.get("payment_method"),
+                    "payment_method_details": source.get("payment_method_details"),
+                    "metadata": source.get("metadata", {}),
+                    "created": source.get("created"),
+                }
+                
+                # Add customer email and name if available
+                if source.get("customer_email"):
+                    payment_intent["customer_email"] = source.get("customer_email")
+                if source.get("customer_name"):
+                    payment_intent["customer_name"] = source.get("customer_name")
+                
+                # Redact the payment intent
+                redacted = _redact_payment_intent(payment_intent)
+                items.append(redacted)
+            
+            return items
+            
+        except Exception as e:
+            logger.error(
+                "Failed to query mock payments from ES for tenant=%s: %s",
+                self._tenant_id,
+                e
+            )
+            return []
 
     async def disconnect(self) -> None:
         """Delete the vault envelope. Idempotent."""

@@ -107,9 +107,15 @@ import StormModeBanner from "./StormModeBanner";
 
 const DISPATCHER_ID = "dispatcher-001";
 const PAGE_SIZE = 10;
+const GENERATED_PLAN_REFRESH_ATTEMPTS = 4;
+const GENERATED_PLAN_REFRESH_DELAY_MS = 750;
 
 function activeTenantId(): string {
   return getCurrentTenantId();
+}
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 const TABS: Tab[] = [
@@ -2071,23 +2077,30 @@ function PlansTab() {
   });
 
   // Fetch plan list from backend
-  const loadPlanList = useCallback(async () => {
-    setListLoading(true);
-    try {
-      const result = await listPlans(
-        activeTenantId(),
-        planPage,
-        PAGE_SIZE,
-        statusFilter || undefined,
-      );
-      setPlanList(result.data ?? []);
-      setPlanPagination(result.pagination ?? null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load plans");
-    } finally {
-      setListLoading(false);
-    }
-  }, [planPage, statusFilter]);
+  const loadPlanList = useCallback(
+    async (overrides?: { page?: number; status?: string }) => {
+      setListLoading(true);
+      try {
+        const page = overrides?.page ?? planPage;
+        const status = overrides?.status ?? statusFilter;
+        const result = await listPlans(
+          activeTenantId(),
+          page,
+          PAGE_SIZE,
+          status || undefined,
+        );
+        setPlanList(result.data ?? []);
+        setPlanPagination(result.pagination ?? null);
+        return result;
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to load plans");
+        throw err;
+      } finally {
+        setListLoading(false);
+      }
+    },
+    [planPage, statusFilter],
+  );
 
   // Load plan list on mount and when page/filter changes
   useEffect(() => {
@@ -2104,16 +2117,35 @@ function PlansTab() {
     setGenerating(true);
     setError("");
     try {
-      await generatePlan(activeTenantId());
+      const response = await generatePlan(activeTenantId());
       addToast("Plan generated successfully", "success");
-      refreshPlanList();
+
+      // Reset to page 1 and clear status filter to show the new plan
+      setPlanPage(1);
+      setStatusFilter("");
+
+      const generatedId = response.plan_id ?? response.run_id;
+      let result = await loadPlanList({ page: 1, status: "" });
+
+      for (
+        let attempt = 0;
+        generatedId &&
+        !result.data.some(
+          (plan) => plan.plan_id === generatedId || plan.run_id === generatedId,
+        ) &&
+        attempt < GENERATED_PLAN_REFRESH_ATTEMPTS;
+        attempt += 1
+      ) {
+        await wait(GENERATED_PLAN_REFRESH_DELAY_MS);
+        result = await loadPlanList({ page: 1, status: "" });
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to generate plan");
       addToast("Failed to generate plan", "error");
     } finally {
       setGenerating(false);
     }
-  }, [addToast, refreshPlanList]);
+  }, [addToast, loadPlanList]);
 
   // Approve plan
   const handleApprove = useCallback(
@@ -2333,6 +2365,7 @@ function PlansTab() {
                 </div>
                 <div className="flex items-center gap-4 mt-1 text-xs text-gray-500">
                   {p.truck_id && <span>Truck: {p.truck_id}</span>}
+                  {p.run_id && <span>Run: {p.run_id}</span>}
                   {p.created_at && (
                     <span>{new Date(p.created_at).toLocaleDateString()}</span>
                   )}

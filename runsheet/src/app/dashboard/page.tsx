@@ -33,7 +33,8 @@ const SettingsPage = lazy(() => import("../../components/SettingsPage"));
 const CustomersPage = lazy(
   () => import("../../components/commerce/CustomersListPage"),
 );
-const DriversPage = lazy(() => import("../ops/drivers/page"));
+const DriversHub = lazy(() => import("../../components/DriversHub"));
+const OperationsControl = lazy(() => import("../ops/control/page"));
 
 function MapLoadingPlaceholder() {
   return (
@@ -133,7 +134,7 @@ export default function Home() {
           <div className="flex-1 bg-gray-50">
             <ErrorBoundary componentName="Drivers">
               <Suspense fallback={<ComponentLoadingPlaceholder />}>
-                <DriversPage />
+                <DriversHub />
               </Suspense>
             </ErrorBoundary>
           </div>
@@ -189,6 +190,17 @@ export default function Home() {
             <ErrorBoundary componentName="Analytics">
               <Suspense fallback={<ComponentLoadingPlaceholder />}>
                 <AnalyticsHub />
+              </Suspense>
+            </ErrorBoundary>
+          </div>
+        );
+
+      case "control":
+        return (
+          <div className="flex-1 bg-gray-50">
+            <ErrorBoundary componentName="Control Center">
+              <Suspense fallback={<ComponentLoadingPlaceholder />}>
+                <OperationsControl />
               </Suspense>
             </ErrorBoundary>
           </div>

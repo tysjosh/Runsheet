@@ -1017,24 +1017,23 @@ class CompartmentLoadingAgent(OverlayAgentBase):
     def _resolve_fuel_grade_from_product_code(
         self, product_code: str
     ) -> Optional[FuelGrade]:
-        """Map a product_code to a FuelGrade enum value.
+        """Map a product_code to a FuelGrade enum value using the mapping service.
 
-        Uses the canonical product codes directly — no legacy
-        FuelGrade.AGO/PMS/ATK/LPG fallback coercion on the intake path.
-        The enum is left in place for other consumers.
+        Supports both US market product codes (DIESEL_2, GASOLINE_REG, etc.)
+        and FuelGrade enum values (AGO, PMS, ATK, LPG).
         """
-        mapping = {
-            "DIESEL_2": FuelGrade.AGO,
-            "GASOLINE_REG": FuelGrade.PMS,
-            "KEROSENE": FuelGrade.ATK,
-            "PROPANE": FuelGrade.LPG,
-            # Direct enum values still accepted from other consumers
-            "AGO": FuelGrade.AGO,
-            "PMS": FuelGrade.PMS,
-            "ATK": FuelGrade.ATK,
-            "LPG": FuelGrade.LPG,
-        }
-        return mapping.get(product_code.upper()) if product_code else None
+        if not product_code:
+            return None
+
+        # Try direct FuelGrade enum parsing first
+        try:
+            return FuelGrade(product_code)
+        except ValueError:
+            pass
+
+        # Use the mapping service for US product codes
+        from fuel.services.fuel_product_mapping import fuel_product_mapper
+        return fuel_product_mapper.us_to_fuel_grade(product_code)
 
     # ------------------------------------------------------------------
     # Query trucks and compartments (Req 3.1)
@@ -1078,16 +1077,30 @@ class CompartmentLoadingAgent(OverlayAgentBase):
                 if not truck_id:
                     continue
 
-                # Parse allowed_grades
+                # Parse allowed_grades with product code mapping support
                 allowed_grades_raw = source.get("allowed_grades", [])
                 allowed_grades = []
                 for g in allowed_grades_raw:
                     try:
+                        # Try direct FuelGrade enum parsing first
                         allowed_grades.append(FuelGrade(g))
                     except ValueError:
-                        continue
+                        # Try mapping from US product code
+                        from fuel.services.fuel_product_mapping import fuel_product_mapper
+                        mapped_grade = fuel_product_mapper.us_to_fuel_grade(g)
+                        if mapped_grade:
+                            allowed_grades.append(mapped_grade)
+                        else:
+                            logger.debug(
+                                "CompartmentLoadingAgent: unrecognized fuel grade '%s' for truck %s compartment %s",
+                                g, truck_id, source.get("compartment_id")
+                            )
 
                 if not allowed_grades:
+                    logger.debug(
+                        "CompartmentLoadingAgent: truck %s compartment %s has no valid allowed_grades, skipping",
+                        truck_id, source.get("compartment_id")
+                    )
                     continue
 
                 compartment = Compartment(
@@ -1104,7 +1117,7 @@ class CompartmentLoadingAgent(OverlayAgentBase):
                         "compartments": [],
                         "max_weight_kg": source.get("max_weight_kg"),
                         "tare_weight_kg": source.get("tare_weight_kg", 0.0),
-                        "depot_location": source.get("depot_location"),
+                        "depot_location": source.get("depot_city"),  # Use depot_city for equipment check
                         "compartment_states": {},
                     }
                 trucks[truck_id]["compartments"].append(compartment)
@@ -1255,6 +1268,11 @@ class CompartmentLoadingAgent(OverlayAgentBase):
             Filtered dict of trucks with equipment available at their depot.
         """
         trucks = await self._query_trucks(tenant_id)
+        logger.info(
+            "CompartmentLoadingAgent: _query_trucks returned %d trucks for tenant %s",
+            len(trucks),
+            tenant_id,
+        )
         if not trucks:
             return trucks
 

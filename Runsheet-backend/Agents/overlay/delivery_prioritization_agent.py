@@ -585,21 +585,20 @@ class DeliveryPrioritizationAgent(OverlayAgentBase):
         return score, False, reasons
 
     def _resolve_fuel_grade(self, product_code: Optional[str]) -> FuelGrade:
-        """Map a product_code to a FuelGrade enum value."""
+        """Map a product_code to a FuelGrade enum value using the mapping service."""
         if not product_code:
             return FuelGrade.AGO
 
-        mapping = {
-            "DIESEL_2": FuelGrade.AGO,
-            "GASOLINE_REG": FuelGrade.PMS,
-            "KEROSENE": FuelGrade.ATK,
-            "PROPANE": FuelGrade.LPG,
-            "AGO": FuelGrade.AGO,
-            "PMS": FuelGrade.PMS,
-            "ATK": FuelGrade.ATK,
-            "LPG": FuelGrade.LPG,
-        }
-        return mapping.get(product_code.upper(), FuelGrade.AGO)
+        # Try direct FuelGrade enum parsing first
+        try:
+            return FuelGrade(product_code)
+        except ValueError:
+            pass
+
+        # Use the mapping service for US product codes
+        from fuel.services.fuel_product_mapping import fuel_product_mapper
+        mapped_grade = fuel_product_mapper.us_to_fuel_grade(product_code)
+        return mapped_grade if mapped_grade else FuelGrade.AGO
 
     def _build_proposal(
         self, priority_list: DeliveryPriorityList, tenant_id: str

@@ -8,13 +8,11 @@ import {
   Map,
   Receipt,
   Shield,
-  User,
 } from "lucide-react";
 import { lazy, Suspense, useState } from "react";
 import LoadingSpinner from "./LoadingSpinner";
 import { PageHeader, type Tab, TabNavigation } from "./ui";
 
-const DriversPage = lazy(() => import("./compliance/DriversPage"));
 const AssetCertificationsPage = lazy(
   () => import("./compliance/AssetCertificationsPage"),
 );
@@ -33,7 +31,6 @@ const TerminalBOLsPage = lazy(() => import("./compliance/TerminalBOLsPage"));
 const IFTAReportPage = lazy(() => import("./compliance/IFTAReportPage"));
 
 const TABS: Tab[] = [
-  { id: "drivers", label: "Drivers", icon: <User className="w-4 h-4" /> },
   {
     id: "certifications",
     label: "Certs",
@@ -55,7 +52,7 @@ const TABS: Tab[] = [
 type TabId = string;
 
 export default function ComplianceHub() {
-  const [activeTab, setActiveTab] = useState<TabId>("drivers");
+  const [activeTab, setActiveTab] = useState<TabId>("certifications");
 
   return (
     <div className="flex flex-col h-full">
@@ -67,7 +64,6 @@ export default function ComplianceHub() {
       />
       <div className="flex-1 overflow-auto">
         <Suspense fallback={<LoadingSpinner message="Loading..." />}>
-          {activeTab === "drivers" && <DriversPage />}
           {activeTab === "certifications" && <AssetCertificationsPage />}
           {activeTab === "tax" && <TaxJurisdictionsPage />}
           {activeTab === "contracts" && <PriceProtectionContractsPage />}

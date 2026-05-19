@@ -376,6 +376,70 @@ def seed_fuel_stations(force: bool = False):
 
 
 # ---------------------------------------------------------------------------
+# 3a. mvp_tank_forecasts (urgent delivery scenarios)
+# ---------------------------------------------------------------------------
+def seed_tank_forecasts(force: bool = False):
+    index = "mvp_tank_forecasts"
+    if not force and _index_count(index) > 0:
+        logger.info(f"⏭️  {index} already has data — skipping")
+        return
+
+    # Create forecasts for the fuel stations with realistic hours_to_runout
+    # that will trigger delivery priorities
+    # FuelGrade enum: AGO (diesel), PMS (gasoline), ATK (kerosene/jet fuel), LPG (propane)
+    forecasts = [
+        # Critical stations (< 12 hours to runout)
+        ("FS-003", "PMS",  8.5,  6.2,  0.85, 0.92, ["low_stock"]),  # GASOLINE_REG → PMS
+        ("FS-005", "AGO",  10.2, 7.8,  0.78, 0.88, ["low_stock"]),  # DIESEL_2 → AGO
+        ("FS-014", "AGO",  6.5,  4.2,  0.92, 0.95, ["low_stock", "critical"]),  # DEF → AGO
+        
+        # High priority stations (12-24 hours to runout)
+        ("FS-008", "PMS",  18.5, 14.2, 0.68, 0.82, ["low_stock"]),  # GASOLINE_PREM → PMS
+        ("FS-009", "LPG",  22.0, 16.5, 0.55, 0.78, ["low_stock"]),  # PROPANE → LPG
+        ("FS-013", "AGO",  20.5, 15.8, 0.62, 0.80, ["low_stock"]),  # HEATING_OIL → AGO
+        
+        # Medium priority stations (24-48 hours to runout)
+        ("FS-011", "PMS",  36.0, 28.5, 0.42, 0.75, []),  # GASOLINE_REG → PMS
+        
+        # Normal stations (> 48 hours to runout)
+        ("FS-001", "AGO",  72.0, 58.0, 0.15, 0.88, []),  # DIESEL_2 → AGO
+        ("FS-002", "PMS",  68.5, 52.0, 0.18, 0.85, []),  # GASOLINE_REG → PMS
+        ("FS-004", "ATK",  96.0, 78.0, 0.08, 0.90, []),  # KEROSENE → ATK
+        ("FS-006", "AGO",  84.0, 68.0, 0.12, 0.92, []),  # DIESEL_2 → AGO
+        ("FS-007", "LPG",  120.0, 96.0, 0.05, 0.88, []),  # PROPANE → LPG
+        ("FS-010", "AGO",  78.0, 62.0, 0.14, 0.90, []),  # DIESEL_2 → AGO
+        ("FS-012", "PMS",  88.0, 72.0, 0.10, 0.87, []),  # GASOLINE_REG → PMS
+    ]
+
+    actions = []
+    for station_id, fuel_grade, hours_p50, hours_p90, risk_24h, confidence, anomalies in forecasts:
+        forecast_id = f"FC-{station_id}-{_uid()[:8]}"
+        doc = {
+            "forecast_id": forecast_id,
+            "tenant_id": TENANT,
+            "station_id": station_id,
+            "fuel_grade": fuel_grade,
+            "hours_to_runout_p50": hours_p50,
+            "hours_to_runout_p90": hours_p90,
+            "runout_risk_24h": risk_24h,
+            "confidence": confidence,
+            "anomaly_flags": anomalies,
+            "timestamp": _now(),
+            "model_name": "baseline_consumption",
+            "baseline_source": "historical_7d",
+            "weather_fallback": False,
+            "customer_type": "retail",
+            "customer_type_multiplier": 1.0,
+            "scheduled_deliveries": [],
+        }
+        actions.append({"index": {"_index": index, "_id": forecast_id}})
+        actions.append(doc)
+
+    _bulk(actions)
+    logger.info(f"✅ Seeded {len(forecasts)} tank forecasts → {index}")
+
+
+# ---------------------------------------------------------------------------
 # 4. truck_compartments (fuel tanker configuration)
 # ---------------------------------------------------------------------------
 def seed_truck_compartments(force: bool = False):
@@ -384,28 +448,21 @@ def seed_truck_compartments(force: bool = False):
         logger.info(f"⏭️  {index} already has data — skipping")
         return
 
-    # 4 fuel tankers with varied compartment configurations
+    # Configure compartments for the actual tanker trucks (TNK-001, TNK-002)
     # Tuple: (truck_id, comp_id, capacity, allowed_grades, position, depot_city)
+    # FuelGrade enum values: AGO (diesel), PMS (gasoline), ATK (kerosene/jet fuel), LPG (propane)
     compartments = [
-        # Truck FT-001: 4 compartments, 40,000L total, Diesel/Gasoline compatible, Houston depot
-        ("FT-001", "C1", 12000, ["DIESEL_2", "GASOLINE_REG"], 1, "Houston"),
-        ("FT-001", "C2", 12000, ["DIESEL_2", "GASOLINE_REG"], 2, "Houston"),
-        ("FT-001", "C3", 10000, ["DIESEL_2", "GASOLINE_REG"], 3, "Houston"),
-        ("FT-001", "C4", 6000,  ["DIESEL_2", "GASOLINE_REG"], 4, "Houston"),
-        # Truck FT-002: 3 compartments, 25,000L total, Gasoline/Kerosene compatible, Dallas depot
-        ("FT-002", "C1", 10000, ["GASOLINE_REG", "KEROSENE"], 1, "Dallas"),
-        ("FT-002", "C2", 9000,  ["GASOLINE_REG", "KEROSENE"], 2, "Dallas"),
-        ("FT-002", "C3", 6000,  ["GASOLINE_REG", "KEROSENE"], 3, "Dallas"),
-        # Truck FT-003: 5 compartments, 50,000L total, all grades, Denver depot
-        ("FT-003", "C1", 14000, ["DIESEL_2", "GASOLINE_REG", "KEROSENE", "PROPANE"], 1, "Denver"),
-        ("FT-003", "C2", 12000, ["DIESEL_2", "GASOLINE_REG", "KEROSENE", "PROPANE"], 2, "Denver"),
-        ("FT-003", "C3", 10000, ["DIESEL_2", "GASOLINE_REG", "KEROSENE", "PROPANE"], 3, "Denver"),
-        ("FT-003", "C4", 8000,  ["DIESEL_2", "GASOLINE_REG", "KEROSENE", "PROPANE"], 4, "Denver"),
-        ("FT-003", "C5", 6000,  ["DIESEL_2", "GASOLINE_REG", "KEROSENE", "PROPANE"], 5, "Denver"),
-        # Truck FT-004: 3 compartments, 20,000L total, Diesel only, Chicago depot
-        ("FT-004", "C1", 8000,  ["DIESEL_2"], 1, "Chicago"),
-        ("FT-004", "C2", 7000,  ["DIESEL_2"], 2, "Chicago"),
-        ("FT-004", "C3", 5000,  ["DIESEL_2"], 3, "Chicago"),
+        # Truck TNK-001: 4 compartments, 40,000L total, all fuel types, Houston depot
+        ("TNK-001", "C1", 12000, ["AGO", "PMS"], 1, "Houston"),
+        ("TNK-001", "C2", 12000, ["AGO", "PMS"], 2, "Houston"),
+        ("TNK-001", "C3", 10000, ["AGO", "PMS"], 3, "Houston"),
+        ("TNK-001", "C4", 6000,  ["AGO", "PMS"], 4, "Houston"),
+        # Truck TNK-002: 5 compartments, 50,000L total, all grades, Denver depot
+        ("TNK-002", "C1", 14000, ["AGO", "PMS", "ATK", "LPG"], 1, "Denver"),
+        ("TNK-002", "C2", 12000, ["AGO", "PMS", "ATK", "LPG"], 2, "Denver"),
+        ("TNK-002", "C3", 10000, ["AGO", "PMS", "ATK", "LPG"], 3, "Denver"),
+        ("TNK-002", "C4", 8000,  ["AGO", "PMS", "ATK", "LPG"], 4, "Denver"),
+        ("TNK-002", "C5", 6000,  ["AGO", "PMS", "ATK", "LPG"], 5, "Denver"),
     ]
 
     actions = []
@@ -418,8 +475,8 @@ def seed_truck_compartments(force: bool = False):
             "capacity_liters": float(capacity),
             "allowed_grades": grades,
             "position_index": pos,
-            "depot_city": depot,
-            "depot_location": geo,
+            "depot_city": depot,  # String field for equipment check matching
+            "depot_location": geo,  # Geo point as per schema
             "latitude": geo["lat"],
             "longitude": geo["lon"],
             "tenant_id": TENANT,
@@ -703,33 +760,54 @@ def seed_fuel_orders(force: bool = False):
         logger.info(f"⏭️  {index} already has data — skipping")
         return
 
-    customer_ids = [f"CUST-{i:03d}" for i in range(1, 6)]
-    statuses = ["pending", "confirmed", "in_progress", "delivered", "cancelled"]
+    # Create fuel orders that match the stations with urgent forecasts
+    # Status must be "placed", "confirmed", or "scheduled" for the pipeline to pick them up
+    # customer_tank_id must match the station_id in forecasts for scoring to work
+    orders = [
+        # Critical stations - need immediate delivery
+        ("FS-003", "FS-003", "GASOLINE_REG",  2500, "confirmed", "CUST-001"),
+        ("FS-005", "FS-005", "DIESEL_2",      3000, "confirmed", "CUST-002"),
+        ("FS-014", "FS-014", "DEF",           1500, "confirmed", "CUST-003"),
+        
+        # High priority stations
+        ("FS-008", "FS-008", "GASOLINE_PREM", 2200, "scheduled", "CUST-001"),
+        ("FS-009", "FS-009", "PROPANE",       1800, "scheduled", "CUST-004"),
+        ("FS-013", "FS-013", "HEATING_OIL",   2800, "scheduled", "CUST-002"),
+        
+        # Medium priority stations
+        ("FS-011", "FS-011", "GASOLINE_REG",  2000, "placed", "CUST-005"),
+        
+        # Some additional orders for variety
+        ("FS-001", "FS-001", "DIESEL_2",      3500, "placed", "CUST-003"),
+        ("FS-002", "FS-002", "GASOLINE_REG",  2800, "placed", "CUST-004"),
+        ("FS-006", "FS-006", "DIESEL_2",      3200, "placed", "CUST-001"),
+    ]
     
     actions = []
-    for i in range(1, 16):  # 15 orders
-        order_id = f"ORD-{i:04d}"
-        status = random.choice(statuses)
-        customer_id = random.choice(customer_ids)
+    for idx, (station_id, customer_tank_id, product_code, gallons, status, customer_id) in enumerate(orders, start=1):
+        order_id = f"ORD-{idx:04d}"
         city = random.choice(CITY_NAMES)
         
         doc = {
             "order_id": order_id,
             "tenant_id": TENANT,
             "customer_id": customer_id,
+            "customer_tank_id": customer_tank_id,  # Must match station_id in forecasts
             "status": status,
-            "product_code": random.choice(["DIESEL_2", "GASOLINE_REG", "GASOLINE_PREM", "KEROSENE"]),
-            "quantity_gallons": round(random.uniform(500, 5000), 2),
-            "delivery_address": f"{random.randint(100, 9999)} {random.choice(['Main', 'Oak', 'Elm'])} St, {city}",
-            "delivery_date": _future(days=random.randint(1, 14)),
-            "created_at": _ago(days=random.randint(1, 30)),
+            "call_type": "keep_full",  # Type of order for prioritization
+            "product_code": product_code,
+            "gallons_requested": float(gallons),
+            "ship_to_address": f"{random.randint(100, 9999)} {random.choice(['Main', 'Oak', 'Elm'])} St, {city}",
+            "delivery_window_start": _now(),
+            "delivery_window_end": _future(days=2),
+            "created_at": _ago(days=random.randint(1, 7)),
             "updated_at": _ago(hours=random.randint(0, 24)),
         }
         actions.append({"index": {"_index": index, "_id": order_id}})
         actions.append(doc)
     
     _bulk(actions)
-    logger.info(f"✅ Seeded 15 orders → {index}")
+    logger.info(f"✅ Seeded {len(orders)} fuel orders → {index}")
 
 
 # ---------------------------------------------------------------------------
@@ -741,26 +819,46 @@ def seed_customer_tanks(force: bool = False):
         logger.info(f"⏭️  {index} already has data — skipping")
         return
 
-    customer_ids = [f"CUST-{i:03d}" for i in range(1, 6)]
+    # Create customer tanks that match our fuel stations and forecasts
+    # Tank IDs must match the station_id in forecasts for the TankForecastingAgent
+    tanks = [
+        # Critical tanks (low levels, high consumption)
+        ("FS-003", "CUST-001", "GASOLINE_REG", 10000, 1200, 400, "Houston"),
+        ("FS-005", "CUST-002", "DIESEL_2",      15000, 1800, 500, "Dallas"),
+        ("FS-014", "CUST-003", "DEF",           5000,  800,  300, "Chicago"),
+        
+        # High priority tanks
+        ("FS-008", "CUST-001", "GASOLINE_PREM", 8000,  1500, 350, "Atlanta"),
+        ("FS-009", "CUST-004", "PROPANE",       12000, 2200, 400, "Phoenix"),
+        ("FS-013", "CUST-002", "HEATING_OIL",   10000, 2100, 450, "Houston"),
+        
+        # Medium priority tanks
+        ("FS-011", "CUST-005", "GASOLINE_REG",  9000,  3200, 350, "Detroit"),
+        
+        # Normal tanks (good levels)
+        ("FS-001", "CUST-003", "DIESEL_2",      20000, 15000, 400, "Houston"),
+        ("FS-002", "CUST-004", "GASOLINE_REG",  18000, 14000, 380, "Dallas"),
+        ("FS-006", "CUST-001", "DIESEL_2",      22000, 17000, 420, "Denver"),
+    ]
     
     actions = []
-    for i in range(1, 21):  # 20 tanks
-        tank_id = f"TANK-{i:03d}"
-        customer_id = random.choice(customer_ids)
-        city = random.choice(CITY_NAMES)
-        capacity = random.choice([1000, 2000, 5000, 10000])
-        current_level = round(random.uniform(100, capacity * 0.8), 2)
-        
+    for tank_id, customer_id, product_code, capacity, current_level, reorder, city in tanks:
+        geo = _geo(city)
         doc = {
+            "customer_tank_id": tank_id,  # Must match station_id in forecasts
             "tank_id": tank_id,
             "tenant_id": TENANT,
             "customer_id": customer_id,
-            "product_code": random.choice(["DIESEL_2", "GASOLINE_REG", "HEATING_OIL"]),
-            "capacity_gallons": capacity,
-            "current_level_gallons": current_level,
-            "reorder_point_gallons": capacity * 0.2,
-            "location": _geo(city),
-            "last_reading_at": _ago(hours=random.randint(1, 48)),
+            "product_code": product_code,
+            "fuel_type": product_code,  # Alias for compatibility
+            "capacity_gallons": float(capacity),
+            "current_level_gallons": float(current_level),
+            "reorder_point_gallons": float(reorder),
+            "location": geo,
+            "latitude": geo["lat"],
+            "longitude": geo["lon"],
+            "location_name": city,
+            "last_reading_at": _ago(hours=random.randint(1, 12)),
             "created_at": _ago(days=random.randint(90, 365)),
             "updated_at": _ago(hours=random.randint(0, 24)),
         }
@@ -768,7 +866,7 @@ def seed_customer_tanks(force: bool = False):
         actions.append(doc)
     
     _bulk(actions)
-    logger.info(f"✅ Seeded 20 tanks → {index}")
+    logger.info(f"✅ Seeded {len(tanks)} customer tanks → {index}")
 
 
 # ---------------------------------------------------------------------------
@@ -924,28 +1022,41 @@ def seed_inventory(force: bool = False):
         return
 
     items = [
-        ("Fuel Filter - Heavy Duty", "FILTER-HD-001", 45, 10),
-        ("Oil Filter - Standard", "FILTER-OIL-STD", 120, 25),
-        ("Air Filter - Truck", "FILTER-AIR-TRK", 67, 15),
-        ("Brake Pads - Commercial", "BRAKE-PAD-COM", 34, 8),
-        ("Wiper Blades - 24in", "WIPER-24", 89, 20),
-        ("Engine Oil 15W-40 (Gallon)", "OIL-15W40-GAL", 156, 30),
-        ("Coolant (Gallon)", "COOLANT-GAL", 78, 15),
-        ("DEF Fluid (2.5 Gal)", "DEF-2.5GAL", 234, 50),
+        # Fuel equipment (required for truck loading)
+        # (name, category, location, qty, reorder, status, unit, max_capacity)
+        ("Fuel Pump - High Flow", "fuel_equipment", "Houston", 5, 2, "in_stock", "units", 20),
+        ("Fuel Hose - 50ft", "fuel_equipment", "Houston", 10, 3, "in_stock", "units", 30),
+        ("Fuel Meter - Digital", "fuel_equipment", "Houston", 3, 1, "in_stock", "units", 10),
+        ("Fuel Pump - High Flow", "fuel_equipment", "Denver", 5, 2, "in_stock", "units", 20),
+        ("Fuel Hose - 50ft", "fuel_equipment", "Denver", 10, 3, "in_stock", "units", 30),
+        ("Fuel Meter - Digital", "fuel_equipment", "Denver", 3, 1, "in_stock", "units", 10),
+        
+        # Regular inventory items
+        ("Fuel Filter - Heavy Duty", "parts", "Houston", 45, 10, "in_stock", "pieces", 100),
+        ("Oil Filter - Standard", "parts", "Dallas", 120, 25, "in_stock", "pieces", 200),
+        ("Air Filter - Truck", "parts", "Chicago", 67, 15, "in_stock", "pieces", 150),
+        ("Brake Pads - Commercial", "parts", "Denver", 34, 8, "in_stock", "sets", 80),
+        ("Wiper Blades - 24in", "parts", "Atlanta", 89, 20, "in_stock", "pairs", 150),
+        ("Engine Oil 15W-40 (Gallon)", "fluids", "Phoenix", 156, 30, "in_stock", "gallons", 300),
+        ("Coolant (Gallon)", "fluids", "Detroit", 78, 15, "in_stock", "gallons", 200),
+        ("DEF Fluid (2.5 Gal)", "fluids", "Charlotte", 234, 50, "in_stock", "containers", 500),
     ]
     
     actions = []
-    for i, (name, sku, qty, reorder) in enumerate(items, start=1):
+    for i, (name, category, location, qty, reorder, status, unit, max_capacity) in enumerate(items, start=1):
         item_id = f"INV-{i:04d}"
         doc = {
             "item_id": item_id,
             "tenant_id": TENANT,
             "name": name,
-            "sku": sku,
+            "category": category,
             "quantity": qty,
-            "reorder_point": reorder,
-            "unit_cost_cents": random.randint(500, 5000),
-            "location": random.choice(CITY_NAMES),
+            "unit": unit,
+            "min_threshold": reorder,
+            "max_capacity": max_capacity,
+            "status": status,
+            "unit_cost": round(random.uniform(5.00, 50.00), 2),
+            "location": location,
             "created_at": _ago(days=random.randint(90, 365)),
             "updated_at": _ago(days=random.randint(0, 30)),
         }
@@ -1227,8 +1338,12 @@ def main():
         ("riders_current",        seed_riders),
         ("jobs_current",          seed_jobs),
         ("fuel_stations",         seed_fuel_stations),
+        ("mvp_tank_forecasts",    seed_tank_forecasts),
+        ("customer_tanks",        seed_customer_tanks),
         ("truck_compartments",    seed_truck_compartments),
+        ("inventory",             seed_inventory),
         ("fuel_events",           seed_fuel_events),
+        ("fuel_orders_current",   seed_fuel_orders),
         ("agent_memory",          seed_agent_memory),
         ("agent_approval_queue",  seed_approval_queue),
         ("ops_poison_queue",      seed_poison_queue),

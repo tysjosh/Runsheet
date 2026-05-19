@@ -2,7 +2,6 @@
 import {
   Building2,
   Database,
-  Droplets,
   Fuel,
   Gauge,
   Map as MapIcon,
@@ -20,7 +19,6 @@ const DepotsPage = lazy(() => import("./admin/DepotsPage"));
 const RoadRestrictionsPanel = lazy(
   () => import("./admin/RoadRestrictionsPanel"),
 );
-const FuelDistributionPage = lazy(() => import("./ops/FuelDistributionPage"));
 
 const TABS: Tab[] = [
   {
@@ -45,11 +43,6 @@ const TABS: Tab[] = [
     label: "Restrictions",
     icon: <MapIcon className="w-4 h-4" />,
   },
-  {
-    id: "distribution",
-    label: "Distribution",
-    icon: <Droplets className="w-4 h-4" />,
-  },
 ];
 
 type TabId = string;
@@ -73,7 +66,6 @@ export default function FuelOpsPage() {
           {activeTab === "sourcing" && <SourcingPage />}
           {activeTab === "depots" && <DepotsPage />}
           {activeTab === "road-restrictions" && <RoadRestrictionsPanel />}
-          {activeTab === "distribution" && <FuelDistributionPage />}
         </Suspense>
       </div>
     </div>

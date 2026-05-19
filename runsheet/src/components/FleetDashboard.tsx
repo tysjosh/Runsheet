@@ -5,7 +5,6 @@ import {
   Package as PackageIcon,
   Shield,
   Truck,
-  User,
 } from "lucide-react";
 import { lazy, Suspense, useState } from "react";
 import type { Truck as TruckType } from "../types/api";
@@ -17,7 +16,6 @@ import { type Tab, TabNavigation } from "./ui";
 const FleetTracking = lazy(() => import("./FleetTracking"));
 const ShipmentBoardView = lazy(() => import("../app/ops/page"));
 const Inventory = lazy(() => import("./Inventory"));
-const DriversPage = lazy(() => import("./compliance/DriversPage"));
 const AssetCertificationsPage = lazy(
   () => import("./compliance/AssetCertificationsPage"),
 );
@@ -40,7 +38,6 @@ const TABS: Tab[] = [
     label: "Inventory",
     icon: <PackageIcon className="w-4 h-4" />,
   },
-  { id: "drivers", label: "Drivers", icon: <User className="w-4 h-4" /> },
   {
     id: "certifications",
     label: "Certifications",
@@ -73,7 +70,6 @@ export default function FleetDashboard({
             {/* Expiry Alert Summary Widget */}
             <ErrorBoundary componentName="Expiry Alerts">
               <ExpiryAlertWidget
-                onViewDrivers={() => setActiveTab("drivers")}
                 onViewCertifications={() => setActiveTab("certifications")}
               />
             </ErrorBoundary>
@@ -113,18 +109,6 @@ export default function FleetDashboard({
                 fallback={<LoadingSpinner message="Loading inventory..." />}
               >
                 <Inventory />
-              </Suspense>
-            </ErrorBoundary>
-          </div>
-        )}
-
-        {activeTab === "drivers" && (
-          <div className="h-full bg-white border-t border-gray-200 overflow-auto">
-            <ErrorBoundary componentName="Drivers">
-              <Suspense
-                fallback={<LoadingSpinner message="Loading drivers..." />}
-              >
-                <DriversPage />
               </Suspense>
             </ErrorBoundary>
           </div>

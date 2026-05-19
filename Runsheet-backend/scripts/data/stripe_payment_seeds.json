@@ -1,0 +1,417 @@
+{
+  "stripe_payment_intents": [
+    {
+      "payment_id": "pi_3QR8K2L9mN0pO1qP2rS3tU4v",
+      "tenant_id": "demo-tenant",
+      "amount": 125000,
+      "currency": "usd",
+      "status": "succeeded",
+      "customer_id": "cus_ABC123XYZ",
+      "customer_email": "john.smith@acmefuel.com",
+      "customer_name": "John Smith",
+      "description": "Fuel delivery - Invoice #INV-2024-001",
+      "payment_method": "card",
+      "payment_method_details": {
+        "type": "card",
+        "card": {
+          "brand": "visa",
+          "last4": "4242",
+          "exp_month": 12,
+          "exp_year": 2027
+        }
+      },
+      "metadata": {
+        "invoice_id": "INV-2024-001",
+        "customer_account": "ACC-001",
+        "order_id": "ORD-2024-0501"
+      },
+      "created": "2026-05-10T14:30:00Z",
+      "updated_at": "2026-05-10T14:30:15Z"
+    },
+    {
+      "payment_id": "pi_3QR7H1I8jK9lM0nO1pQ2rS3t",
+      "tenant_id": "demo-tenant",
+      "amount": 87500,
+      "currency": "usd",
+      "status": "succeeded",
+      "customer_id": "cus_DEF456ABC",
+      "customer_email": "sarah.johnson@techcorp.com",
+      "customer_name": "Sarah Johnson",
+      "description": "Fuel delivery - Invoice #INV-2024-002",
+      "payment_method": "card",
+      "payment_method_details": {
+        "type": "card",
+        "card": {
+          "brand": "mastercard",
+          "last4": "5555",
+          "exp_month": 8,
+          "exp_year": 2026
+        }
+      },
+      "metadata": {
+        "invoice_id": "INV-2024-002",
+        "customer_account": "ACC-002",
+        "order_id": "ORD-2024-0502"
+      },
+      "created": "2026-05-09T10:15:00Z",
+      "updated_at": "2026-05-09T10:15:22Z"
+    },
+    {
+      "payment_id": "pi_3QR6G0H7iJ8kL9mN0oP1qR2s",
+      "tenant_id": "demo-tenant",
+      "amount": 245000,
+      "currency": "usd",
+      "status": "succeeded",
+      "customer_id": "cus_GHI789DEF",
+      "customer_email": "mike.chen@logistics.com",
+      "customer_name": "Mike Chen",
+      "description": "Bulk fuel order - Invoice #INV-2024-003",
+      "payment_method": "card",
+      "payment_method_details": {
+        "type": "card",
+        "card": {
+          "brand": "amex",
+          "last4": "1234",
+          "exp_month": 3,
+          "exp_year": 2028
+        }
+      },
+      "metadata": {
+        "invoice_id": "INV-2024-003",
+        "customer_account": "ACC-003",
+        "order_id": "ORD-2024-0503"
+      },
+      "created": "2026-05-08T16:45:00Z",
+      "updated_at": "2026-05-08T16:45:18Z"
+    },
+    {
+      "payment_id": "pi_3QR5F9G6hI7jK8lM9nO0pQ1r",
+      "tenant_id": "demo-tenant",
+      "amount": 156000,
+      "currency": "usd",
+      "status": "requires_payment_method",
+      "customer_id": "cus_JKL012GHI",
+      "customer_email": "lisa.martinez@construction.com",
+      "customer_name": "Lisa Martinez",
+      "description": "Fuel delivery - Invoice #INV-2024-004",
+      "payment_method": null,
+      "payment_method_details": null,
+      "metadata": {
+        "invoice_id": "INV-2024-004",
+        "customer_account": "ACC-004",
+        "order_id": "ORD-2024-0504"
+      },
+      "created": "2026-05-07T09:20:00Z",
+      "updated_at": "2026-05-07T09:20:05Z"
+    },
+    {
+      "payment_id": "pi_3QR4E8F5gH6iJ7kL8mN9oP0q",
+      "tenant_id": "demo-tenant",
+      "amount": 198500,
+      "currency": "usd",
+      "status": "succeeded",
+      "customer_id": "cus_MNO345JKL",
+      "customer_email": "david.brown@manufacturing.com",
+      "customer_name": "David Brown",
+      "description": "Monthly fuel contract - Invoice #INV-2024-005",
+      "payment_method": "card",
+      "payment_method_details": {
+        "type": "card",
+        "card": {
+          "brand": "visa",
+          "last4": "8888",
+          "exp_month": 11,
+          "exp_year": 2027
+        }
+      },
+      "metadata": {
+        "invoice_id": "INV-2024-005",
+        "customer_account": "ACC-005",
+        "order_id": "ORD-2024-0505",
+        "contract_type": "monthly"
+      },
+      "created": "2026-05-06T13:00:00Z",
+      "updated_at": "2026-05-06T13:00:28Z"
+    },
+    {
+      "payment_id": "pi_3QR3D7E4fG5hI6jK7lM8nO9p",
+      "tenant_id": "demo-tenant",
+      "amount": 67500,
+      "currency": "usd",
+      "status": "canceled",
+      "customer_id": "cus_PQR678MNO",
+      "customer_email": "emily.davis@retail.com",
+      "customer_name": "Emily Davis",
+      "description": "Fuel delivery - Invoice #INV-2024-006",
+      "payment_method": null,
+      "payment_method_details": null,
+      "metadata": {
+        "invoice_id": "INV-2024-006",
+        "customer_account": "ACC-006",
+        "order_id": "ORD-2024-0506",
+        "cancellation_reason": "customer_requested"
+      },
+      "created": "2026-05-05T11:30:00Z",
+      "updated_at": "2026-05-05T12:15:00Z"
+    },
+    {
+      "payment_id": "pi_3QR2C6D3eF4gH5iJ6kL7mN8o",
+      "tenant_id": "demo-tenant",
+      "amount": 312000,
+      "currency": "usd",
+      "status": "succeeded",
+      "customer_id": "cus_STU901PQR",
+      "customer_email": "robert.wilson@transport.com",
+      "customer_name": "Robert Wilson",
+      "description": "Fleet fuel delivery - Invoice #INV-2024-007",
+      "payment_method": "card",
+      "payment_method_details": {
+        "type": "card",
+        "card": {
+          "brand": "visa",
+          "last4": "9999",
+          "exp_month": 6,
+          "exp_year": 2029
+        }
+      },
+      "metadata": {
+        "invoice_id": "INV-2024-007",
+        "customer_account": "ACC-007",
+        "order_id": "ORD-2024-0507",
+        "fleet_size": "25"
+      },
+      "created": "2026-05-04T08:45:00Z",
+      "updated_at": "2026-05-04T08:45:35Z"
+    },
+    {
+      "payment_id": "pi_3QR1B5C2dE3fG4hI5jK6lM7n",
+      "tenant_id": "demo-tenant",
+      "amount": 143000,
+      "currency": "usd",
+      "status": "processing",
+      "customer_id": "cus_VWX234STU",
+      "customer_email": "jennifer.lee@hospitality.com",
+      "customer_name": "Jennifer Lee",
+      "description": "Fuel delivery - Invoice #INV-2024-008",
+      "payment_method": "card",
+      "payment_method_details": {
+        "type": "card",
+        "card": {
+          "brand": "mastercard",
+          "last4": "7777",
+          "exp_month": 9,
+          "exp_year": 2026
+        }
+      },
+      "metadata": {
+        "invoice_id": "INV-2024-008",
+        "customer_account": "ACC-008",
+        "order_id": "ORD-2024-0508"
+      },
+      "created": "2026-05-03T15:20:00Z",
+      "updated_at": "2026-05-03T15:20:10Z"
+    },
+    {
+      "payment_id": "pi_3QR0A4B1cD2eF3gH4iJ5kL6m",
+      "tenant_id": "demo-tenant",
+      "amount": 89000,
+      "currency": "usd",
+      "status": "succeeded",
+      "customer_id": "cus_YZA567VWX",
+      "customer_email": "thomas.anderson@energy.com",
+      "customer_name": "Thomas Anderson",
+      "description": "Emergency fuel delivery - Invoice #INV-2024-009",
+      "payment_method": "card",
+      "payment_method_details": {
+        "type": "card",
+        "card": {
+          "brand": "visa",
+          "last4": "3333",
+          "exp_month": 4,
+          "exp_year": 2028
+        }
+      },
+      "metadata": {
+        "invoice_id": "INV-2024-009",
+        "customer_account": "ACC-009",
+        "order_id": "ORD-2024-0509",
+        "priority": "emergency"
+      },
+      "created": "2026-05-02T19:00:00Z",
+      "updated_at": "2026-05-02T19:00:42Z"
+    },
+    {
+      "payment_id": "pi_3QQzZ3A0bC1dE2fG3hI4jK5l",
+      "tenant_id": "demo-tenant",
+      "amount": 275000,
+      "currency": "usd",
+      "status": "succeeded",
+      "customer_id": "cus_BCD890YZA",
+      "customer_email": "maria.garcia@agriculture.com",
+      "customer_name": "Maria Garcia",
+      "description": "Seasonal fuel contract - Invoice #INV-2024-010",
+      "payment_method": "card",
+      "payment_method_details": {
+        "type": "card",
+        "card": {
+          "brand": "amex",
+          "last4": "6666",
+          "exp_month": 10,
+          "exp_year": 2027
+        }
+      },
+      "metadata": {
+        "invoice_id": "INV-2024-010",
+        "customer_account": "ACC-010",
+        "order_id": "ORD-2024-0510",
+        "contract_type": "seasonal"
+      },
+      "created": "2026-05-01T12:30:00Z",
+      "updated_at": "2026-05-01T12:30:55Z"
+    },
+    {
+      "payment_id": "pi_3QQyY2Z9aB0cD1eF2gH3iJ4k",
+      "tenant_id": "demo-tenant",
+      "amount": 52000,
+      "currency": "usd",
+      "status": "requires_action",
+      "customer_id": "cus_EFG123BCD",
+      "customer_email": "kevin.taylor@services.com",
+      "customer_name": "Kevin Taylor",
+      "description": "Fuel delivery - Invoice #INV-2024-011",
+      "payment_method": "card",
+      "payment_method_details": {
+        "type": "card",
+        "card": {
+          "brand": "visa",
+          "last4": "2222",
+          "exp_month": 7,
+          "exp_year": 2026
+        }
+      },
+      "metadata": {
+        "invoice_id": "INV-2024-011",
+        "customer_account": "ACC-011",
+        "order_id": "ORD-2024-0511",
+        "requires_3ds": "true"
+      },
+      "created": "2026-04-30T14:15:00Z",
+      "updated_at": "2026-04-30T14:15:08Z"
+    },
+    {
+      "payment_id": "pi_3QQxX1Y8zA9bC0dE1fG2hI3j",
+      "tenant_id": "demo-tenant",
+      "amount": 418000,
+      "currency": "usd",
+      "status": "succeeded",
+      "customer_id": "cus_HIJ456EFG",
+      "customer_email": "amanda.white@industrial.com",
+      "customer_name": "Amanda White",
+      "description": "Large fleet fuel order - Invoice #INV-2024-012",
+      "payment_method": "card",
+      "payment_method_details": {
+        "type": "card",
+        "card": {
+          "brand": "mastercard",
+          "last4": "1111",
+          "exp_month": 5,
+          "exp_year": 2029
+        }
+      },
+      "metadata": {
+        "invoice_id": "INV-2024-012",
+        "customer_account": "ACC-012",
+        "order_id": "ORD-2024-0512",
+        "fleet_size": "50"
+      },
+      "created": "2026-04-29T10:00:00Z",
+      "updated_at": "2026-04-29T10:01:12Z"
+    },
+    {
+      "payment_id": "pi_3QQwW0X7yZ8aB9cD0eF1gH2i",
+      "tenant_id": "demo-tenant",
+      "amount": 96500,
+      "currency": "usd",
+      "status": "succeeded",
+      "customer_id": "cus_KLM789HIJ",
+      "customer_email": "chris.moore@utilities.com",
+      "customer_name": "Chris Moore",
+      "description": "Fuel delivery - Invoice #INV-2024-013",
+      "payment_method": "card",
+      "payment_method_details": {
+        "type": "card",
+        "card": {
+          "brand": "visa",
+          "last4": "0000",
+          "exp_month": 2,
+          "exp_year": 2028
+        }
+      },
+      "metadata": {
+        "invoice_id": "INV-2024-013",
+        "customer_account": "ACC-013",
+        "order_id": "ORD-2024-0513"
+      },
+      "created": "2026-04-28T16:30:00Z",
+      "updated_at": "2026-04-28T16:30:25Z"
+    },
+    {
+      "payment_id": "pi_3QQvV9W6xY7zA8bC9dE0fG1h",
+      "tenant_id": "demo-tenant",
+      "amount": 178000,
+      "currency": "usd",
+      "status": "succeeded",
+      "customer_id": "cus_NOP012KLM",
+      "customer_email": "patricia.harris@healthcare.com",
+      "customer_name": "Patricia Harris",
+      "description": "Hospital fuel delivery - Invoice #INV-2024-014",
+      "payment_method": "card",
+      "payment_method_details": {
+        "type": "card",
+        "card": {
+          "brand": "amex",
+          "last4": "4444",
+          "exp_month": 12,
+          "exp_year": 2027
+        }
+      },
+      "metadata": {
+        "invoice_id": "INV-2024-014",
+        "customer_account": "ACC-014",
+        "order_id": "ORD-2024-0514",
+        "facility_type": "hospital"
+      },
+      "created": "2026-04-27T11:45:00Z",
+      "updated_at": "2026-04-27T11:45:38Z"
+    },
+    {
+      "payment_id": "pi_3QQuU8V5wX6yZ7aB8cD9eF0g",
+      "tenant_id": "demo-tenant",
+      "amount": 134000,
+      "currency": "usd",
+      "status": "succeeded",
+      "customer_id": "cus_QRS345NOP",
+      "customer_email": "daniel.clark@education.com",
+      "customer_name": "Daniel Clark",
+      "description": "School district fuel - Invoice #INV-2024-015",
+      "payment_method": "card",
+      "payment_method_details": {
+        "type": "card",
+        "card": {
+          "brand": "visa",
+          "last4": "5555",
+          "exp_month": 8,
+          "exp_year": 2026
+        }
+      },
+      "metadata": {
+        "invoice_id": "INV-2024-015",
+        "customer_account": "ACC-015",
+        "order_id": "ORD-2024-0515",
+        "customer_type": "government"
+      },
+      "created": "2026-04-26T09:00:00Z",
+      "updated_at": "2026-04-26T09:00:48Z"
+    }
+  ]
+}

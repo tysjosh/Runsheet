@@ -195,6 +195,7 @@ def main():
         "inventory_seeds.json",
         "scheduling_seeds.json",
         "agent_seeds.json",
+        "stripe_payment_seeds.json",
     ]
 
     total_records = 0

@@ -6,6 +6,7 @@ import {
   Fuel,
   ListChecks,
   LogOut,
+  Radio,
   Settings,
   Shield,
   Truck,
@@ -43,6 +44,7 @@ export default function Sidebar({
     { id: "billing", label: "Billing", icon: DollarSign },
     { id: "reconciliation", label: "Reconciliation", icon: ListChecks },
     { id: "analytics", label: "Analytics", icon: BarChart3 },
+    { id: "control", label: "Control Center", icon: Radio },
     { id: "admin", label: "Admin", icon: Shield },
     { id: "settings", label: "Settings", icon: Settings },
   ];
