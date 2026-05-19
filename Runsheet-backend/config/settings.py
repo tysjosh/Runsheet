@@ -577,13 +577,13 @@ class Settings(BaseSettings):
                     "in non-development environments"
                 )
         
-        # Validate dinee_webhook_secret is set in non-development environments
-        if self.environment != Environment.DEVELOPMENT:
+        # Validate dinee_webhook_secret is set in non-development/non-test environments
+        if self.environment not in (Environment.DEVELOPMENT, Environment.TEST):
             if not self.dinee_webhook_secret:
                 raise ValueError(
                     "dinee_webhook_secret is required in non-development environments"
                 )
-            # Validate JWT secret strength in non-development environments
+            # Validate JWT secret strength in non-development/non-test environments
             if not self.jwt_secret or len(self.jwt_secret) < 32:
                 raise ValueError(
                     "jwt_secret must be at least 32 characters in non-development environments"
