@@ -14,7 +14,7 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 from elasticsearch import Elasticsearch
 from dotenv import load_dotenv
-from config.settings import get_settings
+from config.settings import get_settings, Environment
 from resilience.circuit_breaker import CircuitBreaker, CircuitBreakerConfig, CircuitOpenException
 from errors.codes import ErrorCode
 from errors.exceptions import AppException, elasticsearch_unavailable, circuit_open
@@ -62,6 +62,11 @@ class ElasticsearchService:
     
     def connect(self):
         """Initialize Elasticsearch connection"""
+        # Skip actual connection in test environment - tests should mock ES
+        if self.settings.environment == Environment.TEST:
+            logger.info("⏭️  Skipping Elasticsearch connection in test environment")
+            return
+            
         try:
             api_key = self.settings.elastic_api_key.strip('"')
             endpoint = self.settings.elastic_endpoint.strip('"')
