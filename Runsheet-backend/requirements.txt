@@ -17,6 +17,9 @@ redis==5.2.0
 # Rate limiting (Requirements 14.1, 14.2)
 slowapi==0.1.9
 
+# Prometheus metrics (for order_metrics.py and other service metrics)
+prometheus-client==0.21.0
+
 # OpenTelemetry for distributed tracing (Requirement 5.3)
 opentelemetry-api>=1.28.0
 opentelemetry-sdk>=1.28.0
