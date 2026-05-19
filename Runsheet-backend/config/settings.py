@@ -28,6 +28,7 @@ class Environment(str, Enum):
     DEVELOPMENT = "development"
     STAGING = "staging"
     PRODUCTION = "production"
+    TEST = "test"
 
 
 def _detect_environment() -> Environment:
@@ -62,6 +63,7 @@ def _get_env_files(environment: Environment) -> Tuple[str, ...]:
         Environment.DEVELOPMENT: ".env.development",
         Environment.STAGING: ".env.staging",
         Environment.PRODUCTION: ".env.production",
+        Environment.TEST: ".env.test",
     }
     
     # Base .env file is always loaded first (if it exists)
