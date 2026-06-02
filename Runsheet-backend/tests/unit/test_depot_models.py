@@ -606,3 +606,68 @@ class TestRepositoryDelete:
             await repo.delete("", "depot_001")
         with pytest.raises(ValueError):
             await repo.delete("tenant-A", "")
+
+
+# ---------------------------------------------------------------------------
+# Single-default-per-tenant semantics (is_default)
+# ---------------------------------------------------------------------------
+
+
+class TestDefaultDepotFlag:
+    """is_default enforces at most one default depot per tenant."""
+
+    @pytest.mark.asyncio
+    async def test_create_default_clears_other_defaults(
+        self, repo: DepotRepository, es: _FakeESService
+    ):
+        # First default depot.
+        await repo.create(
+            "tenant-A",
+            _base_depot_kwargs(depot_id="depot_001", is_default=True),
+        )
+        assert es.docs["depot_001"]["is_default"] is True
+
+        # Creating a second default clears the first.
+        await repo.create(
+            "tenant-A",
+            _base_depot_kwargs(depot_id="depot_002", is_default=True),
+        )
+        assert es.docs["depot_002"]["is_default"] is True
+        assert es.docs["depot_001"]["is_default"] is False
+
+    @pytest.mark.asyncio
+    async def test_update_default_clears_other_defaults(
+        self, repo: DepotRepository, es: _FakeESService
+    ):
+        await repo.create(
+            "tenant-A",
+            _base_depot_kwargs(depot_id="depot_001", is_default=True),
+        )
+        await repo.create(
+            "tenant-A",
+            _base_depot_kwargs(depot_id="depot_002", is_default=False),
+        )
+
+        # Promote depot_002 to default via update.
+        await repo.update("tenant-A", "depot_002", {"is_default": True})
+
+        assert es.docs["depot_002"]["is_default"] is True
+        assert es.docs["depot_001"]["is_default"] is False
+
+    @pytest.mark.asyncio
+    async def test_default_is_scoped_per_tenant(
+        self, repo: DepotRepository, es: _FakeESService
+    ):
+        # Two tenants can each have their own default depot.
+        await repo.create(
+            "tenant-A",
+            _base_depot_kwargs(depot_id="depot_a", tenant_id="tenant-A", is_default=True),
+        )
+        await repo.create(
+            "tenant-B",
+            _base_depot_kwargs(depot_id="depot_b", tenant_id="tenant-B", is_default=True),
+        )
+
+        # Neither default was cleared because they belong to different tenants.
+        assert es.docs["depot_a"]["is_default"] is True
+        assert es.docs["depot_b"]["is_default"] is True

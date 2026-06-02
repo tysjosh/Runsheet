@@ -510,6 +510,43 @@ class TestScoreReassignments:
         # Default severity is "medium" (weight=2)
         assert candidates[0]["time_saved"] == 20.0
 
+    def test_uses_coordinates_when_available(self):
+        """When job + asset carry coordinates, scoring is distance-driven:
+        a closer asset must burn less fuel (smaller abs fuel_delta) than a
+        far one."""
+        optimizer, _ = _make_optimizer()
+        job = {
+            "job_id": "j1",
+            "job_type": "cargo_transport",
+            "location_lat": 40.0,
+            "location_lon": -74.0,
+        }
+        near_asset = {
+            "asset_id": "near",
+            "asset_type": "vehicle",
+            "location_lat": 40.05,
+            "location_lon": -74.0,
+        }
+        far_asset = {
+            "asset_id": "far",
+            "asset_type": "vehicle",
+            "location_lat": 41.0,
+            "location_lon": -74.0,
+        }
+        signals = [_make_signal(entity_id="j1", severity=Severity.HIGH)]
+
+        candidates = optimizer._score_reassignments(
+            [job], [near_asset, far_asset], signals
+        )
+
+        by_asset = {c["asset_id"]: c for c in candidates}
+        # The nearer asset burns less fuel for the reposition.
+        assert abs(by_asset["near"]["fuel_delta"]) < abs(
+            by_asset["far"]["fuel_delta"]
+        )
+        # And it saves more time, so it ranks first.
+        assert candidates[0]["asset_id"] == "near"
+
 
 # ---------------------------------------------------------------------------
 # Tests: _is_compatible()

@@ -114,6 +114,7 @@ def _make_es_service(tenant_policies: dict = None) -> MagicMock:
 def _make_job_service(
     destination_location: dict = None,
     customer_id: Optional[str] = None,
+    pod_otp: Optional[str] = None,
 ) -> MagicMock:
     """Create a mock JobService with _append_event and _get_job_doc."""
     svc = MagicMock()
@@ -128,6 +129,8 @@ def _make_job_service(
         job_doc["destination_location"] = destination_location
     if customer_id:
         job_doc["customer_id"] = customer_id
+    if pod_otp is not None:
+        job_doc["pod_otp"] = pod_otp
     svc._get_job_doc = AsyncMock(return_value=job_doc)
 
     return svc
@@ -887,7 +890,7 @@ class TestOtpValidation:
         assert body.get("error_code") == "OTP_REQUIRED"
 
     def test_otp_required_and_provided_succeeds(self):
-        """OTP required and provided stores POD with otp_verified=True. Validates: Req 8.5"""
+        """OTP required and matching the provisioned code stores POD with otp_verified=True. Validates: Req 8.5"""
         es = _make_es_service(
             tenant_policies={
                 "tenant_id": TENANT_ID,
@@ -896,7 +899,10 @@ class TestOtpValidation:
                 "otp_required": True,
             }
         )
-        app = _make_app(es_service=es, job_service=_make_job_service())
+        app = _make_app(
+            es_service=es,
+            job_service=_make_job_service(pod_otp="123456"),
+        )
 
         with _SETTINGS_PATCH:
             client = TestClient(app)
@@ -909,6 +915,56 @@ class TestOtpValidation:
         assert resp.status_code == 200
         data = resp.json()["data"]
         assert data["otp_verified"] is True
+
+    def test_otp_required_and_mismatched_returns_invalid(self):
+        """A non-matching OTP is rejected with OTP_INVALID. Validates: Req 8.5"""
+        es = _make_es_service(
+            tenant_policies={
+                "tenant_id": TENANT_ID,
+                "pod_required": True,
+                "pod_radius_meters": 500,
+                "otp_required": True,
+            }
+        )
+        app = _make_app(
+            es_service=es,
+            job_service=_make_job_service(pod_otp="123456"),
+        )
+
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.post(
+                "/api/driver/jobs/JOB_1/pod",
+                json=_pod_payload(otp="999999"),
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 200  # Error returned in body
+        assert resp.json().get("error_code") == "OTP_INVALID"
+
+    def test_otp_required_but_not_provisioned_fails_closed(self):
+        """OTP required but none provisioned on the job fails closed. Validates: Req 8.5"""
+        es = _make_es_service(
+            tenant_policies={
+                "tenant_id": TENANT_ID,
+                "pod_required": True,
+                "pod_radius_meters": 500,
+                "otp_required": True,
+            }
+        )
+        # Job has no pod_otp provisioned.
+        app = _make_app(es_service=es, job_service=_make_job_service())
+
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.post(
+                "/api/driver/jobs/JOB_1/pod",
+                json=_pod_payload(otp="123456"),
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 200  # Error returned in body
+        assert resp.json().get("error_code") == "OTP_NOT_PROVISIONED"
 
     def test_otp_not_required_skips_validation(self):
         """OTP not required skips OTP validation. Validates: Req 8.5"""

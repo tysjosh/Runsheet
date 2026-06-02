@@ -434,8 +434,10 @@ class ExecutionPlanner:
     ) -> str:
         """Execute a single plan step.
 
-        If a confirmation_protocol is available, routes through it.
-        Otherwise returns a placeholder success message.
+        If a confirmation_protocol is available, routes the mutation
+        through it. Otherwise the step runs in SIMULATION mode — no real
+        mutation occurs and the returned result is explicitly labelled as
+        simulated (a warning is also logged).
 
         Args:
             step: The plan step to execute.
@@ -466,8 +468,21 @@ class ExecutionPlanner:
                     mutation_result.result or "Mutation failed"
                 )
 
-        # Placeholder execution when no confirmation protocol is wired
-        return f"Step {step.step_id} ({step.tool_name}) executed successfully"
+        # No confirmation protocol wired: we cannot perform real mutations,
+        # so we run in simulation mode. The result is explicitly labelled as
+        # simulated and a warning is logged so a misconfigured deployment
+        # (missing confirmation protocol) is loud rather than silently
+        # reporting success for work that never happened.
+        logger.warning(
+            "ExecutionPlanner: no confirmation protocol wired — step %s "
+            "(%s) ran in SIMULATION mode and was not actually executed.",
+            step.step_id,
+            step.tool_name,
+        )
+        return (
+            f"Step {step.step_id} ({step.tool_name}) executed successfully "
+            f"(simulated — no confirmation protocol wired)"
+        )
 
     def _resolve_parameters(
         self,

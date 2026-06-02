@@ -32,17 +32,51 @@ EFFECTIVE_DATE = date(2025, 6, 1)
 
 
 class FakeESService:
-    """Minimal ES service stub that returns pre-configured pricing rules."""
+    """Minimal ES service stub that returns pre-configured pricing rules.
 
-    def __init__(self, rules: list[Dict[str, Any]]) -> None:
+    ``rack_prices`` lookups return the configured ``rack_prices`` rows (if
+    any) so the rack-price resolution path can be exercised; all other
+    indices return the configured pricing rules.
+    """
+
+    def __init__(
+        self,
+        rules: list[Dict[str, Any]],
+        rack_prices: Optional[list[Dict[str, Any]]] = None,
+    ) -> None:
         self._rules = rules
+        self._rack_prices = rack_prices or []
 
     async def search_documents(
         self, index: str, query: dict, size: int = 100
     ) -> dict:
-        """Return all configured rules as ES hits."""
-        hits = [{"_source": rule} for rule in self._rules]
+        """Return configured rows for the requested index as ES hits."""
+        if index == "rack_prices":
+            hits = [{"_source": rp} for rp in self._rack_prices]
+        else:
+            hits = [{"_source": rule} for rule in self._rules]
         return {"hits": {"hits": hits}}
+
+
+def _make_rack_price_dict(
+    *,
+    terminal_id: str = TERMINAL_ID,
+    product_code: str = PRODUCT_CODE,
+    price_per_gallon_usd: float = 2.50,
+) -> Dict[str, Any]:
+    """Build a rack_prices row for the FakeESService."""
+    return {
+        "rack_price_id": "rp_test_001",
+        "tenant_id": TENANT_ID,
+        "terminal_id": terminal_id,
+        "product_code": product_code,
+        "price_per_gallon_usd": price_per_gallon_usd,
+        "branded_flag": False,
+        "supplier_brand": None,
+        "provider": "opis",
+        "effective_at": "2025-06-01T00:00:00Z",
+        "retrieved_at": "2025-06-01T00:00:00Z",
+    }
 
 
 def _make_rule_dict(
@@ -120,20 +154,57 @@ class TestRackPlusMargin:
         assert result.contract_id is None
 
     @pytest.mark.asyncio
-    async def test_rack_plus_margin_without_market_price_raises(self):
-        """Without market_price_cents, rack_plus_margin raises NotImplementedError.
+    async def test_rack_plus_margin_without_market_price_uses_rack_index(self):
+        """Without market_price_cents, rack_plus_margin resolves the rack
+        price from the rack_prices index.
 
         Validates: Requirements 11.3
         """
+        margin = 10
+        rule_dict = _make_rule_dict(
+            "rack_plus_margin",
+            margin_cents=margin,
+            terminal_id=TERMINAL_ID,
+        )
+        # 2.50 USD/gal → 250 cents/gal
+        es = FakeESService(
+            [rule_dict],
+            rack_prices=[_make_rack_price_dict(price_per_gallon_usd=2.50)],
+        )
+        engine = SalesPricingEngine(es_service=es, tenant_id=TENANT_ID)
+
+        result = await engine.resolve_price(
+            customer_id=CUSTOMER_ID,
+            product_code=PRODUCT_CODE,
+            gallons=100.0,
+            terminal_id=TERMINAL_ID,
+            route_miles=50.0,
+            effective_date=EFFECTIVE_DATE,
+            market_price_cents=None,
+        )
+
+        assert result.market_price_cents == 250
+        assert result.effective_price_cents == 250 + margin
+
+    @pytest.mark.asyncio
+    async def test_rack_plus_margin_without_rack_price_raises(self):
+        """Without market_price_cents and no rack row, raises a typed error.
+
+        Validates: Requirements 11.3
+        """
+        from commerce.services.sales_pricing_engine import (
+            PricingRackPriceUnavailableError,
+        )
+
         rule_dict = _make_rule_dict(
             "rack_plus_margin",
             margin_cents=10,
             terminal_id=TERMINAL_ID,
         )
-        es = FakeESService([rule_dict])
+        es = FakeESService([rule_dict], rack_prices=[])
         engine = SalesPricingEngine(es_service=es, tenant_id=TENANT_ID)
 
-        with pytest.raises(NotImplementedError, match="OPIS rack-price"):
+        with pytest.raises(PricingRackPriceUnavailableError):
             await engine.resolve_price(
                 customer_id=CUSTOMER_ID,
                 product_code=PRODUCT_CODE,
@@ -285,21 +356,62 @@ class TestCostPlus:
         assert result.contract_id is None
 
     @pytest.mark.asyncio
-    async def test_cost_plus_without_market_price_raises(self):
-        """Without market_price_cents, cost_plus raises NotImplementedError.
+    async def test_cost_plus_without_market_price_uses_rack_index(self):
+        """Without market_price_cents, cost_plus resolves rack price from
+        the rack_prices index.
 
         Validates: Requirements 11.5
         """
+        margin = 10
+        freight_rate = 2
+        route_miles = 30.0
+        rule_dict = _make_rule_dict(
+            "cost_plus",
+            margin_cents=margin,
+            freight_rate_cents_per_mile=freight_rate,
+            terminal_id=TERMINAL_ID,
+        )
+        # 2.50 USD/gal → 250 cents/gal
+        es = FakeESService(
+            [rule_dict],
+            rack_prices=[_make_rack_price_dict(price_per_gallon_usd=2.50)],
+        )
+        engine = SalesPricingEngine(es_service=es, tenant_id=TENANT_ID)
+
+        result = await engine.resolve_price(
+            customer_id=CUSTOMER_ID,
+            product_code=PRODUCT_CODE,
+            gallons=100.0,
+            terminal_id=TERMINAL_ID,
+            route_miles=route_miles,
+            effective_date=EFFECTIVE_DATE,
+            market_price_cents=None,
+        )
+
+        # 250 + (2 × 30) + 10 = 320
+        assert result.market_price_cents == 250
+        assert result.effective_price_cents == 250 + (freight_rate * route_miles) + margin
+
+    @pytest.mark.asyncio
+    async def test_cost_plus_without_rack_price_raises(self):
+        """Without market_price_cents and no rack row, raises a typed error.
+
+        Validates: Requirements 11.5
+        """
+        from commerce.services.sales_pricing_engine import (
+            PricingRackPriceUnavailableError,
+        )
+
         rule_dict = _make_rule_dict(
             "cost_plus",
             margin_cents=10,
             freight_rate_cents_per_mile=2,
             terminal_id=TERMINAL_ID,
         )
-        es = FakeESService([rule_dict])
+        es = FakeESService([rule_dict], rack_prices=[])
         engine = SalesPricingEngine(es_service=es, tenant_id=TENANT_ID)
 
-        with pytest.raises(NotImplementedError, match="OPIS rack-price"):
+        with pytest.raises(PricingRackPriceUnavailableError):
             await engine.resolve_price(
                 customer_id=CUSTOMER_ID,
                 product_code=PRODUCT_CODE,

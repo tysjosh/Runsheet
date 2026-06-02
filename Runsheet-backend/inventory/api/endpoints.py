@@ -168,7 +168,7 @@ async def update_item(
 # ---------------------------------------------------------------------------
 
 
-@router.delete("/items/{item_id}", status_code=204)
+@router.delete("/items/{item_id}", status_code=204, response_model=None)
 @limiter.limit(_inventory_rate)
 async def delete_item(
     request: Request,

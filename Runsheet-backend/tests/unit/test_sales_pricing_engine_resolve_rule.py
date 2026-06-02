@@ -509,9 +509,13 @@ class TestStrategyDispatch:
         es = _FakeESService(rows=[_make_rack_plus_margin_row()])
         engine = SalesPricingEngine(es, "tenant-1")
 
-        # Without market_price_cents, raises NotImplementedError from
-        # get_rack_price (OPIS lookup not yet implemented — Task 5.7).
-        with pytest.raises(NotImplementedError) as exc_info:
+        # Without market_price_cents and no rack_prices row available,
+        # get_rack_price raises a typed PricingRackPriceUnavailableError.
+        from commerce.services.sales_pricing_engine import (
+            PricingRackPriceUnavailableError,
+        )
+
+        with pytest.raises(PricingRackPriceUnavailableError):
             await engine.resolve_price(
                 customer_id="cust-1",
                 product_code="DIESEL",
@@ -520,8 +524,6 @@ class TestStrategyDispatch:
                 route_miles=42.0,
                 effective_date=date(2026, 6, 1),
             )
-
-        assert "OPIS rack-price" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_tiered_volume_strategy_resolves_price(self):
@@ -547,9 +549,13 @@ class TestStrategyDispatch:
         es = _FakeESService(rows=[_make_cost_plus_row()])
         engine = SalesPricingEngine(es, "tenant-1")
 
-        # Without market_price_cents, raises NotImplementedError from
-        # get_rack_price (OPIS lookup not yet implemented — Task 5.7).
-        with pytest.raises(NotImplementedError) as exc_info:
+        # Without market_price_cents and no rack_prices row available,
+        # get_rack_price raises a typed PricingRackPriceUnavailableError.
+        from commerce.services.sales_pricing_engine import (
+            PricingRackPriceUnavailableError,
+        )
+
+        with pytest.raises(PricingRackPriceUnavailableError):
             await engine.resolve_price(
                 customer_id="cust-1",
                 product_code="PROPANE",
@@ -558,8 +564,6 @@ class TestStrategyDispatch:
                 route_miles=42.0,
                 effective_date=date(2026, 6, 1),
             )
-
-        assert "OPIS rack-price" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_no_rule_matched_raises_pricing_error(self):

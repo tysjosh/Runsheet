@@ -1565,6 +1565,10 @@ class DepotCreateRequest(BaseModel):
     timezone: str = Field(..., min_length=1)
     fuel_types_supported: List[str] = Field(default_factory=list)
     status: DepotStatus = "active"
+    is_default: bool = Field(
+        default=False,
+        description="Mark this depot as the tenant's default depot.",
+    )
 
 
 class DepotUpdateRequest(BaseModel):
@@ -1586,6 +1590,10 @@ class DepotUpdateRequest(BaseModel):
     timezone: Optional[str] = Field(default=None, min_length=1)
     fuel_types_supported: Optional[List[str]] = None
     status: Optional[DepotStatus] = None
+    is_default: Optional[bool] = Field(
+        default=None,
+        description="Set True to make this depot the tenant's default depot.",
+    )
 
 
 class DepotListResponse(BaseModel):
@@ -1849,6 +1857,7 @@ async def update_depot(
 @mvp_router.delete(
     "/depots/{depot_id}",
     status_code=status.HTTP_204_NO_CONTENT,
+    response_model=None,
 )
 async def delete_depot(
     depot_id: str,
@@ -5022,6 +5031,7 @@ async def update_terminal(
 @router.delete(
     "/terminals/{terminal_id}",
     status_code=status.HTTP_204_NO_CONTENT,
+    response_model=None,
 )
 async def delete_terminal(
     terminal_id: str,
@@ -6624,6 +6634,7 @@ async def update_supplier_contract(
 @router.delete(
     "/supplier-contracts/{contract_id}",
     status_code=status.HTTP_204_NO_CONTENT,
+    response_model=None,
 )
 async def delete_supplier_contract(
     contract_id: str,

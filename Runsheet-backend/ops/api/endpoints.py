@@ -78,12 +78,25 @@ async def require_ops_enabled(
     Raises HTTPException(404) with TENANT_DISABLED code when the Ops
     Intelligence Layer is disabled for the requesting tenant.
 
-    In development mode (ENVIRONMENT=development), all tenants are allowed.
+    In development mode the feature-flag gate can be bypassed, but only
+    when ``ALLOW_OPS_DEV_BYPASS=true`` is *also* set (two-key posture,
+    mirroring ``ALLOW_DEV_TENANT_BYPASS``). By default even development
+    enforces the per-tenant flag so dev/prod behaviour stays in parity
+    and flag-gated regressions surface locally.
 
     Validates: Requirement 27.3
     """
-    # In development, bypass feature flag check
-    if os.environ.get("ENVIRONMENT", "").lower() == "development":
+    # Development bypass is opt-in via an explicit second key so dev/prod
+    # parity is preserved by default.
+    if (
+        os.environ.get("ENVIRONMENT", "").lower() == "development"
+        and os.environ.get("ALLOW_OPS_DEV_BYPASS", "").lower() == "true"
+    ):
+        logger.warning(
+            "Ops feature-flag gate bypassed for tenant=%s "
+            "(ENVIRONMENT=development + ALLOW_OPS_DEV_BYPASS=true)",
+            tenant.tenant_id,
+        )
         return tenant
     
     if _feature_flag_service is not None:

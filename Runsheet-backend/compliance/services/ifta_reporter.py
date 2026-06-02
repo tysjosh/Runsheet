@@ -45,6 +45,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from compliance.services.compliance_es_mappings import (
     FUEL_CARD_TRANSACTIONS_INDEX,
     IFTA_MILEAGE_INDEX,
+    TAX_JURISDICTIONS_INDEX,
     TERMINAL_BOLS_INDEX,
 )
 from compliance.services.state_boundary_detector import StateBoundaryDetector
@@ -61,6 +62,22 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_PAGE_LIMIT = 50
 _MAX_PAGE_LIMIT = 200
+
+
+# 2-letter US state/territory code → 2-digit FIPS code. Used to resolve the
+# state-level IFTA excise rate from the ``tax_jurisdictions`` index (which is
+# keyed by FIPS). Covers the 50 states + DC.
+_STATE_CODE_TO_FIPS: Dict[str, str] = {
+    "AL": "01", "AK": "02", "AZ": "04", "AR": "05", "CA": "06", "CO": "08",
+    "CT": "09", "DE": "10", "DC": "11", "FL": "12", "GA": "13", "HI": "15",
+    "ID": "16", "IL": "17", "IN": "18", "IA": "19", "KS": "20", "KY": "21",
+    "LA": "22", "ME": "23", "MD": "24", "MA": "25", "MI": "26", "MN": "27",
+    "MS": "28", "MO": "29", "MT": "30", "NE": "31", "NV": "32", "NH": "33",
+    "NJ": "34", "NM": "35", "NY": "36", "NC": "37", "ND": "38", "OH": "39",
+    "OK": "40", "OR": "41", "PA": "42", "RI": "44", "SC": "45", "SD": "46",
+    "TN": "47", "TX": "48", "UT": "49", "VT": "50", "VA": "51", "WA": "53",
+    "WV": "54", "WI": "55", "WY": "56",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -241,13 +258,14 @@ class JurisdictionIFTAEntry(BaseModel):
     )
     tax_rate: float = Field(
         default=0.0,
-        description="IFTA tax rate for this jurisdiction (cents per gallon). "
-        "Set to 0.0 until rate table integration.",
+        description="IFTA tax rate for this jurisdiction (cents per gallon), "
+        "resolved from the tax_jurisdictions rate table. 0.0 when no "
+        "state excise row is configured for the jurisdiction.",
     )
     tax_due: float = Field(
         default=0.0,
-        description="Tax due = net_taxable_gallons × tax_rate. "
-        "Set to 0.0 until rate table integration.",
+        description="Tax due = net_taxable_gallons × tax_rate (cents). "
+        "May be negative when net_taxable_gallons is negative (a credit).",
     )
 
 
@@ -1106,6 +1124,67 @@ class IFTAReporter:
     # Generate quarterly report (Task 12.6, Req 7.4)
     # ------------------------------------------------------------------
 
+    async def _get_jurisdiction_tax_rates(
+        self, tenant_id: str
+    ) -> Dict[str, float]:
+        """Return ``{state_code: rate_cents_per_gallon}`` for IFTA states.
+
+        Resolves the state-level fuel excise rate for each jurisdiction
+        from the ``tax_jurisdictions`` index (the same rate table the
+        Tax_Engine uses), keyed by the 2-digit state FIPS code. Returns a
+        mapping from the 2-letter state code (e.g. ``"TX"``) to the rate
+        in cents per gallon so :meth:`generate_quarterly_report` can
+        compute ``tax_due`` per jurisdiction.
+
+        Rows that are not state-level excise rates are ignored. Failures
+        are logged and yield an empty map so the report still renders
+        (with zero tax) rather than failing outright.
+        """
+        fips_to_state = {fips: code for code, fips in _STATE_CODE_TO_FIPS.items()}
+
+        base_query: Dict[str, Any] = {
+            "query": {
+                "bool": {
+                    "must": [
+                        {"term": {"jurisdiction_level": "state"}},
+                        {"term": {"tax_type": "excise"}},
+                    ]
+                }
+            },
+            "size": 200,
+        }
+        query = inject_tenant_filter(base_query, tenant_id)
+
+        rates: Dict[str, float] = {}
+        try:
+            resp = await self._es.search_documents(
+                TAX_JURISDICTIONS_INDEX, query, 200
+            )
+            hits = (resp or {}).get("hits", {}).get("hits", [])
+        except Exception as exc:  # noqa: BLE001 — degrade gracefully
+            logger.warning(
+                "IFTAReporter: failed to load jurisdiction tax rates for "
+                "tenant=%s: %s",
+                tenant_id,
+                exc,
+            )
+            return rates
+
+        for hit in hits:
+            source = hit.get("_source", {}) if isinstance(hit, dict) else {}
+            fips = str(source.get("fips_code", "")).strip()
+            state_code = fips_to_state.get(fips)
+            rate = source.get("rate_cents_per_gallon")
+            if state_code is None or rate is None:
+                continue
+            # Keep the highest excise rate seen for the state (defensive
+            # against overlapping rows); typically there is exactly one.
+            existing = rates.get(state_code)
+            rate_val = float(rate)
+            if existing is None or rate_val > existing:
+                rates[state_code] = rate_val
+        return rates
+
     async def generate_quarterly_report(
         self,
         tenant_id: str,
@@ -1161,6 +1240,11 @@ class IFTAReporter:
             tenant_id, quarter
         )
 
+        # Step 3b: Load per-jurisdiction excise tax rates (cents/gallon)
+        # so tax_due can be computed below. Empty when no rate table is
+        # configured — the report still renders with zero tax.
+        tax_rates = await self._get_jurisdiction_tax_rates(tenant_id)
+
         # Build a lookup: truck_id -> {jurisdiction -> total_gallons}
         # Exclude flagged trucks from fuel data
         fuel_lookup: Dict[str, Dict[str, float]] = {}
@@ -1215,6 +1299,13 @@ class IFTAReporter:
                     gallons_consumed = taxable_miles / fleet_mpg
                     net_taxable_gallons = gallons_consumed - tax_paid_gallons
 
+                # Tax rate (cents/gallon) resolved from the jurisdiction
+                # rate table; tax_due is net_taxable_gallons × rate, in
+                # cents, rounded to 2 dp. Negative net gallons (credits)
+                # produce a negative tax_due, matching IFTA net-settlement.
+                tax_rate = tax_rates.get(jurisdiction, 0.0)
+                tax_due = round(net_taxable_gallons * tax_rate, 2)
+
                 jurisdiction_entries.append(
                     JurisdictionIFTAEntry(
                         jurisdiction=jurisdiction,
@@ -1222,8 +1313,8 @@ class IFTAReporter:
                         taxable_miles=taxable_miles,
                         tax_paid_gallons=tax_paid_gallons,
                         net_taxable_gallons=net_taxable_gallons,
-                        tax_rate=0.0,  # Placeholder until rate table
-                        tax_due=0.0,  # Placeholder until rate table
+                        tax_rate=tax_rate,
+                        tax_due=tax_due,
                     )
                 )
 

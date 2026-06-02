@@ -138,6 +138,14 @@ class Depot(BaseModel):
         default="active",
         description="active | inactive. Route planning only considers active depots.",
     )
+    is_default: bool = Field(
+        default=False,
+        description=(
+            "When True, this depot is the tenant's default depot. The "
+            "repository enforces at most one default per tenant: setting a "
+            "depot as default clears the flag on any other depot."
+        ),
+    )
     updated_at: Optional[datetime] = Field(
         None, description="Last-modification timestamp written by the repository."
     )
@@ -365,6 +373,11 @@ class DepotRepository:
         doc = model.model_dump(mode="json", exclude_none=False)
         await self._es.index_document(self._index, model.depot_id, doc)
 
+        # Enforce single-default-per-tenant: if this depot was created as
+        # the default, clear the flag on any other depot for the tenant.
+        if model.is_default:
+            await self._clear_other_defaults(tenant_id, model.depot_id)
+
         return model
 
     # ------------------------------------------------------------------
@@ -527,7 +540,54 @@ class DepotRepository:
         partial = validated.model_dump(mode="json", include=delta_keys)
         await self._es.update_document(self._index, depot_id, partial)
 
+        # Enforce single-default-per-tenant when this update set the flag.
+        if clean_patch.get("is_default") is True:
+            await self._clear_other_defaults(tenant_id, depot_id)
+
         return validated
+
+    # ------------------------------------------------------------------
+    # Default-depot bookkeeping
+    # ------------------------------------------------------------------
+
+    async def _clear_other_defaults(
+        self, tenant_id: str, keep_depot_id: str
+    ) -> None:
+        """Clear ``is_default`` on every tenant depot except ``keep_depot_id``.
+
+        Enforces the single-default-per-tenant invariant. Best-effort:
+        failures are logged but do not roll back the primary write, since
+        the freshly-defaulted depot is already persisted and a stale
+        second default is a soft inconsistency the next read reconciles.
+        """
+        try:
+            others = await self.list_for_tenant(tenant_id, size=self.DEFAULT_LIST_SIZE)
+        except Exception as exc:  # noqa: BLE001 — degrade gracefully
+            logger.warning(
+                "DepotRepository._clear_other_defaults: failed to list "
+                "depots for tenant=%s: %s",
+                tenant_id,
+                exc,
+            )
+            return
+
+        for depot in others:
+            if depot.depot_id == keep_depot_id or not depot.is_default:
+                continue
+            try:
+                await self._es.update_document(
+                    self._index,
+                    depot.depot_id,
+                    {"is_default": False, "updated_at": _utcnow_iso()},
+                )
+            except Exception as exc:  # noqa: BLE001 — best-effort
+                logger.warning(
+                    "DepotRepository._clear_other_defaults: failed to clear "
+                    "default on depot=%s tenant=%s: %s",
+                    depot.depot_id,
+                    tenant_id,
+                    exc,
+                )
 
     # ------------------------------------------------------------------
     # Delete

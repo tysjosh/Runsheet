@@ -274,13 +274,18 @@ class TestFallThrough:
             )
 
     @pytest.mark.asyncio
-    async def test_missing_market_price_with_resolver_raises_not_implemented(
+    async def test_missing_market_price_with_resolver_raises_rack_unavailable(
         self,
     ):
         # The resolver needs a market price to dispatch on
-        # ``contract_type`` and to build split-line outputs. Task 5.4
-        # will supply it from the OPIS rack lookup; for now the skeleton
-        # surfaces the gap rather than silently passing zero.
+        # ``contract_type`` and to build split-line outputs. The engine
+        # now resolves it from the rack_prices index; when no rack row
+        # exists it raises PricingRackPriceUnavailableError rather than
+        # silently passing zero.
+        from commerce.services.sales_pricing_engine import (
+            PricingRackPriceUnavailableError,
+        )
+
         canned = PriceResolution(
             effective_price_cents=325,
             contract_id="contract-abc",
@@ -294,7 +299,7 @@ class TestFallThrough:
             price_protection_service=stub,
         )
 
-        with pytest.raises(NotImplementedError):
+        with pytest.raises(PricingRackPriceUnavailableError):
             await engine.resolve_price(
                 customer_id="cust-5",
                 product_code="HEATING_OIL",

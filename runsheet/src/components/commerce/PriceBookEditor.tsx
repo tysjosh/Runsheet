@@ -10,6 +10,7 @@ import type {
 } from "../../services/commerceApi";
 import {
   activatePriceBook,
+  createPriceBook,
   getPriceBook,
   getPriceBooks,
   resolvePricing,
@@ -84,6 +85,13 @@ export default function PriceBookEditor({
     useState<PricingResolveResult | null>(null);
   const [resolving, setResolving] = useState(false);
   const [resolveError, setResolveError] = useState<string | null>(null);
+
+  // Create price book modal state
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [createName, setCreateName] = useState("");
+  const [createDescription, setCreateDescription] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
 
   const fetchPriceBooks = useCallback(async () => {
     setLoading(true);
@@ -199,6 +207,41 @@ export default function PriceBookEditor({
     }
   };
 
+  const openCreateModal = () => {
+    setCreateName("");
+    setCreateDescription("");
+    setCreateError(null);
+    setShowCreateModal(true);
+  };
+
+  const handleCreateBook = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const name = createName.trim();
+    if (!name) {
+      setCreateError("Name is required");
+      return;
+    }
+    setCreating(true);
+    setCreateError(null);
+    try {
+      const res = await createPriceBook({
+        name,
+        description: createDescription.trim() || undefined,
+        rules: [],
+      });
+      setShowCreateModal(false);
+      // Refresh the list and open the newly created book for editing.
+      await fetchPriceBooks();
+      await handleSelectBook(res.data.price_book_id);
+    } catch (err) {
+      setCreateError(
+        err instanceof Error ? err.message : "Failed to create price book",
+      );
+    } finally {
+      setCreating(false);
+    }
+  };
+
   const handleActivate = async () => {
     if (!selectedBook) return;
     setSaving(true);
@@ -277,12 +320,7 @@ export default function PriceBookEditor({
             <Button
               variant="primary"
               size="sm"
-              onClick={() => {
-                // TODO: Implement create price book modal
-                alert(
-                  "Create Price Book feature coming soon! For now, use the backend API to create price books.",
-                );
-              }}
+              onClick={openCreateModal}
             >
               Create Price Book
             </Button>
@@ -293,11 +331,7 @@ export default function PriceBookEditor({
               description="Create a price book to get started with pricing rules."
               action={{
                 label: "Create Price Book",
-                onClick: () => {
-                  alert(
-                    "Create Price Book feature coming soon! For now, use the backend API to create price books.",
-                  );
-                },
+                onClick: openCreateModal,
               }}
             />
           ) : (
@@ -709,6 +743,84 @@ export default function PriceBookEditor({
             )}
           </section>
         </>
+      )}
+
+      {/* Create Price Book modal */}
+      {showCreateModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="create-book-heading"
+        >
+          <div className="bg-white rounded-lg shadow-lg w-full max-w-md p-6">
+            <h2 id="create-book-heading" className="text-lg font-semibold mb-4">
+              Create Price Book
+            </h2>
+            {createError && (
+              <div
+                role="alert"
+                className="bg-error-light border border-error-light text-error-dark p-3 rounded mb-4 text-sm"
+              >
+                {createError}
+              </div>
+            )}
+            <form onSubmit={handleCreateBook}>
+              <div className="mb-4">
+                <label
+                  htmlFor="create-book-name"
+                  className="block text-sm font-medium mb-1"
+                >
+                  Name
+                </label>
+                <input
+                  id="create-book-name"
+                  type="text"
+                  value={createName}
+                  onChange={(e) => setCreateName(e.target.value)}
+                  className="w-full border rounded px-3 py-2"
+                  placeholder="e.g. 2026 Q3 Commercial Diesel"
+                  // biome-ignore lint/a11y/noAutofocus: focus the first field when the modal opens
+                  autoFocus
+                />
+              </div>
+              <div className="mb-4">
+                <label
+                  htmlFor="create-book-description"
+                  className="block text-sm font-medium mb-1"
+                >
+                  Description
+                </label>
+                <textarea
+                  id="create-book-description"
+                  value={createDescription}
+                  onChange={(e) => setCreateDescription(e.target.value)}
+                  className="w-full border rounded px-3 py-2"
+                  rows={3}
+                  placeholder="Optional"
+                />
+              </div>
+              <div className="flex justify-end gap-3">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onClick={() => setShowCreateModal(false)}
+                  disabled={creating}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="submit"
+                  variant="primary"
+                  disabled={creating}
+                  loading={creating}
+                >
+                  Create
+                </Button>
+              </div>
+            </form>
+          </div>
+        </div>
       )}
     </div>
   );

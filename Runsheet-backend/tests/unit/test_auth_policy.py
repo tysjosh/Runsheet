@@ -427,3 +427,75 @@ class TestTenantContext:
     def test_tenant_id_is_required(self):
         with pytest.raises(Exception):
             TenantContext()
+
+
+# ---------------------------------------------------------------------------
+# API-key verification tests (Req 5.x — fail-closed allowlist)
+# ---------------------------------------------------------------------------
+
+
+class TestVerifyApiKey:
+    """Tests for _verify_api_key fail-closed allowlist behavior."""
+
+    def _request_with_key(self, key=None):
+        req = MagicMock()
+        req.headers = {"X-API-Key": key} if key is not None else {}
+        req.state = MagicMock()
+        req.state.request_id = "req-test"
+        return req
+
+    @pytest.mark.asyncio
+    async def test_missing_header_raises_401_required(self):
+        from fastapi import HTTPException
+        from middleware.auth_policy import _verify_api_key
+
+        with pytest.raises(HTTPException) as exc:
+            await _verify_api_key(self._request_with_key())
+        assert exc.value.status_code == 401
+        assert exc.value.detail["error_code"] == "API_KEY_REQUIRED"
+
+    @pytest.mark.asyncio
+    async def test_unconfigured_keys_reject_any_key(self):
+        """With no configured api_keys, any presented key is rejected (fail closed)."""
+        from fastapi import HTTPException
+        from middleware import auth_policy
+
+        with patch(
+            "config.settings.get_settings",
+            return_value=MagicMock(api_keys=""),
+        ):
+            with pytest.raises(HTTPException) as exc:
+                await auth_policy._verify_api_key(
+                    self._request_with_key("anything")
+                )
+        assert exc.value.status_code == 401
+        assert exc.value.detail["error_code"] == "API_KEY_INVALID"
+
+    @pytest.mark.asyncio
+    async def test_invalid_key_rejected(self):
+        from fastapi import HTTPException
+        from middleware import auth_policy
+
+        with patch(
+            "config.settings.get_settings",
+            return_value=MagicMock(api_keys="good-key-1,good-key-2"),
+        ):
+            with pytest.raises(HTTPException) as exc:
+                await auth_policy._verify_api_key(
+                    self._request_with_key("bad-key")
+                )
+        assert exc.value.status_code == 401
+        assert exc.value.detail["error_code"] == "API_KEY_INVALID"
+
+    @pytest.mark.asyncio
+    async def test_valid_key_accepted(self):
+        from middleware import auth_policy
+
+        with patch(
+            "config.settings.get_settings",
+            return_value=MagicMock(api_keys="good-key-1,good-key-2"),
+        ):
+            result = await auth_policy._verify_api_key(
+                self._request_with_key("good-key-2")
+            )
+        assert result == {"api_key": "good-key-2"}

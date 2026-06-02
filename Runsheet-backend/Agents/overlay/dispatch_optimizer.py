@@ -250,6 +250,12 @@ class DispatchOptimizer(OverlayAgentBase):
         Returns a list of candidate dicts sorted by composite score
         (descending), each containing job_id, asset_id, time_saved,
         fuel_delta, and sla_impact.
+
+        Scoring uses real operational estimates when the job/asset
+        documents carry the necessary fields (asset + job coordinates,
+        average speed, fuel burn, SLA deadline). When those fields are
+        absent — e.g. sparse MVP data — it falls back to a
+        severity-weighted heuristic so a proposal is still produced.
         """
         signal_severity = {s.entity_id: s.severity.value for s in signals}
         severity_weight = {"low": 1, "medium": 2, "high": 3, "critical": 4}
@@ -258,30 +264,108 @@ class DispatchOptimizer(OverlayAgentBase):
         for job in jobs:
             job_id = job.get("job_id")
             job_type = job.get("job_type", "cargo_transport")
+            sev = signal_severity.get(job_id, "medium")
+            weight = severity_weight.get(sev, 2)
             for asset in assets:
                 asset_type = asset.get("asset_type", "vehicle")
                 # Basic compatibility check
                 if not self._is_compatible(job_type, asset_type):
                     continue
 
-                # Heuristic scoring
-                sev = signal_severity.get(job_id, "medium")
-                weight = severity_weight.get(sev, 2)
-                time_saved = weight * 10.0  # placeholder heuristic
-                fuel_delta = -weight * 2.0  # negative = savings
-                sla_impact = weight * 0.5   # positive = improvement
-
+                estimate = self._estimate_reassignment(job, asset, weight)
                 candidates.append({
                     "job_id": job_id,
                     "asset_id": asset.get("asset_id"),
-                    "time_saved": time_saved,
-                    "fuel_delta": fuel_delta,
-                    "sla_impact": sla_impact,
-                    "score": time_saved + abs(fuel_delta) + sla_impact,
+                    "time_saved": estimate["time_saved"],
+                    "fuel_delta": estimate["fuel_delta"],
+                    "sla_impact": estimate["sla_impact"],
+                    "score": (
+                        estimate["time_saved"]
+                        + abs(estimate["fuel_delta"])
+                        + estimate["sla_impact"]
+                    ),
                 })
 
         candidates.sort(key=lambda c: c["score"], reverse=True)
         return candidates
+
+    # Default speed/fuel assumptions used only when telemetry is absent.
+    _DEFAULT_AVG_SPEED_KMH: float = 50.0
+    _DEFAULT_FUEL_L_PER_KM: float = 0.35
+
+    def _estimate_reassignment(
+        self, job: Dict[str, Any], asset: Dict[str, Any], weight: int
+    ) -> Dict[str, float]:
+        """Estimate time_saved (min), fuel_delta (L), and sla_impact for a
+        candidate reassignment.
+
+        When the asset and job both expose coordinates, the estimate is
+        derived from the great-circle distance the asset must travel to
+        reach the job, the asset's average speed, and its fuel burn rate.
+        ``sla_impact`` is the slack (minutes) between the estimated
+        arrival and the job's SLA deadline when available. When the
+        required fields are missing the method falls back to a
+        severity-weighted heuristic so a proposal is still produced.
+        """
+        from driver.services.geo_utils import haversine_distance_meters
+
+        asset_lat = asset.get("location_lat", asset.get("lat"))
+        asset_lon = asset.get("location_lon", asset.get("lon"))
+        job_lat = job.get("location_lat", job.get("lat"))
+        job_lon = job.get("location_lon", job.get("lon"))
+
+        have_coords = all(
+            isinstance(v, (int, float))
+            for v in (asset_lat, asset_lon, job_lat, job_lon)
+        )
+
+        if not have_coords:
+            # Heuristic fallback (sparse data): severity-weighted estimate.
+            return {
+                "time_saved": weight * 10.0,
+                "fuel_delta": -weight * 2.0,
+                "sla_impact": weight * 0.5,
+            }
+
+        distance_km = (
+            haversine_distance_meters(asset_lat, asset_lon, job_lat, job_lon)
+            / 1000.0
+        )
+        avg_speed = float(
+            asset.get("avg_speed_kmh") or self._DEFAULT_AVG_SPEED_KMH
+        ) or self._DEFAULT_AVG_SPEED_KMH
+        fuel_rate = float(
+            asset.get("fuel_l_per_km") or self._DEFAULT_FUEL_L_PER_KM
+        )
+
+        # Estimated travel time to reach the job, in minutes.
+        travel_minutes = (distance_km / avg_speed) * 60.0
+
+        # time_saved: a closer asset (shorter travel) saves more time
+        # relative to the current at-risk plan. We weight the saving by the
+        # signal severity so higher-severity jobs rank above equidistant
+        # lower-severity ones.
+        time_saved = round(weight * max(0.0, 60.0 - travel_minutes) / 6.0, 2)
+
+        # fuel_delta: extra fuel (litres) the reassignment burns. Negative
+        # convention = cost; the optimizer ranks on abs(fuel_delta) so a
+        # longer reposition is penalised.
+        fuel_delta = round(-distance_km * fuel_rate, 2)
+
+        # sla_impact: slack (minutes) between estimated arrival and the
+        # job's SLA deadline. Positive = arrives with time to spare.
+        sla_slack = job.get("sla_slack_minutes")
+        if isinstance(sla_slack, (int, float)):
+            sla_impact = round(float(sla_slack) - travel_minutes, 2)
+        else:
+            # No SLA data: treat a sub-hour reposition as non-negative.
+            sla_impact = round(max(0.0, 60.0 - travel_minutes), 2)
+
+        return {
+            "time_saved": time_saved,
+            "fuel_delta": fuel_delta,
+            "sla_impact": sla_impact,
+        }
 
     @staticmethod
     def _is_compatible(job_type: str, asset_type: str) -> bool:

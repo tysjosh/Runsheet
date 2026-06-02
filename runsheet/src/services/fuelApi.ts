@@ -1284,15 +1284,10 @@ export interface DepotUpdatePayload {
   fuel_types_supported?: string[];
   status?: DepotStatus;
   /**
-   * Marks this depot as the tenant's default.
-   *
-   * NOTE (Task 11.3): the backend ``PATCH`` contract does not yet expose
-   * ``is_default`` — follow-up backend work tracked in spec task 4.1 is
-   * expected to mirror this flag into the tenant ``default_depot_id``
-   * via :class:`services.tenant_settings.TenantSettingsService`. Until
-   * then, servers that forbid extra fields will reject this payload with
-   * HTTP 422; the UI surfaces that as a non-blocking error so the rest of
-   * the CRUD surface stays usable.
+   * Marks this depot as the tenant's default. The backend ``PATCH``
+   * contract accepts this flag and enforces a single default per tenant:
+   * setting one depot as default clears the flag on any other depot
+   * (see :class:`fuel.depot_models.DepotRepository`).
    */
   is_default?: boolean;
 }

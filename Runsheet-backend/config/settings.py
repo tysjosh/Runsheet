@@ -186,6 +186,22 @@ class Settings(BaseSettings):
         description="Algorithm used for JWT signing (default: HS256)"
     )
 
+    # API-key authentication
+    #
+    # Comma-separated list of valid API keys for routes that declare the
+    # ``api_key_required`` auth policy. When empty, API-key auth is
+    # treated as unconfigured and every API-key request is rejected
+    # (fail closed) rather than accepting any non-empty key. Keys are
+    # compared in constant time to avoid timing side-channels.
+    api_keys: str = Field(
+        default="",
+        description=(
+            "Comma-separated list of accepted API keys for the "
+            "api_key_required auth policy. Empty = API-key auth disabled "
+            "(all such requests rejected)."
+        ),
+    )
+
     # Demo data seeding at startup.
     #
     # Historically ``bootstrap/core.py`` called

@@ -11,6 +11,7 @@ Validates: Requirements 8.1, 8.2, 8.3, 8.4, 8.5
 """
 
 import asyncio
+import hmac
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -282,6 +283,23 @@ async def _get_tenant_policies(tenant_id: str) -> dict:
             exc,
         )
     return defaults
+
+
+def _extract_expected_otp(job_doc: Optional[dict]) -> Optional[str]:
+    """Return the expected delivery OTP provisioned on the job, if any.
+
+    The OTP is provisioned when a delivery is dispatched and shared with
+    the recipient out-of-band (SMS/email). It is stored on the job
+    document under one of the canonical keys below. Returns ``None`` when
+    no OTP has been provisioned so callers can fail closed.
+    """
+    if not job_doc:
+        return None
+    for key in ("pod_otp", "delivery_otp", "otp_code", "expected_otp"):
+        value = job_doc.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return None
 
 
 async def _get_job_destination(job_id: str, tenant_id: str) -> Optional[dict]:
@@ -831,17 +849,57 @@ async def submit_pod(
     otp_required = policies.get("otp_required", False)
 
     # OTP validation (Req 8.5)
+    #
+    # When a tenant requires OTP, the driver-submitted code is verified
+    # against the expected OTP provisioned on the job document
+    # (``pod_otp``/``delivery_otp`` — generated when the delivery is
+    # dispatched and shared with the customer out-of-band). Verification
+    # uses a constant-time comparison to avoid leaking the code through
+    # timing. The handler fails *closed*: if the job has no provisioned
+    # OTP we cannot prove the driver is at the right delivery, so the
+    # submission is rejected rather than rubber-stamped.
     otp_verified = False
     if otp_required:
-        if not body.otp:
+        submitted_otp = (body.otp or "").strip()
+        if not submitted_otp:
             return {
                 "error": "OTP is required for this tenant",
                 "error_code": "OTP_REQUIRED",
                 "request_id": _get_request_id(request),
             }
-        # For OTP validation, we check against the job's stored OTP
-        # In a real implementation, this would check against a generated OTP
-        # For now, we accept any non-empty OTP when otp_required is True
+
+        expected_otp = _extract_expected_otp(job_doc)
+        if not expected_otp:
+            # Fail closed — OTP is required but none was provisioned for
+            # this job. Accepting any code here would defeat the control.
+            logger.warning(
+                "POD OTP required but no expected OTP provisioned: "
+                "tenant=%s job=%s",
+                tenant.tenant_id,
+                job_id,
+            )
+            return {
+                "error": (
+                    "OTP verification is required but no OTP was "
+                    "provisioned for this delivery"
+                ),
+                "error_code": "OTP_NOT_PROVISIONED",
+                "request_id": _get_request_id(request),
+            }
+
+        if not hmac.compare_digest(submitted_otp, str(expected_otp).strip()):
+            logger.warning(
+                "POD OTP mismatch: tenant=%s job=%s driver=%s",
+                tenant.tenant_id,
+                job_id,
+                tenant.user_id,
+            )
+            return {
+                "error": "The OTP provided is invalid",
+                "error_code": "OTP_INVALID",
+                "request_id": _get_request_id(request),
+            }
+
         otp_verified = True
 
     # Geotag distance validation (Req 8.3)

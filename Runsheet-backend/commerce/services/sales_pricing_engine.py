@@ -122,6 +122,49 @@ class PricingNoRuleMatchedError(ValueError):
             f"Error code: {self.error_code}"
         )
 
+
+#: Error code raised when no rack price is available for a
+#: ``(tenant, terminal, product)`` tuple and no explicit
+#: ``market_price_cents`` override was supplied (Req 11.3, 11.5).
+ERROR_CODE_PRICING_RACK_PRICE_UNAVAILABLE: str = "pricing.rack_price_unavailable"
+
+
+class PricingRackPriceUnavailableError(ValueError):
+    """Raised when a rack price cannot be resolved for the lookup tuple.
+
+    The ``rack_plus_margin`` and ``cost_plus`` strategies (and the
+    price-protection first-priority path) need a current rack price. When
+    the caller does not supply ``market_price_cents`` and no row exists in
+    the ``rack_prices`` index for the ``(tenant, terminal, product)``
+    tuple, this error is raised so the failure is explicit rather than
+    silently producing a zero-priced line.
+
+    Subclasses :class:`ValueError` so existing ``ValueError`` handlers
+    continue to work. The ``error_code`` attribute exposes the stable
+    :data:`ERROR_CODE_PRICING_RACK_PRICE_UNAVAILABLE` identifier.
+    """
+
+    error_code: str = ERROR_CODE_PRICING_RACK_PRICE_UNAVAILABLE
+
+    def __init__(
+        self,
+        *,
+        tenant_id: str,
+        terminal_id: str,
+        product_code: str,
+    ) -> None:
+        self.tenant_id = tenant_id
+        self.terminal_id = terminal_id
+        self.product_code = product_code
+        super().__init__(
+            f"No rack price available for tenant={tenant_id!r}, "
+            f"terminal={terminal_id!r}, product={product_code!r}. "
+            f"Either supply market_price_cents explicitly or ensure the "
+            f"rack_prices index has a current row. "
+            f"Error code: {self.error_code}"
+        )
+
+
 #: Maximum number of pricing-rule rows fetched for any single
 #: ``customer_id`` + ``product_code`` lookup. Priority resolution
 #: (Task 5.3) is going to narrow this down client-side across the
@@ -494,13 +537,13 @@ class SalesPricingEngine:
         # fields exactly as the resolver computed them.
         if self._price_protection_service is not None:
             if market_price_cents is None:
-                raise NotImplementedError(
-                    "SalesPricingEngine.resolve_price requires "
-                    "market_price_cents when a PriceProtectionService "
-                    "is wired. The OPIS rack-price lookup that "
-                    "supplies this value is tracked by Task 5.4 "
-                    "(rack_plus_margin strategy). Pass "
-                    "market_price_cents explicitly for now."
+                # Resolve the rack price from the rack_prices index so the
+                # price-protection resolver can dispatch on contract_type
+                # and build split-line outputs. Falls back to a typed
+                # PricingRackPriceUnavailableError when no rack row exists.
+                market_price_cents = await self.get_rack_price(
+                    product_code=product_code,
+                    terminal_id=terminal_id,
                 )
             resolution = await self._price_protection_service.resolve_price(
                 customer_id=customer_id,
@@ -555,7 +598,7 @@ class SalesPricingEngine:
         elif strategy == "rack_plus_margin":
             # rack_plus_margin strategy (Task 5.4 / Req 11.3):
             # effective_price = rack_price + rule.margin_cents
-            rack_price = self.get_rack_price(
+            rack_price = await self.get_rack_price(
                 product_code=product_code,
                 terminal_id=rule.terminal_id or terminal_id,
                 market_price_cents=market_price_cents,
@@ -589,7 +632,7 @@ class SalesPricingEngine:
         elif strategy == "cost_plus":
             # cost_plus strategy (Task 5.6 / Req 11.5):
             # effective_price = rack_price + (freight_rate × miles) + margin
-            rack_price = self.get_rack_price(
+            rack_price = await self.get_rack_price(
                 product_code=product_code,
                 terminal_id=rule.terminal_id or terminal_id,
                 market_price_cents=market_price_cents,
@@ -632,28 +675,32 @@ class SalesPricingEngine:
     # Rack price helper (Task 5.4 / 5.6)
     # ------------------------------------------------------------------
 
-    def get_rack_price(
+    async def get_rack_price(
         self,
         product_code: str,
         terminal_id: str,
         market_price_cents: Optional[int] = None,
     ) -> int:
-        """Return the current rack price for a product/terminal.
+        """Return the current rack price for a product/terminal in cents.
 
-        This method provides the seam for callers who already know the
-        rack price (via ``market_price_cents``). When the caller passes
-        ``market_price_cents``, that value is used directly as the rack
-        price — this is the primary path for Tasks 5.4 and 5.6 until
-        the daily OPIS refresh (Task 5.7) is implemented.
+        Resolution order:
 
-        When ``market_price_cents`` is not provided, the method raises
-        :class:`NotImplementedError` pointing at Task 5.7 (daily OPIS
-        refresh) which will implement the automatic rack-price lookup
-        from the OPIS index.
+        1. **Explicit override.** When the caller passes
+           ``market_price_cents`` it is used directly. This is the seam
+           for callers who already know the rack price (e.g. a daily
+           batch that pre-resolved prices).
+        2. **``rack_prices`` index lookup.** Otherwise the most recent
+           :class:`integrations.rack_price_provider_base.RackPrice` row
+           for the ``(tenant, terminal, product)`` tuple is fetched from
+           the ``rack_prices`` ES index (populated by
+           :class:`integrations.rack_price_sync.RackPriceSyncService`
+           from the OPIS feed or the CSV fallback). The stored
+           ``price_per_gallon_usd`` is converted to integer cents per
+           gallon.
 
         Args:
             product_code: Canonical fuel product code.
-            terminal_id: Terminal identifier for the OPIS lookup.
+            terminal_id: Terminal identifier for the rack-price lookup.
             market_price_cents: If provided, used directly as the rack
                 price (seam for callers who already know the rack price).
 
@@ -661,20 +708,59 @@ class SalesPricingEngine:
             The rack price in integer cents per gallon.
 
         Raises:
-            NotImplementedError: When ``market_price_cents`` is not
-                provided and the OPIS rack-price lookup is not yet
-                implemented (Task 5.7).
+            PricingRackPriceUnavailableError: When ``market_price_cents``
+                is not provided and no rack-price row exists for the
+                ``(tenant, terminal, product)`` tuple.
 
         Validates: Requirements 11.3, 11.5
         """
         if market_price_cents is not None:
             return market_price_cents
-        raise NotImplementedError(
-            "SalesPricingEngine.get_rack_price: automatic OPIS rack-price "
-            "lookup is not yet implemented. Pass market_price_cents "
-            "explicitly, or wait for Task 5.7 (daily OPIS refresh) to "
-            f"land. product_code={product_code!r}, "
-            f"terminal_id={terminal_id!r}."
+
+        from fuel.services.fuel_ops_es_mappings import RACK_PRICES_INDEX
+
+        base_query: dict = {
+            "query": {
+                "bool": {
+                    "must": [
+                        {"term": {"terminal_id": terminal_id}},
+                        {"term": {"product_code": product_code}},
+                    ]
+                }
+            },
+            # Most-recent observation wins.
+            "sort": [{"effective_at": {"order": "desc"}}],
+            "size": 1,
+        }
+        query = inject_tenant_filter(base_query, self._tenant_id)
+
+        try:
+            response = await self._es.search_documents(
+                RACK_PRICES_INDEX, query, 1
+            )
+            hits = (response or {}).get("hits", {}).get("hits", [])
+        except Exception as exc:  # noqa: BLE001 — surface as a typed error below
+            logger.warning(
+                "SalesPricingEngine.get_rack_price: rack_prices lookup "
+                "failed tenant=%s terminal=%s product=%s: %s",
+                self._tenant_id,
+                terminal_id,
+                product_code,
+                exc,
+            )
+            hits = []
+
+        if hits:
+            source = hits[0].get("_source", {})
+            price_usd = source.get("price_per_gallon_usd")
+            if price_usd is not None:
+                # USD/gallon → integer cents/gallon (Constraint C1).
+                return int(round(float(price_usd) * 100))
+
+        raise PricingRackPriceUnavailableError(
+            tenant_id=self._tenant_id,
+            terminal_id=terminal_id,
+            product_code=product_code,
         )
 
     # ------------------------------------------------------------------

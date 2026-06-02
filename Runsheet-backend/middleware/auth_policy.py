@@ -11,6 +11,8 @@ import logging
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
+import hmac
+
 from fastapi import Depends, HTTPException, Request
 from pydantic import BaseModel
 
@@ -265,8 +267,29 @@ async def _verify_api_key(request: Request) -> dict:
             ).model_dump(),
         )
 
-    # In production, validate against a stored key list
-    # For now, accept any non-empty key
+    # Validate against the configured key list. ``settings.api_keys`` is a
+    # comma-separated allowlist; an empty list means API-key auth is not
+    # configured, so we fail closed (reject) rather than accept any key.
+    # Comparison is constant-time per candidate to avoid leaking which
+    # prefix matched via response timing.
+    from config.settings import get_settings
+
+    configured = get_settings().api_keys or ""
+    valid_keys = [k.strip() for k in configured.split(",") if k.strip()]
+
+    matched = any(hmac.compare_digest(api_key, candidate) for candidate in valid_keys)
+    if not matched:
+        logger.warning("API-key authentication failed: no matching configured key")
+        raise HTTPException(
+            status_code=401,
+            detail=ErrorResponse(
+                error_code="API_KEY_INVALID",
+                message="Invalid API key",
+                details=None,
+                request_id=getattr(request.state, "request_id", "unknown"),
+            ).model_dump(),
+        )
+
     return {"api_key": api_key}
 
 
