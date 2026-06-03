@@ -223,13 +223,35 @@ async def initialize(app, container: ServiceContainer) -> None:
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("UnitConversion import failed: %s", exc)
 
-    # 3. TenantCredentialsVault — AWS KMS-backed credential store.
+    # 3. TenantCredentialsVault — KMS envelope-encrypted credential store.
+    #    Production sets ``FUEL_OPS_KMS_KEY_ID`` and the vault lazily builds a
+    #    real ``boto3.client("kms")``. Local-dev / CI have no KMS key (and no
+    #    AWS creds), so we inject a ``LocalKMSClient`` that performs real
+    #    AES-GCM envelope encryption under a process-local master key. This
+    #    keeps credential-dependent flows (intake-channel registration,
+    #    integration credential storage) working end-to-end off-AWS without
+    #    silently calling the real KMS API. Never used in production.
     try:
         from services.credentials_vault import TenantCredentialsVault
 
+        kms_key_id = fuel_ops_settings.get("kms_key_id")
+        kms_client = None
+        _env = getattr(settings.environment, "value", settings.environment)
+        if not kms_key_id and _env != "production":
+            from services.local_kms import LOCAL_KMS_DEFAULT_KEY_ID, LocalKMSClient
+
+            kms_key_id = LOCAL_KMS_DEFAULT_KEY_ID
+            kms_client = LocalKMSClient(key_id=kms_key_id)
+            logger.info(
+                "No FUEL_OPS_KMS_KEY_ID configured in %s; using LocalKMSClient "
+                "for the credentials vault (dev/CI envelope encryption)",
+                _env,
+            )
+
         credentials_vault = TenantCredentialsVault(
             es_service=es_service,
-            kms_key_id=fuel_ops_settings.get("kms_key_id"),
+            kms_key_id=kms_key_id,
+            kms_client=kms_client,
         )
         container.credentials_vault = credentials_vault
         logger.info("TenantCredentialsVault registered")

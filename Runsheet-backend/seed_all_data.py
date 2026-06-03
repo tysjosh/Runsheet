@@ -68,6 +68,27 @@ DATA_DIR = Path(__file__).parent / "scripts" / "data"
 # Helpers
 # ---------------------------------------------------------------------------
 TENANT = os.environ.get("SEED_TENANT_ID", "").strip()
+
+
+def _retired_indices() -> set:
+    """ES indices retired in migration Phase 6 (Postgres is their sole store).
+
+    The seeder must NOT recreate or load these — doing so would resurrect a
+    dropped index (with a dynamic mapping) that the app no longer reads from.
+    Sourced from the same ``RETIRED_ES_INDICES`` setting the runtime gate uses.
+    """
+    try:
+        from config.settings import get_settings
+        return set(get_settings().retired_es_indices or [])
+    except Exception:  # noqa: BLE001
+        # Fall back to the raw env var so the seeder works even if settings
+        # validation is unavailable in a standalone run.
+        raw = os.environ.get("RETIRED_ES_INDICES", "")
+        return {p.strip() for p in raw.replace("[", "").replace("]", "")
+                .replace('"', "").split(",") if p.strip()}
+
+
+_RETIRED_INDICES = _retired_indices()
 SCHEMA_VERSION = "1.0"
 
 US_CITIES = {
@@ -320,6 +341,11 @@ def _managed_index_mappings() -> dict:
         OpsElasticsearchService.POISON_QUEUE: _ops._get_poison_queue_mapping(),
     })
 
+    # Drop indices retired in Phase 6 (Postgres-only) so neither create nor
+    # recreate resurrects a dropped index with a stale/dynamic mapping.
+    for _retired in _RETIRED_INDICES:
+        mappings.pop(_retired, None)
+
     return mappings
 
 
@@ -446,6 +472,12 @@ def _load_json_file(filepath: Path, force: bool) -> int:
     total = 0
     for index_name, records in data.items():
         if not isinstance(records, list) or not records:
+            continue
+        if index_name in _RETIRED_INDICES:
+            logger.info(
+                "⏭️  %s retired (Postgres-only) — skipping ES fixture load",
+                index_name,
+            )
             continue
         if not force and _index_count(index_name) > 0:
             logger.info(f"⏭️  {index_name} already has data — skipping")
@@ -1355,21 +1387,42 @@ def seed_fuel_orders(force: bool = False):
     for idx, (station_id, customer_tank_id, product_code, gallons, status, customer_id) in enumerate(orders, start=1):
         order_id = f"ORD-{idx:04d}"
         city = random.choice(CITY_NAMES)
-        
+        geo = _geo(city)
+        # Map each customer_id to a readable name so the order list renders.
+        customer_name = {
+            "CUST-001": "Acme Fuel Distribution",
+            "CUST-002": "Metro Transit Authority",
+            "CUST-003": "Harbor Logistics Co",
+            "CUST-004": "Sunrise Energy Partners",
+            "CUST-005": "Industrial Logistics",
+        }.get(customer_id, customer_id)
+        created = _ago(days=random.randint(1, 7))
+
         doc = {
             "order_id": order_id,
             "tenant_id": TENANT,
             "customer_id": customer_id,
+            "customer_name": customer_name,
             "customer_tank_id": customer_tank_id,  # Must match station_id in forecasts
             "status": status,
             "call_type": "keep_full",  # Type of order for prioritization
             "product_code": product_code,
             "gallons_requested": float(gallons),
             "ship_to_address": f"{random.randint(100, 9999)} {random.choice(['Main', 'Oak', 'Elm'])} St, {city}",
+            "ship_to_lat": geo["lat"],
+            "ship_to_lon": geo["lon"],
+            "fill_to_full": False,
             "delivery_window_start": _now(),
             "delivery_window_end": _future(days=2),
-            "created_at": _ago(days=random.randint(1, 7)),
+            # Intake provenance — required by the strict FuelOrder model.
+            "intake_channel": "dispatcher",
+            "intake_channel_id": "dispatcher-default",
+            "intake_metadata": {"dispatcher_user_id": "seed-dispatcher"},
+            "source_schema_version": "1.0",
+            "trace_id": _uid(),
+            "created_at": created,
             "updated_at": _ago(hours=random.randint(0, 24)),
+            "last_event_timestamp": created,
         }
         actions.append({"index": {"_index": index, "_id": order_id}})
         actions.append(doc)

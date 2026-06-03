@@ -73,10 +73,17 @@ _IGNORED_FIELDS = {
     "payment": {"updated_at"},
     "price_book": {"updated_at"},
     "pricing_rule": {"updated_at"},
-    "invoice_event": set(),
-    "account_event": set(),
-    "dunning_event": set(),
-    "ar_aging_snapshot": set(),
+    # Event/snapshot projections key off the domain timestamp (``occurred_at``
+    # / ``queued_at`` / ``snapshot_date``) and intentionally do NOT carry
+    # ``created_at`` / ``updated_at`` — those are stamped onto the ES ``_source``
+    # by ``ElasticsearchService.index_document`` at write time and have no
+    # Postgres column (same class as the invoice ``_last_applied_seq`` exclusion
+    # above). Excluding them keeps parity honest: every legitimately-projected
+    # event would otherwise show a spurious created_at/updated_at divergence.
+    "invoice_event": {"created_at", "updated_at"},
+    "account_event": {"created_at", "updated_at"},
+    "dunning_event": {"created_at", "updated_at"},
+    "ar_aging_snapshot": {"created_at", "updated_at"},
     # Compliance config: stored document is the verbatim ES doc — compare all.
     "tax_jurisdiction": set(),
     "tax_exemption": set(),

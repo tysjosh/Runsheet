@@ -690,12 +690,6 @@
     "created_at": "date",
     "updated_at": "date"
   },
-  "invoice_counter_checkpoints": {
-    "tenant_id": "keyword",
-    "max_seq": "long",
-    "checkpoint_date": "date",
-    "created_at": "date"
-  },
   "invoice_events": {
     "event_id": "keyword",
     "invoice_id": "keyword",

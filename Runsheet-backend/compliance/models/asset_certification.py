@@ -15,7 +15,7 @@ Validates: Requirements 13.1
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Literal
+from typing import Literal, Optional
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -124,6 +124,27 @@ class AssetCertification(BaseModel):
     status: CertificationStatus = Field(
         default="valid",
         description="Certification status: valid, expiring_soon, or expired",
+    )
+
+    # ------------------------------------------------------------------
+    # Optional provenance (present in the ES mapping; populated by the
+    # admin surface / imports). Kept optional so older records without them
+    # still validate.
+    # ------------------------------------------------------------------
+    issuing_authority: Optional[str] = Field(
+        default=None,
+        description="Authority that issued / performed the certification",
+    )
+    retest_due_date: Optional[date] = Field(
+        default=None,
+        description=(
+            "Date the asset is next due for retest (e.g. the 3-year horizon "
+            "for annual cargo-tank tests); None when not applicable"
+        ),
+    )
+    document_ref: Optional[str] = Field(
+        default=None,
+        description="Reference to the scanned certificate document (e.g. S3 key)",
     )
 
     # ------------------------------------------------------------------

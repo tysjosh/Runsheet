@@ -6,10 +6,14 @@
       "jurisdiction_level": "state",
       "jurisdiction_name": "Texas",
       "tax_type": "excise",
-      "product_codes": ["DIESEL_2", "GASOLINE_REG", "GASOLINE_PREM"],
+      "product_codes": [
+        "DIESEL_2",
+        "GASOLINE_REG",
+        "GASOLINE_PREM"
+      ],
       "rate_cents_per_gallon": 20,
-      "effective_date": "2024-01-01T00:00:00Z",
-      "expiry_date": "2027-12-31T23:59:59Z",
+      "effective_date": "2024-01-01",
+      "expiry_date": "2027-12-31",
       "source": "texas_comptroller"
     },
     {
@@ -18,10 +22,14 @@
       "jurisdiction_level": "state",
       "jurisdiction_name": "Illinois",
       "tax_type": "excise",
-      "product_codes": ["DIESEL_2", "GASOLINE_REG", "GASOLINE_PREM"],
+      "product_codes": [
+        "DIESEL_2",
+        "GASOLINE_REG",
+        "GASOLINE_PREM"
+      ],
       "rate_cents_per_gallon": 39,
-      "effective_date": "2024-01-01T00:00:00Z",
-      "expiry_date": "2027-12-31T23:59:59Z",
+      "effective_date": "2024-01-01",
+      "expiry_date": "2027-12-31",
       "source": "illinois_dor"
     },
     {
@@ -30,10 +38,14 @@
       "jurisdiction_level": "state",
       "jurisdiction_name": "Colorado",
       "tax_type": "excise",
-      "product_codes": ["DIESEL_2", "GASOLINE_REG", "GASOLINE_PREM"],
+      "product_codes": [
+        "DIESEL_2",
+        "GASOLINE_REG",
+        "GASOLINE_PREM"
+      ],
       "rate_cents_per_gallon": 22,
-      "effective_date": "2024-01-01T00:00:00Z",
-      "expiry_date": "2027-12-31T23:59:59Z",
+      "effective_date": "2024-01-01",
+      "expiry_date": "2027-12-31",
       "source": "colorado_dor"
     },
     {
@@ -42,10 +54,15 @@
       "jurisdiction_level": "state",
       "jurisdiction_name": "Texas",
       "tax_type": "ust",
-      "product_codes": ["DIESEL_2", "GASOLINE_REG", "GASOLINE_PREM", "KEROSENE"],
+      "product_codes": [
+        "DIESEL_2",
+        "GASOLINE_REG",
+        "GASOLINE_PREM",
+        "KEROSENE"
+      ],
       "rate_cents_per_gallon": 1,
-      "effective_date": "2024-01-01T00:00:00Z",
-      "expiry_date": "2027-12-31T23:59:59Z",
+      "effective_date": "2024-01-01",
+      "expiry_date": "2027-12-31",
       "source": "texas_comptroller"
     }
   ],
@@ -58,10 +75,12 @@
       "certificate_number": "637M-TX-12345",
       "letter_suffix": "M",
       "issuing_authority": "IRS",
-      "product_codes": ["OFF_ROAD_DIESEL"],
+      "product_codes": [
+        "OFF_ROAD_DIESEL"
+      ],
       "jurisdiction_fips": "48",
-      "issued_date": "2024-01-15T00:00:00Z",
-      "expiry_date": "2027-01-14T23:59:59Z",
+      "issued_date": "2024-01-15",
+      "expiry_date": "2027-01-14",
       "status": "valid",
       "document_ref": "s3://compliance-docs/637M-TX-12345.pdf"
     },
@@ -73,10 +92,13 @@
       "certificate_number": "GOV-IL-98765",
       "letter_suffix": null,
       "issuing_authority": "Illinois Department of Revenue",
-      "product_codes": ["DIESEL_2", "GASOLINE_REG"],
+      "product_codes": [
+        "DIESEL_2",
+        "GASOLINE_REG"
+      ],
       "jurisdiction_fips": "17",
-      "issued_date": "2023-06-01T00:00:00Z",
-      "expiry_date": "2026-05-31T23:59:59Z",
+      "issued_date": "2023-06-01",
+      "expiry_date": "2026-05-31",
       "status": "valid",
       "document_ref": "s3://compliance-docs/GOV-IL-98765.pdf"
     },
@@ -88,10 +110,13 @@
       "certificate_number": "FARM-CO-54321",
       "letter_suffix": null,
       "issuing_authority": "Colorado Department of Agriculture",
-      "product_codes": ["DIESEL_2", "GASOLINE_REG"],
+      "product_codes": [
+        "DIESEL_2",
+        "GASOLINE_REG"
+      ],
       "jurisdiction_fips": "08",
-      "issued_date": "2024-03-10T00:00:00Z",
-      "expiry_date": "2026-03-09T23:59:59Z",
+      "issued_date": "2024-03-10",
+      "expiry_date": "2026-03-09",
       "status": "valid",
       "document_ref": "s3://compliance-docs/FARM-CO-54321.pdf"
     }
@@ -154,47 +179,47 @@
       "cert_id": "CERT-001",
       "asset_id": "TNK-001",
       "certification_type": "V_test",
-      "certification_date": "2025-06-15T00:00:00Z",
-      "expiry_date": "2026-06-14T23:59:59Z",
+      "certification_date": "2025-06-15",
+      "expiry_date": "2026-06-14",
       "inspector_name": "John Smith",
       "certificate_number": "V-2025-TX-001",
       "issuing_authority": "Texas Department of Licensing and Regulation",
       "status": "valid",
-      "retest_due_date": "2028-06-15T00:00:00Z",
+      "retest_due_date": "2028-06-15",
       "document_ref": "s3://certifications/V-2025-TX-001.pdf"
     },
     {
       "cert_id": "CERT-002",
       "asset_id": "TNK-001",
       "certification_type": "K_test",
-      "certification_date": "2025-06-15T00:00:00Z",
-      "expiry_date": "2026-06-14T23:59:59Z",
+      "certification_date": "2025-06-15",
+      "expiry_date": "2026-06-14",
       "inspector_name": "John Smith",
       "certificate_number": "K-2025-TX-001",
       "issuing_authority": "Texas Department of Licensing and Regulation",
       "status": "valid",
-      "retest_due_date": "2028-06-15T00:00:00Z",
+      "retest_due_date": "2028-06-15",
       "document_ref": "s3://certifications/K-2025-TX-001.pdf"
     },
     {
       "cert_id": "CERT-003",
       "asset_id": "TNK-002",
       "certification_type": "P_test",
-      "certification_date": "2024-09-20T00:00:00Z",
-      "expiry_date": "2029-09-19T23:59:59Z",
+      "certification_date": "2024-09-20",
+      "expiry_date": "2029-09-19",
       "inspector_name": "Sarah Johnson",
       "certificate_number": "P-2024-CO-002",
       "issuing_authority": "Colorado Public Utilities Commission",
       "status": "valid",
-      "retest_due_date": "2027-09-20T00:00:00Z",
+      "retest_due_date": "2027-09-20",
       "document_ref": "s3://certifications/P-2024-CO-002.pdf"
     },
     {
       "cert_id": "CERT-004",
       "asset_id": "TRK-001",
       "certification_type": "fire_extinguisher",
-      "certification_date": "2025-12-01T00:00:00Z",
-      "expiry_date": "2026-11-30T23:59:59Z",
+      "certification_date": "2025-12-01",
+      "expiry_date": "2026-11-30",
       "inspector_name": "Mike Davis",
       "certificate_number": "FE-2025-001",
       "issuing_authority": "Fire Safety Inspections Inc",
@@ -210,8 +235,8 @@
       "truck_id": "TNK-001",
       "compartment_id": "C1",
       "calibration_certificate_number": "CAL-2025-TX-001",
-      "calibration_date": "2025-08-10T00:00:00Z",
-      "calibration_expiry_date": "2026-08-09T23:59:59Z",
+      "calibration_date": "2025-08-10",
+      "calibration_expiry_date": "2026-08-09",
       "weights_measures_authority": "Texas Department of Agriculture",
       "status": "valid",
       "manufacturer": "Liquid Controls",
@@ -224,8 +249,8 @@
       "truck_id": "TNK-001",
       "compartment_id": "C2",
       "calibration_certificate_number": "CAL-2025-TX-002",
-      "calibration_date": "2025-08-10T00:00:00Z",
-      "calibration_expiry_date": "2026-08-09T23:59:59Z",
+      "calibration_date": "2025-08-10",
+      "calibration_expiry_date": "2026-08-09",
       "weights_measures_authority": "Texas Department of Agriculture",
       "status": "valid",
       "manufacturer": "Liquid Controls",
@@ -238,8 +263,8 @@
       "truck_id": "TNK-002",
       "compartment_id": "C1",
       "calibration_certificate_number": "CAL-2025-CO-001",
-      "calibration_date": "2025-07-15T00:00:00Z",
-      "calibration_expiry_date": "2026-07-14T23:59:59Z",
+      "calibration_date": "2025-07-15",
+      "calibration_expiry_date": "2026-07-14",
       "weights_measures_authority": "Colorado Department of Agriculture",
       "status": "valid",
       "manufacturer": "Neptune",
@@ -273,7 +298,9 @@
       "net_gallons": 3490.0,
       "pod_gallons": 3475.0,
       "variance_pct": 0.43,
-      "variance_flags": ["meter_pod_variance"],
+      "variance_flags": [
+        "meter_pod_variance"
+      ],
       "event_type": "delivery_completed",
       "actor_id": "DRV-002",
       "occurred_at": "2026-05-02T10:15:00Z"

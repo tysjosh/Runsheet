@@ -235,8 +235,8 @@
   ],
   "intake_channels": [
     {
-      "channel_id": "CHAN-001",
-      "channel_type": "email",
+      "channel_id": "email-orders",
+      "channel_type": "api_partner",
       "display_name": "Email Orders",
       "hmac_secret_ref": "HMAC-EMAIL-001",
       "supported_schema_versions": ["v1", "v2"],
@@ -245,8 +245,8 @@
       "enabled": true
     },
     {
-      "channel_id": "CHAN-002",
-      "channel_type": "api",
+      "channel_id": "rest-api",
+      "channel_type": "api_partner",
       "display_name": "REST API",
       "hmac_secret_ref": "HMAC-API-001",
       "supported_schema_versions": ["v1", "v2"],
@@ -255,8 +255,8 @@
       "enabled": true
     },
     {
-      "channel_id": "CHAN-003",
-      "channel_type": "phone",
+      "channel_id": "phone-orders",
+      "channel_type": "voice",
       "display_name": "Phone Orders",
       "hmac_secret_ref": "HMAC-PHONE-001",
       "supported_schema_versions": ["v1"],
@@ -265,17 +265,17 @@
       "enabled": true
     },
     {
-      "channel_id": "CHAN-004",
-      "channel_type": "fax",
-      "display_name": "Fax Orders",
-      "hmac_secret_ref": "HMAC-FAX-001",
+      "channel_id": "csv-upload",
+      "channel_type": "csv",
+      "display_name": "CSV Upload",
+      "hmac_secret_ref": "HMAC-CSV-001",
       "supported_schema_versions": ["v1"],
       "rate_limit_per_minute": 10,
       "secret_version": 1,
       "enabled": true
     },
     {
-      "channel_id": "CHAN-005",
+      "channel_id": "edi-x12",
       "channel_type": "edi",
       "display_name": "EDI X12",
       "hmac_secret_ref": "HMAC-EDI-001",

@@ -43,9 +43,6 @@ ACCOUNT_EVENTS_INDEX = "account_events"
 # Dunning
 DUNNING_EVENTS_INDEX = "dunning_events"
 
-# Invoice numbering
-INVOICE_COUNTER_CHECKPOINTS_INDEX = "invoice_counter_checkpoints"
-
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
@@ -229,9 +226,15 @@ INVOICE_EVENTS_MAPPING = {
             "invoice_id":  {"type": "keyword"},
             "tenant_id":   {"type": "keyword"},
             "event_type":  {"type": "keyword"},
-            "payload":     {"type": "object"},
+            # Free-form audit payload — stored verbatim, NOT indexed (see
+            # account_events for rationale).
+            "payload":     {"type": "object", "enabled": False},
             "occurred_at": {"type": "date"},
             "actor":       {"type": "keyword"},
+            "sequence_number": {"type": "long"},
+            # Auto-stamped by ElasticsearchService.index_document.
+            "created_at":  {"type": "date"},
+            "updated_at":  {"type": "date"},
         },
     },
     "settings": _DEFAULT_SETTINGS,
@@ -277,10 +280,17 @@ ACCOUNT_EVENTS_MAPPING = {
             "account_id":      {"type": "keyword"},
             "tenant_id":       {"type": "keyword"},
             "event_type":      {"type": "keyword"},
-            "payload":         {"type": "object"},
+            # Free-form audit payload — stored verbatim, NOT indexed, so it can
+            # carry per-event fields (customer_id, old_state, ...) without the
+            # index-level strict dynamic mapping rejecting unmapped sub-keys.
+            "payload":         {"type": "object", "enabled": False},
             "occurred_at":     {"type": "date"},
             "actor":           {"type": "keyword"},
             "sequence_number": {"type": "long"},
+            # ElasticsearchService.index_document auto-stamps these on every
+            # write; declare them so the strict mapping accepts them.
+            "created_at":      {"type": "date"},
+            "updated_at":      {"type": "date"},
         },
     },
     "settings": _DEFAULT_SETTINGS,
@@ -334,24 +344,6 @@ AR_AGING_SNAPSHOTS_MAPPING = {
 
 
 # ---------------------------------------------------------------------------
-# Invoice counter checkpoints mapping
-# ---------------------------------------------------------------------------
-
-INVOICE_COUNTER_CHECKPOINTS_MAPPING = {
-    "mappings": {
-        "dynamic": "strict",
-        "properties": {
-            "tenant_id":       {"type": "keyword"},
-            "max_seq":         {"type": "long"},
-            "checkpoint_date": {"type": "date"},
-            "created_at":      {"type": "date"},
-        },
-    },
-    "settings": _DEFAULT_SETTINGS,
-}
-
-
-# ---------------------------------------------------------------------------
 # Index registry
 # ---------------------------------------------------------------------------
 
@@ -373,8 +365,6 @@ COMMERCE_INDEX_MAPPINGS = {
     ACCOUNT_EVENTS_INDEX:              ACCOUNT_EVENTS_MAPPING,
     # Dunning
     DUNNING_EVENTS_INDEX:              DUNNING_EVENTS_MAPPING,
-    # Invoice numbering
-    INVOICE_COUNTER_CHECKPOINTS_INDEX: INVOICE_COUNTER_CHECKPOINTS_MAPPING,
 }
 
 

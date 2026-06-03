@@ -637,7 +637,7 @@ class InvoiceService:
             "customer_id": customer_id,
             "account_id": account_id,
             "order_id": order_id,
-            "invoice_number": None,  # Assigned by invoice_numbering service
+            "invoice_number": None,  # Allocated from the Postgres counter on finalize
             "status": InvoiceStatus.DRAFT.value,
             "total_cents": total_cents,
             "amount_paid_cents": 0,

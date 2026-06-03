@@ -242,7 +242,8 @@ lockstep.
   apply_payment / void).
 - ~~Replace `invoice_numbering.py` with a Postgres sequence~~ ✅ done
   (`InvoiceCounterORM` + `InvoiceRepository.allocate_number`, allocated under a
-  row lock inside the finalize transaction). The legacy module is deprecated.
+  row lock inside the finalize transaction). The legacy module + its
+  `invoice_counter_checkpoints` ES index have been **removed** (Phase 6).
 - ~~**Payments** — dual-write `PaymentService`~~ ✅ done (ingest / reverse), with
   the **authoritative promotion** in place: set `COMMERCE_PAYMENTS_AUTHORITATIVE=true`
   and `PaymentService.ingest` inserts into Postgres first so the
@@ -333,9 +334,15 @@ lockstep.
   parity against real data.
 - **Phase 5 — stop the ES projection.** After a parity soak with reads on
   Postgres, stop running the outbox relay (and/or turn off dual-write) so the
-  migrated ES indices stop receiving writes.- **Phase 6 — drop the ES indices.** Delete the migrated indices, remove them
-  from the seed registry + mapping modules, and delete the deprecated
-  `invoice_numbering.py` and `invoice_counter_checkpoints` index.
+  migrated ES indices stop receiving writes.
+- **Phase 6 — drop the ES indices.** Drop the migrated index and add it to
+  `RETIRED_ES_INDICES` (see below). Note: keep the index's **mapping** in its
+  `*_es_mappings.py` registry — `rebuild_from_postgres` needs it to recreate
+  the index with the correct strict mapping if you ever rebuild. Only remove a
+  mapping/seeder entry when an aggregate is being deleted entirely (not just
+  retired from ES). The deprecated `invoice_numbering.py` + its
+  `invoice_counter_checkpoints` index were fully removed since the Postgres
+  counter replaced them outright.
 
 ### Reversibility safety net: rebuild-from-Postgres (`persistence.rebuild_from_postgres`)
 
@@ -416,4 +423,39 @@ green (95 records across the remaining indices). To undo:
   remaining ES indices (event streams, telemetry, agent/ML, search/dashboard
   projections, notifications/queues) stay in Elasticsearch by design.
 
-```
+### Dev-environment hardening (post-migration journey test, 2026-06-03)
+
+An end-to-end operator-journey test (create customer → account → job lifecycle →
+intake-channel registration → analytics) surfaced three issues — none caused by
+the migration, all fixed at the correct layer:
+
+1. **`account_events` / `invoice_events` mapping rejected projections (503).**
+   Those indices mapped `payload` as a strict object and lacked the
+   `created_at` / `updated_at` / `sequence_number` fields that
+   `ElasticsearchService.index_document` auto-stamps. Fixed in
+   `commerce/services/commerce_es_mappings.py` (`payload` → `enabled: false`,
+   added the missing date/seq fields) and the two empty indices were recreated
+   with the new mappings.
+
+2. **Intake-channel registration 500 (`kms_key_id required`) off-AWS.**
+   Registering a channel stores its HMAC secret in `TenantCredentialsVault`,
+   which needs a KMS key. Dev/CI have no `FUEL_OPS_KMS_KEY_ID` (and no AWS
+   creds). Added `services/local_kms.py` — a `LocalKMSClient` implementing the
+   boto3 KMS subset the vault uses (`generate_data_key` / `decrypt`) with real
+   AES-GCM envelope encryption under a process-local master key
+   (`LOCAL_KMS_MASTER_KEY`, stable dev default so blobs survive restarts).
+   `bootstrap/agents.py` injects it whenever no `FUEL_OPS_KMS_KEY_ID` is set and
+   the environment is not `production`; the real-KMS path is unchanged. Verified
+   end-to-end: register → 201 + one-time plaintext secret, channel persists to
+   the PG `intake_channels` table, list serves from PG, and rotate-secret
+   round-trips the vault against the live ES cluster.
+
+3. **Parity false-positive on event `created_at` / `updated_at`.** Event and
+   snapshot projections key off the domain timestamp (`occurred_at` /
+   `queued_at`) and have no `created_at` / `updated_at` Postgres column, but ES
+   stamps them onto `_source` at write time — so every projected event showed a
+   spurious divergence. Added them to `parity_check`'s per-aggregate ignore set
+   for `invoice_event` / `account_event` / `dunning_event` /
+   `ar_aging_snapshot` (same class as the existing invoice `_last_applied_seq`
+   exclusion). `parity_check` is green at 106/106 records.
+

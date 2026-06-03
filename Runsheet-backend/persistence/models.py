@@ -305,9 +305,10 @@ class IdempotencyKeyORM(Base):
 class InvoiceCounterORM(Base):
     """Per-tenant monotonic invoice-number counter.
 
-    Replaces the Redis-INCR + ES-checkpoint + reseed machinery
-    (``commerce/services/invoice_numbering.py``) with a single row per tenant.
-    The next number is allocated by incrementing ``next_seq`` under a row lock
+    Replaces the former Redis-INCR + ES-checkpoint + reseed machinery
+    (the removed ``commerce/services/invoice_numbering.py``) with a single row
+    per tenant. The next number is allocated by incrementing ``next_seq`` under
+    a row lock
     (``SELECT ... FOR UPDATE``) inside the SAME transaction as the invoice
     finalize, so a number is never skipped on rollback and never issued twice
     under concurrency. This is the guarantee ES/Redis could only approximate.

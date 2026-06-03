@@ -1014,6 +1014,11 @@ class AssetCertificationService:
             "inspector_name": cert.inspector_name,
             "certificate_number": cert.certificate_number,
             "status": cert.status,
+            "issuing_authority": cert.issuing_authority,
+            "retest_due_date": (
+                cert.retest_due_date.isoformat() if cert.retest_due_date else None
+            ),
+            "document_ref": cert.document_ref,
             "created_at": cert.created_at.isoformat(),
             "updated_at": cert.updated_at.isoformat(),
         }
