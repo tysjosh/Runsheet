@@ -103,28 +103,41 @@ async def initialize(app, container: ServiceContainer) -> None:
 
         adapter_registry = IntakeAdapterRegistry()
 
-        # Register known adapters
+        # Register known adapters. NB: ``register`` takes the adapter
+        # positionally and channel_type/schema_version as KEYWORD-only args
+        # (note the ``*`` in its signature). Passing them positionally raised
+        # TypeError that the broad ``except`` swallowed as a warning — leaving
+        # the registry EMPTY, so every dispatcher/CSV/EDI order intake failed
+        # with "No adapter registered". (Found in the dispatcher journey test.)
         try:
             from fuel.intake.dispatcher_adapter import DispatcherIntakeAdapter
-            adapter_registry.register("dispatcher", "1.0", DispatcherIntakeAdapter())
+            adapter_registry.register(
+                DispatcherIntakeAdapter(), channel_type="dispatcher", schema_version="1.0"
+            )
         except Exception as exc:
             logger.warning("Failed to register dispatcher adapter: %s", exc)
 
         try:
             from fuel.intake.csv_adapter import CsvIntakeAdapter
-            adapter_registry.register("csv", "1.0", CsvIntakeAdapter())
+            adapter_registry.register(
+                CsvIntakeAdapter(), channel_type="csv", schema_version="1.0"
+            )
         except Exception as exc:
             logger.warning("Failed to register csv adapter: %s", exc)
 
         try:
             from fuel.intake.legacy_dinee_adapter import LegacyDineeShipmentAdapter
-            adapter_registry.register("legacy", "1.0", LegacyDineeShipmentAdapter())
+            adapter_registry.register(
+                LegacyDineeShipmentAdapter(), channel_type="legacy", schema_version="1.0"
+            )
         except Exception as exc:
             logger.warning("Failed to register legacy dinee adapter: %s", exc)
 
         try:
             from fuel.intake.api_partner_adapter import ApiPartnerGenericAdapter
-            adapter_registry.register("api_partner", "1.0", ApiPartnerGenericAdapter())
+            adapter_registry.register(
+                ApiPartnerGenericAdapter(), channel_type="api_partner", schema_version="1.0"
+            )
         except Exception as exc:
             logger.warning("Failed to register api_partner adapter: %s", exc)
 

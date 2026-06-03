@@ -31,6 +31,7 @@ Validates: Requirements 2.1.3, 2.1.4, 2.1.6.
 from __future__ import annotations
 
 import logging
+import re
 import secrets as stdlib_secrets
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -721,6 +722,69 @@ class IntakeChannelRepository:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    async def ensure_dispatcher_channel(
+        self, tenant_id: str
+    ) -> IntakeChannel:
+        """Return the tenant's dispatcher channel, creating it if absent.
+
+        The dispatcher keyboard intake path (``ingest_dispatcher``) resolves a
+        per-tenant ``channel_type="dispatcher"`` channel. Unlike webhook/EDI
+        channels — which an admin registers explicitly — the dispatcher channel
+        is an implicit, always-present surface (every tenant's operators can key
+        in orders). Historically this was described as "seeded at first use" but
+        no code created it, so a tenant that never ran the seeder hit a hard 404
+        on every dispatcher order. This method makes "first use" real: it looks
+        the channel up and, only when missing, provisions a stable default
+        (``{tenant}-dispatcher``) idempotently.
+
+        Concurrency: if two requests race to create it, the second create may
+        land a duplicate; we tolerate that by re-reading and returning whatever
+        the lookup yields.
+        """
+        self._require_tenant(tenant_id)
+
+        existing = await self.get_dispatcher_channel(tenant_id)
+        if existing is not None:
+            return existing
+
+        # Provision a stable default dispatcher channel for this tenant.
+        channel_id = f"{tenant_id}-dispatcher"
+        # channel_id must match ^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$ — normalise.
+        channel_id = re.sub(r"[^a-z0-9-]", "-", channel_id.lower()).strip("-")
+        if len(channel_id) < 3:
+            channel_id = f"{channel_id}-dispatcher"
+        channel_id = channel_id[:64].rstrip("-")
+
+        try:
+            channel, _secret = await self.create(
+                tenant_id=tenant_id,
+                channel_id=channel_id,
+                channel_type="dispatcher",
+                display_name="Dispatcher Keyboard",
+                supported_schema_versions=["1.0"],
+                enabled=True,
+            )
+            logger.info(
+                "IntakeChannelRepository: auto-provisioned dispatcher channel "
+                "%s for tenant=%s",
+                channel_id,
+                tenant_id,
+            )
+            return channel
+        except Exception as exc:
+            # Likely a race (another request created it) or a transient write
+            # error — re-read and return if it now exists.
+            logger.warning(
+                "ensure_dispatcher_channel: create failed for tenant=%s (%s); "
+                "re-reading",
+                tenant_id,
+                exc,
+            )
+            existing = await self.get_dispatcher_channel(tenant_id)
+            if existing is not None:
+                return existing
+            raise
 
     @staticmethod
     def _require_tenant(tenant_id: str) -> None:

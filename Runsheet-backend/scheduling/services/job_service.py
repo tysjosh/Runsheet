@@ -362,6 +362,18 @@ class JobService:
 
         # Merge updates into doc for return / broadcast
         job_doc.update(update_fields)
+
+        # Dual-write the merged job current-state to the Postgres
+        # source-of-truth. ``_get_job_doc`` serves reads from Postgres under
+        # read-cutover, so an assignment that only touched ES would be
+        # invisible to the next status transition (it would still see
+        # ``scheduled``). Mirror here exactly as create_job / transition_status
+        # do. (Bug found in dispatcher journey: assign left PG at 'scheduled'.)
+        from commerce.services.commerce_persistence_bridge import (
+            mirror_current_state_upsert,
+        )
+        await mirror_current_state_upsert("job", job_doc)
+
         await self._broadcast_job_update("status_changed", job_doc)
 
         return Job(**self._normalize_job_doc(job_doc))
@@ -501,6 +513,13 @@ class JobService:
                 )
 
         await self._broadcast_job_update("status_changed", job_doc)
+
+        # Dual-write the reassigned current-state to Postgres (read-cutover
+        # serves from PG). Mirrors the create_job / transition_status pattern.
+        from commerce.services.commerce_persistence_bridge import (
+            mirror_current_state_upsert,
+        )
+        await mirror_current_state_upsert("job", job_doc)
 
         return Job(**self._normalize_job_doc(job_doc))
 

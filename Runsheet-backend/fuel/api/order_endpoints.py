@@ -126,6 +126,43 @@ def _get_driver_counter_service():
     return _driver_counter_service
 
 
+async def _apply_order_update(
+    repo: Any,
+    order: Any,
+    order_id: str,
+    tenant_id: str,
+    update_fields: Dict[str, Any],
+) -> None:
+    """Apply a partial order update to ES AND mirror it to Postgres.
+
+    The order mutation endpoints (status/assign/cancel/hold/release-hold)
+    historically wrote ONLY to Elasticsearch via ``repo._es.update_document``.
+    Under read-cutover (``COMMERCE_READ_FROM_POSTGRES=true``) reads are served
+    from Postgres, so an ES-only write was invisible: a dispatcher's
+    ``placed → confirmed`` returned 200 but the next read still showed
+    ``placed`` (409 on the following transition). This helper keeps the two
+    stores in step by mirroring the merged order document to the Postgres
+    source-of-truth (the hybrid current-state table has its own authoritative
+    stale-event guard), matching the create path's behavior.
+    """
+    await repo._es.update_document(repo._orders_index, order_id, update_fields)
+
+    # Merge the update onto the current order doc and mirror to Postgres.
+    merged = order.model_dump(mode="json")
+    merged.update(update_fields)
+    merged.setdefault("tenant_id", tenant_id)
+    try:
+        from commerce.services.commerce_persistence_bridge import (
+            mirror_current_state_upsert,
+        )
+        await mirror_current_state_upsert("fuel_order", merged)
+    except Exception as exc:  # noqa: BLE001 — best-effort during the soak
+        logger.warning(
+            "order_endpoints: Postgres mirror failed for order=%s: %s",
+            order_id, exc,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Auth helpers
 # ---------------------------------------------------------------------------
@@ -677,7 +714,7 @@ async def update_order_status(
     if order.status == "on_hold" and body.new_status != "on_hold":
         update_fields["hold_reason"] = None
 
-    await repo._es.update_document(repo._orders_index, order_id, update_fields)
+    await _apply_order_update(repo, order, order_id, tenant.tenant_id, update_fields)
 
     event_doc = {
         "event_id": mint_event_id(),
@@ -804,7 +841,7 @@ async def assign_driver(
         "updated_at": now.isoformat(),
         "last_event_timestamp": now.isoformat(),
     }
-    await repo._es.update_document(repo._orders_index, order_id, update_fields)
+    await _apply_order_update(repo, order, order_id, tenant.tenant_id, update_fields)
 
     event_doc = {
         "event_id": mint_event_id(),
@@ -883,7 +920,7 @@ async def cancel_order(
         "updated_at": now.isoformat(),
         "last_event_timestamp": now.isoformat(),
     }
-    await repo._es.update_document(repo._orders_index, order_id, update_fields)
+    await _apply_order_update(repo, order, order_id, tenant.tenant_id, update_fields)
 
     event_doc = {
         "event_id": mint_event_id(),
@@ -972,7 +1009,7 @@ async def hold_order(
         "updated_at": now.isoformat(),
         "last_event_timestamp": now.isoformat(),
     }
-    await repo._es.update_document(repo._orders_index, order_id, update_fields)
+    await _apply_order_update(repo, order, order_id, tenant.tenant_id, update_fields)
 
     event_doc = {
         "event_id": mint_event_id(),
@@ -1071,7 +1108,7 @@ async def release_hold_order(
             "updated_at": now.isoformat(),
             "last_event_timestamp": now.isoformat(),
         }
-        await repo._es.update_document(repo._orders_index, order_id, update_fields)
+        await _apply_order_update(repo, order, order_id, tenant.tenant_id, update_fields)
 
         event_doc = {
             "event_id": mint_event_id(),
@@ -1097,7 +1134,7 @@ async def release_hold_order(
             "updated_at": now.isoformat(),
             "last_event_timestamp": now.isoformat(),
         }
-        await repo._es.update_document(repo._orders_index, order_id, update_fields)
+        await _apply_order_update(repo, order, order_id, tenant.tenant_id, update_fields)
 
         event_doc = {
             "event_id": mint_event_id(),

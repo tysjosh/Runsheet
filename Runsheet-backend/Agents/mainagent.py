@@ -875,9 +875,13 @@ class LogisticsAgent:
             
             # Use non-streaming completion. Bind the tenant ContextVar for the
             # duration of the call so ES-reading tools are tenant-scoped.
+            # NB: the Strands ``Agent`` exposes ``invoke_async`` (not
+            # ``run_async``) for a single non-streaming turn; it returns an
+            # ``AgentResult`` whose ``__str__`` yields the concatenated text.
             effective_tenant_id = _require_tenant_id(tenant_id)
             with set_current_tenant(effective_tenant_id):
-                response = await self.agent.run_async(message)
+                agent_result = await self.agent.invoke_async(message)
+            response = str(agent_result)
             
             # Record success in circuit breaker
             self._circuit_breaker._on_success()

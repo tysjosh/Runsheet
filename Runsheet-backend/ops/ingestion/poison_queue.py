@@ -62,8 +62,12 @@ class PoisonQueueService:
             "max_retries": MAX_RETRIES,
             "status": "pending",
         }
-        es = self.ops_es.es_service
-        await es.client.index(index=self.INDEX_NAME, id=event_id, document=doc)
+        # ``OpsElasticsearchService`` exposes the underlying SYNC ES client
+        # directly via ``.client`` (there is no ``.es_service`` attribute, and
+        # the client is synchronous — ``await`` raised AttributeError /
+        # "can't be used in await"). This crashed the order-intake error path
+        # (poison-queue write), masking the real adapter error with a 500.
+        self.ops_es.client.index(index=self.INDEX_NAME, id=event_id, document=doc)
         logger.warning(
             "Event %s stored in poison queue: %s (%s), trace_id=%s",
             event_id, error, error_type, trace_id,
@@ -94,8 +98,8 @@ class PoisonQueueService:
             "size": size,
             "sort": [{"created_at": "desc"}],
         }
-        es = self.ops_es.es_service
-        result = await es.client.search(
+        es = self.ops_es
+        result = es.client.search(
             index=self.INDEX_NAME,
             body=body,
             request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
@@ -107,9 +111,9 @@ class PoisonQueueService:
 
     async def retry_event(self, event_id: str) -> dict:
         """Retry a poison queue event through the standard pipeline. Req 4.4"""
-        es = self.ops_es.es_service
+        es = self.ops_es
         try:
-            result = await es.client.get(index=self.INDEX_NAME, id=event_id)
+            result = es.client.get(index=self.INDEX_NAME, id=event_id)
         except Exception:
             return {"status": "not_found", "event_id": event_id}
 
@@ -121,7 +125,7 @@ class PoisonQueueService:
                 "Event %s exceeded max retries (%d). Marking permanently failed.",
                 event_id, MAX_RETRIES,
             )
-            await es.client.update(
+            es.client.update(
                 index=self.INDEX_NAME,
                 id=event_id,
                 doc={"status": "permanently_failed"},
@@ -129,7 +133,7 @@ class PoisonQueueService:
             return {"status": "permanently_failed", "event_id": event_id}
 
         # Increment retry count and mark as retrying
-        await es.client.update(
+        es.client.update(
             index=self.INDEX_NAME,
             id=event_id,
             doc={"retry_count": current_retries + 1, "status": "retrying"},
@@ -144,8 +148,7 @@ class PoisonQueueService:
 
     async def purge_event(self, event_id: str) -> None:
         """Permanently remove a failed event from the queue. Req 4.7"""
-        es = self.ops_es.es_service
-        await es.client.delete(index=self.INDEX_NAME, id=event_id, ignore=[404])
+        self.ops_es.client.delete(index=self.INDEX_NAME, id=event_id, ignore=[404])
         logger.info("Purged event %s from poison queue", event_id)
 
     async def get_queue_depth(self, tenant_id: Optional[str] = None) -> int:
@@ -153,6 +156,5 @@ class PoisonQueueService:
         query: dict = {"match_all": {}}
         if tenant_id:
             query = {"term": {"tenant_id": tenant_id}}
-        es = self.ops_es.es_service
-        result = await es.client.count(index=self.INDEX_NAME, query=query)
+        result = self.ops_es.client.count(index=self.INDEX_NAME, query=query)
         return result.get("count", 0)

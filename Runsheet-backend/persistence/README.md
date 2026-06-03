@@ -459,3 +459,73 @@ the migration, all fixed at the correct layer:
    `ar_aging_snapshot` (same class as the existing invoice `_last_applied_seq`
    exclusion). `parity_check` is green at 106/106 records.
 
+
+### Dispatcher journey hardening (manual + agentic E2E, 2026-06-03)
+
+A second end-to-end test simulating a fuel dispatcher's day — in BOTH the manual
+REST/UI flow and the agentic AI-assistant flow — surfaced six more pre-existing
+defects (none migration-related; all fixed at the correct layer). The full
+journey now passes 21/21 and `parity_check` stays green at 106/106.
+
+1. **Adapter registry never populated (every order intake failed).**
+   `bootstrap/fuel.py` called `IntakeAdapterRegistry.register("dispatcher",
+   "1.0", adapter)` positionally, but `register(adapter, *, channel_type,
+   schema_version)` takes the type/version as KEYWORD-only args. The resulting
+   `TypeError` was swallowed by a broad `except`, leaving the registry empty so
+   every dispatcher/CSV/EDI/partner order 500'd with "No adapter registered".
+   Fixed all four registration calls to pass keyword args.
+
+2. **OrderIntakePipeline wired with `None` deps (boot-order bug).** The pipeline
+   is built in `bootstrap/fuel.py` (#5) but `intake_channel_repository` (#11) and
+   `credentials_vault` (#10) are registered later — so it kept
+   `intake_channel_repo=None` and every dispatcher create 500'd
+   (`'NoneType' has no attribute 'get_dispatcher_channel'`). Added
+   `set_intake_channel_repo` / `set_credentials_vault` setters and late-inject
+   them from `bootstrap/integrations.py` (also re-points the webhook receiver).
+
+3. **No dispatcher intake channel existed.** `_resolve_dispatcher_channel` only
+   looked up a `channel_type="dispatcher"` channel and 404'd when absent (the
+   docstring claimed "seeded at first use" but nothing created it). Added
+   `IntakeChannelRepository.ensure_dispatcher_channel` — idempotently provisions
+   a stable `{tenant}-dispatcher` channel on first use.
+
+4. **Poison-queue error path crashed (masking real errors).** `poison_queue.py`
+   used `self.ops_es.es_service` (no such attribute) and `await
+   es.client.X(...)` on the SYNC ES client. Fixed every method to
+   `self.ops_es.client.X(...)` without await. The same sync-client misuse was
+   fixed across `legacy_mirror_backfill_worker.py` (it was fully broken in
+   production — every `await client.search/get/delete/update` raised
+   "object ... can't be used in 'await' expression"); its unit tests were
+   mocking the client as async and so never caught it — now mocked as the real
+   sync client.
+
+5. **`fuel_order_events` mapping rejected projections (503).** The index mapped
+   `event_payload` as a strict `nested` object, but order events carry free-form
+   payloads (`intake_channel`, `dispatcher_user_id`, …) → strict-dynamic
+   rejection. Remapped to `{"type":"object","enabled":false}` (same as
+   job_events / account_events). Also added `fuel_order_events` to
+   `ElasticsearchService.index_document`'s `_TIMESTAMP_SKIP_INDICES` — it's a
+   strict event-stream index that rejected the auto-stamped
+   `created_at`/`updated_at`. Empty index recreated with the corrected mapping.
+
+6. **Fresh orders persisted to NEITHER store (read-after-write 404).** On the
+   serverless ES the `scripted_upsert` staleness-guard ran on a fresh insert,
+   compared the incoming timestamp to itself, and set `ctx.op='noop'` — the
+   `upsert` body was never materialised and the PG mirror (gated on
+   `result != "noop"`) was skipped, so a 201 create was immediately a 404 read
+   (reads served from PG). `FuelOrderRepository.upsert_with_last_event_timestamp`
+   now detects a noop with no existing doc and indexes the document directly,
+   then mirrors to Postgres.
+
+7. **Agent fallback chat crashed (`Agent.run_async` AttributeError).** The
+   non-streaming `/api/chat/fallback` path called `self.agent.run_async(...)`;
+   the Strands `Agent` exposes `invoke_async` (returning an `AgentResult` whose
+   `__str__` is the text). Fixed to `await self.agent.invoke_async(message)` then
+   `str(result)`. The agentic dispatcher questions now return grounded,
+   data-backed answers.
+
+Dev config note: the order-intake pipeline is gated behind the
+`overlay.order_intake_pipeline` feature flag (rollout gate, default `disabled`).
+For demo-tenant it is set to `active_auto` (via `FeatureFlagService`) so the
+dispatcher keyboard path creates orders through the new pipeline instead of
+short-circuiting to `legacy_passthrough`.

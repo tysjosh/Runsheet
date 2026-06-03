@@ -364,14 +364,43 @@ class FuelOrderRepository:
             )
             result = response.get("result", "")
             if result == "noop":
+                # Two cases produce a scripted_upsert "noop":
+                #   (a) genuine stale-event discard — the doc EXISTS and the
+                #       incoming last_event_timestamp is older-or-equal; OR
+                #   (b) a serverless-ES quirk where ``scripted_upsert`` reports
+                #       "noop" AND fails to materialise the ``upsert`` body on a
+                #       FRESH insert (the doc does not exist afterwards).
+                # Case (b) silently dropped every new order from BOTH stores —
+                # and since reads are served from Postgres, the dispatcher hit a
+                # 404 immediately after a 201 create. Distinguish them: if the
+                # doc is absent, index it directly (fresh insert); only a true
+                # existing-doc noop is a stale discard.
+                exists = self._es.client.exists(
+                    index=self._orders_index, id=order_id
+                )
+                if exists:
+                    logger.info(
+                        "FuelOrderRepository.upsert_with_last_event_timestamp: "
+                        "discarded stale event for order=%s, "
+                        "incoming_timestamp=%s",
+                        order_id,
+                        doc.get("last_event_timestamp"),
+                    )
+                    return False
+                # Fresh insert that the scripted upsert failed to apply — index
+                # the document directly so ES and Postgres both receive it.
+                self._es.client.index(
+                    index=self._orders_index,
+                    id=order_id,
+                    body=doc,
+                    refresh=True,
+                )
                 logger.info(
                     "FuelOrderRepository.upsert_with_last_event_timestamp: "
-                    "discarded stale event for order=%s, "
-                    "incoming_timestamp=%s",
+                    "scripted_upsert no-op'd a fresh insert for order=%s; "
+                    "indexed directly (serverless-ES fallback)",
                     order_id,
-                    doc.get("last_event_timestamp"),
                 )
-                return False
             # Dual-write the order current-state to Postgres. The repository's
             # own stale-event guard mirrors the ES scripted-upsert semantics.
             from commerce.services.commerce_persistence_bridge import (

@@ -109,13 +109,20 @@ def _sample_driver() -> Dict[str, Any]:
 
 @pytest.fixture
 def es_service():
-    """Mock ES service with client for search/get/delete/update."""
+    """Mock ES service with a SYNC client for search/get/delete/update.
+
+    Production injects the synchronous ``elasticsearch_service`` client, so the
+    worker calls ``self._es.client.X(...)`` WITHOUT await. The mock client must
+    therefore be a plain ``MagicMock`` (not ``AsyncMock``) — otherwise the tests
+    would pass against a contract that crashes in production with
+    "object ... can't be used in 'await' expression".
+    """
     svc = MagicMock()
-    svc.client = AsyncMock()
-    svc.client.search = AsyncMock(return_value={"hits": {"hits": []}})
-    svc.client.get = AsyncMock()
-    svc.client.delete = AsyncMock()
-    svc.client.update = AsyncMock()
+    svc.client = MagicMock()
+    svc.client.search = MagicMock(return_value={"hits": {"hits": []}})
+    svc.client.get = MagicMock()
+    svc.client.delete = MagicMock()
+    svc.client.update = MagicMock()
     return svc
 
 
@@ -182,10 +189,10 @@ class TestSuccessfulMirror:
         self, worker, es_service, ops_es_service
     ):
         entry = _make_entry()
-        es_service.client.search = AsyncMock(
+        es_service.client.search = MagicMock(
             return_value={"hits": {"hits": [{"_source": entry}]}}
         )
-        es_service.client.get = AsyncMock(
+        es_service.client.get = MagicMock(
             return_value={"_source": _sample_order()}
         )
 
@@ -207,10 +214,10 @@ class TestSuccessfulMirror:
             entity_type="driver",
             entity_id="drv_001",
         )
-        es_service.client.search = AsyncMock(
+        es_service.client.search = MagicMock(
             return_value={"hits": {"hits": [{"_source": entry}]}}
         )
-        es_service.client.get = AsyncMock(
+        es_service.client.get = MagicMock(
             return_value={"_source": _sample_driver()}
         )
 
@@ -237,11 +244,11 @@ class TestExponentialBackoff:
         self, worker, es_service, ops_es_service
     ):
         entry = _make_entry(retry_count=0)
-        es_service.client.search = AsyncMock(
+        es_service.client.search = MagicMock(
             return_value={"hits": {"hits": [{"_source": entry}]}}
         )
         # Order IS found but the upsert to legacy fails
-        es_service.client.get = AsyncMock(
+        es_service.client.get = MagicMock(
             return_value={"_source": _sample_order()}
         )
         ops_es_service.upsert_shipment_current = AsyncMock(
@@ -263,10 +270,10 @@ class TestExponentialBackoff:
         self, worker, es_service, ops_es_service
     ):
         entry = _make_entry(retry_count=1)
-        es_service.client.search = AsyncMock(
+        es_service.client.search = MagicMock(
             return_value={"hits": {"hits": [{"_source": entry}]}}
         )
-        es_service.client.get = AsyncMock(
+        es_service.client.get = MagicMock(
             return_value={"_source": _sample_order()}
         )
         ops_es_service.upsert_shipment_current = AsyncMock(
@@ -286,10 +293,10 @@ class TestExponentialBackoff:
         self, worker, es_service, ops_es_service
     ):
         entry = _make_entry(retry_count=2)
-        es_service.client.search = AsyncMock(
+        es_service.client.search = MagicMock(
             return_value={"hits": {"hits": [{"_source": entry}]}}
         )
-        es_service.client.get = AsyncMock(
+        es_service.client.get = MagicMock(
             return_value={"_source": _sample_order()}
         )
         ops_es_service.upsert_shipment_current = AsyncMock(
@@ -324,11 +331,11 @@ class TestExhaustedRetries:
             retry_count=10,  # 60 * 2^10 = 61440s ≈ 17h — exceeds remaining 1h
             created_at=created_at,
         )
-        es_service.client.search = AsyncMock(
+        es_service.client.search = MagicMock(
             return_value={"hits": {"hits": [{"_source": entry}]}}
         )
         # Order found but mirror fails
-        es_service.client.get = AsyncMock(
+        es_service.client.get = MagicMock(
             return_value={"_source": _sample_order()}
         )
         ops_es_service.upsert_shipment_current = AsyncMock(
@@ -352,10 +359,10 @@ class TestExhaustedRetries:
     ):
         created_at = (FIXED_NOW - timedelta(hours=23, minutes=59)).isoformat()
         entry = _make_entry(retry_count=15, created_at=created_at)
-        es_service.client.search = AsyncMock(
+        es_service.client.search = MagicMock(
             return_value={"hits": {"hits": [{"_source": entry}]}}
         )
-        es_service.client.get = AsyncMock(
+        es_service.client.get = MagicMock(
             return_value={"_source": _sample_order()}
         )
         ops_es_service.upsert_shipment_current = AsyncMock(
@@ -382,11 +389,11 @@ class TestExhaustedRetries:
         # Created 1 hour ago, retry_count=0 → next backoff = 60s, well within 24h
         created_at = (FIXED_NOW - timedelta(hours=1)).isoformat()
         entry = _make_entry(retry_count=0, created_at=created_at)
-        es_service.client.search = AsyncMock(
+        es_service.client.search = MagicMock(
             return_value={"hits": {"hits": [{"_source": entry}]}}
         )
         # Order found but mirror fails
-        es_service.client.get = AsyncMock(
+        es_service.client.get = MagicMock(
             return_value={"_source": _sample_order()}
         )
         ops_es_service.upsert_shipment_current = AsyncMock(
@@ -423,7 +430,7 @@ class TestWorkerResilience:
             entity_id="ord_bad",
         )
 
-        es_service.client.search = AsyncMock(
+        es_service.client.search = MagicMock(
             return_value={
                 "hits": {"hits": [
                     {"_source": bad_entry},
@@ -434,7 +441,7 @@ class TestWorkerResilience:
 
         call_count = 0
 
-        async def _get_side_effect(*args, **kwargs):
+        def _get_side_effect(*args, **kwargs):
             nonlocal call_count
             call_count += 1
             if kwargs.get("id") == "ord_bad" or (args and len(args) > 1 and args[1] == "ord_bad"):
@@ -443,12 +450,12 @@ class TestWorkerResilience:
 
         # Make get return order for good, crash for bad
         # The worker fetches by entity_id, so we need to handle both
-        async def _smart_get(index, id, **kwargs):
+        def _smart_get(index, id, **kwargs):
             if id == "ord_bad":
                 raise RuntimeError("Unexpected crash")
             return {"_source": {**_sample_order(), "order_id": id}}
 
-        es_service.client.get = AsyncMock(side_effect=_smart_get)
+        es_service.client.get = MagicMock(side_effect=_smart_get)
 
         processed = await worker.run_cycle()
 
@@ -460,7 +467,7 @@ class TestWorkerResilience:
     @pytest.mark.asyncio
     async def test_empty_queue_returns_zero(self, worker, es_service):
         """When no entries are due, returns 0."""
-        es_service.client.search = AsyncMock(
+        es_service.client.search = MagicMock(
             return_value={"hits": {"hits": []}}
         )
 
@@ -481,11 +488,11 @@ class TestEntityNotFound:
         self, worker, es_service, ops_es_service
     ):
         entry = _make_entry()
-        es_service.client.search = AsyncMock(
+        es_service.client.search = MagicMock(
             return_value={"hits": {"hits": [{"_source": entry}]}}
         )
         # Order not found (404 raises exception in ES client)
-        es_service.client.get = AsyncMock(
+        es_service.client.get = MagicMock(
             side_effect=Exception("NotFoundError")
         )
 
@@ -503,10 +510,10 @@ class TestEntityNotFound:
             entity_type="driver",
             entity_id="drv_001",
         )
-        es_service.client.search = AsyncMock(
+        es_service.client.search = MagicMock(
             return_value={"hits": {"hits": [{"_source": entry}]}}
         )
-        es_service.client.get = AsyncMock(
+        es_service.client.get = MagicMock(
             side_effect=Exception("NotFoundError")
         )
 
@@ -529,7 +536,7 @@ class TestUnknownEntityType:
         self, worker, es_service, poison_queue_service
     ):
         entry = _make_entry(entity_type="unknown_thing")
-        es_service.client.search = AsyncMock(
+        es_service.client.search = MagicMock(
             return_value={"hits": {"hits": [{"_source": entry}]}}
         )
 

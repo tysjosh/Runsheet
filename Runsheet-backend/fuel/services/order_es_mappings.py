@@ -111,7 +111,15 @@ FUEL_ORDER_EVENTS_MAPPING = {
             "order_id": {"type": "keyword"},
             "tenant_id": {"type": "keyword"},
             "event_type": {"type": "keyword"},
-            "event_payload": {"type": "nested"},
+            # ``event_payload`` is a free-form, event-type-specific bag (the
+            # order_placed event carries intake_channel/dispatcher_user_id, a
+            # status_changed event carries old/new status, etc.). Mapping it as
+            # a strict ``nested`` object rejected those dynamic keys with
+            # ``strict_dynamic_mapping_exception`` and 503'd EVERY order intake.
+            # Store it as a non-indexed object (same pattern as job_events /
+            # account_events / invoice_events) — persisted verbatim, never
+            # dynamically mapped. We don't query into event_payload here.
+            "event_payload": {"type": "object", "enabled": False},
             "event_timestamp": {"type": "date"},
             "ingested_at": {"type": "date"},
             "source_schema_version": {"type": "keyword"},

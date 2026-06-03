@@ -136,6 +136,29 @@ class OrderIntakePipeline:
         self._hooks: List[Any] = []
 
     # ------------------------------------------------------------------
+    # Late dependency injection
+    # ------------------------------------------------------------------
+
+    def set_intake_channel_repo(self, repo: Any) -> None:
+        """Inject the intake-channel repository after construction.
+
+        The pipeline is built in ``bootstrap/fuel.py`` (boot order #5), but
+        the :class:`IntakeChannelRepository` and ``credentials_vault`` it needs
+        for channel resolution are only registered later by the ``agents`` (#10)
+        and ``integrations`` (#11) bootstrap modules. Without this setter the
+        pipeline would keep ``intake_channel_repo=None`` forever and EVERY
+        dispatcher order create / webhook ingest would 500 with
+        ``'NoneType' object has no attribute 'get_dispatcher_channel'``.
+        ``bootstrap/integrations.py`` calls this once the repo exists.
+        """
+        self._intake_channel_repo = repo
+
+    def set_credentials_vault(self, vault: Any) -> None:
+        """Inject the credentials vault after construction (see
+        :meth:`set_intake_channel_repo` for the boot-order rationale)."""
+        self._credentials_vault = vault
+
+    # ------------------------------------------------------------------
     # Hook registration
     # ------------------------------------------------------------------
 
@@ -625,13 +648,21 @@ class OrderIntakePipeline:
     async def _resolve_dispatcher_channel(self, tenant_id: str) -> Any:
         """Resolve the tenant's single dispatcher channel.
 
-        The dispatcher channel is seeded at first use with
-        ``channel_type="dispatcher"``. This method looks up the tenant's
-        dispatcher channel.
+        The dispatcher channel is an implicit, always-present intake surface
+        (every tenant's operators can key in orders), so we provision it on
+        first use rather than 404-ing when an admin never registered one. The
+        repository's ``ensure_dispatcher_channel`` looks it up and creates a
+        stable default only when missing (idempotent).
         """
-        channel = await self._intake_channel_repo.get_dispatcher_channel(
-            tenant_id
-        )
+        ensure = getattr(self._intake_channel_repo, "ensure_dispatcher_channel", None)
+        if ensure is not None:
+            channel = await ensure(tenant_id)
+        else:
+            # Backwards-compatible fallback for repos/mocks without the ensure
+            # helper: look up directly.
+            channel = await self._intake_channel_repo.get_dispatcher_channel(
+                tenant_id
+            )
         if channel is None:
             from errors.exceptions import resource_not_found
 

@@ -146,12 +146,17 @@ class LegacyMirrorBackfillWorker:
             "sort": [{"next_retry_at": "asc"}],
         }
         try:
-            result = await self._es.client.search(
+            # ``self._es.client`` is the SYNC Elasticsearch client (same
+            # instance the order repository uses synchronously). Awaiting it
+            # raised "object ObjectApiResponse can't be used in 'await'
+            # expression", so the worker silently fetched nothing every cycle
+            # and never processed a single pending mirror. Call it directly.
+            result = self._es.client.search(
                 index=PENDING_LEGACY_MIRRORS_INDEX,
                 body=body,
                 request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
             )
-            hits = result.get("hits", {}).get("hits", [])
+            hits = (result or {}).get("hits", {}).get("hits", [])
             return [h["_source"] for h in hits]
         except Exception as exc:
             logger.error(
@@ -309,7 +314,7 @@ class LegacyMirrorBackfillWorker:
         try:
             from fuel.services.order_es_mappings import FUEL_ORDERS_CURRENT_INDEX
 
-            result = await self._es.client.get(
+            result = self._es.client.get(
                 index=FUEL_ORDERS_CURRENT_INDEX, id=order_id
             )
             source = result.get("_source", {})
@@ -327,7 +332,7 @@ class LegacyMirrorBackfillWorker:
         try:
             from fuel.services.order_es_mappings import DRIVERS_CURRENT_INDEX
 
-            result = await self._es.client.get(
+            result = self._es.client.get(
                 index=DRIVERS_CURRENT_INDEX, id=driver_id
             )
             source = result.get("_source", {})
@@ -341,7 +346,7 @@ class LegacyMirrorBackfillWorker:
     async def _remove_entry(self, entry_id: str) -> None:
         """Remove an entry from pending_legacy_mirrors."""
         try:
-            await self._es.client.delete(
+            self._es.client.delete(
                 index=PENDING_LEGACY_MIRRORS_INDEX,
                 id=entry_id,
                 ignore=[404],
@@ -359,7 +364,7 @@ class LegacyMirrorBackfillWorker:
         """Update an entry's retry_count and next_retry_at for backoff."""
         now = self._clock()
         try:
-            await self._es.client.update(
+            self._es.client.update(
                 index=PENDING_LEGACY_MIRRORS_INDEX,
                 id=entry_id,
                 doc={

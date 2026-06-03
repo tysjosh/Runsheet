@@ -1214,8 +1214,16 @@ class ElasticsearchService:
         try:
             async def _do_index():
                 # Only inject timestamps for indices that have these fields in their mapping.
-                # Strict-mapped indices like job_events will reject unknown fields.
-                _TIMESTAMP_SKIP_INDICES = {"job_events", "shipment_events"}
+                # Strict-mapped event-stream indices reject unknown top-level
+                # fields. ``fuel_order_events`` is strict and carries its own
+                # domain timestamps (event_timestamp / ingested_at), so the
+                # auto-stamped created_at/updated_at triggered a
+                # strict_dynamic_mapping_exception and 503'd every order intake
+                # — it belongs in the skip set alongside job_events /
+                # shipment_events.
+                _TIMESTAMP_SKIP_INDICES = {
+                    "job_events", "shipment_events", "fuel_order_events",
+                }
                 if index not in _TIMESTAMP_SKIP_INDICES:
                     document["updated_at"] = utcnow().isoformat()
                     if "created_at" not in document:
