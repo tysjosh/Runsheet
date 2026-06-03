@@ -406,6 +406,25 @@ class FuelOrderRepository:
         if size <= 0:
             raise ValueError("size must be a positive integer")
 
+        # Read-cutover: serve from Postgres when enabled. Matches the ES query
+        # (match_all, sort created_at desc, capped at ``size``).
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_hybrid_search,
+        )
+        pg = await read_hybrid_search(
+            "fuel_order", tenant_id,
+            sort_field="created_at", sort_order="desc",
+            page=1, size=size,
+        )
+        if pg is not _NOT_CUT_OVER:
+            out: List[FuelOrder] = []
+            for source in pg["items"]:
+                model = _safe_order_load(source)
+                if model is not None:
+                    out.append(model)
+            return out
+
         query = inject_tenant_filter(
             {"query": {"match_all": {}}},
             tenant_id,
@@ -480,6 +499,47 @@ class FuelOrderRepository:
             page = 1
         if size <= 0:
             size = self.DEFAULT_PAGE_SIZE
+
+        # Read-cutover: serve from Postgres when enabled. Maps the ES filter set
+        # onto document term-filters + a created_at range, preserving the
+        # offset/total contract and the sort semantics ("field:order").
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_hybrid_search,
+        )
+        term_filters = {
+            "status": status,
+            "customer_id": customer_id,
+            "assigned_driver_id": driver_id,
+            "call_type": call_type,
+            "product_code": product_code,
+            "intake_channel": intake_channel,
+        }
+        if sort:
+            parts = sort.split(":")
+            pg_sort_field = parts[0]
+            pg_sort_order = parts[1] if len(parts) > 1 else "desc"
+        else:
+            pg_sort_field, pg_sort_order = "created_at", "desc"
+        pg = await read_hybrid_search(
+            "fuel_order", tenant_id,
+            term_filters=term_filters,
+            range_field="created_at", range_gte=start_date, range_lte=end_date,
+            sort_field=pg_sort_field, sort_order=pg_sort_order,
+            page=page, size=size,
+        )
+        if pg is not _NOT_CUT_OVER:
+            orders_pg: List[FuelOrder] = []
+            for source in pg["items"]:
+                model = _safe_order_load(source)
+                if model is not None:
+                    orders_pg.append(model)
+            return {
+                "orders": orders_pg,
+                "total": pg["total"],
+                "page": pg["page"],
+                "size": pg["size"],
+            }
 
         # Build filter clauses
         filters: List[Dict[str, Any]] = []

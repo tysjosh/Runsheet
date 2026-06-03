@@ -1084,3 +1084,21 @@ class CurrentStateRepository:
         outbox.enqueue(session, aggregate_type=self.aggregate_type, aggregate_id=resolved_id,
                        tenant_id=tenant_id, event_type="upserted", row=row)
         return row
+
+    async def delete(self, session: AsyncSession, tenant_id: str, doc_id: str) -> bool:
+        """Delete a current-state row (tenant-scoped). Returns True if removed.
+
+        Removes the authoritative Postgres row so a read-cutover deployment
+        does not keep serving a deleted aggregate. We do NOT enqueue an outbox
+        tombstone here: the ES projection is deleted directly by the caller
+        (the repository's ``delete_document``) during the soak, and once the ES
+        index is dropped the projection no longer exists to reconcile.
+        """
+        row = await session.get(self.model, doc_id)
+        if row is None:
+            return False
+        if not getattr(self, "_tenant_optional", False) and row.tenant_id != tenant_id:
+            return False
+        await session.delete(row)
+        await session.flush()
+        return True

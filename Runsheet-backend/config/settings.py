@@ -214,6 +214,20 @@ class Settings(BaseSettings):
         le=60.0,
         description="OutboxRelay idle poll interval in seconds.",
     )
+    retired_es_indices_raw: str = Field(
+        default="",
+        alias="RETIRED_ES_INDICES",
+        description=(
+            "Comma-separated (or JSON array) list of Elasticsearch indices "
+            "retired (migrated to the Postgres source-of-truth and DROPPED in "
+            "migration Phase 6). Writes to these indices (direct "
+            "index/update/delete AND outbox-relay projection) are silently "
+            "skipped so a dropped index is not recreated with dynamic "
+            "mappings. Reversible: remove an index from this list (and rebuild "
+            "it via persistence.rebuild_from_postgres) to resume projecting. "
+            "Read it via the ``retired_es_indices`` property."
+        ),
+    )
 
     # Session Store Configuration
     session_store_type: str = Field(
@@ -668,7 +682,29 @@ class Settings(BaseSettings):
             if v and not (v.startswith("http://") or v.startswith("https://")):
                 raise ValueError("dinee_api_base_url must be a valid HTTP/HTTPS URL")
         return v
-    
+
+    @property
+    def retired_es_indices(self) -> List[str]:
+        """Parsed list of retired ES index names (Phase 6).
+
+        Accepts either a JSON array or a comma-separated string in the
+        ``RETIRED_ES_INDICES`` env var; both normalise to a clean list. Parsed
+        on access (the raw value is a plain string field so pydantic-settings
+        never tries to JSON-decode it from the environment).
+        """
+        raw = (self.retired_es_indices_raw or "").strip()
+        if not raw:
+            return []
+        if raw.startswith("["):
+            import json
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, list):
+                    return [str(x).strip() for x in parsed if str(x).strip()]
+            except (ValueError, TypeError):
+                pass
+        return [part.strip() for part in raw.split(",") if part.strip()]
+
     @model_validator(mode="after")
     def validate_session_store_config(self) -> "Settings":
         """Validate that the appropriate session store URL/table is provided."""

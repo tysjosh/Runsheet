@@ -309,7 +309,18 @@ def setup_order_intake_indices(es_service) -> None:
     es_client = es_service.client
     is_serverless = es_service.is_serverless
 
+    # Skip indices that have been retired (migrated to Postgres + dropped in
+    # Phase 6) so startup does not silently recreate a dropped index.
+    try:
+        from config.settings import get_settings
+        retired = set(get_settings().retired_es_indices or [])
+    except Exception:  # noqa: BLE001
+        retired = set()
+
     for index_name, mapping in ORDER_INTAKE_INDEX_MAPPINGS.items():
+        if index_name in retired:
+            logger.info("Skipping retired order-intake index: %s", index_name)
+            continue
         try:
             if not es_client.indices.exists(index=index_name):
                 body = mapping

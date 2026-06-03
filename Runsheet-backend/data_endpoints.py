@@ -335,22 +335,38 @@ async def get_fleet_summary(request: Request, tenant: TenantContext = Depends(ge
 @limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
 async def get_trucks(request: Request, tenant: TenantContext = Depends(get_tenant_context)):
     try:
-        # Filter for only truck assets: asset_subtype is "truck" OR asset_type is not set (legacy documents)
-        inner_query = {
-            "query": {
-                "bool": {
-                    "should": [
-                        {"term": {"asset_subtype": "truck"}},
-                        {"bool": {"must_not": {"exists": {"field": "asset_type"}}}}
-                    ],
-                    "minimum_should_match": 1
+        # Read-cutover: serve from Postgres when enabled. The ES query keeps
+        # docs where asset_subtype == "truck" OR asset_type is missing (legacy),
+        # sorted by created_at desc. We reproduce that predicate + sort over the
+        # PG documents so the formatted payload is identical.
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_hybrid_fetch_for_aggregation,
+        )
+        pg_docs = await read_hybrid_fetch_for_aggregation("truck", tenant.tenant_id)
+        if pg_docs is not _NOT_CUT_OVER:
+            trucks = [
+                d for d in pg_docs
+                if d.get("asset_subtype") == "truck" or "asset_type" not in d
+            ]
+            trucks.sort(key=lambda d: d.get("created_at") or "", reverse=True)
+        else:
+            # Filter for only truck assets: asset_subtype is "truck" OR asset_type is not set (legacy documents)
+            inner_query = {
+                "query": {
+                    "bool": {
+                        "should": [
+                            {"term": {"asset_subtype": "truck"}},
+                            {"bool": {"must_not": {"exists": {"field": "asset_type"}}}}
+                        ],
+                        "minimum_should_match": 1
+                    }
                 }
             }
-        }
-        query = inject_tenant_filter(inner_query, tenant.tenant_id)
-        query["sort"] = [{"created_at": {"order": "desc"}}]
-        response = await elasticsearch_service.search_documents("trucks", query, size=1000)
-        trucks = [hit["_source"] for hit in response["hits"]["hits"]]
+            query = inject_tenant_filter(inner_query, tenant.tenant_id)
+            query["sort"] = [{"created_at": {"order": "desc"}}]
+            response = await elasticsearch_service.search_documents("trucks", query, size=1000)
+            trucks = [hit["_source"] for hit in response["hits"]["hits"]]
 
         # Convert to Truck model format for consistency
         formatted_trucks = []
@@ -399,17 +415,30 @@ async def get_trucks(request: Request, tenant: TenantContext = Depends(get_tenan
 @limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
 async def get_truck_by_id(truck_id: str, request: Request, tenant: TenantContext = Depends(get_tenant_context)):
     try:
-        # Tenant-scoped lookup by truck_id
-        query = inject_tenant_filter(
-            {"query": {"term": {"_id": truck_id}}},
-            tenant.tenant_id,
+        # Read-cutover: serve from Postgres when enabled. The ES path looks up
+        # by _id (== truck_id) scoped to tenant; the hybrid get applies the same
+        # tenant isolation (tenant-optional for legacy generic-ES truck docs).
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_hybrid_get,
         )
-        query["size"] = 1
-        result = await elasticsearch_service.search_documents("trucks", query, size=1)
-        hits = result["hits"]["hits"]
-        if not hits:
-            raise resource_not_found(message="Truck not found", details={"truck_id": truck_id})
-        truck = hits[0]["_source"]
+        pg = await read_hybrid_get("truck", tenant.tenant_id, truck_id)
+        if pg is not _NOT_CUT_OVER:
+            if pg is None:
+                raise resource_not_found(message="Truck not found", details={"truck_id": truck_id})
+            truck = pg
+        else:
+            # Tenant-scoped lookup by truck_id
+            query = inject_tenant_filter(
+                {"query": {"term": {"_id": truck_id}}},
+                tenant.tenant_id,
+            )
+            query["size"] = 1
+            result = await elasticsearch_service.search_documents("trucks", query, size=1)
+            hits = result["hits"]["hits"]
+            if not hits:
+                raise resource_not_found(message="Truck not found", details={"truck_id": truck_id})
+            truck = hits[0]["_source"]
         
         # Convert to Truck model format
         route_data = truck.get("route", {})
@@ -717,6 +746,16 @@ async def update_fleet_asset(asset_id: str, body: UpdateAsset, request: Request,
         updated_query["size"] = 1
         updated_result = await elasticsearch_service.search_documents("trucks", updated_query, size=1)
         updated_doc = updated_result["hits"]["hits"][0]["_source"] if updated_result["hits"]["hits"] else {}
+
+        # Dual-write the updated truck/asset to the Postgres source-of-truth so
+        # the PG row stays current (the create path mirrors too; without this
+        # the read-cutover would serve a stale row after partial updates).
+        if updated_doc:
+            from commerce.services.commerce_persistence_bridge import (
+                mirror_current_state_upsert,
+            )
+            await mirror_current_state_upsert("truck", updated_doc, doc_id=asset_id)
+
         return {
             "data": _format_asset(updated_doc),
             "success": True,

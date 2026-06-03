@@ -597,6 +597,27 @@ async def get_job_metrics(
     effective_bucket = _resolve_bucket(bucket, start_date, end_date)
     interval = _bucket_interval(effective_bucket)
 
+    # Read-cutover: aggregate over Postgres job rows when enabled.
+    from commerce.services.commerce_persistence_bridge import (
+        _NOT_CUT_OVER,
+        read_hybrid_fetch_for_aggregation,
+    )
+    from scheduling.services import job_metrics_aggregator as agg
+
+    pg_jobs = await read_hybrid_fetch_for_aggregation(
+        "job", tenant.tenant_id,
+        range_field="scheduled_time", range_gte=start_date, range_lte=end_date,
+    )
+    if pg_jobs is not _NOT_CUT_OVER:
+        buckets_data = agg.bucket_jobs_over_time(pg_jobs, interval)
+        return {
+            "data": buckets_data,
+            "bucket": effective_bucket,
+            "start_date": start_date,
+            "end_date": end_date,
+            "request_id": _get_request_id(request),
+        }
+
     # Build query with tenant filter
     must_clauses: list[dict] = [
         {"term": {"tenant_id": tenant.tenant_id}},
@@ -674,6 +695,23 @@ async def get_completion_metrics(
 
     svc = _get_job_service()
     es = svc._es
+
+    # Read-cutover: aggregate over Postgres job rows when enabled.
+    from commerce.services.commerce_persistence_bridge import (
+        _NOT_CUT_OVER,
+        read_hybrid_fetch_for_aggregation,
+    )
+    from scheduling.services import job_metrics_aggregator as agg
+
+    pg_jobs = await read_hybrid_fetch_for_aggregation(
+        "job", tenant.tenant_id,
+        range_field="scheduled_time", range_gte=start_date, range_lte=end_date,
+    )
+    if pg_jobs is not _NOT_CUT_OVER:
+        return {
+            "data": agg.completion_metrics(pg_jobs),
+            "request_id": _get_request_id(request),
+        }
 
     must_clauses: list[dict] = [
         {"term": {"tenant_id": tenant.tenant_id}},
@@ -777,6 +815,25 @@ async def get_asset_utilization(
 
     svc = _get_job_service()
     es = svc._es
+
+    # Read-cutover: aggregate over Postgres job rows when enabled.
+    from commerce.services.commerce_persistence_bridge import (
+        _NOT_CUT_OVER,
+        read_hybrid_fetch_for_aggregation,
+    )
+    from scheduling.services import job_metrics_aggregator as agg
+
+    pg_jobs = await read_hybrid_fetch_for_aggregation(
+        "job", tenant.tenant_id,
+        range_field="scheduled_time", range_gte=start_date, range_lte=end_date,
+    )
+    if pg_jobs is not _NOT_CUT_OVER:
+        # ES path filters on exists(asset_assigned); the aggregator already
+        # ignores jobs without an asset, so the result is equivalent.
+        return {
+            "data": agg.asset_utilization(pg_jobs, start_date, end_date),
+            "request_id": _get_request_id(request),
+        }
 
     must_clauses: list[dict] = [
         {"term": {"tenant_id": tenant.tenant_id}},

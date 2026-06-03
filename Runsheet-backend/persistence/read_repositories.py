@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -328,6 +328,133 @@ class HybridReadRepository:
             return None
         return dict(row.document or {})
 
+    async def get_any(self, session: AsyncSession,
+                      doc_id: str) -> Optional[Dict[str, Any]]:
+        """Get a document by primary key WITHOUT a tenant filter.
+
+        For globally-unique-id lookups where the tenant is derived *from* the
+        row (e.g. webhook channel resolution: the caller has not yet
+        established tenant identity). Returns the verbatim document or None.
+        """
+        row = await session.get(self.model, doc_id)
+        return dict(row.document or {}) if row is not None else None
+
+    async def find_one(self, session: AsyncSession, tenant_id: str, *,
+                       term_filters: Optional[Dict[str, Any]] = None,
+                       ) -> Optional[Dict[str, Any]]:
+        """Return the first tenant-scoped document matching ``term_filters``.
+
+        Mirrors the ES "first hit" lookups (e.g. the tenant's single
+        dispatcher channel: ``channel_type == 'dispatcher'``). Document-field
+        equality only; tenant isolation enforced via the typed column.
+        """
+        where = []
+        if not self.tenant_optional:
+            where.append(self.model.tenant_id == tenant_id)
+        for key, value in (term_filters or {}).items():
+            if value is None:
+                continue
+            where.append(self._doc_field(key) == value)
+        row = (
+            await session.execute(select(self.model).where(*where).limit(1))
+        ).scalars().first()
+        if row is None:
+            return None
+        if not self.tenant_optional and row.tenant_id != tenant_id:
+            return None
+        return dict(row.document or {})
+
+    def _doc_field(self, name: str):
+        """A comparable/orderable handle to a *document* field.
+
+        Always reads from the verbatim JSON ``document`` column (never the typed
+        mirror columns) so search ordering/filtering matches Elasticsearch,
+        which operates on the document. Notably the typed ``created_at`` is the
+        mirror-insert time, whereas ES sorts on the document's business
+        ``created_at`` / ``scheduled_time`` — so we must go through the JSON
+        accessor here. Compiles to ``JSON_EXTRACT`` on SQLite and ``->>`` on
+        PostgreSQL, so the same code runs in tests and against the container.
+        """
+        return self.model.document[name].as_string()
+
+    async def search(self, session: AsyncSession, tenant_id: str, *,
+                     term_filters: Optional[Dict[str, Any]] = None,
+                     in_filters: Optional[Dict[str, list]] = None,
+                     bool_filters: Optional[Dict[str, bool]] = None,
+                     range_field: Optional[str] = None,
+                     range_gte: Optional[str] = None,
+                     range_lte: Optional[str] = None,
+                     range_lt: Optional[str] = None,
+                     exists_fields: Optional[List[str]] = None,
+                     sort_field: str = "created_at",
+                     sort_order: str = "desc",
+                     page: int = 1,
+                     size: int = _DEFAULT_PAGE_LIMIT) -> Dict[str, Any]:
+        """Offset-paginated search over the document, matching the ES contract.
+
+        Returns ``{"items": [...verbatim docs...], "total": int, "page": int,
+        "size": int}``. ``term_filters`` are exact-match on document fields;
+        ``in_filters`` match a field against a set of values (ES ``terms``);
+        ``bool_filters`` match a JSON boolean field; ``range_field`` applies an
+        inclusive ``>= range_gte`` / ``<= range_lte`` (or exclusive ``<
+        range_lt``) string comparison (ISO-8601 timestamps sort lexically ==
+        chronologically); ``exists_fields`` require the document field to be
+        present and non-null (ES ``exists``). Cross-tenant rows are excluded via
+        the typed, indexed ``tenant_id``.
+        """
+        if page < 1:
+            page = 1
+        if size <= 0:
+            size = _DEFAULT_PAGE_LIMIT
+        size = _clamp(size)
+
+        where = []
+        if not self.tenant_optional:
+            where.append(self.model.tenant_id == tenant_id)
+        for key, value in (term_filters or {}).items():
+            if value is None:
+                continue
+            where.append(self._doc_field(key) == value)
+        for key, values in (in_filters or {}).items():
+            if not values:
+                continue
+            where.append(self._doc_field(key).in_(list(values)))
+        for key, value in (bool_filters or {}).items():
+            if value is None:
+                continue
+            where.append(self.model.document[key].as_boolean() == bool(value))
+        for field in (exists_fields or []):
+            where.append(self._doc_field(field).is_not(None))
+        if range_field and range_gte is not None:
+            where.append(self._doc_field(range_field) >= range_gte)
+        if range_field and range_lte is not None:
+            where.append(self._doc_field(range_field) <= range_lte)
+        if range_field and range_lt is not None:
+            where.append(self._doc_field(range_field) < range_lt)
+
+        total = (
+            await session.execute(
+                select(func.count()).select_from(self.model).where(*where)
+            )
+        ).scalar_one()
+
+        order_expr = self._doc_field(sort_field)
+        order_expr = order_expr.desc() if sort_order == "desc" else order_expr.asc()
+        stmt = (
+            select(self.model)
+            .where(*where)
+            .order_by(order_expr, getattr(self.model, self.pk_attr).asc())
+            .offset((page - 1) * size)
+            .limit(size)
+        )
+        rows = list((await session.execute(stmt)).scalars().all())
+        return {
+            "items": [dict(r.document or {}) for r in rows],
+            "total": int(total),
+            "page": page,
+            "size": size,
+        }
+
     async def list(self, session: AsyncSession, tenant_id: str, *,
                    filters: Optional[Dict[str, Any]] = None,
                    cursor: Optional[str] = None,
@@ -372,6 +499,118 @@ class HybridReadRepository:
         )
         rows = list((await session.execute(stmt)).scalars().all())
 
+        items = [dict(r.document or {}) for r in rows]
+        next_cursor = None
+        if len(rows) == limit and rows:
+            next_cursor = getattr(rows[-1], self.pk_attr)
+        return {"items": items, "next_cursor": next_cursor, "limit": limit}
+
+    async def fetch_for_aggregation(
+        self, session: AsyncSession, tenant_id: str, *,
+        term_filters: Optional[Dict[str, Any]] = None,
+        in_filters: Optional[Dict[str, list]] = None,
+        bool_filters: Optional[Dict[str, bool]] = None,
+        exists_fields: Optional[List[str]] = None,
+        range_field: Optional[str] = None,
+        range_gte: Optional[str] = None,
+        range_lte: Optional[str] = None,
+        cap: int = 50_000,
+    ) -> List[Dict[str, Any]]:
+        """Return every matching verbatim document for in-Python aggregation.
+
+        The metrics/analytics endpoints aggregate over the migrated
+        ``jobs_current`` / ``shipments_current`` rows. Rather than pushing
+        GROUP BY into portable SQL (which would diverge from the ES
+        ``date_histogram`` calendar bucketing and the Python duration math
+        already used), we pull the matching documents and reuse the exact same
+        post-processing the ES path runs — guaranteeing byte-identical output.
+        Tenant-scoped; capped to ``cap`` rows as a safety bound (per-tenant
+        counts are modest).
+        """
+        where = []
+        if not self.tenant_optional:
+            where.append(self.model.tenant_id == tenant_id)
+        for key, value in (term_filters or {}).items():
+            if value is None:
+                continue
+            where.append(self._doc_field(key) == value)
+        for key, values in (in_filters or {}).items():
+            if not values:
+                continue
+            where.append(self._doc_field(key).in_(list(values)))
+        for key, value in (bool_filters or {}).items():
+            if value is None:
+                continue
+            where.append(self.model.document[key].as_boolean() == bool(value))
+        for field in (exists_fields or []):
+            where.append(self._doc_field(field).is_not(None))
+        if range_field and range_gte is not None:
+            where.append(self._doc_field(range_field) >= range_gte)
+        if range_field and range_lte is not None:
+            where.append(self._doc_field(range_field) <= range_lte)
+
+        stmt = select(self.model).where(*where).limit(cap)
+        rows = (await session.execute(stmt)).scalars().all()
+        return [dict(r.document or {}) for r in rows]
+
+    async def list_sorted(
+        self, session: AsyncSession, tenant_id: str, *,
+        term_filters: Optional[Dict[str, Any]] = None,
+        sort_doc_field: str = "created_at",
+        sort_order: str = "asc",
+        cursor: Optional[str] = None,
+        limit: int = _DEFAULT_PAGE_LIMIT,
+    ) -> Dict[str, Any]:
+        """Keyset page sorted by a *document* field then pk, both directions.
+
+        Reproduces the ES ``sort: [{<doc_field>: <order>}, {<pk>: asc}]`` +
+        ``search_after=[cursor, cursor]`` contract used by aggregates whose
+        list order is a document field (e.g. asset_certifications sorted by
+        ``expiry_date asc, cert_id asc``). The cursor is the trailing row's pk;
+        we resolve its sort value to build a strict ``(sort, pk)`` boundary so
+        pages stay contiguous. Returns ``{items, next_cursor, limit}`` — the
+        same envelope those services emit.
+        """
+        limit = _clamp(limit)
+        pk_col = getattr(self.model, self.pk_attr)
+        sort_expr = self._doc_field(sort_doc_field)
+        ascending = sort_order != "desc"
+
+        where = []
+        if not self.tenant_optional:
+            where.append(self.model.tenant_id == tenant_id)
+        for key, value in (term_filters or {}).items():
+            if value is None:
+                continue
+            where.append(self._doc_field(key) == value)
+
+        if cursor:
+            cur = (
+                await session.execute(
+                    select(sort_expr, pk_col).where(pk_col == cursor)
+                )
+            ).first()
+            if cur is not None:
+                cur_sort, cur_id = cur
+                if ascending:
+                    where.append(
+                        or_(sort_expr > cur_sort,
+                            and_(sort_expr == cur_sort, pk_col > cur_id))
+                    )
+                else:
+                    where.append(
+                        or_(sort_expr < cur_sort,
+                            and_(sort_expr == cur_sort, pk_col > cur_id))
+                    )
+
+        order_sort = sort_expr.asc() if ascending else sort_expr.desc()
+        stmt = (
+            select(self.model)
+            .where(*where)
+            .order_by(order_sort, pk_col.asc())
+            .limit(limit)
+        )
+        rows = list((await session.execute(stmt)).scalars().all())
         items = [dict(r.document or {}) for r in rows]
         next_cursor = None
         if len(rows) == limit and rows:

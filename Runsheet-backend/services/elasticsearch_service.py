@@ -59,7 +59,23 @@ class ElasticsearchService:
         )
         
         self.connect()
-    
+
+    def _is_retired_index(self, index: str) -> bool:
+        """True when ``index`` has been retired (migrated to Postgres + dropped).
+
+        Writes to a retired index (direct index/update/delete AND outbox-relay
+        projection, since the relay calls ``index_document``) are skipped so a
+        dropped index is not silently recreated with ES dynamic mappings.
+        Read from current settings each call so the list can be flipped without
+        restarting (and tests can monkeypatch it). Reversible: remove the index
+        from ``retired_es_indices`` to resume projecting to it.
+        """
+        try:
+            retired = get_settings().retired_es_indices
+        except Exception:  # noqa: BLE001 — never let a settings hiccup block ES
+            return False
+        return index in (retired or [])
+
     def connect(self):
         """Initialize Elasticsearch connection"""
         # Skip actual connection in test environment - tests should mock ES
@@ -1193,6 +1209,8 @@ class ElasticsearchService:
         - Requirement 3.5: Implement circuit breakers for Elasticsearch
         - Requirement 2.4: Return specific error code indicating database unavailability
         """
+        if self._is_retired_index(index):
+            return {"result": "skipped_retired_index"}
         try:
             async def _do_index():
                 # Only inject timestamps for indices that have these fields in their mapping.
@@ -1223,6 +1241,8 @@ class ElasticsearchService:
 
         Only the fields present in *partial_doc* are merged into the existing document.
         """
+        if self._is_retired_index(index):
+            return {"result": "skipped_retired_index"}
         try:
             async def _do_update():
                 partial_doc["updated_at"] = utcnow().isoformat()
@@ -1512,6 +1532,8 @@ class ElasticsearchService:
 
         Returns True if the document was deleted, False if not found.
         """
+        if self._is_retired_index(index):
+            return False
         try:
             async def _do_delete():
                 self.client.delete(index=index, id=doc_id, refresh="wait_for")

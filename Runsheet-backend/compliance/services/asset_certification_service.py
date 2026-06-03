@@ -360,6 +360,27 @@ class AssetCertificationService:
         if limit > _MAX_PAGE_LIMIT:
             limit = _MAX_PAGE_LIMIT
 
+        # Read-cutover: serve from Postgres when enabled. The ES list sorts by
+        # (expiry_date asc, cert_id asc) — a document field — so we use the
+        # sorted keyset helper rather than the created_at-mirror list.
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_hybrid_list_sorted,
+        )
+        term_filters = {
+            "asset_id": asset_id,
+            "certification_type": certification_type,
+            "status": status,
+        }
+        pg = await read_hybrid_list_sorted(
+            "asset_certification", tenant_id,
+            term_filters=term_filters,
+            sort_doc_field="expiry_date", sort_order="asc",
+            cursor=cursor, limit=limit,
+        )
+        if pg is not _NOT_CUT_OVER:
+            return pg
+
         must_clauses: List[Dict[str, Any]] = []
         if asset_id:
             must_clauses.append({"term": {"asset_id": asset_id}})

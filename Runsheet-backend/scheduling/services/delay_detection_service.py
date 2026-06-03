@@ -241,6 +241,21 @@ class DelayDetectionService:
 
         Validates: Requirement 7.5
         """
+        # Read-cutover: aggregate over Postgres delayed-job rows when enabled.
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_hybrid_fetch_for_aggregation,
+        )
+        from scheduling.services import job_metrics_aggregator as agg
+
+        pg_jobs = await read_hybrid_fetch_for_aggregation(
+            "job", tenant_id,
+            bool_filters={"delayed": True},
+            range_field="scheduled_time", range_gte=start_date, range_lte=end_date,
+        )
+        if pg_jobs is not _NOT_CUT_OVER:
+            return agg.delay_metrics(pg_jobs)
+
         must_clauses: list[dict] = [
             {"term": {"tenant_id": tenant_id}},
             {"term": {"delayed": True}},

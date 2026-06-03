@@ -480,8 +480,25 @@ class IntakeChannelRepository:
                 exc,
             )
 
-        # Delete the channel document from ES
-        await self._es.delete_document(self._channels_index, channel_id)
+        # Delete the channel document from ES (best-effort: once the
+        # intake_channels index is dropped in Phase 6 this is a no-op, so a
+        # missing-index error must not fail the delete — Postgres is the
+        # source-of-truth).
+        try:
+            await self._es.delete_document(self._channels_index, channel_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "IntakeChannelRepository.delete: ES delete skipped/failed for "
+                "channel=%s (continuing; Postgres is source-of-truth): %s",
+                channel_id, exc,
+            )
+
+        # Delete the authoritative Postgres row so the read-cutover path stops
+        # serving the channel.
+        from commerce.services.commerce_persistence_bridge import (
+            mirror_current_state_delete,
+        )
+        await mirror_current_state_delete("intake_channel", tenant_id, channel_id)
 
         logger.info(
             "IntakeChannelRepository.delete: deleted channel=%s tenant=%s",
@@ -607,6 +624,16 @@ class IntakeChannelRepository:
         if not channel_id or not channel_id.strip():
             raise ValueError("channel_id must be a non-empty string")
 
+        # Read-cutover: serve from Postgres when enabled. Tenant-agnostic
+        # get-by-id (the webhook path derives the tenant FROM the channel).
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_hybrid_get_any,
+        )
+        pg = await read_hybrid_get_any("intake_channel", channel_id)
+        if pg is not _NOT_CUT_OVER:
+            return _safe_channel_load(pg) if pg is not None else None
+
         query = {
             "query": {"term": {"channel_id": channel_id}},
             "size": 1,
@@ -640,6 +667,18 @@ class IntakeChannelRepository:
         the given tenant, or ``None`` if none exists.
         """
         self._require_tenant(tenant_id)
+
+        # Read-cutover: serve from Postgres when enabled.
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_hybrid_find_one,
+        )
+        pg = await read_hybrid_find_one(
+            "intake_channel", tenant_id,
+            term_filters={"channel_type": "dispatcher"},
+        )
+        if pg is not _NOT_CUT_OVER:
+            return _safe_channel_load(pg) if pg is not None else None
 
         query = inject_tenant_filter(
             {

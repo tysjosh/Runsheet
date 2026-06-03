@@ -822,6 +822,40 @@ class JobService:
                 details={"sort_order": sort_order, "valid_values": ["asc", "desc"]},
             )
 
+        # Read-cutover: serve from Postgres when enabled. The ES query filters
+        # on document term fields, applies a scheduled_time range, sorts by
+        # (sort_by, sort_order) and paginates by offset with a total — all of
+        # which read_hybrid_search reproduces against the JSON document.
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_hybrid_search,
+        )
+        pg = await read_hybrid_search(
+            "job", tenant_id,
+            term_filters={
+                "job_type": job_type,
+                "status": status,
+                "asset_assigned": asset_assigned,
+                "origin": origin,
+                "destination": destination,
+            },
+            range_field="scheduled_time", range_gte=start_date, range_lte=end_date,
+            sort_field=sort_by, sort_order=sort_order,
+            page=page, size=size,
+        )
+        if pg is not _NOT_CUT_OVER:
+            total = pg["total"]
+            total_pages = math.ceil(total / size) if size > 0 else 0
+            return {
+                "data": pg["items"],
+                "pagination": {
+                    "page": page,
+                    "size": size,
+                    "total": total,
+                    "total_pages": total_pages,
+                },
+            }
+
         # Build query
         must_clauses: list[dict] = [
             {"term": {"tenant_id": tenant_id}},
@@ -895,6 +929,20 @@ class JobService:
             JobStatus.IN_PROGRESS.value,
         ]
 
+        # Read-cutover: serve from Postgres when enabled.
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_hybrid_search,
+        )
+        pg = await read_hybrid_search(
+            "job", tenant_id,
+            in_filters={"status": active_statuses},
+            sort_field="scheduled_time", sort_order="asc",
+            page=1, size=1000,
+        )
+        if pg is not _NOT_CUT_OVER:
+            return pg["items"]
+
         query: dict = {
             "query": {
                 "bool": {
@@ -926,6 +974,21 @@ class JobService:
         Returns:
             List of delayed job source dicts.
         """
+        # Read-cutover: serve from Postgres when enabled.
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_hybrid_search,
+        )
+        pg = await read_hybrid_search(
+            "job", tenant_id,
+            term_filters={"status": JobStatus.IN_PROGRESS.value},
+            bool_filters={"delayed": True},
+            sort_field="scheduled_time", sort_order="asc",
+            page=1, size=1000,
+        )
+        if pg is not _NOT_CUT_OVER:
+            return pg["items"]
+
         query: dict = {
             "query": {
                 "bool": {
@@ -1008,6 +1071,27 @@ class JobService:
             "otp_required": False,
             "nudge_timeout_minutes": 10,
         }
+        # Read-cutover: serve from Postgres when enabled. tenant_job_policies is
+        # keyed by tenant_id (one row per tenant), so the PG primary key IS the
+        # tenant_id. A missing row yields defaults, same as the ES path.
+        try:
+            from commerce.services.commerce_persistence_bridge import (
+                _NOT_CUT_OVER,
+                read_hybrid_get,
+            )
+            pg = await read_hybrid_get("tenant_job_policy", tenant_id, tenant_id)
+            if pg is not _NOT_CUT_OVER:
+                if pg:
+                    return {
+                        key: pg.get(key, default)
+                        for key, default in defaults.items()
+                    }
+                return defaults
+        except Exception as exc:
+            logger.warning(
+                "Failed to fetch tenant policies from Postgres for %s, "
+                "falling back: %s", tenant_id, exc,
+            )
         try:
             query = {
                 "query": {"term": {"tenant_id": tenant_id}},

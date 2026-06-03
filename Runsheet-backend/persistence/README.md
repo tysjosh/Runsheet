@@ -207,6 +207,16 @@ The services then resolve `get` / `list` / `find_by_order` from Postgres via
 (`persistence/projections.py`). Reads no longer touch ES — the precondition for
 Phases 5–6.
 
+> **Dev status (2026-06-02):** `COMMERCE_READ_FROM_POSTGRES=true` is now LIVE in
+> `.env.development`. Wired read paths (commerce get/list/find + the hybrid
+> master-data/current-state/config gets and lists, the orders/jobs list +
+> search paths, the scheduling metrics/analytics endpoints, the asset-cert
+> **list** (sorted by expiry_date), the tax-engine FIPS jurisdiction + customer
+> exemption lookups, the tenant_job_policies get, the legacy `trucks` list/get,
+> and the ops `shipments` reads + metrics) serve from Postgres. Every migrated
+> index is now cut over for reads. Flip the flag back off in the env file to
+> instantly revert every read to ES.
+
 ### Parity check (gate the soak with evidence)
 
 Before flipping the read-cutover, prove Postgres matches ES record-for-record:
@@ -261,7 +271,59 @@ lockstep.
   backfill + parity only (its ES scripted upsert is a server-side partial
   merge and is legacy/sunsetting, so a partial write-mirror would be lossy).
   Verified at 65/65 record parity against real data.
-- ~~Master data~~ ✅ done — `drivers` (compliance CDL/medical), `depots`,
+  **Read-cutover (orders/jobs lists):** `FuelOrderRepository.get` /
+  `list_for_tenant` / `search` and `JobService._get_job_doc` / `list_jobs` /
+  `get_active_jobs` / `get_delayed_jobs` now serve from Postgres when the flag
+  is on. These list/search paths query the JSON `document` column directly (via
+  `HybridReadRepository.search`) — NOT the typed mirror columns — because the
+  typed `created_at` is the mirror-insert time, whereas ES sorts/filters on the
+  document's business `created_at` / `scheduled_time`. Offset + total + term /
+  `terms` / boolean / date-range filters all match the ES contract. JSON
+  accessors (`as_string` / `as_boolean`) compile on both SQLite (tests) and
+  Postgres (container). Verified end-to-end against the live container with an
+  ES guard that fails if the ES read path is touched.
+  **Read-cutover (scheduling metrics/analytics):** the `/scheduling/metrics/*`
+  endpoints (`metrics/jobs` date-histogram, `metrics/completion`,
+  `metrics/assets`, `metrics/delays`) now aggregate over Postgres job rows when
+  the flag is on. Rather than push GROUP BY into portable SQL (which would
+  diverge from the ES `date_histogram` calendar bucketing and the Python
+  duration math), the cutover fetches the matching `jobs_current` documents via
+  `read_hybrid_fetch_for_aggregation` and runs `job_metrics_aggregator` — a
+  pure-Python module that reproduces the ES output exactly (empty interior
+  buckets filled per `min_doc_count: 0`, `key_as_string` millisecond/`Z`
+  format, terms-agg doc_count-desc ordering, identical completion/active-hours
+  math). Verified byte-identical to the ES aggregations against the live
+  container (same bucket count, same per-type/-asset numbers, including a
+  pre-existing negative completion-time row that both paths compute the same).
+  **Read-cutover (asset-cert list / tax engine / tenant policies / trucks):**
+  asset_certifications **list** serves from PG via `read_hybrid_list_sorted`
+  (keyset on the document `expiry_date asc, cert_id asc` — a document field, so
+  it cannot use the typed-`created_at` keyset); the tax engine's
+  `get_jurisdiction_rates` (FIPS `terms` rollup + effective/expiry date window,
+  expiry-or-missing handled in Python) and `check_exemption` (customer +
+  status=valid + expiry window, product-code scoping + priority selection
+  reusing the existing candidate loop) serve from PG; `_get_tenant_policies`
+  resolves the per-tenant `tenant_job_policies` row (keyed by tenant_id) from
+  PG; and the legacy `trucks` `/fleet/trucks` list (asset_subtype==truck OR
+  asset_type-missing predicate + created_at-desc sort reproduced in Python) and
+  `/fleet/trucks/{id}` get serve from PG. The truck **update** path now also
+  dual-writes to Postgres (previously only create did), so the read-cutover
+  cannot serve a stale row after a partial update. All verified byte-identical
+  to ES against the live container with an ES guard.
+  **Read-cutover (ops shipments):** the ops shipment reads now serve from PG —
+  `GET /ops/shipments` (list), `/ops/shipments/{id}` (get; event history still
+  reads the un-migrated `shipment_events` from ES), `/ops/shipments/sla-breaches`
+  (exists `estimated_delivery` + past-due, via `search` `exists_fields` +
+  exclusive `range_lt`), `/ops/shipments/failures` (failed shipments from PG;
+  per-row `failure_reason` enrichment still reads `shipment_events`), and the
+  metrics `GET /ops/metrics/shipments` / `/ops/metrics/sla` / `/ops/metrics/failures`
+  (Python `shipment_metrics_aggregator` reproducing the ES `date_histogram` +
+  status/reason terms + the SLA painless-script breach rule). The shipment
+  **write path** now also dual-writes: `OpsElasticsearchService.upsert_shipment_current`
+  mirrors to Postgres after a non-stale ES write (the repo's stale-event guard
+  matches the ES scripted upsert). `/ops/riders*` stays on ES (riders are not a
+  migrated aggregate). NB: the ES scripted upsert no-ops fresh inserts on the
+  current serverless ES (a pre-existing ES quirk, identical on both paths).
   `terminals`, `asset_certifications`, `intake_channels`, `trucks`, `locations`
   are dual-written via hybrid document tables. Write-mirror is wired for
   drivers (create), asset certifications (create), depots (create + update),
@@ -271,10 +333,83 @@ lockstep.
   parity against real data.
 - **Phase 5 — stop the ES projection.** After a parity soak with reads on
   Postgres, stop running the outbox relay (and/or turn off dual-write) so the
-  migrated ES indices stop receiving writes.
-- **Phase 6 — drop the ES indices.** Delete the migrated indices, remove them
+  migrated ES indices stop receiving writes.- **Phase 6 — drop the ES indices.** Delete the migrated indices, remove them
   from the seed registry + mapping modules, and delete the deprecated
   `invoice_numbering.py` and `invoice_counter_checkpoints` index.
+
+### Reversibility safety net: rebuild-from-Postgres (`persistence.rebuild_from_postgres`)
+
+Once reads are cut over, the migrated ES indices are disposable *projections*,
+so dropping one must be reversible. `rebuild_from_postgres` is the inverse of
+`backfill`: it reads every PG row for an aggregate, runs it through the SAME
+projector the relay uses (`persistence.projections.PROJECTORS`), recreates the
+index with its **correct strict mapping** (looked up from the domain mapping
+registries — NOT ES dynamic typing, which would silently make `tenant_id`
+`text` and break `term` queries), and indexes each doc **verbatim** (it writes
+via the raw ES client so `index_document`'s `updated_at = now()` rewrite does
+not diverge the field from the PG-stored value), then refreshes.
+
+```bash
+# Rebuild one index from Postgres:
+ENVIRONMENT=development ./venv/bin/python -m persistence.rebuild_from_postgres \
+    --aggregate intake_channel --tenant demo-tenant
+# Rebuild every migrated aggregate's index:
+ENVIRONMENT=development ./venv/bin/python -m persistence.rebuild_from_postgres \
+    --all --tenant demo-tenant     # add --dry-run to report counts only
+```
+
+### Proven reversible drop runbook (Phase 5→6 per index)
+
+Demonstrated end-to-end on `intake_channels` against the live cluster:
+
+1. Confirm the index's reads are cut over to PG (get/list/search/metrics) and
+   its writes mirror to PG (so a rebuild loses nothing). Run `parity_check`.
+2. `DELETE` the ES index.
+3. Confirm the app's read path still works — it now serves from Postgres with
+   the index gone (this is the whole point of the read-cutover).
+4. `rebuild_from_postgres --aggregate <agg>` to reconstruct it (or leave it
+   dropped for good once you no longer need the ES search/dashboard surface).
+5. `parity_check` → `PARITY OK`.
+
+The drop is only truly final once nothing reads the index. Re-running the
+rebuild restores it byte-identically at any time, so the operation is safe to
+rehearse. **Lesson learned during the POC:** always recreate the index with its
+registered mapping — a dynamically-typed recreate breaks `tenant_id` `term`
+filtering (it lands as `text`). `rebuild_from_postgres` handles this.
+
+### Permanent drop: the `RETIRED_ES_INDICES` gate
+
+A *permanent* Phase 6 drop needs one more thing than the rehearsal: a way to
+stop the app from recreating the dropped index. Set `RETIRED_ES_INDICES`
+(comma-separated, or a JSON array) to the dropped index names. This gate, read
+inside `ElasticsearchService`, makes `index_document` / `update_document` /
+`delete_document` **skip** those indices — so the direct service writes AND the
+outbox-relay projection (which calls `index_document`) become no-ops, and the
+startup index-setup (`setup_order_intake_indices`) skips recreating them.
+`parity_check` skips retired indices (Postgres is their sole store). Fully
+reversible: remove the name from `RETIRED_ES_INDICES` and
+`rebuild_from_postgres --aggregate <agg>` to bring the index back.
+
+Before retiring an index, audit EVERY consumer — not just the obvious get/list.
+The `intake_channels` retirement surfaced two extra read paths that had to be
+cut over first: `get_by_channel_id` (the **unauthenticated webhook** ingestion
+resolves the tenant FROM the channel) and `get_dispatcher_channel` (`find_one`
+on a document field), plus a service-level `delete` that had to remove the PG
+source-of-truth row (`mirror_current_state_delete`) and a webhook-seed write
+that had to mirror to PG.
+
+#### Done: `intake_channels` retired (2026-06-02)
+
+`intake_channels` is the first index taken all the way through Phase 6. All
+read paths (`get`, `list_for_tenant`, `get_by_channel_id`,
+`get_dispatcher_channel`) serve from Postgres; create/update/rotate mirror to
+PG and `delete` removes the PG row; the ES index is dropped and listed in
+`RETIRED_ES_INDICES`. Verified against the live cluster: index stays dropped
+across a restart, reads + webhook resolution serve from PG, writes return
+`skipped_retired_index` without recreating the index, and `parity_check` is
+green (95 records across the remaining indices). To undo:
+`RETIRED_ES_INDICES=` (drop it from the list), restart, then
+`python -m persistence.rebuild_from_postgres --aggregate intake_channel`.
 - **Migration scope complete** — all recommended source-of-truth domains
   (commerce, compliance config, orders/jobs current-state, master data) now
   dual-write to Postgres with outbox→ES projection, backfill, and parity. The

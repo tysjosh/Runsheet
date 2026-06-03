@@ -878,6 +878,31 @@ async def mirror_current_state_upsert(
         )
 
 
+async def mirror_current_state_delete(
+    aggregate_type: str, tenant_id: str, doc_id: str
+) -> None:
+    """Best-effort: delete an orders/jobs current-state row from Postgres.
+
+    Keeps the PG source-of-truth in step with a service-level delete so a
+    read-cutover deployment stops serving the deleted aggregate. Best-effort
+    during the soak (ES delete is handled by the caller).
+    """
+    if not _enabled():
+        return
+    from persistence.database import session_scope
+    from persistence.repositories import CurrentStateRepository
+
+    try:
+        repo = CurrentStateRepository(aggregate_type)
+        async with session_scope() as session:
+            await repo.delete(session, tenant_id, doc_id)
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "Postgres dual-delete failed for %s %s (tenant %s)",
+            aggregate_type, doc_id, tenant_id,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Read-cutover helpers for hybrid aggregates (config / current-state / master)
 # ---------------------------------------------------------------------------
@@ -899,6 +924,35 @@ async def read_hybrid_get(aggregate_type: str, tenant_id: str, doc_id: str):
         return await repo.get(session, tenant_id, doc_id)
 
 
+async def read_hybrid_get_any(aggregate_type: str, doc_id: str):
+    """Tenant-agnostic get-by-id from Postgres, or _NOT_CUT_OVER when ES-served.
+
+    For lookups where the tenant is derived from the row (e.g. webhook channel
+    resolution by globally-unique channel_id).
+    """
+    if not read_from_postgres():
+        return _NOT_CUT_OVER
+    from persistence.database import session_scope
+    from persistence.read_repositories import HybridReadRepository
+
+    repo = HybridReadRepository(aggregate_type)
+    async with session_scope() as session:
+        return await repo.get_any(session, doc_id)
+
+
+async def read_hybrid_find_one(aggregate_type: str, tenant_id: str, *,
+                               term_filters: dict | None = None):
+    """First tenant-scoped doc matching term_filters, or _NOT_CUT_OVER off."""
+    if not read_from_postgres():
+        return _NOT_CUT_OVER
+    from persistence.database import session_scope
+    from persistence.read_repositories import HybridReadRepository
+
+    repo = HybridReadRepository(aggregate_type)
+    async with session_scope() as session:
+        return await repo.find_one(session, tenant_id, term_filters=term_filters)
+
+
 async def read_hybrid_list(aggregate_type: str, tenant_id: str, *,
                            filters: dict | None = None, cursor: str | None = None,
                            limit: int = 50):
@@ -912,4 +966,106 @@ async def read_hybrid_list(aggregate_type: str, tenant_id: str, *,
     async with session_scope() as session:
         return await repo.list(
             session, tenant_id, filters=filters, cursor=cursor, limit=limit
+        )
+
+
+async def read_hybrid_search(aggregate_type: str, tenant_id: str, *,
+                             term_filters: dict | None = None,
+                             in_filters: dict | None = None,
+                             bool_filters: dict | None = None,
+                             range_field: str | None = None,
+                             range_gte: str | None = None,
+                             range_lte: str | None = None,
+                             range_lt: str | None = None,
+                             exists_fields: list | None = None,
+                             sort_field: str = "created_at",
+                             sort_order: str = "desc",
+                             page: int = 1, size: int = 20):
+    """Offset-paginated search of a hybrid aggregate from Postgres.
+
+    Returns the ES-equivalent ``{"items", "total", "page", "size"}`` envelope,
+    or ``_NOT_CUT_OVER`` when reads should still be served from Elasticsearch.
+    Used for the orders/jobs list endpoints whose contract is offset + total
+    (not the keyset ``list`` helper above).
+    """
+    if not read_from_postgres():
+        return _NOT_CUT_OVER
+    from persistence.database import session_scope
+    from persistence.read_repositories import HybridReadRepository
+
+    repo = HybridReadRepository(aggregate_type)
+    async with session_scope() as session:
+        return await repo.search(
+            session, tenant_id,
+            term_filters=term_filters, in_filters=in_filters,
+            bool_filters=bool_filters,
+            range_field=range_field, range_gte=range_gte, range_lte=range_lte,
+            range_lt=range_lt, exists_fields=exists_fields,
+            sort_field=sort_field, sort_order=sort_order,
+            page=page, size=size,
+        )
+
+
+async def read_hybrid_fetch_for_aggregation(
+    aggregate_type: str, tenant_id: str, *,
+    term_filters: dict | None = None,
+    in_filters: dict | None = None,
+    bool_filters: dict | None = None,
+    exists_fields: list | None = None,
+    range_field: str | None = None,
+    range_gte: str | None = None,
+    range_lte: str | None = None,
+):
+    """Fetch all matching hybrid documents for in-Python aggregation.
+
+    Returns a list of verbatim documents, or ``_NOT_CUT_OVER`` when reads
+    should still be served from Elasticsearch. Powers the analytics/metrics
+    endpoints (job counts, completion, asset utilization, delays; shipment
+    status/SLA/failure metrics) and the tax-engine FIPS/exemption lookups,
+    which compute their rollups / filtering in Python — so the Postgres path
+    reuses the identical post-processing and stays byte-identical to the ES
+    query output.
+    """
+    if not read_from_postgres():
+        return _NOT_CUT_OVER
+    from persistence.database import session_scope
+    from persistence.read_repositories import HybridReadRepository
+
+    repo = HybridReadRepository(aggregate_type)
+    async with session_scope() as session:
+        return await repo.fetch_for_aggregation(
+            session, tenant_id,
+            term_filters=term_filters, in_filters=in_filters,
+            bool_filters=bool_filters, exists_fields=exists_fields,
+            range_field=range_field, range_gte=range_gte, range_lte=range_lte,
+        )
+
+
+async def read_hybrid_list_sorted(
+    aggregate_type: str, tenant_id: str, *,
+    term_filters: dict | None = None,
+    sort_doc_field: str = "created_at",
+    sort_order: str = "asc",
+    cursor: str | None = None,
+    limit: int = 50,
+):
+    """Keyset list sorted by a document field then pk, from Postgres.
+
+    Returns ``{items, next_cursor, limit}``, or ``_NOT_CUT_OVER`` when reads
+    should still be served from Elasticsearch. Used by aggregates whose list
+    order is a document field rather than the typed ``created_at`` mirror
+    column (e.g. asset_certifications sorted by ``expiry_date asc, cert_id asc``).
+    """
+    if not read_from_postgres():
+        return _NOT_CUT_OVER
+    from persistence.database import session_scope
+    from persistence.read_repositories import HybridReadRepository
+
+    repo = HybridReadRepository(aggregate_type)
+    async with session_scope() as session:
+        return await repo.list_sorted(
+            session, tenant_id,
+            term_filters=term_filters,
+            sort_doc_field=sort_doc_field, sort_order=sort_order,
+            cursor=cursor, limit=limit,
         )

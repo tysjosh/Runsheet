@@ -275,7 +275,19 @@ async def parity_check(tenant_id: Optional[str] = None) -> Tuple[int, int]:
     total_checked = 0
     total_mismatches = 0
 
+    # Indices retired in Phase 6 no longer exist in ES — Postgres is now their
+    # sole store, so a parity diff against an absent index is meaningless. Skip
+    # them (they were verified before the drop and PG is authoritative).
+    try:
+        from config.settings import get_settings
+        retired = set(get_settings().retired_es_indices or [])
+    except Exception:  # noqa: BLE001
+        retired = set()
+
     for agg, (index, id_field) in _INDEX_BY_AGG.items():
+        if index in retired:
+            logger.info("[%s] index %s retired (Postgres-only) — skipping parity", agg, index)
+            continue
         es_docs = await _fetch_es_all(es_client, index, tenant_id)
         pg_docs = await _fetch_pg_all(agg, tenant_id)
 

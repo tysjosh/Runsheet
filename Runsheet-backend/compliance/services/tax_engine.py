@@ -806,6 +806,36 @@ class TaxEngine:
         candidate_codes = self._compute_candidate_fips_codes(fips_code)
         iso_date = effective_date.isoformat()
 
+        # Read-cutover: serve from Postgres when enabled. We fetch the rows
+        # matching the FIPS rollup with effective_date <= invoice date, then
+        # apply the "expiry_date >= date OR missing" rule in Python (the
+        # missing-field OR is awkward in portable SQL) and reuse the same
+        # model validation. Byte-identical to the ES query result set.
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_hybrid_fetch_for_aggregation,
+        )
+        pg_docs = await read_hybrid_fetch_for_aggregation(
+            "tax_jurisdiction", self._tenant_id,
+            in_filters={"fips_code": candidate_codes},
+            range_field="effective_date", range_lte=iso_date,
+        )
+        if pg_docs is not _NOT_CUT_OVER:
+            rates_pg: List[JurisdictionRate] = []
+            for source in pg_docs:
+                expiry = source.get("expiry_date")
+                if expiry is not None and str(expiry) < iso_date:
+                    continue  # expired before the invoice date
+                try:
+                    rates_pg.append(JurisdictionRate.model_validate(source))
+                except Exception as exc:
+                    logger.warning(
+                        "TaxEngine: skipping malformed tax_jurisdictions row "
+                        "for tenant=%s fips_code=%s: %s",
+                        self._tenant_id, fips_code, exc,
+                    )
+            return rates_pg
+
         # Build the ES query:
         # - terms filter on fips_code covering the full federal → state →
         #   county → city rollup
@@ -1361,56 +1391,77 @@ class TaxEngine:
         canonical_code = canonicalize(product_code)
         iso_date = effective_date.isoformat()
 
-        # Build the ES query:
-        # - customer_id + status == "valid"
-        # - expiry_date >= effective_date (inclusive per Req 6.6)
-        # - product_codes match OR missing (None = applies to all
-        #   products for the exemption_type)
-        base_query: dict = {
-            "query": {
-                "bool": {
-                    "filter": [
-                        {"term": {"customer_id": customer_id.strip()}},
-                        {"term": {"status": "valid"}},
-                        {"range": {"expiry_date": {"gte": iso_date}}},
-                        {
-                            "bool": {
-                                "should": [
-                                    {
-                                        "term": {
-                                            "product_codes": canonical_code
-                                        }
-                                    },
-                                    {
-                                        "bool": {
-                                            "must_not": [
-                                                {
-                                                    "exists": {
-                                                        "field": "product_codes"
-                                                    }
-                                                }
-                                            ]
-                                        }
-                                    },
-                                ],
-                                "minimum_should_match": 1,
-                            }
-                        },
-                    ]
-                }
-            },
-            "size": _MAX_EXEMPTIONS_PER_LOOKUP,
-        }
-
-        query = inject_tenant_filter(base_query, self._tenant_id)
-
-        response = await self._es.search_documents(
-            TAX_EXEMPTIONS_INDEX,
-            query,
-            size=_MAX_EXEMPTIONS_PER_LOOKUP,
+        # Read-cutover: serve from Postgres when enabled. We fetch the rows
+        # matching customer_id + status=valid + expiry_date >= invoice date,
+        # then wrap them as ES-shaped hits so the existing candidate loop
+        # (which already re-checks expiry/status, applies product-code scoping
+        # including the blanket/missing case, and does priority selection) runs
+        # unchanged. Byte-identical to the ES query + Python post-processing.
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_hybrid_fetch_for_aggregation,
         )
+        pg_docs = await read_hybrid_fetch_for_aggregation(
+            "tax_exemption", self._tenant_id,
+            term_filters={"customer_id": customer_id.strip(), "status": "valid"},
+            range_field="expiry_date", range_gte=iso_date,
+        )
+        if pg_docs is not _NOT_CUT_OVER:
+            hits = [{"_source": d} for d in pg_docs]
+        else:
+            hits = None
 
-        hits = ((response or {}).get("hits") or {}).get("hits") or []
+        if hits is None:
+            # Build the ES query:
+            # - customer_id + status == "valid"
+            # - expiry_date >= effective_date (inclusive per Req 6.6)
+            # - product_codes match OR missing (None = applies to all
+            #   products for the exemption_type)
+            base_query: dict = {
+                "query": {
+                    "bool": {
+                        "filter": [
+                            {"term": {"customer_id": customer_id.strip()}},
+                            {"term": {"status": "valid"}},
+                            {"range": {"expiry_date": {"gte": iso_date}}},
+                            {
+                                "bool": {
+                                    "should": [
+                                        {
+                                            "term": {
+                                                "product_codes": canonical_code
+                                            }
+                                        },
+                                        {
+                                            "bool": {
+                                                "must_not": [
+                                                    {
+                                                        "exists": {
+                                                            "field": "product_codes"
+                                                        }
+                                                    }
+                                                ]
+                                            }
+                                        },
+                                    ],
+                                    "minimum_should_match": 1,
+                                }
+                            },
+                        ]
+                    }
+                },
+                "size": _MAX_EXEMPTIONS_PER_LOOKUP,
+            }
+
+            query = inject_tenant_filter(base_query, self._tenant_id)
+
+            response = await self._es.search_documents(
+                TAX_EXEMPTIONS_INDEX,
+                query,
+                size=_MAX_EXEMPTIONS_PER_LOOKUP,
+            )
+
+            hits = ((response or {}).get("hits") or {}).get("hits") or []
         candidates: List[TaxExemption] = []
         for hit in hits:
             source = hit.get("_source") if isinstance(hit, dict) else None

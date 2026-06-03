@@ -249,6 +249,22 @@ async def _ensure_dinee_legacy_channel_seeded(tenant_id: str) -> None:
             INTAKE_CHANNELS_INDEX, DINEE_LEGACY_CHANNEL_ID, channel_doc
         )
 
+        # Dual-write the legacy intake channel to the Postgres source-of-truth
+        # so the PG row (and any rebuild-from-PG of the intake_channels index)
+        # includes it. Best-effort: ES write already succeeded above.
+        try:
+            from commerce.services.commerce_persistence_bridge import (
+                mirror_current_state_upsert,
+            )
+            await mirror_current_state_upsert(
+                "intake_channel", channel_doc, doc_id=DINEE_LEGACY_CHANNEL_ID
+            )
+        except Exception:  # noqa: BLE001 — best-effort during soak
+            logger.exception(
+                "Postgres dual-write failed for dinee-legacy intake channel "
+                "(tenant=%s)", tenant_id,
+            )
+
         _dinee_legacy_seeded[tenant_id] = True
         logger.info(
             "Seeded dinee-legacy intake channel for tenant=%s", tenant_id

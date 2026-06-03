@@ -227,6 +227,29 @@ async def get_sla_breaches(
 
     now = datetime.now(timezone.utc).isoformat()
 
+    # Read-cutover: serve from Postgres when enabled. SLA breach = an
+    # estimated_delivery that exists and is in the past, sorted ascending.
+    from commerce.services.commerce_persistence_bridge import (
+        _NOT_CUT_OVER,
+        read_hybrid_search,
+    )
+    pg = await read_hybrid_search(
+        "shipment", tenant.tenant_id,
+        term_filters={"status": status, "rider_id": rider_id},
+        exists_fields=["estimated_delivery"],
+        range_field="estimated_delivery", range_lt=now,
+        sort_field="estimated_delivery", sort_order="asc",
+        page=page, size=size,
+    )
+    if pg is not _NOT_CUT_OVER:
+        return paginated_response_dict(
+            items=_mask_response_data(pg["items"], tenant, request),
+            total=pg["total"],
+            page=page,
+            page_size=size,
+            request_id=_get_request_id(request),
+        )
+
     # SLA breach: estimated_delivery exists and is in the past
     filters: list[dict] = [
         {"range": {"estimated_delivery": {"lt": now}}},
@@ -288,6 +311,56 @@ async def get_shipment_failures(
     _validate_date(start_date, "start_date")
     _validate_date(end_date, "end_date")
     es = _get_es()
+
+    # Read-cutover: fetch the failed shipments from Postgres when enabled. The
+    # per-shipment failure_reason enrichment still reads shipment_events from ES
+    # (that index is NOT migrated), so we only swap the shipments_current read.
+    from commerce.services.commerce_persistence_bridge import (
+        _NOT_CUT_OVER,
+        read_hybrid_search,
+    )
+    pg = await read_hybrid_search(
+        "shipment", tenant.tenant_id,
+        term_filters={"status": "failed", "rider_id": rider_id},
+        range_field="updated_at", range_gte=start_date, range_lte=end_date,
+        sort_field="updated_at", sort_order="desc",
+        page=page, size=size,
+    )
+    if pg is not _NOT_CUT_OVER:
+        shipments = list(pg["items"])
+        total = pg["total"]
+        data = []
+        for shipment in shipments:
+            if not shipment.get("failure_reason"):
+                sid = shipment.get("shipment_id")
+                if sid:
+                    event_query = inject_tenant_filter(
+                        {"query": {"bool": {"must": [
+                            {"term": {"shipment_id": sid}},
+                            {"term": {"event_type": "shipment_failed"}},
+                        ]}}},
+                        tenant.tenant_id,
+                    )
+                    event_query["size"] = 1
+                    event_query["sort"] = [{"event_timestamp": {"order": "desc"}}]
+                    event_result = es.client.search(
+                        index=OpsElasticsearchService.SHIPMENT_EVENTS,
+                        body=event_query,
+                        request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
+                    )
+                    if event_result["hits"]["hits"]:
+                        latest_event = event_result["hits"]["hits"][0]["_source"]
+                        payload = latest_event.get("event_payload", {})
+                        if isinstance(payload, dict):
+                            shipment["failure_reason"] = payload.get("failure_reason", "unknown")
+            data.append(shipment)
+        return paginated_response_dict(
+            items=_mask_response_data(data, tenant, request),
+            total=total,
+            page=page,
+            page_size=size,
+            request_id=_get_request_id(request),
+        )
 
     filters: list[dict] = [
         {"term": {"status": "failed"}},
@@ -382,6 +455,28 @@ async def list_shipments(
     _validate_date(end_date, "end_date")
     es = _get_es()
 
+    # Read-cutover: serve from Postgres when enabled. Mirrors the ES filter set
+    # (status term, rider_id term, updated_at range) + offset/total + sort.
+    from commerce.services.commerce_persistence_bridge import (
+        _NOT_CUT_OVER,
+        read_hybrid_search,
+    )
+    pg = await read_hybrid_search(
+        "shipment", tenant.tenant_id,
+        term_filters={"status": status, "rider_id": rider_id},
+        range_field="updated_at", range_gte=start_date, range_lte=end_date,
+        sort_field=sort_by, sort_order=sort_order,
+        page=page, size=size,
+    )
+    if pg is not _NOT_CUT_OVER:
+        return paginated_response_dict(
+            items=_mask_response_data(pg["items"], tenant, request),
+            total=pg["total"],
+            page=page,
+            page_size=size,
+            request_id=_get_request_id(request),
+        )
+
     # Build the inner query with optional filters
     filters: list[dict] = []
     if status:
@@ -443,24 +538,37 @@ async def get_shipment(
     """Return a single shipment with its full event history."""
     es = _get_es()
 
-    # Fetch the shipment document (tenant-scoped)
-    shipment_query = inject_tenant_filter(
-        {"query": {"term": {"shipment_id": shipment_id}}},
-        tenant.tenant_id,
+    # Read-cutover: fetch the shipment from Postgres when enabled; the event
+    # history still reads shipment_events from ES (that index is NOT migrated).
+    from commerce.services.commerce_persistence_bridge import (
+        _NOT_CUT_OVER,
+        read_hybrid_get,
     )
-    shipment_query["size"] = 1
+    pg = await read_hybrid_get("shipment", tenant.tenant_id, shipment_id)
+    if pg is not _NOT_CUT_OVER:
+        if pg is None:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404, detail="Shipment not found")
+        shipment_data = pg
+    else:
+        # Fetch the shipment document (tenant-scoped)
+        shipment_query = inject_tenant_filter(
+            {"query": {"term": {"shipment_id": shipment_id}}},
+            tenant.tenant_id,
+        )
+        shipment_query["size"] = 1
 
-    shipment_result = es.client.search(
-        index=OpsElasticsearchService.SHIPMENTS_CURRENT,
-        body=shipment_query,
-        request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
-    )
+        shipment_result = es.client.search(
+            index=OpsElasticsearchService.SHIPMENTS_CURRENT,
+            body=shipment_query,
+            request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
+        )
 
-    if not shipment_result["hits"]["hits"]:
-        from fastapi import HTTPException
-        raise HTTPException(status_code=404, detail="Shipment not found")
+        if not shipment_result["hits"]["hits"]:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404, detail="Shipment not found")
 
-    shipment_data = shipment_result["hits"]["hits"][0]["_source"]
+        shipment_data = shipment_result["hits"]["hits"][0]["_source"]
 
     # Fetch the full event history for this shipment (tenant-scoped)
     events_query = inject_tenant_filter(
@@ -811,6 +919,32 @@ async def get_shipment_metrics(
     effective_bucket = _resolve_bucket(bucket, start_date, end_date)
     interval = _bucket_interval(effective_bucket)
 
+    from ops.models import MetricsBucket, MetricsResponse
+
+    # Read-cutover: aggregate over Postgres shipment rows when enabled.
+    from commerce.services.commerce_persistence_bridge import (
+        _NOT_CUT_OVER,
+        read_hybrid_fetch_for_aggregation,
+    )
+    from ops.services import shipment_metrics_aggregator as sagg
+
+    pg_docs = await read_hybrid_fetch_for_aggregation(
+        "shipment", tenant.tenant_id,
+        range_field="updated_at", range_gte=start_date, range_lte=end_date,
+    )
+    if pg_docs is not _NOT_CUT_OVER:
+        buckets_pg = [
+            MetricsBucket(timestamp=b["timestamp"], values=b["values"])
+            for b in sagg.shipment_status_buckets(pg_docs, interval)
+        ]
+        return MetricsResponse(
+            data=buckets_pg,
+            bucket=effective_bucket,
+            start_date=start_date,
+            end_date=end_date,
+            request_id=_get_request_id(request),
+        )
+
     filters: list[dict] = []
     dr = _build_date_range_filter(start_date, end_date, field="updated_at")
     if dr:
@@ -842,8 +976,6 @@ async def get_shipment_metrics(
         body=query,
         request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
     )
-
-    from ops.models import MetricsBucket, MetricsResponse
 
     buckets_data: list[MetricsBucket] = []
     for b in result.get("aggregations", {}).get("over_time", {}).get("buckets", []):
@@ -882,6 +1014,35 @@ async def get_sla_metrics(
 
     effective_bucket = _resolve_bucket(bucket, start_date, end_date)
     interval = _bucket_interval(effective_bucket)
+
+    from ops.models import MetricsBucket, MetricsResponse
+
+    # Read-cutover: aggregate over Postgres shipment rows when enabled. Only
+    # shipments WITH an estimated_delivery participate (exists filter); the SLA
+    # breach is computed against last_event_timestamp in the aggregator.
+    from commerce.services.commerce_persistence_bridge import (
+        _NOT_CUT_OVER,
+        read_hybrid_fetch_for_aggregation,
+    )
+    from ops.services import shipment_metrics_aggregator as sagg
+
+    pg_docs = await read_hybrid_fetch_for_aggregation(
+        "shipment", tenant.tenant_id,
+        exists_fields=["estimated_delivery"],
+        range_field="updated_at", range_gte=start_date, range_lte=end_date,
+    )
+    if pg_docs is not _NOT_CUT_OVER:
+        buckets_pg = [
+            MetricsBucket(timestamp=b["timestamp"], values=b["values"])
+            for b in sagg.shipment_sla_buckets(pg_docs, interval)
+        ]
+        return MetricsResponse(
+            data=buckets_pg,
+            bucket=effective_bucket,
+            start_date=start_date,
+            end_date=end_date,
+            request_id=_get_request_id(request),
+        )
 
     # We need shipments that have an estimated_delivery so we can compare
     filters: list[dict] = [{"exists": {"field": "estimated_delivery"}}]
@@ -1052,6 +1213,33 @@ async def get_failure_metrics(
     effective_bucket = _resolve_bucket(bucket, start_date, end_date)
     interval = _bucket_interval(effective_bucket)
 
+    from ops.models import MetricsBucket, MetricsResponse
+
+    # Read-cutover: aggregate over Postgres failed-shipment rows when enabled.
+    from commerce.services.commerce_persistence_bridge import (
+        _NOT_CUT_OVER,
+        read_hybrid_fetch_for_aggregation,
+    )
+    from ops.services import shipment_metrics_aggregator as sagg
+
+    pg_docs = await read_hybrid_fetch_for_aggregation(
+        "shipment", tenant.tenant_id,
+        term_filters={"status": "failed"},
+        range_field="updated_at", range_gte=start_date, range_lte=end_date,
+    )
+    if pg_docs is not _NOT_CUT_OVER:
+        buckets_pg = [
+            MetricsBucket(timestamp=b["timestamp"], values=b["values"])
+            for b in sagg.shipment_failure_buckets(pg_docs, interval)
+        ]
+        return MetricsResponse(
+            data=buckets_pg,
+            bucket=effective_bucket,
+            start_date=start_date,
+            end_date=end_date,
+            request_id=_get_request_id(request),
+        )
+
     filters: list[dict] = [{"term": {"status": "failed"}}]
     dr = _build_date_range_filter(start_date, end_date, field="updated_at")
     if dr:
@@ -1079,8 +1267,6 @@ async def get_failure_metrics(
         body=query,
         request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
     )
-
-    from ops.models import MetricsBucket, MetricsResponse
 
     buckets_data: list[MetricsBucket] = []
     for b in result.get("aggregations", {}).get("over_time", {}).get("buckets", []):
