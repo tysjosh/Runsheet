@@ -120,9 +120,9 @@ function getStatusBadge(status: DriverStatus): string {
 }
 
 function getBarColor(percentage: number): string {
-  if (percentage > 100) return "bg-error-light0";
-  if (percentage >= 60) return "bg-warning-light0";
-  return "bg-success-light0";
+  if (percentage > 100) return "bg-error";
+  if (percentage >= 60) return "bg-warning";
+  return "bg-success";
 }
 
 function formatDate(dateStr?: string | null): string {

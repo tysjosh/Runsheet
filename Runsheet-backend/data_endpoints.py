@@ -635,6 +635,12 @@ async def create_fleet_asset(body: CreateAsset, request: Request, tenant: Tenant
         # Index into the trucks index using asset_id as the document ID
         await elasticsearch_service.index_document("trucks", body.asset_id, doc)
 
+        # Dual-write the truck/asset to the Postgres source-of-truth.
+        from commerce.services.commerce_persistence_bridge import (
+            mirror_current_state_upsert,
+        )
+        await mirror_current_state_upsert("truck", doc, doc_id=body.asset_id)
+
         return {
             "data": _format_asset(doc),
             "success": True,

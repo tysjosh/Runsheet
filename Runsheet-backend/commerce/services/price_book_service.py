@@ -258,6 +258,12 @@ class PriceBookService:
             PRICE_BOOKS_CURRENT_INDEX, price_book_id, book_doc
         )
 
+        # Dual-write the price book to the Postgres source-of-truth.
+        from commerce.services.commerce_persistence_bridge import (
+            mirror_price_book_create,
+        )
+        await mirror_price_book_create(book_doc)
+
         # Persist rules to pricing_rules_current
         if validated_rules:
             await self._persist_rules(validated_rules)
@@ -452,6 +458,15 @@ class PriceBookService:
             PRICE_BOOKS_CURRENT_INDEX, price_book_id, partial
         )
 
+        # Mirror the book field changes (+ recomputed rule_count) to Postgres.
+        from commerce.services.commerce_persistence_bridge import (
+            mirror_price_book_fields,
+        )
+        _pg = {k: v for k, v in partial.items() if k != "updated_at"}
+        if new_rules is not None:
+            _pg["rule_count"] = len(new_rules)
+        await mirror_price_book_fields(tenant_id, price_book_id, _pg)
+
         # Bump cache invalidation on any mutation (Req 3.6)
         rules_for_invalidation = new_rules or existing.get("rules", [])
         await self._invalidate_cache(tenant_id, rules_for_invalidation)
@@ -516,6 +531,14 @@ class PriceBookService:
             PRICE_BOOKS_CURRENT_INDEX, price_book_id, partial
         )
 
+        # Mirror the activation status change to Postgres.
+        from commerce.services.commerce_persistence_bridge import (
+            mirror_price_book_fields,
+        )
+        await mirror_price_book_fields(
+            tenant_id, price_book_id, {"status": PriceBookStatus.ACTIVE.value}
+        )
+
         # Fan out rules into pricing_rules_current
         rules = existing.get("rules", [])
         # Remove any stale rules for this book first
@@ -572,6 +595,11 @@ class PriceBookService:
             await self._es.index_document(
                 PRICING_RULES_CURRENT_INDEX, rule_id, rule
             )
+        # Dual-write the rule batch to Postgres (parent book mirrored above).
+        from commerce.services.commerce_persistence_bridge import (
+            mirror_pricing_rules_upsert,
+        )
+        await mirror_pricing_rules_upsert(rules)
 
     async def _remove_rules_for_book(
         self, tenant_id: str, price_book_id: str
@@ -599,9 +627,16 @@ class PriceBookService:
         )
 
         hits = response.get("hits", {}).get("hits", [])
+        removed_ids = []
         for hit in hits:
             rule_id = hit["_source"]["rule_id"]
             await self._es.delete_document(PRICING_RULES_CURRENT_INDEX, rule_id)
+            removed_ids.append(rule_id)
+        # Mirror the deletions to Postgres.
+        from commerce.services.commerce_persistence_bridge import (
+            mirror_pricing_rules_delete,
+        )
+        await mirror_pricing_rules_delete(tenant_id, removed_ids)
 
     async def _invalidate_cache(
         self, tenant_id: str, rules: List[Dict[str, Any]]

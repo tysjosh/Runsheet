@@ -246,6 +246,11 @@ class DunningService:
             await self._es.update_document(
                 DUNNING_EVENTS_INDEX, event_id, partial
             )
+            # Mirror the cancellation to Postgres.
+            from commerce.services.commerce_persistence_bridge import (
+                mirror_dunning_event_fields,
+            )
+            await mirror_dunning_event_fields(tenant_id, event_id, partial)
             cancelled_count += 1
 
         # Notify the notification service to drop queued messages
@@ -451,6 +456,12 @@ class DunningService:
         await self._es.index_document(
             DUNNING_EVENTS_INDEX, event_id, dunning_doc
         )
+
+        # Dual-write the dunning event to the Postgres source-of-truth.
+        from commerce.services.commerce_persistence_bridge import (
+            mirror_dunning_event_create,
+        )
+        await mirror_dunning_event_create(dunning_doc)
 
         # Enqueue notification via notification service
         if self._notification_service:

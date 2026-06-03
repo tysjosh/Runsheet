@@ -106,6 +106,15 @@ TENANT_JOB_POLICIES_MAPPING = {
 }
 
 
+# Module-level registry: index_name -> mapping. Single source of truth for
+# both setup_scheduling_indices and the seed script's recreate path.
+SCHEDULING_INDEX_MAPPINGS = {
+    JOBS_CURRENT_INDEX: JOBS_CURRENT_MAPPING,
+    JOB_EVENTS_INDEX: JOB_EVENTS_MAPPING,
+    TENANT_JOB_POLICIES_INDEX: TENANT_JOB_POLICIES_MAPPING,
+}
+
+
 def setup_scheduling_indices(es_service):
     """
     Create scheduling indices and apply ILM policy.
@@ -124,13 +133,7 @@ def setup_scheduling_indices(es_service):
     es_client = es_service.client
     is_serverless = es_service.is_serverless
 
-    indices = {
-        JOBS_CURRENT_INDEX: JOBS_CURRENT_MAPPING,
-        JOB_EVENTS_INDEX: JOB_EVENTS_MAPPING,
-        TENANT_JOB_POLICIES_INDEX: TENANT_JOB_POLICIES_MAPPING,
-    }
-
-    for index_name, mapping in indices.items():
+    for index_name, mapping in SCHEDULING_INDEX_MAPPINGS.items():
         try:
             if not es_client.indices.exists(index=index_name):
                 if is_serverless:
@@ -142,7 +145,16 @@ def setup_scheduling_indices(es_service):
         except Exception:
             logger.exception("Failed to create scheduling index %s", index_name)
 
-    # Apply ILM policy for job_events
+    # Apply ILM policy for job_events.
+    # ILM is unavailable on serverless / basic-tier clusters (the PUT
+    # returns a 400 "no handler found"), so skip it cleanly there.
+    if is_serverless:
+        logger.info(
+            "Skipping scheduling ILM policy setup — ILM not available on "
+            "this Elasticsearch cluster (serverless/basic tier)."
+        )
+        return
+
     try:
         es_client.ilm.put_lifecycle(
             name=JOB_EVENTS_ILM_POLICY_NAME,

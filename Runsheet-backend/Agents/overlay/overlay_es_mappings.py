@@ -188,7 +188,7 @@ JOB_PRIORITIES_MAPPING = {
                     "reasons":              {"type": "keyword"},
                 },
             },
-            "scoring_weights": {"type": "object", "enabled": True},
+            "scoring_weights": {"type": "flattened"},
             "tenant_id":       {"type": "keyword"},
             "timestamp":       {"type": "date"},
         },
@@ -197,6 +197,18 @@ JOB_PRIORITIES_MAPPING = {
         "number_of_shards": 1,
         "number_of_replicas": 1,
     },
+}
+
+
+# Module-level registry: index_name -> mapping. Single source of truth for
+# both setup_overlay_indices and the seed script's recreate path.
+OVERLAY_INDEX_MAPPINGS = {
+    AGENT_SIGNALS_INDEX: AGENT_SIGNALS_MAPPING,
+    AGENT_SHADOW_PROPOSALS_INDEX: AGENT_SHADOW_PROPOSALS_MAPPING,
+    AGENT_OUTCOMES_INDEX: AGENT_OUTCOMES_MAPPING,
+    AGENT_REVENUE_REPORTS_INDEX: AGENT_REVENUE_REPORTS_MAPPING,
+    AGENT_POLICY_EXPERIMENTS_INDEX: AGENT_POLICY_EXPERIMENTS_MAPPING,
+    JOB_PRIORITIES_INDEX: JOB_PRIORITIES_MAPPING,
 }
 
 
@@ -213,16 +225,7 @@ def setup_overlay_indices(es_service) -> None:
     es_client = es_service.client
     is_serverless = es_service.is_serverless
 
-    indices = {
-        AGENT_SIGNALS_INDEX: AGENT_SIGNALS_MAPPING,
-        AGENT_SHADOW_PROPOSALS_INDEX: AGENT_SHADOW_PROPOSALS_MAPPING,
-        AGENT_OUTCOMES_INDEX: AGENT_OUTCOMES_MAPPING,
-        AGENT_REVENUE_REPORTS_INDEX: AGENT_REVENUE_REPORTS_MAPPING,
-        AGENT_POLICY_EXPERIMENTS_INDEX: AGENT_POLICY_EXPERIMENTS_MAPPING,
-        JOB_PRIORITIES_INDEX: JOB_PRIORITIES_MAPPING,
-    }
-
-    for index_name, mapping in indices.items():
+    for index_name, mapping in OVERLAY_INDEX_MAPPINGS.items():
         try:
             if not es_client.indices.exists(index=index_name):
                 if is_serverless:

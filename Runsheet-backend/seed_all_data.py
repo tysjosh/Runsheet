@@ -1,21 +1,55 @@
 #!/usr/bin/env python3
 """
-Standalone seed script for ALL Elasticsearch indices needed by the Runsheet frontend.
+Single seed entry point for ALL Elasticsearch data needed by Runsheet.
+
+This one script does everything:
+  1. Creates index mappings (idempotent — only creates what's missing).
+     With ``--recreate`` it first DROPS every managed index (destructive).
+  2. Loads the static JSON fixtures from ``scripts/data/*.json``.
+  3. Generates programmatic demo data (trucks, jobs, riders, commerce, etc.).
 
 Usage:
-    SEED_TENANT_ID=tenant-a python seed_all_data.py
-    SEED_TENANT_ID=tenant-a python seed_all_data.py --force
+    SEED_TENANT_ID=demo-tenant python seed_all_data.py
+        Fill empty indices only (safe, idempotent).
 
-Uses the existing elasticsearch_service singleton and the sync client.index() / client.bulk()
-methods directly.
+    SEED_TENANT_ID=demo-tenant python seed_all_data.py --force
+        Re-seed every index, overwriting existing seed data.
+
+    SEED_TENANT_ID=demo-tenant python seed_all_data.py --recreate
+        DROP and recreate all index mappings first, then seed. Destructive —
+        requires typing YES to confirm (skip the prompt with --yes).
+
+    Extra flags:
+      --skip-json          Skip the static JSON fixtures (step 2).
+      --skip-programmatic  Skip the generated demo data (step 3).
+      --yes                Skip the --recreate confirmation prompt.
+
+Uses the existing elasticsearch_service singleton and the sync client.index() /
+client.bulk() methods directly.
 """
 
 import sys
 import os
+import json
+import glob
 import uuid
 import random
 import logging
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
+
+# ---------------------------------------------------------------------------
+# Load environment BEFORE importing the ES singleton so it connects to the
+# right cluster when run standalone (mirrors main.py / the old loaders).
+# ---------------------------------------------------------------------------
+from dotenv import load_dotenv
+
+_ENV = os.environ.get("ENVIRONMENT", "development").lower()
+_ENV_FILE = Path(__file__).parent / f".env.{_ENV}"
+if _ENV_FILE.exists():
+    load_dotenv(_ENV_FILE)
+else:
+    load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -26,6 +60,9 @@ logger = logging.getLogger(__name__)
 from services.elasticsearch_service import elasticsearch_service
 
 ES = elasticsearch_service.client
+
+# Directory holding the static JSON fixtures (step 2).
+DATA_DIR = Path(__file__).parent / "scripts" / "data"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -94,6 +131,379 @@ def _bulk(actions: list):
 
 def _single(index: str, doc_id: str, body: dict):
     ES.index(index=index, id=doc_id, body=body, refresh=True)
+
+
+# ---------------------------------------------------------------------------
+# Step 1: Index mappings (create / recreate)
+# ---------------------------------------------------------------------------
+
+def _index_setup_functions():
+    """Return the list of (label, setup_fn) for every domain's index mappings.
+
+    Each ``setup_*_indices`` function is idempotent: it creates indices that
+    do not yet exist and leaves existing ones untouched. They are the single
+    source of truth for index names + mappings, so deriving the managed-index
+    list from them (see :func:`_managed_indices`) keeps everything in sync.
+    """
+    from notifications.services.notification_es_mappings import setup_notification_indices
+    from notifications.services.audit_es_mappings import setup_audit_indices
+    from fuel.services.order_es_mappings import setup_order_intake_indices
+    from Agents.support.mvp_es_mappings import setup_mvp_indices
+    from Agents.overlay.overlay_es_mappings import setup_overlay_indices
+    from Agents.agent_es_mappings import setup_agent_indices
+    from compliance.services.compliance_es_mappings import setup_compliance_indices
+    from commerce.services.commerce_es_mappings import setup_commerce_indices
+    from inventory.es_mappings import setup_inventory_indices
+    from scheduling.services.scheduling_es_mappings import setup_scheduling_indices
+    from driver.services.driver_es_mappings import setup_driver_indices
+    from fuel.services.fuel_es_mappings import setup_fuel_indices
+    from fuel.services.fuel_ops_es_mappings import setup_fuel_ops_indices
+
+    # ``setup_fuel_indices`` takes (es_client, es_service); wrap it so every
+    # entry in this list shares the uniform ``setup_fn(es_service)`` shape.
+    def _setup_fuel(es_service):
+        setup_fuel_indices(es_service.client, es_service=es_service)
+
+    # Legacy core indices (trucks, locations, inventory, support_tickets,
+    # analytics_events) are created by the ElasticsearchService singleton's
+    # own setup_indices(); mirror that here so the seed is self-contained.
+    def _setup_core(es_service):
+        es_service.setup_indices()
+
+    # Ops Intelligence indices (shipments_current, shipment_events,
+    # riders_current, ops_poison_queue) live on OpsElasticsearchService.
+    def _setup_ops(es_service):
+        from ops.services.ops_es_service import OpsElasticsearchService
+        OpsElasticsearchService(es_service).setup_ops_indices()
+
+    return [
+        ("Core/legacy indices", _setup_core),
+        ("Ops Intelligence indices", _setup_ops),
+        ("Notification indices", setup_notification_indices),
+        ("Audit timeline indices", setup_audit_indices),
+        ("Order/Intake indices", setup_order_intake_indices),
+        ("MVP overlay indices", setup_mvp_indices),
+        ("Agent overlay indices", setup_overlay_indices),
+        ("Agent system indices", setup_agent_indices),
+        ("Compliance indices", setup_compliance_indices),
+        ("Commerce indices", setup_commerce_indices),
+        ("Inventory indices", setup_inventory_indices),
+        ("Scheduling indices", setup_scheduling_indices),
+        ("Driver indices", setup_driver_indices),
+        ("Fuel monitoring indices", _setup_fuel),
+        ("Fuel Ops indices", setup_fuel_ops_indices),
+    ]
+
+
+def _managed_index_mappings() -> dict:
+    """Collect ``{index_name: mapping}`` for every index the app defines.
+
+    Pulls directly from each domain's mapping registry so the recreate list
+    can never drift from what the setup functions actually create. Also folds
+    in the handful of standalone indices that have a setup helper but no
+    module-level registry dict (agent system, fleet/assets).
+    """
+    mappings: dict = {}
+
+    # Domain registries (dict of index_name -> mapping)
+    from notifications.services.notification_es_mappings import (
+        NOTIFICATIONS_CURRENT_INDEX, NOTIFICATIONS_CURRENT_MAPPING,
+        NOTIFICATION_PREFERENCES_INDEX, NOTIFICATION_PREFERENCES_MAPPING,
+        NOTIFICATION_TEMPLATES_INDEX, NOTIFICATION_TEMPLATES_MAPPING,
+        NOTIFICATION_RULES_INDEX, NOTIFICATION_RULES_MAPPING,
+        DEAD_LETTER_QUEUE_INDEX, DEAD_LETTER_QUEUE_MAPPING,
+    )
+    mappings.update({
+        NOTIFICATIONS_CURRENT_INDEX: NOTIFICATIONS_CURRENT_MAPPING,
+        NOTIFICATION_PREFERENCES_INDEX: NOTIFICATION_PREFERENCES_MAPPING,
+        NOTIFICATION_TEMPLATES_INDEX: NOTIFICATION_TEMPLATES_MAPPING,
+        NOTIFICATION_RULES_INDEX: NOTIFICATION_RULES_MAPPING,
+        DEAD_LETTER_QUEUE_INDEX: DEAD_LETTER_QUEUE_MAPPING,
+    })
+
+    from fuel.services.order_es_mappings import ORDER_INTAKE_INDEX_MAPPINGS
+    mappings.update(ORDER_INTAKE_INDEX_MAPPINGS)
+
+    from Agents.support.mvp_es_mappings import MVP_INDEX_MAPPINGS
+    mappings.update(MVP_INDEX_MAPPINGS)
+
+    from Agents.overlay.overlay_es_mappings import OVERLAY_INDEX_MAPPINGS
+    mappings.update(OVERLAY_INDEX_MAPPINGS)
+
+    from compliance.services.compliance_es_mappings import COMPLIANCE_INDEX_MAPPINGS
+    mappings.update(COMPLIANCE_INDEX_MAPPINGS)
+
+    from commerce.services.commerce_es_mappings import COMMERCE_INDEX_MAPPINGS
+    mappings.update(COMMERCE_INDEX_MAPPINGS)
+
+    from inventory.es_mappings import (
+        INVENTORY_INDEX, INVENTORY_MAPPING,
+        INVENTORY_EVENTS_INDEX, INVENTORY_EVENTS_MAPPING,
+        RESTOCK_REQUESTS_INDEX, RESTOCK_REQUESTS_MAPPING,
+    )
+    mappings.update({
+        INVENTORY_INDEX: INVENTORY_MAPPING,
+        INVENTORY_EVENTS_INDEX: INVENTORY_EVENTS_MAPPING,
+        RESTOCK_REQUESTS_INDEX: RESTOCK_REQUESTS_MAPPING,
+    })
+
+    from scheduling.services.scheduling_es_mappings import SCHEDULING_INDEX_MAPPINGS
+    mappings.update(SCHEDULING_INDEX_MAPPINGS)
+
+    from fuel.services.fuel_ops_es_mappings import FUEL_OPS_INDEX_MAPPINGS
+    mappings.update(FUEL_OPS_INDEX_MAPPINGS)
+
+    # Agent system indices (registry-less; named constants).
+    from Agents.agent_es_mappings import (
+        AGENT_APPROVAL_QUEUE_INDEX, AGENT_APPROVAL_QUEUE_MAPPING,
+        AGENT_ACTIVITY_LOG_INDEX, AGENT_ACTIVITY_LOG_MAPPING,
+        AGENT_MEMORY_INDEX, AGENT_MEMORY_MAPPING,
+        AGENT_FEEDBACK_INDEX, AGENT_FEEDBACK_MAPPING,
+    )
+    mappings.update({
+        AGENT_APPROVAL_QUEUE_INDEX: AGENT_APPROVAL_QUEUE_MAPPING,
+        AGENT_ACTIVITY_LOG_INDEX: AGENT_ACTIVITY_LOG_MAPPING,
+        AGENT_MEMORY_INDEX: AGENT_MEMORY_MAPPING,
+        AGENT_FEEDBACK_INDEX: AGENT_FEEDBACK_MAPPING,
+    })
+
+    # Fleet / assets + ops poison queue (seeded programmatically below).
+    from fuel.services.fuel_es_mappings import (
+        FUEL_STATIONS_INDEX, FUEL_STATIONS_MAPPING,
+        FUEL_EVENTS_INDEX, FUEL_EVENTS_MAPPING,
+    )
+    mappings.update({
+        FUEL_STATIONS_INDEX: FUEL_STATIONS_MAPPING,
+        FUEL_EVENTS_INDEX: FUEL_EVENTS_MAPPING,
+    })
+
+    # Driver communication indices.
+    from driver.services.driver_es_mappings import (
+        JOB_MESSAGES_INDEX, JOB_MESSAGES_MAPPING,
+        PROOF_OF_DELIVERY_INDEX, PROOF_OF_DELIVERY_MAPPING,
+        DRIVER_PRESENCE_INDEX, DRIVER_PRESENCE_MAPPING,
+        DRIVER_EXCEPTIONS_INDEX, DRIVER_EXCEPTIONS_MAPPING,
+        IDEMPOTENCY_KEYS_INDEX, IDEMPOTENCY_KEYS_MAPPING,
+    )
+    mappings.update({
+        JOB_MESSAGES_INDEX: JOB_MESSAGES_MAPPING,
+        PROOF_OF_DELIVERY_INDEX: PROOF_OF_DELIVERY_MAPPING,
+        DRIVER_PRESENCE_INDEX: DRIVER_PRESENCE_MAPPING,
+        DRIVER_EXCEPTIONS_INDEX: DRIVER_EXCEPTIONS_MAPPING,
+        IDEMPOTENCY_KEYS_INDEX: IDEMPOTENCY_KEYS_MAPPING,
+    })
+
+    # Audit timeline.
+    from notifications.services.audit_es_mappings import (
+        JOB_AUDIT_TIMELINE_INDEX, JOB_AUDIT_TIMELINE_MAPPING,
+    )
+    mappings.update({JOB_AUDIT_TIMELINE_INDEX: JOB_AUDIT_TIMELINE_MAPPING})
+
+    # Legacy core indices (mappings are methods on the ES singleton).
+    from services.elasticsearch_service import elasticsearch_service as _es
+    mappings.update({
+        "trucks": _es._get_trucks_mapping(),
+        "locations": _es._get_locations_mapping(),
+        "inventory": _es._get_inventory_mapping(),
+        "support_tickets": _es._get_support_tickets_mapping(),
+        "analytics_events": _es._get_analytics_mapping(),
+        "import_sessions": _es._get_import_sessions_mapping(),
+    })
+
+    # Ops Intelligence indices (mappings are methods on OpsElasticsearchService).
+    from ops.services.ops_es_service import OpsElasticsearchService
+    _ops = OpsElasticsearchService(_es)
+    mappings.update({
+        OpsElasticsearchService.SHIPMENTS_CURRENT: _ops._get_shipments_current_mapping(),
+        OpsElasticsearchService.SHIPMENT_EVENTS: _ops._get_shipment_events_mapping(),
+        OpsElasticsearchService.RIDERS_CURRENT: _ops._get_riders_current_mapping(),
+        OpsElasticsearchService.POISON_QUEUE: _ops._get_poison_queue_mapping(),
+    })
+
+    return mappings
+
+
+def recreate_indices(assume_yes: bool = False):
+    """DROP and recreate every managed index. DESTRUCTIVE.
+
+    Deletes all indices derived from the domain mapping registries, then
+    re-runs the idempotent setup functions to recreate them with current
+    mappings. Requires interactive confirmation unless ``assume_yes``.
+    """
+    managed = sorted(_managed_index_mappings().keys())
+
+    print("\n" + "=" * 60)
+    print("  ⚠️  RECREATE: this DELETES ALL DATA in managed indices")
+    print("=" * 60)
+    print(f"  {len(managed)} indices will be dropped and recreated.")
+
+    if not assume_yes:
+        response = input("\nType 'YES' to proceed with index recreation: ")
+        if response != "YES":
+            print("❌ Aborted. No changes made.")
+            sys.exit(0)
+
+    deleted = 0
+    for index_name in managed:
+        try:
+            if ES.indices.exists(index=index_name):
+                ES.indices.delete(index=index_name)
+                deleted += 1
+        except Exception as e:  # noqa: BLE001
+            print(f"  ✗ Error deleting {index_name}: {e}")
+    print(f"🗑️  Deleted {deleted} indices\n")
+
+    create_indices()
+
+
+def create_indices():
+    """Create any missing index mappings (idempotent).
+
+    Runs every domain's ``setup_*_indices`` function. Existing indices are
+    left untouched, so this is safe to run on every seed.
+    """
+    print("🔨 Ensuring index mappings exist...")
+    for label, setup_fn in _index_setup_functions():
+        try:
+            setup_fn(elasticsearch_service)
+            print(f"  ✓ {label}")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ✗ {label}: {e}")
+    print()
+
+
+# ---------------------------------------------------------------------------
+# Step 2: Static JSON fixtures (scripts/data/*.json)
+# ---------------------------------------------------------------------------
+
+# ID fields tried (in order) when assigning a document _id for JSON records.
+_JSON_ID_FIELDS = [
+    "id", "record_id", "event_id", "notification_id", "preference_id",
+    "template_id", "rule_id", "jurisdiction_id", "exemption_id", "contract_id",
+    "cert_id", "meter_id", "audit_id", "bol_id", "adjustment_id", "forecast_id",
+    "priority_id", "priority_list_id", "plan_id", "group_id", "reconciliation_id",
+    "depot_id", "terminal_id", "rack_price_id", "report_id", "alert_id",
+    "override_id", "instance_id", "reading_id", "telemetry_id", "cleaning_event_id",
+    "restriction_id", "run_id", "ocr_result_id", "recommendation_id", "request_id",
+    "channel_id", "location_id", "message_id", "exception_id", "driver_id",
+    "order_id", "customer_id", "account_id", "invoice_id", "payment_id",
+    "price_book_id", "pricing_rule_id", "job_id", "route_id", "pod_id",
+    "truck_id", "rider_id", "station_id", "tank_id", "customer_tank_id",
+    "memory_id", "action_id",
+]
+
+
+def _resolve_json_doc_id(index_name: str, doc: dict):
+    """Pick a document _id for a JSON seed record."""
+    for field in _JSON_ID_FIELDS:
+        if field in doc:
+            return doc[field]
+    # Fallback: singular form of the index name (e.g. depots -> depot_id).
+    for candidate in (
+        f"{index_name.rstrip('s')}_id",
+        f"{index_name.replace('_current', '').rstrip('s')}_id",
+    ):
+        if candidate in doc:
+            return doc[candidate]
+    return None
+
+
+def _index_property_names(index_name: str):
+    """Return the set of top-level mapped field names for a strict index.
+
+    Returns ``None`` when the mapping can't be read or the index is not
+    ``dynamic: strict`` — callers treat ``None`` as "permissive" (any field
+    allowed). Cached per run to avoid repeated mapping fetches.
+    """
+    cache = _index_property_names._cache
+    if index_name in cache:
+        return cache[index_name]
+
+    result = None
+    try:
+        if ES.indices.exists(index=index_name):
+            mapping = ES.indices.get_mapping(index=index_name)
+            mappings = mapping.get(index_name, {}).get("mappings", {})
+            # Only constrain when the index is strict; dynamic indices accept
+            # arbitrary fields so there's nothing to filter.
+            if mappings.get("dynamic") == "strict":
+                result = set((mappings.get("properties") or {}).keys())
+    except Exception:  # noqa: BLE001 — be permissive on any lookup failure
+        result = None
+
+    cache[index_name] = result
+    return result
+
+
+_index_property_names._cache = {}
+
+
+def _load_json_file(filepath: Path, force: bool) -> int:
+    """Load one JSON fixture file into ES. Returns records loaded."""
+    with open(filepath, "r") as f:
+        data = json.load(f)
+
+    total = 0
+    for index_name, records in data.items():
+        if not isinstance(records, list) or not records:
+            continue
+        if not force and _index_count(index_name) > 0:
+            logger.info(f"⏭️  {index_name} already has data — skipping")
+            continue
+
+        # Strict indices reject unknown fields, so only auto-stamp the
+        # convenience timestamps the index actually defines. ``allowed`` is
+        # None when the mapping can't be read (treat as permissive).
+        allowed = _index_property_names(index_name)
+
+        def _allows(field: str) -> bool:
+            return allowed is None or field in allowed
+
+        actions = []
+        now = _now()
+        for record in records:
+            doc = dict(record)
+            doc.setdefault("tenant_id", TENANT)
+            if _allows("created_at"):
+                doc.setdefault("created_at", now)
+            if _allows("updated_at"):
+                doc.setdefault("updated_at", now)
+            doc_id = _resolve_json_doc_id(index_name, doc)
+            if not doc_id:
+                logger.warning(
+                    "No ID field for record in %s: %s",
+                    index_name, list(doc.keys())[:5],
+                )
+                continue
+            actions.append({"index": {"_index": index_name, "_id": doc_id}})
+            actions.append(doc)
+
+        if actions:
+            _bulk(actions)
+            count = len(actions) // 2
+            total += count
+            logger.info(f"✅ Loaded {count} records → {index_name}")
+    return total
+
+
+def load_json_fixtures(force: bool = False):
+    """Load every ``scripts/data/*.json`` fixture (auto-discovered)."""
+    files = sorted(DATA_DIR.glob("*.json"))
+    if not files:
+        print(f"⚠️  No *.json seed files found in {DATA_DIR}")
+        return
+
+    print(f"Discovered {len(files)} JSON fixture(s): {', '.join(p.name for p in files)}")
+    total = 0
+    for filepath in files:
+        try:
+            print(f"{'─' * 40}")
+            print(f"  Loading fixture: {filepath.name}")
+            total += _load_json_file(filepath, force=force)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Failed to load %s", filepath.name)
+            print(f"  ❌ Error loading {filepath.name}: {e}")
+    print(f"\n  JSON fixtures: loaded {total} records")
 
 
 # ---------------------------------------------------------------------------
@@ -752,6 +1162,164 @@ def seed_poison_queue(force: bool = False):
 
 
 # ---------------------------------------------------------------------------
+# 8a. Canonical driver roster — single source of truth shared by the
+#     Utilization (drivers_current) and Qualifications (drivers) seeders so
+#     the same driver looks consistent across both Drivers tabs.
+# ---------------------------------------------------------------------------
+
+# 2-letter CDL state per home city (drives both seeders).
+_DRIVER_CITY_STATE = {
+    "Houston": "TX", "Dallas": "TX", "Chicago": "IL", "Denver": "CO",
+    "Atlanta": "GA", "Phoenix": "AZ", "Detroit": "MI", "Charlotte": "NC",
+}
+
+# Each entry is one physical driver, identified by the SAME driver_id +
+# full_name across both indices.
+#
+# Fields:
+#   id, name, city, cdl_class, hazmat (bool), tanker (bool),
+#   util_status   — drivers_current status: active|on_break|off_duty|inactive
+#   availability  — drivers_current availability label
+#   qual_status   — drivers (compliance) status: active|suspended|expired
+#   active_orders, completed_today — utilization workload
+#   med_offset_days — days from now the medical card expires
+#       (negative = expired, ≤30 = expiring soon → warning in BOTH tabs)
+_DRIVER_ROSTER = [
+    # id        name              city        cdl hazmat tanker util_status avail        qual_status active completed med_offset
+    ("DRV-001", "Mike Johnson",    "Houston",  "A", True,  True,  "active",   "available", "active",    3, 7,  365),
+    ("DRV-002", "Sarah Williams",  "Dallas",   "A", False, True,  "active",   "available", "active",    2, 5,  200),
+    ("DRV-003", "James Rodriguez", "Chicago",  "A", True,  True,  "active",   "on_route",  "active",    9, 4,  20),   # overloaded + medical expiring soon
+    ("DRV-004", "Emily Chen",      "Denver",   "B", False, False, "active",   "available", "active",    2, 6,  540),
+    ("DRV-005", "David Thompson",  "Atlanta",  "A", True,  True,  "on_break", "break",     "active",    0, 3,  90),
+    ("DRV-006", "Maria Garcia",    "Phoenix",  "A", False, False, "on_break", "break",     "expired",   1, 2,  -5),   # medical card expired
+    ("DRV-007", "Robert Kim",      "Detroit",  "B", False, False, "off_duty", "offline",   "active",    0, 0,  410),
+    ("DRV-008", "Jennifer Davis",  "Charlotte","A", True,  True,  "off_duty", "offline",   "suspended", 0, 1,  150),
+    ("DRV-009", "Carlos Mendez",   "Houston",  "A", True,  True,  "active",   "available", "active",    4, 8,  75),
+    ("DRV-010", "Aisha Patel",     "Denver",   "B", False, False, "inactive", "offline",   "active",    0, 0,  300),
+]
+
+
+def _date_only(days_from_now: int) -> str:
+    """ISO date string (YYYY-MM-DD) offset by ``days_from_now``."""
+    return (datetime.now(timezone.utc) + timedelta(days=days_from_now)).date().isoformat()
+
+
+# ---------------------------------------------------------------------------
+# 8b. drivers_current (Driver Utilization view)
+# ---------------------------------------------------------------------------
+def seed_drivers_current(force: bool = False):
+    """Seed the ``drivers_current`` index read by the Driver Utilization view.
+
+    Distinct from the ``drivers`` index (compliance qualifications) and
+    ``riders_current`` (legacy ops riders). The Driver Utilization endpoint
+    (``GET /api/ops/drivers/utilization``) reads this index via
+    ``DriverRepository``. Built from :data:`_DRIVER_ROSTER` so driver IDs,
+    names, and medical-card dates match the Qualifications tab exactly.
+    Fields match :class:`fuel.order_models.Driver` (strict mapping).
+    """
+    index = "drivers_current"
+    if not force and _index_count(index) > 0:
+        logger.info(f"⏭️  {index} already has data — skipping")
+        return
+
+    # Truck assignment: active/on_break drivers get a truck, others don't.
+    truck_pool = {
+        "DRV-001": "TRK-001", "DRV-002": "TRK-002", "DRV-003": "TRK-003",
+        "DRV-004": "TRK-004", "DRV-005": "TRK-005", "DRV-009": "TNK-001",
+    }
+
+    actions = []
+    for (did, name, city, cdl, hazmat, _tanker, util_status, avail,
+         _qual_status, active, completed, med_offset) in _DRIVER_ROSTER:
+        last_seen = (
+            _ago(minutes=random.randint(1, 90))
+            if util_status in ("active", "on_break")
+            else _ago(hours=random.randint(6, 48))
+        )
+        medical_expiry = (
+            _future(days=med_offset) if med_offset >= 0
+            else _ago(days=abs(med_offset))
+        )
+        doc = {
+            "driver_id": did,
+            "tenant_id": TENANT,
+            "driver_name": name,
+            "phone": f"+1{random.randint(2000000000, 9999999999)}",
+            "status": util_status,
+            "availability": avail,
+            "assigned_truck_id": truck_pool.get(did),
+            "cdl_class": cdl,
+            "hazmat_endorsement": hazmat,
+            "medical_card_expiry": medical_expiry,
+            "current_location": _geo(city),
+            "last_seen": last_seen,
+            "active_order_count": active,
+            "completed_today": completed,
+            "last_event_timestamp": last_seen,
+            "source_schema_version": SCHEMA_VERSION,
+            "trace_id": _uid(),
+            "created_at": _ago(days=random.randint(30, 365)),
+            "updated_at": _now(),
+        }
+        actions.append({"index": {"_index": index, "_id": did}})
+        actions.append(doc)
+
+    _bulk(actions)
+    logger.info(f"✅ Seeded {len(_DRIVER_ROSTER)} docs → {index}")
+
+
+# ---------------------------------------------------------------------------
+# 8c. drivers (Driver Qualifications / DQF view)
+# ---------------------------------------------------------------------------
+def seed_drivers_qualifications(force: bool = False):
+    """Seed the ``drivers`` index read by the Driver Qualifications view.
+
+    Built from the SAME :data:`_DRIVER_ROSTER` as ``drivers_current`` so each
+    driver_id / full_name / medical-card date is consistent across the
+    Utilization and Qualifications tabs. Fields match the strict
+    ``DRIVERS_MAPPING`` / :class:`compliance.models.driver.Driver`.
+    """
+    index = "drivers"
+    if not force and _index_count(index) > 0:
+        logger.info(f"⏭️  {index} already has data — skipping")
+        return
+
+    actions = []
+    for i, (did, name, city, cdl, hazmat, tanker, _util_status, _avail,
+            qual_status, _active, _completed, med_offset) in enumerate(_DRIVER_ROSTER, start=1):
+        state = _DRIVER_CITY_STATE.get(city, "TX")
+        doc = {
+            "driver_id": did,
+            "tenant_id": TENANT,
+            "full_name": name,
+            "cdl_number": f"{state}-CDL-{100000 + i}",
+            "cdl_state": state,
+            "cdl_class": cdl,
+            # CDL valid well into the future; medical card uses the shared
+            # offset so the "expiring soon" / "expired" warning matches the
+            # Utilization tab for the same driver.
+            "cdl_expiry_date": _date_only(365 + i * 10),
+            "medical_card_expiry_date": _date_only(med_offset),
+            "hazmat_endorsement_expiry_date": _date_only(300 + i * 5) if hazmat else None,
+            "tanker_endorsement_expiry_date": _date_only(320 + i * 5) if tanker else None,
+            "last_drug_test_date": _date_only(-random.randint(30, 180)),
+            "last_mvr_date": _date_only(-random.randint(30, 200)),
+            "status": qual_status,
+            "suspension_reason": (
+                "Administrative hold" if qual_status == "suspended" else None
+            ),
+            "external_refs": {},
+            "created_at": _ago(days=random.randint(180, 540)),
+            "updated_at": _now(),
+        }
+        actions.append({"index": {"_index": index, "_id": did}})
+        actions.append(doc)
+
+    _bulk(actions)
+    logger.info(f"✅ Seeded {len(_DRIVER_ROSTER)} docs → {index}")
+
+
+# ---------------------------------------------------------------------------
 # 9. Fuel Orders
 # ---------------------------------------------------------------------------
 def seed_fuel_orders(force: bool = False):
@@ -842,23 +1410,31 @@ def seed_customer_tanks(force: bool = False):
     ]
     
     actions = []
+    _CITY_ZIP = {
+        "Houston": "77002", "Dallas": "75201", "Chicago": "60601",
+        "Denver": "80202", "Atlanta": "30303", "Phoenix": "85003",
+        "Detroit": "48226", "Charlotte": "28202",
+    }
     for tank_id, customer_id, product_code, capacity, current_level, reorder, city in tanks:
         geo = _geo(city)
+        # Fields must match the strict CUSTOMER_TANKS_MAPPING exactly.
         doc = {
             "customer_tank_id": tank_id,  # Must match station_id in forecasts
-            "tank_id": tank_id,
             "tenant_id": TENANT,
             "customer_id": customer_id,
-            "product_code": product_code,
-            "fuel_type": product_code,  # Alias for compatibility
+            "customer_type": "commercial",
+            "fuel_type": product_code,            # alias kept for compatibility
+            "fuel_product_code": product_code,
             "capacity_gallons": float(capacity),
             "current_level_gallons": float(current_level),
-            "reorder_point_gallons": float(reorder),
-            "location": geo,
-            "latitude": geo["lat"],
-            "longitude": geo["lon"],
-            "location_name": city,
             "last_reading_at": _ago(hours=random.randint(1, 12)),
+            "location": geo,
+            "location_lat": geo["lat"],
+            "location_lon": geo["lon"],
+            "zip_code": _CITY_ZIP.get(city, "00000"),
+            "k_factor": round(random.uniform(1.5, 4.0), 2),
+            "use_case": "auto_fill",
+            "status": "active",
             "created_at": _ago(days=random.randint(90, 365)),
             "updated_at": _ago(hours=random.randint(0, 24)),
         }
@@ -1031,12 +1607,12 @@ def seed_inventory(force: bool = False):
         ("Fuel Hose - 50ft", "fuel_equipment", "Denver", 10, 3, "in_stock", "units", 30),
         ("Fuel Meter - Digital", "fuel_equipment", "Denver", 3, 1, "in_stock", "units", 10),
         
-        # Regular inventory items
-        ("Fuel Filter - Heavy Duty", "parts", "Houston", 45, 10, "in_stock", "pieces", 100),
-        ("Oil Filter - Standard", "parts", "Dallas", 120, 25, "in_stock", "pieces", 200),
-        ("Air Filter - Truck", "parts", "Chicago", 67, 15, "in_stock", "pieces", 150),
-        ("Brake Pads - Commercial", "parts", "Denver", 34, 8, "in_stock", "sets", 80),
-        ("Wiper Blades - 24in", "parts", "Atlanta", 89, 20, "in_stock", "pairs", 150),
+        # Regular inventory items — categories must match InventoryCategory enum
+        ("Fuel Filter - Heavy Duty", "filters", "Houston", 45, 10, "in_stock", "pieces", 100),
+        ("Oil Filter - Standard", "filters", "Dallas", 120, 25, "in_stock", "pieces", 200),
+        ("Air Filter - Truck", "filters", "Chicago", 67, 15, "in_stock", "pieces", 150),
+        ("Brake Pads - Commercial", "brake_parts", "Denver", 34, 8, "in_stock", "sets", 80),
+        ("Wiper Blades - 24in", "general", "Atlanta", 89, 20, "in_stock", "pairs", 150),
         ("Engine Oil 15W-40 (Gallon)", "fluids", "Phoenix", 156, 30, "in_stock", "gallons", 300),
         ("Coolant (Gallon)", "fluids", "Detroit", 78, 15, "in_stock", "gallons", 200),
         ("DEF Fluid (2.5 Gal)", "fluids", "Charlotte", 234, 50, "in_stock", "containers", 500),
@@ -1153,7 +1729,7 @@ def seed_commerce_accounts(force: bool = False):
                 "line1": f"{random.randint(100, 9999)} {random.choice(['Main', 'Oak', 'Elm', 'Pine'])} St",
                 "city": city,
                 "state": "TX" if city == "Houston" else ("IL" if city == "Chicago" else "CO"),
-                "zip": f"{random.randint(10000, 99999)}",
+                "postal_code": f"{random.randint(10000, 99999)}",
                 "country": "US",
             },
             "payment_method_preference": random.choice(["invoice", "ach", "card"]),
@@ -1314,15 +1890,20 @@ def main():
         )
 
     force = "--force" in sys.argv
+    recreate = "--recreate" in sys.argv
+    assume_yes = "--yes" in sys.argv
+    skip_json = "--skip-json" in sys.argv
+    skip_programmatic = "--skip-programmatic" in sys.argv
 
     print("=" * 60)
-    print("  Runsheet — Elasticsearch Seed Script")
+    print("  Runsheet — Seed (single entry point)")
     print("=" * 60)
-
-    if force:
-        print("⚠️  --force flag detected: will re-seed ALL indices\n")
-    else:
-        print("ℹ️  Will only seed indices that are empty\n")
+    print(f"  Tenant:            {TENANT}")
+    print(f"  Recreate indices:  {'YES (destructive)' if recreate else 'no'}")
+    print(f"  Force re-seed:     {'YES' if force else 'no'}")
+    print(f"  Skip JSON:         {'YES' if skip_json else 'no'}")
+    print(f"  Skip programmatic: {'YES' if skip_programmatic else 'no'}")
+    print("=" * 60)
 
     try:
         if not ES.ping():
@@ -1333,37 +1914,58 @@ def main():
         print(f"❌ Elasticsearch connection failed: {e}")
         sys.exit(1)
 
-    seeders = [
-        ("trucks",                seed_trucks),
-        ("riders_current",        seed_riders),
-        ("jobs_current",          seed_jobs),
-        ("fuel_stations",         seed_fuel_stations),
-        ("mvp_tank_forecasts",    seed_tank_forecasts),
-        ("customer_tanks",        seed_customer_tanks),
-        ("truck_compartments",    seed_truck_compartments),
-        ("inventory",             seed_inventory),
-        ("fuel_events",           seed_fuel_events),
-        ("fuel_orders_current",   seed_fuel_orders),
-        ("agent_memory",          seed_agent_memory),
-        ("agent_approval_queue",  seed_approval_queue),
-        ("ops_poison_queue",      seed_poison_queue),
-        ("customers_current",     seed_commerce_customers),
-        ("accounts_current",      seed_commerce_accounts),
-        ("invoices_current",      seed_commerce_invoices),
-        ("payments_current",      seed_commerce_payments),
-    ]
+    # ----- Step 1: indices -------------------------------------------------
+    print(f"{'═' * 60}\n  Step 1: Index mappings\n{'═' * 60}")
+    if recreate:
+        recreate_indices(assume_yes=assume_yes)
+    else:
+        create_indices()
 
-    for name, fn in seeders:
-        try:
-            print(f"{'─' * 40}")
-            print(f"  Seeding: {name}")
-            fn(force=force)
-        except Exception as e:
-            logger.exception("Failed to seed %s", name)
-            print(f"  ❌ Error seeding {name}: {e}")
+    # ----- Step 2: static JSON fixtures -----------------------------------
+    if not skip_json:
+        print(f"{'═' * 60}\n  Step 2: Static JSON fixtures\n{'═' * 60}")
+        load_json_fixtures(force=force)
+    else:
+        print("⏭️  Step 2 skipped (--skip-json)")
+
+    # ----- Step 3: programmatic demo data ---------------------------------
+    if skip_programmatic:
+        print("⏭️  Step 3 skipped (--skip-programmatic)")
+    else:
+        print(f"{'═' * 60}\n  Step 3: Programmatic demo data\n{'═' * 60}")
+        seeders = [
+            ("trucks",                seed_trucks),
+            ("riders_current",        seed_riders),
+            ("jobs_current",          seed_jobs),
+            ("fuel_stations",         seed_fuel_stations),
+            ("mvp_tank_forecasts",    seed_tank_forecasts),
+            ("customer_tanks",        seed_customer_tanks),
+            ("truck_compartments",    seed_truck_compartments),
+            ("inventory",             seed_inventory),
+            ("fuel_events",           seed_fuel_events),
+            ("fuel_orders_current",   seed_fuel_orders),
+            ("agent_memory",          seed_agent_memory),
+            ("agent_approval_queue",  seed_approval_queue),
+            ("ops_poison_queue",      seed_poison_queue),
+            ("drivers_current",       seed_drivers_current),
+            ("drivers",               seed_drivers_qualifications),
+            ("customers_current",     seed_commerce_customers),
+            ("accounts_current",      seed_commerce_accounts),
+            ("invoices_current",      seed_commerce_invoices),
+            ("payments_current",      seed_commerce_payments),
+        ]
+
+        for name, fn in seeders:
+            try:
+                print(f"{'─' * 40}")
+                print(f"  Seeding: {name}")
+                fn(force=force)
+            except Exception as e:
+                logger.exception("Failed to seed %s", name)
+                print(f"  ❌ Error seeding {name}: {e}")
 
     print(f"\n{'=' * 60}")
-    print("  Seeding complete!")
+    print("  ✅ Seeding complete!")
     print("=" * 60)
 
 

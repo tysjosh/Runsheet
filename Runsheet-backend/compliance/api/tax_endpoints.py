@@ -533,6 +533,12 @@ async def create_tax_jurisdiction(
         document,
     )
 
+    # Dual-write the tax jurisdiction config to the Postgres source-of-truth.
+    from commerce.services.commerce_persistence_bridge import (
+        mirror_compliance_config_upsert,
+    )
+    await mirror_compliance_config_upsert("tax_jurisdiction", document)
+
     logger.info(
         "tax_jurisdictions.create: tenant=%s jurisdiction=%s fips=%s "
         "level=%s tax_type=%s",
@@ -700,6 +706,12 @@ async def create_exemption(
         exemption.exemption_id,
         document,
     )
+
+    # Dual-write the tax exemption config to the Postgres source-of-truth.
+    from commerce.services.commerce_persistence_bridge import (
+        mirror_compliance_config_upsert,
+    )
+    await mirror_compliance_config_upsert("tax_exemption", document)
 
     logger.info(
         "tax_exemptions.create: tenant=%s exemption=%s customer=%s type=%s",

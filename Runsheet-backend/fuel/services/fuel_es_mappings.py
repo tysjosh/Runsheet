@@ -140,7 +140,16 @@ def setup_fuel_indices(es_client, es_service=None):
         except Exception:
             logger.exception("Failed to create fuel index %s", index_name)
 
-    # Apply ILM policy for fuel_events
+    # Apply ILM policy for fuel_events.
+    # ILM is unavailable on serverless / basic-tier clusters (the PUT
+    # returns a 400 "no handler found"), so skip it cleanly there.
+    if is_serverless:
+        logger.info(
+            "Skipping fuel ILM policy setup — ILM not available on this "
+            "Elasticsearch cluster (serverless/basic tier)."
+        )
+        return
+
     try:
         es_client.ilm.put_lifecycle(
             name=FUEL_EVENTS_ILM_POLICY_NAME,

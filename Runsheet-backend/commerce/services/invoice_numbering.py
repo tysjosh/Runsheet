@@ -1,5 +1,17 @@
 """Per-tenant monotonic invoice numbering via Redis INCR.
 
+.. deprecated::
+    Superseded by the PostgreSQL per-tenant counter
+    (``persistence.models.InvoiceCounterORM`` +
+    ``InvoiceRepository.allocate_number``), which allocates the next number
+    under a row lock inside the SAME transaction as the invoice finalize — so
+    a number is never skipped on rollback nor issued twice under concurrency,
+    with no Redis/ES checkpoint+reseed machinery. ``InvoiceService.finalize_draft``
+    now calls ``commerce_persistence_bridge.allocate_invoice_number`` when
+    ``commerce_dual_write_postgres`` is enabled. This module is retained only
+    for environments that have not yet adopted the persistence layer and will
+    be removed once the Postgres source-of-truth is the default.
+
 Uses Redis INCR on key ``commerce:invoice_seq:{tenant_id}`` for fast
 monotonic generation. A daily checkpoint writes the current ``max_seq``
 to the ``invoice_counter_checkpoints`` ES index so the counter can be

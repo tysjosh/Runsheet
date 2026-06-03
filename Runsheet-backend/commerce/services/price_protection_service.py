@@ -741,6 +741,13 @@ class PriceProtectionService:
                 and abs(refreshed_remaining - new_remaining)
                 < _REMAINING_GALLONS_EPSILON
             ):
+                # Mirror the post-decrement contract state to Postgres.
+                from commerce.services.commerce_persistence_bridge import (
+                    mirror_compliance_config_upsert,
+                )
+                await mirror_compliance_config_upsert(
+                    "price_protection_contract", refreshed.model_dump(mode="json")
+                )
                 return refreshed
 
             logger.info(

@@ -185,6 +185,12 @@ class JobService:
         # --- Index into jobs_current ---
         await self._es.index_document(JOBS_CURRENT_INDEX, job_id, doc)
 
+        # Dual-write the job current-state to the Postgres source-of-truth.
+        from commerce.services.commerce_persistence_bridge import (
+            mirror_current_state_upsert,
+        )
+        await mirror_current_state_upsert("job", doc)
+
         # --- Append event ---
         await self._append_event(
             job_id=job_id,
@@ -216,6 +222,20 @@ class JobService:
         Raises:
             AppException: 404 if the job is not found for this tenant.
         """
+        # Read-cutover: serve the current-state doc from Postgres when enabled.
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_hybrid_get,
+        )
+        pg = await read_hybrid_get("job", tenant_id, job_id)
+        if pg is not _NOT_CUT_OVER:
+            if pg is None:
+                raise resource_not_found(
+                    f"Job '{job_id}' not found",
+                    details={"job_id": job_id},
+                )
+            return pg
+
         query = {
             "query": {
                 "bool": {
@@ -661,6 +681,12 @@ class JobService:
         # Merge updates and broadcast
         job_doc.update(update_fields)
         await self._broadcast_job_update("status_changed", job_doc)
+
+        # Dual-write the merged job current-state to Postgres.
+        from commerce.services.commerce_persistence_bridge import (
+            mirror_current_state_upsert,
+        )
+        await mirror_current_state_upsert("job", job_doc)
 
         # --- Auto-consume parts for completed maintenance jobs (Req 5.1, 5.3, 5.5) ---
         if target_status == JobStatus.COMPLETED:

@@ -196,8 +196,39 @@ class PaymentService:
             "reversed_at": None,
         }
 
-        # Persist the payment record
+        # Authoritative path (Req 6.5, promotion step): when payments are
+        # write-authoritative, insert into Postgres FIRST. The unique
+        # (tenant, source, external_id) constraint rejects a re-delivered
+        # webhook even under concurrency — returning the existing payment
+        # idempotently rather than creating a duplicate. Falls through to the
+        # ES path when not authoritative or when FK parents aren't mirrored.
+        from commerce.services.commerce_persistence_bridge import (
+            PaymentAlreadyExists,
+            create_payment_authoritative,
+            mirror_payment_create,
+        )
+        try:
+            authoritative_doc = await create_payment_authoritative(doc)
+        except PaymentAlreadyExists as dup:
+            logger.info(
+                "Idempotent skip (Postgres dedupe): payment already exists for "
+                "source=%s external_id=%s tenant=%s",
+                source, external_id, tenant_id,
+            )
+            return dup.existing
+        if authoritative_doc is not None:
+            # Postgres accepted the insert as source-of-truth; the outbox relay
+            # will project it to ES. Use the projected doc as the ES write too
+            # so the read path is immediately consistent during migration.
+            doc = authoritative_doc
+
+        # Persist the payment record to ES (projection / legacy source).
         await self._es.index_document(PAYMENTS_CURRENT_INDEX, payment_id, doc)
+
+        # Best-effort dual-write mirror for the soak phase (no-op when
+        # payments are already authoritative — the row exists above).
+        if authoritative_doc is None:
+            await mirror_payment_create(doc)
 
         # Overpayment handling (Req 6.4):
         # If amount_cents > invoice.remaining_cents, only apply remaining_cents
@@ -372,6 +403,13 @@ class PaymentService:
             PAYMENTS_CURRENT_INDEX, payment_id, reversal_update
         )
 
+        # Mirror the reversal (status + reversed_at) to the Postgres
+        # source-of-truth when the persistence layer is engaged.
+        from commerce.services.commerce_persistence_bridge import (
+            mirror_payment_reverse,
+        )
+        await mirror_payment_reverse(tenant_id, payment_id, now.isoformat())
+
         # Subtract from the invoice and re-evaluate state
         if self._invoice_service:
             invoice = await self._invoice_service.get(
@@ -413,6 +451,12 @@ class PaymentService:
             await self._es.index_document(
                 INVOICE_EVENTS_INDEX, event_id, event_doc
             )
+
+            # Mirror the payment_reversed invoice ledger entry to Postgres.
+            from commerce.services.commerce_persistence_bridge import (
+                mirror_invoice_event,
+            )
+            await mirror_invoice_event(event_doc)
 
             # Update the invoice projection
             invoice_update: Dict[str, Any] = {
@@ -460,6 +504,20 @@ class PaymentService:
 
         Validates: Constraint C3
         """
+        # Read-cutover: serve from Postgres when enabled.
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_payment_get,
+        )
+        pg = await read_payment_get(tenant_id, payment_id)
+        if pg is not _NOT_CUT_OVER:
+            if pg is None:
+                raise resource_not_found(
+                    f"Payment '{payment_id}' not found",
+                    details={"payment_id": payment_id},
+                )
+            return pg
+
         base_query: Dict[str, Any] = {
             "query": {
                 "bool": {
@@ -520,6 +578,18 @@ class PaymentService:
             limit = _DEFAULT_PAGE_LIMIT
         if limit > _MAX_PAGE_LIMIT:
             limit = _MAX_PAGE_LIMIT
+
+        # Read-cutover: serve the page from Postgres when enabled.
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_payment_list,
+        )
+        pg = await read_payment_list(
+            tenant_id, invoice_id=invoice_id, account_id=account_id,
+            cursor=cursor, limit=limit,
+        )
+        if pg is not _NOT_CUT_OVER:
+            return pg
 
         must_clauses: List[Dict[str, Any]] = []
         if invoice_id:
@@ -672,6 +742,10 @@ class PaymentService:
         await self._es.index_document(
             ACCOUNT_EVENTS_INDEX, event_id, event_doc
         )
+
+        # Mirror the credit_balance_applied account event to Postgres.
+        from commerce.services.commerce_persistence_bridge import mirror_account_event
+        await mirror_account_event(event_doc)
 
         logger.info(
             "Accrued %d cents excess to account %s credit balance "

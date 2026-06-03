@@ -373,6 +373,12 @@ class DepotRepository:
         doc = model.model_dump(mode="json", exclude_none=False)
         await self._es.index_document(self._index, model.depot_id, doc)
 
+        # Dual-write the depot to the Postgres source-of-truth.
+        from commerce.services.commerce_persistence_bridge import (
+            mirror_current_state_upsert,
+        )
+        await mirror_current_state_upsert("depot", doc)
+
         # Enforce single-default-per-tenant: if this depot was created as
         # the default, clear the flag on any other depot for the tenant.
         if model.is_default:
@@ -395,6 +401,15 @@ class DepotRepository:
         self._require_tenant(tenant_id)
         if not depot_id or not depot_id.strip():
             raise ValueError("depot_id must be a non-empty string")
+
+        # Read-cutover: serve from Postgres when enabled.
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_hybrid_get,
+        )
+        pg = await read_hybrid_get("depot", tenant_id, depot_id)
+        if pg is not _NOT_CUT_OVER:
+            return _safe_model_load(pg) if pg is not None else None
 
         source = await self._fetch_source(depot_id)
         if source is None:
@@ -435,6 +450,27 @@ class DepotRepository:
         self._require_tenant(tenant_id)
         if size <= 0:
             raise ValueError("size must be a positive integer")
+
+        # Read-cutover: serve from Postgres when enabled. The ``fuel_type``
+        # filter targets a document array (not a typed column), so route to PG
+        # only when it is absent; otherwise fall back to ES.
+        if not fuel_type:
+            from commerce.services.commerce_persistence_bridge import (
+                _NOT_CUT_OVER,
+                read_hybrid_list,
+            )
+            pg = await read_hybrid_list(
+                "depot", tenant_id,
+                filters={"status": status} if status is not None else None,
+                limit=size,
+            )
+            if pg is not _NOT_CUT_OVER:
+                out: List[Depot] = []
+                for source in pg["items"]:
+                    model = _safe_model_load(source)
+                    if model is not None:
+                        out.append(model)
+                return out
 
         must: List[Dict[str, Any]] = [{"term": {"tenant_id": tenant_id}}]
         if status is not None:
@@ -539,6 +575,14 @@ class DepotRepository:
         delta_keys = set(clean_patch.keys()) | {"updated_at"}
         partial = validated.model_dump(mode="json", include=delta_keys)
         await self._es.update_document(self._index, depot_id, partial)
+
+        # Dual-write the full validated depot to Postgres (verbatim doc).
+        from commerce.services.commerce_persistence_bridge import (
+            mirror_current_state_upsert,
+        )
+        await mirror_current_state_upsert(
+            "depot", validated.model_dump(mode="json", exclude_none=False)
+        )
 
         # Enforce single-default-per-tenant when this update set the flag.
         if clean_patch.get("is_default") is True:

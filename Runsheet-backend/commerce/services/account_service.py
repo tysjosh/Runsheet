@@ -177,6 +177,10 @@ class AccountService:
             ACCOUNT_EVENTS_INDEX, event_doc["event_id"], event_doc
         )
 
+        # Dual-write the account audit entry to the Postgres source-of-truth.
+        from commerce.services.commerce_persistence_bridge import mirror_account_event
+        await mirror_account_event(event_doc)
+
         logger.info(
             "Wrote account event %s (type=%s, seq=%d) for account %s tenant %s",
             event_doc["event_id"],
@@ -288,6 +292,13 @@ class AccountService:
 
         await self._es.index_document(ACCOUNTS_CURRENT_INDEX, account_id, doc)
 
+        # Dual-write to the Postgres source-of-truth when opted in. No-op
+        # otherwise. Mirrors the same document so the row and ES doc agree.
+        from commerce.services.commerce_persistence_bridge import (
+            mirror_account_create,
+        )
+        await mirror_account_create(doc)
+
         # Write the created event
         await self._write_account_event(
             tenant_id=tenant_id,
@@ -323,6 +334,26 @@ class AccountService:
 
         Validates: Requirements 2.4, C3
         """
+        # Read-cutover: serve the stored account projection from Postgres when
+        # enabled. open_balance_cents / available_credit_cents are kept current
+        # on the row by refresh_open_balance, so we return them as-is and only
+        # layer on the derived oldest_open_invoice_days.
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_account_get,
+        )
+        pg = await read_account_get(tenant_id, account_id)
+        if pg is not _NOT_CUT_OVER:
+            if pg is None:
+                raise resource_not_found(
+                    f"Account '{account_id}' not found",
+                    details={"account_id": account_id},
+                )
+            pg["oldest_open_invoice_days"] = (
+                await self._compute_oldest_open_invoice_days(tenant_id, account_id)
+            )
+            return pg
+
         base_query: Dict[str, Any] = {
             "query": {
                 "bool": {
@@ -392,6 +423,18 @@ class AccountService:
             limit = _DEFAULT_PAGE_LIMIT
         if limit > _MAX_PAGE_LIMIT:
             limit = _MAX_PAGE_LIMIT
+
+        # Read-cutover: serve the page from Postgres when enabled.
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_account_list,
+        )
+        pg = await read_account_list(
+            tenant_id, customer_id=customer_id, status=status,
+            cursor=cursor, limit=limit,
+        )
+        if pg is not _NOT_CUT_OVER:
+            return pg
 
         must_clauses: List[Dict[str, Any]] = []
         if customer_id:
@@ -546,6 +589,13 @@ class AccountService:
                         )
 
         await self._es.update_document(ACCOUNTS_CURRENT_INDEX, account_id, partial)
+
+        # Dual-write the same computed field changes to Postgres when opted in.
+        from commerce.services.commerce_persistence_bridge import (
+            mirror_account_fields,
+        )
+        _pg_fields = {k: v for k, v in partial.items() if k != "updated_at"}
+        await mirror_account_fields(tenant_id, account_id, _pg_fields)
 
         merged = {**existing, **partial}
         logger.info("Updated account %s for tenant %s", account_id, tenant_id)
@@ -757,6 +807,17 @@ class AccountService:
                 )
 
         await self._es.update_document(ACCOUNTS_CURRENT_INDEX, account_id, partial)
+
+        # Dual-write the recomputed balance / credit state to Postgres when
+        # opted in. event_type=balance_changed mirrors the repository's own
+        # balance-mutation event label.
+        from commerce.services.commerce_persistence_bridge import (
+            mirror_account_fields,
+        )
+        _pg_fields = {k: v for k, v in partial.items() if k != "updated_at"}
+        await mirror_account_fields(
+            tenant_id, account_id, _pg_fields, event_type="balance_changed"
+        )
 
         merged = {**existing, **partial}
         logger.info(

@@ -479,7 +479,7 @@ class DataSeeder:
             {
                 "item_id": "INV-001",
                 "name": "Diesel Fuel Premium Grade",
-                "category": "Fuel",
+                "category": "fuel_equipment",
                 "quantity": 15000,
                 "unit": "gallons",
                 "min_threshold": 5000,
@@ -491,7 +491,7 @@ class DataSeeder:
             {
                 "item_id": "INV-002",
                 "name": "Heavy Duty Truck Tires",
-                "category": "Parts",
+                "category": "tires",
                 "quantity": 25,
                 "unit": "pieces",
                 "min_threshold": 10,
@@ -503,7 +503,7 @@ class DataSeeder:
             {
                 "item_id": "INV-003",
                 "name": "Synthetic Engine Oil 15W-40",
-                "category": "Maintenance",
+                "category": "fluids",
                 "quantity": 0,
                 "unit": "bottles",
                 "min_threshold": 20,
@@ -515,7 +515,7 @@ class DataSeeder:
             {
                 "item_id": "INV-004",
                 "name": "Ceramic Brake Pads Heavy Duty",
-                "category": "Parts",
+                "category": "brake_parts",
                 "quantity": 120,
                 "unit": "sets",
                 "min_threshold": 30,
@@ -527,7 +527,7 @@ class DataSeeder:
             {
                 "item_id": "INV-005",
                 "name": "Radiator Coolant Fluid",
-                "category": "Maintenance",
+                "category": "fluids",
                 "quantity": 8,
                 "unit": "bottles",
                 "min_threshold": 15,
@@ -878,7 +878,7 @@ class DataSeeder:
             {
                 "item_id": "INV-001",
                 "name": "Diesel Fuel Premium Grade",
-                "category": "Fuel",
+                "category": "fuel_equipment",
                 "quantity": 15000,
                 "unit": "gallons",
                 "min_threshold": 5000,
@@ -890,7 +890,7 @@ class DataSeeder:
             {
                 "item_id": "INV-002",
                 "name": "Heavy Duty Truck Tires",
-                "category": "Parts",
+                "category": "tires",
                 "quantity": 50,
                 "unit": "pieces",
                 "min_threshold": 10,
@@ -902,7 +902,7 @@ class DataSeeder:
             {
                 "item_id": "INV-003",
                 "name": "Synthetic Engine Oil 15W-40",
-                "category": "Maintenance",
+                "category": "fluids",
                 "quantity": 25,
                 "unit": "bottles",
                 "min_threshold": 20,
@@ -914,7 +914,7 @@ class DataSeeder:
             {
                 "item_id": "INV-004",
                 "name": "Ceramic Brake Pads Heavy Duty",
-                "category": "Parts",
+                "category": "brake_parts",
                 "quantity": 120,
                 "unit": "sets",
                 "min_threshold": 30,

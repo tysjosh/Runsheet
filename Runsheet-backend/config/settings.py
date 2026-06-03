@@ -122,6 +122,99 @@ class Settings(BaseSettings):
         description="Path to Google Cloud service account credentials file"
     )
     
+    # ── PostgreSQL source-of-truth (persistence/) ─────────────────────
+    #
+    # When set, the persistence layer (commerce + idempotency) treats
+    # PostgreSQL as the transactional system-of-record and Elasticsearch
+    # as a rebuildable read/search projection fed by the transactional
+    # outbox. When EMPTY, the persistence layer is dormant and the app
+    # behaves exactly as before (ES-only). This makes the migration
+    # strictly opt-in and reversible.
+    #
+    # Use an async SQLAlchemy URL, e.g.:
+    #   postgresql+psycopg://user:pass@host:5432/runsheet
+    # Tests pass an in-memory SQLite async URL:
+    #   sqlite+aiosqlite:///:memory:
+    database_url: Optional[str] = Field(
+        default=None,
+        description=(
+            "Async SQLAlchemy URL for the PostgreSQL source-of-truth. "
+            "Empty = persistence layer dormant (ES-only, legacy behavior). "
+            "Example: postgresql+psycopg://user:pass@host:5432/runsheet"
+        ),
+    )
+    database_pool_size: int = Field(
+        default=10,
+        ge=1,
+        le=100,
+        description="SQLAlchemy connection pool size (ignored for sqlite).",
+    )
+    database_max_overflow: int = Field(
+        default=5,
+        ge=0,
+        le=100,
+        description="SQLAlchemy max overflow connections beyond pool_size.",
+    )
+    database_echo: bool = Field(
+        default=False,
+        description="When True, SQLAlchemy logs all emitted SQL (debug only).",
+    )
+    commerce_dual_write_postgres: bool = Field(
+        default=False,
+        description=(
+            "When True (and database_url is set), commerce writes go to "
+            "PostgreSQL as source-of-truth with an outbox row in the same "
+            "transaction; the ES document is written as a projection. When "
+            "False, commerce writes go straight to ES (legacy). Default "
+            "False so enabling the persistence layer is a deliberate, "
+            "per-environment step."
+        ),
+    )
+    commerce_payments_authoritative: bool = Field(
+        default=False,
+        description=(
+            "Promotion step for payments (requires database_url). When True, "
+            "PaymentService.ingest inserts the payment row into PostgreSQL "
+            "FIRST; the unique (tenant, source, external_id) constraint then "
+            "REJECTS a re-delivered Stripe/QBO webhook even under concurrency "
+            "(returns the existing payment idempotently) instead of relying "
+            "on the best-effort ES idempotency fast-path. Enable only after "
+            "customers/accounts/invoices are dual-written and backfilled so "
+            "the payment's FK parents exist in Postgres. Default False."
+        ),
+    )
+    commerce_read_from_postgres: bool = Field(
+        default=False,
+        description=(
+            "Read-cutover flag (requires database_url). When True, the "
+            "commerce services serve reads (get / list / projections) from the "
+            "PostgreSQL source-of-truth instead of Elasticsearch. The PG read "
+            "path returns byte-identical document shapes (via "
+            "persistence.projections) so callers/UI see no difference. Enable "
+            "only AFTER dual-write + backfill have achieved parity. This is the "
+            "precondition for retiring the commerce ES indices: once reads no "
+            "longer touch ES, the projection can be stopped and the indices "
+            "dropped. Default False (reads served from ES, legacy behavior)."
+        ),
+    )
+    outbox_relay_enabled: bool = Field(
+        default=True,
+        description=(
+            "When True (and database_url is set), the OutboxRelay runs as a "
+            "background task at startup, draining persistence outbox events "
+            "into Elasticsearch so the ES projection stays in sync with the "
+            "Postgres source-of-truth. Set False to run the relay out-of-band "
+            "(e.g. a separate worker) or to pause projection. No effect when "
+            "the persistence layer is dormant."
+        ),
+    )
+    outbox_relay_poll_interval_seconds: float = Field(
+        default=1.0,
+        ge=0.1,
+        le=60.0,
+        description="OutboxRelay idle poll interval in seconds.",
+    )
+
     # Session Store Configuration
     session_store_type: str = Field(
         default="redis",

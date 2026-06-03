@@ -289,6 +289,12 @@ async def create_price_protection_contract(
         document,
     )
 
+    # Dual-write the price-protection contract to the Postgres source-of-truth.
+    from commerce.services.commerce_persistence_bridge import (
+        mirror_compliance_config_upsert,
+    )
+    await mirror_compliance_config_upsert("price_protection_contract", document)
+
     logger.info(
         "price_protection_contracts.create: tenant=%s contract=%s "
         "customer=%s product=%s type=%s",
@@ -413,6 +419,27 @@ async def _fetch_contract_or_404(
     is indistinguishable from "not found" so the handler does not
     leak existence across tenants.
     """
+    # Read-cutover: serve from Postgres when enabled (before requiring the ES
+    # service, so a fully cut-over deployment need not configure it).
+    from commerce.services.commerce_persistence_bridge import (
+        _NOT_CUT_OVER,
+        read_hybrid_get,
+    )
+    pg = await read_hybrid_get("price_protection_contract", tenant_id, contract_id)
+    if pg is not _NOT_CUT_OVER:
+        if pg is not None:
+            return pg
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error_code": "price_protection_contract.not_found",
+                "message": (
+                    f"No price-protection contract with id {contract_id!r} "
+                    "is visible to the requesting tenant."
+                ),
+            },
+        )
+
     es = _get_es_service()
 
     base_query: Dict[str, Any] = {
@@ -597,6 +624,12 @@ async def update_price_protection_contract(
         validated.contract_id,
         document,
     )
+
+    # Dual-write the updated contract to the Postgres source-of-truth.
+    from commerce.services.commerce_persistence_bridge import (
+        mirror_compliance_config_upsert,
+    )
+    await mirror_compliance_config_upsert("price_protection_contract", document)
 
     logger.info(
         "price_protection_contracts.update: tenant=%s contract=%s "

@@ -134,6 +134,13 @@ class CustomerService:
 
         await self._es.index_document(CUSTOMERS_CURRENT_INDEX, customer_id, doc)
 
+        # Dual-write to the Postgres source-of-truth when opted in
+        # (settings.commerce_dual_write_postgres). No-op otherwise.
+        from commerce.services.commerce_persistence_bridge import (
+            mirror_customer_create,
+        )
+        await mirror_customer_create(doc)
+
         logger.info(
             "Created customer %s for tenant %s",
             customer_id,
@@ -150,6 +157,22 @@ class CustomerService:
 
         Validates: Requirement C3
         """
+        # Read-cutover: when commerce_read_from_postgres is on, serve from the
+        # Postgres source-of-truth (byte-identical projection). Falls through to
+        # ES otherwise.
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_customer_get,
+        )
+        pg = await read_customer_get(tenant_id, customer_id)
+        if pg is not _NOT_CUT_OVER:
+            if pg is None:
+                raise resource_not_found(
+                    f"Customer '{customer_id}' not found",
+                    details={"customer_id": customer_id},
+                )
+            return pg
+
         base_query: Dict[str, Any] = {
             "query": {
                 "bool": {
@@ -205,6 +228,26 @@ class CustomerService:
             limit = _DEFAULT_PAGE_LIMIT
         if limit > _MAX_PAGE_LIMIT:
             limit = _MAX_PAGE_LIMIT
+
+        # Read-cutover: serve the page from Postgres when enabled. Account
+        # counts are layered on afterward using the same enrichment helper
+        # (which itself reads from ES today; harmless during the soak and a
+        # follow-up once accounts reads are also cut over).
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_customer_list,
+        )
+        pg = await read_customer_list(
+            tenant_id, status=status, cursor=cursor, limit=limit
+        )
+        if pg is not _NOT_CUT_OVER:
+            if include_account_counts and pg["items"]:
+                account_counts = await self._get_account_counts_for_customers(
+                    tenant_id, [item["customer_id"] for item in pg["items"]]
+                )
+                for item in pg["items"]:
+                    item["account_count"] = account_counts.get(item["customer_id"], 0)
+            return pg
 
         must_clauses: List[Dict[str, Any]] = []
         if status:
@@ -316,6 +359,15 @@ class CustomerService:
         partial["updated_at"] = utcnow().isoformat()
 
         await self._es.update_document(CUSTOMERS_CURRENT_INDEX, doc_id, partial)
+
+        # Dual-write the same field changes to the Postgres source-of-truth
+        # when opted in. The Postgres row stores its own updated_at via the
+        # ORM onupdate hook, so we forward only the business fields.
+        from commerce.services.commerce_persistence_bridge import (
+            mirror_customer_update,
+        )
+        _pg_fields = {k: v for k, v in partial.items() if k != "updated_at"}
+        await mirror_customer_update(tenant_id, doc_id, _pg_fields)
 
         merged = {**existing, **partial}
         logger.info("Updated customer %s for tenant %s", customer_id, tenant_id)

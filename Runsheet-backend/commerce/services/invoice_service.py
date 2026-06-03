@@ -216,6 +216,10 @@ class InvoiceService:
             INVOICE_EVENTS_INDEX, event_doc["event_id"], event_doc
         )
 
+        # Dual-write the invoice ledger entry to the Postgres source-of-truth.
+        from commerce.services.commerce_persistence_bridge import mirror_invoice_event
+        await mirror_invoice_event(event_doc)
+
         logger.info(
             "Wrote invoice event %s (type=%s, seq=%d) for invoice %s tenant %s",
             event_doc["event_id"],
@@ -692,6 +696,15 @@ class InvoiceService:
         # Then update projection
         await self._es.index_document(INVOICES_CURRENT_INDEX, invoice_id, doc)
 
+        # Dual-write the generated invoice to the Postgres source-of-truth
+        # when opted in. Passes the service's authoritative totals (which may
+        # include TaxEngine-computed tax) so the row and ES doc agree. No-op
+        # when dual-write is off.
+        from commerce.services.commerce_persistence_bridge import (
+            mirror_invoice_create,
+        )
+        await mirror_invoice_create(doc)
+
         # Mark as processed for idempotency
         if self._idempotency:
             await self._idempotency.mark_processed(idemp_key, tenant_id)
@@ -772,6 +785,19 @@ class InvoiceService:
 
         now = utcnow()
 
+        # Allocate a monotonic invoice number from the Postgres counter when
+        # dual-write is on. This replaces the legacy Redis/ES numbering path;
+        # when the persistence layer is dormant the helper returns None and the
+        # invoice_number stays unset, exactly as before.
+        from commerce.services.commerce_persistence_bridge import (
+            allocate_invoice_number,
+            mirror_invoice_fields,
+        )
+        allocated_number = await allocate_invoice_number(tenant_id)
+        invoice_number_str: Optional[str] = None
+        if allocated_number is not None and not invoice.get("invoice_number"):
+            invoice_number_str = f"INV-{allocated_number:06d}"
+
         # Write event FIRST (Constraint C7)
         event_doc = await self._write_invoice_event(
             tenant_id=tenant_id,
@@ -790,8 +816,19 @@ class InvoiceService:
             "issued_at": now.isoformat(),
             "finalized_at": now.isoformat(),
         }
+        if invoice_number_str is not None:
+            partial["invoice_number"] = invoice_number_str
         await self._update_projection(
             invoice_id, partial, event_doc["sequence_number"]
+        )
+
+        # Mirror the finalize transition (status + number) to Postgres.
+        _pg_fields = {
+            k: v for k, v in partial.items()
+            if k not in ("_last_applied_seq", "updated_at")
+        }
+        await mirror_invoice_fields(
+            tenant_id, invoice_id, _pg_fields, event_type="finalized"
         )
 
         merged = {**invoice, **partial, "updated_at": utcnow().isoformat()}
@@ -921,6 +958,21 @@ class InvoiceService:
             invoice_id, partial, event_doc["sequence_number"]
         )
 
+        # Mirror the payment-applied transition to Postgres when opted in.
+        from commerce.services.commerce_persistence_bridge import (
+            mirror_invoice_fields,
+        )
+        await mirror_invoice_fields(
+            tenant_id,
+            invoice_id,
+            {
+                "amount_paid_cents": new_paid,
+                "remaining_cents": new_remaining,
+                "status": new_status,
+            },
+            event_type="payment_applied",
+        )
+
         merged = {**invoice, **partial, "updated_at": utcnow().isoformat()}
         logger.info(
             "Applied payment of %d cents to invoice %s (status: %s -> %s) tenant %s",
@@ -1038,6 +1090,23 @@ class InvoiceService:
         }
         await self._update_projection(
             invoice_id, partial, event_doc["sequence_number"]
+        )
+
+        # Mirror the void transition to Postgres when opted in.
+        from commerce.services.commerce_persistence_bridge import (
+            mirror_invoice_fields,
+        )
+        await mirror_invoice_fields(
+            tenant_id,
+            invoice_id,
+            {
+                "status": InvoiceStatus.VOID.value,
+                "voided_at": now.isoformat(),
+                "void_reason": reason,
+                "amount_paid_cents": 0,
+                "remaining_cents": 0,
+            },
+            event_type="voided",
         )
 
         merged = {**invoice, **partial, "updated_at": utcnow().isoformat()}
@@ -1257,6 +1326,21 @@ class InvoiceService:
 
         Validates: Constraint C3
         """
+        # Read-cutover: serve from Postgres (byte-identical projection) when
+        # commerce_read_from_postgres is on. Falls through to ES otherwise.
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_invoice_get,
+        )
+        pg = await read_invoice_get(tenant_id, invoice_id)
+        if pg is not _NOT_CUT_OVER:
+            if pg is None:
+                raise resource_not_found(
+                    f"Invoice '{invoice_id}' not found",
+                    details={"invoice_id": invoice_id},
+                )
+            return pg
+
         base_query: Dict[str, Any] = {
             "query": {
                 "bool": {
@@ -1309,6 +1393,18 @@ class InvoiceService:
             limit = _DEFAULT_PAGE_LIMIT
         if limit > _MAX_PAGE_LIMIT:
             limit = _MAX_PAGE_LIMIT
+
+        # Read-cutover: serve the page from Postgres when enabled.
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_invoice_list,
+        )
+        pg = await read_invoice_list(
+            tenant_id, status=status, customer_id=customer_id,
+            account_id=account_id, order_id=order_id, cursor=cursor, limit=limit,
+        )
+        if pg is not _NOT_CUT_OVER:
+            return pg
 
         must_clauses: List[Dict[str, Any]] = []
         if status:
@@ -1713,6 +1809,15 @@ class InvoiceService:
         self, tenant_id: str, order_id: str
     ) -> Optional[Dict[str, Any]]:
         """Find an existing invoice for a given order_id (idempotency lookup)."""
+        # Read-cutover: resolve from Postgres when enabled.
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_invoice_find_by_order,
+        )
+        pg = await read_invoice_find_by_order(tenant_id, order_id)
+        if pg is not _NOT_CUT_OVER:
+            return pg
+
         base_query: Dict[str, Any] = {
             "query": {
                 "bool": {

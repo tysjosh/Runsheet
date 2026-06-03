@@ -1,0 +1,47 @@
+# Local PostgreSQL for the commerce source-of-truth (persistence/).
+#
+# This is the database the persistence layer migrates and dual-writes to during
+# local development and the read-cutover soak. It is intentionally a separate,
+# opt-in service: the app stays ES-only until DATABASE_URL points here.
+#
+# Usage:
+#   docker compose up -d postgres          # start the container (detached)
+#   docker compose ps                      # check health
+#   docker compose logs -f postgres        # tail logs
+#   docker compose down                    # stop (keeps data volume)
+#   docker compose down -v                 # stop AND delete the data volume
+#
+# After it is healthy, point the app at it and create the schema:
+#   export DATABASE_URL="postgresql+psycopg://runsheet:runsheet@localhost:5432/runsheet"
+#   ./venv/bin/alembic upgrade head
+#
+# Credentials below match the DATABASE_URL line in .env.development. They are
+# local-only dev defaults — never reuse them for staging/production.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: runsheet-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: runsheet
+      POSTGRES_PASSWORD: runsheet
+      POSTGRES_DB: runsheet
+      # Use scram-sha-256 (the modern default) and a UTF-8 template.
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --encoding=UTF8"
+    ports:
+      # Host 5432 -> container 5432. Change the host side if 5432 is taken.
+      - "5432:5432"
+    volumes:
+      - runsheet_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # pg_isready returns 0 only once the server accepts connections.
+      test: ["CMD-SHELL", "pg_isready -U runsheet -d runsheet"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  runsheet_pgdata:
+    name: runsheet_pgdata

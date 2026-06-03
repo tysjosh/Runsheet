@@ -198,6 +198,12 @@ class DriverQualificationService:
 
         await self._es.index_document(DRIVERS_INDEX, driver.driver_id, doc)
 
+        # Dual-write the driver qualification record to Postgres.
+        from commerce.services.commerce_persistence_bridge import (
+            mirror_current_state_upsert,
+        )
+        await mirror_current_state_upsert("driver", doc)
+
         logger.info(
             "Created driver %s (%s) for tenant %s",
             driver.driver_id,
@@ -218,6 +224,20 @@ class DriverQualificationService:
 
         Validates: Requirement 5.1, Constraint C3
         """
+        # Read-cutover: serve from Postgres when enabled.
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_hybrid_get,
+        )
+        pg = await read_hybrid_get("driver", tenant_id, driver_id)
+        if pg is not _NOT_CUT_OVER:
+            if pg is None:
+                raise resource_not_found(
+                    f"Driver '{driver_id}' not found",
+                    details={"driver_id": driver_id},
+                )
+            return pg
+
         base_query: Dict[str, Any] = {
             "query": {
                 "bool": {
@@ -268,6 +288,19 @@ class DriverQualificationService:
             limit = _DEFAULT_PAGE_LIMIT
         if limit > _MAX_PAGE_LIMIT:
             limit = _MAX_PAGE_LIMIT
+
+        # Read-cutover: serve the page from Postgres when enabled.
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_hybrid_list,
+        )
+        pg = await read_hybrid_list(
+            "driver", tenant_id,
+            filters={"status": status} if status else None,
+            cursor=cursor, limit=limit,
+        )
+        if pg is not _NOT_CUT_OVER:
+            return pg
 
         must_clauses: List[Dict[str, Any]] = []
         if status:
@@ -444,6 +477,13 @@ class DriverQualificationService:
         await self._es.update_document(DRIVERS_INDEX, driver_id, partial)
 
         merged = {**existing, **partial}
+
+        # Dual-write the full merged driver record to Postgres.
+        from commerce.services.commerce_persistence_bridge import (
+            mirror_current_state_upsert,
+        )
+        await mirror_current_state_upsert("driver", merged)
+
         logger.info(
             "Updated driver %s for tenant %s",
             driver_id,

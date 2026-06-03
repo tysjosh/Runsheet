@@ -170,6 +170,12 @@ class AssetCertificationService:
             ASSET_CERTIFICATIONS_INDEX, cert.cert_id, doc
         )
 
+        # Dual-write the asset certification to the Postgres source-of-truth.
+        from commerce.services.commerce_persistence_bridge import (
+            mirror_current_state_upsert,
+        )
+        await mirror_current_state_upsert("asset_certification", doc)
+
         logger.info(
             "Created asset certification %s (type=%s, asset=%s) for tenant %s",
             cert.cert_id,
@@ -287,6 +293,20 @@ class AssetCertificationService:
 
         Validates: Requirement 13.1, Constraint C3
         """
+        # Read-cutover: serve from Postgres when enabled.
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_hybrid_get,
+        )
+        pg = await read_hybrid_get("asset_certification", tenant_id, cert_id)
+        if pg is not _NOT_CUT_OVER:
+            if pg is None:
+                raise resource_not_found(
+                    f"Asset certification '{cert_id}' not found",
+                    details={"cert_id": cert_id},
+                )
+            return pg
+
         base_query: Dict[str, Any] = {
             "query": {
                 "bool": {

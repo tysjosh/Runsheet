@@ -218,6 +218,15 @@ class FuelOrderRepository:
         if not order_id or not order_id.strip():
             raise ValueError("order_id must be a non-empty string")
 
+        # Read-cutover: serve from Postgres when enabled.
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_hybrid_get,
+        )
+        pg = await read_hybrid_get("fuel_order", tenant_id, order_id)
+        if pg is not _NOT_CUT_OVER:
+            return _safe_order_load(pg) if pg is not None else None
+
         query = inject_tenant_filter(
             {"query": {"term": {"order_id": order_id}}},
             tenant_id,
@@ -292,6 +301,11 @@ class FuelOrderRepository:
         await self._es.index_document(
             self._orders_index, model.order_id, doc
         )
+        # Dual-write the order current-state to the Postgres source-of-truth.
+        from commerce.services.commerce_persistence_bridge import (
+            mirror_current_state_upsert,
+        )
+        await mirror_current_state_upsert("fuel_order", doc)
         return model
 
     # ------------------------------------------------------------------
@@ -358,6 +372,12 @@ class FuelOrderRepository:
                     doc.get("last_event_timestamp"),
                 )
                 return False
+            # Dual-write the order current-state to Postgres. The repository's
+            # own stale-event guard mirrors the ES scripted-upsert semantics.
+            from commerce.services.commerce_persistence_bridge import (
+                mirror_current_state_upsert,
+            )
+            await mirror_current_state_upsert("fuel_order", doc)
             return True
         except Exception as exc:
             logger.error(

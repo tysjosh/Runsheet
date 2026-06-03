@@ -108,7 +108,7 @@ MVP_DELIVERY_PRIORITIES_MAPPING = {
                     },
                 },
             },
-            "scoring_weights": {"type": "object", "enabled": True},
+            "scoring_weights": {"type": "flattened"},
             "tenant_id":       {"type": "keyword"},
             "run_id":          {"type": "keyword"},
             "timestamp":       {"type": "date"},
@@ -469,6 +469,21 @@ MVP_COST_CONFIGS_MAPPING = {
 # Index setup function
 # ---------------------------------------------------------------------------
 
+# Module-level registry: index_name -> mapping. Single source of truth for
+# both setup_mvp_indices and the seed script's recreate path.
+MVP_INDEX_MAPPINGS = {
+    MVP_TANK_FORECASTS_INDEX: MVP_TANK_FORECASTS_MAPPING,
+    MVP_DELIVERY_PRIORITIES_INDEX: MVP_DELIVERY_PRIORITIES_MAPPING,
+    MVP_LOAD_PLANS_INDEX: MVP_LOAD_PLANS_MAPPING,
+    MVP_ROUTES_INDEX: MVP_ROUTES_MAPPING,
+    MVP_REPLAN_EVENTS_INDEX: MVP_REPLAN_EVENTS_MAPPING,
+    MVP_PLAN_OUTCOMES_INDEX: MVP_PLAN_OUTCOMES_MAPPING,
+    TRUCK_COMPARTMENTS_INDEX: TRUCK_COMPARTMENTS_MAPPING,
+    MVP_PLAN_EXECUTIONS_INDEX: MVP_PLAN_EXECUTIONS_MAPPING,
+    MVP_COST_CONFIGS_INDEX: MVP_COST_CONFIGS_MAPPING,
+}
+
+
 def setup_mvp_indices(es_service) -> None:
     """Create MVP ES indices if they don't already exist.
 
@@ -482,19 +497,7 @@ def setup_mvp_indices(es_service) -> None:
     es_client = es_service.client
     is_serverless = es_service.is_serverless
 
-    indices = {
-        MVP_TANK_FORECASTS_INDEX: MVP_TANK_FORECASTS_MAPPING,
-        MVP_DELIVERY_PRIORITIES_INDEX: MVP_DELIVERY_PRIORITIES_MAPPING,
-        MVP_LOAD_PLANS_INDEX: MVP_LOAD_PLANS_MAPPING,
-        MVP_ROUTES_INDEX: MVP_ROUTES_MAPPING,
-        MVP_REPLAN_EVENTS_INDEX: MVP_REPLAN_EVENTS_MAPPING,
-        MVP_PLAN_OUTCOMES_INDEX: MVP_PLAN_OUTCOMES_MAPPING,
-        TRUCK_COMPARTMENTS_INDEX: TRUCK_COMPARTMENTS_MAPPING,
-        MVP_PLAN_EXECUTIONS_INDEX: MVP_PLAN_EXECUTIONS_MAPPING,
-        MVP_COST_CONFIGS_INDEX: MVP_COST_CONFIGS_MAPPING,
-    }
-
-    for index_name, mapping in indices.items():
+    for index_name, mapping in MVP_INDEX_MAPPINGS.items():
         try:
             if not es_client.indices.exists(index=index_name):
                 if is_serverless:

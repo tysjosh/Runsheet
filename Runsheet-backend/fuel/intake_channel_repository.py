@@ -235,6 +235,11 @@ class IntakeChannelRepository:
             self._channels_index, model.channel_id, doc
         )
 
+        from commerce.services.commerce_persistence_bridge import (
+            mirror_current_state_upsert,
+        )
+        await mirror_current_state_upsert("intake_channel", doc)
+
         logger.info(
             "IntakeChannelRepository.create: created channel=%s "
             "tenant=%s type=%s",
@@ -260,6 +265,15 @@ class IntakeChannelRepository:
         self._require_tenant(tenant_id)
         if not channel_id or not channel_id.strip():
             raise ValueError("channel_id must be a non-empty string")
+
+        # Read-cutover: serve from Postgres when enabled.
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_hybrid_get,
+        )
+        pg = await read_hybrid_get("intake_channel", tenant_id, channel_id)
+        if pg is not _NOT_CUT_OVER:
+            return _safe_channel_load(pg) if pg is not None else None
 
         query = inject_tenant_filter(
             {"query": {"term": {"channel_id": channel_id}}},
@@ -315,6 +329,20 @@ class IntakeChannelRepository:
         self._require_tenant(tenant_id)
         if size <= 0:
             raise ValueError("size must be a positive integer")
+
+        # Read-cutover: serve from Postgres when enabled (created_at DESC).
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_hybrid_list,
+        )
+        pg = await read_hybrid_list("intake_channel", tenant_id, limit=size)
+        if pg is not _NOT_CUT_OVER:
+            out_pg: List[IntakeChannel] = []
+            for source in pg["items"]:
+                model = _safe_channel_load(source)
+                if model is not None:
+                    out_pg.append(model)
+            return out_pg
 
         query = inject_tenant_filter(
             {"query": {"match_all": {}}},
@@ -400,6 +428,11 @@ class IntakeChannelRepository:
         await self._es.index_document(
             self._channels_index, model.channel_id, doc
         )
+
+        from commerce.services.commerce_persistence_bridge import (
+            mirror_current_state_upsert,
+        )
+        await mirror_current_state_upsert("intake_channel", doc)
 
         logger.info(
             "IntakeChannelRepository.update: updated channel=%s tenant=%s",
@@ -539,6 +572,11 @@ class IntakeChannelRepository:
         await self._es.index_document(
             self._channels_index, model.channel_id, doc
         )
+
+        from commerce.services.commerce_persistence_bridge import (
+            mirror_current_state_upsert,
+        )
+        await mirror_current_state_upsert("intake_channel", doc)
 
         logger.info(
             "IntakeChannelRepository.rotate_secret: rotated secret for "

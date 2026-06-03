@@ -200,7 +200,16 @@ def setup_agent_indices(es_service):
         except Exception:
             logger.exception("Failed to create agent index %s", index_name)
 
-    # Apply ILM policy for agent_activity_log
+    # Apply ILM policy for agent_activity_log.
+    # ILM is unavailable on serverless / basic-tier clusters (the PUT
+    # returns a 400 "no handler found"), so skip it cleanly there.
+    if is_serverless:
+        logger.info(
+            "Skipping agent ILM policy setup — ILM not available on this "
+            "Elasticsearch cluster (serverless/basic tier)."
+        )
+        return
+
     try:
         es_client.ilm.put_lifecycle(
             name=AGENT_ACTIVITY_LOG_ILM_POLICY_NAME,

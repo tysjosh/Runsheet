@@ -174,7 +174,16 @@ def setup_inventory_indices(es_service) -> None:
         except Exception as e:
             logger.error("Failed to create inventory index %s: %s", index_name, e)
 
-    # Apply ILM policy for inventory_events
+    # Apply ILM policy for inventory_events.
+    # ILM is unavailable on serverless / basic-tier clusters (the PUT
+    # returns a 400 "no handler found"), so skip it cleanly there.
+    if is_serverless:
+        logger.info(
+            "Skipping inventory ILM policy setup — ILM not available on "
+            "this Elasticsearch cluster (serverless/basic tier)."
+        )
+        return
+
     try:
         es_client.ilm.put_lifecycle(
             name=INVENTORY_EVENTS_ILM_POLICY_NAME,

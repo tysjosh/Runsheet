@@ -202,6 +202,12 @@ async def create_pricing_rule(
     es = _get_es_service()
     await es.index_document(PRICING_RULES_INDEX, rule.rule_id, document)
 
+    # Dual-write the sell-side pricing rule to the Postgres source-of-truth.
+    from commerce.services.commerce_persistence_bridge import (
+        mirror_compliance_config_upsert,
+    )
+    await mirror_compliance_config_upsert("compliance_pricing_rule", document)
+
     logger.info(
         "pricing_rules.create: tenant=%s rule=%s strategy=%s product=%s",
         tenant.tenant_id,

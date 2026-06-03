@@ -320,6 +320,12 @@ class ARAgingService:
             AR_AGING_SNAPSHOTS_INDEX, snapshot_id, snapshot_doc
         )
 
+        # Dual-write the AR aging snapshot to the Postgres source-of-truth.
+        from commerce.services.commerce_persistence_bridge import (
+            mirror_ar_aging_snapshot,
+        )
+        await mirror_ar_aging_snapshot(snapshot_doc)
+
         logger.info(
             "Wrote daily AR aging snapshot for tenant %s date %s "
             "(total_open: %d cents, accounts_with_balance: %d)",

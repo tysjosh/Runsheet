@@ -14,6 +14,22 @@ google-cloud-aiplatform==1.72.0
 # Redis for session storage (Requirement 8.4)
 redis==5.2.0
 
+# PostgreSQL source-of-truth for transactional/financial models
+# (Commerce backbone + idempotency). Elasticsearch becomes a rebuildable
+# read/search projection fed by a transactional outbox (persistence/).
+#   - SQLAlchemy 2.x async ORM (engine + session)
+#   - asyncpg/psycopg3 driver for the app's async engine; psycopg3 also
+#     serves Alembic's synchronous migration runner, so a single driver
+#     covers both paths (postgresql+psycopg://...).
+#   - alembic for schema migrations
+#   - aiosqlite is a TEST-ONLY async driver so the persistence-layer unit
+#     tests can run against an in-memory SQLite database with no external
+#     Postgres dependency (matches the mocked-services test policy).
+SQLAlchemy[asyncio]>=2.0.30
+alembic>=1.13.0
+psycopg[binary]>=3.1.0
+aiosqlite>=0.20.0
+
 # Rate limiting (Requirements 14.1, 14.2)
 slowapi==0.1.9
 

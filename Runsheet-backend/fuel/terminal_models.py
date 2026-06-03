@@ -79,6 +79,15 @@ from fuel.services.fuel_product_catalog import (
 logger = logging.getLogger(__name__)
 
 
+# Maps a base-repo ``entity_type`` to the persistence-layer aggregate type for
+# the Postgres dual-write mirror. Only entities being migrated are listed; all
+# others (terminal_wait_reports, sourcing_recommendations, …) are skipped.
+_BASE_REPO_MIRROR_AGGREGATES = {
+    "terminal": "terminal",
+    "supplier_contract": "supplier_contract",
+}
+
+
 # ---------------------------------------------------------------------------
 # Shared enums / constants
 # ---------------------------------------------------------------------------
@@ -849,6 +858,19 @@ class _BaseTenantScopedRepository:
         doc = model.model_dump(mode="json", exclude_none=False)
         doc_id = getattr(model, self.id_field)
         await self._es.index_document(self._index, doc_id, doc)
+        # Dual-write master/config entities to the Postgres source-of-truth.
+        _agg = _BASE_REPO_MIRROR_AGGREGATES.get(self.entity_type)
+        if _agg is not None:
+            if _agg == "supplier_contract":
+                from commerce.services.commerce_persistence_bridge import (
+                    mirror_compliance_config_upsert,
+                )
+                await mirror_compliance_config_upsert(_agg, doc)
+            else:
+                from commerce.services.commerce_persistence_bridge import (
+                    mirror_current_state_upsert,
+                )
+                await mirror_current_state_upsert(_agg, doc)
         return model
 
     # ------------------------------------------------------------------
@@ -859,6 +881,19 @@ class _BaseTenantScopedRepository:
         self._require_tenant(tenant_id)
         if not entity_id or not entity_id.strip():
             raise ValueError(f"{self.id_field} must be a non-empty string")
+
+        # Read-cutover: serve from Postgres when this entity is migrated and
+        # COMMERCE_READ_FROM_POSTGRES is on. Returns the verbatim document,
+        # re-hydrated through the model so the public contract is unchanged.
+        _agg = _BASE_REPO_MIRROR_AGGREGATES.get(self.entity_type)
+        if _agg is not None:
+            from commerce.services.commerce_persistence_bridge import (
+                _NOT_CUT_OVER,
+                read_hybrid_get,
+            )
+            pg = await read_hybrid_get(_agg, tenant_id, entity_id)
+            if pg is not _NOT_CUT_OVER:
+                return self._safe_model_load(pg) if pg is not None else None
 
         source = await self._fetch_source(entity_id)
         if source is None:
@@ -887,6 +922,38 @@ class _BaseTenantScopedRepository:
         effective_size = size if size is not None else self.DEFAULT_LIST_SIZE
         if effective_size <= 0:
             raise ValueError("size must be a positive integer")
+
+        # Read-cutover: serve from Postgres for migrated entity types. Only the
+        # simple ``{"term": {field: value}}`` filter shape is translated; any
+        # other clause (range/terms/geo/custom sort) falls back to ES so we
+        # never silently change list semantics.
+        _agg = _BASE_REPO_MIRROR_AGGREGATES.get(self.entity_type)
+        if _agg is not None and not sort:
+            translatable = True
+            pg_filters: Dict[str, Any] = {}
+            for clause in (extra_must or []):
+                term = clause.get("term") if isinstance(clause, dict) else None
+                if term and len(term) == 1:
+                    (field, value), = term.items()
+                    pg_filters[field] = value
+                else:
+                    translatable = False
+                    break
+            if translatable:
+                from commerce.services.commerce_persistence_bridge import (
+                    _NOT_CUT_OVER,
+                    read_hybrid_list,
+                )
+                pg = await read_hybrid_list(
+                    _agg, tenant_id, filters=pg_filters, limit=effective_size
+                )
+                if pg is not _NOT_CUT_OVER:
+                    out: List[BaseModel] = []
+                    for source in pg["items"]:
+                        model = self._safe_model_load(source)
+                        if model is not None:
+                            out.append(model)
+                    return out
 
         must: List[Dict[str, Any]] = [{"term": {"tenant_id": tenant_id}}]
         if extra_must:
@@ -963,6 +1030,20 @@ class _BaseTenantScopedRepository:
             include=set(clean_patch.keys()) | {"updated_at"},
         )
         await self._es.update_document(self._index, entity_id, partial)
+        # Dual-write master/config entity updates to Postgres (full doc).
+        _agg = _BASE_REPO_MIRROR_AGGREGATES.get(self.entity_type)
+        if _agg is not None:
+            full = validated.model_dump(mode="json", exclude_none=False)
+            if _agg == "supplier_contract":
+                from commerce.services.commerce_persistence_bridge import (
+                    mirror_compliance_config_upsert,
+                )
+                await mirror_compliance_config_upsert(_agg, full)
+            else:
+                from commerce.services.commerce_persistence_bridge import (
+                    mirror_current_state_upsert,
+                )
+                await mirror_current_state_upsert(_agg, full)
         return validated
 
     # ------------------------------------------------------------------
