@@ -125,6 +125,16 @@ class DelayDetectionService:
                 )
                 continue
 
+            # Mirror the delay transition to the Postgres source-of-truth so a
+            # PG-served read (get_delayed_jobs / delay metrics) reflects it and
+            # the sweep does not re-detect the same job every cycle.
+            from commerce.services.commerce_persistence_bridge import (
+                mirror_current_state_fields,
+            )
+            await mirror_current_state_fields(
+                "job", job_doc.get("tenant_id"), job_id, update_fields
+            )
+
             # Merge updates into doc for broadcast
             job_doc.update(update_fields)
             newly_delayed.append(job_doc)

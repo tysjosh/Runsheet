@@ -924,17 +924,30 @@ class _BaseTenantScopedRepository:
             raise ValueError("size must be a positive integer")
 
         # Read-cutover: serve from Postgres for migrated entity types. Only the
-        # simple ``{"term": {field: value}}`` filter shape is translated; any
-        # other clause (range/terms/geo/custom sort) falls back to ES so we
-        # never silently change list semantics.
+        # simple ``{"term": {field: value}}`` filter shape is translated, AND
+        # only when every filtered field maps to a typed ORM column the PG
+        # ``list`` can honor. Document-only fields (e.g. the ``supported_products``
+        # / ``preferred_terminal_ids`` JSON arrays, or scalar doc fields like
+        # ``operator``) are NOT typed columns — the PG ``list`` would silently
+        # drop them and return the whole tenant set, so any such filter (plus
+        # range/terms/geo/custom sort) falls back to ES to preserve list
+        # semantics exactly.
         _agg = _BASE_REPO_MIRROR_AGGREGATES.get(self.entity_type)
         if _agg is not None and not sort:
+            from persistence.read_repositories import HybridReadRepository
+
+            model = HybridReadRepository(_agg).model
             translatable = True
             pg_filters: Dict[str, Any] = {}
             for clause in (extra_must or []):
                 term = clause.get("term") if isinstance(clause, dict) else None
                 if term and len(term) == 1:
                     (field, value), = term.items()
+                    # Only honor a filter the PG ``list`` can actually apply —
+                    # i.e. backed by a typed column on the ORM model.
+                    if getattr(model, field, None) is None:
+                        translatable = False
+                        break
                     pg_filters[field] = value
                 else:
                     translatable = False

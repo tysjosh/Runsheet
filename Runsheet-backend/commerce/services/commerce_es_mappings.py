@@ -213,6 +213,14 @@ INVOICES_CURRENT_MAPPING = {
             "external_refs":       {"type": "object"},
             "created_at":          {"type": "date"},
             "updated_at":          {"type": "date"},
+            # Idempotency checkpoint stamped by InvoiceService._update_projection
+            # (the last applied event sequence_number). It is ES-projection
+            # bookkeeping with no Postgres column — parity_check excludes it.
+            # Declared here because the index is ``dynamic: strict`` and every
+            # status-transition projection write carries it; without the field
+            # the strict mapping rejects the whole update and the transition
+            # silently fails.
+            "_last_applied_seq":   {"type": "long"},
         },
     },
     "settings": _DEFAULT_SETTINGS,

@@ -633,6 +633,145 @@ async def read_payment_list(tenant_id: str, **kwargs):
         return await PaymentReadRepository().list(session, tenant_id, **kwargs)
 
 
+# --- AR aging / credit / dunning / background-job reads (invoices+accounts) ---
+
+
+async def read_account_get_or_none(tenant_id: str, account_id: str):
+    """Tenant-scoped account doc from PG, ``None`` if missing, or _NOT_CUT_OVER."""
+    if not read_from_postgres():
+        return _NOT_CUT_OVER
+    from persistence.database import session_scope
+    from persistence.read_repositories import AccountReadRepository
+
+    async with session_scope() as session:
+        return await AccountReadRepository().get(session, tenant_id, account_id)
+
+
+async def read_invoices_open_for_aggregation(
+    tenant_id: str, *, statuses, account_id=None, require_issued_at=False,
+    due_on_or_before=None, order_by_due_asc=False,
+):
+    """Tenant-scoped open invoices for AR-aging / dunning Python rollups."""
+    if not read_from_postgres():
+        return _NOT_CUT_OVER
+    from persistence.database import session_scope
+    from persistence.read_repositories import InvoiceReadRepository
+
+    async with session_scope() as session:
+        return await InvoiceReadRepository().fetch_open_for_aggregation(
+            session, tenant_id, statuses=statuses, account_id=account_id,
+            require_issued_at=require_issued_at,
+            due_on_or_before=due_on_or_before, order_by_due_asc=order_by_due_asc,
+        )
+
+
+async def read_invoice_sum_remaining(tenant_id: str, account_id: str, *, statuses):
+    """Sum of remaining_cents over an account's invoices, or _NOT_CUT_OVER."""
+    if not read_from_postgres():
+        return _NOT_CUT_OVER
+    from persistence.database import session_scope
+    from persistence.read_repositories import InvoiceReadRepository
+
+    async with session_scope() as session:
+        return await InvoiceReadRepository().sum_remaining_cents(
+            session, tenant_id, account_id, statuses=statuses
+        )
+
+
+async def read_invoice_count_accounts_with_balance(tenant_id: str, *, statuses):
+    """Distinct accounts with a positive-remaining open invoice, or _NOT_CUT_OVER."""
+    if not read_from_postgres():
+        return _NOT_CUT_OVER
+    from persistence.database import session_scope
+    from persistence.read_repositories import InvoiceReadRepository
+
+    async with session_scope() as session:
+        return await InvoiceReadRepository().count_accounts_with_open_balance(
+            session, tenant_id, statuses=statuses
+        )
+
+
+async def read_invoices_due_all_tenants(*, statuses, due_on_or_before):
+    """CROSS-TENANT past-due invoice sweep for the overdue job, or _NOT_CUT_OVER."""
+    if not read_from_postgres():
+        return _NOT_CUT_OVER
+    from persistence.database import session_scope
+    from persistence.read_repositories import InvoiceReadRepository
+
+    async with session_scope() as session:
+        return await InvoiceReadRepository().scan_due_all_tenants(
+            session, statuses=statuses, due_on_or_before=due_on_or_before
+        )
+
+
+async def read_accounts_expired_overrides_all_tenants(*, credit_state, expires_on_or_before):
+    """CROSS-TENANT expired-override account sweep for the expiry job, or _NOT_CUT_OVER."""
+    if not read_from_postgres():
+        return _NOT_CUT_OVER
+    from persistence.database import session_scope
+    from persistence.read_repositories import AccountReadRepository
+
+    async with session_scope() as session:
+        return await AccountReadRepository().scan_expired_overrides_all_tenants(
+            session, credit_state=credit_state,
+            expires_on_or_before=expires_on_or_before,
+        )
+
+
+async def read_price_book_get(tenant_id: str, price_book_id: str):
+    """Read a price book (without rules) from Postgres, or _NOT_CUT_OVER off."""
+    if not read_from_postgres():
+        return _NOT_CUT_OVER
+    from persistence.database import session_scope
+    from persistence.read_repositories import PriceBookReadRepository
+
+    async with session_scope() as session:
+        return await PriceBookReadRepository().get(session, tenant_id, price_book_id)
+
+
+async def read_price_book_list(tenant_id: str, **kwargs):
+    """List price books from Postgres, or _NOT_CUT_OVER when ES-served."""
+    if not read_from_postgres():
+        return _NOT_CUT_OVER
+    from persistence.database import session_scope
+    from persistence.read_repositories import PriceBookReadRepository
+
+    async with session_scope() as session:
+        return await PriceBookReadRepository().list(session, tenant_id, **kwargs)
+
+
+async def read_pricing_rules_for_book(tenant_id: str, price_book_id: str):
+    """Read a book's fan-out pricing rules from Postgres, or _NOT_CUT_OVER off."""
+    if not read_from_postgres():
+        return _NOT_CUT_OVER
+    from persistence.database import session_scope
+    from persistence.read_repositories import PriceBookReadRepository
+
+    async with session_scope() as session:
+        return await PriceBookReadRepository().rules_for_book(
+            session, tenant_id, price_book_id
+        )
+
+
+async def read_pricing_rules_by_product(tenant_id: str, product_code: str):
+    """Read all tenant pricing rules for a product (PricingEngine candidate set).
+
+    Returns the projected ``pricing_rules_current`` docs from Postgres, or
+    ``_NOT_CUT_OVER`` when the engine should still query Elasticsearch. The
+    caller applies effective-window / quantity / precedence filtering, so this
+    returns the full candidate set just like the ES ``size: 1000`` term query.
+    """
+    if not read_from_postgres():
+        return _NOT_CUT_OVER
+    from persistence.database import session_scope
+    from persistence.read_repositories import PriceBookReadRepository
+
+    async with session_scope() as session:
+        return await PriceBookReadRepository().rules_by_product(
+            session, tenant_id, product_code
+        )
+
+
 # ---------------------------------------------------------------------------
 # Rest-of-commerce mirrors (price books/rules, event ledgers, AR aging)
 # ---------------------------------------------------------------------------
@@ -899,6 +1038,33 @@ async def mirror_current_state_delete(
     except Exception:  # noqa: BLE001
         logger.exception(
             "Postgres dual-delete failed for %s %s (tenant %s)",
+            aggregate_type, doc_id, tenant_id,
+        )
+
+
+async def mirror_current_state_fields(
+    aggregate_type: str, tenant_id: str, doc_id: str, fields: Dict[str, Any]
+) -> None:
+    """Best-effort: merge a partial field update into a current-state row.
+
+    For status-transition writes that apply an ES partial update without the
+    full document on hand (e.g. the asset-certification expiry sweep marking a
+    cert ``expiring_soon`` / ``expired`` / ``superseded``). Merges ``fields``
+    into the verbatim ``document`` column + typed columns so the PG
+    source-of-truth and the ES projection converge.
+    """
+    if not _enabled():
+        return
+    from persistence.database import session_scope
+    from persistence.repositories import CurrentStateRepository
+
+    try:
+        repo = CurrentStateRepository(aggregate_type)
+        async with session_scope() as session:
+            await repo.set_fields(session, tenant_id, doc_id, **fields)
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "Postgres dual-write fields failed for %s %s (tenant %s)",
             aggregate_type, doc_id, tenant_id,
         )
 

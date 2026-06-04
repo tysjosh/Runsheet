@@ -244,6 +244,81 @@ class UpdateAsset(BaseModel):
 @limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
 async def get_fleet_summary(request: Request, tenant: TenantContext = Depends(get_tenant_context)):
     try:
+        # Read-cutover: the trucks/assets reads here are structured scans +
+        # aggregations over the migrated ``truck`` aggregate (the ``assets``
+        # index is an ES alias onto ``trucks``), so when the flag is on we pull
+        # the tenant's asset documents once from Postgres and compute every
+        # count in Python — byte-identical to the ES match_all + terms aggs.
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_hybrid_fetch_for_aggregation,
+        )
+
+        pg_assets = await read_hybrid_fetch_for_aggregation("truck", tenant.tenant_id)
+        if pg_assets is not _NOT_CUT_OVER:
+            # The ``truck`` aggregate is tenant-optional (legacy docs may lack a
+            # tenant_id), so ``fetch_for_aggregation`` does not tenant-filter.
+            # The ES path injects a tenant_id term filter, so to stay
+            # byte-identical we keep only this tenant's docs here.
+            pg_assets = [
+                a for a in pg_assets if a.get("tenant_id") == tenant.tenant_id
+            ]
+            # Trucks summary: legacy "trucks" set == every doc in the index
+            # (the alias and the index share the same docs), matching the ES
+            # match_all scan.
+            trucks = pg_assets
+            summary = FleetSummary(
+                totalTrucks=len(trucks),
+                activeTrucks=len([t for t in trucks if t.get("status") in ['on_time', 'delayed']]),
+                onTimeTrucks=len([t for t in trucks if t.get("status") == 'on_time']),
+                delayedTrucks=len([t for t in trucks if t.get("status") == 'delayed']),
+                averageDelay=45,
+            )
+
+            # Multi-asset rollups: reproduce the by_type / by_subtype terms aggs
+            # (doc_count-desc, then key asc to match ES bucket ordering) and the
+            # active/delayed status filters.
+            from collections import Counter
+
+            type_counts = Counter(
+                a.get("asset_type") for a in pg_assets if a.get("asset_type") is not None
+            )
+            subtype_counts = Counter(
+                a.get("asset_subtype") for a in pg_assets
+                if a.get("asset_subtype") is not None
+            )
+
+            def _ordered(counter):
+                # ES terms agg orders by doc_count desc, then key asc.
+                return {
+                    k: c for k, c in sorted(
+                        counter.items(), key=lambda kv: (-kv[1], kv[0])
+                    )
+                }
+
+            total_assets = len(pg_assets)
+            active_assets = len([
+                a for a in pg_assets if a.get("status") in ("active", "in_transit")
+            ])
+            delayed_assets = len([
+                a for a in pg_assets if a.get("status") == "delayed"
+            ])
+            by_type = _ordered(type_counts)
+            by_subtype = _ordered(subtype_counts)
+
+            data = summary.dict()
+            data["totalAssets"] = total_assets
+            data["activeAssets"] = active_assets
+            data["delayedAssets"] = delayed_assets
+            data["byType"] = by_type
+            data["bySubtype"] = by_subtype
+
+            return {
+                "data": data,
+                "success": True,
+                "timestamp": utcnow().isoformat(),
+            }
+
         # Build tenant-scoped query for trucks
         trucks_query = inject_tenant_filter(
             {"query": {"match_all": {}}},
@@ -345,6 +420,11 @@ async def get_trucks(request: Request, tenant: TenantContext = Depends(get_tenan
         )
         pg_docs = await read_hybrid_fetch_for_aggregation("truck", tenant.tenant_id)
         if pg_docs is not _NOT_CUT_OVER:
+            # truck is tenant-optional → fetch is not tenant-filtered; mirror
+            # the ES inject_tenant_filter by keeping only this tenant's docs.
+            pg_docs = [
+                d for d in pg_docs if d.get("tenant_id") == tenant.tenant_id
+            ]
             trucks = [
                 d for d in pg_docs
                 if d.get("asset_subtype") == "truck" or "asset_type" not in d
@@ -424,7 +504,10 @@ async def get_truck_by_id(truck_id: str, request: Request, tenant: TenantContext
         )
         pg = await read_hybrid_get("truck", tenant.tenant_id, truck_id)
         if pg is not _NOT_CUT_OVER:
-            if pg is None:
+            # truck is tenant-optional, so read_hybrid_get does not enforce
+            # tenant isolation; the ES path injects a tenant_id filter (which
+            # also excludes legacy null-tenant docs), so match that here.
+            if pg is None or pg.get("tenant_id") != tenant.tenant_id:
                 raise resource_not_found(message="Truck not found", details={"truck_id": truck_id})
             truck = pg
         else:
@@ -552,6 +635,37 @@ async def get_fleet_assets(
 ):
     """Return all assets with optional filtering by asset_type, asset_subtype, and status."""
     try:
+        # Read-cutover: serve the assets-alias list from Postgres when on. The
+        # ES path filters by asset_type / asset_subtype / status (all term
+        # filters) sorted created_at desc; we reproduce that over the migrated
+        # ``truck`` documents so the formatted payload is identical.
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_hybrid_fetch_for_aggregation,
+        )
+
+        pg_assets = await read_hybrid_fetch_for_aggregation("truck", tenant.tenant_id)
+        if pg_assets is not _NOT_CUT_OVER:
+            # truck is tenant-optional → fetch is not tenant-filtered; mirror
+            # the ES inject_tenant_filter by keeping only this tenant's docs.
+            docs = [
+                d for d in pg_assets if d.get("tenant_id") == tenant.tenant_id
+            ]
+            if asset_type:
+                docs = [d for d in docs if d.get("asset_type") == asset_type]
+            if asset_subtype:
+                docs = [d for d in docs if d.get("asset_subtype") == asset_subtype]
+            if status:
+                docs = [d for d in docs if d.get("status") == status]
+            docs.sort(key=lambda d: d.get("created_at") or "", reverse=True)
+
+            formatted_assets = [_format_asset(doc) for doc in docs]
+            return {
+                "data": formatted_assets,
+                "success": True,
+                "timestamp": utcnow().isoformat(),
+            }
+
         # Build ES query with optional filters
         filters: List[dict] = []
         if asset_type:
@@ -595,6 +709,30 @@ async def get_fleet_assets(
 async def get_asset_by_id(asset_id: str, request: Request, tenant: TenantContext = Depends(get_tenant_context)):
     """Return a single asset by ID regardless of type."""
     try:
+        # Read-cutover: serve the by-id lookup from Postgres when on. The ES
+        # path looks up by _id (== truck_id/asset_id) scoped to tenant; the
+        # hybrid get applies the same tenant isolation (tenant-optional for
+        # legacy generic-ES asset docs).
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_hybrid_get,
+        )
+
+        pg = await read_hybrid_get("truck", tenant.tenant_id, asset_id)
+        if pg is not _NOT_CUT_OVER:
+            # truck is tenant-optional, so read_hybrid_get does not enforce
+            # tenant isolation; the ES path injects a tenant_id filter (which
+            # also excludes legacy null-tenant docs), so match that here.
+            if pg is None or pg.get("tenant_id") != tenant.tenant_id:
+                raise resource_not_found(
+                    message="Asset not found", details={"asset_id": asset_id}
+                )
+            return {
+                "data": _format_asset(pg),
+                "success": True,
+                "timestamp": utcnow().isoformat(),
+            }
+
         # Tenant-scoped lookup by asset_id
         query = inject_tenant_filter(
             {"query": {"term": {"_id": asset_id}}},

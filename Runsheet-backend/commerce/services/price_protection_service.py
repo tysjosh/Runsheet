@@ -376,37 +376,20 @@ class PriceProtectionService:
 
         iso_date = effective_date.isoformat()
 
-        # Build the ES query:
-        # - customer_id + product_code + status == "active"
-        # - start_date <= effective_date  (range lte)
-        # - end_date   >= effective_date  (range gte)
-        base_query: dict = {
-            "query": {
-                "bool": {
-                    "filter": [
-                        {"term": {"customer_id": customer_id.strip()}},
-                        {"term": {"product_code": product_code.strip()}},
-                        {"term": {"status": "active"}},
-                        {"range": {"start_date": {"lte": iso_date}}},
-                        {"range": {"end_date": {"gte": iso_date}}},
-                    ]
-                }
-            },
-            "size": _MAX_CONTRACT_ROWS_PER_LOOKUP,
-        }
-
-        query = inject_tenant_filter(base_query, self._tenant_id)
-
-        response = await self._es.search_documents(
-            PRICE_PROTECTION_CONTRACTS_INDEX,
-            query,
-            size=_MAX_CONTRACT_ROWS_PER_LOOKUP,
+        # Source candidate rows from Postgres when the commerce read-cutover
+        # is active, else from the ``price_protection_contracts`` ES index.
+        # We fetch every active contract for the customer/product and apply the
+        # ``[start_date, end_date]`` window filter client-side (the same
+        # defense-in-depth re-check that already runs below), so both back-ends
+        # yield an identical candidate set without needing two range clauses.
+        sources = await self._fetch_active_contract_sources(
+            customer_id=customer_id.strip(),
+            product_code=product_code.strip(),
+            iso_date=iso_date,
         )
 
-        hits = ((response or {}).get("hits") or {}).get("hits") or []
         candidates: List[PriceProtectionContract] = []
-        for hit in hits:
-            source = hit.get("_source") if isinstance(hit, dict) else None
+        for source in sources:
             if not isinstance(source, dict):
                 continue
             try:
@@ -447,6 +430,71 @@ class PriceProtectionService:
             )
         )
         return candidates[0]
+
+    async def _fetch_active_contract_sources(
+        self,
+        customer_id: str,
+        product_code: str,
+        iso_date: str,
+    ) -> List[dict]:
+        """Return raw active ``price_protection_contracts`` source docs.
+
+        Serves from Postgres (aggregate ``price_protection_contract``) when the
+        commerce read-cutover is active, else from the
+        ``price_protection_contracts`` ES index. Both filter on
+        ``customer_id`` + ``product_code`` + ``status == 'active'``; the
+        ``[start_date, end_date]`` window is re-checked client-side in
+        :meth:`find_active_contract`, so the candidate sets are identical.
+        """
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_hybrid_search,
+        )
+
+        pg = await read_hybrid_search(
+            "price_protection_contract",
+            self._tenant_id,
+            term_filters={
+                "customer_id": customer_id,
+                "product_code": product_code,
+                "status": "active",
+            },
+            page=1,
+            size=_MAX_CONTRACT_ROWS_PER_LOOKUP,
+        )
+        if pg is not _NOT_CUT_OVER:
+            return list(pg.get("items", []))
+
+        base_query: dict = {
+            "query": {
+                "bool": {
+                    "filter": [
+                        {"term": {"customer_id": customer_id}},
+                        {"term": {"product_code": product_code}},
+                        {"term": {"status": "active"}},
+                        {"range": {"start_date": {"lte": iso_date}}},
+                        {"range": {"end_date": {"gte": iso_date}}},
+                    ]
+                }
+            },
+            "size": _MAX_CONTRACT_ROWS_PER_LOOKUP,
+        }
+
+        query = inject_tenant_filter(base_query, self._tenant_id)
+
+        response = await self._es.search_documents(
+            PRICE_PROTECTION_CONTRACTS_INDEX,
+            query,
+            size=_MAX_CONTRACT_ROWS_PER_LOOKUP,
+        )
+
+        hits = ((response or {}).get("hits") or {}).get("hits") or []
+        sources: List[dict] = []
+        for hit in hits:
+            source = hit.get("_source") if isinstance(hit, dict) else None
+            if isinstance(source, dict):
+                sources.append(source)
+        return sources
 
     # ------------------------------------------------------------------
     # Price resolution
@@ -910,34 +958,50 @@ class PriceProtectionService:
         # (Constraint C3). ``status == "active"`` is the only other
         # filter — we evaluate both transition triggers (zero gallons,
         # past end_date) in Python so we only traverse the index once.
-        base_query: dict = {
-            "query": {
-                "bool": {
-                    "filter": [
-                        {"term": {"status": "active"}},
-                    ]
-                }
-            },
-            "size": _MAX_EXPIRY_SCAN_ROWS,
-        }
-        query = inject_tenant_filter(base_query, self._tenant_id)
+        # Reads from Postgres when the commerce read-cutover is active.
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_hybrid_search,
+        )
 
-        try:
-            response = await self._es.search_documents(
-                PRICE_PROTECTION_CONTRACTS_INDEX,
-                query,
-                size=_MAX_EXPIRY_SCAN_ROWS,
-            )
-        except Exception as exc:
-            logger.error(
-                "PriceProtectionService.check_expiry: scan failed for "
-                "tenant=%s: %s",
-                self._tenant_id,
-                exc,
-            )
-            return []
+        pg = await read_hybrid_search(
+            "price_protection_contract",
+            self._tenant_id,
+            term_filters={"status": "active"},
+            page=1,
+            size=_MAX_EXPIRY_SCAN_ROWS,
+        )
+        if pg is not _NOT_CUT_OVER:
+            hits = [{"_source": doc} for doc in pg.get("items", [])]
+        else:
+            base_query: dict = {
+                "query": {
+                    "bool": {
+                        "filter": [
+                            {"term": {"status": "active"}},
+                        ]
+                    }
+                },
+                "size": _MAX_EXPIRY_SCAN_ROWS,
+            }
+            query = inject_tenant_filter(base_query, self._tenant_id)
 
-        hits = ((response or {}).get("hits") or {}).get("hits") or []
+            try:
+                response = await self._es.search_documents(
+                    PRICE_PROTECTION_CONTRACTS_INDEX,
+                    query,
+                    size=_MAX_EXPIRY_SCAN_ROWS,
+                )
+            except Exception as exc:
+                logger.error(
+                    "PriceProtectionService.check_expiry: scan failed for "
+                    "tenant=%s: %s",
+                    self._tenant_id,
+                    exc,
+                )
+                return []
+
+            hits = ((response or {}).get("hits") or {}).get("hits") or []
         if len(hits) >= _MAX_EXPIRY_SCAN_ROWS:
             # Extremely unusual — a single tenant with more active
             # contracts than the scan window. Log so operators notice
@@ -1464,6 +1528,20 @@ class PriceProtectionService:
             PRICE_PROTECTION_CONTRACTS_INDEX,
             contract.contract_id,
             patch,
+        )
+
+        # Mirror the terminal status to Postgres so the source-of-truth (and
+        # the read-cutover scan in ``check_expiry``) reflects the transition;
+        # otherwise a PG-served scan would re-transition the same contract on
+        # every cron pass. Best-effort, same as the decrement path.
+        mirrored = contract.model_dump(mode="json")
+        mirrored.update(patch)
+        from commerce.services.commerce_persistence_bridge import (
+            mirror_compliance_config_upsert,
+        )
+
+        await mirror_compliance_config_upsert(
+            "price_protection_contract", mirrored
         )
 
     async def _fetch_contract(

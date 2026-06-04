@@ -1749,6 +1749,22 @@ class GeotabConnector(IntegrationConnector):
             await self._es.update_document(
                 self._trucks_index, truck_id, partial
             )
+            # Mirror live position to the Postgres source-of-truth so the
+            # PG-backed fleet reads reflect it. Partial field-merge (preserves
+            # other truck fields). Only for the canonical ``trucks`` aggregate.
+            if self._trucks_index == "trucks":
+                try:
+                    from commerce.services.commerce_persistence_bridge import (
+                        mirror_current_state_fields,
+                    )
+                    await mirror_current_state_fields(
+                        "truck", self._tenant_id, truck_id, partial
+                    )
+                except Exception:  # noqa: BLE001 — best-effort, never block telemetry
+                    logger.warning(
+                        "GeotabConnector: PG position mirror failed tenant=%s "
+                        "truck=%s", self._tenant_id, truck_id, exc_info=True,
+                    )
             return True
         except Exception as exc:
             logger.warning(

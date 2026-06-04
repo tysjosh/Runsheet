@@ -52,44 +52,59 @@ async def run_invoice_overdue_cycle(
     """
     now = utcnow()
 
-    # Query for invoices past their due date that are still open/partial.
-    # This is a system-level sweep across all tenants. Each mark_overdue
-    # call is tenant-scoped internally.
-    query: Dict[str, Any] = {
-        "query": {
-            "bool": {
-                "must": [
-                    {
-                        "terms": {
-                            "status": [
-                                InvoiceStatus.OPEN.value,
-                                InvoiceStatus.PARTIAL.value,
-                            ]
-                        }
-                    },
-                    {
-                        "range": {
-                            "due_date": {
-                                "lte": now.isoformat(),
+    # Read-cutover: serve the cross-tenant sweep from Postgres when on. PG
+    # ``due_date`` is a pure date column, so the boundary is compared against
+    # ``now.date()`` (the ES doc stores a datetime, but for a daily/hourly
+    # sweep the date boundary is the meaningful one). Each ``mark_overdue``
+    # call below stays tenant-scoped.
+    from commerce.services.commerce_persistence_bridge import (
+        _NOT_CUT_OVER,
+        read_invoices_due_all_tenants,
+    )
+
+    _OVERDUE_STATUSES = [InvoiceStatus.OPEN.value, InvoiceStatus.PARTIAL.value]
+
+    pg = await read_invoices_due_all_tenants(
+        statuses=_OVERDUE_STATUSES, due_on_or_before=now.date()
+    )
+    if pg is not _NOT_CUT_OVER:
+        hits = [{"_source": doc} for doc in pg]
+    else:
+        # Query for invoices past their due date that are still open/partial.
+        # This is a system-level sweep across all tenants. Each mark_overdue
+        # call is tenant-scoped internally.
+        query: Dict[str, Any] = {
+            "query": {
+                "bool": {
+                    "must": [
+                        {
+                            "terms": {
+                                "status": _OVERDUE_STATUSES
                             }
-                        }
-                    },
-                ]
-            }
-        },
-        "size": _MAX_SCAN_SIZE,
-        "_source": ["invoice_id", "tenant_id", "due_date", "status"],
-    }
+                        },
+                        {
+                            "range": {
+                                "due_date": {
+                                    "lte": now.isoformat(),
+                                }
+                            }
+                        },
+                    ]
+                }
+            },
+            "size": _MAX_SCAN_SIZE,
+            "_source": ["invoice_id", "tenant_id", "due_date", "status"],
+        }
 
-    try:
-        response = await es_service.search_documents(
-            INVOICES_CURRENT_INDEX, query, size=_MAX_SCAN_SIZE
-        )
-    except Exception as exc:
-        logger.error("Invoice overdue scan failed: %s", exc)
-        return 0
+        try:
+            response = await es_service.search_documents(
+                INVOICES_CURRENT_INDEX, query, size=_MAX_SCAN_SIZE
+            )
+        except Exception as exc:
+            logger.error("Invoice overdue scan failed: %s", exc)
+            return 0
 
-    hits = response.get("hits", {}).get("hits", [])
+        hits = response.get("hits", {}).get("hits", [])
     if not hits:
         logger.debug("No past-due invoices found for overdue transition")
         return 0

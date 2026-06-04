@@ -45,37 +45,50 @@ async def run_credit_override_expiry_cycle(
     """
     now = utcnow()
 
-    # Query for accounts with expired overrides — no tenant filter here
-    # because this is a system-level sweep across all tenants. Each
-    # expire_override call is tenant-scoped internally.
-    query: Dict[str, Any] = {
-        "query": {
-            "bool": {
-                "must": [
-                    {"term": {"credit_state": CreditState.OVERRIDE.value}},
-                    {
-                        "range": {
-                            "credit_override_expires_at": {
-                                "lte": now.isoformat(),
+    # Read-cutover: serve the cross-tenant sweep from Postgres when on. Each
+    # ``expire_override`` call below stays tenant-scoped.
+    from commerce.services.commerce_persistence_bridge import (
+        _NOT_CUT_OVER,
+        read_accounts_expired_overrides_all_tenants,
+    )
+
+    pg = await read_accounts_expired_overrides_all_tenants(
+        credit_state=CreditState.OVERRIDE.value, expires_on_or_before=now
+    )
+    if pg is not _NOT_CUT_OVER:
+        hits = [{"_source": doc} for doc in pg]
+    else:
+        # Query for accounts with expired overrides — no tenant filter here
+        # because this is a system-level sweep across all tenants. Each
+        # expire_override call is tenant-scoped internally.
+        query: Dict[str, Any] = {
+            "query": {
+                "bool": {
+                    "must": [
+                        {"term": {"credit_state": CreditState.OVERRIDE.value}},
+                        {
+                            "range": {
+                                "credit_override_expires_at": {
+                                    "lte": now.isoformat(),
+                                }
                             }
-                        }
-                    },
-                ]
-            }
-        },
-        "size": 100,
-        "_source": ["account_id", "tenant_id", "credit_override_expires_at"],
-    }
+                        },
+                    ]
+                }
+            },
+            "size": 100,
+            "_source": ["account_id", "tenant_id", "credit_override_expires_at"],
+        }
 
-    try:
-        response = await es_service.search_documents(
-            ACCOUNTS_CURRENT_INDEX, query, size=100
-        )
-    except Exception as exc:
-        logger.error("Credit override expiry scan failed: %s", exc)
-        return 0
+        try:
+            response = await es_service.search_documents(
+                ACCOUNTS_CURRENT_INDEX, query, size=100
+            )
+        except Exception as exc:
+            logger.error("Credit override expiry scan failed: %s", exc)
+            return 0
 
-    hits = response.get("hits", {}).get("hits", [])
+        hits = response.get("hits", {}).get("hits", [])
     if not hits:
         logger.debug("No expired credit overrides found")
         return 0

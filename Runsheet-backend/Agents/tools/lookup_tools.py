@@ -76,9 +76,22 @@ async def find_truck_by_id(truck_identifier: str) -> str:
 
     try:
         logger.info(f"🔍 Finding asset: {truck_identifier}")
-        assets_query = inject_tenant_filter({"query": {"match_all": {}}}, tenant_id)
-        assets_resp = await elasticsearch_service.search_documents("trucks", assets_query, size=1000)
-        assets = [hit["_source"] for hit in assets_resp.get("hits", {}).get("hits", [])]
+        # Read-cutover: serve from Postgres when enabled. The ES path is a
+        # tenant-scoped match_all over the trucks index; we reproduce it via the
+        # migrated ``truck`` aggregate. ``truck`` is tenant-optional so the
+        # fetch is not tenant-filtered — apply an explicit tenant_id match to
+        # mirror the ES inject_tenant_filter (legacy null-tenant docs excluded).
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_hybrid_fetch_for_aggregation,
+        )
+        pg_assets = await read_hybrid_fetch_for_aggregation("truck", tenant_id)
+        if pg_assets is not _NOT_CUT_OVER:
+            assets = [a for a in pg_assets if a.get("tenant_id") == tenant_id]
+        else:
+            assets_query = inject_tenant_filter({"query": {"match_all": {}}}, tenant_id)
+            assets_resp = await elasticsearch_service.search_documents("trucks", assets_query, size=1000)
+            assets = [hit["_source"] for hit in assets_resp.get("hits", {}).get("hits", [])]
 
         identifier_lower = truck_identifier.lower()
 
@@ -200,16 +213,30 @@ async def get_all_locations() -> str:
 
     try:
         logger.info("📍 Getting all locations")
-        loc_query = inject_tenant_filter({"query": {"match_all": {}}}, tenant_id)
-        loc_resp = await elasticsearch_service.search_documents("locations", loc_query, size=1000)
-        locations = [hit["_source"] for hit in loc_resp.get("hits", {}).get("hits", [])]
+        # Read-cutover: serve from Postgres when enabled. The ES path is a
+        # tenant-scoped match_all over the locations index; we reproduce it via
+        # the migrated ``location`` aggregate. ``location`` is tenant-optional
+        # so the fetch is not tenant-filtered — apply an explicit tenant_id
+        # match to mirror the ES inject_tenant_filter.
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_hybrid_fetch_for_aggregation,
+        )
+        pg_locs = await read_hybrid_fetch_for_aggregation("location", tenant_id)
+        if pg_locs is not _NOT_CUT_OVER:
+            locations = [l for l in pg_locs if l.get("tenant_id") == tenant_id]
+        else:
+            loc_query = inject_tenant_filter({"query": {"match_all": {}}}, tenant_id)
+            loc_resp = await elasticsearch_service.search_documents("locations", loc_query, size=1000)
+            locations = [hit["_source"] for hit in loc_resp.get("hits", {}).get("hits", [])]
         
         response = f"📍 **All Locations** ({len(locations)} total)\n\n"
         
-        # Group by type
+        # Group by type. The migrated docs use ``location_type`` / ``location_name``;
+        # older/generic docs may use ``type`` / ``name``. Accept both.
         by_type = {}
         for loc in locations:
-            loc_type = loc.get('type', 'unknown')
+            loc_type = loc.get('location_type') or loc.get('type') or 'unknown'
             if loc_type not in by_type:
                 by_type[loc_type] = []
             by_type[loc_type].append(loc)
@@ -218,7 +245,9 @@ async def get_all_locations() -> str:
             type_emoji = {"depot": "🏭", "warehouse": "🏢", "station": "🚉", "port": "⚓"}.get(loc_type, "📍")
             response += f"**{type_emoji} {loc_type.title()}s:**\n"
             for loc in locs:
-                response += f"• {loc.get('name')} ({loc.get('region')})\n"
+                name = loc.get('location_name') or loc.get('name') or loc.get('location_id') or 'Unknown'
+                region = loc.get('region') or loc.get('address') or ''
+                response += f"• {name} ({region})\n" if region else f"• {name}\n"
             response += "\n"
         
         success = True

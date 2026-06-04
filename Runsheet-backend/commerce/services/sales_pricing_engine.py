@@ -315,39 +315,20 @@ class SalesPricingEngine:
 
         iso_date = effective_date.isoformat()
 
-        # Build the ES query. Note: ``expiry_date`` is optional on
-        # :class:`PricingRule`, so we cannot express the full window
-        # filter as a single ``range`` clause without losing the
-        # "no expiry" rules. Task 5.2 resolves this by filtering the
-        # lower bound in ES and the upper bound client-side after
-        # :class:`PricingRule.model_validate` — cheaper than a
-        # should/must_not_exists hybrid and preserves the priority
-        # ordering that Task 5.3 will layer on top.
-        base_query: dict = {
-            "query": {
-                "bool": {
-                    "filter": [
-                        {"term": {"product_code": product_code.strip()}},
-                        {"term": {"status": "active"}},
-                        {"range": {"effective_date": {"lte": iso_date}}},
-                    ]
-                }
-            },
-            "size": _MAX_RULE_ROWS_PER_LOOKUP,
-        }
-
-        query = inject_tenant_filter(base_query, self._tenant_id)
-
-        response = await self._es.search_documents(
-            PRICING_RULES_INDEX,
-            query,
-            size=_MAX_RULE_ROWS_PER_LOOKUP,
+        # Source the candidate rows from Postgres when the commerce
+        # read-cutover is active, else from the ``pricing_rules`` ES index.
+        # ``expiry_date`` is optional on :class:`PricingRule`, so the lower
+        # bound (effective_date <= iso_date) is applied at the source and the
+        # optional upper bound is re-checked client-side after
+        # :class:`PricingRule.model_validate` — both back-ends return the same
+        # candidate set, and the priority ordering is layered on below.
+        sources = await self._fetch_rule_sources(
+            product_code=product_code.strip(),
+            iso_date=iso_date,
         )
 
-        hits = ((response or {}).get("hits") or {}).get("hits") or []
         candidates: List[PricingRule] = []
-        for hit in hits:
-            source = hit.get("_source") if isinstance(hit, dict) else None
+        for source in sources:
             if not isinstance(source, dict):
                 continue
             try:
@@ -440,6 +421,68 @@ class SalesPricingEngine:
             return None
 
         return top
+
+    async def _fetch_rule_sources(
+        self,
+        product_code: str,
+        iso_date: str,
+    ) -> List[dict]:
+        """Return raw ``pricing_rules`` source docs for the lookup.
+
+        Serves from Postgres (aggregate ``compliance_pricing_rule``) when the
+        commerce read-cutover is active, else from the ``pricing_rules`` ES
+        index. Both apply the same source-side filter — ``product_code`` exact
+        match, ``status == 'active'``, ``effective_date <= iso_date`` — and
+        leave the optional ``expiry_date`` upper bound to the client-side
+        re-check in :meth:`resolve_rule`.
+        """
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_hybrid_search,
+        )
+
+        pg = await read_hybrid_search(
+            "compliance_pricing_rule",
+            self._tenant_id,
+            term_filters={"product_code": product_code, "status": "active"},
+            range_field="effective_date",
+            range_lte=iso_date,
+            sort_field="effective_date",
+            sort_order="desc",
+            page=1,
+            size=_MAX_RULE_ROWS_PER_LOOKUP,
+        )
+        if pg is not _NOT_CUT_OVER:
+            return list(pg.get("items", []))
+
+        base_query: dict = {
+            "query": {
+                "bool": {
+                    "filter": [
+                        {"term": {"product_code": product_code}},
+                        {"term": {"status": "active"}},
+                        {"range": {"effective_date": {"lte": iso_date}}},
+                    ]
+                }
+            },
+            "size": _MAX_RULE_ROWS_PER_LOOKUP,
+        }
+
+        query = inject_tenant_filter(base_query, self._tenant_id)
+
+        response = await self._es.search_documents(
+            PRICING_RULES_INDEX,
+            query,
+            size=_MAX_RULE_ROWS_PER_LOOKUP,
+        )
+
+        hits = ((response or {}).get("hits") or {}).get("hits") or []
+        sources: List[dict] = []
+        for hit in hits:
+            source = hit.get("_source") if isinstance(hit, dict) else None
+            if isinstance(source, dict):
+                sources.append(source)
+        return sources
 
     # ------------------------------------------------------------------
     # Price resolution

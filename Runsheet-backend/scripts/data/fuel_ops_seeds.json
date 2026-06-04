@@ -363,8 +363,8 @@
       "branded_required": true,
       "minimum_lift_gallons_per_month": 100000.0,
       "rebate_terms": "$0.02 per gallon rebate if monthly volume exceeds 150,000 gallons",
-      "effective_from": "2026-01-01T00:00:00Z",
-      "effective_to": "2026-12-31T23:59:59Z",
+      "effective_from": "2026-01-01",
+      "effective_to": "2026-12-31",
       "status": "active"
     },
     {
@@ -376,8 +376,8 @@
       "branded_required": false,
       "minimum_lift_gallons_per_month": 75000.0,
       "rebate_terms": "$0.015 per gallon rebate if monthly volume exceeds 100,000 gallons",
-      "effective_from": "2026-03-01T00:00:00Z",
-      "effective_to": "2026-08-31T23:59:59Z",
+      "effective_from": "2026-03-01",
+      "effective_to": "2026-08-31",
       "status": "active"
     }
   ],

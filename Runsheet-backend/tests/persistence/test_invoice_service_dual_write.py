@@ -251,3 +251,56 @@ async def test_dual_write_off_does_not_touch_postgres(engine, monkeypatch):
         event_rows = await session.scalar(select(func.count()).select_from(OutboxEventORM))
     assert invoice_rows == 0
     assert event_rows == 0
+
+
+async def test_mark_overdue_mirrors_status_to_postgres(engine, dual_write_on, monkeypatch):
+    """mark_overdue must mirror status=overdue to PG (regression).
+
+    Previously it wrote the status to ES only, so the PG row stayed open and the
+    PG-backed overdue sweep + invoice get re-marked the same invoice forever.
+    """
+    # Read from PG too, so service.get() (inside mark_overdue) sees the seeded
+    # PG invoice and the idempotency short-circuit can engage on the 2nd call.
+    monkeypatch.setenv("COMMERCE_READ_FROM_POSTGRES", "true")
+    clear_settings_cache()
+
+    await _seed_parents()
+    repo = InvoiceRepository()
+    async with session_scope() as session:
+        await repo.create(
+            session, invoice_id="INV-OD", tenant_id=TENANT, customer_id="cust_1",
+            account_id="acct_1", line_items=_line_items(), status="open",
+            total_cents=35000, remaining_cents=35000,
+        )
+        await repo.set_fields(session, TENANT, "INV-OD", status="open",
+                              due_date="2026-01-01")
+
+    es = _make_es()
+    service = InvoiceService(es)
+    result = await service.mark_overdue(tenant_id=TENANT, invoice_id="INV-OD")
+    assert result["status"] == "overdue"
+
+    async with session_scope() as session:
+        row = await repo.get(session, TENANT, "INV-OD")
+        assert row.status == "overdue"  # mirrored to PG, not just ES
+
+    # Idempotent: a second call sees overdue in PG and returns without a new event.
+    again = await service.mark_overdue(tenant_id=TENANT, invoice_id="INV-OD")
+    assert again["status"] == "overdue"
+    clear_settings_cache()
+
+
+def test_invoices_current_mapping_declares_last_applied_seq():
+    """The strict invoices_current mapping must declare _last_applied_seq.
+
+    _update_projection stamps this field on every status transition; if the
+    strict mapping omits it the whole projection write is rejected and the
+    transition silently fails (the bug that made overdue invoices re-mark
+    every cycle).
+    """
+    from commerce.services.commerce_es_mappings import INVOICES_CURRENT_MAPPING
+
+    props = INVOICES_CURRENT_MAPPING["mappings"]["properties"]
+    assert INVOICES_CURRENT_MAPPING["mappings"]["dynamic"] == "strict"
+    assert "_last_applied_seq" in props
+    assert props["_last_applied_seq"]["type"] == "long"

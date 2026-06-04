@@ -361,13 +361,27 @@ class DunningService:
         - status in (open, partial, overdue)
         - due_date <= cutoff_date
         """
+        _DUNNING_STATUSES = ["open", "partial", "overdue"]
+
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_invoices_open_for_aggregation,
+        )
+
+        pg = await read_invoices_open_for_aggregation(
+            tenant_id, statuses=_DUNNING_STATUSES,
+            due_on_or_before=cutoff_date, order_by_due_asc=True,
+        )
+        if pg is not _NOT_CUT_OVER:
+            return pg
+
         query: Dict[str, Any] = {
             "query": {
                 "bool": {
                     "must": [
                         {
                             "terms": {
-                                "status": ["open", "partial", "overdue"]
+                                "status": _DUNNING_STATUSES
                             }
                         },
                         {

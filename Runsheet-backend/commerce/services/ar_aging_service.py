@@ -93,26 +93,9 @@ class ARAgingService:
         # and remaining_cents. We use a scroll-style approach with a
         # reasonable size limit since accounts typically don't have
         # thousands of open invoices.
-        query: Dict[str, Any] = {
-            "query": {
-                "bool": {
-                    "must": [
-                        {"term": {"account_id": account_id}},
-                        {"terms": {"status": _AGING_STATUSES}},
-                        {"exists": {"field": "issued_at"}},
-                    ]
-                }
-            },
-            "size": 10000,
-            "_source": ["invoice_id", "issued_at", "remaining_cents"],
-        }
-        query = inject_tenant_filter(query, tenant_id)
-
-        response = await self._es.search_documents(
-            INVOICES_CURRENT_INDEX, query, size=10000
+        hits = await self._fetch_open_invoices(
+            tenant_id, account_id=account_id, require_issued_at=True
         )
-
-        hits = response["hits"]["hits"]
 
         # Compute buckets
         bucket_0_30 = 0
@@ -120,8 +103,7 @@ class ARAgingService:
         bucket_61_90 = 0
         bucket_90_plus = 0
 
-        for hit in hits:
-            source = hit["_source"]
+        for source in hits:
             remaining_cents = int(source.get("remaining_cents", 0))
             issued_at_raw = source.get("issued_at")
 
@@ -174,25 +156,7 @@ class ARAgingService:
         now = utcnow()
 
         # Query all open invoices for this tenant
-        query: Dict[str, Any] = {
-            "query": {
-                "bool": {
-                    "must": [
-                        {"terms": {"status": _AGING_STATUSES}},
-                        {"exists": {"field": "issued_at"}},
-                    ]
-                }
-            },
-            "size": 10000,
-            "_source": ["invoice_id", "account_id", "issued_at", "remaining_cents"],
-        }
-        query = inject_tenant_filter(query, tenant_id)
-
-        response = await self._es.search_documents(
-            INVOICES_CURRENT_INDEX, query, size=10000
-        )
-
-        hits = response["hits"]["hits"]
+        hits = await self._fetch_open_invoices(tenant_id, require_issued_at=True)
 
         # Aggregate buckets at tenant level and per-account
         tenant_bucket_0_30 = 0
@@ -203,8 +167,7 @@ class ARAgingService:
         # Per-account tracking
         account_aging: Dict[str, Dict[str, int]] = {}
 
-        for hit in hits:
-            source = hit["_source"]
+        for source in hits:
             remaining_cents = int(source.get("remaining_cents", 0))
             issued_at_raw = source.get("issued_at")
             acct_id = source.get("account_id", "unknown")
@@ -388,6 +351,42 @@ class ARAgingService:
         delta = now_aware - issued_dt
         return max(0, delta.days)
 
+    async def _fetch_open_invoices(
+        self, tenant_id: str, *, account_id: str | None = None,
+        require_issued_at: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Fetch open invoices for aging, from Postgres when cut over else ES.
+
+        Returns a list of ``invoices_current`` documents (``_source`` shape)
+        so the bucket math is identical on both paths.
+        """
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_invoices_open_for_aggregation,
+        )
+
+        pg = await read_invoices_open_for_aggregation(
+            tenant_id, statuses=_AGING_STATUSES, account_id=account_id,
+            require_issued_at=require_issued_at,
+        )
+        if pg is not _NOT_CUT_OVER:
+            return pg
+
+        must: List[Dict[str, Any]] = [{"terms": {"status": _AGING_STATUSES}}]
+        if account_id:
+            must.append({"term": {"account_id": account_id}})
+        if require_issued_at:
+            must.append({"exists": {"field": "issued_at"}})
+        query: Dict[str, Any] = {
+            "query": {"bool": {"must": must}},
+            "size": 10000,
+        }
+        query = inject_tenant_filter(query, tenant_id)
+        response = await self._es.search_documents(
+            INVOICES_CURRENT_INDEX, query, size=10000
+        )
+        return [hit["_source"] for hit in response["hits"]["hits"]]
+
     async def _count_accounts_with_balance(
         self, tenant_id: str
     ) -> int:
@@ -399,6 +398,17 @@ class ARAgingService:
 
         Validates: Constraint C3
         """
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_invoice_count_accounts_with_balance,
+        )
+
+        pg = await read_invoice_count_accounts_with_balance(
+            tenant_id, statuses=_AGING_STATUSES
+        )
+        if pg is not _NOT_CUT_OVER:
+            return int(pg)
+
         query: Dict[str, Any] = {
             "query": {
                 "bool": {

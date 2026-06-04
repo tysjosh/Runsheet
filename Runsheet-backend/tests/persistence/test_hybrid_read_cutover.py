@@ -551,3 +551,778 @@ async def test_truck_get_served_from_postgres(engine, read_from_pg):
     assert doc is not None
     assert doc["truck_id"] == "TRUCK-9"
     assert doc["status"] == "on_time"
+
+# ---------------------------------------------------------------------------
+# Price book / pricing rule (commerce, typed-column models)
+# ---------------------------------------------------------------------------
+
+
+async def _seed_price_book(price_book_id, *, status="active", name="PB",
+                           tenant_id=TENANT):
+    from persistence.repositories import PriceBookRepository
+    async with session_scope() as s:
+        await PriceBookRepository().create(
+            s, price_book_id=price_book_id, tenant_id=tenant_id, name=name,
+            status=status, rule_count=0,
+        )
+
+
+async def _seed_pricing_rule(rule_id, price_book_id, *, product_code="DIESEL_2",
+                             tenant_id=TENANT):
+    from persistence.repositories import PricingRuleRepository
+    async with session_scope() as s:
+        await PricingRuleRepository().upsert(s, rule={
+            "rule_id": rule_id, "price_book_id": price_book_id, "tenant_id": tenant_id,
+            "product_code": product_code, "scope_type": "all", "scope_value": "*",
+            "effective_from": None, "effective_to": None,
+            "min_quantity_gallons": None, "unit_price_cents": 350,
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-01T00:00:00+00:00",
+        })
+
+
+async def test_price_book_service_get_served_from_postgres(engine, read_from_pg):
+    await _seed_price_book("pb_svc", name="Spring Book")
+    await _seed_pricing_rule("rule_a", "pb_svc")
+
+    from commerce.services.price_book_service import PriceBookService
+    service = PriceBookService(_es_raises_on_read())
+    book = await service.get(TENANT, "pb_svc")
+    assert book["price_book_id"] == "pb_svc"
+    assert book["name"] == "Spring Book"
+    # Rules are embedded, also from Postgres.
+    assert [r["rule_id"] for r in book["rules"]] == ["rule_a"]
+
+
+async def test_price_book_service_get_missing_raises(engine, read_from_pg):
+    from commerce.services.price_book_service import PriceBookService
+    from errors.exceptions import AppException
+    service = PriceBookService(_es_raises_on_read())
+    with pytest.raises(AppException):
+        await service.get(TENANT, "does_not_exist")
+
+
+async def test_price_book_service_get_tenant_isolation(engine, read_from_pg):
+    await _seed_price_book("pb_other", tenant_id="other-tenant")
+    from commerce.services.price_book_service import PriceBookService
+    from errors.exceptions import AppException
+    service = PriceBookService(_es_raises_on_read())
+    with pytest.raises(AppException):
+        await service.get(TENANT, "pb_other")
+
+
+async def test_price_book_service_list_served_from_postgres(engine, read_from_pg):
+    await _seed_price_book("pb_1", status="active")
+    await _seed_price_book("pb_2", status="active")
+    await _seed_price_book("pb_draft", status="draft")
+
+    from commerce.services.price_book_service import PriceBookService
+    service = PriceBookService(_es_raises_on_read())
+
+    all_books = await service.list(TENANT)
+    assert {b["price_book_id"] for b in all_books["items"]} >= {"pb_1", "pb_2", "pb_draft"}
+
+    active = await service.list(TENANT, status="active")
+    assert {b["price_book_id"] for b in active["items"]} == {"pb_1", "pb_2"}
+
+
+async def test_price_book_list_pagination_contiguous(engine, read_from_pg):
+    for i in range(3):
+        await _seed_price_book(f"pbp_{i}", status="active")
+    from commerce.services.price_book_service import PriceBookService
+    service = PriceBookService(_es_raises_on_read())
+    p1 = await service.list(TENANT, limit=1)
+    assert p1["next_cursor"] is not None
+    p2 = await service.list(TENANT, limit=1, cursor=p1["next_cursor"])
+    assert p1["items"][0]["price_book_id"] != p2["items"][0]["price_book_id"]
+
+
+# ---------------------------------------------------------------------------
+# PricingEngine (commerce pricing_rules_current candidate set)
+# ---------------------------------------------------------------------------
+
+
+async def _seed_pricing_rule_full(rule_id, price_book_id, *, product_code="DIESEL_2",
+                                  scope_type="default", scope_value="default",
+                                  unit_price_cents=350, effective_from=None,
+                                  effective_to=None, min_quantity_gallons=None,
+                                  tenant_id=TENANT):
+    from persistence.repositories import PricingRuleRepository
+    async with session_scope() as s:
+        await PricingRuleRepository().upsert(s, rule={
+            "rule_id": rule_id, "price_book_id": price_book_id, "tenant_id": tenant_id,
+            "product_code": product_code, "scope_type": scope_type,
+            "scope_value": scope_value,
+            "effective_from": effective_from or "2026-01-01T00:00:00+00:00",
+            "effective_to": effective_to,
+            "min_quantity_gallons": min_quantity_gallons,
+            "unit_price_cents": unit_price_cents,
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-01T00:00:00+00:00",
+        })
+
+
+async def test_pricing_engine_resolves_from_postgres(engine, read_from_pg):
+    from datetime import datetime
+
+    from commerce.models.account import Account, AccountTier
+    from commerce.services.pricing_engine import PricingEngine
+
+    await _seed_price_book("pb_eng", status="active")
+    # Default rule + an account-scoped rule that should win on precedence.
+    await _seed_pricing_rule_full("rule_default", "pb_eng", scope_type="default",
+                                  scope_value="default", unit_price_cents=350)
+    await _seed_pricing_rule_full("rule_acct", "pb_eng", scope_type="account",
+                                  scope_value="acct_1", unit_price_cents=300)
+
+    account = Account(account_id="acct_1", tenant_id=TENANT, customer_id="cust_1",
+                      display_name="Acme", tier=AccountTier.GOLD)
+    # No Redis → every resolve hits the candidate fetch, which serves from PG.
+    # NOTE: naive ``moment`` — SQLite's DateTime drops the tz info the seeded
+    # effective_from carried (PostgreSQL's DateTime(timezone=True) preserves it
+    # in production), so a naive moment keeps the effective-window comparison
+    # well-typed in the test without changing the production code path.
+    pricing = PricingEngine(_es_raises_on_read(), redis_client=None)
+    result = await pricing.resolve(
+        tenant_id=TENANT, account=account, product_code="DIESEL_2",
+        moment=datetime(2026, 6, 1), quantity_gallons=500.0,
+    )
+    assert result.rule_id == "rule_acct"
+    assert result.unit_price_cents == 300
+    assert result.matched_from_cache is False
+
+
+async def test_pricing_engine_product_scoping_from_postgres(engine, read_from_pg):
+    from datetime import datetime
+
+    from commerce.models.account import Account, AccountTier
+    from commerce.services.pricing_engine import PricingEngine, PricingError
+
+    await _seed_price_book("pb_eng2", status="active")
+    await _seed_pricing_rule_full("rule_diesel", "pb_eng2", product_code="DIESEL_2",
+                                  scope_type="default", scope_value="default")
+    account = Account(account_id="acct_9", tenant_id=TENANT, customer_id="cust_9",
+                      display_name="Beta", tier=AccountTier.DEFAULT)
+    pricing = PricingEngine(_es_raises_on_read(), redis_client=None)
+    # A different product has no rules → no_rule_matched, and ES is never queried.
+    with pytest.raises(PricingError):
+        await pricing.resolve(
+            tenant_id=TENANT, account=account, product_code="GASOLINE_REG",
+            moment=datetime(2026, 6, 1), quantity_gallons=100.0,
+        )
+
+
+# ---------------------------------------------------------------------------
+# SalesPricingEngine (compliance pricing_rules) + PriceProtectionService
+# (price_protection_contracts) read-cutover
+# ---------------------------------------------------------------------------
+
+
+async def test_sales_pricing_engine_resolve_rule_from_postgres(engine, read_from_pg):
+    from datetime import date
+
+    from commerce.services.sales_pricing_engine import SalesPricingEngine
+
+    await _seed("compliance_pricing_rule", {
+        "rule_id": "spr_1", "tenant_id": TENANT, "customer_id": "cust_1",
+        "account_id": None, "product_code": "DIESEL_2", "status": "active",
+        "strategy": "posted_price", "posted_price_cents": 325, "priority": 10,
+        "effective_date": "2026-01-01", "expiry_date": None,
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    })
+    svc = SalesPricingEngine(_es_raises_on_read(), tenant_id=TENANT)
+    rule = await svc.resolve_rule(
+        customer_id="cust_1", account_id=None, product_code="DIESEL_2",
+        effective_date=date(2026, 6, 1),
+    )
+    assert rule is not None
+    assert rule.rule_id == "spr_1"
+    assert rule.posted_price_cents == 325
+
+
+async def test_sales_pricing_engine_expired_rule_excluded_from_postgres(engine, read_from_pg):
+    from datetime import date
+
+    from commerce.services.sales_pricing_engine import SalesPricingEngine
+
+    await _seed("compliance_pricing_rule", {
+        "rule_id": "spr_exp", "tenant_id": TENANT, "customer_id": "cust_2",
+        "account_id": None, "product_code": "DIESEL_2", "status": "active",
+        "strategy": "posted_price", "posted_price_cents": 300, "priority": 10,
+        "effective_date": "2026-01-01", "expiry_date": "2026-03-01",
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    })
+    svc = SalesPricingEngine(_es_raises_on_read(), tenant_id=TENANT)
+    # effective_date after expiry → client-side window re-check drops it.
+    rule = await svc.resolve_rule(
+        customer_id="cust_2", account_id=None, product_code="DIESEL_2",
+        effective_date=date(2026, 6, 1),
+    )
+    assert rule is None
+
+
+def _ppc_doc(contract_id, **over):
+    doc = {
+        "contract_id": contract_id, "tenant_id": TENANT, "customer_id": "cust_1",
+        "account_id": "acct_1", "product_code": "DIESEL_2",
+        "contract_type": "fixed_price",
+        "contracted_gallons": 1000.0, "remaining_gallons": 1000.0,
+        "fixed_price_cents": 300, "status": "active", "version": 0,
+        "start_date": "2026-01-01", "end_date": "2026-12-31",
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    }
+    doc.update(over)
+    return doc
+
+
+async def test_price_protection_find_active_contract_from_postgres(engine, read_from_pg):
+    from datetime import date
+
+    from commerce.services.price_protection_service import PriceProtectionService
+
+    await _seed("price_protection_contract", _ppc_doc("ppc_find"))
+    svc = PriceProtectionService(_es_raises_on_read(), tenant_id=TENANT)
+    contract = await svc.find_active_contract("cust_1", "DIESEL_2", date(2026, 6, 1))
+    assert contract is not None
+    assert contract.contract_id == "ppc_find"
+
+
+async def test_price_protection_window_filter_from_postgres(engine, read_from_pg):
+    from datetime import date
+
+    from commerce.services.price_protection_service import PriceProtectionService
+
+    # Active status but the effective date is outside [start_date, end_date].
+    await _seed("price_protection_contract", _ppc_doc(
+        "ppc_window", start_date="2026-01-01", end_date="2026-03-01"))
+    svc = PriceProtectionService(_es_raises_on_read(), tenant_id=TENANT)
+    contract = await svc.find_active_contract("cust_1", "DIESEL_2", date(2026, 6, 1))
+    assert contract is None
+
+
+async def test_price_protection_resolve_price_from_postgres(engine, read_from_pg):
+    from datetime import date
+
+    from commerce.services.price_protection_service import PriceProtectionService
+
+    await _seed("price_protection_contract", _ppc_doc(
+        "ppc_resolve", contract_type="fixed_price", fixed_price_cents=280))
+    svc = PriceProtectionService(_es_raises_on_read(), tenant_id=TENANT)
+    resolution = await svc.resolve_price(
+        customer_id="cust_1", product_code="DIESEL_2", market_price_cents=400,
+        gallons=100.0, effective_date=date(2026, 6, 1),
+    )
+    assert resolution.contract_id == "ppc_resolve"
+    assert resolution.effective_price_cents == 280
+
+
+async def test_price_protection_check_expiry_from_postgres(engine, read_from_pg):
+    from datetime import date
+
+    from commerce.services.price_protection_service import PriceProtectionService
+
+    # One contract past its end_date (should transition to expired), one current.
+    es = _es_raises_on_read()  # update_document is allowed; search_documents is not
+    await _seed("price_protection_contract", _ppc_doc(
+        "ppc_old", end_date="2026-03-01"))
+    await _seed("price_protection_contract", _ppc_doc(
+        "ppc_current", end_date="2026-12-31"))
+    svc = PriceProtectionService(es, tenant_id=TENANT)
+    transitioned = await svc.check_expiry(today=date(2026, 6, 1))
+    assert transitioned == ["ppc_old"]
+    # The status transition was written via update_document (ES write path).
+    es.update_document.assert_awaited()
+
+
+async def test_supplier_contract_get_served_from_postgres(engine, read_from_pg):
+    await _seed("supplier_contract", {
+        "contract_id": "sc_get", "tenant_id": TENANT, "supplier_name": "Marathon",
+        "product_code": "DIESEL_2", "preferred_terminal_ids": ["TERM-001"],
+        "minimum_lift_gallons_per_month": 10000.0,
+        "contract_price_per_gallon_usd": 3.18, "branded_required": True,
+        "status": "active", "effective_from": "2026-01-01",
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    })
+    from fuel.terminal_models import SupplierContractRepository
+    repo = SupplierContractRepository(_es_raises_on_read())
+    contract = await repo.get(TENANT, "sc_get")
+    assert contract is not None
+    assert contract.contract_id == "sc_get"
+    assert contract.supplier_name == "Marathon"
+
+
+# ---------------------------------------------------------------------------
+# Secondary commerce reads — AR aging / credit / dunning / background jobs
+# (invoices_current + accounts_current scans, served from PG when cut over)
+# ---------------------------------------------------------------------------
+
+
+async def _seed_customer(customer_id, *, tenant_id=TENANT):
+    from persistence.repositories import CustomerRepository
+    async with session_scope() as s:
+        await CustomerRepository().create(
+            s, customer_id=customer_id, tenant_id=tenant_id,
+            display_name=f"Cust {customer_id}",
+        )
+
+
+async def _seed_account(account_id, customer_id, *, tenant_id=TENANT,
+                        credit_limit_cents=0, credit_state=None,
+                        credit_override_expires_at=None):
+    from persistence.repositories import AccountRepository
+    async with session_scope() as s:
+        await AccountRepository().create(
+            s, account_id=account_id, tenant_id=tenant_id, customer_id=customer_id,
+            display_name=f"Acct {account_id}", credit_limit_cents=credit_limit_cents,
+        )
+        if credit_state is not None or credit_override_expires_at is not None:
+            fields = {}
+            if credit_state is not None:
+                fields["credit_state"] = credit_state
+            if credit_override_expires_at is not None:
+                fields["credit_override_expires_at"] = credit_override_expires_at
+            await AccountRepository().set_fields(s, tenant_id, account_id, **fields)
+
+
+async def _seed_invoice(invoice_id, account_id, customer_id, *, tenant_id=TENANT,
+                        status="open", remaining_cents=10000, total_cents=10000,
+                        issued_at=None, due_date=None):
+    from persistence.repositories import InvoiceRepository
+    repo = InvoiceRepository()
+    async with session_scope() as s:
+        await repo.create(
+            s, invoice_id=invoice_id, tenant_id=tenant_id, customer_id=customer_id,
+            account_id=account_id, line_items=[{
+                "line_id": f"li_{invoice_id}", "product_code": "DIESEL_2",
+                "quantity_gallons": 100.0, "unit_price_cents": 100,
+                "subtotal_cents": total_cents,
+            }],
+            status=status, total_cents=total_cents, remaining_cents=remaining_cents,
+            due_date=due_date,
+        )
+        fields = {"status": status}
+        if issued_at is not None:
+            fields["issued_at"] = issued_at
+        await repo.set_fields(s, tenant_id, invoice_id, **fields)
+
+
+async def test_ar_aging_account_served_from_postgres(engine, read_from_pg):
+    from datetime import timedelta
+
+    from commerce.services.ar_aging_service import ARAgingService
+    from services.time_utils import utcnow
+
+    await _seed_customer("c_ar")
+    await _seed_account("a_ar", "c_ar")
+    now = utcnow()
+    # One invoice in 0-30 bucket, one in 90+.
+    await _seed_invoice("inv_recent", "a_ar", "c_ar", status="open",
+                        remaining_cents=5000,
+                        issued_at=(now - timedelta(days=5)).isoformat())
+    await _seed_invoice("inv_old", "a_ar", "c_ar", status="overdue",
+                        remaining_cents=7000,
+                        issued_at=(now - timedelta(days=120)).isoformat())
+
+    svc = ARAgingService(_es_raises_on_read())
+    aging = await svc.compute_account_aging(TENANT, "a_ar")
+    assert aging["bucket_0_30_cents"] == 5000
+    assert aging["bucket_90_plus_cents"] == 7000
+    assert aging["total_open_cents"] == 12000
+
+
+async def test_ar_aging_tenant_and_snapshot_from_postgres(engine, read_from_pg):
+    from datetime import timedelta
+
+    from commerce.services.ar_aging_service import ARAgingService
+    from services.time_utils import utcnow
+
+    await _seed_customer("c_t")
+    await _seed_account("a_t1", "c_t")
+    await _seed_account("a_t2", "c_t")
+    now = utcnow()
+    await _seed_invoice("inv_t1", "a_t1", "c_t", status="open",
+                        remaining_cents=3000,
+                        issued_at=(now - timedelta(days=10)).isoformat())
+    await _seed_invoice("inv_t2", "a_t2", "c_t", status="partial",
+                        remaining_cents=4000,
+                        issued_at=(now - timedelta(days=45)).isoformat())
+    # paid invoice (remaining 0) must NOT count.
+    await _seed_invoice("inv_paid", "a_t1", "c_t", status="paid",
+                        remaining_cents=0,
+                        issued_at=(now - timedelta(days=2)).isoformat())
+
+    svc = ARAgingService(_es_raises_on_read())
+    tenant_aging = await svc.compute_tenant_aging(TENANT)
+    assert tenant_aging["total_open_cents"] == 7000
+    assert tenant_aging["bucket_0_30_cents"] == 3000
+    assert tenant_aging["bucket_31_60_cents"] == 4000
+    assert {a["account_id"] for a in tenant_aging["by_account"]} == {"a_t1", "a_t2"}
+
+    # Snapshot writes to ES/PG (index_document allowed) and counts 2 accounts.
+    es = _es_raises_on_read()
+    svc2 = ARAgingService(es)
+    snap = await svc2.write_daily_snapshot(TENANT)
+    assert snap["total_open_cents"] == 7000
+    assert snap["account_count_with_balance"] == 2
+    es.index_document.assert_awaited()
+
+
+async def test_credit_open_balance_served_from_postgres(engine, read_from_pg):
+    from commerce.services.credit_service import CreditService
+
+    await _seed_customer("c_cr")
+    await _seed_account("a_cr", "c_cr", credit_limit_cents=100000)
+    await _seed_invoice("inv_cr1", "a_cr", "c_cr", status="open",
+                        remaining_cents=6000)
+    await _seed_invoice("inv_cr2", "a_cr", "c_cr", status="partial",
+                        remaining_cents=2500)
+    await _seed_invoice("inv_cr_paid", "a_cr", "c_cr", status="paid",
+                        remaining_cents=0)
+
+    svc = CreditService(_es_raises_on_read())
+    balance = await svc._compute_open_balance(TENANT, "a_cr")
+    assert balance == 8500
+
+    account = await svc._get_account(TENANT, "a_cr")
+    assert account["account_id"] == "a_cr"
+
+
+async def test_credit_get_account_missing_raises_from_postgres(engine, read_from_pg):
+    from commerce.services.credit_service import CreditService
+    from errors.exceptions import AppException
+
+    svc = CreditService(_es_raises_on_read())
+    with pytest.raises(AppException):
+        await svc._get_account(TENANT, "no_such_account")
+
+
+async def test_dunning_overdue_scan_served_from_postgres(engine, read_from_pg):
+    from datetime import timedelta
+
+    from commerce.services.dunning_service import DunningService
+    from services.time_utils import utcnow
+
+    await _seed_customer("c_dun")
+    await _seed_account("a_dun", "c_dun")
+    today = utcnow().date()
+    # 40 days overdue (eligible) and 1 day overdue (below 30-day min threshold).
+    await _seed_invoice("inv_due_old", "a_dun", "c_dun", status="open",
+                        remaining_cents=9000, due_date=(today - timedelta(days=40)))
+    await _seed_invoice("inv_due_new", "a_dun", "c_dun", status="open",
+                        remaining_cents=9000, due_date=(today - timedelta(days=1)))
+
+    svc = DunningService(_es_raises_on_read())
+    cutoff = today - timedelta(days=30)
+    overdue = await svc._query_overdue_invoices(TENANT, cutoff)
+    assert {i["invoice_id"] for i in overdue} == {"inv_due_old"}
+
+
+async def test_invoice_overdue_job_cross_tenant_from_postgres(engine, read_from_pg):
+    from datetime import timedelta
+    from unittest.mock import AsyncMock
+
+    from commerce.services.invoice_overdue_job import run_invoice_overdue_cycle
+    from services.time_utils import utcnow
+
+    today = utcnow().date()
+    await _seed_customer("c_j1")
+    await _seed_account("a_j1", "c_j1")
+    await _seed_invoice("inv_j_due", "a_j1", "c_j1", status="open",
+                        remaining_cents=5000, due_date=(today - timedelta(days=3)))
+    # A second tenant's past-due invoice — the sweep is cross-tenant.
+    await _seed_customer("c_j2", tenant_id="other-tenant")
+    await _seed_account("a_j2", "c_j2", tenant_id="other-tenant")
+    await _seed_invoice("inv_j_due2", "a_j2", "c_j2", tenant_id="other-tenant",
+                        status="partial", remaining_cents=5000,
+                        due_date=(today - timedelta(days=3)))
+    # Not due yet — excluded.
+    await _seed_invoice("inv_j_future", "a_j1", "c_j1", status="open",
+                        remaining_cents=5000, due_date=(today + timedelta(days=10)))
+
+    es = _es_raises_on_read()  # search_documents must NOT be used
+    invoice_service = AsyncMock()
+    invoice_service.mark_overdue = AsyncMock(return_value={})
+    count = await run_invoice_overdue_cycle(es, invoice_service)
+    assert count == 2
+    marked = {
+        call.kwargs["invoice_id"]
+        for call in invoice_service.mark_overdue.await_args_list
+    }
+    assert marked == {"inv_j_due", "inv_j_due2"}
+
+
+async def test_credit_override_expiry_job_cross_tenant_from_postgres(engine, read_from_pg):
+    from datetime import timedelta
+    from unittest.mock import AsyncMock
+
+    from commerce.models.account import CreditState
+    from commerce.services.credit_override_expiry_job import (
+        run_credit_override_expiry_cycle,
+    )
+    from services.time_utils import utcnow
+
+    now = utcnow()
+    await _seed_customer("c_ov")
+    # Expired override (eligible).
+    await _seed_account("a_ov_expired", "c_ov",
+                        credit_state=CreditState.OVERRIDE.value,
+                        credit_override_expires_at=(now - timedelta(hours=1)))
+    # Future override (not yet expired).
+    await _seed_account("a_ov_future", "c_ov",
+                        credit_state=CreditState.OVERRIDE.value,
+                        credit_override_expires_at=(now + timedelta(hours=1)))
+    # Plain account (no override).
+    await _seed_account("a_ov_ok", "c_ov")
+
+    es = _es_raises_on_read()  # search_documents must NOT be used
+    credit_service = AsyncMock()
+    credit_service.expire_override = AsyncMock(return_value={})
+    count = await run_credit_override_expiry_cycle(es, credit_service)
+    assert count == 1
+    expired = {
+        call.kwargs["account_id"]
+        for call in credit_service.expire_override.await_args_list
+    }
+    assert expired == {"a_ov_expired"}
+
+
+# ---------------------------------------------------------------------------
+# Asset-cert status transitions mirror to PG (prevents expiry-scan drift)
+# ---------------------------------------------------------------------------
+
+
+async def test_asset_cert_transition_mirrors_to_postgres(engine, read_from_pg, monkeypatch):
+    # Dual-write must be enabled for the mirror to fire.
+    monkeypatch.setenv("COMMERCE_DUAL_WRITE_POSTGRES", "true")
+    clear_settings_cache()
+
+    await _seed("asset_certification", _cert_doc("cert_mir", "2026-02-01",
+                                                 status="valid"))
+
+    from commerce.services.commerce_persistence_bridge import (
+        mirror_current_state_fields,
+    )
+    # Simulate the expiry sweep's status transition (ES write + PG mirror).
+    await mirror_current_state_fields(
+        "asset_certification", TENANT, "cert_mir",
+        {"status": "expiring_soon", "updated_at": "2026-06-01T00:00:00+00:00"},
+    )
+
+    async with session_scope() as s:
+        doc = await HybridReadRepository("asset_certification").get(
+            s, TENANT, "cert_mir"
+        )
+    # Both the verbatim document and the typed column reflect the transition.
+    assert doc["status"] == "expiring_soon"
+    from persistence.models import AssetCertificationORM
+    async with session_scope() as s:
+        row = await s.get(AssetCertificationORM, "cert_mir")
+        assert row.status == "expiring_soon"
+    clear_settings_cache()
+
+
+# ---------------------------------------------------------------------------
+# Fleet dashboard reads (trucks scan + assets-alias aggregation/list/get)
+# served from PG via the truck aggregate (assets is an ES alias on trucks)
+# ---------------------------------------------------------------------------
+
+
+async def _seed_asset(asset_id, *, asset_type=None, asset_subtype=None, status="active",
+                      tenant_id=TENANT, created_at="2026-01-01T00:00:00+00:00"):
+    doc = {
+        "truck_id": asset_id, "asset_id": asset_id, "tenant_id": tenant_id,
+        "status": status, "created_at": created_at,
+    }
+    if asset_type is not None:
+        doc["asset_type"] = asset_type
+    if asset_subtype is not None:
+        doc["asset_subtype"] = asset_subtype
+    await _seed("truck", doc, doc_id=asset_id)
+
+
+async def test_fleet_summary_rollups_from_postgres(engine, read_from_pg):
+    # Mixed asset types/subtypes + a cross-tenant row that must be excluded.
+    await _seed_asset("V1", asset_type="vehicle", asset_subtype="truck",
+                      status="on_time")
+    await _seed_asset("V2", asset_type="vehicle", asset_subtype="truck",
+                      status="delayed")
+    await _seed_asset("B1", asset_type="vessel", asset_subtype="barge",
+                      status="active")
+    await _seed_asset("OTHER", asset_type="vehicle", asset_subtype="truck",
+                      status="on_time", tenant_id="other-tenant")
+
+    from collections import Counter
+
+    from commerce.services.commerce_persistence_bridge import (
+        _NOT_CUT_OVER, read_hybrid_fetch_for_aggregation,
+    )
+    docs = await read_hybrid_fetch_for_aggregation("truck", TENANT)
+    assert docs is not _NOT_CUT_OVER
+    # Tenant isolation: the cross-tenant row is filtered out by the endpoint.
+    docs = [d for d in docs if d.get("tenant_id") == TENANT]
+    assert {d["truck_id"] for d in docs} == {"V1", "V2", "B1"}
+
+    # Truck status rollup (totalTrucks counts every doc in the index).
+    assert len(docs) == 3
+    assert len([d for d in docs if d.get("status") == "on_time"]) == 1
+    assert len([d for d in docs if d.get("status") == "delayed"]) == 1
+
+    # by_type / by_subtype ordering: doc_count desc then key asc.
+    type_counts = Counter(d.get("asset_type") for d in docs)
+    by_type = {k: c for k, c in sorted(type_counts.items(), key=lambda kv: (-kv[1], kv[0]))}
+    assert list(by_type.items()) == [("vehicle", 2), ("vessel", 1)]
+
+
+async def test_fleet_assets_filter_and_get_from_postgres(engine, read_from_pg):
+    await _seed_asset("VS1", asset_type="vessel", asset_subtype="boat",
+                      status="active", created_at="2026-02-01T00:00:00+00:00")
+    await _seed_asset("VS2", asset_type="vessel", asset_subtype="boat",
+                      status="idle", created_at="2026-03-01T00:00:00+00:00")
+    await _seed_asset("EQ1", asset_type="equipment", asset_subtype="crane",
+                      status="active", created_at="2026-01-01T00:00:00+00:00")
+
+    from commerce.services.commerce_persistence_bridge import (
+        _NOT_CUT_OVER, read_hybrid_fetch_for_aggregation, read_hybrid_get,
+    )
+    docs = await read_hybrid_fetch_for_aggregation("truck", TENANT)
+    assert docs is not _NOT_CUT_OVER
+    docs = [d for d in docs if d.get("tenant_id") == TENANT]
+
+    # Filter by asset_type=vessel, sort created_at desc (the endpoint's logic).
+    vessels = [d for d in docs if d.get("asset_type") == "vessel"]
+    vessels.sort(key=lambda d: d.get("created_at") or "", reverse=True)
+    assert [d["asset_id"] for d in vessels] == ["VS2", "VS1"]
+
+    # Get by id from PG.
+    one = await read_hybrid_get("truck", TENANT, "EQ1")
+    assert one is not _NOT_CUT_OVER
+    assert one["asset_subtype"] == "crane"
+
+
+# ---------------------------------------------------------------------------
+# Tax endpoint list handlers (tax-jurisdictions + exemptions) served from PG
+# ---------------------------------------------------------------------------
+
+
+async def test_tax_jurisdiction_list_filters_from_postgres(engine, read_from_pg):
+    from datetime import date
+
+    common = {
+        "tenant_id": TENANT, "jurisdiction_name": "X",
+        "rate_cents_per_gallon": 184, "product_codes": ["DIESEL_2"],
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    }
+    # Active state row, a different tax_type, and an expired row.
+    await _seed("tax_jurisdiction", {**common, "jurisdiction_id": "j_excise",
+                "fips_code": "48", "tax_type": "excise",
+                "effective_date": "2025-01-01"})
+    await _seed("tax_jurisdiction", {**common, "jurisdiction_id": "j_ust",
+                "fips_code": "48", "tax_type": "ust",
+                "effective_date": "2025-01-01"})
+    await _seed("tax_jurisdiction", {**common, "jurisdiction_id": "j_expired",
+                "fips_code": "48", "tax_type": "excise",
+                "effective_date": "2024-01-01", "expiry_date": "2025-06-01"})
+
+    from commerce.services.commerce_persistence_bridge import (
+        _NOT_CUT_OVER, read_hybrid_fetch_for_aggregation,
+    )
+
+    # tax_type filter → only excise rows (the endpoint's term filter).
+    docs = await read_hybrid_fetch_for_aggregation(
+        "tax_jurisdiction", TENANT, term_filters={"tax_type": "excise"},
+        range_field="effective_date", range_lte="2026-01-15",
+    )
+    assert docs is not _NOT_CUT_OVER
+    iso = date(2026, 1, 15).isoformat()
+    items = [d for d in docs
+             if not (d.get("expiry_date") and str(d["expiry_date"]) < iso)]
+    assert {d["jurisdiction_id"] for d in items} == {"j_excise"}  # expired excluded
+
+
+async def test_tax_exemption_list_blanket_and_product_from_postgres(engine, read_from_pg):
+    base = {
+        "tenant_id": TENANT, "exemption_type": "farm", "status": "valid",
+        "expiry_date": "2026-12-31",
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    }
+    # Product-specific, blanket (no product_codes), and a different-product cert.
+    await _seed("tax_exemption", {**base, "exemption_id": "ex_diesel",
+                "customer_id": "cust_1", "certificate_number": "CN-1",
+                "product_codes": ["DIESEL_2"]})
+    await _seed("tax_exemption", {**base, "exemption_id": "ex_blanket",
+                "customer_id": "cust_1", "certificate_number": "CN-2"})
+    await _seed("tax_exemption", {**base, "exemption_id": "ex_gas",
+                "customer_id": "cust_1", "certificate_number": "CN-3",
+                "product_codes": ["GASOLINE_REG"]})
+
+    from commerce.services.commerce_persistence_bridge import (
+        _NOT_CUT_OVER, read_hybrid_fetch_for_aggregation,
+    )
+
+    docs = await read_hybrid_fetch_for_aggregation(
+        "tax_exemption", TENANT,
+        term_filters={"customer_id": "cust_1", "status": "valid"},
+        range_field="expiry_date", range_gte="2026-06-01",
+    )
+    assert docs is not _NOT_CUT_OVER
+    # Endpoint's product_code rule: contains code OR blanket (no product_codes).
+    pc = "DIESEL_2"
+    items = [d for d in docs
+             if not (d.get("product_codes") and pc not in d["product_codes"])]
+    assert {d["exemption_id"] for d in items} == {"ex_diesel", "ex_blanket"}
+
+
+# ---------------------------------------------------------------------------
+# Agent lookup tools (get_all_locations / find_truck_by_id) served from PG
+# ---------------------------------------------------------------------------
+
+
+async def test_get_all_locations_served_from_postgres(engine, read_from_pg):
+    from Agents.tools.lookup_tools import get_all_locations
+    from Agents.tools._tenant_context import set_current_tenant
+
+    await _seed("location", {"location_id": "LOC-1", "tenant_id": TENANT,
+                             "location_name": "Houston Depot", "location_type": "depot",
+                             "region": "TX"}, doc_id="LOC-1")
+    await _seed("location", {"location_id": "LOC-2", "tenant_id": TENANT,
+                             "location_name": "Dallas Warehouse", "location_type": "warehouse",
+                             "region": "TX"}, doc_id="LOC-2")
+    # Cross-tenant row must be excluded.
+    await _seed("location", {"location_id": "LOC-X", "tenant_id": "other",
+                             "location_name": "Leak", "location_type": "depot",
+                             "region": "??"}, doc_id="LOC-X")
+
+    # ES guard: the tool must NOT touch ES once cut over.
+    import Agents.tools.lookup_tools as lt
+    lt.elasticsearch_service.search_documents = _es_raises_on_read().search_documents
+
+    with set_current_tenant(TENANT):
+        out = await get_all_locations()
+    assert "Houston Depot" in out
+    assert "Dallas Warehouse" in out
+    assert "Leak" not in out  # cross-tenant excluded
+    assert "2 total" in out
+
+
+async def test_find_truck_by_id_served_from_postgres(engine, read_from_pg):
+    from Agents.tools.lookup_tools import find_truck_by_id
+    from Agents.tools._tenant_context import set_current_tenant
+
+    await _seed("truck", {"truck_id": "GI-58A", "asset_id": "GI-58A",
+                          "tenant_id": TENANT, "asset_type": "vehicle",
+                          "asset_subtype": "truck", "status": "on_time",
+                          "plate_number": "GI-58A"}, doc_id="GI-58A")
+
+    import Agents.tools.lookup_tools as lt
+    lt.elasticsearch_service.search_documents = _es_raises_on_read().search_documents
+
+    with set_current_tenant(TENANT):
+        out = await find_truck_by_id("GI-58A")
+    assert "GI-58A" in out
+    assert "vehicle" in out

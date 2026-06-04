@@ -294,6 +294,21 @@ class PriceBookService:
 
         Validates: Requirement C3
         """
+        # Read-cutover: serve the book metadata from Postgres when enabled.
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_price_book_get,
+        )
+        pg = await read_price_book_get(tenant_id, price_book_id)
+        if pg is not _NOT_CUT_OVER:
+            if pg is None:
+                raise resource_not_found(
+                    f"PriceBook '{price_book_id}' not found",
+                    details={"price_book_id": price_book_id},
+                )
+            pg["rules"] = await self._get_rules_for_book(tenant_id, price_book_id)
+            return pg
+
         base_query: Dict[str, Any] = {
             "query": {
                 "bool": {
@@ -344,6 +359,17 @@ class PriceBookService:
             limit = _DEFAULT_PAGE_LIMIT
         if limit > _MAX_PAGE_LIMIT:
             limit = _MAX_PAGE_LIMIT
+
+        # Read-cutover: serve from Postgres when enabled.
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_price_book_list,
+        )
+        pg = await read_price_book_list(
+            tenant_id, status=status, cursor=cursor, limit=limit
+        )
+        if pg is not _NOT_CUT_OVER:
+            return pg
 
         must_clauses: List[Dict[str, Any]] = []
         if status:
@@ -568,6 +594,15 @@ class PriceBookService:
         self, tenant_id: str, price_book_id: str
     ) -> List[Dict[str, Any]]:
         """Fetch all pricing rules for a given price book."""
+        # Read-cutover: serve from Postgres when enabled.
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_pricing_rules_for_book,
+        )
+        pg = await read_pricing_rules_for_book(tenant_id, price_book_id)
+        if pg is not _NOT_CUT_OVER:
+            return pg
+
         base_query: Dict[str, Any] = {
             "query": {
                 "bool": {

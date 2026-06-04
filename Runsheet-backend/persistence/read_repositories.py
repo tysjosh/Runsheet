@@ -28,12 +28,14 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from persistence.models import AccountORM, CustomerORM, InvoiceORM, PaymentORM
+from persistence.models import AccountORM, CustomerORM, InvoiceORM, PaymentORM, PriceBookORM, PricingRuleORM
 from persistence.projections import (
     account_to_doc,
     customer_to_doc,
     invoice_to_doc,
     payment_to_doc,
+    price_book_to_doc,
+    pricing_rule_to_doc,
 )
 
 logger = logging.getLogger(__name__)
@@ -171,6 +173,31 @@ class AccountReadRepository:
         )
         return _page_result([account_to_doc(r) for r in rows], limit, "account_id")
 
+    async def scan_expired_overrides_all_tenants(
+        self, session: AsyncSession, *, credit_state: str, expires_on_or_before,
+        cap: int = 1_000,
+    ) -> List[Dict[str, Any]]:
+        """CROSS-TENANT scan for accounts whose credit override has expired.
+
+        Powers the credit-override-expiry background job — a system-level
+        sweep (no tenant filter); each ``expire_override`` call is
+        tenant-scoped internally. Matches the ES filter ``credit_state ==
+        override AND credit_override_expires_at <= now``. Returns the verbatim
+        ``accounts_current`` projection.
+        """
+        rows = (
+            await session.execute(
+                select(AccountORM)
+                .where(
+                    AccountORM.credit_state == credit_state,
+                    AccountORM.credit_override_expires_at.is_not(None),
+                    AccountORM.credit_override_expires_at <= expires_on_or_before,
+                )
+                .limit(cap)
+            )
+        ).scalars().all()
+        return [account_to_doc(r) for r in rows]
+
 
 # ---------------------------------------------------------------------------
 # Invoice
@@ -230,6 +257,110 @@ class InvoiceReadRepository:
         )
         return _page_result([invoice_to_doc(r) for r in rows], limit, "invoice_id")
 
+    # --- Aggregation / sweep reads (AR aging, credit, dunning, overdue job) ---
+
+    async def fetch_open_for_aggregation(
+        self, session: AsyncSession, tenant_id: str, *,
+        statuses: List[str],
+        account_id: Optional[str] = None,
+        require_issued_at: bool = False,
+        due_on_or_before=None,
+        order_by_due_asc: bool = False,
+        cap: int = 10_000,
+    ) -> List[Dict[str, Any]]:
+        """Tenant-scoped open-invoice fetch for in-Python rollups.
+
+        Powers AR aging (bucket math), the dunning overdue scan, and the
+        credit open-balance sum. Returns the verbatim ``invoices_current``
+        projection so the callers' existing Python aggregation is unchanged.
+        ``statuses`` is the ES ``terms`` set; ``require_issued_at`` mirrors the
+        ES ``exists: issued_at`` filter; ``due_on_or_before`` applies the
+        ``due_date <= X`` range (date-compared, matching the date-only column).
+        """
+        filters = [
+            InvoiceORM.tenant_id == tenant_id,
+            InvoiceORM.status.in_(statuses),
+        ]
+        if account_id:
+            filters.append(InvoiceORM.account_id == account_id)
+        if require_issued_at:
+            filters.append(InvoiceORM.issued_at.is_not(None))
+        if due_on_or_before is not None:
+            filters.append(InvoiceORM.due_date <= due_on_or_before)
+        stmt = (
+            select(InvoiceORM)
+            .where(*filters)
+            .options(selectinload(InvoiceORM.line_items))
+            .limit(cap)
+        )
+        if order_by_due_asc:
+            stmt = stmt.order_by(InvoiceORM.due_date.asc())
+        rows = (await session.execute(stmt)).scalars().all()
+        return [invoice_to_doc(r) for r in rows]
+
+    async def sum_remaining_cents(
+        self, session: AsyncSession, tenant_id: str, account_id: str, *,
+        statuses: List[str],
+    ) -> int:
+        """Sum ``remaining_cents`` over an account's invoices in ``statuses``.
+
+        Mirrors the credit-service ES ``sum`` aggregation (Constraint C1 —
+        integer cents). Pushed into SQL since no per-row data is needed.
+        """
+        total = (
+            await session.execute(
+                select(func.coalesce(func.sum(InvoiceORM.remaining_cents), 0)).where(
+                    InvoiceORM.tenant_id == tenant_id,
+                    InvoiceORM.account_id == account_id,
+                    InvoiceORM.status.in_(statuses),
+                )
+            )
+        ).scalar_one()
+        return int(total or 0)
+
+    async def count_accounts_with_open_balance(
+        self, session: AsyncSession, tenant_id: str, *, statuses: List[str],
+    ) -> int:
+        """Distinct accounts with a positive-remaining open invoice.
+
+        Mirrors the AR-aging ``cardinality(account_id)`` aggregation filtered
+        to ``status in statuses`` and ``remaining_cents > 0``.
+        """
+        count = (
+            await session.execute(
+                select(func.count(func.distinct(InvoiceORM.account_id))).where(
+                    InvoiceORM.tenant_id == tenant_id,
+                    InvoiceORM.status.in_(statuses),
+                    InvoiceORM.remaining_cents > 0,
+                )
+            )
+        ).scalar_one()
+        return int(count or 0)
+
+    async def scan_due_all_tenants(
+        self, session: AsyncSession, *, statuses: List[str], due_on_or_before,
+        cap: int = 10_000,
+    ) -> List[Dict[str, Any]]:
+        """CROSS-TENANT past-due invoice scan for the overdue background job.
+
+        The job is a system-level sweep (no tenant filter); each downstream
+        ``mark_overdue`` call is tenant-scoped internally. Returns the verbatim
+        projection so the job's per-tenant grouping is unchanged.
+        """
+        rows = (
+            await session.execute(
+                select(InvoiceORM)
+                .where(
+                    InvoiceORM.status.in_(statuses),
+                    InvoiceORM.due_date.is_not(None),
+                    InvoiceORM.due_date <= due_on_or_before,
+                )
+                .options(selectinload(InvoiceORM.line_items))
+                .limit(cap)
+            )
+        ).scalars().all()
+        return [invoice_to_doc(r) for r in rows]
+
 
 # ---------------------------------------------------------------------------
 # Payment
@@ -265,6 +396,89 @@ class PaymentReadRepository:
             cursor=cursor, limit=limit,
         )
         return _page_result([payment_to_doc(r) for r in rows], limit, "payment_id")
+
+
+# ---------------------------------------------------------------------------
+# Price book / pricing rule (commerce, typed-column models)
+# ---------------------------------------------------------------------------
+
+
+class PriceBookReadRepository:
+    """Read-side for commerce price books + their fan-out pricing rules.
+
+    Unlike the hybrid aggregates these are typed-column models, so reads
+    project through ``price_book_to_doc`` / ``pricing_rule_to_doc`` to return
+    the byte-identical ``price_books_current`` / ``pricing_rules_current``
+    document shapes the ES path returned.
+    """
+
+    async def get(self, session: AsyncSession, tenant_id: str,
+                  price_book_id: str) -> Optional[Dict[str, Any]]:
+        row = (
+            await session.execute(
+                select(PriceBookORM).where(
+                    PriceBookORM.tenant_id == tenant_id,
+                    PriceBookORM.price_book_id == price_book_id,
+                )
+            )
+        ).scalar_one_or_none()
+        return price_book_to_doc(row) if row is not None else None
+
+    async def list(self, session: AsyncSession, tenant_id: str, *,
+                   status: Optional[str] = None, cursor: Optional[str] = None,
+                   limit: int = _DEFAULT_PAGE_LIMIT) -> Dict[str, Any]:
+        limit = _clamp(limit)
+        filters = [PriceBookORM.status == status] if status else []
+        rows = await _keyset_page(
+            session, PriceBookORM, tenant_id=tenant_id, filters=filters,
+            sort_col=PriceBookORM.created_at, id_col=PriceBookORM.price_book_id,
+            cursor=cursor, limit=limit,
+        )
+        return _page_result(
+            [price_book_to_doc(r) for r in rows], limit, "price_book_id"
+        )
+
+    async def rules_for_book(self, session: AsyncSession, tenant_id: str,
+                             price_book_id: str) -> List[Dict[str, Any]]:
+        """All pricing rules for a book, ordered ``created_at ASC`` (ES contract)."""
+        rows = list(
+            (
+                await session.execute(
+                    select(PricingRuleORM)
+                    .where(
+                        PricingRuleORM.tenant_id == tenant_id,
+                        PricingRuleORM.price_book_id == price_book_id,
+                    )
+                    .order_by(
+                        PricingRuleORM.created_at.asc(),
+                        PricingRuleORM.rule_id.asc(),
+                    )
+                )
+            ).scalars().all()
+        )
+        return [pricing_rule_to_doc(r) for r in rows]
+
+    async def rules_by_product(self, session: AsyncSession, tenant_id: str,
+                               product_code: str) -> List[Dict[str, Any]]:
+        """Every tenant rule for a product (PricingEngine candidate set).
+
+        Mirrors the ES ``pricing_rules_current`` term query on
+        ``product_code`` (size 1000); the engine applies effective-window /
+        quantity / precedence filtering in Python afterward, so we return the
+        full candidate set projected to the ES doc shape. Backed by the
+        ``ix_pricing_rule_tenant_product`` composite index.
+        """
+        rows = list(
+            (
+                await session.execute(
+                    select(PricingRuleORM).where(
+                        PricingRuleORM.tenant_id == tenant_id,
+                        PricingRuleORM.product_code == product_code,
+                    )
+                )
+            ).scalars().all()
+        )
+        return [pricing_rule_to_doc(r) for r in rows]
 
 
 # ---------------------------------------------------------------------------

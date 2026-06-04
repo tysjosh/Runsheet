@@ -254,15 +254,56 @@ lockstep.
   + `COMMERCE_READ_FROM_POSTGRES`).
 - ~~Rest of commerce~~ ✅ done — price books + pricing rules, the invoice /
   account / dunning event ledgers, and AR aging snapshots are dual-written
-  (outbox-projected), covered by the backfill + parity check. Reads for these
-  are not yet routed through Postgres (the four core aggregates are the ones
-  wired for read-cutover); add read repos for them before dropping their ES
-  indices.
+  (outbox-projected), covered by the backfill + parity check.
+  **Read-cutover (price books + pricing rules):** `PriceBookService.get` /
+  `list` / `_get_rules_for_book` serve from PG (typed `PriceBookReadRepository`
+  projecting `price_books_current` / `pricing_rules_current` via
+  `price_book_to_doc` / `pricing_rule_to_doc`), and `PricingEngine._query_es_rules`
+  sources its candidate set from PG (`read_pricing_rules_by_product` over the
+  `ix_pricing_rule_tenant_product` index; effective-window / quantity /
+  precedence filtering still runs in Python, identical to the ES path).
+  **Read-cutover (secondary AR / credit / dunning reads + background jobs):**
+  the invoice/account *scan* reads now serve from PG — `ARAgingService`
+  (`compute_account_aging` / `compute_tenant_aging` bucket math +
+  `_count_accounts_with_balance` cardinality), `CreditService._get_account` /
+  `_compute_open_balance` (SQL `SUM(remaining_cents)`), and
+  `DunningService._query_overdue_invoices` (status + `due_date <= cutoff`,
+  ordered) fetch from `InvoiceReadRepository` / `AccountReadRepository`
+  aggregation helpers. The two **cross-tenant background sweeps** —
+  `invoice_overdue_job` (past-due open/partial) and `credit_override_expiry_job`
+  (expired credit overrides) — read from dedicated `scan_*_all_tenants` repo
+  methods (no tenant filter; each downstream `mark_overdue` / `expire_override`
+  stays tenant-scoped). The append-only `account_events` / `dunning_events`
+  ledger reads stay on ES by design. Verified byte-identical to ES against the
+  live container (AR total and the cross-tenant past-due set matched exactly)
+  with an ES guard.
+  The invoice / account / dunning event ledgers + AR aging snapshots remain
+  ES-served writes/reads for the append-only `*_events` streams + snapshot
+  rollups.
 - ~~Compliance config~~ ✅ done — `tax_jurisdictions`, `tax_exemptions`,
   `price_protection_contracts`, the compliance sell-side `pricing_rules`, and
   `supplier_contracts` are dual-written via hybrid document tables (typed index
   columns + verbatim ES document), covered by the backfill + parity check.
   Verified at 43/43 record parity against real data.
+  **Read-cutover (pricing family):** `SalesPricingEngine.resolve_rule` sources
+  its `pricing_rules` candidate rows from PG (`read_hybrid_search` on
+  `compliance_pricing_rule` with the `product_code`+`status`+effective-date
+  filter; the optional `expiry_date` upper bound is re-checked client-side, then
+  the customer/account/product-default priority ordering runs unchanged).
+  `PriceProtectionService.find_active_contract` and the tenant-wide
+  `check_expiry` scan serve from PG (`read_hybrid_search` on
+  `price_protection_contract`; the `[start_date, end_date]` window is
+  re-checked client-side). The version-based CAS writes (`decrement_gallons`,
+  status transitions) stay ES-authoritative during the soak — `_fetch_contract`
+  deliberately still reads ES so the optimistic-concurrency verify loop sees its
+  own writes — but `_write_status_transition` now also mirrors the terminal
+  status to PG so a PG-served `check_expiry` scan does not re-transition the
+  same contract every pass. `supplier_contracts` get/list serve from PG through
+  the shared `_BaseTenantScopedRepository` cutover; list filters that map to a
+  typed ORM column (`status` / `supplier_name` / `product_code`) translate to
+  the PG `list`, while document-only filters (the `preferred_terminal_ids` JSON
+  array) correctly fall back to ES so list semantics never silently change.
+  Verified end-to-end against the live container with an ES guard.
 - ~~Orders / jobs current-state~~ ✅ done — `fuel_orders_current`,
   `jobs_current`, `shipments_current`, `tenant_job_policies` are dual-written
   via hybrid document tables with a **stale-event guard** (rejects out-of-order
@@ -311,6 +352,101 @@ lockstep.
   dual-writes to Postgres (previously only create did), so the read-cutover
   cannot serve a stale row after a partial update. All verified byte-identical
   to ES against the live container with an ES guard.
+  **Read-cutover (fleet dashboard summary + assets alias):** `GET /fleet/summary`
+  (trucks match_all scan → status counts + the `assets`-alias `by_type` /
+  `by_subtype` terms aggs + active/delayed filters) and the multi-asset
+  endpoints `GET /fleet/assets` (asset_type / asset_subtype / status term
+  filters, created_at-desc) + `GET /fleet/assets/{id}` now serve from PG. The
+  `assets` index is an ES **alias onto `trucks`**, so all of these read the one
+  migrated `truck` aggregate: a single `read_hybrid_fetch_for_aggregation`
+  pull, with the `by_type` / `by_subtype` rollups reproduced in Python in the
+  ES terms-agg order (doc_count desc, then key asc). Because `truck` is
+  tenant-optional (`fetch_for_aggregation` does not tenant-filter), the
+  endpoints apply an explicit `tenant_id` match so the result matches the ES
+  `inject_tenant_filter` exactly (legacy null-tenant docs excluded); the by-id
+  paths add the same guard so a tenant-optional `get` cannot leak a cross-tenant
+  asset. Verified byte-identical to the ES rollups against the live container
+  (total 10, on_time 8, delayed 2, by_type `{vehicle:10}`, by_subtype
+  `{truck:6, tanker:2, van:2}`).
+  **Stays on ES — agent fleet semantic search:** `Agents/tools/search_tools.py`
+  `search_fleet_data` uses an ES `multi_match` full-text relevance query across
+  `cargo.description` / `driver_name` / `asset_name` / `vessel_name` / etc.
+  This is genuine full-text search (relevance-ranked), not a structured filter,
+  so it is intentionally left reading the ES `trucks` projection — reproducing
+  ES relevance scoring in Postgres would diverge. The `trucks` index therefore
+  cannot be dropped while this tool is in use; it remains a search/read
+  projection by design.
+  **Asset-cert status-transition write-mirror:** the expiry sweep's
+  `_transition_to_expiring_soon` / `_transition_to_expired`, the
+  `_clear_dispatch_restriction` supersede, and `update_status` previously wrote
+  the new status to ES only — leaving the PG row at `valid` and causing a
+  read-cutover/parity drift. They now mirror the change to PG via
+  `mirror_current_state_fields` (a new `CurrentStateRepository.set_fields` that
+  merges the partial into the verbatim `document` + typed `status` column), so
+  PG stays the source-of-truth and the next PG-served scan does not re-fire the
+  transition. Verified: parity returned to 106/106 after reconciling the
+  pre-existing CERT-001/CERT-002 drift through this same path.
+  **Read-cutover (tax endpoint list handlers):** `GET /api/compliance/tax-jurisdictions`
+  (fips_code / tax_type term filters + effective_date<=iso, with the
+  "expiry >= iso OR missing" open-ended-row rule applied in Python) and
+  `GET /api/compliance/exemptions` (customer_id + status=valid term filters +
+  expiry_date>=iso, with the "product_codes contains X OR blanket/missing" rule
+  in Python) now serve from PG via `read_hybrid_fetch_for_aggregation` over the
+  `tax_jurisdiction` / `tax_exemption` hybrid aggregates — the same back-end the
+  tax engine already reads. Verified byte-identical to ES against the live
+  container (4 jurisdictions, `?tax_type=excise` → 3, 3 exemptions).
+  **Two pre-existing write-mirror bugs surfaced + fixed during this batch (both
+  exposed once the overdue sweep + invoice get were PG-backed):**
+  1. `InvoiceService.mark_overdue` wrote `status=overdue` to ES only (the
+     sibling finalize / pay / void transitions all mirror via
+     `mirror_invoice_fields`, but overdue was missed). With the invoice get +
+     overdue sweep now PG-backed, the stale PG `open`/`partial` status caused
+     the hourly cron to re-mark the same invoices forever (14 duplicate
+     `overdue_marked` events accrued). Fixed by adding the matching
+     `mirror_invoice_fields` call.
+  2. `invoices_current` is `dynamic: strict` but did **not** declare
+     `_last_applied_seq`, which `_update_projection` stamps on every status
+     transition — so the projection write was rejected outright and the status
+     never persisted in ES either. Fixed by declaring the field in
+     `INVOICES_CURRENT_MAPPING` (+ an additive `put_mapping` on the live index);
+     `parity_check` already treated it as a known ES-only projection field.
+  Also fixed the analogous `scheduling.delay_detection_service` gap: marking a
+  job `delayed=True` wrote to ES only, so a PG-served `get_delayed_jobs` /
+  delay-metrics read disagreed — it now mirrors via `mirror_current_state_fields`.
+  Reconciled the accumulated dev drift (duplicate events deduped, INV-0001 /
+  INV-0004 transitioned to overdue in both stores, JOB-007 delayed flag synced)
+  → parity back to 106/106. Regression tests added:
+  `test_mark_overdue_mirrors_status_to_postgres` and
+  `test_invoices_current_mapping_declares_last_applied_seq`.
+  **Read-cutover (agent lookup tools + locations):** the `get_all_locations`
+  and `find_truck_by_id` agent tools now serve from PG via
+  `read_hybrid_fetch_for_aggregation` over the `location` / `truck` aggregates
+  (both tenant-optional, so an explicit `tenant_id` match mirrors the ES
+  `inject_tenant_filter`). Wiring these surfaced a cluster of pre-existing bugs
+  on the legacy `locations` index:
+  1. `locations` was created with **dynamic mapping**, so its `tenant_id` is
+     `text` (not `keyword`). A `term: {tenant_id}` query matches nothing on a
+     text field — so `get_all_locations`' ES path already returned 0, AND the
+     backfill/parity tools silently saw ES=0 (a blind spot). Fixed `parity_check`
+     to fall back to `tenant_id.keyword` then a client-side filter (so it sees
+     the same rows the app serves), and backfilled the 4 master locations into
+     PG. Parity rose 106 → 110 (locations now visible + in sync).
+  2. `get_all_locations` read `type` / `name` / `region` but the docs carry
+     `location_type` / `location_name` / `address` — it rendered "Unknowns /
+     None" on BOTH paths. Fixed the tool to accept both field shapes.
+  3. `parity_check._fetch_es_all` now clears its scroll contexts (the serverless
+     cluster caps open scroll contexts; the multi-query fallback would otherwise
+     exhaust them).
+  **Live-position write-mirror:** the ingestion location-update path
+  (`ingestion/service.py`) and the Geotab connector wrote `current_location` to
+  the ES `trucks` doc only. Now that the fleet reads serve from PG, both mirror
+  the position fields to PG via `mirror_current_state_fields` (a partial
+  field-merge — notably safer than the ingestion path's ES `index_document`,
+  which full-replaces the doc).
+  **Stays on ES by design:** the agent fleet *semantic* search
+  (`search_fleet_data`, `multi_match` relevance) and the `search_orders` /
+  `search_support_tickets` / `search_inventory` semantic tools — full-text
+  relevance search is an ES strength, not a structured filter PG can reproduce.
   **Read-cutover (ops shipments):** the ops shipment reads now serve from PG —
   `GET /ops/shipments` (list), `/ops/shipments/{id}` (get; event history still
   reads the un-migrated `shipment_events` from ES), `/ops/shipments/sla-breaches`

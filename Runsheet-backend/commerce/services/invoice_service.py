@@ -1201,6 +1201,20 @@ class InvoiceService:
             invoice_id, partial, event_doc["sequence_number"]
         )
 
+        # Mirror the overdue transition to the Postgres source-of-truth.
+        # Without this the PG row stays open/partial, and the (now PG-backed)
+        # overdue sweep + invoice get would re-mark the same invoice every
+        # cycle — matching the sibling transitions (finalize / pay / void).
+        from commerce.services.commerce_persistence_bridge import (
+            mirror_invoice_fields,
+        )
+        await mirror_invoice_fields(
+            tenant_id,
+            invoice_id,
+            {"status": InvoiceStatus.OVERDUE.value},
+            event_type="overdue_marked",
+        )
+
         merged = {**invoice, **partial, "updated_at": utcnow().isoformat()}
         logger.info(
             "Marked invoice %s as overdue (was: %s) tenant %s",

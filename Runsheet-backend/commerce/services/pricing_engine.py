@@ -263,7 +263,22 @@ class PricingEngine:
     async def _query_es_rules(
         self, tenant_id: str, product_code: str
     ) -> List[Dict[str, Any]]:
-        """Query pricing_rules_current for all rules matching tenant + product."""
+        """Query all rules matching tenant + product.
+
+        Reads from Postgres when the commerce read-cutover is active (the
+        engine then applies effective-window / quantity / precedence filtering
+        in Python, identical to the ES path); otherwise falls back to the
+        ``pricing_rules_current`` ES index.
+        """
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_pricing_rules_by_product,
+        )
+
+        pg = await read_pricing_rules_by_product(tenant_id, product_code)
+        if pg is not _NOT_CUT_OVER:
+            return pg
+
         base_query: Dict[str, Any] = {
             "query": {
                 "bool": {

@@ -171,21 +171,56 @@ def _diff_doc(agg: str, es_doc: Dict[str, Any], pg_doc: Dict[str, Any]) -> List[
 
 
 async def _fetch_es_all(es_client, index: str, tenant_id: Optional[str]) -> Dict[str, Dict[str, Any]]:
-    """Return ``{id: _source}`` for every doc in an index (optionally one tenant)."""
-    query: Dict[str, Any] = {"term": {"tenant_id": tenant_id}} if tenant_id else {"match_all": {}}
+    """Return ``{id: _source}`` for every doc in an index (optionally one tenant).
+
+    Legacy generic-ES indices (``trucks`` / ``locations``) were created with
+    dynamic mapping, so their ``tenant_id`` is ``text`` (with a ``.keyword``
+    subfield) rather than ``keyword``. A plain ``term: {tenant_id}`` query
+    matches nothing on a ``text`` field, which previously made parity silently
+    report ES=0 for those indices. When a tenant-scoped term yields nothing but
+    the index is non-empty, retry on ``tenant_id.keyword`` then fall back to a
+    client-side filter — so parity sees the same rows the application reads
+    (which post-filter in Python) actually serve.
+    """
     if not es_client.indices.exists(index=index):
         return {}
-    out: Dict[str, Dict[str, Any]] = {}
-    resp = es_client.search(index=index, query=query, size=500, scroll="2m")
-    scroll_id = resp.get("_scroll_id")
-    hits = resp["hits"]["hits"]
-    while hits:
-        for hit in hits:
-            out[hit["_id"]] = hit["_source"]
-        resp = es_client.scroll(scroll_id=scroll_id, scroll="2m")
+
+    def _scroll(query: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+        out: Dict[str, Dict[str, Any]] = {}
+        resp = es_client.search(index=index, query=query, size=500, scroll="2m")
         scroll_id = resp.get("_scroll_id")
         hits = resp["hits"]["hits"]
-    return out
+        while hits:
+            for hit in hits:
+                out[hit["_id"]] = hit["_source"]
+            resp = es_client.scroll(scroll_id=scroll_id, scroll="2m")
+            scroll_id = resp.get("_scroll_id")
+            hits = resp["hits"]["hits"]
+        # Release the scroll context promptly — the serverless cluster caps the
+        # number of open scroll contexts, and parity opens several per run.
+        if scroll_id:
+            try:
+                es_client.clear_scroll(scroll_id=scroll_id)
+            except Exception:  # noqa: BLE001 — best-effort cleanup
+                pass
+        return out
+
+    if tenant_id is None:
+        return _scroll({"match_all": {}})
+
+    out = _scroll({"term": {"tenant_id": tenant_id}})
+    if out:
+        return out
+
+    out = _scroll({"term": {"tenant_id.keyword": tenant_id}})
+    if out:
+        return out
+
+    return {
+        doc_id: src
+        for doc_id, src in _scroll({"match_all": {}}).items()
+        if src.get("tenant_id") == tenant_id
+    }
 
 
 async def _fetch_pg_all(agg: str, tenant_id: Optional[str]) -> Dict[str, Dict[str, Any]]:

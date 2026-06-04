@@ -87,6 +87,20 @@ class CreditService:
         Raises resource_not_found if the account does not exist under
         the given tenant.
         """
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_account_get_or_none,
+        )
+
+        pg = await read_account_get_or_none(tenant_id, account_id)
+        if pg is not _NOT_CUT_OVER:
+            if pg is None:
+                raise resource_not_found(
+                    f"Account '{account_id}' not found",
+                    details={"account_id": account_id, "tenant_id": tenant_id},
+                )
+            return pg
+
         query: Dict[str, Any] = {
             "query": {
                 "bool": {
@@ -120,6 +134,19 @@ class CreditService:
         """
         from commerce.services.commerce_es_mappings import INVOICES_CURRENT_INDEX
 
+        _OPEN_STATUSES = ["open", "partial", "overdue", "draft"]
+
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_invoice_sum_remaining,
+        )
+
+        pg = await read_invoice_sum_remaining(
+            tenant_id, account_id, statuses=_OPEN_STATUSES
+        )
+        if pg is not _NOT_CUT_OVER:
+            return int(pg)
+
         query: Dict[str, Any] = {
             "query": {
                 "bool": {
@@ -127,7 +154,7 @@ class CreditService:
                         {"term": {"account_id": account_id}},
                         {
                             "terms": {
-                                "status": ["open", "partial", "overdue", "draft"]
+                                "status": _OPEN_STATUSES
                             }
                         },
                     ]

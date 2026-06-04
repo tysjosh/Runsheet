@@ -429,6 +429,45 @@ async def list_tax_jurisdictions(
 
     es = _get_es_service()
 
+    # Read-cutover: serve from Postgres when enabled. The fips_code / tax_type
+    # term filters + effective_date<=iso map directly; the "expiry >= iso OR
+    # missing" open-ended-row rule is applied in Python (awkward in portable
+    # SQL), mirroring tax_engine.get_jurisdiction_rates. Byte-identical result
+    # set to the ES query.
+    from commerce.services.commerce_persistence_bridge import (
+        _NOT_CUT_OVER,
+        read_hybrid_fetch_for_aggregation,
+    )
+
+    _iso = effective_date.isoformat() if effective_date is not None else None
+    _term_filters: Dict[str, Any] = {}
+    if fips_code is not None:
+        _term_filters["fips_code"] = fips_code.strip()
+    if tax_type is not None:
+        _term_filters["tax_type"] = tax_type.strip()
+
+    pg_docs = await read_hybrid_fetch_for_aggregation(
+        "tax_jurisdiction", tenant.tenant_id,
+        term_filters=_term_filters or None,
+        range_field="effective_date" if _iso is not None else None,
+        range_lte=_iso,
+    )
+    if pg_docs is not _NOT_CUT_OVER:
+        items = []
+        for source in pg_docs:
+            if _iso is not None:
+                expiry = source.get("expiry_date")
+                if expiry is not None and str(expiry) < _iso:
+                    continue  # expired before the requested date
+            items.append(source)
+            if len(items) >= size:
+                break
+        return {
+            "data": items,
+            "count": len(items),
+            "request_id": _get_request_id(request),
+        }
+
     filters: List[Dict[str, Any]] = []
     if fips_code is not None:
         filters.append({"term": {"fips_code": fips_code.strip()}})
@@ -596,6 +635,48 @@ async def list_exemptions(
     """
 
     es = _get_es_service()
+
+    # Read-cutover: serve from Postgres when enabled. customer_id + (when
+    # effective_date supplied) status=valid map to term filters, and
+    # expiry_date>=iso maps to a range; the "product_codes contains X OR the
+    # field is missing (blanket)" rule is applied in Python (list-membership +
+    # missing-field OR is awkward in portable SQL). Byte-identical result set.
+    from commerce.services.commerce_persistence_bridge import (
+        _NOT_CUT_OVER,
+        read_hybrid_fetch_for_aggregation,
+    )
+
+    _iso = effective_date.isoformat() if effective_date is not None else None
+    _term_filters: Dict[str, Any] = {}
+    if customer_id is not None:
+        _term_filters["customer_id"] = customer_id.strip()
+    if effective_date is not None:
+        _term_filters["status"] = "valid"
+    _pc = product_code.strip() if product_code is not None else None
+
+    pg_docs = await read_hybrid_fetch_for_aggregation(
+        "tax_exemption", tenant.tenant_id,
+        term_filters=_term_filters or None,
+        range_field="expiry_date" if _iso is not None else None,
+        range_gte=_iso,
+    )
+    if pg_docs is not _NOT_CUT_OVER:
+        items = []
+        for source in pg_docs:
+            if _pc is not None:
+                codes = source.get("product_codes")
+                # Blanket exemption (no/empty product_codes) applies to all;
+                # otherwise the list must contain the requested code.
+                if codes and _pc not in codes:
+                    continue
+            items.append(source)
+            if len(items) >= size:
+                break
+        return {
+            "data": items,
+            "count": len(items),
+            "request_id": _get_request_id(request),
+        }
 
     filters: List[Dict[str, Any]] = []
     if customer_id is not None:

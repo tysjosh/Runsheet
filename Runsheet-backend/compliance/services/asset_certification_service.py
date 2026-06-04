@@ -253,6 +253,13 @@ class AssetCertificationService:
                 await self._es.update_document(
                     ASSET_CERTIFICATIONS_INDEX, cert_id, partial
                 )
+                # Mirror the status transition to the Postgres source-of-truth.
+                from commerce.services.commerce_persistence_bridge import (
+                    mirror_current_state_fields,
+                )
+                await mirror_current_state_fields(
+                    "asset_certification", tenant_id, cert_id, partial
+                )
                 cleared_count += 1
                 logger.info(
                     "Cleared dispatch restriction: certification %s "
@@ -494,6 +501,13 @@ class AssetCertificationService:
         )
 
         merged = {**existing, **partial}
+        # Mirror the field changes to the Postgres source-of-truth.
+        from commerce.services.commerce_persistence_bridge import (
+            mirror_current_state_upsert,
+        )
+        await mirror_current_state_upsert(
+            "asset_certification", merged, doc_id=cert_id
+        )
         logger.info(
             "Updated asset certification %s for tenant %s",
             cert_id,
@@ -659,6 +673,13 @@ class AssetCertificationService:
             await self._es.update_document(
                 ASSET_CERTIFICATIONS_INDEX, cert_id, partial
             )
+            # Mirror the status transition to the Postgres source-of-truth.
+            from commerce.services.commerce_persistence_bridge import (
+                mirror_current_state_fields,
+            )
+            await mirror_current_state_fields(
+                "asset_certification", tenant_id, cert_id, partial
+            )
             logger.warning(
                 "Transitioned certification %s to expired for tenant %s",
                 cert_id,
@@ -687,6 +708,13 @@ class AssetCertificationService:
             }
             await self._es.update_document(
                 ASSET_CERTIFICATIONS_INDEX, cert_id, partial
+            )
+            # Mirror the status transition to the Postgres source-of-truth.
+            from commerce.services.commerce_persistence_bridge import (
+                mirror_current_state_fields,
+            )
+            await mirror_current_state_fields(
+                "asset_certification", tenant_id, cert_id, partial
             )
             logger.info(
                 "Transitioned certification %s to expiring_soon for tenant %s",

@@ -1085,6 +1085,31 @@ class CurrentStateRepository:
                        tenant_id=tenant_id, event_type="upserted", row=row)
         return row
 
+    async def set_fields(self, session: AsyncSession, tenant_id: str, doc_id: str,
+                         **fields: Any) -> Optional[Any]:
+        """Merge partial ``fields`` into a current-state row's document.
+
+        For status-transition writes that apply an ES partial update (e.g. the
+        asset-certification expiry sweep marking a cert ``expiring_soon`` /
+        ``expired`` / ``superseded``). The fields are merged into the verbatim
+        ``document`` JSON and lifted into any matching typed column, so the PG
+        source-of-truth and the ES projection converge. Tenant-scoped; returns
+        the row, or ``None`` when the row is absent under this tenant.
+        """
+        row = await session.get(self.model, doc_id)
+        if row is None or row.tenant_id != tenant_id:
+            return None
+        merged = dict(row.document or {})
+        merged.update(fields)
+        row.document = merged
+        for col in self.typed_cols:
+            if col in fields:
+                setattr(row, col, fields[col])
+        await session.flush()
+        outbox.enqueue(session, aggregate_type=self.aggregate_type, aggregate_id=doc_id,
+                       tenant_id=tenant_id, event_type="upserted", row=row)
+        return row
+
     async def delete(self, session: AsyncSession, tenant_id: str, doc_id: str) -> bool:
         """Delete a current-state row (tenant-scoped). Returns True if removed.
 

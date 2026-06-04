@@ -671,6 +671,23 @@ class DataIngestionService:
                 document=location_data
             )
 
+            # Mirror the live-position fields to the Postgres source-of-truth so
+            # the (now PG-backed) fleet dashboard / truck reads reflect the
+            # update. Uses a partial field-merge (not a full replace) so the
+            # other truck fields are preserved.
+            try:
+                from commerce.services.commerce_persistence_bridge import (
+                    mirror_current_state_fields,
+                )
+                await mirror_current_state_fields(
+                    "truck", tenant_id, asset_id, location_data
+                )
+            except Exception:  # noqa: BLE001 — best-effort, never block ingestion
+                self._logger.warning(
+                    "PG location mirror failed for asset %s", asset_id,
+                    exc_info=True,
+                )
+
             # Also store in locations history index for tracking
             location_history = {
                 "truck_id": asset_id,
