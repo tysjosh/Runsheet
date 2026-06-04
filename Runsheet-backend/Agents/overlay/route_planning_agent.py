@@ -1217,6 +1217,21 @@ class RoutePlanningAgent(OverlayAgentBase):
             "size": 1,
         }
         try:
+            # Read-cutover: serve the by-id lookup from Postgres when enabled.
+            # ``truck`` is tenant-optional, so read_hybrid_get does not enforce
+            # tenant isolation — apply an explicit tenant_id match to mirror the
+            # ES term filter.
+            from commerce.services.commerce_persistence_bridge import (
+                _NOT_CUT_OVER,
+                read_hybrid_get,
+            )
+
+            pg = await read_hybrid_get("truck", tenant_id, truck_id)
+            if pg is not _NOT_CUT_OVER:
+                if pg is None or pg.get("tenant_id") != tenant_id:
+                    return None
+                return pg.get("driver_id") or None
+
             response = await self._es.search_documents("trucks", query, size=1)
             hits = response.get("hits", {}).get("hits", [])
             if hits:
@@ -1848,6 +1863,20 @@ class RoutePlanningAgent(OverlayAgentBase):
             "size": 1000,
         }
         try:
+            # Read-cutover: serve from Postgres when enabled (tenant-scoped).
+            from commerce.services.commerce_persistence_bridge import (
+                _NOT_CUT_OVER,
+                read_hybrid_search,
+            )
+
+            pg = await read_hybrid_search(
+                "fuel_order", tenant_id,
+                in_filters={"status": ["confirmed", "scheduled"]},
+                page=1, size=1000,
+            )
+            if pg is not _NOT_CUT_OVER:
+                return pg.get("items", [])
+
             resp = await self._es.search_documents(
                 FUEL_ORDERS_CURRENT_INDEX, query, 1000
             )

@@ -184,8 +184,32 @@ class RevenueGuard(OverlayAgentBase):
             "size": 200,
             "sort": [{"completed_at": {"order": "desc"}}],
         }
-        resp = await self._es.search_documents(JOBS_CURRENT_INDEX, query, 200)
-        jobs = [h["_source"] for h in resp["hits"]["hits"]]
+        # Read-cutover: serve from Postgres when enabled (tenant-scoped). The ES
+        # ``completed_at >= now-7d`` date-math is resolved to a concrete ISO
+        # cutoff so the PG string range compares correctly (ISO sorts lexically
+        # == chronologically).
+        from datetime import datetime, timedelta, timezone
+
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_hybrid_search,
+        )
+
+        cutoff_iso = (
+            datetime.now(timezone.utc) - timedelta(days=7)
+        ).isoformat()
+        pg = await read_hybrid_search(
+            "job", tenant_id,
+            in_filters={"status": ["completed", "delivered"]},
+            range_field="completed_at", range_gte=cutoff_iso,
+            sort_field="completed_at", sort_order="desc",
+            page=1, size=200,
+        )
+        if pg is not _NOT_CUT_OVER:
+            jobs = pg.get("items", [])
+        else:
+            resp = await self._es.search_documents(JOBS_CURRENT_INDEX, query, 200)
+            jobs = [h["_source"] for h in resp["hits"]["hits"]]
 
         route_margins: Dict[str, List[float]] = defaultdict(list)
         for job in jobs:

@@ -205,6 +205,25 @@ class DriverNudgeAgent(OverlayAgentBase):
 
         try:
             from scheduling.services.scheduling_es_mappings import JOBS_CURRENT_INDEX
+            # Read-cutover: serve the cross-tenant sweep from Postgres when
+            # enabled. The ``must_not driver_acked=True`` negation (match jobs
+            # that are unacked OR have no flag) is awkward as a positive PG
+            # filter, so we fetch status+assigned_at matches and exclude
+            # driver_acked==True in Python — byte-identical to the ES result.
+            from commerce.services.commerce_persistence_bridge import (
+                _NOT_CUT_OVER,
+                read_hybrid_search_all_tenants,
+            )
+
+            pg = await read_hybrid_search_all_tenants(
+                "job",
+                term_filters={"status": "assigned"},
+                range_field="assigned_at", range_lte=nudge_cutoff.isoformat(),
+                sort_field="assigned_at", sort_order="asc", size=100,
+            )
+            if pg is not _NOT_CUT_OVER:
+                return [j for j in pg if j.get("driver_acked") is not True]
+
             result = await self._es.search_documents(JOBS_CURRENT_INDEX, query, size=100)
             hits = result.get("hits", {}).get("hits", [])
             return [hit["_source"] for hit in hits]

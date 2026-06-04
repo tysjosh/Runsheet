@@ -533,7 +533,18 @@ def setup_compliance_indices(es_service) -> None:
     es_client = es_service.client
     is_serverless = es_service.is_serverless
 
+    # Skip indices retired in Phase 6 (migrated to Postgres + dropped) so
+    # startup does not silently recreate a dropped index.
+    try:
+        from config.settings import get_settings
+        retired = set(get_settings().retired_es_indices or [])
+    except Exception:  # noqa: BLE001
+        retired = set()
+
     for index_name, mapping in COMPLIANCE_INDEX_MAPPINGS.items():
+        if index_name in retired:
+            logger.info("Skipping retired compliance index: %s", index_name)
+            continue
         try:
             if not es_client.indices.exists(index=index_name):
                 body = mapping

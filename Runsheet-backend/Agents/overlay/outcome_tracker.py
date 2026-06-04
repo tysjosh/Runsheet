@@ -3,7 +3,8 @@ Outcome Tracker — links proposals to execution results.
 
 Captures before-KPIs at proposal time, after-KPIs after observation
 window (default 1 hour), computes realized_delta, flags adverse
-outcomes (>10% worse), and handles inconclusive cases.
+outcomes (>10% worse in the KPI's *worsening* direction — see
+KPI_DIRECTION), and handles inconclusive cases.
 
 Validates: Requirements 11.1–11.8
 """
@@ -22,6 +23,65 @@ OUTCOMES_INDEX = "agent_outcomes"
 DEFAULT_OBSERVATION_WINDOW_SECONDS = 3600
 # Adverse outcome threshold (10% worse)
 DEFAULT_ADVERSE_THRESHOLD_PCT = 10.0
+
+# KPI directionality — whether a KPI is "higher is better" or "lower is
+# better". The adverse-outcome check must compare against the *worsening*
+# direction for each KPI: for higher-is-better KPIs a >threshold DROP is
+# adverse; for lower-is-better KPIs a >threshold RISE is adverse. Without
+# this map the classifier treated every drop as adverse, which mislabeled
+# genuine improvements (e.g. a fuel-cost reduction) as "adverse" and fed
+# that false signal to the LearningPolicyAgent.
+#
+# Direction values:
+#   +1  -> higher is better (improvement = increase). Adverse when it falls.
+#   -1  -> lower is better  (improvement = decrease). Adverse when it rises.
+KPI_HIGHER_IS_BETTER = 1
+KPI_LOWER_IS_BETTER = -1
+
+KPI_DIRECTION: Dict[str, int] = {
+    # Lower is better — cost/time/risk metrics.
+    "total_fuel_cost": KPI_LOWER_IS_BETTER,
+    "fuel_cost": KPI_LOWER_IS_BETTER,
+    "avg_delivery_time_minutes": KPI_LOWER_IS_BETTER,
+    "delivery_time_minutes": KPI_LOWER_IS_BETTER,
+    "delivery_time": KPI_LOWER_IS_BETTER,
+    "sla_penalty": KPI_LOWER_IS_BETTER,
+    "runout_risk_24h": KPI_LOWER_IS_BETTER,
+    "assignment_response_time": KPI_LOWER_IS_BETTER,
+    # Higher is better — compliance/satisfaction/throughput metrics.
+    "sla_compliance_rate": KPI_HIGHER_IS_BETTER,
+    "sla_compliance_pct": KPI_HIGHER_IS_BETTER,
+    "customer_satisfaction_score": KPI_HIGHER_IS_BETTER,
+    "driver_ack_rate": KPI_HIGHER_IS_BETTER,
+    "margin_pct": KPI_HIGHER_IS_BETTER,
+}
+
+# When a KPI is not in the map, default to "higher is better" — this
+# preserves the prior behavior for unknown KPIs (a drop is treated as
+# adverse) so the change is conservative for un-mapped metrics.
+DEFAULT_KPI_DIRECTION = KPI_HIGHER_IS_BETTER
+
+
+def kpi_is_adverse(kpi_name: str, before_val: float, delta: float,
+                   threshold_pct: float) -> bool:
+    """Return True if ``delta`` represents an adverse move for ``kpi_name``.
+
+    The KPI's directionality (from :data:`KPI_DIRECTION`) decides which sign
+    of change is "worse". The magnitude is compared against ``threshold_pct``
+    as a percentage of the (absolute) before value.
+
+    * higher-is-better KPI → adverse when it drops > threshold%.
+    * lower-is-better KPI  → adverse when it rises > threshold%.
+    """
+    if before_val == 0:
+        return False
+    pct_change = (delta / abs(before_val)) * 100
+    direction = KPI_DIRECTION.get(kpi_name, DEFAULT_KPI_DIRECTION)
+    # Signed change in the "worse" direction: for higher-is-better a negative
+    # pct_change is bad; for lower-is-better a positive pct_change is bad.
+    # Multiplying by -direction makes "worse" always positive.
+    worsening_pct = pct_change * -direction
+    return worsening_pct > threshold_pct
 
 
 class PendingOutcome:
@@ -163,15 +223,15 @@ class OutcomeTracker:
                     for k in set(pending.before_kpis) | set(after_kpis)
                 }
 
-                # Determine status (Req 11.7)
+                # Determine status (Req 11.7). Use per-KPI directionality so
+                # an improvement in a lower-is-better KPI (e.g. fuel cost or
+                # delivery time dropping) is NOT misflagged as adverse.
                 status = "measured"
                 for kpi, before_val in pending.before_kpis.items():
                     delta = realized_delta.get(kpi, 0)
-                    if before_val != 0:
-                        pct_change = (delta / abs(before_val)) * 100
-                        if pct_change < -self._adverse_threshold:
-                            status = "adverse"
-                            break
+                    if kpi_is_adverse(kpi, before_val, delta, self._adverse_threshold):
+                        status = "adverse"
+                        break
 
                 outcome = OutcomeRecord(
                     intervention_id=iid,
@@ -222,10 +282,24 @@ class OutcomeTracker:
                 },
                 "size": len(entity_ids),
             }
-            resp = await self._es.search_documents(
-                "jobs_current", query, len(entity_ids)
+            # Read-cutover: serve from Postgres when enabled (tenant-scoped).
+            from commerce.services.commerce_persistence_bridge import (
+                _NOT_CUT_OVER,
+                read_hybrid_search,
             )
-            hits = [h["_source"] for h in resp["hits"]["hits"]]
+
+            pg = await read_hybrid_search(
+                "job", tenant_id,
+                in_filters={"job_id": entity_ids},
+                page=1, size=max(len(entity_ids), 1),
+            )
+            if pg is not _NOT_CUT_OVER:
+                hits = pg.get("items", [])
+            else:
+                resp = await self._es.search_documents(
+                    "jobs_current", query, len(entity_ids)
+                )
+                hits = [h["_source"] for h in resp["hits"]["hits"]]
 
             if not hits:
                 return None

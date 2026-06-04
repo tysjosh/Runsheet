@@ -204,6 +204,27 @@ class DeliveryPrioritizationAgent(OverlayAgentBase):
             },
         }
         try:
+            # Read-cutover: serve from Postgres when enabled. The ES terms-agg
+            # on tenant_id is reproduced by fetching pending orders cross-tenant
+            # and collecting the distinct tenant_ids in Python.
+            from commerce.services.commerce_persistence_bridge import (
+                _NOT_CUT_OVER,
+                read_hybrid_search_all_tenants,
+            )
+
+            pg = await read_hybrid_search_all_tenants(
+                "fuel_order",
+                in_filters={"status": ["placed", "confirmed", "scheduled"]},
+                size=10_000,
+            )
+            if pg is not _NOT_CUT_OVER:
+                seen: List[str] = []
+                for order in pg:
+                    tid = order.get("tenant_id")
+                    if tid and tid not in seen:
+                        seen.append(tid)
+                return seen
+
             resp = await self._es.search_documents(
                 FUEL_ORDERS_CURRENT_INDEX, query, 0
             )
@@ -296,6 +317,20 @@ class DeliveryPrioritizationAgent(OverlayAgentBase):
             "size": 1000,
         }
         try:
+            # Read-cutover: serve from Postgres when enabled (tenant-scoped).
+            from commerce.services.commerce_persistence_bridge import (
+                _NOT_CUT_OVER,
+                read_hybrid_search,
+            )
+
+            pg = await read_hybrid_search(
+                "fuel_order", tenant_id,
+                in_filters={"status": ["placed", "confirmed", "scheduled"]},
+                page=1, size=1000,
+            )
+            if pg is not _NOT_CUT_OVER:
+                return pg.get("items", [])
+
             resp = await self._es.search_documents(
                 FUEL_ORDERS_CURRENT_INDEX, query, 1000
             )

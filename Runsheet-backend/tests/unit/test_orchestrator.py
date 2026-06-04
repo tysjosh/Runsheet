@@ -154,6 +154,12 @@ class TestRoutingTable:
         assert "delivery" in keywords
         assert "ops" in keywords
         assert "breach" in keywords
+        # Core ops nouns: the ops specialist owns search_orders / search_drivers
+        # and customer-scoped queries. Previously a "driver"/"order" query fell
+        # through to the reporting fallback, which lacks those tools.
+        assert "driver" in keywords
+        assert "order" in keywords
+        assert "customer" in keywords
 
     def test_reporting_keywords(self):
         keywords = AgentOrchestrator.ROUTING_TABLE["reporting"]
@@ -196,6 +202,18 @@ class TestClassifyIntent:
     def test_single_ops_keyword(self):
         orch = _make_orchestrator()
         result = orch._classify_intent_keywords("Track this shipment")
+        assert "ops" in result
+
+    def test_driver_query_routes_to_ops(self):
+        orch = _make_orchestrator()
+        # "Search for available drivers" must route to ops (owner of
+        # search_drivers), not fall through to the reporting fallback.
+        result = orch._classify_intent_keywords("Search for available drivers")
+        assert "ops" in result
+
+    def test_order_query_routes_to_ops(self):
+        orch = _make_orchestrator()
+        result = orch._classify_intent_keywords("Show me all placed orders")
         assert "ops" in result
 
     def test_single_reporting_keyword(self):

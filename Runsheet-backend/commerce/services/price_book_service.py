@@ -644,6 +644,27 @@ class PriceBookService:
         Since ElasticsearchService doesn't expose delete_by_query, we
         search for all rules and delete them individually.
         """
+        # Read-cutover: source the rule_ids to delete from Postgres when
+        # enabled (so this works after pricing_rules_current is dropped —
+        # ``search_documents`` is NOT retire-gated and would error on a missing
+        # index). The per-rule ES delete is retire-gated (no-op once dropped),
+        # and the deletions still mirror to PG below.
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_pricing_rules_for_book,
+        )
+
+        pg_rules = await read_pricing_rules_for_book(tenant_id, price_book_id)
+        if pg_rules is not _NOT_CUT_OVER:
+            removed_ids = [r["rule_id"] for r in pg_rules]
+            for rule_id in removed_ids:
+                await self._es.delete_document(PRICING_RULES_CURRENT_INDEX, rule_id)
+            from commerce.services.commerce_persistence_bridge import (
+                mirror_pricing_rules_delete,
+            )
+            await mirror_pricing_rules_delete(tenant_id, removed_ids)
+            return
+
         base_query: Dict[str, Any] = {
             "query": {
                 "bool": {

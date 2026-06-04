@@ -1172,6 +1172,42 @@ async def read_hybrid_search(aggregate_type: str, tenant_id: str, *,
         )
 
 
+async def read_hybrid_search_all_tenants(aggregate_type: str, *,
+                                         term_filters: dict | None = None,
+                                         in_filters: dict | None = None,
+                                         bool_filters: dict | None = None,
+                                         range_field: str | None = None,
+                                         range_gte: str | None = None,
+                                         range_lte: str | None = None,
+                                         range_lt: str | None = None,
+                                         exists_fields: list | None = None,
+                                         sort_field: str = "created_at",
+                                         sort_order: str = "asc",
+                                         size: int = 200):
+    """CROSS-TENANT hybrid search for the autonomous monitor sweeps.
+
+    Returns a list of verbatim documents matching the filters across ALL
+    tenants (the agents dispatch per-tenant internally), or ``_NOT_CUT_OVER``
+    when reads should still be served from Elasticsearch. System-level only —
+    request-path reads must use the tenant-scoped ``read_hybrid_search``.
+    """
+    if not read_from_postgres():
+        return _NOT_CUT_OVER
+    from persistence.database import session_scope
+    from persistence.read_repositories import HybridReadRepository
+
+    repo = HybridReadRepository(aggregate_type)
+    async with session_scope() as session:
+        return await repo.search_all_tenants(
+            session,
+            term_filters=term_filters, in_filters=in_filters,
+            bool_filters=bool_filters,
+            range_field=range_field, range_gte=range_gte, range_lte=range_lte,
+            range_lt=range_lt, exists_fields=exists_fields,
+            sort_field=sort_field, sort_order=sort_order, size=size,
+        )
+
+
 async def read_hybrid_fetch_for_aggregation(
     aggregate_type: str, tenant_id: str, *,
     term_filters: dict | None = None,

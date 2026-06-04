@@ -447,6 +447,59 @@ lockstep.
   (`search_fleet_data`, `multi_match` relevance) and the `search_orders` /
   `search_support_tickets` / `search_inventory` semantic tools — full-text
   relevance search is an ES strength, not a structured filter PG can reproduce.
+- **Agents layer — autonomous monitor sweeps (in progress)** ✅ first chunk done.
+  The background monitor agents run a single **cross-tenant** ES sweep then
+  dispatch per-tenant internally. A new `HybridReadRepository.search_all_tenants`
+  + `read_hybrid_search_all_tenants` bridge helper reproduces that pattern (same
+  term / terms / bool / range / exists filters + document-field sort, WITHOUT
+  the tenant clause; system-level only — request-path reads stay tenant-scoped).
+  Cut over: `JobSLAMonitor` (in_progress + `estimated_arrival<=threshold`),
+  `DelayResponseAgent` (in_progress + `estimated_arrival<now`; its
+  `_find_available_asset` truck lookup uses tenant-scoped `read_hybrid_search`),
+  `SLAGuardianAgent` (in_transit shipments + `estimated_delivery<=threshold`),
+  and `TruckFuelMonitor` (fetches trucks cross-tenant then applies the
+  **numeric** `fuel_level_pct` threshold in Python — the PG JSON range helper
+  compares as strings, correct for ISO dates but NOT numbers). Verified
+  byte-identical to ES against the live container (in_progress jobs
+  `[JOB-007, JOB-008, JOB-009]` on both). Remaining agent reads (overlay
+  optimizers, tank/route/compartment agents reading `fuel_stations` /
+  `mvp_tank_forecasts` / `customer_tanks` / `truck_compartments`, and the
+  agent memory / approval-queue stores) are NOT yet cut over — several read
+  un-migrated indices (those stay ES by design); the migrated-aggregate reads
+  among them are the next chunk.
+- **Agents layer — overlay optimizers (jobs_current readers)** ✅ done. The
+  signal-driven overlay optimizers' `jobs_current` reads now serve from PG:
+  `DispatchOptimizer._query_affected_jobs` (in_progress + `terms job_id`) and
+  `._query_available_assets` (on_time trucks, tenant-scoped via a document
+  `tenant_id` term since `truck` is tenant-optional); `OutcomeTracker._measure_kpis`
+  (`terms job_id`); `RevenueGuard._compute_route_margins` (completed/delivered +
+  `completed_at >= now-7d`, with the ES date-math resolved to a concrete ISO
+  cutoff for the PG string range); `JobPriorityEngine._query_active_jobs`
+  (scheduled/assigned/in_progress, sorted by `estimated_arrival`); and
+  `DriverNudgeAgent` (cross-tenant assigned + `assigned_at <= cutoff`, with the
+  ES `must_not driver_acked=True` negation applied in Python). Verified
+  byte-identical to ES against the live container (active jobs JOB-001..009 on
+  both paths). Remaining: the tank/route/compartment agents read un-migrated
+  indices (`fuel_stations`, `mvp_tank_forecasts`, `customer_tanks`,
+  `truck_compartments`, `mvp_*`) which stay on ES by design; `route_planning_agent`
+  reads `fuel_orders_current` (migrated) — a candidate for a later chunk.
+- **Agents layer — fuel_orders_current readers** ✅ done. The remaining migrated
+  `fuel_orders_current` agent reads now serve from PG:
+  `RoutePlanningAgent._fetch_routable_orders` (confirmed/scheduled) +
+  `._get_driver_for_truck` (by-id truck lookup, tenant-guarded);
+  `DeliveryPrioritizationAgent._fetch_pending_orders` (placed/confirmed/scheduled,
+  tenant-scoped) + `._discover_tenants_with_pending_orders` (the ES tenant
+  terms-agg reproduced by a cross-tenant fetch + distinct tenant_ids in Python);
+  and `CompartmentLoadingAgent._query_fuel_orders` (loadable statuses,
+  tenant-scoped). Verified byte-identical to ES against the live container
+  (routable orders ORD-0001..0006 on both paths). With this, **every migrated
+  aggregate read in the autonomous + overlay agent layers is cut over**
+  (`jobs_current`, `fuel_orders_current`, `shipments_current`, `trucks`). What
+  remains ES-only in the agents is by design: un-migrated indices
+  (`fuel_stations`, `mvp_tank_forecasts`, `customer_tanks`, `truck_compartments`,
+  `mvp_load_plans`, `mvp_routes`, `inventory`, `fuel_events`, `rack_prices`,
+  `storm_*`, `meter_registry`), the agent memory / approval-queue stores, the
+  `*_events` streams, and full-text semantic search.
   **Read-cutover (ops shipments):** the ops shipment reads now serve from PG —
   `GET /ops/shipments` (list), `/ops/shipments/{id}` (get; event history still
   reads the un-migrated `shipment_events` from ES), `/ops/shipments/sla-breaches`
@@ -553,6 +606,58 @@ across a restart, reads + webhook resolution serve from PG, writes return
 green (95 records across the remaining indices). To undo:
 `RETIRED_ES_INDICES=` (drop it from the list), restart, then
 `python -m persistence.rebuild_from_postgres --aggregate intake_channel`.
+
+#### Done: `supplier_contracts` retired (2026-06-04)
+
+The second index taken to Phase 6, and the first of the pricing family. Reads
+(`get` / `list_for_tenant` via the shared `_BaseTenantScopedRepository` cutover)
+serve from Postgres; create/update mirror to PG via `mirror_compliance_config_upsert`.
+Dropped from the live cluster and added to `RETIRED_ES_INDICES`. Verified
+end-to-end: pre-drop PG=2 ES=2; after `DELETE` the repo still served
+`list_for_tenant(active)` → `[SUPP-001, SUPP-002]` and `get(SUPP-001)` from PG
+with the index gone; a `repo.create` after retirement returned
+`skipped_retired_index` from ES yet **persisted to PG** (read back from PG);
+the index stayed dropped across a restart; `parity_check` skips it and is green
+(108 records). Reversibility proven live: `rebuild_from_postgres --aggregate
+supplier_contract` recreated it byte-identically with the correct **strict**
+mapping (`tenant_id` `keyword`, `dynamic: strict`), then it was re-dropped.
+**Gap found + fixed during this drop:** `setup_fuel_ops_indices` did not honor
+the `RETIRED_ES_INDICES` gate (only the order-intake setup did), so the first
+restart silently recreated the dropped index. Added the same retired-index skip
+guard (regression test: `test_skips_retired_indices`). To undo:
+`RETIRED_ES_INDICES=intake_channels` (drop it from the list), restart, then
+`python -m persistence.rebuild_from_postgres --aggregate supplier_contract`.
+
+#### Done: pricing family retired (2026-06-04)
+
+`price_books_current`, `pricing_rules_current` (commerce) and `pricing_rules`
+(the compliance sell-side rules) taken to Phase 6. Reads were already cut over
+(`PriceBookService.get`/`list`/`_get_rules_for_book`, `PricingEngine`, and
+`SalesPricingEngine.resolve_rule`); the last ungated ES readers were wired
+before dropping:
+- `commerce/api/pricing_endpoints.py::list_pricing_rules` → PG via
+  `read_hybrid_fetch_for_aggregation("compliance_pricing_rule", …)`.
+- `PriceBookService._remove_rules_for_book` (a write-path read-before-delete)
+  now sources the rule_ids from PG, so a price-book update works after the
+  index is gone (`search_documents` is NOT retire-gated and would otherwise
+  error on a dropped index).
+Dropped from the live cluster and added to `RETIRED_ES_INDICES`. Verified
+end-to-end with the indices gone: a `PriceBookService.create` (book + fan-out
+rule) persisted to PG with ES gated, `get`/`list` served from PG, and
+`PricingEngine.resolve` returned the rule from the PG candidate set; all three
+indices stayed dropped across a restart; `parity_check` skips them and is green
+(108 records). `price_protection_contracts` is intentionally **kept** — its
+`_fetch_contract` still reads ES inside the version-based CAS decrement loop.
+**Gap found + fixed:** the `RETIRED_ES_INDICES` startup gate was only honored by
+`setup_order_intake_indices` and (just before) `setup_fuel_ops_indices`;
+`setup_commerce_indices` and `setup_compliance_indices` did not check it and
+would have recreated the dropped indices on the next restart. Added the same
+retired-skip guard to both (regression test: `test_skips_retired_indices` in
+the compliance + fuel-ops mapping suites). The programmatic seeders are now
+also retirement-safe centrally: `seed_all_data._bulk` / `_single` drop writes
+to any retired index. To undo any of these:
+`RETIRED_ES_INDICES=…` (remove the name), restart, then
+`python -m persistence.rebuild_from_postgres --aggregate price_book|pricing_rule|compliance_pricing_rule`.
 - **Migration scope complete** — all recommended source-of-truth domains
   (commerce, compliance config, orders/jobs current-state, master data) now
   dual-write to Postgres with outbox→ES projection, backfill, and parity. The

@@ -135,10 +135,28 @@ class SLAGuardianAgent(AutonomousAgentBase):
             "sort": [{"estimated_delivery": {"order": "asc"}}],
         }
 
-        resp = await self._es.search_documents(
-            SHIPMENTS_CURRENT_INDEX, query, 200
+        # Read-cutover: serve the cross-tenant sweep from Postgres when enabled
+        # (each shipment is dispatched per its own tenant below). Same status +
+        # date-range + sort as the ES query.
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_hybrid_search_all_tenants,
         )
-        at_risk_shipments = [h["_source"] for h in resp["hits"]["hits"]]
+
+        pg = await read_hybrid_search_all_tenants(
+            "shipment",
+            term_filters={"status": "in_transit"},
+            range_field="estimated_delivery",
+            range_lte=threshold_time.isoformat(),
+            sort_field="estimated_delivery", sort_order="asc", size=200,
+        )
+        if pg is not _NOT_CUT_OVER:
+            at_risk_shipments = pg
+        else:
+            resp = await self._es.search_documents(
+                SHIPMENTS_CURRENT_INDEX, query, 200
+            )
+            at_risk_shipments = [h["_source"] for h in resp["hits"]["hits"]]
 
         for shipment in at_risk_shipments:
             shipment_id = shipment.get("shipment_id")

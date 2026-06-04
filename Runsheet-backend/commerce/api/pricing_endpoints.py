@@ -243,6 +243,37 @@ async def list_pricing_rules(
     """
     es = _get_es_service()
 
+    # Read-cutover: serve from Postgres when enabled (aggregate
+    # ``compliance_pricing_rule``). All four filters are exact-match term
+    # filters that map directly to document fields; reproduced via the
+    # fetch-for-aggregation helper, same as the tax endpoint list handlers.
+    from commerce.services.commerce_persistence_bridge import (
+        _NOT_CUT_OVER,
+        read_hybrid_fetch_for_aggregation,
+    )
+
+    _term_filters: Dict[str, Any] = {}
+    if customer_id is not None:
+        _term_filters["customer_id"] = customer_id.strip()
+    if product_code is not None:
+        _term_filters["product_code"] = product_code.strip()
+    if strategy is not None:
+        _term_filters["strategy"] = strategy.strip()
+    if status is not None:
+        _term_filters["status"] = status.strip()
+
+    pg = await read_hybrid_fetch_for_aggregation(
+        "compliance_pricing_rule", tenant.tenant_id,
+        term_filters=_term_filters or None,
+    )
+    if pg is not _NOT_CUT_OVER:
+        items = pg[:size]
+        return {
+            "data": items,
+            "count": len(items),
+            "request_id": _get_request_id(request),
+        }
+
     filters: List[Dict[str, Any]] = []
     if customer_id is not None:
         filters.append({"term": {"customer_id": customer_id.strip()}})

@@ -311,12 +311,12 @@ class TestCheckPendingOutcomes:
 
     @pytest.mark.asyncio
     async def test_adverse_status_when_degradation_exceeds_threshold(self):
-        """Req 11.7: flag adverse if degradation >10% of before value."""
-        # Before: delivery=30, after: delivery=40 → delta=+10, pct=+33% (worse for delivery)
-        # But the logic checks if pct_change < -threshold, meaning the metric got worse
-        # For delivery_time, higher is worse, but the code checks raw delta direction
-        # Let's use a metric where decrease is bad: sla_compliance_rate
-        # Before: sla=1.0, after: sla=0.8 → delta=-0.2, pct=-20% → adverse
+        """Req 11.7: flag adverse if a KPI worsens >10% in its bad direction.
+
+        Uses sla_compliance_rate (higher is better): 1.0 -> 0.0 is a -100%
+        drop, which is adverse. The other KPIs (fuel/delivery) are unchanged
+        here so they don't affect the result.
+        """
         es = _make_es_service(
             hits=[
                 {"actual_delivery_minutes": 30.0, "fuel_cost": 100.0, "sla_met": False}
@@ -359,7 +359,78 @@ class TestCheckPendingOutcomes:
         assert results[0].status == "measured"
 
     @pytest.mark.asyncio
-    async def test_inconclusive_when_no_hits(self):
+    async def test_fuel_cost_reduction_is_not_adverse(self):
+        """Directionality: a large DROP in fuel cost (lower is better) is an
+        improvement, NOT adverse — even though it exceeds the 10% threshold.
+
+        Regression for the prior bug where any >10% decrease was flagged
+        adverse, mislabeling genuine cost savings and feeding a false
+        negative-outcome signal to the LearningPolicyAgent.
+        """
+        es = _make_es_service(
+            hits=[
+                {"actual_delivery_minutes": 30.0, "fuel_cost": 60.0, "sla_met": True}
+            ]
+        )
+        tracker = _make_tracker(es_service=es, adverse_threshold_pct=10.0)
+        before = {"total_fuel_cost": 100.0}  # after 60 -> -40% (improvement)
+        await tracker.record_proposal_execution("int-1", before, "t1", ["j1"])
+        tracker._pending["int-1"].measure_at = datetime.now(
+            timezone.utc
+        ) - timedelta(seconds=1)
+
+        results = await tracker.check_pending_outcomes()
+        assert results[0].realized_delta["total_fuel_cost"] == pytest.approx(-40.0)
+        assert results[0].status == "measured"
+
+    @pytest.mark.asyncio
+    async def test_fuel_cost_increase_is_adverse(self):
+        """Directionality: a >10% RISE in fuel cost (lower is better) is adverse."""
+        es = _make_es_service(
+            hits=[
+                {"actual_delivery_minutes": 30.0, "fuel_cost": 130.0, "sla_met": True}
+            ]
+        )
+        tracker = _make_tracker(es_service=es, adverse_threshold_pct=10.0)
+        before = {"total_fuel_cost": 100.0}  # after 130 -> +30% (worse)
+        await tracker.record_proposal_execution("int-1", before, "t1", ["j1"])
+        tracker._pending["int-1"].measure_at = datetime.now(
+            timezone.utc
+        ) - timedelta(seconds=1)
+
+        results = await tracker.check_pending_outcomes()
+        assert results[0].status == "adverse"
+
+    @pytest.mark.asyncio
+    async def test_delivery_time_reduction_is_not_adverse(self):
+        """Directionality: faster delivery (lower is better) is an improvement."""
+        es = _make_es_service(
+            hits=[
+                {"actual_delivery_minutes": 40.0, "fuel_cost": 100.0, "sla_met": True}
+            ]
+        )
+        tracker = _make_tracker(es_service=es, adverse_threshold_pct=10.0)
+        before = {"avg_delivery_time_minutes": 60.0}  # after 40 -> -33% (faster)
+        await tracker.record_proposal_execution("int-1", before, "t1", ["j1"])
+        tracker._pending["int-1"].measure_at = datetime.now(
+            timezone.utc
+        ) - timedelta(seconds=1)
+
+        results = await tracker.check_pending_outcomes()
+        assert results[0].status == "measured"
+
+    @pytest.mark.asyncio
+    async def test_unknown_kpi_defaults_to_higher_is_better(self):
+        """An un-mapped KPI keeps the prior conservative behavior: a >10%
+        drop is treated as adverse (default direction = higher is better)."""
+        es = _make_es_service(hits=[{"some_custom_metric": 50.0}])
+        # _measure_kpis only emits the three known KPIs, so drive the helper
+        # directly to assert the default-direction contract.
+        from Agents.overlay.outcome_tracker import kpi_is_adverse
+        # Unknown KPI, 100 -> 80 is -20% -> adverse under higher-is-better default.
+        assert kpi_is_adverse("some_custom_metric", 100.0, -20.0, 10.0) is True
+        # Unknown KPI, 100 -> 120 is +20% -> not adverse (an increase is "good").
+        assert kpi_is_adverse("some_custom_metric", 100.0, 20.0, 10.0) is False
         """Req 11.8: inconclusive when entities cannot be found."""
         es = _make_es_service(hits=[])  # No hits
         tracker = _make_tracker(es_service=es)

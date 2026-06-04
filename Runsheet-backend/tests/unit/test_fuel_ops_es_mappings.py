@@ -426,3 +426,24 @@ class TestSetupFuelOpsIndices:
             for call in es_service.client.indices.create.call_args_list
         }
         assert attempted == EXPECTED_INDICES
+
+    def test_skips_retired_indices(self, monkeypatch):
+        """A Phase-6 retired index must NOT be recreated at startup."""
+        from config.settings import clear_settings_cache
+
+        monkeypatch.setenv("RETIRED_ES_INDICES", "supplier_contracts")
+        clear_settings_cache()
+        try:
+            es_service = self._make_es_service()
+            with self._patch_es_module():
+                setup_fuel_ops_indices(es_service)
+
+            created = {
+                call.kwargs["index"]
+                for call in es_service.client.indices.create.call_args_list
+            }
+            assert SUPPLIER_CONTRACTS_INDEX not in created
+            # Every other index is still created.
+            assert created == EXPECTED_INDICES - {SUPPLIER_CONTRACTS_INDEX}
+        finally:
+            clear_settings_cache()

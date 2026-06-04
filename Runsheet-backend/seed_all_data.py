@@ -139,7 +139,38 @@ def _index_count(index: str) -> int:
 
 
 def _bulk(actions: list):
-    """Execute a bulk request."""
+    """Execute a bulk request.
+
+    Action pairs targeting a Phase-6 retired index are dropped centrally so no
+    programmatic seeder resurrects a dropped index (Postgres is its sole store).
+    """
+    if not actions:
+        return
+    if _RETIRED_INDICES:
+        filtered: list = []
+        skipped = False
+        i = 0
+        while i < len(actions):
+            action = actions[i]
+            # Bulk actions come in (meta, doc) pairs; meta has the target index.
+            meta = action.get("index") or action.get("create") or {} if isinstance(action, dict) else {}
+            target = meta.get("_index")
+            has_doc = (i + 1) < len(actions) and not (
+                isinstance(actions[i + 1], dict)
+                and ({"index", "create", "update", "delete"} & set(actions[i + 1].keys()))
+            )
+            if target in _RETIRED_INDICES:
+                skipped = True
+                i += 2 if has_doc else 1
+                continue
+            filtered.append(action)
+            if has_doc:
+                filtered.append(actions[i + 1])
+            i += 2 if has_doc else 1
+        if skipped:
+            logger.info("⏭️  Skipped bulk writes to retired index(es): %s",
+                        ", ".join(sorted(_RETIRED_INDICES)))
+        actions = filtered
     if not actions:
         return
     resp = ES.bulk(body=actions, refresh=True)
@@ -151,6 +182,9 @@ def _bulk(actions: list):
 
 
 def _single(index: str, doc_id: str, body: dict):
+    if index in _RETIRED_INDICES:
+        logger.info("⏭️  Skipping write to retired index: %s", index)
+        return
     ES.index(index=index, id=doc_id, body=body, refresh=True)
 
 

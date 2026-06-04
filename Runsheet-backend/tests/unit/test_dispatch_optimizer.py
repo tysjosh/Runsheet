@@ -547,6 +547,39 @@ class TestScoreReassignments:
         # And it saves more time, so it ranks first.
         assert candidates[0]["asset_id"] == "near"
 
+    def test_falls_back_to_truck_id_when_asset_id_absent(self):
+        """Older / MVP fleet documents only carry ``truck_id`` (no
+        ``asset_id`` alias). The candidate must resolve the canonical id
+        from ``truck_id`` rather than emitting ``asset_id: None`` (which
+        would route a no-op reassignment mutation)."""
+        optimizer, _ = _make_optimizer()
+        jobs = [{"job_id": "j1", "job_type": "cargo_transport"}]
+        # Only truck_id present — the shape of seeded/legacy trucks.
+        assets = [{"truck_id": "TRK-001", "asset_type": "vehicle"}]
+        signals = [_make_signal(entity_id="j1", severity=Severity.HIGH)]
+
+        candidates = optimizer._score_reassignments(jobs, assets, signals)
+
+        assert len(candidates) == 1
+        assert candidates[0]["asset_id"] == "TRK-001"
+
+    def test_skips_asset_with_no_resolvable_id(self):
+        """An asset carrying neither asset_id nor truck_id is skipped so no
+        reassignment action with a null asset id is ever produced."""
+        optimizer, _ = _make_optimizer()
+        jobs = [{"job_id": "j1", "job_type": "cargo_transport"}]
+        assets = [
+            {"asset_type": "vehicle"},  # no id at all -> skipped
+            {"asset_id": "a1", "asset_type": "vehicle"},  # valid
+        ]
+        signals = [_make_signal(entity_id="j1", severity=Severity.HIGH)]
+
+        candidates = optimizer._score_reassignments(jobs, assets, signals)
+
+        assert len(candidates) == 1
+        assert candidates[0]["asset_id"] == "a1"
+        assert all(c["asset_id"] for c in candidates)
+
 
 # ---------------------------------------------------------------------------
 # Tests: _is_compatible()

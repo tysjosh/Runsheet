@@ -113,14 +113,39 @@ class TruckFuelMonitor(AutonomousAgentBase):
             "size": 100,
         }
 
+        # Read-cutover: serve the cross-tenant sweep from Postgres when enabled.
+        # ``fuel_level_pct`` is numeric, and the PG JSON range helper compares
+        # as strings (correct for ISO dates, NOT for numbers), so we fetch the
+        # trucks and apply the numeric threshold in Python — byte-identical to
+        # the ES numeric range.
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_hybrid_search_all_tenants,
+        )
+
         try:
-            resp = await self._es.search_documents(TRUCKS_INDEX, query, 100)
+            pg = await read_hybrid_search_all_tenants(
+                "truck", sort_field="created_at", sort_order="desc", size=100,
+            )
         except Exception:
-            # Req 1.8: log error and continue without crashing
-            self.logger.exception("Failed to query trucks index")
+            self.logger.exception("Failed to query trucks from Postgres")
             return detections, actions
 
-        flagged_trucks = [h["_source"] for h in resp.get("hits", {}).get("hits", [])]
+        if pg is not _NOT_CUT_OVER:
+            flagged_trucks = [
+                t for t in pg
+                if isinstance(t.get("fuel_level_pct"), (int, float))
+                and t["fuel_level_pct"] < self._fuel_threshold_pct
+            ]
+        else:
+            try:
+                resp = await self._es.search_documents(TRUCKS_INDEX, query, 100)
+            except Exception:
+                # Req 1.8: log error and continue without crashing
+                self.logger.exception("Failed to query trucks index")
+                return detections, actions
+
+            flagged_trucks = [h["_source"] for h in resp.get("hits", {}).get("hits", [])]
 
         for truck in flagged_trucks:
             truck_id = truck.get("truck_id")

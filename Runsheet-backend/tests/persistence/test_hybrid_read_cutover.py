@@ -8,7 +8,7 @@ to ES.
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -1326,3 +1326,279 @@ async def test_find_truck_by_id_served_from_postgres(engine, read_from_pg):
         out = await find_truck_by_id("GI-58A")
     assert "GI-58A" in out
     assert "vehicle" in out
+
+
+# ---------------------------------------------------------------------------
+# Autonomous monitor agents — cross-tenant sweeps served from PG
+# (job SLA, delay response, SLA guardian, truck fuel)
+# ---------------------------------------------------------------------------
+
+
+def _agent_es_guard():
+    """ES double whose search_documents fails (read path must not be used),
+    but whose write surface is permissive (agents may write/broadcast)."""
+    es = _es_raises_on_read()
+    es.index_document = AsyncMock(return_value={"result": "created"})
+    es.update_document = AsyncMock(return_value={"result": "updated"})
+    return es
+
+
+async def test_hybrid_search_all_tenants_crosses_tenants(engine, read_from_pg):
+    # Jobs across two tenants, both in_progress + past the threshold.
+    await _seed("job", _job_doc("j_a", status="in_progress",
+                                estimated_arrival="2026-01-01T00:00:00+00:00",
+                                tenant_id=TENANT))
+    await _seed("job", _job_doc("j_b", status="in_progress",
+                                estimated_arrival="2026-01-01T00:00:00+00:00",
+                                tenant_id="other-tenant"))
+    await _seed("job", _job_doc("j_done", status="completed",
+                                estimated_arrival="2026-01-01T00:00:00+00:00"))
+
+    from commerce.services.commerce_persistence_bridge import (
+        _NOT_CUT_OVER, read_hybrid_search_all_tenants,
+    )
+    rows = await read_hybrid_search_all_tenants(
+        "job", term_filters={"status": "in_progress"},
+        range_field="estimated_arrival", range_lte="2026-06-01T00:00:00+00:00",
+        sort_field="estimated_arrival", sort_order="asc", size=200,
+    )
+    assert rows is not _NOT_CUT_OVER
+    # Both tenants' in_progress jobs returned; completed excluded.
+    assert {r["job_id"] for r in rows} == {"j_a", "j_b"}
+
+
+async def test_job_sla_monitor_served_from_postgres(engine, read_from_pg):
+    from datetime import datetime, timedelta, timezone
+
+    # An in_progress job whose ETA is within the warning threshold.
+    soon = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+    await _seed("job", _job_doc("j_sla", status="in_progress",
+                                estimated_arrival=soon))
+    # A job far in the future — not at risk.
+    far = (datetime.now(timezone.utc) + timedelta(hours=12)).isoformat()
+    await _seed("job", _job_doc("j_ok", status="in_progress",
+                                estimated_arrival=far))
+
+    from Agents.autonomous.job_sla_monitor import JobSLAMonitor
+    agent = JobSLAMonitor(
+        es_service=_agent_es_guard(),
+        activity_log_service=_noop_activity_log(),
+        ws_manager=_noop_ws(),
+        confirmation_protocol=MagicMock(),
+        feature_flag_service=None,
+        signal_bus=None,
+        sla_warning_threshold_minutes=30,
+    )
+    detections, _actions = await agent.monitor_cycle()
+    assert "j_sla" in detections
+    assert "j_ok" not in detections
+
+
+async def test_sla_guardian_served_from_postgres(engine, read_from_pg):
+    from datetime import datetime, timedelta, timezone
+
+    soon = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+    await _seed("shipment", {
+        "shipment_id": "shp_g", "tenant_id": TENANT, "status": "in_transit",
+        "estimated_delivery": soon, "rider_id": None,
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    })
+
+    from Agents.autonomous.sla_guardian_agent import SLAGuardianAgent
+    agent = SLAGuardianAgent(
+        es_service=_agent_es_guard(),
+        activity_log_service=_noop_activity_log(),
+        ws_manager=_noop_ws(),
+        confirmation_protocol=MagicMock(),
+        feature_flag_service=None,
+        sla_threshold_minutes=30,
+    )
+    detections, _actions = await agent.monitor_cycle()
+    assert "shp_g" in detections
+
+
+def _noop_activity_log():
+    al = MagicMock()
+    al.log_monitoring_cycle = AsyncMock(return_value="log-1")
+    return al
+
+
+def _noop_ws():
+    ws = MagicMock()
+    ws.broadcast_event = AsyncMock()
+    return ws
+
+
+# ---------------------------------------------------------------------------
+# Overlay optimizer agents — jobs_current readers served from PG
+# ---------------------------------------------------------------------------
+
+
+def _overlay_es_guard():
+    es = _es_raises_on_read()
+    es.index_document = AsyncMock(return_value={"result": "created"})
+    es.update_document = AsyncMock(return_value={"result": "updated"})
+    return es
+
+
+def _make_dispatch_optimizer():
+    from Agents.overlay.dispatch_optimizer import DispatchOptimizer
+    return DispatchOptimizer(
+        signal_bus=MagicMock(),
+        es_service=_overlay_es_guard(),
+        activity_log_service=MagicMock(),
+        ws_manager=MagicMock(),
+        confirmation_protocol=MagicMock(),
+        autonomy_config_service=MagicMock(),
+        feature_flag_service=MagicMock(),
+        execution_planner=MagicMock(),
+    )
+
+
+async def test_dispatch_optimizer_affected_jobs_from_postgres(engine, read_from_pg):
+    await _seed("job", _job_doc("j_aff1", status="in_progress"))
+    await _seed("job", _job_doc("j_aff2", status="in_progress"))
+    await _seed("job", _job_doc("j_other", status="scheduled"))
+
+    opt = _make_dispatch_optimizer()
+    rows = await opt._query_affected_jobs({"j_aff1", "j_aff2", "j_other"}, TENANT)
+    # Only in_progress jobs within the id set.
+    assert {r["job_id"] for r in rows} == {"j_aff1", "j_aff2"}
+
+
+async def test_dispatch_optimizer_available_assets_from_postgres(engine, read_from_pg):
+    await _seed("truck", {"truck_id": "AV1", "asset_id": "AV1", "tenant_id": TENANT,
+                          "asset_type": "vehicle", "status": "on_time"}, doc_id="AV1")
+    await _seed("truck", {"truck_id": "AV2", "asset_id": "AV2", "tenant_id": TENANT,
+                          "asset_type": "vehicle", "status": "delayed"}, doc_id="AV2")
+    # Cross-tenant on_time truck must be excluded.
+    await _seed("truck", {"truck_id": "AVX", "asset_id": "AVX", "tenant_id": "other",
+                          "asset_type": "vehicle", "status": "on_time"}, doc_id="AVX")
+
+    opt = _make_dispatch_optimizer()
+    rows = await opt._query_available_assets(TENANT)
+    assert {r["truck_id"] for r in rows} == {"AV1"}
+
+
+async def test_job_priority_engine_active_jobs_from_postgres(engine, read_from_pg):
+    await _seed("job", _job_doc("jp1", status="scheduled"))
+    await _seed("job", _job_doc("jp2", status="assigned"))
+    await _seed("job", _job_doc("jp3", status="in_progress"))
+    await _seed("job", _job_doc("jp_done", status="completed"))
+
+    from Agents.overlay.job_priority_engine import JobPriorityEngine
+    eng = JobPriorityEngine(
+        signal_bus=MagicMock(),
+        es_service=_overlay_es_guard(),
+        activity_log_service=MagicMock(),
+        ws_manager=MagicMock(),
+        confirmation_protocol=MagicMock(),
+        autonomy_config_service=MagicMock(),
+        feature_flag_service=MagicMock(),
+    )
+    rows = await eng._query_active_jobs(TENANT)
+    assert {r["job_id"] for r in rows} == {"jp1", "jp2", "jp3"}  # completed excluded
+
+
+# ---------------------------------------------------------------------------
+# Route planning + delivery prioritization agents — fuel_orders_current from PG
+# ---------------------------------------------------------------------------
+
+
+def _fuel_order_doc(order_id, status="confirmed", tenant_id=TENANT):
+    return {
+        "order_id": order_id, "tenant_id": tenant_id, "customer_id": "cust_1",
+        "customer_name": "Acme", "ship_to_address": "1 St",
+        "ship_to_lat": 32.7, "ship_to_lon": -96.8, "call_type": "will_call",
+        "fill_to_full": True, "product_code": "DIESEL_2",
+        "intake_channel": "dispatcher", "intake_channel_id": "ch_1",
+        "status": status, "source_schema_version": "1.0", "trace_id": "t",
+        "last_event_timestamp": "2026-01-01T00:00:00+00:00",
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    }
+
+
+async def test_route_planning_routable_orders_from_postgres(engine, read_from_pg):
+    await _seed("fuel_order", _fuel_order_doc("o_conf", status="confirmed"))
+    await _seed("fuel_order", _fuel_order_doc("o_sched", status="scheduled"))
+    await _seed("fuel_order", _fuel_order_doc("o_placed", status="placed"))
+    await _seed("fuel_order", _fuel_order_doc("o_other", status="delivered"))
+
+    from Agents.overlay.route_planning_agent import RoutePlanningAgent
+    agent = RoutePlanningAgent(
+        signal_bus=MagicMock(),
+        es_service=_overlay_es_guard(),
+        activity_log_service=MagicMock(),
+        ws_manager=MagicMock(),
+        confirmation_protocol=MagicMock(),
+        autonomy_config_service=MagicMock(),
+        feature_flag_service=MagicMock(),
+    )
+    rows = await agent._fetch_routable_orders(TENANT)
+    # Only confirmed + scheduled are routable.
+    assert {r["order_id"] for r in rows} == {"o_conf", "o_sched"}
+
+
+async def test_delivery_prioritization_pending_and_discovery_from_postgres(engine, read_from_pg):
+    await _seed("fuel_order", _fuel_order_doc("p_placed", status="placed"))
+    await _seed("fuel_order", _fuel_order_doc("p_conf", status="confirmed"))
+    await _seed("fuel_order", _fuel_order_doc("p_done", status="delivered"))
+    # A second tenant's pending order (for cross-tenant discovery).
+    await _seed("fuel_order", _fuel_order_doc("p_other", status="placed",
+                                              tenant_id="other-tenant"))
+
+    from Agents.overlay.delivery_prioritization_agent import (
+        DeliveryPrioritizationAgent,
+    )
+    agent = DeliveryPrioritizationAgent(
+        signal_bus=MagicMock(),
+        es_service=_overlay_es_guard(),
+        activity_log_service=MagicMock(),
+        ws_manager=MagicMock(),
+        confirmation_protocol=MagicMock(),
+        autonomy_config_service=MagicMock(),
+        feature_flag_service=MagicMock(),
+    )
+
+    # Tenant-scoped pending fetch: placed + confirmed (delivered excluded).
+    pending = await agent._fetch_pending_orders(TENANT)
+    assert {o["order_id"] for o in pending} == {"p_placed", "p_conf"}
+
+    # Cross-tenant discovery includes both tenants with pending orders.
+    tenants = await agent._discover_tenants_with_pending_orders()
+    assert set(tenants) == {TENANT, "other-tenant"}
+
+
+# ---------------------------------------------------------------------------
+# Commerce pricing-rules list endpoint (compliance_pricing_rule) from PG
+# ---------------------------------------------------------------------------
+
+
+async def test_compliance_pricing_rule_list_filters_from_postgres(engine, read_from_pg):
+    base = {
+        "tenant_id": TENANT, "product_code": "DIESEL_2", "status": "active",
+        "strategy": "posted_price", "posted_price_cents": 325, "priority": 10,
+        "effective_date": "2026-01-01", "expiry_date": None,
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    }
+    await _seed("compliance_pricing_rule", {**base, "rule_id": "cpr_c1",
+                "customer_id": "cust_1"})
+    await _seed("compliance_pricing_rule", {**base, "rule_id": "cpr_c2",
+                "customer_id": "cust_2"})
+    await _seed("compliance_pricing_rule", {**base, "rule_id": "cpr_gas",
+                "customer_id": "cust_1", "product_code": "GASOLINE_REG"})
+
+    from commerce.services.commerce_persistence_bridge import (
+        _NOT_CUT_OVER, read_hybrid_fetch_for_aggregation,
+    )
+
+    # customer_id + product_code term filters (the endpoint's logic).
+    docs = await read_hybrid_fetch_for_aggregation(
+        "compliance_pricing_rule", TENANT,
+        term_filters={"customer_id": "cust_1", "product_code": "DIESEL_2"},
+    )
+    assert docs is not _NOT_CUT_OVER
+    assert {d["rule_id"] for d in docs} == {"cpr_c1"}

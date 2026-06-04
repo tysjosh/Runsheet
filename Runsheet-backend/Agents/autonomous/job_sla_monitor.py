@@ -119,14 +119,36 @@ class JobSLAMonitor(AutonomousAgentBase):
             "sort": [{"estimated_arrival": {"order": "asc"}}],
         }
 
+        # Read-cutover: serve the cross-tenant sweep from Postgres when enabled
+        # (the agent dispatches per-tenant below). Same status+range+sort as ES.
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_hybrid_search_all_tenants,
+        )
+
         try:
-            resp = await self._es.search_documents(JOBS_CURRENT_INDEX, query, 200)
+            pg = await read_hybrid_search_all_tenants(
+                "job",
+                term_filters={"status": "in_progress"},
+                range_field="estimated_arrival",
+                range_lte=threshold_time.isoformat(),
+                sort_field="estimated_arrival", sort_order="asc", size=200,
+            )
         except Exception:
-            # Log error and continue without crashing (follows Req 1.8 pattern)
-            self.logger.exception("Failed to query jobs_current index")
+            self.logger.exception("Failed to query jobs from Postgres")
             return detections, actions
 
-        at_risk_jobs = [h["_source"] for h in resp.get("hits", {}).get("hits", [])]
+        if pg is not _NOT_CUT_OVER:
+            at_risk_jobs = pg
+        else:
+            try:
+                resp = await self._es.search_documents(JOBS_CURRENT_INDEX, query, 200)
+            except Exception:
+                # Log error and continue without crashing (follows Req 1.8 pattern)
+                self.logger.exception("Failed to query jobs_current index")
+                return detections, actions
+
+            at_risk_jobs = [h["_source"] for h in resp.get("hits", {}).get("hits", [])]
 
         for job in at_risk_jobs:
             job_id = job.get("job_id")

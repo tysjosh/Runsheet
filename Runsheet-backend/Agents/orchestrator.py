@@ -53,6 +53,7 @@ class AgentOrchestrator:
         ],
         "ops": [
             "shipment", "rider", "sla", "delivery", "ops", "breach",
+            "driver", "order", "customer",
         ],
         "reporting": [
             "report", "analysis", "summary", "overview", "performance",

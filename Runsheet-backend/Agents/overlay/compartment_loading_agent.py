@@ -720,6 +720,20 @@ class CompartmentLoadingAgent(OverlayAgentBase):
         }
 
         try:
+            # Read-cutover: serve from Postgres when enabled (tenant-scoped).
+            from commerce.services.commerce_persistence_bridge import (
+                _NOT_CUT_OVER,
+                read_hybrid_search,
+            )
+
+            pg = await read_hybrid_search(
+                "fuel_order", tenant_id,
+                in_filters={"status": ["placed", "confirmed", "scheduled"]},
+                page=1, size=500,
+            )
+            if pg is not _NOT_CUT_OVER:
+                return pg.get("items", [])
+
             resp = await self._es.search_documents(
                 FUEL_ORDERS_CURRENT_INDEX, query, 500
             )

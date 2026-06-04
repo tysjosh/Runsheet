@@ -669,6 +669,69 @@ class HybridReadRepository:
             "size": size,
         }
 
+    async def search_all_tenants(
+        self, session: AsyncSession, *,
+        term_filters: Optional[Dict[str, Any]] = None,
+        in_filters: Optional[Dict[str, list]] = None,
+        bool_filters: Optional[Dict[str, bool]] = None,
+        range_field: Optional[str] = None,
+        range_gte: Optional[str] = None,
+        range_lte: Optional[str] = None,
+        range_lt: Optional[str] = None,
+        exists_fields: Optional[List[str]] = None,
+        sort_field: str = "created_at",
+        sort_order: str = "asc",
+        size: int = _DEFAULT_PAGE_LIMIT,
+    ) -> List[Dict[str, Any]]:
+        """CROSS-TENANT document search for system-level background sweeps.
+
+        The autonomous monitor agents (job SLA, delay response, SLA guardian,
+        truck fuel, …) run a single system-wide ES query with no tenant filter
+        and then dispatch per-tenant internally. This reproduces that exact
+        access pattern over the migrated current-state aggregates: same
+        ``term`` / ``terms`` / ``bool`` / ``range`` / ``exists`` filter set and
+        document-field sort as :meth:`search`, but WITHOUT the tenant clause.
+        Returns the matching verbatim documents (capped at ``size``), ordered
+        by ``sort_field``. NOT for request-path reads — those must stay
+        tenant-scoped.
+        """
+        if size <= 0:
+            size = _DEFAULT_PAGE_LIMIT
+        size = _clamp(size)
+
+        where = []
+        for key, value in (term_filters or {}).items():
+            if value is None:
+                continue
+            where.append(self._doc_field(key) == value)
+        for key, values in (in_filters or {}).items():
+            if not values:
+                continue
+            where.append(self._doc_field(key).in_(list(values)))
+        for key, value in (bool_filters or {}).items():
+            if value is None:
+                continue
+            where.append(self.model.document[key].as_boolean() == bool(value))
+        for field in (exists_fields or []):
+            where.append(self._doc_field(field).is_not(None))
+        if range_field and range_gte is not None:
+            where.append(self._doc_field(range_field) >= range_gte)
+        if range_field and range_lte is not None:
+            where.append(self._doc_field(range_field) <= range_lte)
+        if range_field and range_lt is not None:
+            where.append(self._doc_field(range_field) < range_lt)
+
+        order_expr = self._doc_field(sort_field)
+        order_expr = order_expr.desc() if sort_order == "desc" else order_expr.asc()
+        stmt = (
+            select(self.model)
+            .where(*where)
+            .order_by(order_expr, getattr(self.model, self.pk_attr).asc())
+            .limit(size)
+        )
+        rows = list((await session.execute(stmt)).scalars().all())
+        return [dict(r.document or {}) for r in rows]
+
     async def list(self, session: AsyncSession, tenant_id: str, *,
                    filters: Optional[Dict[str, Any]] = None,
                    cursor: Optional[str] = None,

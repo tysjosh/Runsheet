@@ -124,8 +124,27 @@ class DelayResponseAgent(AutonomousAgentBase):
             "size": 50,
         }
 
-        resp = await self._es.search_documents(JOBS_CURRENT_INDEX, query, 50)
-        delayed_jobs = [h["_source"] for h in resp["hits"]["hits"]]
+        # Read-cutover: serve the cross-tenant sweep from Postgres when enabled
+        # (each job is dispatched per its own tenant_id below). The PG ``job``
+        # rows always carry a tenant_id (NOT NULL), so the ES ``exists:
+        # tenant_id`` filter is implicitly satisfied.
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_hybrid_search_all_tenants,
+        )
+
+        pg = await read_hybrid_search_all_tenants(
+            "job",
+            term_filters={"status": "in_progress"},
+            range_field="estimated_arrival", range_lt=now,
+            exists_fields=["tenant_id"],
+            sort_field="estimated_arrival", sort_order="asc", size=50,
+        )
+        if pg is not _NOT_CUT_OVER:
+            delayed_jobs = pg
+        else:
+            resp = await self._es.search_documents(JOBS_CURRENT_INDEX, query, 50)
+            delayed_jobs = [h["_source"] for h in resp["hits"]["hits"]]
 
         for job in delayed_jobs:
             job_id = job.get("job_id")
@@ -315,6 +334,28 @@ class DelayResponseAgent(AutonomousAgentBase):
             },
             "size": 1,
         }
+        # Read-cutover: serve from Postgres when enabled. ``truck`` is
+        # tenant-optional so search() does not tenant-filter — pass the
+        # tenant_id as a document term filter (matching the ES term) so the
+        # result is tenant-scoped exactly like ES.
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_hybrid_search,
+        )
+
+        pg = await read_hybrid_search(
+            "truck", tenant_id,
+            term_filters={
+                "tenant_id": tenant_id,
+                "asset_type": asset_type,
+                "status": "on_time",
+            },
+            page=1, size=1,
+        )
+        if pg is not _NOT_CUT_OVER:
+            items = pg.get("items", [])
+            return items[0] if items else None
+
         resp = await self._es.search_documents(ASSETS_INDEX, query, 1)
         hits = [h["_source"] for h in resp["hits"]["hits"]]
         return hits[0] if hits else None

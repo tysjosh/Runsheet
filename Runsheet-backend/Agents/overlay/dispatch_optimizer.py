@@ -214,6 +214,21 @@ class DispatchOptimizer(OverlayAgentBase):
             },
             "size": 100,
         }
+        # Read-cutover: serve from Postgres when enabled (tenant-scoped).
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_hybrid_search,
+        )
+
+        pg = await read_hybrid_search(
+            "job", tenant_id,
+            term_filters={"status": "in_progress"},
+            in_filters={"job_id": list(entity_ids)},
+            page=1, size=100,
+        )
+        if pg is not _NOT_CUT_OVER:
+            return pg.get("items", [])
+
         resp = await self._es.search_documents(JOBS_CURRENT_INDEX, query, 100)
         return [h["_source"] for h in resp["hits"]["hits"]]
 
@@ -232,6 +247,22 @@ class DispatchOptimizer(OverlayAgentBase):
             },
             "size": 50,
         }
+        # Read-cutover: serve from Postgres when enabled. ``truck`` is
+        # tenant-optional, so pass tenant_id as a document term filter to match
+        # the ES tenant scoping exactly.
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_hybrid_search,
+        )
+
+        pg = await read_hybrid_search(
+            "truck", tenant_id,
+            term_filters={"tenant_id": tenant_id, "status": "on_time"},
+            page=1, size=50,
+        )
+        if pg is not _NOT_CUT_OVER:
+            return pg.get("items", [])
+
         resp = await self._es.search_documents(ASSETS_INDEX, query, 50)
         return [h["_source"] for h in resp["hits"]["hits"]]
 
@@ -272,10 +303,21 @@ class DispatchOptimizer(OverlayAgentBase):
                 if not self._is_compatible(job_type, asset_type):
                     continue
 
+                # Resolve the canonical asset identifier. Older / MVP fleet
+                # documents only carry ``truck_id`` while newer ones add the
+                # ``asset_id`` alias (POST /api/fleet/assets writes both). Both
+                # identify the same row, so accept either and skip the asset
+                # when neither is present rather than emitting a reassignment
+                # action with ``asset_id: None`` (a no-op mutation). Mirrors the
+                # same fallback in DelayResponseAgent.monitor_cycle.
+                asset_id = asset.get("asset_id") or asset.get("truck_id")
+                if not asset_id:
+                    continue
+
                 estimate = self._estimate_reassignment(job, asset, weight)
                 candidates.append({
                     "job_id": job_id,
-                    "asset_id": asset.get("asset_id"),
+                    "asset_id": asset_id,
                     "time_saved": estimate["time_saved"],
                     "fuel_delta": estimate["fuel_delta"],
                     "sla_impact": estimate["sla_impact"],
