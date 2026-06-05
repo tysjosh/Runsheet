@@ -221,3 +221,222 @@ export async function putPresignedFile(
     );
   }
 }
+
+// ─── Driver Communication Types ───────────────────────────────────────────────
+
+/**
+ * Field-exception categories a driver can report.
+ *
+ * Mirrors ``ExceptionType`` in :mod:`Runsheet-backend/driver/models.py`.
+ */
+export type ExceptionType =
+  | "road_closure"
+  | "vehicle_breakdown"
+  | "customer_unavailable"
+  | "access_denied"
+  | "weather"
+  | "cargo_damage"
+  | "other";
+
+/** Severity scale shared with the agent risk-signal pipeline. */
+export type ExceptionSeverity = "low" | "medium" | "high" | "critical";
+
+/** WGS-84 coordinate pair (note: backend uses ``lng``, not ``lon``). */
+export interface DriverGeoPoint {
+  lat: number;
+  lng: number;
+}
+
+export interface ReportExceptionPayload {
+  exception_type: ExceptionType;
+  severity: ExceptionSeverity;
+  note: string;
+  location?: DriverGeoPoint;
+  media_refs?: string[];
+}
+
+/** Stored exception document echoed back on report. */
+export interface DriverException {
+  exception_id: string;
+  job_id: string;
+  exception_type: ExceptionType;
+  severity: ExceptionSeverity;
+  note: string;
+  location: DriverGeoPoint | null;
+  media_refs: string[];
+  tenant_id: string;
+  timestamp: string;
+}
+
+export type MessageSenderRole = "driver" | "dispatcher";
+
+export interface SendMessagePayload {
+  body: string;
+  sender_id: string;
+  sender_role: MessageSenderRole;
+}
+
+export interface JobMessage {
+  message_id: string;
+  job_id: string;
+  sender_id: string;
+  sender_role: MessageSenderRole;
+  body: string;
+  timestamp: string;
+  tenant_id: string;
+}
+
+export interface PaginationMeta {
+  page: number;
+  size: number;
+  total: number;
+  total_pages: number;
+}
+
+/**
+ * Proof-of-delivery submission body.
+ *
+ * Mirrors ``PODRequest`` in
+ * :mod:`Runsheet-backend/driver/api/pod_endpoints.py`. Prefer the
+ * ``*_ref`` fields (file_refs from {@link presignPodUpload}); the
+ * ``*_url`` variants are deprecated. ``geotag`` and ``timestamp`` are
+ * required. For a refused delivery, set ``refused_delivery: true`` and
+ * supply ``refusal_reason_code``.
+ */
+export interface SubmitPODPayload {
+  recipient_name: string;
+  customer_id?: string;
+  signature_ref?: string;
+  photo_refs?: string[];
+  meter_ticket_ref?: string;
+  /** @deprecated use signature_ref */
+  signature_url?: string;
+  /** @deprecated use photo_refs */
+  photo_urls?: string[];
+  delivered_gallons?: number;
+  geotag: DriverGeoPoint;
+  /** ISO 8601 timestamp. */
+  timestamp: string;
+  otp?: string;
+  refused_delivery?: boolean;
+  refusal_reason_code?:
+    | "customer_refused"
+    | "customer_unavailable"
+    | "access_denied"
+    | "unsafe_site"
+    | "wrong_product"
+    | "insufficient_capacity"
+    | "payment_hold"
+    | "other";
+  refusal_note?: string;
+}
+
+/** Stored POD document echoed back on submission (subset of fields). */
+export interface ProofOfDelivery {
+  pod_id: string;
+  job_id: string;
+  order_id?: string | null;
+  recipient_name: string;
+  customer_id?: string | null;
+  signature_ref?: string | null;
+  photo_refs?: string[];
+  meter_ticket_ref?: string | null;
+  delivered_gallons?: number | null;
+  delivered_gallons_source?: string | null;
+  geotag: { lat: number; lon: number };
+  timestamp: string;
+  otp_verified?: boolean;
+  location_mismatch?: boolean;
+  status: string;
+  refused_delivery: boolean;
+  refusal_reason_code?: string | null;
+  refusal_note?: string | null;
+  tenant_id: string;
+  [key: string]: unknown;
+}
+
+// ─── Driver Communication Endpoints ────────────────────────────────────────────
+
+/**
+ * POST /api/driver/jobs/:jobId/exceptions — report a field exception.
+ *
+ * Persists the exception, appends an ``exception_reported`` event to the
+ * job timeline, and (for high/critical severity) broadcasts an escalation
+ * over the dispatcher and driver WebSocket channels. The submitting driver
+ * must be the one assigned to the job (else 403).
+ */
+export async function reportException(
+  jobId: string,
+  payload: ReportExceptionPayload,
+): Promise<{ data: DriverException; request_id: string }> {
+  return driverRequest<{ data: DriverException; request_id: string }>(
+    `/driver/jobs/${encodeURIComponent(jobId)}/exceptions`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+/**
+ * POST /api/driver/jobs/:jobId/messages — post a message to the job thread.
+ *
+ * The sender must be the assigned driver or a dispatcher for the tenant.
+ */
+export async function sendJobMessage(
+  jobId: string,
+  payload: SendMessagePayload,
+): Promise<{ data: JobMessage; request_id: string }> {
+  return driverRequest<{ data: JobMessage; request_id: string }>(
+    `/driver/jobs/${encodeURIComponent(jobId)}/messages`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+/**
+ * GET /api/driver/jobs/:jobId/messages — list the job thread (ascending by
+ * timestamp), paginated via ``page``/``size``.
+ */
+export async function listJobMessages(
+  jobId: string,
+  params: { page?: number; size?: number } = {},
+): Promise<{
+  data: JobMessage[];
+  pagination: PaginationMeta;
+  request_id: string;
+}> {
+  const search = new URLSearchParams();
+  if (params.page != null) search.set("page", String(params.page));
+  if (params.size != null) search.set("size", String(params.size));
+  const qs = search.toString() ? `?${search.toString()}` : "";
+  return driverRequest<{
+    data: JobMessage[];
+    pagination: PaginationMeta;
+    request_id: string;
+  }>(`/driver/jobs/${encodeURIComponent(jobId)}/messages${qs}`);
+}
+
+/**
+ * POST /api/driver/jobs/:jobId/pod — submit proof of delivery.
+ *
+ * Validates geotag distance against the job destination and, when the tenant
+ * has OTP enabled, the supplied OTP. When a ``meter_ticket_ref`` is provided
+ * without ``delivered_gallons``, the server runs OCR to extract the gallon
+ * count. Use {@link presignPodUpload} + {@link putPresignedFile} first to
+ * obtain the ``*_ref`` values.
+ */
+export async function submitPOD(
+  jobId: string,
+  payload: SubmitPODPayload,
+): Promise<{ data: ProofOfDelivery; request_id: string }> {
+  return driverRequest<{ data: ProofOfDelivery; request_id: string }>(
+    `/driver/jobs/${encodeURIComponent(jobId)}/pod`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}

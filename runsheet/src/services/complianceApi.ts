@@ -997,3 +997,234 @@ export async function approveKFactorAdjustment(
     body: JSON.stringify(payload),
   });
 }
+
+// ─── K-Factor Variance & Suggestion ──────────────────────────────────────────
+
+export interface KFactorVarianceResult {
+  delivery_id: string;
+  tank_id: string;
+  /** K-factor × accumulated HDD since the last delivery. */
+  predicted_gallons: number;
+  /** Actual gallons delivered. */
+  actual_gallons: number;
+  /** (actual − predicted) / predicted × 100. */
+  variance_percent: number;
+  /** Suggested revised K-factor when variance exceeds the threshold. */
+  suggested_kfactor: number | null;
+  /** True when variance exceeds the configured threshold (default ±15%). */
+  flagged: boolean;
+}
+
+export interface KFactorSuggestion {
+  tank_id: string;
+  /** null when insufficient data exists or variance is within threshold. */
+  suggested_kfactor: number | null;
+}
+
+/**
+ * GET /compliance/kfactor/:tankId/variance — compute predicted-vs-actual
+ * variance for a specific delivery. ``deliveryId`` is required and passed
+ * as the ``delivery_id`` query parameter.
+ */
+export async function getKFactorVariance(
+  tankId: string,
+  deliveryId: string,
+): Promise<SingleResponse<KFactorVarianceResult>> {
+  const qs = buildQueryString({ delivery_id: deliveryId });
+  return complianceRequest<SingleResponse<KFactorVarianceResult>>(
+    `/compliance/kfactor/${encodeURIComponent(tankId)}/variance${qs}`,
+  );
+}
+
+/**
+ * GET /compliance/kfactor/:tankId/suggest — get the suggested K-factor for a
+ * tank. Returns ``suggested_kfactor: null`` when there are fewer than three
+ * deliveries or the variance is within threshold.
+ */
+export async function getKFactorSuggestion(
+  tankId: string,
+): Promise<SingleResponse<KFactorSuggestion>> {
+  return complianceRequest<SingleResponse<KFactorSuggestion>>(
+    `/compliance/kfactor/${encodeURIComponent(tankId)}/suggest`,
+  );
+}
+
+// ─── IFTA Completeness & Fleet MPG ───────────────────────────────────────────
+
+export interface IFTAIncompleteDataFlag {
+  truck_id: string;
+  flag_type: string;
+  quarter: string;
+  reason: string;
+  flagged_at: string;
+}
+
+export interface IFTACompletenessResult {
+  data: IFTAIncompleteDataFlag[];
+  count: number;
+  /** True when no trucks are flagged for the quarter. */
+  complete: boolean;
+  request_id: string;
+}
+
+export interface FleetMPGResult {
+  quarter: string;
+  /** Fleet average MPG (total_miles / total_gallons); 0.0 when no data. */
+  fleet_mpg: number;
+}
+
+/**
+ * GET /compliance/ifta/completeness?quarter= — list trucks missing Geotab
+ * telemetry for the quarter (and therefore excluded from the automated IFTA
+ * return). Unlike the single/paginated envelopes, this response carries
+ * ``count`` and ``complete`` flags alongside ``data``.
+ */
+export async function getIFTACompleteness(
+  quarter: string,
+): Promise<IFTACompletenessResult> {
+  const qs = buildQueryString({ quarter });
+  return complianceRequest<IFTACompletenessResult>(
+    `/compliance/ifta/completeness${qs}`,
+  );
+}
+
+/** GET /compliance/ifta/fleet-mpg?quarter= — fleet average MPG for a quarter. */
+export async function getFleetMPG(
+  quarter: string,
+): Promise<SingleResponse<FleetMPGResult>> {
+  const qs = buildQueryString({ quarter });
+  return complianceRequest<SingleResponse<FleetMPGResult>>(
+    `/compliance/ifta/fleet-mpg${qs}`,
+  );
+}
+
+// ─── Single Asset Certification (read / update) ──────────────────────────────
+
+export interface UpdateAssetCertificationPayload {
+  certification_date?: string;
+  expiry_date?: string;
+  inspector_name?: string;
+  certificate_number?: string;
+  status?: CertificationStatus;
+}
+
+/** GET /compliance/asset-certifications/:certId — fetch a single certification. */
+export async function getAssetCertification(
+  certId: string,
+): Promise<SingleResponse<AssetCertification>> {
+  return complianceRequest<SingleResponse<AssetCertification>>(
+    `/compliance/asset-certifications/${encodeURIComponent(certId)}`,
+  );
+}
+
+/** PUT /compliance/asset-certifications/:certId — update a certification. */
+export async function updateAssetCertification(
+  certId: string,
+  payload: UpdateAssetCertificationPayload,
+): Promise<SingleResponse<AssetCertification>> {
+  return complianceRequest<SingleResponse<AssetCertification>>(
+    `/compliance/asset-certifications/${encodeURIComponent(certId)}`,
+    {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+// ─── Price Protection Contract Variance ──────────────────────────────────────
+
+export interface PriceProtectionVarianceBreakdownItem {
+  delivery_id: string;
+  market_price_cents: number;
+  effective_price_cents: number;
+  gallons: number;
+  variance_cents: number;
+}
+
+export interface PriceProtectionVarianceReport {
+  contract_id: string;
+  /** Signed from the customer's perspective: positive = customer saved money. */
+  total_variance_cents: number;
+  total_gallons: number;
+  delivery_count: number;
+  breakdown: PriceProtectionVarianceBreakdownItem[];
+  /** Full contract document, enriched server-side for the portfolio row. */
+  contract: PriceProtectionContract;
+}
+
+/**
+ * GET /commerce/price-protection-contracts/:contractId/variance — portfolio
+ * variance report for a single contract. Returns 404 when the contract id is
+ * unknown to the tenant.
+ */
+export async function getPriceProtectionVariance(
+  contractId: string,
+): Promise<SingleResponse<PriceProtectionVarianceReport>> {
+  return complianceRequest<SingleResponse<PriceProtectionVarianceReport>>(
+    `/commerce/price-protection-contracts/${encodeURIComponent(contractId)}/variance`,
+  );
+}
+
+// ─── Terminal BOL Confirm / Link ──────────────────────────────────────────────
+
+/**
+ * Operator-confirmed fields for a pending manual BOL. Every field is
+ * optional — only the fields provided are applied, then the BOL transitions
+ * from ``pending_confirmation`` to ``ingested``.
+ */
+export interface ConfirmTerminalBOLPayload {
+  load_number?: string;
+  product_code?: string;
+  gross_gallons?: number;
+  net_gallons?: number;
+  observed_temperature_f?: number;
+  api_gravity?: number;
+  supplier_name?: string;
+  terminal_name?: string;
+  driver_id?: string;
+  /** ISO 8601 timestamp the BOL was issued at the terminal. */
+  timestamp?: string;
+}
+
+/**
+ * POST /compliance/terminal-bols/:bolId/confirm — confirm operator-reviewed
+ * fields on a pending manual BOL and mark it ``ingested``.
+ */
+export async function confirmTerminalBOL(
+  bolId: string,
+  payload: ConfirmTerminalBOLPayload = {},
+): Promise<SingleResponse<TerminalBOL>> {
+  return complianceRequest<SingleResponse<TerminalBOL>>(
+    `/compliance/terminal-bols/${encodeURIComponent(bolId)}/confirm`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+/** Summary returned by the BOL-link endpoint (not a full BOL document). */
+export interface LinkTerminalBOLResult {
+  bol_id: string;
+  load_plan_id: string;
+  status: TerminalBOLStatus;
+}
+
+/**
+ * POST /compliance/terminal-bols/:bolId/link — link a BOL to a load plan for
+ * chain-of-custody traceability (transitions ``ingested`` → ``linked``).
+ * Returns a small ``{ bol_id, load_plan_id, status }`` summary rather than
+ * the full BOL document.
+ */
+export async function linkTerminalBOL(
+  bolId: string,
+  payload: { load_plan_id: string },
+): Promise<SingleResponse<LinkTerminalBOLResult>> {
+  return complianceRequest<SingleResponse<LinkTerminalBOLResult>>(
+    `/compliance/terminal-bols/${encodeURIComponent(bolId)}/link`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}

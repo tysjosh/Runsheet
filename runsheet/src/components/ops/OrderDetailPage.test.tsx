@@ -31,6 +31,8 @@ jest.mock("../../services/ordersApi", () => ({
   updateOrderStatus: jest.fn(),
   assignDriver: jest.fn(),
   cancelOrder: jest.fn(),
+  holdOrder: jest.fn(),
+  releaseHoldOrder: jest.fn(),
 }));
 
 jest.mock("../../services/api", () => ({
@@ -53,6 +55,8 @@ import {
   cancelOrder,
   getOrder,
   getOrderEvents,
+  holdOrder,
+  releaseHoldOrder,
   updateOrderStatus,
 } from "../../services/ordersApi";
 
@@ -67,6 +71,10 @@ const mockAssignDriver = assignDriver as jest.MockedFunction<
   typeof assignDriver
 >;
 const mockCancelOrder = cancelOrder as jest.MockedFunction<typeof cancelOrder>;
+const mockHoldOrder = holdOrder as jest.MockedFunction<typeof holdOrder>;
+const mockReleaseHoldOrder = releaseHoldOrder as jest.MockedFunction<
+  typeof releaseHoldOrder
+>;
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -129,6 +137,8 @@ beforeEach(() => {
   mockUpdateOrderStatus.mockReset();
   mockAssignDriver.mockReset();
   mockCancelOrder.mockReset();
+  mockHoldOrder.mockReset();
+  mockReleaseHoldOrder.mockReset();
 });
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -347,6 +357,90 @@ describe("OrderDetailPage — mutation controls", () => {
         reason: "Customer requested",
       }),
     );
+  });
+
+  it("shows hold modal and submits a hold reason", async () => {
+    mockGetOrder.mockResolvedValue({
+      data: orderFixture({ status: "placed" }),
+      request_id: "r1",
+    });
+    mockGetOrderEvents.mockResolvedValue({ data: [], request_id: "r2" });
+    mockHoldOrder.mockResolvedValue({
+      data: orderFixture({ status: "on_hold", hold_reason: "credit check" }),
+      request_id: "r3",
+    });
+
+    render(<OrderDetailPage />);
+
+    expect(await screen.findByText(/acme fuel co/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /^place on hold$/i }));
+
+    // Modal appears with the reason textarea
+    const reasonInput = await screen.findByLabelText(/hold reason/i);
+    fireEvent.change(reasonInput, { target: { value: "credit check" } });
+
+    await act(async () => {
+      // The modal's primary submit button also reads "Place on Hold".
+      const buttons = screen.getAllByRole("button", {
+        name: /^place on hold$/i,
+      });
+      fireEvent.click(buttons[buttons.length - 1]);
+    });
+
+    await waitFor(() =>
+      expect(mockHoldOrder).toHaveBeenCalledWith("ord_test123", {
+        hold_reason: "credit check",
+      }),
+    );
+  });
+
+  it("shows release-hold action for an on_hold order and submits", async () => {
+    mockGetOrder.mockResolvedValue({
+      data: orderFixture({ status: "on_hold", hold_reason: "credit check" }),
+      request_id: "r1",
+    });
+    mockGetOrderEvents.mockResolvedValue({ data: [], request_id: "r2" });
+    mockReleaseHoldOrder.mockResolvedValue({
+      data: orderFixture({ status: "placed" }),
+      request_id: "r3",
+    });
+
+    render(<OrderDetailPage />);
+
+    expect(await screen.findByText(/acme fuel co/i)).toBeInTheDocument();
+
+    // An on_hold order must NOT offer "Place on Hold" but MUST offer "Release Hold".
+    expect(
+      screen.queryByRole("button", { name: /^place on hold$/i }),
+    ).not.toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /release hold/i }));
+    });
+
+    await waitFor(() =>
+      expect(mockReleaseHoldOrder).toHaveBeenCalledWith("ord_test123"),
+    );
+  });
+
+  it("does not offer hold actions for an in_transit order", async () => {
+    mockGetOrder.mockResolvedValue({
+      data: orderFixture({ status: "in_transit" }),
+      request_id: "r1",
+    });
+    mockGetOrderEvents.mockResolvedValue({ data: [], request_id: "r2" });
+
+    render(<OrderDetailPage />);
+
+    expect(await screen.findByText(/acme fuel co/i)).toBeInTheDocument();
+    // in_transit is past the holdable window and not on_hold.
+    expect(
+      screen.queryByRole("button", { name: /^place on hold$/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /release hold/i }),
+    ).not.toBeInTheDocument();
   });
 
   it("surfaces backend error_code on mutation failure", async () => {

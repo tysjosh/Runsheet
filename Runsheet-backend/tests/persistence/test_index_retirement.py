@@ -154,3 +154,54 @@ async def test_non_retired_index_not_gated(monkeypatch):
     es = ElasticsearchService.__new__(ElasticsearchService)
     assert es._is_retired_index("customers_current") is False
     clear_settings_cache()
+
+
+class _PassthroughBreaker:
+    """Minimal circuit breaker stub that just runs the wrapped coroutine."""
+
+    async def execute(self, fn):
+        return await fn()
+
+
+class _NotFound(Exception):
+    """Mimics an elasticsearch NotFoundError carrying a 404 status_code."""
+
+    status_code = 404
+
+
+async def test_get_document_returns_none_on_404(monkeypatch):
+    """A missing document is an expected outcome for existence/idempotency
+    probes — get_document returns None quietly, not raising or logging ERROR."""
+    from unittest.mock import MagicMock
+
+    from services.elasticsearch_service import ElasticsearchService
+
+    es = ElasticsearchService.__new__(ElasticsearchService)
+    es._read_circuit_breaker = _PassthroughBreaker()
+    client = MagicMock()
+    client.get = MagicMock(side_effect=_NotFound("not_found"))
+    es.client = client
+
+    result = await es.get_document("weather_alerts", "missing-id")
+    assert result is None
+
+
+async def test_get_document_raises_on_non_404(monkeypatch):
+    """A genuine ES failure (non-404) still raises through the error handler."""
+    from unittest.mock import MagicMock
+
+    from errors.exceptions import AppException
+    from services.elasticsearch_service import ElasticsearchService
+
+    es = ElasticsearchService.__new__(ElasticsearchService)
+    es._read_circuit_breaker = _PassthroughBreaker()
+
+    class _ServerError(Exception):
+        status_code = 503
+
+    client = MagicMock()
+    client.get = MagicMock(side_effect=_ServerError("unavailable"))
+    es.client = client
+
+    with pytest.raises(AppException):
+        await es.get_document("weather_alerts", "any-id")

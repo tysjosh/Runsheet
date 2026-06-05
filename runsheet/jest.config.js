@@ -17,6 +17,10 @@ const customJestConfig = {
   // Module name mapper for path aliases (matching tsconfig paths)
   moduleNameMapper: {
     "^@/(.*)$": "<rootDir>/src/$1",
+    // `jose` (v6+) is pure ESM with no CJS build; stub it so service-client
+    // tests that transitively import src/utils/auth.ts can run under the
+    // CommonJS Jest runtime. See test/mocks/jose.js for rationale.
+    "^jose$": "<rootDir>/test/mocks/jose.js",
   },
 
   // Test file patterns

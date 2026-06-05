@@ -33,6 +33,7 @@ from Agents.autonomous.weather_alert_ingester import (
     DEFAULT_POLL_INTERVAL_SECONDS,
     NWS_ACTIVE_ALERTS_URL,
     WeatherAlertIngester,
+    zip_to_state,
 )
 from fuel.services.fuel_ops_es_mappings import (
     CUSTOMER_TANKS_INDEX,
@@ -157,6 +158,101 @@ def _mock_transport(features: List[Dict[str, Any]]) -> httpx.MockTransport:
         )
 
     return httpx.MockTransport(handler)
+
+
+# ---------------------------------------------------------------------------
+# ZIP -> state derivation + NWS area query (regression for the HTTP 400 bug
+# where ZIP codes were sent as the ``zone`` param, which NWS rejects)
+# ---------------------------------------------------------------------------
+
+
+class TestZipToState:
+    """zip_to_state maps US ZIPs to USPS 2-letter states via prefix ranges."""
+
+    def test_maps_known_zips(self):
+        assert zip_to_state("75247") == "TX"   # Dallas
+        assert zip_to_state("30303") == "GA"   # Atlanta
+        assert zip_to_state("77002") == "TX"   # Houston
+        assert zip_to_state("14202") == "NY"   # Buffalo
+        assert zip_to_state("06001") == "CT"   # Avon
+        assert zip_to_state("99501") == "AK"   # Anchorage
+        assert zip_to_state("90001") == "CA"   # Los Angeles
+
+    def test_handles_zip_plus_four(self):
+        assert zip_to_state("75247-1234") == "TX"
+
+    def test_returns_none_for_malformed(self):
+        assert zip_to_state("abcde") is None
+        assert zip_to_state("") is None
+        assert zip_to_state("ab") is None
+
+    def test_returns_none_for_non_string(self):
+        assert zip_to_state(None) is None  # type: ignore[arg-type]
+        assert zip_to_state(75247) is None  # type: ignore[arg-type]
+
+
+class TestNWSAreaQuery:
+    """The fetch must query NWS by ``area`` (state) derived from the ZIP
+    footprint — never by ``zone=<zip>`` which NWS rejects with HTTP 400."""
+
+    @pytest.mark.asyncio
+    async def test_fetch_uses_area_state_not_zone_zip(self):
+        captured: Dict[str, Any] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["params"] = dict(request.url.params)
+            return httpx.Response(
+                200, json={"type": "FeatureCollection", "features": []}
+            )
+
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            agent = _build_agent(http_client=client)
+            # Dallas + Atlanta + Houston -> {TX, GA}
+            await agent._fetch_nws_alerts("tenant-A", ["75247", "30303", "77002"])
+
+        assert "zone" not in captured["params"], "must not send ZIPs as zone"
+        assert "area" in captured["params"], "must filter by area (state)"
+        states = set(captured["params"]["area"].split(","))
+        assert states == {"TX", "GA"}
+
+    @pytest.mark.asyncio
+    async def test_fetch_dedupes_states(self):
+        captured: Dict[str, Any] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["params"] = dict(request.url.params)
+            return httpx.Response(
+                200, json={"type": "FeatureCollection", "features": []}
+            )
+
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            agent = _build_agent(http_client=client)
+            # Three TX ZIPs collapse to a single area=TX.
+            await agent._fetch_nws_alerts("tenant-A", ["75247", "77002", "75201"])
+
+        assert captured["params"].get("area") == "TX"
+
+    @pytest.mark.asyncio
+    async def test_fetch_falls_back_to_unscoped_when_no_state(self):
+        """Un-mappable ZIPs must NOT produce a zone/area filter — an unscoped
+        active-alerts pull is used and filtered client-side instead."""
+        captured: Dict[str, Any] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["params"] = dict(request.url.params)
+            return httpx.Response(
+                200, json={"type": "FeatureCollection", "features": []}
+            )
+
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            agent = _build_agent(http_client=client)
+            await agent._fetch_nws_alerts("tenant-A", ["abcde", "zzzzz"])
+
+        assert "zone" not in captured["params"]
+        assert "area" not in captured["params"]
 
 
 # ---------------------------------------------------------------------------

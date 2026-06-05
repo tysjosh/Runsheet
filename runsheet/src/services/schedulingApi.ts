@@ -390,3 +390,121 @@ export async function reassignAsset(
     },
   );
 }
+
+// ─── Driver Acknowledgment Endpoints ─────────────────────────────────────────
+
+/** Result of a driver ack/accept/reject action (job lifecycle event). */
+export interface DriverActionResult {
+  job_id: string;
+  action: "ack" | "accept" | "reject";
+  actor_id: string;
+  timestamp: string;
+  previous_status?: JobStatus;
+  new_status?: JobStatus;
+  reason?: string;
+  device_id?: string | null;
+}
+
+/**
+ * POST /scheduling/jobs/:id/ack — driver acknowledges an assignment.
+ *
+ * The job must be in ``assigned`` status. Appends an ``ack`` event to the
+ * job timeline. This is the action the DriverNudgeAgent escalates when it
+ * is missing past the nudge timeout.
+ */
+export async function ackJob(
+  jobId: string,
+  deviceId?: string,
+): Promise<SingleResponse<DriverActionResult>> {
+  return schedulingRequest<SingleResponse<DriverActionResult>>(
+    `/scheduling/jobs/${encodeURIComponent(jobId)}/ack`,
+    {
+      method: "POST",
+      body: JSON.stringify({ device_id: deviceId ?? null }),
+    },
+  );
+}
+
+/**
+ * POST /scheduling/jobs/:id/accept — driver accepts an assignment.
+ *
+ * A ``scheduled`` job transitions to ``assigned`` (claiming it for the
+ * acting driver); an already-``assigned`` job is confirmed.
+ */
+export async function acceptJob(
+  jobId: string,
+): Promise<SingleResponse<DriverActionResult>> {
+  return schedulingRequest<SingleResponse<DriverActionResult>>(
+    `/scheduling/jobs/${encodeURIComponent(jobId)}/accept`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
+}
+
+/**
+ * POST /scheduling/jobs/:id/reject — driver rejects an assignment.
+ *
+ * Requires a ``reason``. An ``assigned`` job reverts to ``scheduled`` so it
+ * can be re-dispatched.
+ */
+export async function rejectJob(
+  jobId: string,
+  reason: string,
+): Promise<SingleResponse<DriverActionResult>> {
+  return schedulingRequest<SingleResponse<DriverActionResult>>(
+    `/scheduling/jobs/${encodeURIComponent(jobId)}/reject`,
+    {
+      method: "POST",
+      body: JSON.stringify({ reason }),
+    },
+  );
+}
+
+// ─── Job Reroute Endpoint ────────────────────────────────────────────────────
+
+export interface RerouteJobPayload {
+  new_destination: string;
+  reason?: string;
+}
+
+/**
+ * POST /api/v1/scheduling/jobs/:id/reroute — reroute an in-flight job to a
+ * new destination. Mounted under the ``/api/v1/scheduling`` prefix (distinct
+ * from the other scheduling routes), so the leading ``/api`` is stripped from
+ * the base before composing the v1 path.
+ */
+export async function rerouteJob(
+  jobId: string,
+  payload: RerouteJobPayload,
+): Promise<SingleResponse<Job>> {
+  // API_BASE_URL ends in `/api`; the reroute route lives at `/api/v1/...`.
+  const base = API_BASE_URL.replace(/\/api$/, "");
+  const url = `${base}/api/v1/scheduling/jobs/${encodeURIComponent(jobId)}/reroute`;
+  const token = await getAuthToken();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  try {
+    const response = await fetchWithTimeout(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new ApiError(
+        body.detail || body.message || `HTTP error! status: ${response.status}`,
+        response.status,
+      );
+    }
+    return await response.json();
+  } catch (error) {
+    if (error instanceof ApiTimeoutError || error instanceof ApiError) {
+      throw error;
+    }
+    throw new ApiError(
+      error instanceof Error ? error.message : "Unknown error",
+      0,
+    );
+  }
+}

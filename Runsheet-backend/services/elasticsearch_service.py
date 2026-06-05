@@ -1518,7 +1518,14 @@ class ElasticsearchService:
     async def get_document(self, index: str, doc_id: str):
         """
         Get a single document by ID with circuit breaker protection.
-        
+
+        Returns the document ``_source`` dict, or ``None`` when the document
+        does not exist. A missing document is an expected outcome for
+        idempotency / existence checks (e.g. the weather-alert ingester
+        checking whether an alert was already persisted), so a 404 is NOT
+        logged at ERROR — it quietly returns ``None``. Genuine ES failures
+        (auth, connection, 5xx) still raise through ``_handle_elasticsearch_error``.
+
         Validates:
         - Requirement 3.5: Implement circuit breakers for Elasticsearch
         - Requirement 2.4: Return specific error code indicating database unavailability
@@ -1532,6 +1539,11 @@ class ElasticsearchService:
         except CircuitOpenException as e:
             self._handle_circuit_breaker_exception(e)
         except Exception as e:
+            # NotFoundError (404) means the doc doesn't exist — return None
+            # without logging at ERROR. This is an expected path for
+            # existence/idempotency probes.
+            if getattr(e, "status_code", None) == 404:
+                return None
             self._handle_elasticsearch_error(f"get_document({index}, {doc_id})", e)
     
     async def delete_document(self, index: str, doc_id: str) -> bool:

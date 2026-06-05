@@ -88,7 +88,7 @@
       "weather_alert_ref": {
         "alert_id": "ALERT-001",
         "alert_type": "severe_thunderstorm",
-        "severity": "warning",
+        "severity": "severe",
         "headline": "Severe Thunderstorm Warning",
         "source": "nws",
         "region_code": "TX-DFW",

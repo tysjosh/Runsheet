@@ -171,6 +171,14 @@ export interface CancelOrderPayload {
   reason: string;
 }
 
+export interface HoldOrderPayload {
+  hold_reason: string;
+}
+
+export interface ReleaseHoldPayload {
+  notes?: string;
+}
+
 // ─── Response Types ──────────────────────────────────────────────────────────
 
 export interface OrderResponse {
@@ -342,4 +350,113 @@ export async function cancelOrder(
       body: JSON.stringify(payload),
     },
   );
+}
+
+/** POST /api/orders/:order_id/hold — place an order on hold with a reason */
+export async function holdOrder(
+  orderId: string,
+  payload: HoldOrderPayload,
+): Promise<OrderResponse> {
+  return ordersRequest<OrderResponse>(
+    `/orders/${encodeURIComponent(orderId)}/hold`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+/**
+ * POST /api/orders/:order_id/release-hold — release an order from hold.
+ *
+ * Re-runs the registered intake hooks (pricing, credit-check, etc.). If
+ * all pass, the order transitions back to ``placed``; if any hook fails,
+ * the order stays ``on_hold`` with an updated ``hold_reason``.
+ */
+export async function releaseHoldOrder(
+  orderId: string,
+  payload: ReleaseHoldPayload = {},
+): Promise<OrderResponse> {
+  return ordersRequest<OrderResponse>(
+    `/orders/${encodeURIComponent(orderId)}/release-hold`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+// ─── Bulk Create ─────────────────────────────────────────────────────────────
+
+/**
+ * A single row in a bulk-upload request.
+ *
+ * Mirrors ``BulkOrderRow`` in
+ * :mod:`Runsheet-backend/fuel/api/order_endpoints.py`. ``client_event_id``
+ * is optional per-row — when omitted the backend derives an idempotency
+ * key from the row contents. ``schema_version`` defaults to ``"1.0"``
+ * server-side, so callers rarely set it.
+ */
+export interface BulkOrderRow {
+  client_event_id?: string;
+  customer_id: string;
+  customer_name: string;
+  customer_phone?: string;
+  customer_email?: string;
+  ship_to_address: string;
+  ship_to_lat: number;
+  ship_to_lon: number;
+  customer_tank_id?: string;
+  product_code: string;
+  gallons_requested?: number;
+  fill_to_full?: boolean;
+  call_type: CallType;
+  delivery_window_start?: string;
+  delivery_window_end?: string;
+  po_number?: string;
+  special_instructions?: string;
+  schema_version?: string;
+}
+
+export interface BulkOrderRequest {
+  orders: BulkOrderRow[];
+  /** When true, validates every row without persisting any order. */
+  dry_run?: boolean;
+}
+
+export interface BulkOrderResultItem {
+  row_index: number;
+  order_id?: string | null;
+  event_id?: string | null;
+  /** Per-row outcome: e.g. ``created``, ``duplicate``, ``error``, ``valid``. */
+  status: string;
+  error?: string | null;
+}
+
+export interface BulkOrderResponse {
+  total: number;
+  processed: number;
+  duplicates: number;
+  errors: number;
+  dry_run: boolean;
+  results: BulkOrderResultItem[];
+}
+
+/**
+ * POST /api/orders/bulk — bulk-create fuel orders (up to 1000 rows).
+ *
+ * Pass ``dry_run: true`` to validate all rows without persisting; the
+ * response ``results`` array still reports per-row status so a dispatcher
+ * can preview a CSV import before committing. Exceeding the 1000-row cap
+ * is rejected by the backend with a 400. Unlike the other endpoints this
+ * route returns the ``BulkOrderResponse`` payload directly (no
+ * ``{ data, request_id }`` envelope).
+ */
+export async function createOrdersBulk(
+  payload: BulkOrderRequest,
+): Promise<BulkOrderResponse> {
+  return ordersRequest<BulkOrderResponse>("/orders/bulk", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 }

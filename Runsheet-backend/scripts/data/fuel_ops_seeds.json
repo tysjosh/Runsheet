@@ -418,7 +418,7 @@
       "alert_id": "ALERT-001",
       "region_code": "TX-DFW",
       "alert_type": "severe_thunderstorm",
-      "severity": "warning",
+      "severity": "severe",
       "headline": "Severe Thunderstorm Warning",
       "description": "Severe thunderstorms with damaging winds, large hail, and heavy rain expected. Seek shelter immediately.",
       "expected_start_at": "2026-05-08T05:00:00Z",
@@ -432,7 +432,7 @@
       "alert_id": "ALERT-002",
       "region_code": "IL-CHI",
       "alert_type": "winter_storm",
-      "severity": "watch",
+      "severity": "moderate",
       "headline": "Winter Storm Watch",
       "description": "Heavy snow possible. 6-10 inches expected. Travel may become difficult.",
       "expected_start_at": "2026-01-15T18:00:00Z",
@@ -446,7 +446,7 @@
   "storm_mode_overrides": [
     {
       "override_id": "OVERRIDE-001",
-      "action": "force_enable",
+      "action": "activate",
       "reason": "Hurricane approaching Gulf Coast. Enabling storm mode for all Texas operations.",
       "actor_id": "ADMIN-001",
       "expires_at": "2026-09-15T23:59:59Z"

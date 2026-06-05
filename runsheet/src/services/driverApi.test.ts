@@ -18,9 +18,16 @@
 
 import { ApiError } from "./api";
 import {
+  listJobMessages,
   type PresignResponse,
   presignPodUpload,
   putPresignedFile,
+  type ReportExceptionPayload,
+  reportException,
+  type SendMessagePayload,
+  type SubmitPODPayload,
+  sendJobMessage,
+  submitPOD,
 } from "./driverApi";
 
 // ─── Test fixtures ───────────────────────────────────────────────────────────
@@ -148,5 +155,154 @@ describe("putPresignedFile", () => {
         "image/png",
       ),
     ).rejects.toThrow(ApiError);
+  });
+});
+
+// ─── reportException ───────────────────────────────────────────────────────
+
+describe("reportException", () => {
+  it("POSTs the exception payload to the job-scoped endpoint", async () => {
+    const exceptionDoc = {
+      exception_id: "exc-1",
+      job_id: "job-7",
+      exception_type: "road_closure",
+      severity: "high",
+      note: "Bridge out on Route 9",
+      location: { lat: 30.1, lng: -97.7 },
+      media_refs: [],
+      tenant_id: "tenant-a",
+      timestamp: "2026-01-15T12:00:00Z",
+    };
+    mockFetchOnce({
+      ok: true,
+      body: { data: exceptionDoc, request_id: "req-1" },
+    });
+
+    const payload: ReportExceptionPayload = {
+      exception_type: "road_closure",
+      severity: "high",
+      note: "Bridge out on Route 9",
+      location: { lat: 30.1, lng: -97.7 },
+    };
+    const result = await reportException("job-7", payload);
+
+    expect(result.data).toEqual(exceptionDoc);
+    const [url, options] = (global.fetch as jest.Mock).mock.calls[0];
+    expect(url).toBe(`${API_BASE_URL}/driver/jobs/job-7/exceptions`);
+    expect(options.method).toBe("POST");
+    expect(JSON.parse(options.body)).toEqual(payload);
+  });
+
+  it("raises ApiError when the driver is not assigned (403)", async () => {
+    mockFetchOnce({
+      ok: false,
+      status: 403,
+      body: { detail: "Assignment revoked" },
+    });
+
+    await expect(
+      reportException("job-7", {
+        exception_type: "other",
+        severity: "low",
+        note: "n/a",
+      }),
+    ).rejects.toThrow(ApiError);
+  });
+});
+
+// ─── sendJobMessage / listJobMessages ──────────────────────────────────────
+
+describe("job messaging", () => {
+  it("sendJobMessage POSTs the message body to the thread endpoint", async () => {
+    const messageDoc = {
+      message_id: "msg-1",
+      job_id: "job-7",
+      sender_id: "driver-3",
+      sender_role: "driver",
+      body: "On my way",
+      timestamp: "2026-01-15T12:01:00Z",
+      tenant_id: "tenant-a",
+    };
+    mockFetchOnce({ ok: true, body: { data: messageDoc, request_id: "r" } });
+
+    const payload: SendMessagePayload = {
+      body: "On my way",
+      sender_id: "driver-3",
+      sender_role: "driver",
+    };
+    const result = await sendJobMessage("job-7", payload);
+
+    expect(result.data).toEqual(messageDoc);
+    const [url, options] = (global.fetch as jest.Mock).mock.calls[0];
+    expect(url).toBe(`${API_BASE_URL}/driver/jobs/job-7/messages`);
+    expect(options.method).toBe("POST");
+    expect(JSON.parse(options.body)).toEqual(payload);
+  });
+
+  it("listJobMessages serializes page/size and reads the paginated envelope", async () => {
+    mockFetchOnce({
+      ok: true,
+      body: {
+        data: [],
+        pagination: { page: 2, size: 25, total: 0, total_pages: 1 },
+        request_id: "r",
+      },
+    });
+
+    const result = await listJobMessages("job-7", { page: 2, size: 25 });
+
+    expect(result.pagination.page).toBe(2);
+    const [url] = (global.fetch as jest.Mock).mock.calls[0];
+    expect(url).toBe(
+      `${API_BASE_URL}/driver/jobs/job-7/messages?page=2&size=25`,
+    );
+  });
+
+  it("listJobMessages omits the query string when no params are supplied", async () => {
+    mockFetchOnce({
+      ok: true,
+      body: {
+        data: [],
+        pagination: { page: 1, size: 50, total: 0, total_pages: 1 },
+        request_id: "r",
+      },
+    });
+
+    await listJobMessages("job-7");
+
+    const [url] = (global.fetch as jest.Mock).mock.calls[0];
+    expect(url).toBe(`${API_BASE_URL}/driver/jobs/job-7/messages`);
+  });
+});
+
+// ─── submitPOD ─────────────────────────────────────────────────────────────
+
+describe("submitPOD", () => {
+  it("POSTs the POD payload with file_refs to the job endpoint", async () => {
+    const podDoc = {
+      pod_id: "pod-1",
+      job_id: "job-7",
+      recipient_name: "Jane Doe",
+      geotag: { lat: 30.1, lon: -97.7 },
+      timestamp: "2026-01-15T12:05:00Z",
+      status: "submitted",
+      refused_delivery: false,
+      tenant_id: "tenant-a",
+    };
+    mockFetchOnce({ ok: true, body: { data: podDoc, request_id: "r" } });
+
+    const payload: SubmitPODPayload = {
+      recipient_name: "Jane Doe",
+      signature_ref: "tenants/tenant-a/signature/abc.png",
+      geotag: { lat: 30.1, lng: -97.7 },
+      timestamp: "2026-01-15T12:05:00Z",
+    };
+    const result = await submitPOD("job-7", payload);
+
+    expect(result.data.pod_id).toBe("pod-1");
+    const [url, options] = (global.fetch as jest.Mock).mock.calls[0];
+    expect(url).toBe(`${API_BASE_URL}/driver/jobs/job-7/pod`);
+    expect(options.method).toBe("POST");
+    expect(JSON.parse(options.body)).toEqual(payload);
   });
 });

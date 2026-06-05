@@ -383,3 +383,228 @@ export async function getIndexingMonitoring(): Promise<IndexingMetrics> {
 export async function getPoisonQueueMonitoring(): Promise<PoisonQueueMetrics> {
   return opsRequest<PoisonQueueMetrics>("/ops/monitoring/poison-queue");
 }
+
+// ─── Rider List / Detail Endpoints ───────────────────────────────────────────
+
+export interface RiderListFilters extends PaginationParams {
+  status?: RiderStatus;
+}
+
+/** A rider with the shipments currently assigned to them. */
+export interface RiderDetail extends OpsRider {
+  assigned_shipments?: OpsShipment[];
+}
+
+/** GET /ops/riders — paginated rider records from riders_current */
+export async function getRiders(
+  filters: RiderListFilters = {},
+): Promise<PaginatedResponse<OpsRider>> {
+  const qs = buildQueryString(filters);
+  return opsRequest<PaginatedResponse<OpsRider>>(`/ops/riders${qs}`);
+}
+
+/** GET /ops/riders/:id — single rider with assigned shipment details */
+export async function getRiderById(
+  riderId: string,
+): Promise<{ data: RiderDetail; request_id: string }> {
+  return opsRequest<{ data: RiderDetail; request_id: string }>(
+    `/ops/riders/${encodeURIComponent(riderId)}`,
+  );
+}
+
+// ─── Event List Endpoint ──────────────────────────────────────────────────────
+
+export interface EventFilters extends PaginationParams, DateRangeParams {
+  shipment_id?: string;
+  event_type?: string;
+}
+
+/** GET /ops/events — paginated events from shipment_events */
+export async function getEvents(
+  filters: EventFilters = {},
+): Promise<PaginatedResponse<OpsEvent>> {
+  const qs = buildQueryString(filters);
+  return opsRequest<PaginatedResponse<OpsEvent>>(`/ops/events${qs}`);
+}
+
+// ─── Rider Metrics Endpoint ───────────────────────────────────────────────────
+
+/** GET /ops/metrics/riders — rider utilization/availability in time buckets */
+export async function getRiderMetrics(
+  filters: MetricsFilters = {},
+): Promise<MetricsResponse> {
+  const qs = buildQueryString(filters);
+  return opsRequest<MetricsResponse>(`/ops/metrics/riders${qs}`);
+}
+
+// ─── Prometheus Metrics Endpoint ──────────────────────────────────────────────
+
+/**
+ * GET /ops/metrics/prometheus — Prometheus text-exposition metrics.
+ *
+ * Unlike the other ops endpoints this returns ``text/plain`` rather than
+ * JSON, so it bypasses the shared ``opsRequest`` helper and returns the raw
+ * exposition string for a dashboard "raw metrics" view or scrape preview.
+ */
+export async function getPrometheusMetrics(): Promise<string> {
+  const url = `${API_BASE_URL}/ops/metrics/prometheus`;
+  const token = await getAuthToken();
+  const headers: Record<string, string> = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+  try {
+    const response = await fetchWithTimeout(url, { headers });
+    if (!response.ok) {
+      const body = await response.text().catch(() => "");
+      throw new ApiError(
+        body || `HTTP error! status: ${response.status}`,
+        response.status,
+      );
+    }
+    return await response.text();
+  } catch (error) {
+    if (error instanceof ApiTimeoutError || error instanceof ApiError) {
+      throw error;
+    }
+    throw new ApiError(
+      error instanceof Error ? error.message : "Unknown error",
+      0,
+    );
+  }
+}
+
+// ─── Replay / Backfill Endpoints ──────────────────────────────────────────────
+
+export interface ReplayTriggerPayload {
+  tenant_id: string;
+  /** ISO 8601 start of the backfill range. */
+  start_time: string;
+  /** ISO 8601 end of the backfill range (must be after start_time). */
+  end_time: string;
+}
+
+export type ReplayJobState = "pending" | "running" | "completed" | "failed";
+
+export interface ReplayJobStatus {
+  job_id: string;
+  tenant_id: string;
+  status: ReplayJobState;
+  total_records: number;
+  processed_count: number;
+  failed_count: number;
+  skipped_count: number;
+  estimated_remaining?: string | null;
+  started_at: string;
+  completed_at?: string | null;
+}
+
+/**
+ * POST /ops/replay/trigger — start a backfill job for a tenant + time range.
+ *
+ * The job runs in the background; poll {@link getReplayStatus} with the
+ * returned ``job_id`` to track progress.
+ */
+export async function triggerReplay(
+  payload: ReplayTriggerPayload,
+): Promise<{ data: ReplayJobStatus; request_id: string }> {
+  return opsRequest<{ data: ReplayJobStatus; request_id: string }>(
+    "/ops/replay/trigger",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+/** GET /ops/replay/status/:jobId — poll a backfill job's progress */
+export async function getReplayStatus(
+  jobId: string,
+): Promise<{ data: ReplayJobStatus; request_id: string }> {
+  return opsRequest<{ data: ReplayJobStatus; request_id: string }>(
+    `/ops/replay/status/${encodeURIComponent(jobId)}`,
+  );
+}
+
+// ─── Drift Detection Endpoint ─────────────────────────────────────────────────
+
+export interface DriftRunPayload {
+  tenant_id: string;
+  /** ISO 8601 start; defaults server-side to the last 24 hours when omitted. */
+  start_time?: string;
+  /** ISO 8601 end; defaults server-side to now when omitted. */
+  end_time?: string;
+}
+
+export interface DriftResult {
+  tenant_id: string;
+  checked_at: string;
+  shipment_count_dinee: number;
+  shipment_count_runsheet: number;
+  rider_count_dinee: number;
+  rider_count_runsheet: number;
+  divergent_shipments: Record<string, unknown>[];
+  divergent_riders: Record<string, unknown>[];
+  channel_statuses: Record<string, string>;
+  divergent_orders: Record<string, unknown>[];
+  drift_percentage: number;
+  alert_triggered: boolean;
+}
+
+/**
+ * POST /ops/drift/run — compare the upstream (Dinee) source state against the
+ * Runsheet ES read-model and return divergence results for a tenant.
+ */
+export async function runDriftDetection(
+  payload: DriftRunPayload,
+): Promise<{ data: DriftResult; request_id: string }> {
+  return opsRequest<{ data: DriftResult; request_id: string }>(
+    "/ops/drift/run",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+// ─── Feature Flag Admin Endpoints ─────────────────────────────────────────────
+
+export interface FeatureFlagResult {
+  tenant_id: string;
+  status: "enabled" | "disabled" | "rolled_back";
+  ws_clients_disconnected?: number;
+  purge_data?: boolean;
+}
+
+/** POST /ops/admin/feature-flags/:tenantId/enable — enable Ops Intelligence */
+export async function enableOpsFeatureFlag(
+  tenantId: string,
+): Promise<{ data: FeatureFlagResult; request_id: string }> {
+  return opsRequest<{ data: FeatureFlagResult; request_id: string }>(
+    `/ops/admin/feature-flags/${encodeURIComponent(tenantId)}/enable`,
+    { method: "POST" },
+  );
+}
+
+/** POST /ops/admin/feature-flags/:tenantId/disable — disable Ops Intelligence */
+export async function disableOpsFeatureFlag(
+  tenantId: string,
+): Promise<{ data: FeatureFlagResult; request_id: string }> {
+  return opsRequest<{ data: FeatureFlagResult; request_id: string }>(
+    `/ops/admin/feature-flags/${encodeURIComponent(tenantId)}/disable`,
+    { method: "POST" },
+  );
+}
+
+/**
+ * POST /ops/admin/feature-flags/:tenantId/rollback — disable the flag and
+ * optionally purge the tenant's data from every ops ES index.
+ */
+export async function rollbackOpsFeatureFlag(
+  tenantId: string,
+  purgeData = false,
+): Promise<{ data: FeatureFlagResult; request_id: string }> {
+  const qs = buildQueryString({ purge_data: purgeData });
+  return opsRequest<{ data: FeatureFlagResult; request_id: string }>(
+    `/ops/admin/feature-flags/${encodeURIComponent(tenantId)}/rollback${qs}`,
+    { method: "POST" },
+  );
+}

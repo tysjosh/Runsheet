@@ -110,6 +110,50 @@ _NWS_SEVERITY_MAP: Dict[str, WeatherAlertSeverity] = {
 _NWS_SEVERITY_FALLBACK: WeatherAlertSeverity = "moderate"
 
 
+#: ZIP-prefix (first 3 digits) → USPS 2-letter state ranges. The NWS
+#: ``/alerts/active`` endpoint filters by ``area`` (state code), NOT by ZIP,
+#: so the ingester derives the distinct set of states covering the tenant's
+#: ZIP footprint and queries by ``area``. Ranges are inclusive ``(low, high,
+#: state)`` over the integer value of the first three ZIP digits (ZCTA
+#: prefixes). Source: USPS ZIP prefix allocations. Prefixes that span only
+#: territories / unused blocks fall through to ``None`` and are skipped.
+_ZIP3_STATE_RANGES: List[Tuple[int, int, str]] = [
+    (0, 0, "PR"), (6, 9, "PR"), (10, 27, "MA"), (28, 29, "RI"),
+    (30, 38, "NH"), (39, 49, "ME"), (50, 54, "VT"), (55, 59, "MA"),
+    (60, 69, "CT"), (70, 89, "NJ"), (100, 149, "NY"), (150, 196, "PA"),
+    (197, 199, "DE"), (200, 205, "DC"), (206, 219, "MD"), (220, 246, "VA"),
+    (247, 268, "WV"), (270, 289, "NC"), (290, 299, "SC"), (300, 319, "GA"),
+    (320, 349, "FL"), (350, 369, "AL"), (370, 385, "TN"), (386, 397, "MS"),
+    (398, 399, "GA"), (400, 427, "KY"), (430, 459, "OH"), (460, 479, "IN"),
+    (480, 499, "MI"), (500, 528, "IA"), (530, 549, "WI"), (550, 567, "MN"),
+    (569, 579, "SD"), (580, 588, "ND"), (590, 599, "MT"), (600, 629, "IL"),
+    (630, 658, "MO"), (660, 679, "KS"), (680, 693, "NE"), (700, 714, "LA"),
+    (716, 729, "AR"), (730, 749, "OK"), (750, 799, "TX"), (800, 816, "CO"),
+    (820, 831, "WY"), (832, 838, "ID"), (840, 847, "UT"), (850, 865, "AZ"),
+    (870, 884, "NM"), (889, 899, "NV"), (900, 961, "CA"), (967, 968, "HI"),
+    (970, 979, "OR"), (980, 994, "WA"), (995, 999, "AK"),
+]
+
+
+def zip_to_state(zip_code: str) -> Optional[str]:
+    """Map a 5-digit US ZIP to its USPS 2-letter state via prefix ranges.
+
+    Returns ``None`` for malformed ZIPs or prefixes that don't fall in a
+    known range, so callers can skip un-mappable ZIPs rather than send an
+    invalid NWS ``area`` filter.
+    """
+    if not isinstance(zip_code, str):
+        return None
+    digits = zip_code.strip()[:5]
+    if len(digits) < 3 or not digits[:3].isdigit():
+        return None
+    prefix = int(digits[:3])
+    for low, high, state in _ZIP3_STATE_RANGES:
+        if low <= prefix <= high:
+            return state
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Type aliases
 # ---------------------------------------------------------------------------
@@ -408,16 +452,37 @@ class WeatherAlertIngester(AutonomousAgentBase):
         :class:`CircuitOpenError` — we return an empty feature list so
         the monitor cycle advances without raising.
 
-        The NWS API does not accept a ZIP list directly; it filters by
-        ``zone`` id or by ``area`` (two-letter state). For a practical
-        first-pass the ingester submits the ZIP list as a ``point=`` /
-        ``zone=`` comma-separated query so the upstream returns a
-        superset and we filter client-side in
-        :meth:`_build_weather_alert`. When the upstream rejects the
-        parameter, we fall back to an unscoped active-alerts pull and
-        filter locally. NWS is expected to return a GeoJSON FeatureCollection.
+        The NWS ``/alerts/active`` endpoint does NOT filter by ZIP. It
+        filters by ``area`` (USPS 2-letter state code), ``zone`` (NWS zone
+        id like ``TXZ123``), or ``point`` (lat,lon). The tenant footprint
+        is a set of ZIP codes, so we derive the distinct set of **states**
+        covering those ZIPs (via :func:`zip_to_state`) and query by
+        ``area`` — NWS returns every active alert in those states and we
+        narrow to the tenant's ZIPs client-side in
+        :meth:`_build_weather_alert`. When no state can be derived from the
+        footprint, we fall back to an unscoped active-alerts pull and filter
+        locally rather than sending an invalid ``area`` filter (which NWS
+        rejects with HTTP 400). NWS returns a GeoJSON FeatureCollection.
         """
-        params = {"zone": ",".join(zip_codes[:50])}
+        # Derive the distinct USPS states covering the ZIP footprint; NWS
+        # ``area`` accepts a comma-separated list of state codes.
+        states: List[str] = []
+        seen_states: set[str] = set()
+        for zip_code in zip_codes:
+            state = zip_to_state(zip_code)
+            if state and state not in seen_states:
+                seen_states.add(state)
+                states.append(state)
+
+        # NWS caps practical area lists; 50 distinct states is the whole
+        # country, so the slice is a defensive no-op in practice.
+        if states:
+            params: Dict[str, str] = {"area": ",".join(states[:50])}
+        else:
+            # No mappable state — fall back to an unscoped active-alerts
+            # pull (filtered client-side) instead of a 400-triggering
+            # ``zone=<zip>`` query.
+            params = {}
         headers = {
             "User-Agent": self._user_agent,
             "Accept": "application/geo+json",

@@ -27,7 +27,9 @@ import {
   type FuelOrderEvent,
   getOrder,
   getOrderEvents,
+  holdOrder,
   type OrderStatus,
+  releaseHoldOrder,
   updateOrderStatus,
 } from "../../../services/ordersApi";
 
@@ -269,6 +271,7 @@ function MutationControls({
   const [showAssignModal, setShowAssignModal] = useState(false);
   const [showCancelModal, setShowCancelModal] = useState(false);
   const [showStatusModal, setShowStatusModal] = useState(false);
+  const [showHoldModal, setShowHoldModal] = useState(false);
   const [working, setWorking] = useState(false);
 
   // Assign driver
@@ -335,9 +338,51 @@ function MutationControls({
     }
   }, [order.order_id, newStatus, statusReason, addToast, onMutationSuccess]);
 
+  // Place on hold
+  const [holdReason, setHoldReason] = useState("");
+  const handleHold = useCallback(async () => {
+    if (!holdReason.trim()) return;
+    setWorking(true);
+    try {
+      await holdOrder(order.order_id, { hold_reason: holdReason.trim() });
+      addToast("Order placed on hold", "success");
+      setShowHoldModal(false);
+      setHoldReason("");
+      onMutationSuccess();
+    } catch (err) {
+      const msg =
+        err instanceof ApiError ? err.message : "Failed to place order on hold";
+      addToast(msg, "error");
+    } finally {
+      setWorking(false);
+    }
+  }, [order.order_id, holdReason, addToast, onMutationSuccess]);
+
+  // Release from hold (re-runs intake hooks server-side). The backend may
+  // keep the order on_hold with a refreshed hold_reason when a re-run intake
+  // hook fails, so we re-fetch and surface the resulting status to the user
+  // rather than assuming success.
+  const handleReleaseHold = useCallback(async () => {
+    setWorking(true);
+    try {
+      await releaseHoldOrder(order.order_id);
+      addToast("Release requested — refreshing order", "success");
+      onMutationSuccess();
+    } catch (err) {
+      const msg =
+        err instanceof ApiError ? err.message : "Failed to release hold";
+      addToast(msg, "error");
+    } finally {
+      setWorking(false);
+    }
+  }, [order.order_id, addToast, onMutationSuccess]);
+
   const isTerminal = ["delivered", "failed", "cancelled"].includes(
     order.status,
   );
+  const isOnHold = order.status === "on_hold";
+  // The state machine only allows placed/confirmed/scheduled → on_hold.
+  const canHold = ["placed", "confirmed", "scheduled"].includes(order.status);
 
   return (
     <>
@@ -360,6 +405,29 @@ function MutationControls({
             >
               Assign Driver
             </button>
+            {isOnHold ? (
+              <button
+                type="button"
+                onClick={handleReleaseHold}
+                disabled={working}
+                className="px-3 py-1.5 text-xs font-medium text-success-dark border border-success-light rounded-lg hover:bg-success-light disabled:opacity-50 inline-flex items-center gap-1"
+                aria-label="Release hold"
+              >
+                {working && <Loader2 className="w-3 h-3 animate-spin" />}
+                Release Hold
+              </button>
+            ) : (
+              canHold && (
+                <button
+                  type="button"
+                  onClick={() => setShowHoldModal(true)}
+                  className="px-3 py-1.5 text-xs font-medium text-warning-dark border border-warning-light rounded-lg hover:bg-warning-light"
+                  aria-label="Place on hold"
+                >
+                  Place on Hold
+                </button>
+              )
+            )}
             <button
               type="button"
               onClick={() => setShowCancelModal(true)}
@@ -458,6 +526,57 @@ function MutationControls({
                   <Loader2 className="w-4 h-4 animate-spin" />
                 ) : (
                   "Confirm Cancel"
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Place on Hold Modal */}
+      {showHoldModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-sm mx-4 p-6">
+            <div className="flex items-center gap-2 mb-4">
+              <AlertTriangle className="w-5 h-5 text-warning-dark" />
+              <h3 className="text-lg font-semibold text-warning-dark">
+                Place on Hold
+              </h3>
+            </div>
+            <p className="text-sm text-gray-600 mb-4">
+              Holding pauses the order until it is released. Provide a reason
+              (e.g. credit check, awaiting customer confirmation).
+            </p>
+            <textarea
+              value={holdReason}
+              onChange={(e) => setHoldReason(e.target.value)}
+              placeholder="Reason for hold"
+              rows={3}
+              className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg mb-4 focus:ring-2 focus:ring-primary focus:outline-none"
+              aria-label="Hold reason"
+            />
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowHoldModal(false)}
+                className="px-3 py-2 text-sm border border-gray-200 rounded-lg"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleHold}
+                disabled={working || !holdReason.trim()}
+                className="px-3 py-2 text-sm font-medium text-white bg-warning-dark rounded-lg disabled:opacity-50 hover:opacity-90"
+              >
+                {working ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  "Place on Hold"
                 )}
               </button>
             </div>
