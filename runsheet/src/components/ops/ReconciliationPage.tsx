@@ -47,6 +47,7 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { type Column, Table } from "@/components/ui";
 import type {
   BOLDownloadResponse,
   HashChainMismatch,
@@ -1037,94 +1038,125 @@ interface ReconciliationTableProps {
 }
 
 function ReconciliationTable({ records, onSelect }: ReconciliationTableProps) {
-  if (records.length === 0) {
-    return (
-      <div className="border border-dashed border-gray-200 rounded-lg px-6 py-12 text-center text-sm text-gray-500">
-        No reconciliation records match the current filters.
-      </div>
-    );
-  }
+  const columns: Column<ReconciliationRecord>[] = [
+    {
+      key: "pod_id",
+      label: "POD",
+      className: "font-mono text-xs text-gray-700 break-all",
+      render: (record) => record.pod_id,
+    },
+    {
+      key: "order_id",
+      label: "Order",
+      className: "font-mono text-xs text-gray-700 break-all",
+      render: (record) => record.order_id,
+    },
+    {
+      key: "ordered_gallons",
+      label: "Ordered",
+      align: "right",
+      className: "text-gray-700",
+      render: (record) => formatGallons(record.ordered_gallons),
+    },
+    {
+      key: "loaded_gallons",
+      label: "Loaded",
+      align: "right",
+      className: "text-gray-700",
+      render: (record) => formatGallons(record.loaded_gallons),
+    },
+    {
+      key: "delivered_gallons",
+      label: "Delivered",
+      align: "right",
+      className: "text-gray-700",
+      render: (record) => formatGallons(record.delivered_gallons),
+    },
+    {
+      key: "invoiced_gallons",
+      label: "Invoiced",
+      align: "right",
+      className: "text-gray-700",
+      render: (record) => formatGallons(record.invoiced_gallons),
+    },
+    {
+      key: "variance_load_vs_order_pct",
+      label: "L/O %",
+      align: "right",
+      className: "font-mono",
+      render: (record) => (
+        <span className={varianceCellClass(record.variance_load_vs_order_pct)}>
+          {formatVariancePct(record.variance_load_vs_order_pct)}
+        </span>
+      ),
+    },
+    {
+      key: "variance_delivered_vs_loaded_pct",
+      label: "D/L %",
+      align: "right",
+      className: "font-mono",
+      render: (record) => (
+        <span
+          className={varianceCellClass(record.variance_delivered_vs_loaded_pct)}
+        >
+          {formatVariancePct(record.variance_delivered_vs_loaded_pct)}
+        </span>
+      ),
+    },
+    {
+      key: "variance_invoiced_vs_delivered_pct",
+      label: "I/D %",
+      align: "right",
+      className: "font-mono",
+      render: (record) => (
+        <span
+          className={varianceCellClass(
+            record.variance_invoiced_vs_delivered_pct,
+          )}
+        >
+          {formatVariancePct(record.variance_invoiced_vs_delivered_pct)}
+        </span>
+      ),
+    },
+    {
+      key: "generated_at",
+      label: "Generated",
+      className: "text-xs text-gray-500 whitespace-nowrap",
+      render: (record) => formatTimestamp(record.generated_at),
+    },
+    {
+      key: "actions",
+      label: "",
+      render: (record) => (
+        <button
+          type="button"
+          onClick={() => onSelect(record)}
+          className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-gray-700 hover:text-gray-900 border border-gray-200 rounded-md hover:bg-gray-50"
+          aria-label={`Open POD ${record.pod_id}`}
+        >
+          <FileText className="w-3 h-3" aria-hidden="true" />
+          POD
+        </button>
+      ),
+    },
+  ];
 
   return (
-    <div className="border border-gray-200 rounded-lg overflow-hidden">
-      <table className="w-full text-sm">
-        <thead className="bg-gray-50">
-          <tr className="text-left text-xs uppercase tracking-wide text-gray-500">
-            <th className="px-3 py-2 font-medium">POD</th>
-            <th className="px-3 py-2 font-medium">Order</th>
-            <th className="px-3 py-2 font-medium text-right">Ordered</th>
-            <th className="px-3 py-2 font-medium text-right">Loaded</th>
-            <th className="px-3 py-2 font-medium text-right">Delivered</th>
-            <th className="px-3 py-2 font-medium text-right">Invoiced</th>
-            <th className="px-3 py-2 font-medium text-right">L/O %</th>
-            <th className="px-3 py-2 font-medium text-right">D/L %</th>
-            <th className="px-3 py-2 font-medium text-right">I/D %</th>
-            <th className="px-3 py-2 font-medium">Generated</th>
-            <th className="px-3 py-2 font-medium" aria-label="Actions" />
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-gray-100">
-          {records.map((record) => {
-            const alerted = isAlertedRow(record);
-            return (
-              <tr
-                key={record.reconciliation_id}
-                data-testid={`reconciliation-row-${record.reconciliation_id}`}
-                className={alerted ? "bg-error-light" : "bg-white"}
-              >
-                <td className="px-3 py-2 font-mono text-xs text-gray-700 break-all">
-                  {record.pod_id}
-                </td>
-                <td className="px-3 py-2 font-mono text-xs text-gray-700 break-all">
-                  {record.order_id}
-                </td>
-                <td className="px-3 py-2 text-right text-gray-700">
-                  {formatGallons(record.ordered_gallons)}
-                </td>
-                <td className="px-3 py-2 text-right text-gray-700">
-                  {formatGallons(record.loaded_gallons)}
-                </td>
-                <td className="px-3 py-2 text-right text-gray-700">
-                  {formatGallons(record.delivered_gallons)}
-                </td>
-                <td className="px-3 py-2 text-right text-gray-700">
-                  {formatGallons(record.invoiced_gallons)}
-                </td>
-                <td
-                  className={`px-3 py-2 text-right font-mono ${varianceCellClass(record.variance_load_vs_order_pct)}`}
-                >
-                  {formatVariancePct(record.variance_load_vs_order_pct)}
-                </td>
-                <td
-                  className={`px-3 py-2 text-right font-mono ${varianceCellClass(record.variance_delivered_vs_loaded_pct)}`}
-                >
-                  {formatVariancePct(record.variance_delivered_vs_loaded_pct)}
-                </td>
-                <td
-                  className={`px-3 py-2 text-right font-mono ${varianceCellClass(record.variance_invoiced_vs_delivered_pct)}`}
-                >
-                  {formatVariancePct(record.variance_invoiced_vs_delivered_pct)}
-                </td>
-                <td className="px-3 py-2 text-xs text-gray-500 whitespace-nowrap">
-                  {formatTimestamp(record.generated_at)}
-                </td>
-                <td className="px-3 py-2">
-                  <button
-                    type="button"
-                    onClick={() => onSelect(record)}
-                    className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-gray-700 hover:text-gray-900 border border-gray-200 rounded-md hover:bg-gray-50"
-                    aria-label={`Open POD ${record.pod_id}`}
-                  >
-                    <FileText className="w-3 h-3" aria-hidden="true" />
-                    POD
-                  </button>
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
+    <Table<ReconciliationRecord>
+      ariaLabel="Reconciliation records"
+      variant="compact"
+      className="border border-gray-200 rounded-lg"
+      columns={columns}
+      data={records}
+      getRowId={(record) => record.reconciliation_id}
+      rowTestId={(record) => `reconciliation-row-${record.reconciliation_id}`}
+      rowClassName={(record) => (isAlertedRow(record) ? "bg-error-light" : "")}
+      emptyState={
+        <span className="text-gray-500">
+          No reconciliation records match the current filters.
+        </span>
+      }
+    />
   );
 }
 

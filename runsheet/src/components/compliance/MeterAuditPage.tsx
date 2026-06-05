@@ -2,6 +2,7 @@
 
 import type React from "react";
 import { useCallback, useEffect, useState } from "react";
+import { type Column, Table } from "@/components/ui";
 import {
   type CreateMeterPayload,
   createMeter,
@@ -50,6 +51,118 @@ function varianceBadge(flag: string | null): {
   if (!flag) return null;
   return { label: flag, className: "bg-error-light text-error-dark" };
 }
+
+// ─── Table columns ───────────────────────────────────────────────────────────
+
+function getMeterColumns(
+  onViewAuditTrail: (meter: MeterRegistration) => void,
+): Column<MeterRegistration>[] {
+  return [
+    {
+      key: "meter_number",
+      label: "Meter Number",
+      render: (meter) => (
+        <span className="font-medium">{meter.meter_number}</span>
+      ),
+    },
+    {
+      key: "truck_id",
+      label: "Truck ID",
+      render: (meter) => meter.truck_id,
+    },
+    {
+      key: "calibration_certificate_number",
+      label: "Calibration Cert #",
+      render: (meter) => meter.calibration_certificate_number,
+    },
+    {
+      key: "calibration_date",
+      label: "Calibration Date",
+      render: (meter) => formatDate(meter.calibration_date),
+    },
+    {
+      key: "calibration_expiry_date",
+      label: "Expiry Date",
+      render: (meter) => formatDate(meter.calibration_expiry_date),
+    },
+    {
+      key: "status",
+      label: "Status",
+      render: (meter) => {
+        const status = calibrationStatusBadge(meter.calibration_expiry_date);
+        return (
+          <span
+            className={`inline-block px-2 py-1 rounded text-xs font-medium ${status.className}`}
+          >
+            {status.label}
+          </span>
+        );
+      },
+    },
+    {
+      key: "weights_measures_authority",
+      label: "W&M Authority",
+      render: (meter) => meter.weights_measures_authority,
+    },
+    {
+      key: "actions",
+      label: "Actions",
+      render: (meter) => (
+        <button
+          type="button"
+          onClick={() => onViewAuditTrail(meter)}
+          className="text-info hover:underline text-sm"
+        >
+          Audit Trail
+        </button>
+      ),
+    },
+  ];
+}
+
+const auditTrailColumns: Column<MeterAuditEntry>[] = [
+  {
+    key: "delivery_id",
+    label: "Delivery ID",
+    render: (entry) => <span className="font-medium">{entry.delivery_id}</span>,
+  },
+  {
+    key: "invoice_id",
+    label: "Invoice ID",
+    render: (entry) => entry.invoice_id,
+  },
+  {
+    key: "gross_gallons",
+    label: "Gross Gallons",
+    render: (entry) => entry.gross_gallons.toFixed(1),
+  },
+  {
+    key: "net_gallons",
+    label: "Net Gallons",
+    render: (entry) => entry.net_gallons.toFixed(1),
+  },
+  {
+    key: "variance",
+    label: "Variance",
+    render: (entry) => {
+      const vBadge = varianceBadge(entry.variance_flag);
+      return vBadge ? (
+        <span
+          className={`inline-block px-2 py-1 rounded text-xs font-medium ${vBadge.className}`}
+        >
+          {vBadge.label}
+        </span>
+      ) : (
+        <span className="text-success text-xs font-medium">OK</span>
+      );
+    },
+  },
+  {
+    key: "timestamp",
+    label: "Timestamp",
+    render: (entry) => formatDate(entry.timestamp),
+  },
+];
 
 // ─── Main Component ──────────────────────────────────────────────────────────
 
@@ -188,79 +301,15 @@ export default function MeterAuditPage() {
         {/* Meters table */}
         {!loading && !error && (
           <>
-            <div className="overflow-x-auto">
-              <table className="w-full border-collapse" role="table">
-                <thead>
-                  <tr className="border-b bg-gray-50">
-                    <th className="text-left p-3 font-medium">Meter Number</th>
-                    <th className="text-left p-3 font-medium">Truck ID</th>
-                    <th className="text-left p-3 font-medium">
-                      Calibration Cert #
-                    </th>
-                    <th className="text-left p-3 font-medium">
-                      Calibration Date
-                    </th>
-                    <th className="text-left p-3 font-medium">Expiry Date</th>
-                    <th className="text-left p-3 font-medium">Status</th>
-                    <th className="text-left p-3 font-medium">W&M Authority</th>
-                    <th className="text-left p-3 font-medium">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {meters.map((meter) => {
-                    const status = calibrationStatusBadge(
-                      meter.calibration_expiry_date,
-                    );
-                    return (
-                      <tr
-                        key={meter.meter_id}
-                        className="border-b hover:bg-gray-50"
-                      >
-                        <td className="p-3 font-medium">
-                          {meter.meter_number}
-                        </td>
-                        <td className="p-3">{meter.truck_id}</td>
-                        <td className="p-3">
-                          {meter.calibration_certificate_number}
-                        </td>
-                        <td className="p-3">
-                          {formatDate(meter.calibration_date)}
-                        </td>
-                        <td className="p-3">
-                          {formatDate(meter.calibration_expiry_date)}
-                        </td>
-                        <td className="p-3">
-                          <span
-                            className={`inline-block px-2 py-1 rounded text-xs font-medium ${status.className}`}
-                          >
-                            {status.label}
-                          </span>
-                        </td>
-                        <td className="p-3">
-                          {meter.weights_measures_authority}
-                        </td>
-                        <td className="p-3">
-                          <button
-                            type="button"
-                            onClick={() => handleViewAuditTrail(meter)}
-                            className="text-info hover:underline text-sm"
-                          >
-                            Audit Trail
-                          </button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                  {meters.length === 0 && (
-                    <tr>
-                      <td colSpan={8} className="p-6 text-center text-gray-500">
-                        No meters registered.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
+            <Table<MeterRegistration>
+              ariaLabel="Registered meters"
+              columns={getMeterColumns(handleViewAuditTrail)}
+              data={meters}
+              getRowId={(meter) => meter.meter_id}
+              emptyState={
+                <span className="text-gray-500">No meters registered.</span>
+              }
+            />
 
             {/* Pagination */}
             <nav
@@ -353,59 +402,17 @@ export default function MeterAuditPage() {
         {/* Audit trail table */}
         {!auditLoading && !auditError && (
           <>
-            <div className="overflow-x-auto">
-              <table className="w-full border-collapse" role="table">
-                <thead>
-                  <tr className="border-b bg-gray-50">
-                    <th className="text-left p-3 font-medium">Delivery ID</th>
-                    <th className="text-left p-3 font-medium">Invoice ID</th>
-                    <th className="text-left p-3 font-medium">Gross Gallons</th>
-                    <th className="text-left p-3 font-medium">Net Gallons</th>
-                    <th className="text-left p-3 font-medium">Variance</th>
-                    <th className="text-left p-3 font-medium">Timestamp</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {auditEntries.map((entry) => {
-                    const vBadge = varianceBadge(entry.variance_flag);
-                    return (
-                      <tr
-                        key={entry.audit_id}
-                        className="border-b hover:bg-gray-50"
-                      >
-                        <td className="p-3 font-medium">{entry.delivery_id}</td>
-                        <td className="p-3">{entry.invoice_id}</td>
-                        <td className="p-3">
-                          {entry.gross_gallons.toFixed(1)}
-                        </td>
-                        <td className="p-3">{entry.net_gallons.toFixed(1)}</td>
-                        <td className="p-3">
-                          {vBadge ? (
-                            <span
-                              className={`inline-block px-2 py-1 rounded text-xs font-medium ${vBadge.className}`}
-                            >
-                              {vBadge.label}
-                            </span>
-                          ) : (
-                            <span className="text-success text-xs font-medium">
-                              OK
-                            </span>
-                          )}
-                        </td>
-                        <td className="p-3">{formatDate(entry.timestamp)}</td>
-                      </tr>
-                    );
-                  })}
-                  {auditEntries.length === 0 && (
-                    <tr>
-                      <td colSpan={6} className="p-6 text-center text-gray-500">
-                        No audit entries found for this meter.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
+            <Table<MeterAuditEntry>
+              ariaLabel="Meter delivery audit trail"
+              columns={auditTrailColumns}
+              data={auditEntries}
+              getRowId={(entry) => entry.audit_id}
+              emptyState={
+                <span className="text-gray-500">
+                  No audit entries found for this meter.
+                </span>
+              }
+            />
 
             {/* Audit trail pagination */}
             <nav

@@ -2,6 +2,7 @@
 
 import type React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { type Column, Table } from "@/components/ui";
 import {
   getTerminalBOLs,
   type TerminalBOL,
@@ -45,6 +46,65 @@ function formatDate(dateStr: string | null): string {
 function formatGallons(gallons: number): string {
   return gallons.toFixed(1);
 }
+
+// ─── Table columns ───────────────────────────────────────────────────────────
+
+const bolColumns: Column<TerminalBOL>[] = [
+  {
+    key: "load_number",
+    label: "Load Number",
+    render: (bol) => <span className="font-medium">{bol.load_number}</span>,
+  },
+  {
+    key: "product_code",
+    label: "Product Code",
+    render: (bol) => bol.product_code,
+  },
+  {
+    key: "gross_gallons",
+    label: "Gross Gallons",
+    render: (bol) => formatGallons(bol.gross_gallons),
+  },
+  {
+    key: "net_gallons",
+    label: "Net Gallons",
+    render: (bol) => formatGallons(bol.net_gallons),
+  },
+  {
+    key: "supplier_name",
+    label: "Supplier",
+    render: (bol) => bol.supplier_name,
+  },
+  {
+    key: "terminal_name",
+    label: "Terminal",
+    render: (bol) => bol.terminal_name,
+  },
+  {
+    key: "driver_id",
+    label: "Driver ID",
+    render: (bol) => bol.driver_id,
+  },
+  {
+    key: "timestamp",
+    label: "Timestamp",
+    render: (bol) => formatDate(bol.timestamp),
+  },
+  {
+    key: "status",
+    label: "Status",
+    render: (bol) => {
+      const badge = statusBadge(bol.status);
+      return (
+        <span
+          className={`inline-block px-2 py-1 rounded text-xs font-medium ${badge.className}`}
+        >
+          {badge.label}
+        </span>
+      );
+    },
+  },
+];
 
 // ─── Main Component ──────────────────────────────────────────────────────────
 
@@ -234,61 +294,15 @@ export default function TerminalBOLsPage() {
         {/* BOLs table */}
         {!loading && !error && (
           <>
-            <div className="overflow-x-auto">
-              <table className="w-full border-collapse" role="table">
-                <thead>
-                  <tr className="border-b bg-gray-50">
-                    <th className="text-left p-3 font-medium">Load Number</th>
-                    <th className="text-left p-3 font-medium">Product Code</th>
-                    <th className="text-left p-3 font-medium">Gross Gallons</th>
-                    <th className="text-left p-3 font-medium">Net Gallons</th>
-                    <th className="text-left p-3 font-medium">Supplier</th>
-                    <th className="text-left p-3 font-medium">Terminal</th>
-                    <th className="text-left p-3 font-medium">Driver ID</th>
-                    <th className="text-left p-3 font-medium">Timestamp</th>
-                    <th className="text-left p-3 font-medium">Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {bols.map((bol) => {
-                    const badge = statusBadge(bol.status);
-                    return (
-                      <tr
-                        key={bol.bol_id}
-                        className="border-b hover:bg-gray-50"
-                      >
-                        <td className="p-3 font-medium">{bol.load_number}</td>
-                        <td className="p-3">{bol.product_code}</td>
-                        <td className="p-3">
-                          {formatGallons(bol.gross_gallons)}
-                        </td>
-                        <td className="p-3">
-                          {formatGallons(bol.net_gallons)}
-                        </td>
-                        <td className="p-3">{bol.supplier_name}</td>
-                        <td className="p-3">{bol.terminal_name}</td>
-                        <td className="p-3">{bol.driver_id}</td>
-                        <td className="p-3">{formatDate(bol.timestamp)}</td>
-                        <td className="p-3">
-                          <span
-                            className={`inline-block px-2 py-1 rounded text-xs font-medium ${badge.className}`}
-                          >
-                            {badge.label}
-                          </span>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                  {bols.length === 0 && (
-                    <tr>
-                      <td colSpan={9} className="p-6 text-center text-gray-500">
-                        No terminal BOLs found.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
+            <Table<TerminalBOL>
+              ariaLabel="Terminal BOLs"
+              columns={bolColumns}
+              data={bols}
+              getRowId={(bol) => bol.bol_id}
+              emptyState={
+                <span className="text-gray-500">No terminal BOLs found.</span>
+              }
+            />
 
             {/* Pagination */}
             <nav

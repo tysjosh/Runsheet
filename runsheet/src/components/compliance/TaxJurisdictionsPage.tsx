@@ -2,6 +2,7 @@
 
 import type React from "react";
 import { useCallback, useEffect, useState } from "react";
+import { type Column, Table } from "@/components/ui";
 import {
   type CreateJurisdictionRatePayload,
   createTaxJurisdiction,
@@ -140,6 +141,64 @@ function parseCSV(csvText: string): CSVParseResult {
 
   return { rows, errors };
 }
+
+// ─── Table columns ───────────────────────────────────────────────────────────
+
+const jurisdictionColumns: Column<JurisdictionRate>[] = [
+  {
+    key: "fips_code",
+    label: "FIPS Code",
+    render: (r) => <span className="font-mono text-sm">{r.fips_code}</span>,
+  },
+  {
+    key: "jurisdiction_level",
+    label: "Level",
+    render: (r) => (
+      <span
+        className={`inline-block px-2 py-1 rounded text-xs font-medium ${jurisdictionLevelBadge(r.jurisdiction_level)}`}
+      >
+        {r.jurisdiction_level}
+      </span>
+    ),
+  },
+  {
+    key: "tax_type",
+    label: "Tax Type",
+    render: (r) => (
+      <span
+        className={`inline-block px-2 py-1 rounded text-xs font-medium ${taxTypeBadge(r.tax_type)}`}
+      >
+        {r.tax_type}
+      </span>
+    ),
+  },
+  {
+    key: "product_codes",
+    label: "Product Codes",
+    render: (r) => (
+      <span className="text-sm">{r.product_codes.join(", ") || "—"}</span>
+    ),
+  },
+  {
+    key: "rate_cents_per_gallon",
+    label: "Rate (¢/gal)",
+    render: (r) => (
+      <span className="font-medium">{r.rate_cents_per_gallon}¢</span>
+    ),
+  },
+  {
+    key: "effective_date",
+    label: "Effective Date",
+    render: (r) => (
+      <span className="text-sm">{formatDate(r.effective_date)}</span>
+    ),
+  },
+  {
+    key: "expiry_date",
+    label: "Expiry Date",
+    render: (r) => <span className="text-sm">{formatDate(r.expiry_date)}</span>,
+  },
+];
 
 // ─── Main Component ──────────────────────────────────────────────────────────
 
@@ -440,68 +499,17 @@ export default function TaxJurisdictionsPage() {
         {/* Jurisdictions table */}
         {!loading && !error && (
           <>
-            <div className="overflow-x-auto">
-              <table className="w-full border-collapse" role="table">
-                <thead>
-                  <tr className="border-b bg-gray-50">
-                    <th className="text-left p-3 font-medium">FIPS Code</th>
-                    <th className="text-left p-3 font-medium">Level</th>
-                    <th className="text-left p-3 font-medium">Tax Type</th>
-                    <th className="text-left p-3 font-medium">Product Codes</th>
-                    <th className="text-left p-3 font-medium">Rate (¢/gal)</th>
-                    <th className="text-left p-3 font-medium">
-                      Effective Date
-                    </th>
-                    <th className="text-left p-3 font-medium">Expiry Date</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {jurisdictions.map((rate) => (
-                    <tr
-                      key={rate.jurisdiction_id}
-                      className="border-b hover:bg-gray-50"
-                    >
-                      <td className="p-3 font-mono text-sm">
-                        {rate.fips_code}
-                      </td>
-                      <td className="p-3">
-                        <span
-                          className={`inline-block px-2 py-1 rounded text-xs font-medium ${jurisdictionLevelBadge(rate.jurisdiction_level)}`}
-                        >
-                          {rate.jurisdiction_level}
-                        </span>
-                      </td>
-                      <td className="p-3">
-                        <span
-                          className={`inline-block px-2 py-1 rounded text-xs font-medium ${taxTypeBadge(rate.tax_type)}`}
-                        >
-                          {rate.tax_type}
-                        </span>
-                      </td>
-                      <td className="p-3 text-sm">
-                        {rate.product_codes.join(", ") || "—"}
-                      </td>
-                      <td className="p-3 font-medium">
-                        {rate.rate_cents_per_gallon}¢
-                      </td>
-                      <td className="p-3 text-sm">
-                        {formatDate(rate.effective_date)}
-                      </td>
-                      <td className="p-3 text-sm">
-                        {formatDate(rate.expiry_date)}
-                      </td>
-                    </tr>
-                  ))}
-                  {jurisdictions.length === 0 && (
-                    <tr>
-                      <td colSpan={7} className="p-6 text-center text-gray-500">
-                        No tax jurisdiction rates found.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
+            <Table<JurisdictionRate>
+              ariaLabel="Tax jurisdiction rates"
+              columns={jurisdictionColumns}
+              data={jurisdictions}
+              getRowId={(r) => r.jurisdiction_id}
+              emptyState={
+                <span className="text-gray-500">
+                  No tax jurisdiction rates found.
+                </span>
+              }
+            />
 
             {/* Pagination */}
             <nav

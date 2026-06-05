@@ -14,6 +14,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import LoadingSpinner from "../../../components/LoadingSpinner";
 import FailureBarChart from "../../../components/ops/FailureBarChart";
 import FailureTrendChart from "../../../components/ops/FailureTrendChart";
+import { type Column, Table } from "../../../components/ui";
 import type {
   FailureFilters,
   MetricsBucket,
@@ -423,6 +424,37 @@ function FailureTypeDropdown({
   );
 }
 
+const failedShipmentColumns: Column<OpsShipment>[] = [
+  {
+    key: "shipment_id",
+    label: "Shipment ID",
+    className: "font-mono text-xs text-gray-800",
+    render: (s) => s.shipment_id,
+  },
+  {
+    key: "failure_reason",
+    label: "Failure Reason",
+    render: (s) => (
+      <span className="inline-block px-2 py-0.5 text-xs rounded bg-error-light text-error-dark">
+        {s.failure_reason ?? "Unknown"}
+      </span>
+    ),
+  },
+  {
+    key: "rider_id",
+    label: "Rider",
+    className: "text-gray-600",
+    render: (s) => s.rider_id ?? "—",
+  },
+  {
+    key: "updated_at",
+    label: "Timestamp",
+    className: "text-gray-500 text-xs",
+    render: (s) =>
+      s.updated_at ? new Date(s.updated_at).toLocaleString() : "—",
+  },
+];
+
 function FailedShipmentsTable({
   shipments,
   selectedReason,
@@ -459,53 +491,14 @@ function FailedShipmentsTable({
       {shipments.length === 0 ? (
         <p className="text-sm text-gray-400 py-4">No failed shipments found</p>
       ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-gray-100 text-left text-gray-500">
-                <th className="py-2 pr-4 font-medium">Shipment ID</th>
-                <th className="py-2 pr-4 font-medium">Failure Reason</th>
-                <th className="py-2 pr-4 font-medium">Rider</th>
-                <th className="py-2 font-medium">Timestamp</th>
-              </tr>
-            </thead>
-            <tbody>
-              {shipments.map((s) => (
-                <tr
-                  key={s.shipment_id}
-                  onClick={() => onShipmentClick(s.shipment_id)}
-                  className="border-b border-gray-50 hover:bg-gray-50 transition-colors cursor-pointer"
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      e.preventDefault();
-                      onShipmentClick(s.shipment_id);
-                    }
-                  }}
-                  aria-label={`View details for shipment ${s.shipment_id}`}
-                >
-                  <td className="py-2.5 pr-4 font-mono text-xs text-gray-800">
-                    {s.shipment_id}
-                  </td>
-                  <td className="py-2.5 pr-4">
-                    <span className="inline-block px-2 py-0.5 text-xs rounded bg-error-light text-error-dark">
-                      {s.failure_reason ?? "Unknown"}
-                    </span>
-                  </td>
-                  <td className="py-2.5 pr-4 text-gray-600">
-                    {s.rider_id ?? "—"}
-                  </td>
-                  <td className="py-2.5 text-gray-500 text-xs">
-                    {s.updated_at
-                      ? new Date(s.updated_at).toLocaleString()
-                      : "—"}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <Table<OpsShipment>
+          ariaLabel="Failed shipments"
+          variant="compact"
+          columns={failedShipmentColumns}
+          data={shipments}
+          getRowId={(s) => s.shipment_id}
+          onRowClick={(s) => onShipmentClick(s.shipment_id)}
+        />
       )}
     </div>
   );

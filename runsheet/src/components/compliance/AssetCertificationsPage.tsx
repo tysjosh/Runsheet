@@ -5,8 +5,10 @@ import {
   Badge,
   type BadgeVariant,
   Button,
+  type Column,
   PageHeader,
   Pagination,
+  Table,
 } from "@/components/ui";
 import {
   type AssetCertification,
@@ -151,6 +153,49 @@ function aggregateByAsset(
   );
 }
 
+// ─── Table columns ───────────────────────────────────────────────────────────
+
+const assetCertColumns: Column<AssetCertification>[] = [
+  {
+    key: "certification_type",
+    label: "Type",
+    render: (cert) => (
+      <span className="font-medium">
+        {CERT_TYPE_LABELS[cert.certification_type] || cert.certification_type}
+      </span>
+    ),
+  },
+  {
+    key: "status",
+    label: "Status",
+    render: (cert) => (
+      <Badge variant={certStatusVariant(cert.status)} size="sm">
+        {certStatusLabel(cert.status)}
+      </Badge>
+    ),
+  },
+  {
+    key: "certification_date",
+    label: "Certification Date",
+    render: (cert) => formatDate(cert.certification_date),
+  },
+  {
+    key: "expiry_date",
+    label: "Expiry Date",
+    render: (cert) => formatDate(cert.expiry_date),
+  },
+  {
+    key: "inspector_name",
+    label: "Inspector",
+    render: (cert) => cert.inspector_name,
+  },
+  {
+    key: "certificate_number",
+    label: "Certificate #",
+    render: (cert) => cert.certificate_number,
+  },
+];
+
 // ─── Main Component ──────────────────────────────────────────────────────────
 
 export default function AssetCertificationsPage() {
@@ -288,87 +333,92 @@ export default function AssetCertificationsPage() {
     // them into per-asset summaries (already sorted by urgency).
     const sortedAssets = aggregateByAsset(dashboard.assets);
 
+    const dashboardColumns: Column<AssetCertificationSummary>[] = [
+      {
+        key: "asset_id",
+        label: "Asset",
+        render: (asset) => (
+          <span className="font-medium">{asset.asset_id}</span>
+        ),
+      },
+      {
+        key: "overall_status",
+        label: "Overall Status",
+        render: (asset) => (
+          <Badge variant={certStatusVariant(asset.overall_status)} size="sm">
+            {certStatusLabel(asset.overall_status)}
+          </Badge>
+        ),
+      },
+      {
+        key: "next_expiry",
+        label: "Next Expiry",
+        render: (asset) => formatDate(asset.next_expiry_date),
+      },
+      {
+        key: "days_until_expiry",
+        label: "Days Until Expiry",
+        render: (asset) => (
+          <span
+            className={`font-medium ${
+              asset.days_until_next_expiry <= 7
+                ? "text-error-dark"
+                : asset.days_until_next_expiry <= 30
+                  ? "text-warning-dark"
+                  : "text-gray-700"
+            }`}
+          >
+            {asset.days_until_next_expiry <= 0
+              ? "Overdue"
+              : `${asset.days_until_next_expiry} days`}
+          </span>
+        ),
+      },
+      {
+        key: "certifications",
+        label: "Certifications",
+        render: (asset) => (
+          <div className="flex flex-wrap gap-1">
+            {asset.certifications.map((cert) => (
+              <span
+                key={cert.cert_id}
+                title={`${CERT_TYPE_LABELS[cert.certification_type]}: expires ${formatDate(cert.expiry_date)}`}
+              >
+                <Badge variant={certStatusVariant(cert.status)} size="sm">
+                  {cert.certification_type.replace(/_/g, " ")}
+                </Badge>
+              </span>
+            ))}
+          </div>
+        ),
+      },
+      {
+        key: "actions",
+        label: "Actions",
+        render: (asset) => (
+          <Button
+            type="button"
+            onClick={() => handleViewAsset(asset.asset_id)}
+            variant="ghost"
+            size="sm"
+          >
+            View Details
+          </Button>
+        ),
+      },
+    ];
+
     return (
       <div>
         {renderSummaryCards()}
 
-        <table className="w-full border-collapse" role="table">
-          <thead>
-            <tr className="border-b bg-gray-50">
-              <th className="text-left p-3 font-medium">Asset</th>
-              <th className="text-left p-3 font-medium">Overall Status</th>
-              <th className="text-left p-3 font-medium">Next Expiry</th>
-              <th className="text-left p-3 font-medium">Days Until Expiry</th>
-              <th className="text-left p-3 font-medium">Certifications</th>
-              <th className="text-left p-3 font-medium">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {sortedAssets.map((asset: AssetCertificationSummary) => (
-              <tr key={asset.asset_id} className="border-b hover:bg-gray-50">
-                <td className="p-3 font-medium">{asset.asset_id}</td>
-                <td className="p-3">
-                  <Badge
-                    variant={certStatusVariant(asset.overall_status)}
-                    size="sm"
-                  >
-                    {certStatusLabel(asset.overall_status)}
-                  </Badge>
-                </td>
-                <td className="p-3">{formatDate(asset.next_expiry_date)}</td>
-                <td className="p-3">
-                  <span
-                    className={`font-medium ${
-                      asset.days_until_next_expiry <= 7
-                        ? "text-error-dark"
-                        : asset.days_until_next_expiry <= 30
-                          ? "text-warning-dark"
-                          : "text-gray-700"
-                    }`}
-                  >
-                    {asset.days_until_next_expiry <= 0
-                      ? "Overdue"
-                      : `${asset.days_until_next_expiry} days`}
-                  </span>
-                </td>
-                <td className="p-3">
-                  <div className="flex flex-wrap gap-1">
-                    {asset.certifications.map((cert) => (
-                      <span
-                        key={cert.cert_id}
-                        title={`${CERT_TYPE_LABELS[cert.certification_type]}: expires ${formatDate(cert.expiry_date)}`}
-                      >
-                        <Badge
-                          variant={certStatusVariant(cert.status)}
-                          size="sm"
-                        >
-                          {cert.certification_type.replace(/_/g, " ")}
-                        </Badge>
-                      </span>
-                    ))}
-                  </div>
-                </td>
-                <td className="p-3">
-                  <Button
-                    type="button"
-                    onClick={() => handleViewAsset(asset.asset_id)}
-                    variant="ghost"
-                    size="sm"
-                  >
-                    View Details
-                  </Button>
-                </td>
-              </tr>
-            ))}
-            {sortedAssets.length === 0 && (
-              <tr>
-                <td colSpan={6} className="p-6 text-center text-gray-500">
-                  No assets found.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
+        <Table<AssetCertificationSummary>
+          ariaLabel="Fleet certification dashboard"
+          columns={dashboardColumns}
+          data={sortedAssets}
+          getRowId={(asset) => asset.asset_id}
+          emptyState={<span className="text-gray-500">No assets found.</span>}
+        />
       </div>
     );
   }
@@ -393,44 +443,17 @@ export default function AssetCertificationsPage() {
           </h2>
         </div>
 
-        <table className="w-full border-collapse" role="table">
-          <thead>
-            <tr className="border-b bg-gray-50">
-              <th className="text-left p-3 font-medium">Type</th>
-              <th className="text-left p-3 font-medium">Status</th>
-              <th className="text-left p-3 font-medium">Certification Date</th>
-              <th className="text-left p-3 font-medium">Expiry Date</th>
-              <th className="text-left p-3 font-medium">Inspector</th>
-              <th className="text-left p-3 font-medium">Certificate #</th>
-            </tr>
-          </thead>
-          <tbody>
-            {assetCertifications.map((cert) => (
-              <tr key={cert.cert_id} className="border-b hover:bg-gray-50">
-                <td className="p-3 font-medium">
-                  {CERT_TYPE_LABELS[cert.certification_type] ||
-                    cert.certification_type}
-                </td>
-                <td className="p-3">
-                  <Badge variant={certStatusVariant(cert.status)} size="sm">
-                    {certStatusLabel(cert.status)}
-                  </Badge>
-                </td>
-                <td className="p-3">{formatDate(cert.certification_date)}</td>
-                <td className="p-3">{formatDate(cert.expiry_date)}</td>
-                <td className="p-3">{cert.inspector_name}</td>
-                <td className="p-3">{cert.certificate_number}</td>
-              </tr>
-            ))}
-            {assetCertifications.length === 0 && (
-              <tr>
-                <td colSpan={6} className="p-6 text-center text-gray-500">
-                  No certifications found for this asset.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
+        <Table<AssetCertification>
+          ariaLabel={`Certifications for asset ${selectedAssetId ?? ""}`}
+          columns={assetCertColumns}
+          data={assetCertifications}
+          getRowId={(cert) => cert.cert_id}
+          emptyState={
+            <span className="text-gray-500">
+              No certifications found for this asset.
+            </span>
+          }
+        />
 
         {/* Pagination */}
         {assetCertifications.length > 0 && (

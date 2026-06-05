@@ -14,6 +14,7 @@
 
 import { Loader2, Package, Search } from "lucide-react";
 import { useCallback, useState } from "react";
+import { type Column, Table } from "@/components/ui";
 import {
   type CargoSearchFilters,
   type PaginationMeta,
@@ -61,6 +62,52 @@ function formatStatus(status: string): string {
     .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
     .join(" ");
 }
+
+// ─── Table columns ───────────────────────────────────────────────────────────
+
+const cargoSearchColumns: Column<CargoSearchResult>[] = [
+  {
+    key: "item_id",
+    label: "Item ID",
+    className: "text-sm font-medium text-primary",
+    render: (item) => item.item_id,
+  },
+  {
+    key: "description",
+    label: "Description",
+    className: "text-sm text-gray-700",
+    render: (item) => item.description,
+  },
+  {
+    key: "container_number",
+    label: "Container",
+    className: "text-sm text-gray-700",
+    render: (item) => item.container_number || "—",
+  },
+  {
+    key: "item_status",
+    label: "Status",
+    render: (item) => (
+      <span
+        className={`inline-flex items-center px-2.5 py-0.5 rounded-md text-xs font-medium ${getStatusBadge(item.item_status)}`}
+      >
+        {formatStatus(item.item_status)}
+      </span>
+    ),
+  },
+  {
+    key: "weight_kg",
+    label: "Weight (kg)",
+    className: "text-sm text-gray-700",
+    render: (item) => item.weight_kg,
+  },
+  {
+    key: "job_id",
+    label: "Job ID",
+    className: "text-sm font-mono text-gray-600",
+    render: (item) => item.job_id,
+  },
+];
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
@@ -263,63 +310,16 @@ export default function CargoSearchSection() {
               )}
 
               {/* Results Table */}
-              <div className="overflow-x-auto border border-gray-200 rounded-lg">
-                <table className="w-full" aria-label="Cargo search results">
-                  <thead className="bg-gray-50 border-b border-gray-100">
-                    <tr>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                        Item ID
-                      </th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                        Description
-                      </th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                        Container
-                      </th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                        Status
-                      </th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                        Weight (kg)
-                      </th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                        Job ID
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-100">
-                    {results.map((item) => (
-                      <tr
-                        key={`${item.job_id}-${item.item_id}`}
-                        className="transition-colors hover:bg-gray-50"
-                      >
-                        <td className="px-4 py-3 text-sm font-medium text-primary">
-                          {item.item_id}
-                        </td>
-                        <td className="px-4 py-3 text-sm text-gray-700">
-                          {item.description}
-                        </td>
-                        <td className="px-4 py-3 text-sm text-gray-700">
-                          {item.container_number || "—"}
-                        </td>
-                        <td className="px-4 py-3">
-                          <span
-                            className={`inline-flex items-center px-2.5 py-0.5 rounded-md text-xs font-medium ${getStatusBadge(item.item_status)}`}
-                          >
-                            {formatStatus(item.item_status)}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3 text-sm text-gray-700">
-                          {item.weight_kg}
-                        </td>
-                        <td className="px-4 py-3 text-sm font-mono text-gray-600">
-                          {item.job_id}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+              <Table<CargoSearchResult>
+                ariaLabel="Cargo search results"
+                className="border border-gray-200 rounded-lg"
+                columns={cargoSearchColumns}
+                data={results}
+                getRowId={(item) => `${item.job_id}-${item.item_id}`}
+                emptyState={
+                  <span className="text-gray-500">No cargo items found.</span>
+                }
+              />
 
               {/* Pagination */}
               {pagination && pagination.total_pages > 1 && (

@@ -2,6 +2,7 @@
 
 import type React from "react";
 import { useCallback, useEffect, useState } from "react";
+import { type Column, Table } from "@/components/ui";
 import {
   type CreatePricingRulePayload,
   createPricingRule,
@@ -59,6 +60,55 @@ function formatCents(cents: number | null): string {
   if (cents === null || cents === undefined) return "—";
   return `$${(cents / 100).toFixed(2)}`;
 }
+
+// ─── Table columns ───────────────────────────────────────────────────────────
+
+const pricingRuleColumns: Column<PricingRule>[] = [
+  {
+    key: "customer_id",
+    label: "Customer ID",
+    render: (rule) => (
+      <span className="font-medium">{rule.customer_id || "Default"}</span>
+    ),
+  },
+  {
+    key: "product_code",
+    label: "Product Code",
+    render: (rule) => rule.product_code,
+  },
+  {
+    key: "strategy",
+    label: "Strategy",
+    render: (rule) => (
+      <span
+        className={`inline-block px-2 py-1 rounded text-xs font-medium ${strategyBadgeClass(rule.strategy)}`}
+      >
+        {strategyLabel(rule.strategy)}
+      </span>
+    ),
+  },
+  {
+    key: "margin_cents",
+    label: "Margin (¢)",
+    render: (rule) =>
+      rule.margin_cents !== null ? `${rule.margin_cents}¢` : "—",
+  },
+  {
+    key: "priority",
+    label: "Priority",
+    render: (rule) => rule.priority,
+  },
+  {
+    key: "effective_date",
+    label: "Effective Date",
+    render: (rule) => formatDate(rule.effective_date),
+  },
+  {
+    key: "expiry_date",
+    label: "Expiry Date",
+    render: (rule) => formatDate(rule.expiry_date),
+  },
+];
 
 // ─── Main Component ──────────────────────────────────────────────────────────
 
@@ -182,58 +232,15 @@ export default function PricingRulesPage() {
         {/* Rules table */}
         {!loading && !error && (
           <>
-            <div className="overflow-x-auto">
-              <table className="w-full border-collapse" role="table">
-                <thead>
-                  <tr className="border-b bg-gray-50">
-                    <th className="text-left p-3 font-medium">Customer ID</th>
-                    <th className="text-left p-3 font-medium">Product Code</th>
-                    <th className="text-left p-3 font-medium">Strategy</th>
-                    <th className="text-left p-3 font-medium">Margin (¢)</th>
-                    <th className="text-left p-3 font-medium">Priority</th>
-                    <th className="text-left p-3 font-medium">
-                      Effective Date
-                    </th>
-                    <th className="text-left p-3 font-medium">Expiry Date</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {rules.map((rule) => (
-                    <tr
-                      key={rule.rule_id}
-                      className="border-b hover:bg-gray-50"
-                    >
-                      <td className="p-3 font-medium">
-                        {rule.customer_id || "Default"}
-                      </td>
-                      <td className="p-3">{rule.product_code}</td>
-                      <td className="p-3">
-                        <span
-                          className={`inline-block px-2 py-1 rounded text-xs font-medium ${strategyBadgeClass(rule.strategy)}`}
-                        >
-                          {strategyLabel(rule.strategy)}
-                        </span>
-                      </td>
-                      <td className="p-3">
-                        {rule.margin_cents !== null
-                          ? `${rule.margin_cents}¢`
-                          : "—"}
-                      </td>
-                      <td className="p-3">{rule.priority}</td>
-                      <td className="p-3">{formatDate(rule.effective_date)}</td>
-                      <td className="p-3">{formatDate(rule.expiry_date)}</td>
-                    </tr>
-                  ))}
-                  {rules.length === 0 && (
-                    <tr>
-                      <td colSpan={7} className="p-6 text-center text-gray-500">
-                        No pricing rules found.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
+            <Table<PricingRule>
+              ariaLabel="Sales pricing rules"
+              columns={pricingRuleColumns}
+              data={rules}
+              getRowId={(rule) => rule.rule_id}
+              emptyState={
+                <span className="text-gray-500">No pricing rules found.</span>
+              }
+            />
 
             {/* Pagination */}
             <nav

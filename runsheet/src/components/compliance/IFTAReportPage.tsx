@@ -1,11 +1,13 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
-import { PageHeader } from "@/components/ui";
+import type React from "react";
+import { useCallback, useEffect, useState } from "react";
+import { type Column, PageHeader, Table } from "@/components/ui";
 import {
   type CreateMileageAdjustmentPayload,
   createMileageAdjustment,
   getIFTAReport,
+  type IFTAJurisdictionEntry,
   type IFTAReport,
   type IFTAReportFilters,
   type IFTATruckSummary,
@@ -185,6 +187,120 @@ export default function IFTAReportPage() {
 
   // ─── Render ────────────────────────────────────────────────────────────────
 
+  // Per-truck summary columns. ``Details`` toggles the expandable
+  // jurisdiction breakdown rendered via the Table's renderExpanded hook.
+  const truckColumns: Column<IFTATruckSummary>[] = [
+    {
+      key: "truck_id",
+      label: "Truck ID",
+      render: (t) => <span className="font-medium">{t.truck_id}</span>,
+    },
+    { key: "truck_name", label: "Truck Name", render: (t) => t.truck_name },
+    {
+      key: "total_miles",
+      label: "Total Miles",
+      align: "right",
+      render: (t) => (
+        <span className="font-mono text-sm">{formatNumber(t.total_miles)}</span>
+      ),
+    },
+    {
+      key: "total_gallons",
+      label: "Total Gallons",
+      align: "right",
+      render: (t) => (
+        <span className="font-mono text-sm">
+          {formatNumber(t.total_gallons)}
+        </span>
+      ),
+    },
+    {
+      key: "fleet_mpg",
+      label: "MPG",
+      align: "right",
+      render: (t) => (
+        <span className="font-mono text-sm">
+          {formatNumber(t.fleet_mpg, 2)}
+        </span>
+      ),
+    },
+    {
+      key: "jurisdiction_count",
+      label: "Jurisdictions",
+      align: "center",
+      render: (t) => t.jurisdictions.length,
+    },
+    {
+      key: "details",
+      label: "Details",
+      render: (t) => (
+        <button
+          type="button"
+          onClick={() => toggleTruckDetail(t.truck_id)}
+          className="text-info hover:text-info-dark text-sm underline"
+        >
+          {expandedTruck === t.truck_id ? "Hide" : "View"}
+        </button>
+      ),
+    },
+  ];
+
+  const jurisdictionColumns: Column<IFTAJurisdictionEntry>[] = [
+    {
+      key: "jurisdiction",
+      label: "Jurisdiction",
+      render: (j) => <span className="font-medium">{j.jurisdiction}</span>,
+    },
+    {
+      key: "total_miles",
+      label: "Total Miles",
+      align: "right",
+      render: (j) => (
+        <span className="font-mono">{formatNumber(j.total_miles)}</span>
+      ),
+    },
+    {
+      key: "taxable_miles",
+      label: "Taxable Miles",
+      align: "right",
+      render: (j) => (
+        <span className="font-mono">{formatNumber(j.taxable_miles)}</span>
+      ),
+    },
+    {
+      key: "tax_paid_gallons",
+      label: "Tax Paid Gallons",
+      align: "right",
+      render: (j) => (
+        <span className="font-mono">{formatNumber(j.tax_paid_gallons)}</span>
+      ),
+    },
+    {
+      key: "net_taxable_gallons",
+      label: "Net Taxable Gallons",
+      align: "right",
+      render: (j) => (
+        <span className="font-mono">{formatNumber(j.net_taxable_gallons)}</span>
+      ),
+    },
+    {
+      key: "tax_rate",
+      label: "Tax Rate",
+      align: "right",
+      render: (j) => (
+        <span className="font-mono">{formatCurrency(j.tax_rate)}</span>
+      ),
+    },
+    {
+      key: "tax_due",
+      label: "Tax Due",
+      align: "right",
+      render: (j) => (
+        <span className="font-mono">{formatCurrency(j.tax_due)}</span>
+      ),
+    },
+  ];
+
   return (
     <div className="p-6">
       <PageHeader
@@ -276,129 +392,35 @@ export default function IFTAReportPage() {
           {/* Per-truck table */}
           <div className="mb-8">
             <h2 className="text-lg font-semibold mb-3">Per-Truck Summary</h2>
-            <div className="overflow-x-auto">
-              <table className="w-full border-collapse" role="table">
-                <thead>
-                  <tr className="border-b bg-gray-50">
-                    <th className="text-left p-3 font-medium">Truck ID</th>
-                    <th className="text-left p-3 font-medium">Truck Name</th>
-                    <th className="text-right p-3 font-medium">Total Miles</th>
-                    <th className="text-right p-3 font-medium">
-                      Total Gallons
-                    </th>
-                    <th className="text-right p-3 font-medium">MPG</th>
-                    <th className="text-center p-3 font-medium">
-                      Jurisdictions
-                    </th>
-                    <th className="text-left p-3 font-medium">Details</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {report.trucks.map((truck: IFTATruckSummary) => (
-                    <React.Fragment key={truck.truck_id}>
-                      <tr className="border-b hover:bg-gray-50">
-                        <td className="p-3 font-medium">{truck.truck_id}</td>
-                        <td className="p-3">{truck.truck_name}</td>
-                        <td className="p-3 text-right font-mono text-sm">
-                          {formatNumber(truck.total_miles)}
-                        </td>
-                        <td className="p-3 text-right font-mono text-sm">
-                          {formatNumber(truck.total_gallons)}
-                        </td>
-                        <td className="p-3 text-right font-mono text-sm">
-                          {formatNumber(truck.fleet_mpg, 2)}
-                        </td>
-                        <td className="p-3 text-center">
-                          {truck.jurisdictions.length}
-                        </td>
-                        <td className="p-3">
-                          <button
-                            type="button"
-                            onClick={() => toggleTruckDetail(truck.truck_id)}
-                            className="text-info hover:text-info-dark text-sm underline"
-                          >
-                            {expandedTruck === truck.truck_id ? "Hide" : "View"}
-                          </button>
-                        </td>
-                      </tr>
-                      {/* Expanded jurisdiction detail */}
-                      {expandedTruck === truck.truck_id && (
-                        <tr>
-                          <td colSpan={7} className="p-0">
-                            <div className="bg-gray-50 p-4 border-b">
-                              <table className="w-full border-collapse text-sm">
-                                <thead>
-                                  <tr className="border-b">
-                                    <th className="text-left p-2 font-medium">
-                                      Jurisdiction
-                                    </th>
-                                    <th className="text-right p-2 font-medium">
-                                      Total Miles
-                                    </th>
-                                    <th className="text-right p-2 font-medium">
-                                      Taxable Miles
-                                    </th>
-                                    <th className="text-right p-2 font-medium">
-                                      Tax Paid Gallons
-                                    </th>
-                                    <th className="text-right p-2 font-medium">
-                                      Net Taxable Gallons
-                                    </th>
-                                    <th className="text-right p-2 font-medium">
-                                      Tax Rate
-                                    </th>
-                                    <th className="text-right p-2 font-medium">
-                                      Tax Due
-                                    </th>
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  {truck.jurisdictions.map((j) => (
-                                    <tr
-                                      key={j.jurisdiction}
-                                      className="border-b"
-                                    >
-                                      <td className="p-2 font-medium">
-                                        {j.jurisdiction}
-                                      </td>
-                                      <td className="p-2 text-right font-mono">
-                                        {formatNumber(j.total_miles)}
-                                      </td>
-                                      <td className="p-2 text-right font-mono">
-                                        {formatNumber(j.taxable_miles)}
-                                      </td>
-                                      <td className="p-2 text-right font-mono">
-                                        {formatNumber(j.tax_paid_gallons)}
-                                      </td>
-                                      <td className="p-2 text-right font-mono">
-                                        {formatNumber(j.net_taxable_gallons)}
-                                      </td>
-                                      <td className="p-2 text-right font-mono">
-                                        {formatCurrency(j.tax_rate)}
-                                      </td>
-                                      <td className="p-2 text-right font-mono">
-                                        {formatCurrency(j.tax_due)}
-                                      </td>
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
-                            </div>
-                          </td>
-                        </tr>
-                      )}
-                    </React.Fragment>
-                  ))}
-                  {report.trucks.length === 0 && (
-                    <tr>
-                      <td colSpan={7} className="p-6 text-center text-gray-500">
-                        No truck data available for {quarter}.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
+            <Table<IFTATruckSummary>
+              ariaLabel="Per-truck IFTA summary"
+              columns={truckColumns}
+              data={report.trucks}
+              getRowId={(truck) => truck.truck_id}
+              emptyState={
+                <span className="text-gray-500">
+                  No truck data available for {quarter}.
+                </span>
+              }
+              renderExpanded={(truck) =>
+                expandedTruck === truck.truck_id ? (
+                  <div className="bg-gray-50 p-4 border-b border-gray-200">
+                    <Table<IFTAJurisdictionEntry>
+                      variant="compact"
+                      ariaLabel={`Jurisdiction breakdown for ${truck.truck_id}`}
+                      columns={jurisdictionColumns}
+                      data={truck.jurisdictions}
+                      getRowId={(j) => j.jurisdiction}
+                      emptyState={
+                        <span className="text-gray-500">
+                          No jurisdiction data.
+                        </span>
+                      }
+                    />
+                  </div>
+                ) : null
+              }
+            />
           </div>
 
           {/* Incomplete trucks section */}

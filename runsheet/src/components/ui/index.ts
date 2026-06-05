@@ -25,7 +25,7 @@ export type { StatProps } from "./Stat";
 export { Stat } from "./Stat";
 export type { Stat as StatsBarStat, StatsBarProps } from "./StatsBar";
 export { StatsBar } from "./StatsBar";
-export type { Column, TableProps } from "./Table";
+export type { Column, ColumnAlign, TableProps } from "./Table";
 export { Table } from "./Table";
 export type { Tab, TabNavigationProps } from "./TabNavigation";
 export { TabNavigation } from "./TabNavigation";

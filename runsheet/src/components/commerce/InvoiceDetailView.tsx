@@ -4,7 +4,6 @@ import {
   ArrowLeft,
   Calendar,
   DollarSign,
-  Edit2,
   FileText,
   Package,
   RefreshCw,
@@ -12,16 +11,17 @@ import {
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import {
-  type Invoice,
-  type InvoiceEvent,
-  type Payment,
   getInvoice,
   getInvoiceEvents,
   getPayments,
+  type Invoice,
+  type InvoiceEvent,
+  type InvoiceLineItem,
+  type Payment,
   retryQboPush,
   voidInvoice,
 } from "../../services/commerceApi";
-import { Badge, Button } from "../ui";
+import { Badge, Button, type Column, Table } from "../ui";
 
 interface InvoiceDetailViewProps {
   invoiceId: string;
@@ -67,7 +67,7 @@ export default function InvoiceDetailView({
 
   const handleVoidInvoice = async () => {
     if (!invoice) return;
-    
+
     const reason = prompt("Enter reason for voiding this invoice:");
     if (!reason) return;
 
@@ -77,9 +77,7 @@ export default function InvoiceDetailView({
       setInvoice(response.data);
       alert("Invoice voided successfully");
     } catch (err) {
-      alert(
-        err instanceof Error ? err.message : "Failed to void invoice",
-      );
+      alert(err instanceof Error ? err.message : "Failed to void invoice");
     } finally {
       setActionLoading(false);
     }
@@ -92,9 +90,7 @@ export default function InvoiceDetailView({
       setInvoice(response.data);
       alert("QBO push retry initiated");
     } catch (err) {
-      alert(
-        err instanceof Error ? err.message : "Failed to retry QBO push",
-      );
+      alert(err instanceof Error ? err.message : "Failed to retry QBO push");
     } finally {
       setActionLoading(false);
     }
@@ -145,7 +141,8 @@ export default function InvoiceDetailView({
 
   const getQboStateBadge = (state: string) => {
     if (state === "pushed") return <Badge variant="success">Pushed</Badge>;
-    if (state === "dead_letter") return <Badge variant="error">Dead Letter</Badge>;
+    if (state === "dead_letter")
+      return <Badge variant="error">Dead Letter</Badge>;
     if (state === "retry") return <Badge variant="warning">Retry</Badge>;
     return <Badge variant="default">{state}</Badge>;
   };
@@ -181,6 +178,78 @@ export default function InvoiceDetailView({
 
   const canVoid = invoice.status !== "void" && invoice.status !== "paid";
   const canRetryQbo = invoice.qbo_push_state === "dead_letter";
+
+  const lineItemColumns: Column<InvoiceLineItem>[] = [
+    {
+      key: "product_code",
+      label: "Product Code",
+      className: "text-sm font-medium text-gray-900",
+      render: (item) => item.product_code,
+    },
+    {
+      key: "quantity_gallons",
+      label: "Quantity (gal)",
+      align: "right",
+      className: "text-sm text-gray-700",
+      render: (item) => item.quantity_gallons.toLocaleString(),
+    },
+    {
+      key: "unit_price_cents",
+      label: "Unit Price",
+      align: "right",
+      className: "text-sm text-gray-700",
+      render: (item) => formatCurrency(item.unit_price_cents),
+    },
+    {
+      key: "subtotal_cents",
+      label: "Subtotal",
+      align: "right",
+      className: "text-sm font-medium text-gray-900",
+      render: (item) => formatCurrency(item.subtotal_cents),
+    },
+  ];
+
+  const paymentColumns: Column<Payment>[] = [
+    {
+      key: "payment_id",
+      label: "Payment ID",
+      className: "text-xs font-mono text-gray-700",
+      render: (payment) => `${payment.payment_id.substring(0, 8)}...`,
+    },
+    {
+      key: "method",
+      label: "Method",
+      render: (payment) => getPaymentMethodBadge(payment.method),
+    },
+    {
+      key: "source",
+      label: "Source",
+      className: "text-sm text-gray-700 capitalize",
+      render: (payment) => payment.source,
+    },
+    {
+      key: "status",
+      label: "Status",
+      render: (payment) => (
+        <Badge variant={payment.status === "applied" ? "success" : "error"}>
+          {payment.status}
+        </Badge>
+      ),
+    },
+    {
+      key: "received_at",
+      label: "Received",
+      className: "text-sm text-gray-700",
+      render: (payment) => formatDate(payment.received_at),
+    },
+    {
+      key: "amount_cents",
+      label: "Amount",
+      align: "right",
+      className: "text-sm font-medium text-gray-900",
+      render: (payment) => formatCurrency(payment.amount_cents),
+    },
+  ];
 
   return (
     <div className="p-6">
@@ -401,47 +470,14 @@ export default function InvoiceDetailView({
         {invoice.line_items.length === 0 ? (
           <p className="text-sm text-gray-500 py-4">No line items</p>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead>
-                <tr className="border-b border-gray-200">
-                  <th className="text-left text-xs font-medium text-gray-600 pb-3">
-                    Product Code
-                  </th>
-                  <th className="text-right text-xs font-medium text-gray-600 pb-3">
-                    Quantity (gal)
-                  </th>
-                  <th className="text-right text-xs font-medium text-gray-600 pb-3">
-                    Unit Price
-                  </th>
-                  <th className="text-right text-xs font-medium text-gray-600 pb-3">
-                    Subtotal
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {invoice.line_items.map((item) => (
-                  <tr
-                    key={item.line_id}
-                    className="border-b border-gray-100 last:border-0"
-                  >
-                    <td className="py-3 text-sm font-medium text-gray-900">
-                      {item.product_code}
-                    </td>
-                    <td className="py-3 text-sm text-gray-700 text-right">
-                      {item.quantity_gallons.toLocaleString()}
-                    </td>
-                    <td className="py-3 text-sm text-gray-700 text-right">
-                      {formatCurrency(item.unit_price_cents)}
-                    </td>
-                    <td className="py-3 text-sm font-medium text-gray-900 text-right">
-                      {formatCurrency(item.subtotal_cents)}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <Table<InvoiceLineItem>
+            ariaLabel="Invoice line items"
+            columns={lineItemColumns}
+            data={invoice.line_items}
+            getRowId={(item) => item.line_id}
+            variant="compact"
+            emptyState={<span className="text-gray-500">No line items</span>}
+          />
         )}
       </div>
 
@@ -454,65 +490,16 @@ export default function InvoiceDetailView({
         {payments.length === 0 ? (
           <p className="text-sm text-gray-500 py-4">No payments recorded</p>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead>
-                <tr className="border-b border-gray-200">
-                  <th className="text-left text-xs font-medium text-gray-600 pb-3">
-                    Payment ID
-                  </th>
-                  <th className="text-left text-xs font-medium text-gray-600 pb-3">
-                    Method
-                  </th>
-                  <th className="text-left text-xs font-medium text-gray-600 pb-3">
-                    Source
-                  </th>
-                  <th className="text-left text-xs font-medium text-gray-600 pb-3">
-                    Status
-                  </th>
-                  <th className="text-left text-xs font-medium text-gray-600 pb-3">
-                    Received
-                  </th>
-                  <th className="text-right text-xs font-medium text-gray-600 pb-3">
-                    Amount
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {payments.map((payment) => (
-                  <tr
-                    key={payment.payment_id}
-                    className="border-b border-gray-100 last:border-0"
-                  >
-                    <td className="py-3 text-xs font-mono text-gray-700">
-                      {payment.payment_id.substring(0, 8)}...
-                    </td>
-                    <td className="py-3">
-                      {getPaymentMethodBadge(payment.method)}
-                    </td>
-                    <td className="py-3 text-sm text-gray-700 capitalize">
-                      {payment.source}
-                    </td>
-                    <td className="py-3">
-                      <Badge
-                        variant={
-                          payment.status === "applied" ? "success" : "error"
-                        }
-                      >
-                        {payment.status}
-                      </Badge>
-                    </td>
-                    <td className="py-3 text-sm text-gray-700">
-                      {formatDate(payment.received_at)}
-                    </td>
-                    <td className="py-3 text-sm font-medium text-gray-900 text-right">
-                      {formatCurrency(payment.amount_cents)}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <Table<Payment>
+            ariaLabel="Payment history"
+            columns={paymentColumns}
+            data={payments}
+            getRowId={(payment) => payment.payment_id}
+            variant="compact"
+            emptyState={
+              <span className="text-gray-500">No payments recorded</span>
+            }
+          />
         )}
       </div>
 
@@ -541,9 +528,7 @@ export default function InvoiceDetailView({
                       {formatDateTime(event.occurred_at)}
                     </span>
                   </div>
-                  <p className="text-xs text-gray-600">
-                    Actor: {event.actor}
-                  </p>
+                  <p className="text-xs text-gray-600">Actor: {event.actor}</p>
                   {Object.keys(event.payload).length > 0 && (
                     <details className="mt-2">
                       <summary className="text-xs text-gray-500 cursor-pointer">

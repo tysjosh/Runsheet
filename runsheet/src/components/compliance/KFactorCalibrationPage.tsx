@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { PageHeader } from "@/components/ui";
+import { type Column, PageHeader, Table } from "@/components/ui";
 import {
   approveKFactorAdjustment,
   getKFactorDashboard,
@@ -55,6 +55,89 @@ function formatPercent(value: number | null): string {
 function formatKFactor(value: number | null): string {
   if (value === null) return "—";
   return value.toFixed(4);
+}
+
+// ─── Table columns ───────────────────────────────────────────────────────────
+
+interface DecoratedKFactorEntry {
+  entry: KFactorEntry;
+  status: KFactorStatus;
+}
+function getKFactorColumns(
+  onApprove: (entry: KFactorEntry) => void,
+): Column<DecoratedKFactorEntry>[] {
+  return [
+    {
+      key: "tank_id",
+      label: "Tank ID",
+      render: ({ entry }) => (
+        <span className="font-medium">{entry.tank_id}</span>
+      ),
+    },
+    {
+      key: "customer_id",
+      label: "Customer",
+      render: ({ entry }) => entry.customer_id,
+    },
+    {
+      key: "current_kfactor",
+      label: "Current K-Factor",
+      className: "font-mono text-sm",
+      render: ({ entry }) => formatKFactor(entry.current_kfactor),
+    },
+    {
+      key: "suggested_kfactor",
+      label: "Suggested K-Factor",
+      className: "font-mono text-sm",
+      render: ({ entry }) => formatKFactor(entry.suggested_kfactor),
+    },
+    {
+      key: "variance_percent",
+      label: "Cumulative Variance",
+      render: ({ entry }) => {
+        const variance = entry.variance_percent;
+        return (
+          <span
+            className={
+              variance !== null && Math.abs(variance) > 15
+                ? "text-error font-medium"
+                : "text-gray-700"
+            }
+          >
+            {formatPercent(variance)}
+          </span>
+        );
+      },
+    },
+    {
+      key: "status",
+      label: "Status",
+      render: ({ status }) => {
+        const badge = statusBadge(status);
+        return (
+          <span
+            className={`inline-block px-2 py-1 rounded text-xs font-medium ${badge.className}`}
+          >
+            {badge.label}
+          </span>
+        );
+      },
+    },
+    {
+      key: "actions",
+      label: "Actions",
+      render: ({ entry, status }) =>
+        status === "review_needed" && entry.suggested_kfactor !== null ? (
+          <button
+            type="button"
+            onClick={() => onApprove(entry)}
+            className="bg-primary text-white px-3 py-1 rounded text-sm hover:bg-primary-hover"
+          >
+            Approve
+          </button>
+        ) : null,
+    },
+  ];
 }
 
 // ─── Main Component ──────────────────────────────────────────────────────────
@@ -210,85 +293,17 @@ export default function KFactorCalibrationPage() {
           </div>
 
           {/* Dashboard table */}
-          <div className="overflow-x-auto">
-            <table className="w-full border-collapse" role="table">
-              <thead>
-                <tr className="border-b bg-gray-50">
-                  <th className="text-left p-3 font-medium">Tank ID</th>
-                  <th className="text-left p-3 font-medium">Customer</th>
-                  <th className="text-left p-3 font-medium">
-                    Current K-Factor
-                  </th>
-                  <th className="text-left p-3 font-medium">
-                    Suggested K-Factor
-                  </th>
-                  <th className="text-left p-3 font-medium">
-                    Cumulative Variance
-                  </th>
-                  <th className="text-left p-3 font-medium">Status</th>
-                  <th className="text-left p-3 font-medium">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {sortedEntries.map(({ entry, status }) => {
-                  const badge = statusBadge(status);
-                  const variance = entry.variance_percent;
-                  return (
-                    <tr
-                      key={entry.tank_id}
-                      className="border-b hover:bg-gray-50"
-                    >
-                      <td className="p-3 font-medium">{entry.tank_id}</td>
-                      <td className="p-3">{entry.customer_id}</td>
-                      <td className="p-3 font-mono text-sm">
-                        {formatKFactor(entry.current_kfactor)}
-                      </td>
-                      <td className="p-3 font-mono text-sm">
-                        {formatKFactor(entry.suggested_kfactor)}
-                      </td>
-                      <td className="p-3">
-                        <span
-                          className={
-                            variance !== null && Math.abs(variance) > 15
-                              ? "text-error font-medium"
-                              : "text-gray-700"
-                          }
-                        >
-                          {formatPercent(variance)}
-                        </span>
-                      </td>
-                      <td className="p-3">
-                        <span
-                          className={`inline-block px-2 py-1 rounded text-xs font-medium ${badge.className}`}
-                        >
-                          {badge.label}
-                        </span>
-                      </td>
-                      <td className="p-3">
-                        {status === "review_needed" &&
-                          entry.suggested_kfactor !== null && (
-                            <button
-                              type="button"
-                              onClick={() => handleApproveClick(entry)}
-                              className="bg-primary text-white px-3 py-1 rounded text-sm hover:bg-primary-hover"
-                            >
-                              Approve
-                            </button>
-                          )}
-                      </td>
-                    </tr>
-                  );
-                })}
-                {sortedEntries.length === 0 && (
-                  <tr>
-                    <td colSpan={7} className="p-6 text-center text-gray-500">
-                      No K-factor calibration data available.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
+          <Table<DecoratedKFactorEntry>
+            ariaLabel="K-factor calibration dashboard"
+            columns={getKFactorColumns(handleApproveClick)}
+            data={sortedEntries}
+            getRowId={({ entry }) => entry.tank_id}
+            emptyState={
+              <span className="text-gray-500">
+                No K-factor calibration data available.
+              </span>
+            }
+          />
         </>
       )}
 

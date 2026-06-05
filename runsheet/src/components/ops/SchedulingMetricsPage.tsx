@@ -28,6 +28,7 @@ import {
   Truck,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
+import { type Column, Table } from "@/components/ui";
 import type {
   AssetUtilizationMetric,
   CompletionMetric,
@@ -126,6 +127,102 @@ function StatCard({ label, value, icon, accent = "blue" }: StatCardProps) {
     </div>
   );
 }
+
+// ─── Table columns ───────────────────────────────────────────────────────────
+
+const jobMetricsColumns: Column<JobMetricsBucket>[] = [
+  {
+    key: "timestamp",
+    label: "Timestamp",
+    className: "text-gray-700 whitespace-nowrap",
+    render: (bucket) => new Date(bucket.timestamp).toLocaleString(),
+  },
+  {
+    key: "counts_by_status",
+    label: "Counts by Status",
+    render: (bucket) => (
+      <div className="flex flex-wrap gap-1.5">
+        {Object.entries(bucket.counts_by_status).map(([status, count]) => (
+          <span
+            key={status}
+            className="inline-flex items-center gap-1 text-xs bg-gray-100 text-gray-700 px-2 py-0.5 rounded"
+          >
+            <span className="font-medium">{status}:</span> {count}
+          </span>
+        ))}
+      </div>
+    ),
+  },
+  {
+    key: "counts_by_type",
+    label: "Counts by Type",
+    render: (bucket) => (
+      <div className="flex flex-wrap gap-1.5">
+        {Object.entries(bucket.counts_by_type).map(([type, count]) => (
+          <span
+            key={type}
+            className="inline-flex items-center gap-1 text-xs bg-info-light text-info-dark px-2 py-0.5 rounded"
+          >
+            <span className="font-medium">{type}:</span> {count}
+          </span>
+        ))}
+      </div>
+    ),
+  },
+];
+
+const assetUtilizationColumns: Column<AssetUtilizationMetric>[] = [
+  {
+    key: "asset_id",
+    label: "Asset",
+    className: "text-gray-700 font-medium",
+    render: (asset) => asset.asset_id,
+  },
+  {
+    key: "asset_type",
+    label: "Type",
+    render: (asset) => (
+      <span className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded">
+        {asset.asset_type}
+      </span>
+    ),
+  },
+  {
+    key: "total_jobs",
+    label: "Total Jobs",
+    align: "right",
+    className: "text-gray-700",
+    render: (asset) => asset.total_jobs,
+  },
+  {
+    key: "active_jobs",
+    label: "Active Jobs",
+    align: "right",
+    className: "text-gray-700",
+    render: (asset) => asset.active_jobs,
+  },
+  {
+    key: "completed_jobs",
+    label: "Completed",
+    align: "right",
+    className: "text-gray-700",
+    render: (asset) => asset.completed_jobs,
+  },
+  {
+    key: "total_active_hours",
+    label: "Active Hours",
+    align: "right",
+    className: "text-gray-700",
+    render: (asset) => asset.total_active_hours.toFixed(1),
+  },
+  {
+    key: "idle_hours",
+    label: "Idle Hours",
+    align: "right",
+    className: "text-gray-700",
+    render: (asset) => asset.idle_hours.toFixed(1),
+  },
+];
 
 // ─── Main Component ──────────────────────────────────────────────────────────
 
@@ -324,62 +421,13 @@ export default function SchedulingMetricsPage() {
               No job metrics data for the selected time range.
             </p>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-gray-100">
-                    <th className="text-left py-2 pr-4 text-xs font-medium text-gray-500">
-                      Timestamp
-                    </th>
-                    <th className="text-left py-2 pr-4 text-xs font-medium text-gray-500">
-                      Counts by Status
-                    </th>
-                    <th className="text-left py-2 text-xs font-medium text-gray-500">
-                      Counts by Type
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-50">
-                  {jobMetrics.map((bucket, idx) => (
-                    <tr key={idx}>
-                      <td className="py-2 pr-4 text-gray-700 whitespace-nowrap">
-                        {new Date(bucket.timestamp).toLocaleString()}
-                      </td>
-                      <td className="py-2 pr-4">
-                        <div className="flex flex-wrap gap-1.5">
-                          {Object.entries(bucket.counts_by_status).map(
-                            ([status, count]) => (
-                              <span
-                                key={status}
-                                className="inline-flex items-center gap-1 text-xs bg-gray-100 text-gray-700 px-2 py-0.5 rounded"
-                              >
-                                <span className="font-medium">{status}:</span>{" "}
-                                {count}
-                              </span>
-                            ),
-                          )}
-                        </div>
-                      </td>
-                      <td className="py-2">
-                        <div className="flex flex-wrap gap-1.5">
-                          {Object.entries(bucket.counts_by_type).map(
-                            ([type, count]) => (
-                              <span
-                                key={type}
-                                className="inline-flex items-center gap-1 text-xs bg-info-light text-info-dark px-2 py-0.5 rounded"
-                              >
-                                <span className="font-medium">{type}:</span>{" "}
-                                {count}
-                              </span>
-                            ),
-                          )}
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <Table<JobMetricsBucket>
+              ariaLabel="Job metrics"
+              variant="compact"
+              columns={jobMetricsColumns}
+              data={jobMetrics}
+              getRowId={(bucket) => bucket.timestamp}
+            />
           )}
         </SectionCard>
 
@@ -451,64 +499,13 @@ export default function SchedulingMetricsPage() {
               No asset utilization data for the selected time range.
             </p>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-gray-100">
-                    <th className="text-left py-2 pr-4 text-xs font-medium text-gray-500">
-                      Asset
-                    </th>
-                    <th className="text-left py-2 pr-4 text-xs font-medium text-gray-500">
-                      Type
-                    </th>
-                    <th className="text-right py-2 pr-4 text-xs font-medium text-gray-500">
-                      Total Jobs
-                    </th>
-                    <th className="text-right py-2 pr-4 text-xs font-medium text-gray-500">
-                      Active Jobs
-                    </th>
-                    <th className="text-right py-2 pr-4 text-xs font-medium text-gray-500">
-                      Completed
-                    </th>
-                    <th className="text-right py-2 pr-4 text-xs font-medium text-gray-500">
-                      Active Hours
-                    </th>
-                    <th className="text-right py-2 text-xs font-medium text-gray-500">
-                      Idle Hours
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-50">
-                  {assetUtilization.map((asset) => (
-                    <tr key={asset.asset_id}>
-                      <td className="py-2 pr-4 text-gray-700 font-medium">
-                        {asset.asset_id}
-                      </td>
-                      <td className="py-2 pr-4">
-                        <span className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded">
-                          {asset.asset_type}
-                        </span>
-                      </td>
-                      <td className="py-2 pr-4 text-right text-gray-700">
-                        {asset.total_jobs}
-                      </td>
-                      <td className="py-2 pr-4 text-right text-gray-700">
-                        {asset.active_jobs}
-                      </td>
-                      <td className="py-2 pr-4 text-right text-gray-700">
-                        {asset.completed_jobs}
-                      </td>
-                      <td className="py-2 pr-4 text-right text-gray-700">
-                        {asset.total_active_hours.toFixed(1)}
-                      </td>
-                      <td className="py-2 text-right text-gray-700">
-                        {asset.idle_hours.toFixed(1)}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <Table<AssetUtilizationMetric>
+              ariaLabel="Asset utilization"
+              variant="compact"
+              columns={assetUtilizationColumns}
+              data={assetUtilization}
+              getRowId={(asset) => asset.asset_id}
+            />
           )}
         </SectionCard>
 

@@ -50,6 +50,7 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type Column, Table } from "@/components/ui";
 import { ApiError } from "../../services/api";
 import type {
   RackPrice,
@@ -1076,6 +1077,45 @@ function CandidateRow({ candidate, rank, isBest }: CandidateRowProps) {
 
 // ─── Rack-prices sidebar ─────────────────────────────────────────────────────
 
+const rackPriceColumns: Column<RackPrice>[] = [
+  {
+    key: "terminal",
+    label: "Terminal",
+    className: "font-mono text-xs text-gray-700 break-all",
+    render: (price) => (
+      <span data-testid={`rack-price-row-${price.rack_price_id}`}>
+        {price.terminal_id}
+      </span>
+    ),
+  },
+  {
+    key: "price",
+    label: "Price",
+    align: "right",
+    className: "font-mono text-gray-900",
+    render: (price) => formatUsd(price.price_per_gallon_usd),
+  },
+  {
+    key: "brand",
+    label: "Brand",
+    className: "text-xs",
+    render: (price) =>
+      price.branded_flag ? (
+        <span className="inline-flex items-center text-[10px] px-1.5 py-0.5 rounded bg-info-light text-info-dark font-medium">
+          {price.supplier_brand || "Branded"}
+        </span>
+      ) : (
+        <span className="text-[10px] text-gray-500">Unbranded</span>
+      ),
+  },
+  {
+    key: "effective",
+    label: "Effective",
+    className: "text-xs text-gray-500 whitespace-nowrap",
+    render: (price) => formatTimestamp(price.effective_at),
+  },
+];
+
 function RackPricesPanel({
   prices,
   loading,
@@ -1118,46 +1158,13 @@ function RackPricesPanel({
             No rack prices found for this product.
           </div>
         ) : (
-          <table className="w-full text-sm">
-            <thead className="bg-gray-50 sticky top-0">
-              <tr className="text-left text-[10px] uppercase tracking-wide text-gray-500">
-                <th className="px-3 py-2 font-medium">Terminal</th>
-                <th className="px-3 py-2 font-medium text-right">Price</th>
-                <th className="px-3 py-2 font-medium">Brand</th>
-                <th className="px-3 py-2 font-medium">Effective</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {prices.map((price) => (
-                <tr
-                  key={price.rack_price_id}
-                  className="hover:bg-gray-50/60"
-                  data-testid={`rack-price-row-${price.rack_price_id}`}
-                >
-                  <td className="px-3 py-2 font-mono text-xs text-gray-700 break-all">
-                    {price.terminal_id}
-                  </td>
-                  <td className="px-3 py-2 text-right font-mono text-gray-900">
-                    {formatUsd(price.price_per_gallon_usd)}
-                  </td>
-                  <td className="px-3 py-2 text-xs">
-                    {price.branded_flag ? (
-                      <span className="inline-flex items-center text-[10px] px-1.5 py-0.5 rounded bg-info-light text-info-dark font-medium">
-                        {price.supplier_brand || "Branded"}
-                      </span>
-                    ) : (
-                      <span className="text-[10px] text-gray-500">
-                        Unbranded
-                      </span>
-                    )}
-                  </td>
-                  <td className="px-3 py-2 text-xs text-gray-500 whitespace-nowrap">
-                    {formatTimestamp(price.effective_at)}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <Table<RackPrice>
+            ariaLabel="Latest rack prices"
+            variant="compact"
+            columns={rackPriceColumns}
+            data={prices}
+            getRowId={(price) => price.rack_price_id}
+          />
         )}
       </div>
     </div>

@@ -39,10 +39,12 @@ import {
   Zap,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { type Column, Table } from "@/components/ui";
 import type {
   IndexingMetrics,
   IngestionMetrics,
   MetricsBucket,
+  MetricsBucketEntry,
   MetricsFilters,
   MetricsResponse,
   PoisonQueueMetrics,
@@ -222,6 +224,32 @@ function ShipmentMetricsSection({
     statusKeys.push(...Array.from(keySet).sort());
   }
 
+  const shipmentColumns: Column<MetricsBucketEntry>[] = [
+    {
+      key: "timestamp",
+      label: "Timestamp",
+      className: "text-xs text-gray-700",
+      render: (entry) => new Date(entry.timestamp).toLocaleString(),
+    },
+    {
+      key: "total",
+      label: "Total",
+      align: "right",
+      className: "text-xs font-medium text-gray-900",
+      render: (entry) => (entry.values?.total ?? 0).toLocaleString(),
+    },
+    ...statusKeys.map(
+      (key): Column<MetricsBucketEntry> => ({
+        key,
+        label: key.replace(/_/g, " "),
+        align: "right",
+        headerClassName: "capitalize",
+        className: "text-xs text-gray-600",
+        render: (entry) => (entry.values?.[key] ?? 0).toLocaleString(),
+      }),
+    ),
+  ];
+
   return (
     <div className="bg-white border border-gray-200 rounded-lg">
       <div className="flex items-center gap-2 px-5 py-4 border-b border-gray-100">
@@ -291,54 +319,20 @@ function ShipmentMetricsSection({
           <div className="text-sm text-error bg-error-light px-4 py-3 rounded-lg">
             {error}
           </div>
-        ) : data && data.data.length > 0 ? (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-gray-100">
-                  <th className="text-left py-2 px-3 text-xs font-medium text-gray-500">
-                    Timestamp
-                  </th>
-                  <th className="text-right py-2 px-3 text-xs font-medium text-gray-500">
-                    Total
-                  </th>
-                  {statusKeys.map((key) => (
-                    <th
-                      key={key}
-                      className="text-right py-2 px-3 text-xs font-medium text-gray-500 capitalize"
-                    >
-                      {key.replace(/_/g, " ")}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-50">
-                {data.data.map((entry, idx) => (
-                  <tr key={idx} className="hover:bg-gray-50">
-                    <td className="py-2 px-3 text-xs text-gray-700">
-                      {new Date(entry.timestamp).toLocaleString()}
-                    </td>
-                    <td className="py-2 px-3 text-xs text-right font-medium text-gray-900">
-                      {(entry.values?.total ?? 0).toLocaleString()}
-                    </td>
-                    {statusKeys.map((key) => (
-                      <td
-                        key={key}
-                        className="py-2 px-3 text-xs text-right text-gray-600"
-                      >
-                        {(entry.values?.[key] ?? 0).toLocaleString()}
-                      </td>
-                    ))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
         ) : (
-          <div className="flex flex-col items-center justify-center py-8 text-gray-400">
-            <TrendingUp className="w-8 h-8 mb-2" />
-            <p className="text-sm">No shipment metrics available</p>
-          </div>
+          <Table<MetricsBucketEntry>
+            ariaLabel="Shipment metrics"
+            variant="compact"
+            columns={shipmentColumns}
+            data={data?.data ?? []}
+            getRowId={(entry) => entry.timestamp}
+            emptyState={
+              <div className="flex flex-col items-center justify-center py-8 text-gray-400">
+                <TrendingUp className="w-8 h-8 mb-2" />
+                <p className="text-sm">No shipment metrics available</p>
+              </div>
+            }
+          />
         )}
       </div>
     </div>
@@ -395,6 +389,59 @@ function SlaMetricsSection({
     totalShipments > 0 ? totalCompliant / totalShipments : 1;
   const isHealthy = complianceNum >= 0.95;
   const isDegraded = complianceNum >= 0.85 && complianceNum < 0.95;
+
+  const slaColumns: Column<MetricsBucketEntry>[] = [
+    {
+      key: "timestamp",
+      label: "Timestamp",
+      className: "text-xs text-gray-700",
+      render: (entry) => new Date(entry.timestamp).toLocaleString(),
+    },
+    {
+      key: "total",
+      label: "Total",
+      align: "right",
+      className: "text-xs font-medium text-gray-900",
+      render: (entry) => (entry.values?.total ?? 0).toLocaleString(),
+    },
+    {
+      key: "compliant",
+      label: "Compliant",
+      align: "right",
+      className: "text-xs text-success",
+      render: (entry) => (entry.values?.compliant ?? 0).toLocaleString(),
+    },
+    {
+      key: "breached",
+      label: "Breached",
+      align: "right",
+      className: "text-xs text-error",
+      render: (entry) => (entry.values?.breached ?? 0).toLocaleString(),
+    },
+    {
+      key: "compliance_pct",
+      label: "Compliance %",
+      align: "right",
+      render: (entry) => {
+        const pct = entry.values?.compliance_pct ?? 0;
+        const pctHealthy = pct >= 95;
+        const pctDegraded = pct >= 85 && pct < 95;
+        return (
+          <span
+            className={`px-2 py-0.5 rounded text-xs font-medium ${
+              pctHealthy
+                ? "text-success bg-success-light"
+                : pctDegraded
+                  ? "text-warning bg-warning-light"
+                  : "text-error bg-error-light"
+            }`}
+          >
+            {pct.toFixed(1)}%
+          </span>
+        );
+      },
+    },
+  ];
 
   return (
     <div className="bg-white border border-gray-200 rounded-lg">
@@ -509,65 +556,13 @@ function SlaMetricsSection({
             </div>
 
             {/* Time-bucketed breakdown table */}
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-gray-100">
-                    <th className="text-left py-2 px-3 text-xs font-medium text-gray-500">
-                      Timestamp
-                    </th>
-                    <th className="text-right py-2 px-3 text-xs font-medium text-gray-500">
-                      Total
-                    </th>
-                    <th className="text-right py-2 px-3 text-xs font-medium text-gray-500">
-                      Compliant
-                    </th>
-                    <th className="text-right py-2 px-3 text-xs font-medium text-gray-500">
-                      Breached
-                    </th>
-                    <th className="text-right py-2 px-3 text-xs font-medium text-gray-500">
-                      Compliance %
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-50">
-                  {data.data.map((entry, idx) => {
-                    const pct = entry.values?.compliance_pct ?? 0;
-                    const pctHealthy = pct >= 95;
-                    const pctDegraded = pct >= 85 && pct < 95;
-                    return (
-                      <tr key={idx} className="hover:bg-gray-50">
-                        <td className="py-2 px-3 text-xs text-gray-700">
-                          {new Date(entry.timestamp).toLocaleString()}
-                        </td>
-                        <td className="py-2 px-3 text-xs text-right font-medium text-gray-900">
-                          {(entry.values?.total ?? 0).toLocaleString()}
-                        </td>
-                        <td className="py-2 px-3 text-xs text-right text-success">
-                          {(entry.values?.compliant ?? 0).toLocaleString()}
-                        </td>
-                        <td className="py-2 px-3 text-xs text-right text-error">
-                          {(entry.values?.breached ?? 0).toLocaleString()}
-                        </td>
-                        <td className="py-2 px-3 text-xs text-right">
-                          <span
-                            className={`px-2 py-0.5 rounded text-xs font-medium ${
-                              pctHealthy
-                                ? "text-success bg-success-light"
-                                : pctDegraded
-                                  ? "text-warning bg-warning-light"
-                                  : "text-error bg-error-light"
-                            }`}
-                          >
-                            {pct.toFixed(1)}%
-                          </span>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
+            <Table<MetricsBucketEntry>
+              ariaLabel="SLA compliance breakdown"
+              variant="compact"
+              columns={slaColumns}
+              data={data.data}
+              getRowId={(entry) => entry.timestamp}
+            />
           </div>
         ) : (
           <div className="flex flex-col items-center justify-center py-8 text-gray-400">

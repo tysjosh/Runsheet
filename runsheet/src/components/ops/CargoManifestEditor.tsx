@@ -26,6 +26,7 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useState } from "react";
+import { type Column, Table } from "@/components/ui";
 import {
   updateCargo,
   updateCargoItemStatus,
@@ -263,92 +264,17 @@ function EditableCargoTable({
   onUpdateItemStatus,
   inputClass,
 }: EditableCargoTableProps) {
-  if (items.length === 0) {
-    return (
-      <div className="text-center py-16 text-gray-500">
-        <p className="text-lg font-medium text-gray-400">No cargo items</p>
-        <p className="text-sm text-gray-400 mt-1">
-          This job has no cargo manifest items to edit
-        </p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="overflow-x-auto">
-      <table className="w-full" aria-label="Editable cargo manifest">
-        <thead className="bg-gray-50 sticky top-0 border-b border-gray-100">
-          <tr>
-            <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-              Item ID
-            </th>
-            <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-              Description
-            </th>
-            <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-              Weight (kg)
-            </th>
-            <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-              Container
-            </th>
-            <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-              Seal No.
-            </th>
-            <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-              Status
-            </th>
-            <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-              Actions
-            </th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-gray-100">
-          {items.map((item) => (
-            <EditableCargoRow
-              key={item.item_id}
-              item={item}
-              onFieldChange={onFieldChange}
-              onUpdateItemStatus={onUpdateItemStatus}
-              inputClass={inputClass}
-            />
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-// ─── Editable Row Sub-component ──────────────────────────────────────────────
-
-interface EditableCargoRowProps {
-  item: SchedulingCargoItem;
-  onFieldChange: (
-    itemId: string,
-    field: keyof SchedulingCargoItem,
-    value: string | number,
-  ) => void;
-  onUpdateItemStatus: (
-    itemId: string,
-    newStatus: CargoItemStatus,
-  ) => Promise<void>;
-  inputClass: string;
-}
-
-function EditableCargoRow({
-  item,
-  onFieldChange,
-  onUpdateItemStatus,
-  inputClass,
-}: EditableCargoRowProps) {
-  return (
-    <tr className="transition-colors hover:bg-gray-50">
-      {/* Item ID — read-only */}
-      <td className="px-6 py-3 text-sm font-medium text-primary">
-        {item.item_id}
-      </td>
-
-      {/* Description — editable */}
-      <td className="px-6 py-3">
+  const columns: Column<SchedulingCargoItem>[] = [
+    {
+      key: "item_id",
+      label: "Item ID",
+      className: "text-sm font-medium text-primary",
+      render: (item) => item.item_id,
+    },
+    {
+      key: "description",
+      label: "Description",
+      render: (item) => (
         <input
           type="text"
           value={item.description}
@@ -358,10 +284,12 @@ function EditableCargoRow({
           className={inputClass}
           aria-label={`Description for item ${item.item_id}`}
         />
-      </td>
-
-      {/* Weight — editable */}
-      <td className="px-6 py-3">
+      ),
+    },
+    {
+      key: "weight_kg",
+      label: "Weight (kg)",
+      render: (item) => (
         <input
           type="number"
           value={item.weight_kg}
@@ -377,10 +305,12 @@ function EditableCargoRow({
           className={inputClass}
           aria-label={`Weight for item ${item.item_id}`}
         />
-      </td>
-
-      {/* Container — editable */}
-      <td className="px-6 py-3">
+      ),
+    },
+    {
+      key: "container_number",
+      label: "Container",
+      render: (item) => (
         <input
           type="text"
           value={item.container_number ?? ""}
@@ -390,10 +320,12 @@ function EditableCargoRow({
           className={inputClass}
           aria-label={`Container number for item ${item.item_id}`}
         />
-      </td>
-
-      {/* Seal Number — editable */}
-      <td className="px-6 py-3">
+      ),
+    },
+    {
+      key: "seal_number",
+      label: "Seal No.",
+      render: (item) => (
         <input
           type="text"
           value={item.seal_number ?? ""}
@@ -403,26 +335,47 @@ function EditableCargoRow({
           className={inputClass}
           aria-label={`Seal number for item ${item.item_id}`}
         />
-      </td>
-
-      {/* Status — read-only badge */}
-      <td className="px-6 py-3">
+      ),
+    },
+    {
+      key: "item_status",
+      label: "Status",
+      render: (item) => (
         <span
           className={`inline-flex items-center px-2.5 py-0.5 rounded-md text-xs font-medium ${getStatusBadge(item.item_status)}`}
         >
           {formatStatus(item.item_status)}
         </span>
-      </td>
-
-      {/* Actions — status change buttons */}
-      <td className="px-6 py-3">
+      ),
+    },
+    {
+      key: "actions",
+      label: "Actions",
+      render: (item) => (
         <CargoItemStatusButtons
           itemId={item.item_id}
           currentStatus={item.item_status}
           onUpdateStatus={onUpdateItemStatus}
         />
-      </td>
-    </tr>
+      ),
+    },
+  ];
+
+  return (
+    <Table<SchedulingCargoItem>
+      ariaLabel="Editable cargo manifest"
+      columns={columns}
+      data={items}
+      getRowId={(item) => item.item_id}
+      emptyState={
+        <div className="text-gray-500">
+          <p className="text-lg font-medium text-gray-400">No cargo items</p>
+          <p className="text-sm text-gray-400 mt-1">
+            This job has no cargo manifest items to edit
+          </p>
+        </div>
+      }
+    />
   );
 }
 

@@ -2,6 +2,7 @@
 
 import { AlertTriangle, BarChart3, Search } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
+import { type Column, Table } from "@/components/ui";
 import type {
   EfficiencyFilters,
   EfficiencyMetric,
@@ -108,6 +109,80 @@ export default function FuelEfficiencyChart() {
       ? Math.max(...data.map((m) => efficiencyKmPerLiter(m) ?? 0), 1)
       : 1;
 
+  const efficiencyColumns: Column<EfficiencyMetric>[] = [
+    {
+      key: "asset_id",
+      label: "Vehicle / Asset",
+      className: "font-medium text-primary",
+      render: (metric) => metric.asset_id,
+    },
+    {
+      key: "total_distance_km",
+      label: "Distance (km)",
+      align: "right",
+      className: "text-gray-600",
+      render: (metric) => formatNumber(metric.total_distance_km),
+    },
+    {
+      key: "total_liters",
+      label: "Fuel Consumed (L)",
+      align: "right",
+      className: "text-gray-600",
+      render: (metric) => formatNumber(metric.total_liters),
+    },
+    {
+      key: "efficiency",
+      label: "Efficiency (km/L)",
+      align: "right",
+      render: (metric) => {
+        const kmPerLiter = efficiencyKmPerLiter(metric);
+        if (kmPerLiter == null) {
+          return (
+            <span
+              className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium text-gray-500 bg-gray-100"
+              title="No odometer readings recorded for this vehicle in the selected window, so efficiency cannot be derived."
+            >
+              No odometer data
+            </span>
+          );
+        }
+        const styles = TIER_STYLES[efficiencyTier(kmPerLiter)];
+        return (
+          <span
+            className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${styles.text} ${styles.bg}`}
+          >
+            {kmPerLiter.toFixed(2)}
+          </span>
+        );
+      },
+    },
+    {
+      key: "bar",
+      label: "",
+      headerClassName: "w-40",
+      render: (metric) => {
+        const kmPerLiter = efficiencyKmPerLiter(metric);
+        const hasEfficiency = kmPerLiter != null;
+        const styles =
+          TIER_STYLES[hasEfficiency ? efficiencyTier(kmPerLiter) : "average"];
+        const barWidth = hasEfficiency ? (kmPerLiter / maxEfficiency) * 100 : 0;
+        return (
+          <div className="w-full bg-gray-100 rounded-full h-2">
+            <div
+              className={`h-2 rounded-full ${styles.bar} transition-all`}
+              style={{ width: `${Math.max(barWidth, 2)}%` }}
+              title={
+                hasEfficiency
+                  ? `${kmPerLiter.toFixed(2)} km/L`
+                  : "No efficiency data"
+              }
+            />
+          </div>
+        );
+      },
+    },
+  ];
+
   return (
     <div className="space-y-4">
       {/* Filters */}
@@ -192,81 +267,13 @@ export default function FuelEfficiencyChart() {
 
       {/* Data table with inline bars */}
       {!loading && !error && data.length > 0 && (
-        <div className="overflow-x-auto">
-          <table
-            className="w-full text-sm"
-            aria-label="Fleet fuel efficiency metrics"
-          >
-            <thead>
-              <tr className="border-b border-gray-200 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                <th className="px-3 py-2">Vehicle / Asset</th>
-                <th className="px-3 py-2 text-right">Distance (km)</th>
-                <th className="px-3 py-2 text-right">Fuel Consumed (L)</th>
-                <th className="px-3 py-2 text-right">Efficiency (km/L)</th>
-                <th className="px-3 py-2 w-40" aria-label="Efficiency bar" />
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {data.map((metric) => {
-                const kmPerLiter = efficiencyKmPerLiter(metric);
-                const hasEfficiency = kmPerLiter != null;
-                const tier = hasEfficiency
-                  ? efficiencyTier(kmPerLiter)
-                  : "average";
-                const styles = TIER_STYLES[tier];
-                const barWidth = hasEfficiency
-                  ? (kmPerLiter / maxEfficiency) * 100
-                  : 0;
-
-                return (
-                  <tr
-                    key={metric.asset_id}
-                    className="hover:bg-gray-50 transition-colors"
-                  >
-                    <td className="px-3 py-2.5 font-medium text-primary">
-                      {metric.asset_id}
-                    </td>
-                    <td className="px-3 py-2.5 text-right text-gray-600">
-                      {formatNumber(metric.total_distance_km)}
-                    </td>
-                    <td className="px-3 py-2.5 text-right text-gray-600">
-                      {formatNumber(metric.total_liters)}
-                    </td>
-                    <td className="px-3 py-2.5 text-right">
-                      {hasEfficiency ? (
-                        <span
-                          className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${styles.text} ${styles.bg}`}
-                        >
-                          {kmPerLiter.toFixed(2)}
-                        </span>
-                      ) : (
-                        <span
-                          className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium text-gray-500 bg-gray-100"
-                          title="No odometer readings recorded for this vehicle in the selected window, so efficiency cannot be derived."
-                        >
-                          No odometer data
-                        </span>
-                      )}
-                    </td>
-                    <td className="px-3 py-2.5">
-                      <div className="w-full bg-gray-100 rounded-full h-2">
-                        <div
-                          className={`h-2 rounded-full ${styles.bar} transition-all`}
-                          style={{ width: `${Math.max(barWidth, 2)}%` }}
-                          title={
-                            hasEfficiency
-                              ? `${kmPerLiter.toFixed(2)} km/L`
-                              : "No efficiency data"
-                          }
-                        />
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+        <Table<EfficiencyMetric>
+          ariaLabel="Fleet fuel efficiency metrics"
+          variant="compact"
+          columns={efficiencyColumns}
+          data={data}
+          getRowId={(metric) => metric.asset_id}
+        />
       )}
     </div>
   );

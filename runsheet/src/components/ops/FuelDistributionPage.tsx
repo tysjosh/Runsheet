@@ -50,7 +50,13 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { PageHeader, type Tab, TabNavigation } from "@/components/ui";
+import {
+  type Column,
+  PageHeader,
+  type Tab,
+  Table,
+  TabNavigation,
+} from "@/components/ui";
 import type { ExecutionUpdateData } from "../../hooks/usePlanExecutionSocket";
 import { usePlanExecutionSocket } from "../../hooks/usePlanExecutionSocket";
 import type {
@@ -572,6 +578,62 @@ function OutcomeComparison({ planId }: OutcomeComparisonProps) {
   const varianceColor = (value: number) =>
     Math.abs(value) <= VARIANCE_THRESHOLD ? "text-success" : "text-error";
 
+  const stopVarianceColumns: Column<StopVariance>[] = [
+    {
+      key: "station",
+      label: "Station",
+      className: "text-gray-700",
+      render: (sv) => (
+        <>
+          {sv.station_id} (#{sv.sequence})
+        </>
+      ),
+    },
+    {
+      key: "quantity_variance_pct",
+      label: "Qty Variance %",
+      align: "right",
+      className: "font-medium",
+      render: (sv) => (
+        <span className={varianceColor(sv.quantity_variance_pct)}>
+          {sv.quantity_variance_pct.toFixed(1)}%
+        </span>
+      ),
+    },
+    {
+      key: "time_variance_minutes",
+      label: "Time Variance (min)",
+      align: "right",
+      className: "font-medium",
+      render: (sv) => (
+        <span
+          className={
+            Math.abs(sv.time_variance_minutes) <= 15
+              ? "text-success"
+              : "text-error"
+          }
+        >
+          {sv.time_variance_minutes.toFixed(0)}
+        </span>
+      ),
+    },
+    {
+      key: "status",
+      label: "Status",
+      render: (sv) => (
+        <span
+          className={`inline-flex items-center text-[10px] px-1.5 py-0.5 rounded font-medium ${
+            sv.status === "completed"
+              ? "bg-success-light text-success"
+              : "bg-warning-light text-warning"
+          }`}
+        >
+          {sv.status}
+        </span>
+      ),
+    },
+  ];
+
   return (
     <div className="border border-success-light rounded-lg p-4 bg-success-light/30">
       <div className="flex items-center gap-2 mb-3">
@@ -611,68 +673,29 @@ function OutcomeComparison({ planId }: OutcomeComparisonProps) {
 
       {/* Per-stop comparison table */}
       {outcome.stop_variances && outcome.stop_variances.length > 0 && (
-        <div className="overflow-x-auto">
-          <table
-            className="w-full text-xs"
-            aria-label="Stop variance comparison"
-          >
-            <thead className="bg-white">
-              <tr>
-                <th className="px-3 py-2 text-left text-gray-600 font-medium">
-                  Station
-                </th>
-                <th className="px-3 py-2 text-right text-gray-600 font-medium">
-                  Qty Variance %
-                </th>
-                <th className="px-3 py-2 text-right text-gray-600 font-medium">
-                  Time Variance (min)
-                </th>
-                <th className="px-3 py-2 text-left text-gray-600 font-medium">
-                  Status
-                </th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {outcome.stop_variances.map((sv: StopVariance) => (
-                <tr
-                  key={`${sv.station_id}-${sv.sequence}`}
-                  className="hover:bg-white"
-                >
-                  <td className="px-3 py-2 text-gray-700">
-                    {sv.station_id} (#{sv.sequence})
-                  </td>
-                  <td
-                    className={`px-3 py-2 text-right font-medium ${varianceColor(sv.quantity_variance_pct)}`}
-                  >
-                    {sv.quantity_variance_pct.toFixed(1)}%
-                  </td>
-                  <td
-                    className={`px-3 py-2 text-right font-medium ${Math.abs(sv.time_variance_minutes) <= 15 ? "text-success" : "text-error"}`}
-                  >
-                    {sv.time_variance_minutes.toFixed(0)}
-                  </td>
-                  <td className="px-3 py-2">
-                    <span
-                      className={`inline-flex items-center text-[10px] px-1.5 py-0.5 rounded font-medium ${
-                        sv.status === "completed"
-                          ? "bg-success-light text-success"
-                          : "bg-warning-light text-warning"
-                      }`}
-                    >
-                      {sv.status}
-                    </span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <Table<StopVariance>
+          ariaLabel="Stop variance comparison"
+          variant="compact"
+          columns={stopVarianceColumns}
+          data={outcome.stop_variances}
+          getRowId={(sv) => `${sv.station_id}-${sv.sequence}`}
+        />
       )}
     </div>
   );
 }
 
 // ─── Cost Breakdown Section ──────────────────────────────────────────────────
+
+interface CostRow {
+  id: string;
+  label: string;
+  estimatedDisplay: string;
+  actualDisplay: string;
+  varianceDisplay: string;
+  varianceColor: string;
+  isTotal: boolean;
+}
 
 interface CostBreakdownSectionProps {
   planId: string;
@@ -732,6 +755,125 @@ function CostBreakdownSection({
 
   const { estimated, actual, cost_variance_pct } = costs;
 
+  const showActual = planStatus === "completed" && !!actual;
+
+  const costRows: CostRow[] = [
+    {
+      id: "fuel",
+      label: "Fuel Cost",
+      estimatedDisplay: `${estimated.currency ?? "$"}${estimated.fuel_cost.toFixed(2)}`,
+      actualDisplay: actual
+        ? `${actual.currency ?? "$"}${actual.fuel_cost.toFixed(2)}`
+        : "",
+      varianceDisplay: actual
+        ? estimated.fuel_cost > 0
+          ? `${(((actual.fuel_cost - estimated.fuel_cost) / estimated.fuel_cost) * 100).toFixed(1)}%`
+          : "—"
+        : "",
+      varianceColor: actual
+        ? Math.abs(
+            ((actual.fuel_cost - estimated.fuel_cost) / estimated.fuel_cost) *
+              100,
+          ) <= VARIANCE_THRESHOLD
+          ? "text-success"
+          : "text-error"
+        : "",
+      isTotal: false,
+    },
+    {
+      id: "driver",
+      label: "Driver Cost",
+      estimatedDisplay: `${estimated.currency ?? "$"}${estimated.driver_cost.toFixed(2)}`,
+      actualDisplay: actual
+        ? `${actual.currency ?? "$"}${actual.driver_cost.toFixed(2)}`
+        : "",
+      varianceDisplay: actual
+        ? estimated.driver_cost > 0
+          ? `${(((actual.driver_cost - estimated.driver_cost) / estimated.driver_cost) * 100).toFixed(1)}%`
+          : "—"
+        : "",
+      varianceColor: actual
+        ? Math.abs(
+            ((actual.driver_cost - estimated.driver_cost) /
+              estimated.driver_cost) *
+              100,
+          ) <= VARIANCE_THRESHOLD
+          ? "text-success"
+          : "text-error"
+        : "",
+      isTotal: false,
+    },
+    {
+      id: "total",
+      label: "Total",
+      estimatedDisplay: `${estimated.currency ?? "$"}${(
+        estimated.total_estimated_cost ??
+          estimated.fuel_cost + estimated.driver_cost
+      ).toFixed(2)}`,
+      actualDisplay: actual
+        ? `${actual.currency ?? "$"}${(
+            actual.total_actual_cost ?? actual.fuel_cost + actual.driver_cost
+          ).toFixed(2)}`
+        : "",
+      varianceDisplay:
+        cost_variance_pct != null ? `${cost_variance_pct.toFixed(1)}%` : "—",
+      varianceColor:
+        cost_variance_pct != null &&
+        Math.abs(cost_variance_pct) <= VARIANCE_THRESHOLD
+          ? "text-success"
+          : "text-error",
+      isTotal: true,
+    },
+  ];
+
+  const costColumns: Column<CostRow>[] = [
+    {
+      key: "category",
+      label: "Category",
+      render: (r) => (
+        <span className={r.isTotal ? "text-primary" : "text-gray-700"}>
+          {r.label}
+        </span>
+      ),
+    },
+    {
+      key: "estimated",
+      label: "Estimated",
+      align: "right",
+      render: (r) => (
+        <span className={r.isTotal ? "text-primary" : "text-gray-700"}>
+          {r.estimatedDisplay}
+        </span>
+      ),
+    },
+    ...(showActual
+      ? [
+          {
+            key: "actual",
+            label: "Actual",
+            align: "right" as const,
+            render: (r: CostRow) => (
+              <span className={r.isTotal ? "text-primary" : "text-gray-700"}>
+                {r.actualDisplay}
+              </span>
+            ),
+          },
+          {
+            key: "variance",
+            label: "Variance",
+            align: "right" as const,
+            render: (r: CostRow) => (
+              <span
+                className={`${r.isTotal ? "" : "font-medium"} ${r.varianceColor}`.trim()}
+              >
+                {r.varianceDisplay}
+              </span>
+            ),
+          },
+        ]
+      : []),
+  ];
+
   return (
     <div className="border border-gray-100 rounded-lg p-4">
       <div className="flex items-center gap-2 mb-3">
@@ -739,125 +881,14 @@ function CostBreakdownSection({
         <h4 className="text-sm font-medium text-primary">Cost Analysis</h4>
       </div>
 
-      <div className="overflow-x-auto">
-        <table className="w-full text-xs" aria-label="Cost breakdown">
-          <thead className="bg-gray-50">
-            <tr>
-              <th className="px-3 py-2 text-left text-gray-600 font-medium">
-                Category
-              </th>
-              <th className="px-3 py-2 text-right text-gray-600 font-medium">
-                Estimated
-              </th>
-              {planStatus === "completed" && actual && (
-                <>
-                  <th className="px-3 py-2 text-right text-gray-600 font-medium">
-                    Actual
-                  </th>
-                  <th className="px-3 py-2 text-right text-gray-600 font-medium">
-                    Variance
-                  </th>
-                </>
-              )}
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-gray-100">
-            <tr>
-              <td className="px-3 py-2 text-gray-700">Fuel Cost</td>
-              <td className="px-3 py-2 text-right text-gray-700">
-                {estimated.currency ?? "$"}
-                {estimated.fuel_cost.toFixed(2)}
-              </td>
-              {planStatus === "completed" && actual && (
-                <>
-                  <td className="px-3 py-2 text-right text-gray-700">
-                    {actual.currency ?? "$"}
-                    {actual.fuel_cost.toFixed(2)}
-                  </td>
-                  <td
-                    className={`px-3 py-2 text-right font-medium ${
-                      Math.abs(
-                        ((actual.fuel_cost - estimated.fuel_cost) /
-                          estimated.fuel_cost) *
-                          100,
-                      ) <= VARIANCE_THRESHOLD
-                        ? "text-success"
-                        : "text-error"
-                    }`}
-                  >
-                    {estimated.fuel_cost > 0
-                      ? `${(((actual.fuel_cost - estimated.fuel_cost) / estimated.fuel_cost) * 100).toFixed(1)}%`
-                      : "—"}
-                  </td>
-                </>
-              )}
-            </tr>
-            <tr>
-              <td className="px-3 py-2 text-gray-700">Driver Cost</td>
-              <td className="px-3 py-2 text-right text-gray-700">
-                {estimated.currency ?? "$"}
-                {estimated.driver_cost.toFixed(2)}
-              </td>
-              {planStatus === "completed" && actual && (
-                <>
-                  <td className="px-3 py-2 text-right text-gray-700">
-                    {actual.currency ?? "$"}
-                    {actual.driver_cost.toFixed(2)}
-                  </td>
-                  <td
-                    className={`px-3 py-2 text-right font-medium ${
-                      Math.abs(
-                        ((actual.driver_cost - estimated.driver_cost) /
-                          estimated.driver_cost) *
-                          100,
-                      ) <= VARIANCE_THRESHOLD
-                        ? "text-success"
-                        : "text-error"
-                    }`}
-                  >
-                    {estimated.driver_cost > 0
-                      ? `${(((actual.driver_cost - estimated.driver_cost) / estimated.driver_cost) * 100).toFixed(1)}%`
-                      : "—"}
-                  </td>
-                </>
-              )}
-            </tr>
-            <tr className="font-medium">
-              <td className="px-3 py-2 text-primary">Total</td>
-              <td className="px-3 py-2 text-right text-primary">
-                {estimated.currency ?? "$"}
-                {(
-                  estimated.total_estimated_cost ??
-                  estimated.fuel_cost + estimated.driver_cost
-                ).toFixed(2)}
-              </td>
-              {planStatus === "completed" && actual && (
-                <>
-                  <td className="px-3 py-2 text-right text-primary">
-                    {actual.currency ?? "$"}
-                    {(
-                      actual.total_actual_cost ??
-                      actual.fuel_cost + actual.driver_cost
-                    ).toFixed(2)}
-                  </td>
-                  <td
-                    className={`px-3 py-2 text-right ${
-                      cost_variance_pct != null &&
-                      Math.abs(cost_variance_pct) <= VARIANCE_THRESHOLD
-                        ? "text-success"
-                        : "text-error"
-                    }`}
-                  >
-                    {cost_variance_pct != null
-                      ? `${cost_variance_pct.toFixed(1)}%`
-                      : "—"}
-                  </td>
-                </>
-              )}
-            </tr>
-          </tbody>
-        </table>
-      </div>
+      <Table<CostRow>
+        ariaLabel="Cost breakdown"
+        variant="compact"
+        columns={costColumns}
+        data={costRows}
+        getRowId={(r) => r.id}
+        rowClassName={(r) => (r.isTotal ? "font-medium" : "")}
+      />
     </div>
   );
 }
@@ -1656,6 +1687,41 @@ function ReplanDiffPanel({ seedEventId }: ReplanDiffPanelProps) {
 
 // ─── Plan Detail View ────────────────────────────────────────────────────────
 
+const compartmentColumns: Column<CompartmentAssignment>[] = [
+  {
+    key: "compartment_id",
+    label: "Compartment",
+    className: "text-gray-700",
+    render: (a) => a.compartment_id,
+  },
+  {
+    key: "station_id",
+    label: "Station",
+    className: "text-gray-700",
+    render: (a) => a.station_id,
+  },
+  {
+    key: "fuel_grade",
+    label: "Fuel Grade",
+    className: "text-gray-700",
+    render: (a) => a.fuel_grade,
+  },
+  {
+    key: "quantity",
+    label: "Quantity (gal)",
+    align: "right",
+    className: "text-gray-700",
+    render: (a) => getAssignmentQuantityGallons(a).toLocaleString(),
+  },
+  {
+    key: "capacity",
+    label: "Capacity (gal)",
+    align: "right",
+    className: "text-gray-700",
+    render: (a) => getAssignmentCapacityGallons(a).toLocaleString(),
+  },
+];
+
 interface PlanDetailViewProps {
   planId: string;
   planStatus?: string;
@@ -1827,55 +1893,12 @@ function PlanDetailView({
             </div>
           </div>
           {plan.loading_plan.assignments.length > 0 && (
-            <div className="overflow-x-auto">
-              <table
-                className="w-full text-xs"
-                aria-label="Compartment assignments"
-              >
-                <thead className="bg-gray-50">
-                  <tr>
-                    <th className="px-3 py-2 text-left text-gray-600 font-medium">
-                      Compartment
-                    </th>
-                    <th className="px-3 py-2 text-left text-gray-600 font-medium">
-                      Station
-                    </th>
-                    <th className="px-3 py-2 text-left text-gray-600 font-medium">
-                      Fuel Grade
-                    </th>
-                    <th className="px-3 py-2 text-right text-gray-600 font-medium">
-                      Quantity (gal)
-                    </th>
-                    <th className="px-3 py-2 text-right text-gray-600 font-medium">
-                      Capacity (gal)
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                  {plan.loading_plan.assignments.map(
-                    (a: CompartmentAssignment, i: number) => (
-                      <tr key={i} className="hover:bg-gray-50">
-                        <td className="px-3 py-2 text-gray-700">
-                          {a.compartment_id}
-                        </td>
-                        <td className="px-3 py-2 text-gray-700">
-                          {a.station_id}
-                        </td>
-                        <td className="px-3 py-2 text-gray-700">
-                          {a.fuel_grade}
-                        </td>
-                        <td className="px-3 py-2 text-right text-gray-700">
-                          {getAssignmentQuantityGallons(a).toLocaleString()}
-                        </td>
-                        <td className="px-3 py-2 text-right text-gray-700">
-                          {getAssignmentCapacityGallons(a).toLocaleString()}
-                        </td>
-                      </tr>
-                    ),
-                  )}
-                </tbody>
-              </table>
-            </div>
+            <Table<CompartmentAssignment>
+              ariaLabel="Compartment assignments"
+              variant="compact"
+              columns={compartmentColumns}
+              data={plan.loading_plan.assignments}
+            />
           )}
         </div>
       ) : (
@@ -2467,6 +2490,48 @@ function PlansTab() {
 
 // ─── Forecasts Tab ───────────────────────────────────────────────────────────
 
+const forecastColumns: Column<Forecast>[] = [
+  {
+    key: "station_id",
+    label: "Station",
+    className: "text-sm font-medium text-primary",
+    render: (f) => f.station_id,
+  },
+  {
+    key: "fuel_grade",
+    label: "Fuel Grade",
+    className: "text-sm text-gray-700",
+    render: (f) => f.fuel_grade,
+  },
+  {
+    key: "runout_p50",
+    label: "Runout P50 (hrs)",
+    align: "right",
+    className: "text-sm text-gray-700",
+    render: (f) => ((f as any).hours_to_runout_p50 ?? 0).toFixed(1),
+  },
+  {
+    key: "runout_p90",
+    label: "Runout P90 (hrs)",
+    align: "right",
+    className: "text-sm text-gray-700",
+    render: (f) => ((f as any).hours_to_runout_p90 ?? 0).toFixed(1),
+  },
+  {
+    key: "risk_24h",
+    label: "Risk 24h",
+    align: "right",
+    className: "text-sm text-gray-700",
+    render: (f) => `${(((f as any).runout_risk_24h ?? 0) * 100).toFixed(0)}%`,
+  },
+  {
+    key: "timestamp",
+    label: "Timestamp",
+    className: "text-xs text-gray-500",
+    render: (f) => (f.timestamp ? new Date(f.timestamp).toLocaleString() : "—"),
+  },
+];
+
 function ForecastsTab() {
   const [forecasts, setForecasts] = useState<Forecast[]>([]);
   const [pagination, setPagination] = useState<PaginationMeta | null>(null);
@@ -2555,58 +2620,16 @@ function ForecastsTab() {
           <p className="text-xs mt-1">Try adjusting your filters</p>
         </div>
       ) : (
-        <div className="overflow-x-auto border border-gray-100 rounded-lg">
-          <table className="w-full" aria-label="Tank forecasts">
-            <thead className="bg-gray-50 border-b border-gray-100">
-              <tr>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                  Station
-                </th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                  Fuel Grade
-                </th>
-                <th className="px-4 py-3 text-right text-xs font-medium text-gray-600 uppercase tracking-wider">
-                  Runout P50 (hrs)
-                </th>
-                <th className="px-4 py-3 text-right text-xs font-medium text-gray-600 uppercase tracking-wider">
-                  Runout P90 (hrs)
-                </th>
-                <th className="px-4 py-3 text-right text-xs font-medium text-gray-600 uppercase tracking-wider">
-                  Risk 24h
-                </th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                  Timestamp
-                </th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {forecasts.map((f, i) => (
-                <tr
-                  key={`${f.station_id}-${f.fuel_grade}-${i}`}
-                  className="hover:bg-gray-50"
-                >
-                  <td className="px-4 py-3 text-sm font-medium text-primary">
-                    {f.station_id}
-                  </td>
-                  <td className="px-4 py-3 text-sm text-gray-700">
-                    {f.fuel_grade}
-                  </td>
-                  <td className="px-4 py-3 text-sm text-right text-gray-700">
-                    {((f as any).hours_to_runout_p50 ?? 0).toFixed(1)}
-                  </td>
-                  <td className="px-4 py-3 text-sm text-right text-gray-700">
-                    {((f as any).hours_to_runout_p90 ?? 0).toFixed(1)}
-                  </td>
-                  <td className="px-4 py-3 text-sm text-right text-gray-700">
-                    {(((f as any).runout_risk_24h ?? 0) * 100).toFixed(0)}%
-                  </td>
-                  <td className="px-4 py-3 text-xs text-gray-500">
-                    {f.timestamp ? new Date(f.timestamp).toLocaleString() : "—"}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        <div className="border border-gray-100 rounded-lg">
+          <Table<Forecast>
+            ariaLabel="Tank forecasts"
+            variant="compact"
+            columns={forecastColumns}
+            data={forecasts}
+            getRowId={(f) =>
+              `${f.station_id}-${f.fuel_grade}-${f.timestamp ?? ""}`
+            }
+          />
           {pagination && (
             <PaginationControls
               pagination={pagination}
@@ -2788,6 +2811,137 @@ function PrioritiesTab() {
   const inputClass =
     "px-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white";
 
+  const clusterColumns: Column<PriorityCluster>[] = [
+    {
+      key: "cluster",
+      label: "Cluster",
+      className: "text-sm font-medium text-primary",
+      render: (c) => c.cluster_id,
+    },
+    {
+      key: "size",
+      label: "Size",
+      align: "right",
+      className: "text-sm text-gray-700",
+      render: (c) => c.cluster_size,
+    },
+    {
+      key: "centroid",
+      label: "Centroid",
+      className: "text-xs text-gray-500",
+      render: (c) =>
+        c.centroid
+          ? `${c.centroid.lat.toFixed(4)}, ${c.centroid.lon.toFixed(4)}`
+          : "—",
+    },
+    {
+      key: "members",
+      label: "Members",
+      className: "text-xs text-gray-600",
+      render: (c) => (
+        <div className="flex flex-wrap gap-1">
+          {c.members.slice(0, 8).map((m, i) => (
+            <span
+              key={`${m.station_id ?? m.customer_tank_id ?? i}-${i}`}
+              className="inline-flex items-center gap-1 px-2 py-0.5 bg-gray-100 rounded text-[11px]"
+            >
+              {m.station_id ?? m.customer_tank_id ?? "?"}
+              {m.fuel_grade ? ` · ${m.fuel_grade}` : ""}
+            </span>
+          ))}
+          {c.members.length > 8 && (
+            <span className="text-gray-400 text-[11px]">
+              +{c.members.length - 8} more
+            </span>
+          )}
+        </div>
+      ),
+    },
+  ];
+
+  const priorityColumns: Column<PriorityEntry>[] = [
+    {
+      key: "station",
+      label: "Station",
+      className: "text-sm font-medium text-primary",
+      render: (p) => p.station_id ?? p.customer_tank_id ?? "—",
+    },
+    {
+      key: "name",
+      label: "Name",
+      className: "text-sm text-gray-700",
+      render: (p) =>
+        p.station_name ?? p.station_id ?? p.customer_tank_id ?? "—",
+    },
+    {
+      key: "fuel_grade",
+      label: "Fuel Grade",
+      className: "text-sm text-gray-700",
+      render: (p) => p.fuel_grade,
+    },
+    {
+      key: "priority_score",
+      label: "Priority Score",
+      align: "right",
+      className: "text-sm text-gray-700",
+      render: (p) => (p.priority_score ?? 0).toFixed(2),
+    },
+    {
+      key: "urgency",
+      label: "Urgency",
+      render: (p) => {
+        const urgencyKey = (p as any).urgency ?? p.priority_bucket ?? "low";
+        const urgencyStyle = URGENCY_CONFIG[urgencyKey] ?? URGENCY_CONFIG.low;
+        return (
+          <span
+            className={`inline-flex items-center px-2.5 py-0.5 rounded-md text-xs font-medium ${urgencyStyle.bg} ${urgencyStyle.color}`}
+          >
+            {urgencyKey}
+          </span>
+        );
+      },
+    },
+    {
+      key: "safe_to_delay",
+      label: "Safe to Delay",
+      render: (p) => {
+        const bucket = p.safe_to_delay_bucket;
+        const bucketBadge = bucket
+          ? SAFE_TO_DELAY_BADGE[bucket]
+          : "bg-gray-100 text-gray-500";
+        return (
+          <span
+            className={`inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium ${bucketBadge}`}
+          >
+            {bucket ?? "—"}
+            {p.safe_to_delay_days != null ? ` · ${p.safe_to_delay_days}d` : ""}
+          </span>
+        );
+      },
+    },
+    {
+      key: "cluster",
+      label: "Cluster",
+      className: "text-xs text-gray-600",
+      render: (p) =>
+        p.cluster_id ? (
+          <span>
+            {p.cluster_id}
+            {p.cluster_size != null ? ` (n=${p.cluster_size})` : ""}
+          </span>
+        ) : (
+          <span className="text-gray-400">—</span>
+        ),
+    },
+    {
+      key: "timestamp",
+      label: "Timestamp",
+      className: "text-xs text-gray-500",
+      render: (p) =>
+        p.timestamp ? new Date(p.timestamp).toLocaleString() : "—",
+    },
+  ];
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
@@ -2869,161 +3023,23 @@ function PrioritiesTab() {
           )}
         </div>
       ) : clusterView ? (
-        <div className="overflow-x-auto border border-gray-100 rounded-lg">
-          <table className="w-full" aria-label="Delivery priorities by cluster">
-            <thead className="bg-gray-50 border-b border-gray-100">
-              <tr>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                  Cluster
-                </th>
-                <th className="px-4 py-3 text-right text-xs font-medium text-gray-600 uppercase tracking-wider">
-                  Size
-                </th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                  Centroid
-                </th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                  Members
-                </th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {clusters.map((c) => (
-                <tr key={c.cluster_id} className="hover:bg-gray-50 align-top">
-                  <td className="px-4 py-3 text-sm font-medium text-primary">
-                    {c.cluster_id}
-                  </td>
-                  <td className="px-4 py-3 text-sm text-right text-gray-700">
-                    {c.cluster_size}
-                  </td>
-                  <td className="px-4 py-3 text-xs text-gray-500">
-                    {c.centroid
-                      ? `${c.centroid.lat.toFixed(4)}, ${c.centroid.lon.toFixed(4)}`
-                      : "—"}
-                  </td>
-                  <td className="px-4 py-3 text-xs text-gray-600">
-                    <div className="flex flex-wrap gap-1">
-                      {c.members.slice(0, 8).map((m, i) => (
-                        <span
-                          key={`${m.station_id ?? m.customer_tank_id ?? i}-${i}`}
-                          className="inline-flex items-center gap-1 px-2 py-0.5 bg-gray-100 rounded text-[11px]"
-                        >
-                          {m.station_id ?? m.customer_tank_id ?? "?"}
-                          {m.fuel_grade ? ` · ${m.fuel_grade}` : ""}
-                        </span>
-                      ))}
-                      {c.members.length > 8 && (
-                        <span className="text-gray-400 text-[11px]">
-                          +{c.members.length - 8} more
-                        </span>
-                      )}
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <Table<PriorityCluster>
+          ariaLabel="Delivery priorities by cluster"
+          variant="compact"
+          className="border border-gray-100 rounded-lg"
+          columns={clusterColumns}
+          data={clusters}
+          getRowId={(c) => c.cluster_id}
+          rowClassName={() => "align-top hover:bg-gray-50"}
+        />
       ) : (
-        <div className="overflow-x-auto border border-gray-100 rounded-lg">
-          <table className="w-full" aria-label="Delivery priorities">
-            <thead className="bg-gray-50 border-b border-gray-100">
-              <tr>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                  Station
-                </th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                  Name
-                </th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                  Fuel Grade
-                </th>
-                <th className="px-4 py-3 text-right text-xs font-medium text-gray-600 uppercase tracking-wider">
-                  Priority Score
-                </th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                  Urgency
-                </th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                  Safe to Delay
-                </th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                  Cluster
-                </th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                  Timestamp
-                </th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {paginatedItems.map((p, i) => {
-                const urgencyKey =
-                  (p as any).urgency ?? p.priority_bucket ?? "low";
-                const urgencyStyle =
-                  URGENCY_CONFIG[urgencyKey] ?? URGENCY_CONFIG.low;
-                const bucket = p.safe_to_delay_bucket;
-                const bucketBadge = bucket
-                  ? SAFE_TO_DELAY_BADGE[bucket]
-                  : "bg-gray-100 text-gray-500";
-                return (
-                  <tr
-                    key={`${p.station_id ?? p.customer_tank_id ?? "row"}-${p.fuel_grade}-${i}`}
-                    className="hover:bg-gray-50"
-                  >
-                    <td className="px-4 py-3 text-sm font-medium text-primary">
-                      {p.station_id ?? p.customer_tank_id ?? "—"}
-                    </td>
-                    <td className="px-4 py-3 text-sm text-gray-700">
-                      {p.station_name ??
-                        p.station_id ??
-                        p.customer_tank_id ??
-                        "—"}
-                    </td>
-                    <td className="px-4 py-3 text-sm text-gray-700">
-                      {p.fuel_grade}
-                    </td>
-                    <td className="px-4 py-3 text-sm text-right text-gray-700">
-                      {(p.priority_score ?? 0).toFixed(2)}
-                    </td>
-                    <td className="px-4 py-3">
-                      <span
-                        className={`inline-flex items-center px-2.5 py-0.5 rounded-md text-xs font-medium ${urgencyStyle.bg} ${urgencyStyle.color}`}
-                      >
-                        {urgencyKey}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3">
-                      <span
-                        className={`inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium ${bucketBadge}`}
-                      >
-                        {bucket ?? "—"}
-                        {p.safe_to_delay_days != null
-                          ? ` · ${p.safe_to_delay_days}d`
-                          : ""}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-xs text-gray-600">
-                      {p.cluster_id ? (
-                        <span>
-                          {p.cluster_id}
-                          {p.cluster_size != null
-                            ? ` (n=${p.cluster_size})`
-                            : ""}
-                        </span>
-                      ) : (
-                        <span className="text-gray-400">—</span>
-                      )}
-                    </td>
-                    <td className="px-4 py-3 text-xs text-gray-500">
-                      {p.timestamp
-                        ? new Date(p.timestamp).toLocaleString()
-                        : "—"}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+        <div className="border border-gray-100 rounded-lg">
+          <Table<PriorityEntry>
+            ariaLabel="Delivery priorities"
+            variant="compact"
+            columns={priorityColumns}
+            data={paginatedItems}
+          />
           {paginationMeta.total_pages > 1 && (
             <PaginationControls
               pagination={paginationMeta}
@@ -3054,6 +3070,51 @@ function PrioritiesTab() {
 interface PriorityClustersPanelProps {
   addError: (message: string) => void;
 }
+
+const priorityClusterColumns: Column<PriorityClusterItem>[] = [
+  {
+    key: "cluster",
+    label: "Cluster",
+    className: "font-medium text-primary",
+    render: (cluster) => cluster.cluster_id,
+  },
+  {
+    key: "members",
+    label: "Members",
+    align: "right",
+    className: "text-gray-700",
+    render: (cluster) => cluster.member_count,
+  },
+  {
+    key: "highest_priority",
+    label: "Highest Priority",
+    render: (cluster) => {
+      const bucket = cluster.highest_priority_bucket ?? null;
+      const urgencyStyle = bucket
+        ? (URGENCY_CONFIG[bucket] ?? URGENCY_CONFIG.low)
+        : null;
+      return bucket && urgencyStyle ? (
+        <span
+          className={`inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium ${urgencyStyle.bg} ${urgencyStyle.color}`}
+        >
+          {bucket}
+        </span>
+      ) : (
+        <span className="text-gray-400">—</span>
+      );
+    },
+  },
+  {
+    key: "centroid",
+    label: "Centroid",
+    className: "text-gray-600",
+    render: (cluster) => (
+      <>
+        {cluster.centroid.lat.toFixed(5)},{cluster.centroid.lon.toFixed(5)}
+      </>
+    ),
+  },
+];
 
 function PriorityClustersPanel({ addError }: PriorityClustersPanelProps) {
   const [epsMiles, setEpsMiles] = useState(3);
@@ -3201,62 +3262,13 @@ function PriorityClustersPanel({ addError }: PriorityClustersPanelProps) {
       ) : !data || data.items.length === 0 ? (
         <div className="text-center py-8 text-xs text-gray-400">No results</div>
       ) : (
-        <div className="overflow-x-auto">
-          <table
-            className="w-full text-xs"
-            aria-label="Priority clusters (DBSCAN)"
-          >
-            <thead className="bg-gray-50">
-              <tr>
-                <th className="px-3 py-2 text-left text-gray-600 font-medium">
-                  Cluster
-                </th>
-                <th className="px-3 py-2 text-right text-gray-600 font-medium">
-                  Members
-                </th>
-                <th className="px-3 py-2 text-left text-gray-600 font-medium">
-                  Highest Priority
-                </th>
-                <th className="px-3 py-2 text-left text-gray-600 font-medium">
-                  Centroid
-                </th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {data.items.map((cluster: PriorityClusterItem) => {
-                const bucket = cluster.highest_priority_bucket ?? null;
-                const urgencyStyle = bucket
-                  ? (URGENCY_CONFIG[bucket] ?? URGENCY_CONFIG.low)
-                  : null;
-                return (
-                  <tr key={cluster.cluster_id} className="hover:bg-gray-50">
-                    <td className="px-3 py-2 font-medium text-primary">
-                      {cluster.cluster_id}
-                    </td>
-                    <td className="px-3 py-2 text-right text-gray-700">
-                      {cluster.member_count}
-                    </td>
-                    <td className="px-3 py-2">
-                      {bucket && urgencyStyle ? (
-                        <span
-                          className={`inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium ${urgencyStyle.bg} ${urgencyStyle.color}`}
-                        >
-                          {bucket}
-                        </span>
-                      ) : (
-                        <span className="text-gray-400">—</span>
-                      )}
-                    </td>
-                    <td className="px-3 py-2 text-gray-600">
-                      {cluster.centroid.lat.toFixed(5)},
-                      {cluster.centroid.lon.toFixed(5)}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+        <Table<PriorityClusterItem>
+          ariaLabel="Priority clusters (DBSCAN)"
+          variant="compact"
+          columns={priorityClusterColumns}
+          data={data.items}
+          getRowId={(cluster) => cluster.cluster_id}
+        />
       )}
     </div>
   );

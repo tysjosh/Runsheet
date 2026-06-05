@@ -2,6 +2,7 @@
 
 import type React from "react";
 import { useCallback, useEffect, useState } from "react";
+import { type Column, Table } from "@/components/ui";
 import {
   type ContractStatus,
   type ContractType,
@@ -127,6 +128,116 @@ function computeSettlementVariance(
   };
 }
 
+// ─── Settlement Variance Cell ────────────────────────────────────────────────
+
+function renderVarianceCell(
+  contract: PriceProtectionContract,
+  marketPriceCents: number,
+) {
+  const variance = computeSettlementVariance(contract, marketPriceCents);
+  if (variance.gallonsDelivered === 0) {
+    return <span className="text-gray-400">No deliveries</span>;
+  }
+
+  const varianceDollars = variance.varianceCents / 100;
+  const isPositive = varianceDollars >= 0;
+
+  return (
+    <div className="text-sm">
+      <span
+        className={`font-medium ${isPositive ? "text-success-dark" : "text-error-dark"}`}
+      >
+        {isPositive ? "+" : ""}${varianceDollars.toFixed(2)}
+      </span>
+      <span className="text-gray-400 ml-1 text-xs">
+        ({formatGallons(variance.gallonsDelivered)} gal)
+      </span>
+    </div>
+  );
+}
+
+// ─── Table columns ───────────────────────────────────────────────────────────
+
+function getContractColumns(
+  marketPriceCents: number,
+  onEdit: (contract: PriceProtectionContract) => void,
+): Column<PriceProtectionContract>[] {
+  return [
+    {
+      key: "customer_id",
+      label: "Customer ID",
+      render: (contract) => (
+        <span className="font-medium">{contract.customer_id}</span>
+      ),
+    },
+    {
+      key: "product_code",
+      label: "Product",
+      render: (contract) => contract.product_code,
+    },
+    {
+      key: "contract_type",
+      label: "Type",
+      render: (contract) => (
+        <span
+          className={`inline-block px-2 py-1 rounded text-xs font-medium ${contractTypeBadge(contract.contract_type)}`}
+        >
+          {contractTypeLabel(contract.contract_type)}
+        </span>
+      ),
+    },
+    {
+      key: "start_date",
+      label: "Start Date",
+      render: (contract) => formatDate(contract.start_date),
+    },
+    {
+      key: "end_date",
+      label: "End Date",
+      render: (contract) => formatDate(contract.end_date),
+    },
+    {
+      key: "contracted_gallons",
+      label: "Contracted Gal",
+      render: (contract) => formatGallons(contract.contracted_gallons),
+    },
+    {
+      key: "remaining_gallons",
+      label: "Remaining Gal",
+      render: (contract) => formatGallons(contract.remaining_gallons),
+    },
+    {
+      key: "status",
+      label: "Status",
+      render: (contract) => (
+        <span
+          className={`inline-block px-2 py-1 rounded text-xs font-medium ${statusBadge(contract.status)}`}
+        >
+          {contract.status}
+        </span>
+      ),
+    },
+    {
+      key: "settlement_variance",
+      label: "Settlement Variance",
+      render: (contract) => renderVarianceCell(contract, marketPriceCents),
+    },
+    {
+      key: "actions",
+      label: "Actions",
+      render: (contract) => (
+        <button
+          type="button"
+          onClick={() => onEdit(contract)}
+          className="text-info hover:underline text-sm"
+        >
+          Edit
+        </button>
+      ),
+    },
+  ];
+}
+
 // ─── Main Component ──────────────────────────────────────────────────────────
 
 export default function PriceProtectionContractsPage() {
@@ -190,31 +301,6 @@ export default function PriceProtectionContractsPage() {
   const filteredContracts = contractTypeFilter
     ? contracts.filter((c) => c.contract_type === contractTypeFilter)
     : contracts;
-
-  // ─── Render: Settlement Variance Display ─────────────────────────────────
-
-  function renderVarianceCell(contract: PriceProtectionContract) {
-    const variance = computeSettlementVariance(contract, marketPriceCents);
-    if (variance.gallonsDelivered === 0) {
-      return <span className="text-gray-400">No deliveries</span>;
-    }
-
-    const varianceDollars = variance.varianceCents / 100;
-    const isPositive = varianceDollars >= 0;
-
-    return (
-      <div className="text-sm">
-        <span
-          className={`font-medium ${isPositive ? "text-success-dark" : "text-error-dark"}`}
-        >
-          {isPositive ? "+" : ""}${varianceDollars.toFixed(2)}
-        </span>
-        <span className="text-gray-400 ml-1 text-xs">
-          ({formatGallons(variance.gallonsDelivered)} gal)
-        </span>
-      </div>
-    );
-  }
 
   // ─── Render: Listing View ────────────────────────────────────────────────
 
@@ -294,83 +380,15 @@ export default function PriceProtectionContractsPage() {
         {/* Contracts table */}
         {!loading && !error && (
           <>
-            <div className="overflow-x-auto">
-              <table className="w-full border-collapse" role="table">
-                <thead>
-                  <tr className="border-b bg-gray-50">
-                    <th className="text-left p-3 font-medium">Customer ID</th>
-                    <th className="text-left p-3 font-medium">Product</th>
-                    <th className="text-left p-3 font-medium">Type</th>
-                    <th className="text-left p-3 font-medium">Start Date</th>
-                    <th className="text-left p-3 font-medium">End Date</th>
-                    <th className="text-left p-3 font-medium">
-                      Contracted Gal
-                    </th>
-                    <th className="text-left p-3 font-medium">Remaining Gal</th>
-                    <th className="text-left p-3 font-medium">Status</th>
-                    <th className="text-left p-3 font-medium">
-                      Settlement Variance
-                    </th>
-                    <th className="text-left p-3 font-medium">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredContracts.map((contract) => (
-                    <tr
-                      key={contract.contract_id}
-                      className="border-b hover:bg-gray-50"
-                    >
-                      <td className="p-3 font-medium">
-                        {contract.customer_id}
-                      </td>
-                      <td className="p-3">{contract.product_code}</td>
-                      <td className="p-3">
-                        <span
-                          className={`inline-block px-2 py-1 rounded text-xs font-medium ${contractTypeBadge(contract.contract_type)}`}
-                        >
-                          {contractTypeLabel(contract.contract_type)}
-                        </span>
-                      </td>
-                      <td className="p-3">{formatDate(contract.start_date)}</td>
-                      <td className="p-3">{formatDate(contract.end_date)}</td>
-                      <td className="p-3">
-                        {formatGallons(contract.contracted_gallons)}
-                      </td>
-                      <td className="p-3">
-                        {formatGallons(contract.remaining_gallons)}
-                      </td>
-                      <td className="p-3">
-                        <span
-                          className={`inline-block px-2 py-1 rounded text-xs font-medium ${statusBadge(contract.status)}`}
-                        >
-                          {contract.status}
-                        </span>
-                      </td>
-                      <td className="p-3">{renderVarianceCell(contract)}</td>
-                      <td className="p-3">
-                        <button
-                          type="button"
-                          onClick={() => handleEditContract(contract)}
-                          className="text-info hover:underline text-sm"
-                        >
-                          Edit
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                  {filteredContracts.length === 0 && (
-                    <tr>
-                      <td
-                        colSpan={10}
-                        className="p-6 text-center text-gray-500"
-                      >
-                        No contracts found.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
+            <Table<PriceProtectionContract>
+              ariaLabel="Price protection contracts"
+              columns={getContractColumns(marketPriceCents, handleEditContract)}
+              data={filteredContracts}
+              getRowId={(contract) => contract.contract_id}
+              emptyState={
+                <span className="text-gray-500">No contracts found.</span>
+              }
+            />
 
             {/* Pagination */}
             <nav

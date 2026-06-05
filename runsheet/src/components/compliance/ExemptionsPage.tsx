@@ -2,6 +2,7 @@
 
 import type React from "react";
 import { useCallback, useEffect, useState } from "react";
+import { type Column, Table } from "@/components/ui";
 import {
   type CreateTaxExemptionPayload,
   createTaxExemption,
@@ -73,6 +74,47 @@ function getExemptionTypeLabel(type: string): string {
   const found = EXEMPTION_TYPES.find((t) => t.value === type);
   return found ? found.label : type;
 }
+
+// ─── Table columns ───────────────────────────────────────────────────────────
+
+const exemptionColumns: Column<TaxExemption>[] = [
+  {
+    key: "customer_id",
+    label: "Customer ID",
+    render: (e) => <span className="font-medium">{e.customer_id}</span>,
+  },
+  {
+    key: "exemption_type",
+    label: "Exemption Type",
+    render: (e) => getExemptionTypeLabel(e.exemption_type),
+  },
+  {
+    key: "certificate_number",
+    label: "Certificate Number",
+    render: (e) => (
+      <span className="font-mono text-sm">{e.certificate_number}</span>
+    ),
+  },
+  {
+    key: "expiry_date",
+    label: "Expiry Date",
+    render: (e) => formatDate(e.expiry_date),
+  },
+  {
+    key: "status",
+    label: "Status",
+    render: (e) => {
+      const status = getExpiryStatus(e.expiry_date);
+      return (
+        <span
+          className={`inline-block px-2 py-1 rounded text-xs font-medium ${expiryStatusBadge(status)}`}
+        >
+          {expiryStatusLabel(status)}
+        </span>
+      );
+    },
+  },
+];
 
 // ─── Main Component ──────────────────────────────────────────────────────────
 
@@ -184,57 +226,17 @@ export default function ExemptionsPage() {
         {/* Exemptions table */}
         {!loading && !error && (
           <>
-            <table className="w-full border-collapse" role="table">
-              <thead>
-                <tr className="border-b bg-gray-50">
-                  <th className="text-left p-3 font-medium">Customer ID</th>
-                  <th className="text-left p-3 font-medium">Exemption Type</th>
-                  <th className="text-left p-3 font-medium">
-                    Certificate Number
-                  </th>
-                  <th className="text-left p-3 font-medium">Expiry Date</th>
-                  <th className="text-left p-3 font-medium">Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {exemptions.map((exemption) => {
-                  const status = getExpiryStatus(exemption.expiry_date);
-                  return (
-                    <tr
-                      key={exemption.exemption_id}
-                      className="border-b hover:bg-gray-50"
-                    >
-                      <td className="p-3 font-medium">
-                        {exemption.customer_id}
-                      </td>
-                      <td className="p-3">
-                        {getExemptionTypeLabel(exemption.exemption_type)}
-                      </td>
-                      <td className="p-3 font-mono text-sm">
-                        {exemption.certificate_number}
-                      </td>
-                      <td className="p-3">
-                        {formatDate(exemption.expiry_date)}
-                      </td>
-                      <td className="p-3">
-                        <span
-                          className={`inline-block px-2 py-1 rounded text-xs font-medium ${expiryStatusBadge(status)}`}
-                        >
-                          {expiryStatusLabel(status)}
-                        </span>
-                      </td>
-                    </tr>
-                  );
-                })}
-                {exemptions.length === 0 && (
-                  <tr>
-                    <td colSpan={5} className="p-6 text-center text-gray-500">
-                      No exemption certificates found.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
+            <Table<TaxExemption>
+              ariaLabel="Tax exemption certificates"
+              columns={exemptionColumns}
+              data={exemptions}
+              getRowId={(e) => e.exemption_id}
+              emptyState={
+                <span className="text-gray-500">
+                  No exemption certificates found.
+                </span>
+              }
+            />
 
             {/* Pagination */}
             <nav

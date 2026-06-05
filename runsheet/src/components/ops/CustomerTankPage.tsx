@@ -30,7 +30,6 @@ import {
   ChevronLeft,
   ChevronRight,
   Gauge,
-  Loader2,
   MapPin,
   Pencil,
   Plus,
@@ -39,6 +38,7 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { type Column, Table } from "@/components/ui";
 import type {
   CustomerTank,
   CustomerTankCreatePayload,
@@ -1352,6 +1352,139 @@ export default function CustomerTankPage({
     return `Showing ${start}–${end} of ${totalWindow}${hasNext ? "+" : ""}`;
   }, [tanks.length, page, totalWindow, hasNext]);
 
+  const tankColumns: Column<CustomerTank>[] = [
+    {
+      key: "tank_customer",
+      label: "Tank / Customer",
+      render: (tank) => (
+        <div className="text-sm">
+          <div className="font-medium text-primary">
+            {tank.customer_tank_id}
+          </div>
+          <div className="text-xs text-gray-500">{tank.customer_id}</div>
+        </div>
+      ),
+    },
+    {
+      key: "customer_type",
+      label: "Type",
+      className: "text-sm text-gray-700 capitalize",
+      render: (tank) => tank.customer_type.replace(/_/g, " "),
+    },
+    {
+      key: "fuel",
+      label: "Fuel",
+      className: "text-sm text-gray-700",
+      render: (tank) => (
+        <>
+          <div className="capitalize">{tank.fuel_type.replace(/_/g, " ")}</div>
+          <div className="text-xs text-gray-400">{tank.fuel_product_code}</div>
+        </>
+      ),
+    },
+    {
+      key: "capacity_level",
+      label: "Capacity / Level",
+      render: (tank) => {
+        const pct = levelPct(tank);
+        return (
+          <>
+            <div className="flex items-center gap-2">
+              <div
+                className="flex-1 h-2 bg-gray-200 rounded-full overflow-hidden min-w-[80px]"
+                role="progressbar"
+                aria-valuenow={Math.round(pct)}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-label={`Fill level ${Math.round(pct)}%`}
+              >
+                <div
+                  className="h-full rounded-full bg-info"
+                  style={{ width: `${pct}%` }}
+                />
+              </div>
+              <span className="text-xs text-gray-600 w-14 text-right">
+                {pct.toFixed(0)}%
+              </span>
+            </div>
+            <div className="text-xs text-gray-400 mt-0.5">
+              {formatGallons(tank.current_level_gallons)} /{" "}
+              {formatGallons(tank.capacity_gallons)} gal
+            </div>
+          </>
+        );
+      },
+    },
+    {
+      key: "zip_code",
+      label: "ZIP",
+      className: "text-sm text-gray-700",
+      render: (tank) => (
+        <span className="inline-flex items-center gap-1">
+          <MapPin className="w-3 h-3 text-gray-400" aria-hidden="true" />
+          {tank.zip_code}
+        </span>
+      ),
+    },
+    {
+      key: "k_factor",
+      label: "K-Factor",
+      render: (tank) => {
+        const k = formatKFactor(tank.k_factor);
+        return (
+          <span
+            title={k.title}
+            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium ${k.bg} ${k.color}`}
+          >
+            <Gauge className="w-3 h-3" aria-hidden="true" />
+            {k.label}
+          </span>
+        );
+      },
+    },
+    {
+      key: "runout_forecast",
+      label: "Runout Forecast",
+      render: (tank) => {
+        const fc = formatRunoutForecast(
+          forecastsByTank[tank.customer_tank_id] ?? null,
+        );
+        return (
+          <>
+            <span
+              title={fc.title}
+              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium ${fc.bg} ${fc.color}`}
+            >
+              {fc.label}
+            </span>
+            <div className="text-xs text-gray-400 mt-0.5">{fc.detail}</div>
+          </>
+        );
+      },
+    },
+    {
+      key: "status",
+      label: "Status",
+      render: (tank) => <StatusBadge status={tank.status} />,
+    },
+    {
+      key: "actions",
+      label: "Actions",
+      align: "right",
+      render: (tank) => (
+        <button
+          type="button"
+          onClick={() => setFormOpen({ mode: "edit", tank })}
+          className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-gray-600 bg-gray-100 rounded-md hover:bg-gray-200 hover:text-gray-800 transition-colors"
+          aria-label={`Edit tank ${tank.customer_tank_id}`}
+        >
+          <Pencil className="w-3 h-3" aria-hidden="true" />
+          Edit
+        </button>
+      ),
+    },
+  ];
+
   return (
     <div className="min-h-screen bg-gray-50">
       <ToastContainer toasts={toasts} onDismiss={dismissToast} />
@@ -1399,158 +1532,23 @@ export default function CustomerTankPage({
 
         {/* List */}
         <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
-          {loading && tanks.length === 0 ? (
-            <div className="flex items-center justify-center py-16">
-              <Loader2 className="w-5 h-5 text-gray-400 animate-spin" />
-            </div>
-          ) : tanks.length === 0 ? (
-            <div className="text-center py-16 text-gray-500">
-              <p className="text-lg font-medium text-gray-400">
-                No customer tanks found
-              </p>
-              <p className="text-sm text-gray-400 mt-1">
-                Try adjusting your filters or add a new tank.
-              </p>
-            </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full" aria-label="Customer tank list">
-                <thead className="bg-gray-50 border-b border-gray-100">
-                  <tr>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                      Tank / Customer
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                      Type
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                      Fuel
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                      Capacity / Level
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                      ZIP
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                      K-Factor
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                      Runout Forecast
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                      Status
-                    </th>
-                    <th className="px-6 py-3 text-right text-xs font-medium text-gray-600 uppercase tracking-wider">
-                      Actions
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                  {tanks.map((tank) => {
-                    const pct = levelPct(tank);
-                    const k = formatKFactor(tank.k_factor);
-                    const fc = formatRunoutForecast(
-                      forecastsByTank[tank.customer_tank_id] ?? null,
-                    );
-                    return (
-                      <tr
-                        key={tank.customer_tank_id}
-                        className="hover:bg-gray-50"
-                      >
-                        <td className="px-6 py-3 text-sm">
-                          <div className="font-medium text-primary">
-                            {tank.customer_tank_id}
-                          </div>
-                          <div className="text-xs text-gray-500">
-                            {tank.customer_id}
-                          </div>
-                        </td>
-                        <td className="px-6 py-3 text-sm text-gray-700 capitalize">
-                          {tank.customer_type.replace(/_/g, " ")}
-                        </td>
-                        <td className="px-6 py-3 text-sm text-gray-700">
-                          <div className="capitalize">
-                            {tank.fuel_type.replace(/_/g, " ")}
-                          </div>
-                          <div className="text-xs text-gray-400">
-                            {tank.fuel_product_code}
-                          </div>
-                        </td>
-                        <td className="px-6 py-3">
-                          <div className="flex items-center gap-2">
-                            <div
-                              className="flex-1 h-2 bg-gray-200 rounded-full overflow-hidden min-w-[80px]"
-                              role="progressbar"
-                              aria-valuenow={Math.round(pct)}
-                              aria-valuemin={0}
-                              aria-valuemax={100}
-                              aria-label={`Fill level ${Math.round(pct)}%`}
-                            >
-                              <div
-                                className="h-full rounded-full bg-info"
-                                style={{ width: `${pct}%` }}
-                              />
-                            </div>
-                            <span className="text-xs text-gray-600 w-14 text-right">
-                              {pct.toFixed(0)}%
-                            </span>
-                          </div>
-                          <div className="text-xs text-gray-400 mt-0.5">
-                            {formatGallons(tank.current_level_gallons)} /{" "}
-                            {formatGallons(tank.capacity_gallons)} gal
-                          </div>
-                        </td>
-                        <td className="px-6 py-3 text-sm text-gray-700">
-                          <span className="inline-flex items-center gap-1">
-                            <MapPin
-                              className="w-3 h-3 text-gray-400"
-                              aria-hidden="true"
-                            />
-                            {tank.zip_code}
-                          </span>
-                        </td>
-                        <td className="px-6 py-3">
-                          <span
-                            title={k.title}
-                            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium ${k.bg} ${k.color}`}
-                          >
-                            <Gauge className="w-3 h-3" aria-hidden="true" />
-                            {k.label}
-                          </span>
-                        </td>
-                        <td className="px-6 py-3">
-                          <span
-                            title={fc.title}
-                            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium ${fc.bg} ${fc.color}`}
-                          >
-                            {fc.label}
-                          </span>
-                          <div className="text-xs text-gray-400 mt-0.5">
-                            {fc.detail}
-                          </div>
-                        </td>
-                        <td className="px-6 py-3">
-                          <StatusBadge status={tank.status} />
-                        </td>
-                        <td className="px-6 py-3 text-right">
-                          <button
-                            type="button"
-                            onClick={() => setFormOpen({ mode: "edit", tank })}
-                            className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-gray-600 bg-gray-100 rounded-md hover:bg-gray-200 hover:text-gray-800 transition-colors"
-                            aria-label={`Edit tank ${tank.customer_tank_id}`}
-                          >
-                            <Pencil className="w-3 h-3" aria-hidden="true" />
-                            Edit
-                          </button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
+          <Table<CustomerTank>
+            ariaLabel="Customer tank list"
+            columns={tankColumns}
+            data={tanks}
+            getRowId={(tank) => tank.customer_tank_id}
+            loading={loading && tanks.length === 0}
+            emptyState={
+              <div className="text-gray-500">
+                <p className="text-lg font-medium text-gray-400">
+                  No customer tanks found
+                </p>
+                <p className="text-sm text-gray-400 mt-1">
+                  Try adjusting your filters or add a new tank.
+                </p>
+              </div>
+            }
+          />
 
           {/* Pagination */}
           {tanks.length > 0 && (

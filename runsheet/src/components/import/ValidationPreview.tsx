@@ -9,7 +9,65 @@ import {
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { importApi } from "../../services/importApi";
-import type { ValidationResult } from "../../types/import";
+import type { ValidationIssue, ValidationResult } from "../../types/import";
+import { type Column, Table } from "../ui";
+
+// ─── Table columns ───────────────────────────────────────────────────────────
+
+const errorColumns: Column<ValidationIssue>[] = [
+  {
+    key: "row_number",
+    label: "Row",
+    headerClassName: "text-error-dark w-20",
+    className: "text-error-dark font-medium",
+    render: (issue) => issue.row_number,
+  },
+  {
+    key: "field_name",
+    label: "Field",
+    headerClassName: "text-error-dark w-36",
+    className: "text-error-dark font-mono text-xs",
+    render: (issue) => issue.field_name,
+  },
+  {
+    key: "description",
+    label: "Description",
+    headerClassName: "text-error-dark",
+    className: "text-error",
+    render: (issue) => issue.description,
+  },
+  {
+    key: "value",
+    label: "Value",
+    headerClassName: "text-error-dark w-36",
+    className: "text-error font-mono text-xs truncate max-w-[140px]",
+    render: (issue) => issue.value ?? "—",
+  },
+];
+
+const warningColumns: Column<ValidationIssue>[] = [
+  {
+    key: "row_number",
+    label: "Row",
+    headerClassName: "text-warning-dark w-20",
+    className: "text-warning-dark font-medium",
+    render: (issue) => issue.row_number,
+  },
+  {
+    key: "field_name",
+    label: "Field",
+    headerClassName: "text-warning-dark w-36",
+    className: "text-warning-dark font-mono text-xs",
+    render: (issue) => issue.field_name,
+  },
+  {
+    key: "description",
+    label: "Description",
+    headerClassName: "text-warning-dark",
+    className: "text-warning",
+    render: (issue) => issue.description,
+  },
+];
 
 // ─── Props ───────────────────────────────────────────────────────────────────
 
@@ -118,8 +176,10 @@ export default function ValidationPreview({
     );
   }
 
-  // At this point validationResult is guaranteed non-null
-  const result = validationResult!;
+  // At this point validationResult is guaranteed non-null (loading/error
+  // states returned above), but guard explicitly to satisfy strict checks.
+  if (!validationResult) return null;
+  const result = validationResult;
   const hasErrors = result.error_count > 0;
   const hasWarnings = result.warning_count > 0;
   const canImport = result.valid_rows > 0;
@@ -190,49 +250,12 @@ export default function ValidationPreview({
           </div>
           <div className="rounded-xl border border-error-light overflow-hidden">
             <div className="max-h-64 overflow-y-auto">
-              <table className="w-full text-sm">
-                <thead className="bg-error-light sticky top-0">
-                  <tr>
-                    <th className="text-left px-4 py-2.5 text-xs font-medium text-error-dark uppercase tracking-wider w-20">
-                      Row
-                    </th>
-                    <th className="text-left px-4 py-2.5 text-xs font-medium text-error-dark uppercase tracking-wider w-36">
-                      Field
-                    </th>
-                    <th className="text-left px-4 py-2.5 text-xs font-medium text-error-dark uppercase tracking-wider">
-                      Description
-                    </th>
-                    <th className="text-left px-4 py-2.5 text-xs font-medium text-error-dark uppercase tracking-wider w-36">
-                      Value
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {result.errors.map((issue, idx) => (
-                    <tr
-                      key={`err-${issue.row_number}-${issue.field_name}-${idx}`}
-                      className={
-                        idx < result.errors.length - 1
-                          ? "border-b border-error-light"
-                          : ""
-                      }
-                    >
-                      <td className="px-4 py-2.5 text-error-dark font-medium">
-                        {issue.row_number}
-                      </td>
-                      <td className="px-4 py-2.5 text-error-dark font-mono text-xs">
-                        {issue.field_name}
-                      </td>
-                      <td className="px-4 py-2.5 text-error">
-                        {issue.description}
-                      </td>
-                      <td className="px-4 py-2.5 text-error font-mono text-xs truncate max-w-[140px]">
-                        {issue.value ?? "—"}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+              <Table<ValidationIssue>
+                ariaLabel="Validation errors"
+                columns={errorColumns}
+                data={result.errors}
+                variant="compact"
+              />
             </div>
           </div>
         </div>
@@ -249,43 +272,12 @@ export default function ValidationPreview({
           </div>
           <div className="rounded-xl border border-warning-light overflow-hidden">
             <div className="max-h-64 overflow-y-auto">
-              <table className="w-full text-sm">
-                <thead className="bg-warning-light sticky top-0">
-                  <tr>
-                    <th className="text-left px-4 py-2.5 text-xs font-medium text-warning-dark uppercase tracking-wider w-20">
-                      Row
-                    </th>
-                    <th className="text-left px-4 py-2.5 text-xs font-medium text-warning-dark uppercase tracking-wider w-36">
-                      Field
-                    </th>
-                    <th className="text-left px-4 py-2.5 text-xs font-medium text-warning-dark uppercase tracking-wider">
-                      Description
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {result.warnings.map((issue, idx) => (
-                    <tr
-                      key={`warn-${issue.row_number}-${issue.field_name}-${idx}`}
-                      className={
-                        idx < result.warnings.length - 1
-                          ? "border-b border-warning-light"
-                          : ""
-                      }
-                    >
-                      <td className="px-4 py-2.5 text-warning-dark font-medium">
-                        {issue.row_number}
-                      </td>
-                      <td className="px-4 py-2.5 text-warning-dark font-mono text-xs">
-                        {issue.field_name}
-                      </td>
-                      <td className="px-4 py-2.5 text-warning">
-                        {issue.description}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+              <Table<ValidationIssue>
+                ariaLabel="Validation warnings"
+                columns={warningColumns}
+                data={result.warnings}
+                variant="compact"
+              />
             </div>
           </div>
         </div>

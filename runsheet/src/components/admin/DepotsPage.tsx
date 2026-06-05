@@ -46,6 +46,7 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { type Column, Table } from "@/components/ui";
 import {
   createDepot,
   type Depot,
@@ -1056,6 +1057,144 @@ export default function DepotsPage({ initialFilters }: DepotsPageProps = {}) {
     return `Showing ${start}–${end} of ${totalWindow}${hasNext ? "+" : ""}`;
   }, [depots.length, page, totalWindow, hasNext]);
 
+  const depotColumns: Column<Depot>[] = [
+    {
+      key: "depot",
+      label: "Depot",
+      className: "text-sm",
+      render: (depot) => {
+        const isDefault = isDefaultDepot(depot);
+        return (
+          <>
+            <div className="flex items-center gap-2">
+              <span className="font-medium text-primary">{depot.name}</span>
+              {isDefault && (
+                <span
+                  title="Tenant default depot"
+                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-warning-light text-warning-dark"
+                >
+                  <Star className="w-2.5 h-2.5" aria-hidden="true" />
+                  default
+                </span>
+              )}
+            </div>
+            <div className="text-xs text-gray-500">{depot.depot_id}</div>
+          </>
+        );
+      },
+    },
+    {
+      key: "location",
+      label: "Location",
+      className: "text-sm text-gray-700",
+      render: (depot) => (
+        <div className="flex items-start gap-1">
+          <MapPin
+            className="w-3 h-3 text-gray-400 mt-0.5 shrink-0"
+            aria-hidden="true"
+          />
+          <div>
+            <div className="line-clamp-2">{depot.address}</div>
+            <div className="text-xs text-gray-400 font-mono">
+              {formatCoordinates(depot)}
+            </div>
+          </div>
+        </div>
+      ),
+    },
+    {
+      key: "timezone",
+      label: "Timezone",
+      className: "text-sm text-gray-700",
+      render: (depot) => (
+        <span className="inline-flex items-center gap-1">
+          <Clock className="w-3 h-3 text-gray-400" aria-hidden="true" />
+          {depot.timezone}
+        </span>
+      ),
+    },
+    {
+      key: "products",
+      label: "Products",
+      render: (depot) => (
+        <div className="flex flex-wrap gap-1 max-w-[240px]">
+          {depot.fuel_types_supported.length === 0 ? (
+            <span className="text-xs text-gray-400">—</span>
+          ) : (
+            depot.fuel_types_supported.map((code) => (
+              <span
+                key={code}
+                className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-info-light text-info-dark"
+              >
+                {code}
+              </span>
+            ))
+          )}
+        </div>
+      ),
+    },
+    {
+      key: "status",
+      label: "Status",
+      render: (depot) => <StatusBadge status={depot.status} />,
+    },
+    {
+      key: "actions",
+      label: "Actions",
+      align: "right",
+      render: (depot) => {
+        const isDefault = isDefaultDepot(depot);
+        return (
+          <div className="inline-flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => handleSetDefault(depot)}
+              disabled={isDefault || settingDefaultId === depot.depot_id}
+              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-gray-600 bg-gray-100 rounded-md hover:bg-gray-200 hover:text-gray-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              aria-label={
+                isDefault
+                  ? `${depot.name} is the tenant default`
+                  : `Set ${depot.name} as tenant default`
+              }
+              title={
+                isDefault
+                  ? "Already the tenant default"
+                  : "Set as tenant default"
+              }
+            >
+              {settingDefaultId === depot.depot_id ? (
+                <Loader2 className="w-3 h-3 animate-spin" aria-hidden="true" />
+              ) : isDefault ? (
+                <Star className="w-3 h-3" aria-hidden="true" />
+              ) : (
+                <StarOff className="w-3 h-3" aria-hidden="true" />
+              )}
+              {isDefault ? "Default" : "Set default"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setFormOpen({ mode: "edit", depot })}
+              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-gray-600 bg-gray-100 rounded-md hover:bg-gray-200 hover:text-gray-800 transition-colors"
+              aria-label={`Edit depot ${depot.depot_id}`}
+            >
+              <Pencil className="w-3 h-3" aria-hidden="true" />
+              Edit
+            </button>
+            <button
+              type="button"
+              onClick={() => setDeleteTarget(depot)}
+              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-error bg-error-light rounded-md hover:bg-error-light hover:text-error-dark transition-colors"
+              aria-label={`Delete depot ${depot.depot_id}`}
+            >
+              <Trash2 className="w-3 h-3" aria-hidden="true" />
+              Delete
+            </button>
+          </div>
+        );
+      },
+    },
+  ];
+
   return (
     <div className="min-h-screen bg-gray-50">
       <ToastContainer toasts={toasts} onDismiss={dismissToast} />
@@ -1110,179 +1249,28 @@ export default function DepotsPage({ initialFilters }: DepotsPageProps = {}) {
 
         {/* List */}
         <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
-          {loading && depots.length === 0 ? (
-            <div className="flex items-center justify-center py-16">
-              <Loader2 className="w-5 h-5 text-gray-400 animate-spin" />
-            </div>
-          ) : depots.length === 0 ? (
-            <div className="text-center py-16 text-gray-500">
-              <p className="text-lg font-medium text-gray-400">
-                No depots found
-              </p>
-              <p className="text-sm text-gray-400 mt-1">
-                Try adjusting your filters or add a new depot.
-              </p>
-            </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full" aria-label="Depot list">
-                <thead className="bg-gray-50 border-b border-gray-100">
-                  <tr>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                      Depot
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                      Location
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                      Timezone
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                      Products
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                      Status
-                    </th>
-                    <th className="px-6 py-3 text-right text-xs font-medium text-gray-600 uppercase tracking-wider">
-                      Actions
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                  {depots.map((depot) => {
-                    const isDefault = isDefaultDepot(depot);
-                    return (
-                      <tr key={depot.depot_id} className="hover:bg-gray-50">
-                        <td className="px-6 py-3 text-sm">
-                          <div className="flex items-center gap-2">
-                            <span className="font-medium text-primary">
-                              {depot.name}
-                            </span>
-                            {isDefault && (
-                              <span
-                                title="Tenant default depot"
-                                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-warning-light text-warning-dark"
-                              >
-                                <Star
-                                  className="w-2.5 h-2.5"
-                                  aria-hidden="true"
-                                />
-                                default
-                              </span>
-                            )}
-                          </div>
-                          <div className="text-xs text-gray-500">
-                            {depot.depot_id}
-                          </div>
-                        </td>
-                        <td className="px-6 py-3 text-sm text-gray-700">
-                          <div className="flex items-start gap-1">
-                            <MapPin
-                              className="w-3 h-3 text-gray-400 mt-0.5 shrink-0"
-                              aria-hidden="true"
-                            />
-                            <div>
-                              <div className="line-clamp-2">
-                                {depot.address}
-                              </div>
-                              <div className="text-xs text-gray-400 font-mono">
-                                {formatCoordinates(depot)}
-                              </div>
-                            </div>
-                          </div>
-                        </td>
-                        <td className="px-6 py-3 text-sm text-gray-700">
-                          <span className="inline-flex items-center gap-1">
-                            <Clock
-                              className="w-3 h-3 text-gray-400"
-                              aria-hidden="true"
-                            />
-                            {depot.timezone}
-                          </span>
-                        </td>
-                        <td className="px-6 py-3">
-                          <div className="flex flex-wrap gap-1 max-w-[240px]">
-                            {depot.fuel_types_supported.length === 0 ? (
-                              <span className="text-xs text-gray-400">—</span>
-                            ) : (
-                              depot.fuel_types_supported.map((code) => (
-                                <span
-                                  key={code}
-                                  className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-info-light text-info-dark"
-                                >
-                                  {code}
-                                </span>
-                              ))
-                            )}
-                          </div>
-                        </td>
-                        <td className="px-6 py-3">
-                          <StatusBadge status={depot.status} />
-                        </td>
-                        <td className="px-6 py-3 text-right">
-                          <div className="inline-flex items-center gap-1">
-                            <button
-                              type="button"
-                              onClick={() => handleSetDefault(depot)}
-                              disabled={
-                                isDefault || settingDefaultId === depot.depot_id
-                              }
-                              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-gray-600 bg-gray-100 rounded-md hover:bg-gray-200 hover:text-gray-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                              aria-label={
-                                isDefault
-                                  ? `${depot.name} is the tenant default`
-                                  : `Set ${depot.name} as tenant default`
-                              }
-                              title={
-                                isDefault
-                                  ? "Already the tenant default"
-                                  : "Set as tenant default"
-                              }
-                            >
-                              {settingDefaultId === depot.depot_id ? (
-                                <Loader2
-                                  className="w-3 h-3 animate-spin"
-                                  aria-hidden="true"
-                                />
-                              ) : isDefault ? (
-                                <Star className="w-3 h-3" aria-hidden="true" />
-                              ) : (
-                                <StarOff
-                                  className="w-3 h-3"
-                                  aria-hidden="true"
-                                />
-                              )}
-                              {isDefault ? "Default" : "Set default"}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setFormOpen({ mode: "edit", depot })
-                              }
-                              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-gray-600 bg-gray-100 rounded-md hover:bg-gray-200 hover:text-gray-800 transition-colors"
-                              aria-label={`Edit depot ${depot.depot_id}`}
-                            >
-                              <Pencil className="w-3 h-3" aria-hidden="true" />
-                              Edit
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => setDeleteTarget(depot)}
-                              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-error bg-error-light rounded-md hover:bg-error-light hover:text-error-dark transition-colors"
-                              aria-label={`Delete depot ${depot.depot_id}`}
-                            >
-                              <Trash2 className="w-3 h-3" aria-hidden="true" />
-                              Delete
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
+          <Table<Depot>
+            ariaLabel="Depot list"
+            columns={depotColumns}
+            data={depots}
+            getRowId={(depot) => depot.depot_id}
+            loading={loading && depots.length === 0}
+            loadingState={
+              <div className="flex items-center justify-center py-4">
+                <Loader2 className="w-5 h-5 text-gray-400 animate-spin" />
+              </div>
+            }
+            emptyState={
+              <div className="text-gray-500">
+                <p className="text-lg font-medium text-gray-400">
+                  No depots found
+                </p>
+                <p className="text-sm text-gray-400 mt-1">
+                  Try adjusting your filters or add a new depot.
+                </p>
+              </div>
+            }
+          />
 
           {/* Pagination */}
           {depots.length > 0 && (

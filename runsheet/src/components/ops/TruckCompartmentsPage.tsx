@@ -42,6 +42,7 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { type Column, Table } from "@/components/ui";
 import { ApiError } from "../../services/api";
 import {
   type PodUploadContentType,
@@ -983,6 +984,94 @@ export default function TruckCompartmentsPage() {
     };
   }, [modalCompartment, eligibilityCompartment]);
 
+  const compartmentColumns: Column<TruckCompartmentState>[] = [
+    {
+      key: "position",
+      label: "Position",
+      className: "text-gray-600 font-mono text-xs",
+      render: (c) => (
+        <span data-testid={`compartment-row-${c.compartment_id}`}>
+          {c.position_index}
+        </span>
+      ),
+    },
+    {
+      key: "compartment",
+      label: "Compartment",
+      className: "text-primary font-medium font-mono text-xs",
+      render: (c) => c.compartment_id,
+    },
+    {
+      key: "state",
+      label: "State",
+      render: (c) => <CompartmentStateBadge state={c.state} />,
+    },
+    {
+      key: "capacity",
+      label: "Capacity",
+      className: "text-gray-600 text-xs",
+      render: (c) => formatCapacity(c),
+    },
+    {
+      key: "last_loaded",
+      label: "Last loaded",
+      className: "text-gray-600 text-xs",
+      render: (c) =>
+        c.last_loaded_product ? (
+          <span>
+            <span className="font-medium text-primary">
+              {c.last_loaded_product}
+            </span>
+            <span className="block text-[10px] text-gray-400">
+              {formatTimestamp(c.last_loaded_at)}
+            </span>
+          </span>
+        ) : (
+          "—"
+        ),
+    },
+    {
+      key: "last_cleaned",
+      label: "Last cleaned",
+      className: "text-gray-600 text-xs",
+      render: (c) => formatTimestamp(c.last_cleaned_at),
+    },
+    {
+      key: "allowed_grades",
+      label: "Allowed grades",
+      className: "text-gray-600 text-xs",
+      render: (c) =>
+        c.allowed_grades.length > 0 ? c.allowed_grades.join(", ") : "—",
+    },
+    {
+      key: "actions",
+      label: "Actions",
+      align: "right",
+      render: (c) => (
+        <div className="inline-flex items-center gap-1.5 justify-end">
+          <button
+            type="button"
+            onClick={() => setEligibilityCompartment(c)}
+            className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-primary rounded-md bg-white border border-gray-200 hover:bg-gray-50"
+            data-testid={`check-eligibility-${c.compartment_id}`}
+          >
+            <Search className="w-3 h-3" aria-hidden="true" />
+            Check eligibility
+          </button>
+          <button
+            type="button"
+            onClick={() => setModalCompartment(c)}
+            className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-white rounded-md bg-primary hover:bg-primary-hover"
+            data-testid={`record-cleaning-${c.compartment_id}`}
+          >
+            <Sparkles className="w-3 h-3" aria-hidden="true" />
+            Record cleaning
+          </button>
+        </div>
+      ),
+    },
+  ];
+
   return (
     <div className="flex-1 flex flex-col p-6 bg-gray-50 overflow-auto">
       <ToastContainer toasts={toasts} onDismiss={dismissToast} />
@@ -1149,87 +1238,14 @@ export default function TruckCompartmentsPage() {
         )}
 
         {items.length > 0 && (
-          <div className="overflow-x-auto border border-gray-100 rounded-lg">
-            <table className="w-full text-sm">
-              <thead className="bg-gray-50 text-left text-xs uppercase tracking-wide text-gray-500">
-                <tr>
-                  <th className="px-3 py-2 font-medium">Position</th>
-                  <th className="px-3 py-2 font-medium">Compartment</th>
-                  <th className="px-3 py-2 font-medium">State</th>
-                  <th className="px-3 py-2 font-medium">Capacity</th>
-                  <th className="px-3 py-2 font-medium">Last loaded</th>
-                  <th className="px-3 py-2 font-medium">Last cleaned</th>
-                  <th className="px-3 py-2 font-medium">Allowed grades</th>
-                  <th className="px-3 py-2 font-medium text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100">
-                {items.map((c) => (
-                  <tr
-                    key={c.compartment_id}
-                    data-testid={`compartment-row-${c.compartment_id}`}
-                  >
-                    <td className="px-3 py-2 text-gray-600 font-mono text-xs">
-                      {c.position_index}
-                    </td>
-                    <td className="px-3 py-2 text-primary font-medium font-mono text-xs">
-                      {c.compartment_id}
-                    </td>
-                    <td className="px-3 py-2">
-                      <CompartmentStateBadge state={c.state} />
-                    </td>
-                    <td className="px-3 py-2 text-gray-600 text-xs">
-                      {formatCapacity(c)}
-                    </td>
-                    <td className="px-3 py-2 text-gray-600 text-xs">
-                      {c.last_loaded_product ? (
-                        <span>
-                          <span className="font-medium text-primary">
-                            {c.last_loaded_product}
-                          </span>
-                          <span className="block text-[10px] text-gray-400">
-                            {formatTimestamp(c.last_loaded_at)}
-                          </span>
-                        </span>
-                      ) : (
-                        "—"
-                      )}
-                    </td>
-                    <td className="px-3 py-2 text-gray-600 text-xs">
-                      {formatTimestamp(c.last_cleaned_at)}
-                    </td>
-                    <td className="px-3 py-2 text-gray-600 text-xs">
-                      {c.allowed_grades.length > 0
-                        ? c.allowed_grades.join(", ")
-                        : "—"}
-                    </td>
-                    <td className="px-3 py-2 text-right">
-                      <div className="inline-flex items-center gap-1.5 justify-end">
-                        <button
-                          type="button"
-                          onClick={() => setEligibilityCompartment(c)}
-                          className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-primary rounded-md bg-white border border-gray-200 hover:bg-gray-50"
-                          data-testid={`check-eligibility-${c.compartment_id}`}
-                        >
-                          <Search className="w-3 h-3" aria-hidden="true" />
-                          Check eligibility
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setModalCompartment(c)}
-                          className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-white rounded-md bg-primary hover:bg-primary-hover"
-                          data-testid={`record-cleaning-${c.compartment_id}`}
-                        >
-                          <Sparkles className="w-3 h-3" aria-hidden="true" />
-                          Record cleaning
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <Table<TruckCompartmentState>
+            ariaLabel="Truck compartments"
+            variant="compact"
+            className="border border-gray-100 rounded-lg"
+            columns={compartmentColumns}
+            data={items}
+            getRowId={(c) => c.compartment_id}
+          />
         )}
       </div>
 

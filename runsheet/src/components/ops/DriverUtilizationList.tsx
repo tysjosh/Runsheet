@@ -12,6 +12,7 @@
 
 import { AlertTriangle, ChevronDown, ChevronUp } from "lucide-react";
 import { useCallback, useState } from "react";
+import { type Column, Table } from "@/components/ui";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -206,6 +207,123 @@ export default function DriverUtilizationList({
     );
   };
 
+  const sortableHeader = (field: SortField, label: string) => (
+    <button
+      type="button"
+      onClick={() => handleSort(field)}
+      aria-sort={
+        sortField === field
+          ? sortOrder === "asc"
+            ? "ascending"
+            : "descending"
+          : "none"
+      }
+      className="flex items-center text-xs font-medium text-gray-600 uppercase tracking-wider"
+    >
+      {label}
+      <SortIcon field={field} />
+    </button>
+  );
+
+  const columns: Column<DriverUtilization>[] = [
+    ...COLUMNS.map((col) => ({
+      key: col.key,
+      label: sortableHeader(col.key, col.label),
+      headerClassName: "cursor-pointer select-none hover:bg-gray-100",
+      render: (driver: DriverUtilization) => {
+        switch (col.key) {
+          case "driver_id":
+            return (
+              <span className="text-sm font-medium text-primary">
+                {driver.driver_id}
+              </span>
+            );
+          case "driver_name":
+            return (
+              <span className="text-sm text-gray-700">
+                {driver.driver_name ?? "—"}
+              </span>
+            );
+          case "status":
+            return (
+              <span
+                className={`inline-flex items-center px-2.5 py-0.5 rounded-md text-xs font-medium ${getStatusBadge(driver.status)}`}
+              >
+                {driver.status.replace("_", " ")}
+              </span>
+            );
+          case "active_order_count":
+            return (
+              <span className="text-sm text-gray-700">
+                {driver.active_order_count}
+              </span>
+            );
+          case "completed_today":
+            return (
+              <span className="text-sm text-gray-700">
+                {driver.completed_today}
+              </span>
+            );
+          case "last_seen":
+            return (
+              <span className="text-sm text-gray-600">
+                {formatDate(driver.last_seen)}
+              </span>
+            );
+          default: {
+            const utilPct = getUtilization(driver, capacity);
+            const barWidth = Math.min(utilPct, 100);
+            return (
+              <div className="flex items-center gap-2">
+                <div
+                  className="flex-1 h-2 bg-gray-200 rounded-full overflow-hidden"
+                  role="progressbar"
+                  aria-valuenow={utilPct}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-label={`Utilization ${utilPct}%`}
+                >
+                  <div
+                    className={`h-full rounded-full transition-all ${getBarColor(utilPct)}`}
+                    style={{ width: `${barWidth}%` }}
+                  />
+                </div>
+                <span className="text-xs text-gray-600 w-10 text-right">
+                  {utilPct}%
+                </span>
+              </div>
+            );
+          }
+        }
+      },
+    })),
+    {
+      key: "medical_card",
+      label: "Medical Card",
+      render: (driver: DriverUtilization) => {
+        const medWarning = getMedicalCardWarning(driver);
+        if (medWarning) {
+          return (
+            <span
+              className={`inline-flex items-center gap-1 text-xs font-medium ${isMedicalCardExpired(driver) ? "text-error-dark" : "text-warning-dark"}`}
+            >
+              <AlertTriangle className="w-3 h-3" />
+              {medWarning}
+            </span>
+          );
+        }
+        if (driver.medical_card_expiry) {
+          return (
+            <span className="text-xs text-gray-500">
+              {formatDate(driver.medical_card_expiry)}
+            </span>
+          );
+        }
+        return <span className="text-xs text-gray-400">—</span>;
+      },
+    },
+  ];
+
   return (
     <div>
       {/* Header */}
@@ -239,116 +357,23 @@ export default function DriverUtilizationList({
         </div>
       )}
 
-      {filtered.length === 0 ? (
-        <div className="text-center py-16 text-gray-500">
-          <p className="text-lg font-medium text-gray-400">No drivers found</p>
-          <p className="text-sm text-gray-400 mt-1">
-            Try adjusting your filters
-          </p>
-        </div>
-      ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full" aria-label="Driver utilization list">
-            <thead className="bg-gray-50 sticky top-0 border-b border-gray-100">
-              <tr>
-                {COLUMNS.map((col) => (
-                  <th
-                    key={col.key}
-                    className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider cursor-pointer select-none hover:bg-gray-100"
-                    onClick={() => handleSort(col.key)}
-                    aria-sort={
-                      sortField === col.key
-                        ? sortOrder === "asc"
-                          ? "ascending"
-                          : "descending"
-                        : "none"
-                    }
-                  >
-                    {col.label}
-                    <SortIcon field={col.key} />
-                  </th>
-                ))}
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                  Medical Card
-                </th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {sorted.map((driver) => {
-                const utilPct = getUtilization(driver, capacity);
-                const barWidth = Math.min(utilPct, 100);
-                const medWarning = getMedicalCardWarning(driver);
-
-                return (
-                  <tr
-                    key={driver.driver_id}
-                    className={`${getRowHighlight(driver, capacity)} transition-colors`}
-                  >
-                    <td className="px-6 py-3 text-sm font-medium text-primary">
-                      {driver.driver_id}
-                    </td>
-                    <td className="px-6 py-3 text-sm text-gray-700">
-                      {driver.driver_name ?? "—"}
-                    </td>
-                    <td className="px-6 py-3">
-                      <span
-                        className={`inline-flex items-center px-2.5 py-0.5 rounded-md text-xs font-medium ${getStatusBadge(driver.status)}`}
-                      >
-                        {driver.status.replace("_", " ")}
-                      </span>
-                    </td>
-                    <td className="px-6 py-3 text-sm text-gray-700">
-                      {driver.active_order_count}
-                    </td>
-                    <td className="px-6 py-3 text-sm text-gray-700">
-                      {driver.completed_today}
-                    </td>
-                    <td className="px-6 py-3 text-sm text-gray-600">
-                      {formatDate(driver.last_seen)}
-                    </td>
-                    <td className="px-6 py-3">
-                      <div className="flex items-center gap-2">
-                        <div
-                          className="flex-1 h-2 bg-gray-200 rounded-full overflow-hidden"
-                          role="progressbar"
-                          aria-valuenow={utilPct}
-                          aria-valuemin={0}
-                          aria-valuemax={100}
-                          aria-label={`Utilization ${utilPct}%`}
-                        >
-                          <div
-                            className={`h-full rounded-full transition-all ${getBarColor(utilPct)}`}
-                            style={{ width: `${barWidth}%` }}
-                          />
-                        </div>
-                        <span className="text-xs text-gray-600 w-10 text-right">
-                          {utilPct}%
-                        </span>
-                      </div>
-                    </td>
-                    <td className="px-6 py-3">
-                      {medWarning ? (
-                        <span
-                          className={`inline-flex items-center gap-1 text-xs font-medium ${isMedicalCardExpired(driver) ? "text-error-dark" : "text-warning-dark"}`}
-                        >
-                          <AlertTriangle className="w-3 h-3" />
-                          {medWarning}
-                        </span>
-                      ) : driver.medical_card_expiry ? (
-                        <span className="text-xs text-gray-500">
-                          {formatDate(driver.medical_card_expiry)}
-                        </span>
-                      ) : (
-                        <span className="text-xs text-gray-400">—</span>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
+      <Table<DriverUtilization>
+        ariaLabel="Driver utilization list"
+        columns={columns}
+        data={sorted}
+        getRowId={(driver) => driver.driver_id}
+        rowClassName={(driver) => getRowHighlight(driver, capacity)}
+        emptyState={
+          <div className="text-gray-500">
+            <p className="text-lg font-medium text-gray-400">
+              No drivers found
+            </p>
+            <p className="text-sm text-gray-400 mt-1">
+              Try adjusting your filters
+            </p>
+          </div>
+        }
+      />
     </div>
   );
 }

@@ -1,5 +1,6 @@
 "use client";
 
+import { type Column, Table } from "@/components/ui";
 import type { CargoItemStatus, SchedulingCargoItem } from "../../types/api";
 import CargoItemActions from "./CargoItemActions";
 
@@ -52,84 +53,75 @@ export default function CargoManifestView({
   items,
   onUpdateItemStatus,
 }: CargoManifestViewProps) {
-  if (items.length === 0) {
-    return (
-      <div className="text-center py-16 text-gray-500">
-        <p className="text-lg font-medium text-gray-400">No cargo items</p>
-        <p className="text-sm text-gray-400 mt-1">
-          This job has no cargo manifest items
-        </p>
-      </div>
-    );
-  }
+  const columns: Column<SchedulingCargoItem>[] = [
+    {
+      key: "item_id",
+      label: "Item ID",
+      className: "text-sm font-medium text-primary",
+      render: (item) => item.item_id,
+    },
+    {
+      key: "description",
+      label: "Description",
+      className: "text-sm text-gray-700",
+      render: (item) => item.description,
+    },
+    {
+      key: "weight_kg",
+      label: "Weight (kg)",
+      className: "text-sm text-gray-700",
+      render: (item) => item.weight_kg.toLocaleString(),
+    },
+    {
+      key: "container_number",
+      label: "Container",
+      className: "text-sm text-gray-700",
+      render: (item) => item.container_number ?? "—",
+    },
+    {
+      key: "seal_number",
+      label: "Seal No.",
+      className: "text-sm text-gray-700",
+      render: (item) => item.seal_number ?? "—",
+    },
+    {
+      key: "item_status",
+      label: "Status",
+      render: (item) => (
+        <span
+          className={`inline-flex items-center px-2.5 py-0.5 rounded-md text-xs font-medium ${getStatusBadge(item.item_status)}`}
+        >
+          {formatStatus(item.item_status)}
+        </span>
+      ),
+    },
+    {
+      key: "actions",
+      label: "Actions",
+      render: (item) => (
+        <CargoItemActions
+          itemId={item.item_id}
+          currentStatus={item.item_status}
+          onUpdateStatus={onUpdateItemStatus}
+        />
+      ),
+    },
+  ];
 
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full" aria-label="Cargo manifest">
-        <thead className="bg-gray-50 sticky top-0 border-b border-gray-100">
-          <tr>
-            <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-              Item ID
-            </th>
-            <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-              Description
-            </th>
-            <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-              Weight (kg)
-            </th>
-            <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-              Container
-            </th>
-            <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-              Seal No.
-            </th>
-            <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-              Status
-            </th>
-            <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-              Actions
-            </th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-gray-100">
-          {items.map((item) => (
-            <tr
-              key={item.item_id}
-              className="transition-colors hover:bg-gray-50"
-            >
-              <td className="px-6 py-3 text-sm font-medium text-primary">
-                {item.item_id}
-              </td>
-              <td className="px-6 py-3 text-sm text-gray-700">
-                {item.description}
-              </td>
-              <td className="px-6 py-3 text-sm text-gray-700">
-                {item.weight_kg.toLocaleString()}
-              </td>
-              <td className="px-6 py-3 text-sm text-gray-700">
-                {item.container_number ?? "—"}
-              </td>
-              <td className="px-6 py-3 text-sm text-gray-700">
-                {item.seal_number ?? "—"}
-              </td>
-              <td className="px-6 py-3">
-                <span
-                  className={`inline-flex items-center px-2.5 py-0.5 rounded-md text-xs font-medium ${getStatusBadge(item.item_status)}`}
-                >
-                  {formatStatus(item.item_status)}
-                </span>
-              </td>
-              <td className="px-6 py-3">
-                <CargoItemActions
-                  itemId={item.item_id}
-                  currentStatus={item.item_status}
-                  onUpdateStatus={onUpdateItemStatus}
-                />
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+    <Table<SchedulingCargoItem>
+      ariaLabel="Cargo manifest"
+      columns={columns}
+      data={items}
+      getRowId={(item) => item.item_id}
+      emptyState={
+        <div className="text-gray-500">
+          <p className="text-lg font-medium text-gray-400">No cargo items</p>
+          <p className="text-sm text-gray-400 mt-1">
+            This job has no cargo manifest items
+          </p>
+        </div>
+      }
+    />
   );
 }

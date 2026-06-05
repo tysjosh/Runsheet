@@ -3,6 +3,7 @@
 import { ChevronDown, ChevronUp, ExternalLink } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useState } from "react";
+import { type Column, Table } from "@/components/ui";
 import type { Job, JobStatus } from "../../types/api";
 import JobActionButtons from "./JobActionButtons";
 
@@ -28,17 +29,6 @@ interface JobBoardProps {
   /** Optional callback when a job row is clicked — navigates to job detail */
   onSelectJob?: (jobId: string) => void;
 }
-
-const COLUMNS: { key: SortField; label: string }[] = [
-  { key: "job_id", label: "Job ID" },
-  { key: "job_type", label: "Type" },
-  { key: "status", label: "Status" },
-  { key: "origin", label: "Origin" },
-  { key: "destination", label: "Destination" },
-  { key: "asset_assigned", label: "Asset" },
-  { key: "scheduled_time", label: "Scheduled" },
-  { key: "estimated_arrival", label: "Est. Arrival" },
-];
 
 /**
  * Row background color based on job status.
@@ -145,106 +135,136 @@ export default function JobBoard({
     return compareValues(aVal, bVal, sortOrder);
   });
 
-  const SortIcon = ({ field }: { field: SortField }) => {
-    if (sortField !== field) return null;
-    return sortOrder === "asc" ? (
-      <ChevronUp className="w-3 h-3 inline ml-1" />
-    ) : (
-      <ChevronDown className="w-3 h-3 inline ml-1" />
-    );
-  };
+  const sortableHeader = (field: SortField, label: string) => (
+    <button
+      type="button"
+      onClick={() => handleSort(field)}
+      aria-sort={
+        sortField === field
+          ? sortOrder === "asc"
+            ? "ascending"
+            : "descending"
+          : "none"
+      }
+      className="flex items-center text-xs font-medium text-gray-600 uppercase tracking-wider"
+    >
+      {label}
+      {sortField === field &&
+        (sortOrder === "asc" ? (
+          <ChevronUp className="w-3 h-3 inline ml-1" />
+        ) : (
+          <ChevronDown className="w-3 h-3 inline ml-1" />
+        ))}
+    </button>
+  );
 
-  if (jobs.length === 0) {
-    return (
-      <div className="text-center py-16 text-gray-500">
-        <p className="text-lg font-medium text-gray-400">No jobs found</p>
-        <p className="text-sm text-gray-400 mt-1">Try adjusting your filters</p>
-      </div>
-    );
-  }
+  const columns: Column<Job>[] = [
+    {
+      key: "job_id",
+      label: sortableHeader("job_id", "Job ID"),
+      headerClassName: "cursor-pointer select-none hover:bg-gray-100",
+      className: "text-sm font-medium text-primary",
+      render: (job) =>
+        job.job_type === "cargo_transport" ? (
+          <Link
+            href={`/ops/scheduling/${encodeURIComponent(job.job_id)}/cargo`}
+            className="hover:underline flex items-center gap-1"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {job.job_id}
+            <ExternalLink className="w-3 h-3 text-gray-400" />
+          </Link>
+        ) : (
+          job.job_id
+        ),
+    },
+    {
+      key: "job_type",
+      label: sortableHeader("job_type", "Type"),
+      headerClassName: "cursor-pointer select-none hover:bg-gray-100",
+      className: "text-sm text-gray-700",
+      render: (job) => formatJobType(job.job_type),
+    },
+    {
+      key: "status",
+      label: sortableHeader("status", "Status"),
+      headerClassName: "cursor-pointer select-none hover:bg-gray-100",
+      render: (job) => (
+        <span
+          className={`inline-flex items-center px-2.5 py-0.5 rounded-md text-xs font-medium ${getStatusBadge(job.status, job.delayed)}`}
+        >
+          {job.delayed ? "Delayed" : job.status.replace(/_/g, " ")}
+        </span>
+      ),
+    },
+    {
+      key: "origin",
+      label: sortableHeader("origin", "Origin"),
+      headerClassName: "cursor-pointer select-none hover:bg-gray-100",
+      className: "text-sm text-gray-700",
+      render: (job) => job.origin,
+    },
+    {
+      key: "destination",
+      label: sortableHeader("destination", "Destination"),
+      headerClassName: "cursor-pointer select-none hover:bg-gray-100",
+      className: "text-sm text-gray-700",
+      render: (job) => job.destination,
+    },
+    {
+      key: "asset_assigned",
+      label: sortableHeader("asset_assigned", "Asset"),
+      headerClassName: "cursor-pointer select-none hover:bg-gray-100",
+      className: "text-sm text-gray-700",
+      render: (job) => job.asset_assigned ?? "—",
+    },
+    {
+      key: "scheduled_time",
+      label: sortableHeader("scheduled_time", "Scheduled"),
+      headerClassName: "cursor-pointer select-none hover:bg-gray-100",
+      className: "text-sm text-gray-600",
+      render: (job) => formatDate(job.scheduled_time),
+    },
+    {
+      key: "estimated_arrival",
+      label: sortableHeader("estimated_arrival", "Est. Arrival"),
+      headerClassName: "cursor-pointer select-none hover:bg-gray-100",
+      className: "text-sm text-gray-600",
+      render: (job) => formatDate(job.estimated_arrival),
+    },
+    {
+      key: "actions",
+      label: "Actions",
+      // Stop row-click propagation so action buttons don't trigger navigation.
+      render: (job) => (
+        <div onClick={(e) => e.stopPropagation()}>
+          <JobActionButtons
+            jobId={job.job_id}
+            currentStatus={job.status}
+            onTransition={onTransition}
+          />
+        </div>
+      ),
+    },
+  ];
 
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full" aria-label="Job board">
-        <thead className="bg-gray-50 sticky top-0 border-b border-gray-100">
-          <tr>
-            {COLUMNS.map((col) => (
-              <th
-                key={col.key}
-                className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider cursor-pointer select-none hover:bg-gray-100"
-                onClick={() => handleSort(col.key)}
-                aria-sort={
-                  sortField === col.key
-                    ? sortOrder === "asc"
-                      ? "ascending"
-                      : "descending"
-                    : "none"
-                }
-              >
-                {col.label}
-                <SortIcon field={col.key} />
-              </th>
-            ))}
-            <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-              Actions
-            </th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-gray-100">
-          {sorted.map((job) => (
-            <tr
-              key={job.job_id}
-              className={`${getRowColor(job)} transition-colors ${onSelectJob ? "cursor-pointer hover:bg-gray-100" : ""}`}
-              onClick={() => onSelectJob?.(job.job_id)}
-            >
-              <td className="px-6 py-3 text-sm font-medium text-primary">
-                {job.job_type === "cargo_transport" ? (
-                  <Link
-                    href={`/ops/scheduling/${encodeURIComponent(job.job_id)}/cargo`}
-                    className="hover:underline flex items-center gap-1"
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    {job.job_id}
-                    <ExternalLink className="w-3 h-3 text-gray-400" />
-                  </Link>
-                ) : (
-                  job.job_id
-                )}
-              </td>
-              <td className="px-6 py-3 text-sm text-gray-700">
-                {formatJobType(job.job_type)}
-              </td>
-              <td className="px-6 py-3">
-                <span
-                  className={`inline-flex items-center px-2.5 py-0.5 rounded-md text-xs font-medium ${getStatusBadge(job.status, job.delayed)}`}
-                >
-                  {job.delayed ? "Delayed" : job.status.replace(/_/g, " ")}
-                </span>
-              </td>
-              <td className="px-6 py-3 text-sm text-gray-700">{job.origin}</td>
-              <td className="px-6 py-3 text-sm text-gray-700">
-                {job.destination}
-              </td>
-              <td className="px-6 py-3 text-sm text-gray-700">
-                {job.asset_assigned ?? "—"}
-              </td>
-              <td className="px-6 py-3 text-sm text-gray-600">
-                {formatDate(job.scheduled_time)}
-              </td>
-              <td className="px-6 py-3 text-sm text-gray-600">
-                {formatDate(job.estimated_arrival)}
-              </td>
-              <td className="px-6 py-3" onClick={(e) => e.stopPropagation()}>
-                <JobActionButtons
-                  jobId={job.job_id}
-                  currentStatus={job.status}
-                  onTransition={onTransition}
-                />
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+    <Table<Job>
+      ariaLabel="Job board"
+      variant="standard"
+      columns={columns}
+      data={sorted}
+      getRowId={(job) => job.job_id}
+      onRowClick={onSelectJob ? (job) => onSelectJob(job.job_id) : undefined}
+      rowClassName={(job) => getRowColor(job)}
+      emptyState={
+        <div className="text-gray-500">
+          <p className="text-lg font-medium text-gray-400">No jobs found</p>
+          <p className="text-sm text-gray-400 mt-1">
+            Try adjusting your filters
+          </p>
+        </div>
+      }
+    />
   );
 }

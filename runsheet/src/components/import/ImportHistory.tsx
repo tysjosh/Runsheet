@@ -11,6 +11,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
+import { type Column, Table } from "@/components/ui";
 import { importApi } from "../../services/importApi";
 import type { ImportSessionRecord, ImportStatus } from "../../types/import";
 
@@ -280,6 +281,65 @@ export default function ImportHistory({ onClose }: ImportHistoryProps) {
 
   // ── Render ───────────────────────────────────────────────────────────
 
+  const sessionColumns: Column<ImportSessionRecord>[] = [
+    {
+      key: "expander",
+      label: "",
+      headerClassName: "w-8",
+      render: (session) =>
+        expandedId === session.session_id ? (
+          <ChevronDown className="w-4 h-4 text-gray-400" />
+        ) : (
+          <ChevronRight className="w-4 h-4 text-gray-400" />
+        ),
+    },
+    {
+      key: "created_at",
+      label: "Date",
+      className: "text-gray-600 whitespace-nowrap",
+      render: (session) => formatDate(session.created_at),
+    },
+    {
+      key: "data_type",
+      label: "Data Type",
+      className: "text-primary font-medium whitespace-nowrap",
+      render: (session) =>
+        DATA_TYPE_LABELS[session.data_type] ?? session.data_type,
+    },
+    {
+      key: "source_type",
+      label: "Source",
+      className: "text-gray-600 whitespace-nowrap",
+      render: (session) =>
+        SOURCE_TYPE_LABELS[session.source_type] ?? session.source_type,
+    },
+    {
+      key: "source_name",
+      label: "Source Name",
+      className: "text-gray-600 truncate max-w-[200px]",
+      render: (session) => session.source_name,
+    },
+    {
+      key: "total_records",
+      label: "Total",
+      align: "right",
+      className: "text-gray-600 tabular-nums",
+      render: (session) => session.total_records,
+    },
+    {
+      key: "imported_records",
+      label: "Imported",
+      align: "right",
+      className: "text-gray-600 tabular-nums",
+      render: (session) => session.imported_records,
+    },
+    {
+      key: "status",
+      label: "Status",
+      render: (session) => <StatusBadge status={session.status} />,
+    },
+  ];
+
   return (
     <div>
       {/* Header */}
@@ -362,115 +422,22 @@ export default function ImportHistory({ onClose }: ImportHistoryProps) {
       {/* Sessions table */}
       {sessions.length > 0 && (
         <div className="rounded-xl border border-gray-200 overflow-hidden">
-          <table className="w-full text-sm">
-            <thead className="bg-gray-50">
-              <tr>
-                <th className="w-8" />
-                <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Date
-                </th>
-                <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Data Type
-                </th>
-                <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Source
-                </th>
-                <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Source Name
-                </th>
-                <th className="text-right px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Total
-                </th>
-                <th className="text-right px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Imported
-                </th>
-                <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Status
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {sessions.map((session, idx) => {
-                const isExpanded = expandedId === session.session_id;
-
-                return (
-                  <SessionRow
-                    key={session.session_id}
-                    session={session}
-                    isExpanded={isExpanded}
-                    isLast={idx === sessions.length - 1}
-                    onToggle={() => toggleExpand(session.session_id)}
-                  />
-                );
-              })}
-            </tbody>
-          </table>
+          <Table<ImportSessionRecord>
+            ariaLabel="Import sessions"
+            columns={sessionColumns}
+            data={sessions}
+            getRowId={(session) => session.session_id}
+            variant="compact"
+            onRowClick={(session) => toggleExpand(session.session_id)}
+            selectedId={expandedId ?? undefined}
+            renderExpanded={(session) =>
+              expandedId === session.session_id ? (
+                <SessionDetail session={session} />
+              ) : null
+            }
+          />
         </div>
       )}
     </div>
-  );
-}
-
-// ─── Session Row ─────────────────────────────────────────────────────────────
-
-function SessionRow({
-  session,
-  isExpanded,
-  isLast,
-  onToggle,
-}: {
-  session: ImportSessionRecord;
-  isExpanded: boolean;
-  isLast: boolean;
-  onToggle: () => void;
-}) {
-  return (
-    <>
-      <tr
-        onClick={onToggle}
-        className={`cursor-pointer hover:bg-gray-50 transition-colors ${
-          !isLast && !isExpanded ? "border-b border-gray-100" : ""
-        } ${isExpanded ? "bg-gray-50" : ""}`}
-      >
-        <td className="pl-3 py-3">
-          {isExpanded ? (
-            <ChevronDown className="w-4 h-4 text-gray-400" />
-          ) : (
-            <ChevronRight className="w-4 h-4 text-gray-400" />
-          )}
-        </td>
-        <td className="px-4 py-3 text-gray-600 whitespace-nowrap">
-          {formatDate(session.created_at)}
-        </td>
-        <td className="px-4 py-3 text-primary font-medium whitespace-nowrap">
-          {DATA_TYPE_LABELS[session.data_type] ?? session.data_type}
-        </td>
-        <td className="px-4 py-3 text-gray-600 whitespace-nowrap">
-          {SOURCE_TYPE_LABELS[session.source_type] ?? session.source_type}
-        </td>
-        <td
-          className="px-4 py-3 text-gray-600 truncate max-w-[200px]"
-          title={session.source_name}
-        >
-          {session.source_name}
-        </td>
-        <td className="px-4 py-3 text-right text-gray-600 tabular-nums">
-          {session.total_records}
-        </td>
-        <td className="px-4 py-3 text-right text-gray-600 tabular-nums">
-          {session.imported_records}
-        </td>
-        <td className="px-4 py-3">
-          <StatusBadge status={session.status} />
-        </td>
-      </tr>
-      {isExpanded && (
-        <tr>
-          <td colSpan={8} className={!isLast ? "border-b border-gray-100" : ""}>
-            <SessionDetail session={session} />
-          </td>
-        </tr>
-      )}
-    </>
   );
 }

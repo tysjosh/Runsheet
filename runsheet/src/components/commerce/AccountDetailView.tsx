@@ -1,16 +1,23 @@
 "use client";
 
-import { ArrowLeft, Building2, CreditCard, DollarSign, Edit2, TrendingUp } from "lucide-react";
+import {
+  ArrowLeft,
+  Building2,
+  CreditCard,
+  DollarSign,
+  Edit2,
+  TrendingUp,
+} from "lucide-react";
 import { useEffect, useState } from "react";
 import {
   type Account,
   type AgingBuckets,
-  type Invoice,
   getAccount,
   getAccountAging,
   getInvoices,
+  type Invoice,
 } from "../../services/commerceApi";
-import { Badge, Button } from "../ui";
+import { Badge, Button, type Column, Table } from "../ui";
 
 interface AccountDetailViewProps {
   accountId: string;
@@ -86,7 +93,8 @@ export default function AccountDetailView({
 
   const getStatusBadge = (status: string) => {
     if (status === "active") return <Badge variant="success">Active</Badge>;
-    if (status === "suspended") return <Badge variant="warning">Suspended</Badge>;
+    if (status === "suspended")
+      return <Badge variant="warning">Suspended</Badge>;
     if (status === "closed") return <Badge variant="default">Closed</Badge>;
     return <Badge variant="default">{status}</Badge>;
   };
@@ -105,6 +113,58 @@ export default function AccountDetailView({
       day: "numeric",
     });
   };
+
+  const recentInvoiceColumns: Column<Invoice>[] = [
+    {
+      key: "invoice_number",
+      label: "Invoice #",
+      className: "text-sm font-medium text-gray-900",
+      render: (invoice) => invoice.invoice_number,
+    },
+    {
+      key: "status",
+      label: "Status",
+      render: (invoice) => (
+        <Badge
+          variant={
+            invoice.status === "paid"
+              ? "success"
+              : invoice.status === "overdue"
+                ? "error"
+                : "default"
+          }
+        >
+          {invoice.status}
+        </Badge>
+      ),
+    },
+    {
+      key: "issued_at",
+      label: "Issued",
+      className: "text-sm text-gray-700",
+      render: (invoice) => formatDate(invoice.issued_at),
+    },
+    {
+      key: "due_date",
+      label: "Due Date",
+      className: "text-sm text-gray-700",
+      render: (invoice) => formatDate(invoice.due_date),
+    },
+    {
+      key: "total_cents",
+      label: "Total",
+      align: "right",
+      className: "text-sm text-gray-900",
+      render: (invoice) => formatCurrency(invoice.total_cents),
+    },
+    {
+      key: "remaining_cents",
+      label: "Remaining",
+      align: "right",
+      className: "text-sm font-medium text-gray-900",
+      render: (invoice) => formatCurrency(invoice.remaining_cents),
+    },
+  ];
 
   return (
     <div className="p-6">
@@ -308,69 +368,16 @@ export default function AccountDetailView({
         {recentInvoices.length === 0 ? (
           <p className="text-sm text-gray-500 py-4">No invoices found</p>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead>
-                <tr className="border-b border-gray-200">
-                  <th className="text-left text-xs font-medium text-gray-600 pb-3">
-                    Invoice #
-                  </th>
-                  <th className="text-left text-xs font-medium text-gray-600 pb-3">
-                    Status
-                  </th>
-                  <th className="text-left text-xs font-medium text-gray-600 pb-3">
-                    Issued
-                  </th>
-                  <th className="text-left text-xs font-medium text-gray-600 pb-3">
-                    Due Date
-                  </th>
-                  <th className="text-right text-xs font-medium text-gray-600 pb-3">
-                    Total
-                  </th>
-                  <th className="text-right text-xs font-medium text-gray-600 pb-3">
-                    Remaining
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {recentInvoices.map((invoice) => (
-                  <tr
-                    key={invoice.invoice_id}
-                    className="border-b border-gray-100 last:border-0"
-                  >
-                    <td className="py-3 text-sm font-medium text-gray-900">
-                      {invoice.invoice_number}
-                    </td>
-                    <td className="py-3">
-                      <Badge
-                        variant={
-                          invoice.status === "paid"
-                            ? "success"
-                            : invoice.status === "overdue"
-                              ? "error"
-                              : "default"
-                        }
-                      >
-                        {invoice.status}
-                      </Badge>
-                    </td>
-                    <td className="py-3 text-sm text-gray-700">
-                      {formatDate(invoice.issued_at)}
-                    </td>
-                    <td className="py-3 text-sm text-gray-700">
-                      {formatDate(invoice.due_date)}
-                    </td>
-                    <td className="py-3 text-sm text-gray-900 text-right">
-                      {formatCurrency(invoice.total_cents)}
-                    </td>
-                    <td className="py-3 text-sm font-medium text-gray-900 text-right">
-                      {formatCurrency(invoice.remaining_cents)}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <Table<Invoice>
+            ariaLabel="Recent invoices"
+            columns={recentInvoiceColumns}
+            data={recentInvoices}
+            getRowId={(invoice) => invoice.invoice_id}
+            variant="compact"
+            emptyState={
+              <span className="text-gray-500">No invoices found</span>
+            }
+          />
         )}
       </div>
     </div>

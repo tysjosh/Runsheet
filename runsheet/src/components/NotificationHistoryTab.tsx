@@ -16,6 +16,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { type Column, Table } from "@/components/ui";
 import { useNotificationWebSocket } from "../hooks/useNotificationWebSocket";
 import {
   type DeliveryStatus,
@@ -130,6 +131,96 @@ function formatFullDate(dateStr: string | null | undefined) {
     second: "2-digit",
   });
 }
+
+// ─── Table columns ───────────────────────────────────────────────────────────
+
+const notificationColumns: Column<Notification>[] = [
+  {
+    key: "notification_type",
+    label: "Type",
+    render: (notification) => (
+      <span className="text-sm font-medium text-primary">
+        {getTypeLabel(notification.notification_type)}
+      </span>
+    ),
+  },
+  {
+    key: "channel",
+    label: "Channel",
+    render: (notification) => (
+      <span className="inline-flex items-center gap-1.5 text-sm text-gray-700">
+        {getChannelIcon(notification.channel)}
+        {notification.channel.toUpperCase()}
+      </span>
+    ),
+  },
+  {
+    key: "recipient",
+    label: "Recipient",
+    render: (notification) => (
+      <>
+        <div className="text-sm text-primary">
+          {notification.recipient_name || notification.recipient_reference}
+        </div>
+        {notification.recipient_name && (
+          <div className="text-xs text-gray-500">
+            {notification.recipient_reference}
+          </div>
+        )}
+      </>
+    ),
+  },
+  {
+    key: "subject",
+    label: "Subject",
+    render: (notification) => (
+      <span className="text-sm text-gray-700 line-clamp-1">
+        {notification.subject || "—"}
+      </span>
+    ),
+  },
+  {
+    key: "delivery_status",
+    label: "Status",
+    render: (notification) => (
+      <span
+        className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-medium ${getStatusColor(notification.delivery_status)}`}
+      >
+        {getStatusIcon(notification.delivery_status)}
+        {notification.delivery_status.charAt(0).toUpperCase() +
+          notification.delivery_status.slice(1)}
+      </span>
+    ),
+  },
+  {
+    key: "related_entity",
+    label: "Related Entity",
+    render: (notification) =>
+      notification.related_entity_id ? (
+        <div>
+          <span className="text-sm text-primary font-medium">
+            {notification.related_entity_id}
+          </span>
+          {notification.related_entity_type && (
+            <div className="text-xs text-gray-500">
+              {notification.related_entity_type}
+            </div>
+          )}
+        </div>
+      ) : (
+        <span className="text-sm text-gray-400">—</span>
+      ),
+  },
+  {
+    key: "created_at",
+    label: "Created",
+    render: (notification) => (
+      <span className="text-sm text-gray-600">
+        {formatDate(notification.created_at)}
+      </span>
+    ),
+  },
+];
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
@@ -472,120 +563,28 @@ export default function NotificationHistoryTab() {
               </div>
             </div>
           ) : (
-            <table className="w-full">
-              <thead className="bg-gray-50 sticky top-0 border-b border-gray-100">
-                <tr>
-                  <th className="px-8 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                    Type
-                  </th>
-                  <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                    Channel
-                  </th>
-                  <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                    Recipient
-                  </th>
-                  <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                    Subject
-                  </th>
-                  <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                    Status
-                  </th>
-                  <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                    Related Entity
-                  </th>
-                  <th className="px-6 py-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                    Created
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100">
-                {notifications.map((notification) => (
-                  <tr
-                    key={notification.notification_id}
-                    className={`cursor-pointer transition-colors ${
-                      selectedNotification?.notification_id ===
-                      notification.notification_id
-                        ? "bg-gray-50"
-                        : "hover:bg-gray-50"
-                    }`}
-                    onClick={() => {
-                      setSelectedNotification(notification);
-                      setRetryError("");
-                    }}
-                  >
-                    <td className="px-8 py-4">
-                      <span className="text-sm font-medium text-primary">
-                        {getTypeLabel(notification.notification_type)}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4">
-                      <span className="inline-flex items-center gap-1.5 text-sm text-gray-700">
-                        {getChannelIcon(notification.channel)}
-                        {notification.channel.toUpperCase()}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4">
-                      <div className="text-sm text-primary">
-                        {notification.recipient_name ||
-                          notification.recipient_reference}
-                      </div>
-                      {notification.recipient_name && (
-                        <div className="text-xs text-gray-500">
-                          {notification.recipient_reference}
-                        </div>
-                      )}
-                    </td>
-                    <td className="px-6 py-4">
-                      <span className="text-sm text-gray-700 line-clamp-1">
-                        {notification.subject || "—"}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4">
-                      <span
-                        className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-medium ${getStatusColor(notification.delivery_status)}`}
-                      >
-                        {getStatusIcon(notification.delivery_status)}
-                        {notification.delivery_status.charAt(0).toUpperCase() +
-                          notification.delivery_status.slice(1)}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4">
-                      {notification.related_entity_id ? (
-                        <div>
-                          <span className="text-sm text-primary font-medium">
-                            {notification.related_entity_id}
-                          </span>
-                          {notification.related_entity_type && (
-                            <div className="text-xs text-gray-500">
-                              {notification.related_entity_type}
-                            </div>
-                          )}
-                        </div>
-                      ) : (
-                        <span className="text-sm text-gray-400">—</span>
-                      )}
-                    </td>
-                    <td className="px-6 py-4">
-                      <span className="text-sm text-gray-600">
-                        {formatDate(notification.created_at)}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-
-          {!loading && notifications.length === 0 && (
-            <div className="text-center py-16 text-gray-500">
-              <Bell className="w-16 h-16 mx-auto mb-4 text-gray-300" />
-              <p className="text-lg font-medium text-gray-400">
-                No notifications found
-              </p>
-              <p className="text-sm text-gray-400 mt-1">
-                Try adjusting your search or filter criteria
-              </p>
-            </div>
+            <Table<Notification>
+              ariaLabel="Notification history"
+              columns={notificationColumns}
+              data={notifications}
+              getRowId={(notification) => notification.notification_id}
+              selectedId={selectedNotification?.notification_id}
+              onRowClick={(notification) => {
+                setSelectedNotification(notification);
+                setRetryError("");
+              }}
+              emptyState={
+                <>
+                  <Bell className="w-16 h-16 mx-auto mb-4 text-gray-300" />
+                  <p className="text-lg font-medium text-gray-400">
+                    No notifications found
+                  </p>
+                  <p className="text-sm text-gray-400 mt-1">
+                    Try adjusting your search or filter criteria
+                  </p>
+                </>
+              }
+            />
           )}
         </div>
 

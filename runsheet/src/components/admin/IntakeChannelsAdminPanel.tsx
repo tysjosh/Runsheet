@@ -19,6 +19,7 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
+import { type Column, Table } from "@/components/ui";
 import { ApiError } from "../../services/api";
 import {
   type CreateIntakeChannelPayload,
@@ -209,6 +210,82 @@ export default function IntakeChannelsAdminPanel() {
 
   // ── Render ────────────────────────────────────────────────────────────────
 
+  const channelColumns: Column<IntakeChannel>[] = [
+    {
+      key: "channel_id",
+      label: "Channel ID",
+      className: "text-sm font-mono text-primary",
+      render: (channel) => channel.channel_id,
+    },
+    {
+      key: "display_name",
+      label: "Name",
+      className: "text-sm text-gray-700",
+      render: (channel) => channel.display_name,
+    },
+    {
+      key: "channel_type",
+      label: "Type",
+      className: "text-sm text-gray-700",
+      render: (channel) => channel.channel_type.replace("_", " "),
+    },
+    {
+      key: "status",
+      label: "Status",
+      render: (channel) => (
+        <span
+          className={`inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium ${channel.enabled ? "bg-success-light text-success-dark" : "bg-gray-100 text-gray-600"}`}
+        >
+          {channel.enabled ? "Enabled" : "Disabled"}
+        </span>
+      ),
+    },
+    {
+      key: "versions",
+      label: "Versions",
+      className: "text-xs text-gray-600",
+      render: (channel) => channel.supported_schema_versions.join(", "),
+    },
+    {
+      key: "actions",
+      label: "Actions",
+      align: "right",
+      render: (channel) => (
+        <div className="flex items-center justify-end gap-1">
+          <button
+            type="button"
+            onClick={() => handleRotate(channel.channel_id)}
+            disabled={working === channel.channel_id}
+            className="p-1.5 rounded hover:bg-gray-100 text-gray-600"
+            title="Rotate secret"
+            aria-label={`Rotate secret for ${channel.channel_id}`}
+          >
+            <Key className="w-3.5 h-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={() => handleToggleEnabled(channel)}
+            disabled={working === channel.channel_id}
+            className="px-2 py-1 text-xs border border-gray-200 rounded hover:bg-gray-50"
+            aria-label={`${channel.enabled ? "Disable" : "Enable"} ${channel.channel_id}`}
+          >
+            {channel.enabled ? "Disable" : "Enable"}
+          </button>
+          <button
+            type="button"
+            onClick={() => handleDelete(channel.channel_id)}
+            disabled={working === channel.channel_id}
+            className="p-1.5 rounded hover:bg-error-light text-error"
+            title="Delete channel"
+            aria-label={`Delete ${channel.channel_id}`}
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      ),
+    },
+  ];
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -364,88 +441,18 @@ export default function IntakeChannelsAdminPanel() {
         </div>
       ) : (
         <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
-          <table className="w-full" aria-label="Intake channels list">
-            <thead className="bg-gray-50 border-b border-gray-100">
-              <tr>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">
-                  Channel ID
-                </th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">
-                  Name
-                </th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">
-                  Type
-                </th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">
-                  Status
-                </th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">
-                  Versions
-                </th>
-                <th className="px-4 py-3 text-right text-xs font-medium text-gray-600 uppercase">
-                  Actions
-                </th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {channels.map((channel) => (
-                <tr key={channel.channel_id} className="hover:bg-gray-50">
-                  <td className="px-4 py-3 text-sm font-mono text-primary">
-                    {channel.channel_id}
-                  </td>
-                  <td className="px-4 py-3 text-sm text-gray-700">
-                    {channel.display_name}
-                  </td>
-                  <td className="px-4 py-3 text-sm text-gray-700">
-                    {channel.channel_type.replace("_", " ")}
-                  </td>
-                  <td className="px-4 py-3">
-                    <span
-                      className={`inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium ${channel.enabled ? "bg-success-light text-success-dark" : "bg-gray-100 text-gray-600"}`}
-                    >
-                      {channel.enabled ? "Enabled" : "Disabled"}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3 text-xs text-gray-600">
-                    {channel.supported_schema_versions.join(", ")}
-                  </td>
-                  <td className="px-4 py-3 text-right">
-                    <div className="flex items-center justify-end gap-1">
-                      <button
-                        type="button"
-                        onClick={() => handleRotate(channel.channel_id)}
-                        disabled={working === channel.channel_id}
-                        className="p-1.5 rounded hover:bg-gray-100 text-gray-600"
-                        title="Rotate secret"
-                        aria-label={`Rotate secret for ${channel.channel_id}`}
-                      >
-                        <Key className="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleToggleEnabled(channel)}
-                        disabled={working === channel.channel_id}
-                        className="px-2 py-1 text-xs border border-gray-200 rounded hover:bg-gray-50"
-                        aria-label={`${channel.enabled ? "Disable" : "Enable"} ${channel.channel_id}`}
-                      >
-                        {channel.enabled ? "Disable" : "Enable"}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleDelete(channel.channel_id)}
-                        disabled={working === channel.channel_id}
-                        className="p-1.5 rounded hover:bg-error-light text-error"
-                        title="Delete channel"
-                        aria-label={`Delete ${channel.channel_id}`}
-                      >
-                        <X className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <Table<IntakeChannel>
+            ariaLabel="Intake channels list"
+            columns={channelColumns}
+            data={channels}
+            getRowId={(channel) => channel.channel_id}
+            variant="compact"
+            emptyState={
+              <span className="text-gray-500">
+                No intake channels registered yet.
+              </span>
+            }
+          />
         </div>
       )}
 

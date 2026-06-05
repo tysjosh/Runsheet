@@ -49,6 +49,7 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
+import { type Column, Table } from "@/components/ui";
 import type {
   AgentHealthEntry,
   AutonomyLevel,
@@ -884,6 +885,36 @@ function FeedbackSection() {
   const inputClass =
     "px-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white";
 
+  const feedbackColumns: Column<FeedbackEntry>[] = [
+    {
+      key: "feedback_type",
+      label: "Type",
+      headerClassName: "text-gray-500 normal-case tracking-normal",
+      render: (entry) => feedbackTypeBadge(entry.feedback_type),
+    },
+    {
+      key: "action_id",
+      label: "Action ID",
+      headerClassName: "text-gray-500 normal-case tracking-normal",
+      className: "text-xs text-gray-600 font-mono",
+      render: (entry) => entry.action_id,
+    },
+    {
+      key: "comment",
+      label: "Comment",
+      headerClassName: "text-gray-500 normal-case tracking-normal",
+      className: "text-xs text-gray-600 max-w-xs truncate",
+      render: (entry) => entry.comment || "—",
+    },
+    {
+      key: "created_at",
+      label: "Created",
+      headerClassName: "text-gray-500 normal-case tracking-normal",
+      className: "text-xs text-gray-400",
+      render: (entry) => new Date(entry.created_at).toLocaleString(),
+    },
+  ];
+
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-2">
@@ -992,47 +1023,16 @@ function FeedbackSection() {
       ) : (
         <div className="space-y-2">
           {/* Feedback entries table */}
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-gray-100">
-                  <th className="text-left px-4 py-2 text-xs font-medium text-gray-500">
-                    Type
-                  </th>
-                  <th className="text-left px-4 py-2 text-xs font-medium text-gray-500">
-                    Action ID
-                  </th>
-                  <th className="text-left px-4 py-2 text-xs font-medium text-gray-500">
-                    Comment
-                  </th>
-                  <th className="text-left px-4 py-2 text-xs font-medium text-gray-500">
-                    Created
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100">
-                {entries.map((entry) => (
-                  <tr
-                    key={entry.feedback_id}
-                    className="hover:bg-gray-50 transition-colors"
-                  >
-                    <td className="px-4 py-3">
-                      {feedbackTypeBadge(entry.feedback_type)}
-                    </td>
-                    <td className="px-4 py-3 text-xs text-gray-600 font-mono">
-                      {entry.action_id}
-                    </td>
-                    <td className="px-4 py-3 text-xs text-gray-600 max-w-xs truncate">
-                      {entry.comment || "—"}
-                    </td>
-                    <td className="px-4 py-3 text-xs text-gray-400">
-                      {new Date(entry.created_at).toLocaleString()}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <Table<FeedbackEntry>
+            ariaLabel="Feedback entries"
+            variant="compact"
+            columns={feedbackColumns}
+            data={entries}
+            getRowId={(entry) => entry.feedback_id}
+            emptyState={
+              <span className="text-gray-500">No feedback entries found.</span>
+            }
+          />
 
           {/* Pagination */}
           {totalPages > 1 && (

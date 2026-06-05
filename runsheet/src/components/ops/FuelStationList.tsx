@@ -2,6 +2,7 @@
 
 import { ChevronDown, ChevronUp, MapPin, Pencil } from "lucide-react";
 import { useCallback, useState } from "react";
+import { type Column, Table } from "@/components/ui";
 import type {
   FuelStation,
   FuelType,
@@ -92,15 +93,6 @@ function formatGallons(gallons: number): string {
   return gallons.toFixed(0);
 }
 
-const COLUMNS: { key: SortField; label: string }[] = [
-  { key: "name", label: "Station" },
-  { key: "fuel_type", label: "Fuel Type" },
-  { key: "stock_pct", label: "Stock Level" },
-  { key: "status", label: "Status" },
-  { key: "days_until_empty", label: "Days Left" },
-  { key: "location_name", label: "Location" },
-];
-
 /**
  * Station list with stock percentage bars, status color-coding
  * (green/yellow/red/gray), fuel type, and location.
@@ -154,144 +146,166 @@ export default function FuelStationList({
     );
   };
 
-  if (stations.length === 0) {
-    return (
-      <div className="text-center py-16 text-gray-500">
-        <p className="text-lg font-medium text-gray-400">No stations found</p>
-        <p className="text-sm text-gray-400 mt-1">Try adjusting your filters</p>
-      </div>
-    );
+  const SortableHeader = ({
+    field,
+    label,
+  }: {
+    field: SortField;
+    label: string;
+  }) => (
+    <button
+      type="button"
+      onClick={() => handleSort(field)}
+      aria-sort={
+        sortField === field
+          ? sortOrder === "asc"
+            ? "ascending"
+            : "descending"
+          : "none"
+      }
+      className="flex items-center text-xs font-medium text-gray-600 uppercase tracking-wider"
+    >
+      {label}
+      <SortIcon field={field} />
+    </button>
+  );
+
+  const columns: Column<FuelStation>[] = [
+    {
+      key: "name",
+      label: <SortableHeader field="name" label="Station" />,
+      headerClassName: "cursor-pointer select-none hover:bg-gray-100",
+      className: "text-sm font-medium text-primary",
+      render: (station) => station.name,
+    },
+    {
+      key: "fuel_type",
+      label: <SortableHeader field="fuel_type" label="Fuel Type" />,
+      headerClassName: "cursor-pointer select-none hover:bg-gray-100",
+      className: "text-sm text-gray-700",
+      render: (station) =>
+        FUEL_TYPE_LABELS[station.fuel_type] ?? station.fuel_type,
+    },
+    {
+      key: "stock_pct",
+      label: <SortableHeader field="stock_pct" label="Stock Level" />,
+      headerClassName: "cursor-pointer select-none hover:bg-gray-100",
+      render: (station) => {
+        const stockPct = getStockPercentage(station);
+        const config = STATUS_CONFIG[station.status] ?? STATUS_CONFIG.normal;
+        return (
+          <>
+            <div className="flex items-center gap-2">
+              <div
+                className="flex-1 h-2 bg-gray-200 rounded-full overflow-hidden"
+                role="progressbar"
+                aria-valuenow={Math.round(stockPct)}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-label={`Stock level ${Math.round(stockPct)}%`}
+              >
+                <div
+                  className={`h-full rounded-full transition-all ${config.barColor}`}
+                  style={{ width: `${Math.min(stockPct, 100)}%` }}
+                />
+              </div>
+              <span className="text-xs text-gray-600 w-16 text-right">
+                {stockPct.toFixed(1)}%
+              </span>
+            </div>
+            <div className="text-xs text-gray-400 mt-0.5">
+              {formatGallons(getCurrentStockGallons(station))} /{" "}
+              {formatGallons(getCapacityGallons(station))} gal
+            </div>
+          </>
+        );
+      },
+    },
+    {
+      key: "status",
+      label: <SortableHeader field="status" label="Status" />,
+      headerClassName: "cursor-pointer select-none hover:bg-gray-100",
+      render: (station) => {
+        const config = STATUS_CONFIG[station.status] ?? STATUS_CONFIG.normal;
+        return (
+          <span
+            className={`inline-flex items-center px-2.5 py-0.5 rounded-md text-xs font-medium ${config.bg} ${config.color}`}
+          >
+            {config.label}
+          </span>
+        );
+      },
+    },
+    {
+      key: "days_until_empty",
+      label: <SortableHeader field="days_until_empty" label="Days Left" />,
+      headerClassName: "cursor-pointer select-none hover:bg-gray-100",
+      className: "text-sm text-gray-700",
+      render: (station) =>
+        station.days_until_empty > 0
+          ? `${station.days_until_empty.toFixed(1)} days`
+          : "—",
+    },
+    {
+      key: "location_name",
+      label: <SortableHeader field="location_name" label="Location" />,
+      headerClassName: "cursor-pointer select-none hover:bg-gray-100",
+      className: "text-sm text-gray-600",
+      render: (station) =>
+        station.location_name ? (
+          <span className="flex items-center gap-1">
+            <MapPin className="w-3 h-3 text-gray-400" aria-hidden="true" />
+            {station.location_name}
+          </span>
+        ) : (
+          "—"
+        ),
+    },
+  ];
+
+  if (onEditStation) {
+    columns.push({
+      key: "actions",
+      label: "Actions",
+      align: "right",
+      render: (station) => (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onEditStation(station);
+          }}
+          className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-gray-600 bg-gray-100 rounded-md hover:bg-gray-200 hover:text-gray-800 transition-colors"
+          aria-label={`Edit ${station.name}`}
+        >
+          <Pencil className="w-3 h-3" aria-hidden="true" />
+          Edit
+        </button>
+      ),
+    });
   }
 
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full" aria-label="Fuel station list">
-        <thead className="bg-gray-50 sticky top-0 border-b border-gray-100">
-          <tr>
-            {COLUMNS.map((col) => (
-              <th
-                key={col.key}
-                className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider cursor-pointer select-none hover:bg-gray-100"
-                onClick={() => handleSort(col.key)}
-                aria-sort={
-                  sortField === col.key
-                    ? sortOrder === "asc"
-                      ? "ascending"
-                      : "descending"
-                    : "none"
-                }
-              >
-                {col.label}
-                <SortIcon field={col.key} />
-              </th>
-            ))}
-            {onEditStation && (
-              <th className="px-6 py-3 text-right text-xs font-medium text-gray-600 uppercase tracking-wider">
-                Actions
-              </th>
-            )}
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-gray-100">
-          {sorted.map((station) => {
-            const stockPct = getStockPercentage(station);
-            const config =
-              STATUS_CONFIG[station.status] ?? STATUS_CONFIG.normal;
-            const isSelected = selectedStationId === station.station_id;
-
-            return (
-              <tr
-                key={`${station.station_id}::${station.fuel_type}`}
-                className={`transition-colors cursor-pointer ${
-                  isSelected ? "bg-info-light" : "hover:bg-gray-50"
-                }`}
-                onClick={() => onSelectStation?.(station.station_id)}
-                role="button"
-                tabIndex={0}
-                aria-selected={isSelected}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    onSelectStation?.(station.station_id);
-                  }
-                }}
-              >
-                <td className="px-6 py-3 text-sm font-medium text-primary">
-                  {station.name}
-                </td>
-                <td className="px-6 py-3 text-sm text-gray-700">
-                  {FUEL_TYPE_LABELS[station.fuel_type] ?? station.fuel_type}
-                </td>
-                <td className="px-6 py-3">
-                  <div className="flex items-center gap-2">
-                    <div
-                      className="flex-1 h-2 bg-gray-200 rounded-full overflow-hidden"
-                      role="progressbar"
-                      aria-valuenow={Math.round(stockPct)}
-                      aria-valuemin={0}
-                      aria-valuemax={100}
-                      aria-label={`Stock level ${Math.round(stockPct)}%`}
-                    >
-                      <div
-                        className={`h-full rounded-full transition-all ${config.barColor}`}
-                        style={{ width: `${Math.min(stockPct, 100)}%` }}
-                      />
-                    </div>
-                    <span className="text-xs text-gray-600 w-16 text-right">
-                      {stockPct.toFixed(1)}%
-                    </span>
-                  </div>
-                  <div className="text-xs text-gray-400 mt-0.5">
-                    {formatGallons(getCurrentStockGallons(station))} /{" "}
-                    {formatGallons(getCapacityGallons(station))} gal
-                  </div>
-                </td>
-                <td className="px-6 py-3">
-                  <span
-                    className={`inline-flex items-center px-2.5 py-0.5 rounded-md text-xs font-medium ${config.bg} ${config.color}`}
-                  >
-                    {config.label}
-                  </span>
-                </td>
-                <td className="px-6 py-3 text-sm text-gray-700">
-                  {station.days_until_empty > 0
-                    ? `${station.days_until_empty.toFixed(1)} days`
-                    : "—"}
-                </td>
-                <td className="px-6 py-3 text-sm text-gray-600">
-                  {station.location_name ? (
-                    <span className="flex items-center gap-1">
-                      <MapPin
-                        className="w-3 h-3 text-gray-400"
-                        aria-hidden="true"
-                      />
-                      {station.location_name}
-                    </span>
-                  ) : (
-                    "—"
-                  )}
-                </td>
-                {onEditStation && (
-                  <td className="px-6 py-3 text-right">
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onEditStation(station);
-                      }}
-                      className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-gray-600 bg-gray-100 rounded-md hover:bg-gray-200 hover:text-gray-800 transition-colors"
-                      aria-label={`Edit ${station.name}`}
-                    >
-                      <Pencil className="w-3 h-3" aria-hidden="true" />
-                      Edit
-                    </button>
-                  </td>
-                )}
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
+    <Table<FuelStation>
+      ariaLabel="Fuel station list"
+      columns={columns}
+      data={sorted}
+      variant="compact"
+      getRowId={(station) => station.station_id}
+      selectedId={selectedStationId ?? undefined}
+      onRowClick={
+        onSelectStation
+          ? (station) => onSelectStation(station.station_id)
+          : undefined
+      }
+      emptyState={
+        <div className="text-gray-500">
+          <p className="text-lg font-medium text-gray-400">No stations found</p>
+          <p className="text-sm text-gray-400 mt-1">
+            Try adjusting your filters
+          </p>
+        </div>
+      }
+    />
   );
 }
