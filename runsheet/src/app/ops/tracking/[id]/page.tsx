@@ -127,7 +127,7 @@ export default function ShipmentTrackingPage() {
       {/* Header */}
       <div className="border-b border-gray-100 px-8 py-6">
         <Link
-          href="/ops"
+          href="/dashboard"
           className="inline-flex items-center gap-1 text-sm text-gray-500 hover:text-primary mb-4"
         >
           <ArrowLeft className="w-4 h-4" />

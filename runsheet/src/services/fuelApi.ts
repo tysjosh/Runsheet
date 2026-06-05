@@ -2129,6 +2129,18 @@ export interface TruckCompartmentListResponse {
   total: number;
 }
 
+/** One truck that has at least one compartment configured. */
+export interface CompartmentTruckSummary {
+  truck_id: string;
+  compartment_count: number;
+}
+
+/** Envelope for ``GET /api/fuel/mvp/compartment-trucks``. */
+export interface CompartmentTrucksResponse {
+  items: CompartmentTruckSummary[];
+  total: number;
+}
+
 /**
  * Body for ``POST /api/fuel/mvp/compartments/{id}/cleaning-events``.
  *
@@ -2183,6 +2195,18 @@ export async function listTruckCompartments(
   return fuelRequest<TruckCompartmentListResponse>(
     `/fuel/mvp/trucks/${encodeURIComponent(truckId)}/compartments`,
   );
+}
+
+/**
+ * GET ``/api/fuel/mvp/compartment-trucks`` — list trucks that have at
+ * least one compartment configured, with a per-truck compartment count.
+ *
+ * Powers the Truck Compartments tab's truck picker so dispatchers can
+ * select a tanker from a dropdown instead of having to know its id
+ * up-front. An empty result returns ``items: []`` rather than 404.
+ */
+export async function listCompartmentTrucks(): Promise<CompartmentTrucksResponse> {
+  return fuelRequest<CompartmentTrucksResponse>("/fuel/mvp/compartment-trucks");
 }
 
 /**

@@ -306,6 +306,41 @@ describe("SourcingPage", () => {
     ).toBeInTheDocument();
   });
 
+  it("preloads rack prices and supplier contracts on mount", async () => {
+    mockListRack.mockResolvedValue({
+      items: [
+        {
+          rack_price_id: "RACK-001",
+          tenant_id: "demo-tenant",
+          terminal_id: "TERM-001",
+          product_code: "DIESEL_2",
+          price_per_gallon_usd: 3.25,
+          branded_flag: false,
+          supplier_brand: null,
+          provider: "opis",
+          effective_at: "2026-05-11T06:00:00Z",
+          retrieved_at: "2026-05-11T06:05:00Z",
+        },
+      ],
+      total: 1,
+      page: 1,
+      page_size: 50,
+      has_next: false,
+    });
+
+    render(<SourcingPage />);
+
+    // Both side-panel fetches fire on mount with no query submitted, and the
+    // preloaded rack price renders in the panel.
+    await waitFor(() => {
+      expect(mockListRack).toHaveBeenCalled();
+      expect(mockListContracts).toHaveBeenCalled();
+    });
+    expect(
+      await screen.findByTestId("rack-price-row-RACK-001"),
+    ).toBeInTheDocument();
+  });
+
   it("renders ranked candidates with rack-price fallback banner suppressed when flag is false", async () => {
     mockGetRec.mockResolvedValue(recommendationFixture());
 
@@ -393,13 +428,16 @@ describe("SourcingPage", () => {
     await submitQuery();
 
     await waitFor(() => {
-      expect(mockListRack).toHaveBeenCalled();
+      // The mount effect preloads the side panels unfiltered; after a query
+      // submit the panels are refreshed filtered to the canonical product.
+      // Assert on the most recent call so the preload doesn't shadow it.
+      const lastRack = mockListRack.mock.calls.at(-1);
+      expect(lastRack?.[0]).toEqual(
+        expect.objectContaining({ product_code: "DIESEL_2" }),
+      );
     });
-    // First positional arg (only arg) is the filters object.
-    expect(mockListRack.mock.calls[0][0]).toEqual(
-      expect.objectContaining({ product_code: "DIESEL_2" }),
-    );
-    expect(mockListContracts.mock.calls[0][0]).toEqual(
+    const lastContracts = mockListContracts.mock.calls.at(-1);
+    expect(lastContracts?.[0]).toEqual(
       expect.objectContaining({ product_code: "DIESEL_2", status: "active" }),
     );
   });

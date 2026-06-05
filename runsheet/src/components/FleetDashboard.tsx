@@ -1,11 +1,6 @@
 "use client";
 
-import {
-  Package,
-  Package as PackageIcon,
-  Shield,
-  Truck,
-} from "lucide-react";
+import { Package, Package as PackageIcon, Shield, Truck } from "lucide-react";
 import { lazy, Suspense, useState } from "react";
 import type { Truck as TruckType } from "../types/api";
 import ExpiryAlertWidget from "./compliance/ExpiryAlertWidget";
@@ -24,6 +19,12 @@ interface FleetDashboardProps {
   selectedTruck: TruckType | null;
   onTruckSelect: (truck: TruckType) => void;
   mapView: React.ReactNode;
+  /**
+   * Navigate to a top-level dashboard module (e.g. "drivers"). Wired from
+   * the dashboard shell so in-page affordances like the expiry-alert
+   * widget's "Driver Qualifications" row can jump to the Drivers hub.
+   */
+  onNavigate?: (item: string) => void;
 }
 
 const TABS: Tab[] = [
@@ -51,6 +52,7 @@ export default function FleetDashboard({
   selectedTruck,
   onTruckSelect,
   mapView,
+  onNavigate,
 }: FleetDashboardProps) {
   const [activeTab, setActiveTab] = useState<TabId>("assets");
 
@@ -71,6 +73,9 @@ export default function FleetDashboard({
             <ErrorBoundary componentName="Expiry Alerts">
               <ExpiryAlertWidget
                 onViewCertifications={() => setActiveTab("certifications")}
+                onViewDrivers={
+                  onNavigate ? () => onNavigate("drivers") : undefined
+                }
               />
             </ErrorBoundary>
 

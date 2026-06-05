@@ -80,6 +80,7 @@ function channelFixture(overrides: Partial<IntakeChannel> = {}): IntakeChannel {
     hmac_secret_ref: "ref:vault:abc123",
     supported_schema_versions: ["1.0"],
     rate_limit_per_minute: 100,
+    secret_version: 1,
     enabled: true,
     created_at: "2024-06-01T00:00:00Z",
     updated_at: "2024-06-01T00:00:00Z",
@@ -99,6 +100,7 @@ function channelWithSecretFixture(
     hmac_secret_ref: "ref:vault:abc123",
     supported_schema_versions: ["1.0"],
     rate_limit_per_minute: 100,
+    secret_version: 1,
     enabled: true,
     created_at: "2024-06-01T00:00:00Z",
     updated_at: "2024-06-01T00:00:00Z",
@@ -123,7 +125,7 @@ beforeEach(() => {
 describe("IntakeChannelsAdminPanel — list", () => {
   it("fetches and renders channels on mount", async () => {
     mockList.mockResolvedValue({
-      data: [
+      items: [
         channelFixture({ channel_id: "ch-1", display_name: "Voice Provider" }),
         channelFixture({
           channel_id: "ch-2",
@@ -131,7 +133,7 @@ describe("IntakeChannelsAdminPanel — list", () => {
           channel_type: "edi",
         }),
       ],
-      request_id: "r1",
+      total: 2,
     });
 
     render(<IntakeChannelsAdminPanel />);
@@ -142,7 +144,7 @@ describe("IntakeChannelsAdminPanel — list", () => {
   });
 
   it("renders empty state when no channels", async () => {
-    mockList.mockResolvedValue({ data: [], request_id: "r1" });
+    mockList.mockResolvedValue({ items: [], total: 0 });
 
     render(<IntakeChannelsAdminPanel />);
 
@@ -162,7 +164,7 @@ describe("IntakeChannelsAdminPanel — list", () => {
 
 describe("IntakeChannelsAdminPanel — create", () => {
   it("opens create form and submits successfully", async () => {
-    mockList.mockResolvedValue({ data: [], request_id: "r1" });
+    mockList.mockResolvedValue({ items: [], total: 0 });
     mockCreate.mockResolvedValue(
       channelWithSecretFixture({ hmac_secret: "new-secret-xyz" }),
     );
@@ -196,7 +198,7 @@ describe("IntakeChannelsAdminPanel — create", () => {
   });
 
   it("shows secret exactly once with copy button", async () => {
-    mockList.mockResolvedValue({ data: [], request_id: "r1" });
+    mockList.mockResolvedValue({ items: [], total: 0 });
     mockCreate.mockResolvedValue(
       channelWithSecretFixture({ hmac_secret: "one-time-secret" }),
     );
@@ -240,8 +242,8 @@ describe("IntakeChannelsAdminPanel — create", () => {
 describe("IntakeChannelsAdminPanel — rotate secret", () => {
   it("rotates secret and shows new secret in modal", async () => {
     mockList.mockResolvedValue({
-      data: [channelFixture({ channel_id: "ch-rotate" })],
-      request_id: "r1",
+      items: [channelFixture({ channel_id: "ch-rotate" })],
+      total: 1,
     });
     mockRotate.mockResolvedValue(
       channelWithSecretFixture({ hmac_secret: "rotated-secret-999" }),
@@ -267,8 +269,8 @@ describe("IntakeChannelsAdminPanel — rotate secret", () => {
 describe("IntakeChannelsAdminPanel — toggle enabled", () => {
   it("disables an enabled channel", async () => {
     mockList.mockResolvedValue({
-      data: [channelFixture({ channel_id: "ch-toggle", enabled: true })],
-      request_id: "r1",
+      items: [channelFixture({ channel_id: "ch-toggle", enabled: true })],
+      total: 1,
     });
     mockUpdate.mockResolvedValue(channelFixture({ enabled: false }));
 
@@ -292,8 +294,8 @@ describe("IntakeChannelsAdminPanel — toggle enabled", () => {
 describe("IntakeChannelsAdminPanel — delete", () => {
   it("deletes a channel after confirmation", async () => {
     mockList.mockResolvedValue({
-      data: [channelFixture({ channel_id: "ch-del" })],
-      request_id: "r1",
+      items: [channelFixture({ channel_id: "ch-del" })],
+      total: 1,
     });
     mockDelete.mockResolvedValue(undefined);
     window.confirm = jest.fn(() => true);

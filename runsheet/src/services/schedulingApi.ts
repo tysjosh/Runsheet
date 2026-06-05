@@ -110,10 +110,22 @@ export interface AssetUtilizationMetric {
   idle_hours: number;
 }
 
+/** A single per-job-type delay breakdown row. */
+export interface DelayByJobType {
+  job_type: string;
+  count: number;
+  avg_delay_minutes: number;
+}
+
 export interface DelayMetrics {
   total_delayed: number;
   avg_delay_minutes: number;
-  delays_by_type: Record<string, number>;
+  /**
+   * Per-job-type breakdown as returned by the backend
+   * (``GET /scheduling/metrics/delays``). The backend key is
+   * ``delays_by_job_type`` and the value is a list, not a map.
+   */
+  delays_by_job_type: DelayByJobType[];
 }
 
 // ─── HTTP Helper ─────────────────────────────────────────────────────────────

@@ -1,12 +1,11 @@
 "use client";
 import {
   Activity,
-  DollarSign,
   FileCheck,
-  FileText,
   Gauge,
   Map,
   Receipt,
+  ScrollText,
   Shield,
 } from "lucide-react";
 import { lazy, Suspense, useState } from "react";
@@ -19,10 +18,7 @@ const AssetCertificationsPage = lazy(
 const TaxJurisdictionsPage = lazy(
   () => import("./compliance/TaxJurisdictionsPage"),
 );
-const PriceProtectionContractsPage = lazy(
-  () => import("./compliance/PriceProtectionContractsPage"),
-);
-const PricingRulesPage = lazy(() => import("./compliance/PricingRulesPage"));
+const ExemptionsPage = lazy(() => import("./compliance/ExemptionsPage"));
 const MeterAuditPage = lazy(() => import("./compliance/MeterAuditPage"));
 const KFactorCalibrationPage = lazy(
   () => import("./compliance/KFactorCalibrationPage"),
@@ -38,11 +34,10 @@ const TABS: Tab[] = [
   },
   { id: "tax", label: "Tax", icon: <Receipt className="w-4 h-4" /> },
   {
-    id: "contracts",
-    label: "Contracts",
-    icon: <FileText className="w-4 h-4" />,
+    id: "exemptions",
+    label: "Exemptions",
+    icon: <ScrollText className="w-4 h-4" />,
   },
-  { id: "pricing", label: "Pricing", icon: <DollarSign className="w-4 h-4" /> },
   { id: "meters", label: "Meters", icon: <Gauge className="w-4 h-4" /> },
   { id: "kfactor", label: "K-Factor", icon: <Activity className="w-4 h-4" /> },
   { id: "bols", label: "BOLs", icon: <FileCheck className="w-4 h-4" /> },
@@ -66,8 +61,7 @@ export default function ComplianceHub() {
         <Suspense fallback={<LoadingSpinner message="Loading..." />}>
           {activeTab === "certifications" && <AssetCertificationsPage />}
           {activeTab === "tax" && <TaxJurisdictionsPage />}
-          {activeTab === "contracts" && <PriceProtectionContractsPage />}
-          {activeTab === "pricing" && <PricingRulesPage />}
+          {activeTab === "exemptions" && <ExemptionsPage />}
           {activeTab === "meters" && <MeterAuditPage />}
           {activeTab === "kfactor" && <KFactorCalibrationPage />}
           {activeTab === "bols" && <TerminalBOLsPage />}

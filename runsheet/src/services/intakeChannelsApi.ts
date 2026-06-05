@@ -46,6 +46,7 @@ export interface IntakeChannel {
   hmac_secret_ref: string;
   supported_schema_versions: string[];
   rate_limit_per_minute?: number | null;
+  secret_version: number;
   enabled: boolean;
   created_at: string;
   updated_at: string;
@@ -64,14 +65,22 @@ export interface IntakeChannelWithSecret {
   hmac_secret_ref: string;
   supported_schema_versions: string[];
   rate_limit_per_minute?: number | null;
+  secret_version: number;
   enabled: boolean;
   created_at: string;
   updated_at: string;
 }
 
+/**
+ * Envelope for ``GET /api/integrations/intake-channels``.
+ *
+ * Mirrors the backend ``IntakeChannelListResponse`` — the list endpoint
+ * returns ``{ items, total }`` (NOT the ``{ data, request_id }`` envelope
+ * used by other surfaces).
+ */
 export interface IntakeChannelListResponse {
-  data: IntakeChannel[];
-  request_id: string;
+  items: IntakeChannel[];
+  total: number;
 }
 
 export interface CreateIntakeChannelPayload {

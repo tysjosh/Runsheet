@@ -103,6 +103,7 @@ export default function Home() {
               selectedTruck={selectedTruck}
               onTruckSelect={handleTruckSelect}
               mapView={<MapView selectedTruck={selectedTruck} />}
+              onNavigate={handleNavigate}
             />
           </Suspense>
         );

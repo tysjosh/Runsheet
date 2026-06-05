@@ -12,10 +12,10 @@ import {
   type AssetCertification,
   type AssetCertificationDashboard,
   type CertificationStatus,
-  type CertificationSummary,
   type CertificationType,
   type CreateAssetCertificationPayload,
   createAssetCertification,
+  type FleetCertificationEntry,
   getAssetCertifications,
   getAssetCertificationsDashboard,
 } from "../../services/complianceApi";
@@ -82,6 +82,73 @@ function urgencyOrder(status: CertificationStatus): number {
     default:
       return 3;
   }
+}
+
+// ─── Per-asset aggregation ───────────────────────────────────────────────────
+
+/**
+ * A per-asset rollup of the backend's flat per-certification dashboard
+ * rows. The backend returns one {@link FleetCertificationEntry} per
+ * certification; the table groups them by ``asset_id`` so each asset is a
+ * single row with its certifications, worst-case status, and soonest
+ * expiry.
+ */
+interface AssetCertificationSummary {
+  asset_id: string;
+  certifications: FleetCertificationEntry[];
+  overall_status: CertificationStatus;
+  next_expiry_date: string | null;
+  days_until_next_expiry: number;
+}
+
+/** Worst (most urgent) of two statuses wins for the asset rollup. */
+function worstStatus(
+  a: CertificationStatus,
+  b: CertificationStatus,
+): CertificationStatus {
+  return urgencyOrder(a) <= urgencyOrder(b) ? a : b;
+}
+
+/**
+ * Group the backend's flat certification list into per-asset summaries,
+ * sorted by urgency (most urgent first). Defensive against a missing or
+ * non-array ``assets`` payload so a malformed response degrades to an
+ * empty table rather than crashing the dashboard.
+ */
+function aggregateByAsset(
+  entries: FleetCertificationEntry[] | undefined | null,
+): AssetCertificationSummary[] {
+  const byAsset = new Map<string, AssetCertificationSummary>();
+
+  for (const entry of entries ?? []) {
+    const existing = byAsset.get(entry.asset_id);
+    if (!existing) {
+      byAsset.set(entry.asset_id, {
+        asset_id: entry.asset_id,
+        certifications: [entry],
+        overall_status: entry.status,
+        next_expiry_date: entry.expiry_date,
+        days_until_next_expiry: entry.days_until_expiry,
+      });
+      continue;
+    }
+
+    existing.certifications.push(entry);
+    existing.overall_status = worstStatus(
+      existing.overall_status,
+      entry.status,
+    );
+    if (entry.days_until_expiry < existing.days_until_next_expiry) {
+      existing.days_until_next_expiry = entry.days_until_expiry;
+      existing.next_expiry_date = entry.expiry_date;
+    }
+  }
+
+  return [...byAsset.values()].sort(
+    (a, b) =>
+      urgencyOrder(a.overall_status) - urgencyOrder(b.overall_status) ||
+      a.days_until_next_expiry - b.days_until_next_expiry,
+  );
 }
 
 // ─── Main Component ──────────────────────────────────────────────────────────
@@ -217,10 +284,9 @@ export default function AssetCertificationsPage() {
 
     if (!dashboard) return null;
 
-    // Sort assets by urgency: expired first, then expiring_soon, then valid
-    const sortedAssets = [...dashboard.assets].sort(
-      (a, b) => urgencyOrder(a.overall_status) - urgencyOrder(b.overall_status),
-    );
+    // The backend returns a flat list of per-certification rows; group
+    // them into per-asset summaries (already sorted by urgency).
+    const sortedAssets = aggregateByAsset(dashboard.assets);
 
     return (
       <div>
@@ -238,11 +304,9 @@ export default function AssetCertificationsPage() {
             </tr>
           </thead>
           <tbody>
-            {sortedAssets.map((asset: CertificationSummary) => (
+            {sortedAssets.map((asset: AssetCertificationSummary) => (
               <tr key={asset.asset_id} className="border-b hover:bg-gray-50">
-                <td className="p-3 font-medium">
-                  {asset.asset_name || asset.asset_id}
-                </td>
+                <td className="p-3 font-medium">{asset.asset_id}</td>
                 <td className="p-3">
                   <Badge
                     variant={certStatusVariant(asset.overall_status)}

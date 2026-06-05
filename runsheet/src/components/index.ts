@@ -1,6 +1,5 @@
 export { default as AIChat } from "./AIChat";
 export { default as Analytics } from "./Analytics";
-export { default as DataUpload } from "./DataUpload";
 export { default as ErrorBoundary, withErrorBoundary } from "./ErrorBoundary";
 export { default as FleetTracking } from "./FleetTracking";
 export { default as Header } from "./Header";

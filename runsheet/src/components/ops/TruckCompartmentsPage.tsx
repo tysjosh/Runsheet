@@ -52,6 +52,7 @@ import type {
   CleaningEvent,
   CleaningMethod,
   CompartmentLifecycleState,
+  CompartmentTruckSummary,
   LoadEligibilityDecision,
   LoadEligibilityResponse,
   TruckCompartmentState,
@@ -59,6 +60,7 @@ import type {
 import {
   checkCompartmentLoadEligibility,
   getTruckCompartmentCapacityGallons,
+  listCompartmentTrucks,
   listTruckCompartments,
   recordCleaningEvent,
 } from "../../services/fuelApi";
@@ -898,6 +900,10 @@ export default function TruckCompartmentsPage() {
   const [items, setItems] = useState<TruckCompartmentState[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [truckOptions, setTruckOptions] = useState<CompartmentTruckSummary[]>(
+    [],
+  );
+  const [truckOptionsLoaded, setTruckOptionsLoaded] = useState(false);
   const [modalCompartment, setModalCompartment] =
     useState<TruckCompartmentState | null>(null);
   const [eligibilityCompartment, setEligibilityCompartment] =
@@ -920,6 +926,30 @@ export default function TruckCompartmentsPage() {
       setLoading(false);
     }
   }, []);
+
+  // Load the list of trucks that have compartments configured so the
+  // dispatcher can pick one from a dropdown instead of memorising ids.
+  // Auto-select the first truck so the tab shows data on open.
+  useEffect(() => {
+    let cancelled = false;
+    listCompartmentTrucks()
+      .then((resp) => {
+        if (cancelled) return;
+        setTruckOptions(resp.items);
+        setTruckOptionsLoaded(true);
+        if (resp.items.length > 0) {
+          const first = resp.items[0].truck_id;
+          setTruckIdInput(first);
+          void fetchCompartments(first);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setTruckOptionsLoaded(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [fetchCompartments]);
 
   const handleLookup = (e: React.FormEvent) => {
     e.preventDefault();
@@ -1009,12 +1039,24 @@ export default function TruckCompartmentsPage() {
               <input
                 id="truck-id-input"
                 type="text"
+                list="compartment-truck-options"
                 className="w-full pl-8 pr-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white"
                 value={truckIdInput}
                 onChange={(e) => setTruckIdInput(e.target.value)}
-                placeholder="e.g. TRUCK-042"
+                placeholder={
+                  truckOptions.length > 0
+                    ? `e.g. ${truckOptions[0].truck_id}`
+                    : "e.g. TNK-001"
+                }
                 required
               />
+              <datalist id="compartment-truck-options">
+                {truckOptions.map((t) => (
+                  <option key={t.truck_id} value={t.truck_id}>
+                    {t.truck_id} ({t.compartment_count} compartments)
+                  </option>
+                ))}
+              </datalist>
             </div>
           </div>
           <button
@@ -1034,6 +1076,34 @@ export default function TruckCompartmentsPage() {
           </button>
         </form>
 
+        {truckOptions.length > 0 && (
+          <div className="flex flex-wrap items-center gap-2 mb-6 -mt-2">
+            <span className="text-xs text-gray-500">Tankers:</span>
+            {truckOptions.map((t) => (
+              <button
+                key={t.truck_id}
+                type="button"
+                onClick={() => {
+                  setTruckIdInput(t.truck_id);
+                  void fetchCompartments(t.truck_id);
+                }}
+                className={`px-2.5 py-1 text-xs font-mono rounded-full border transition-colors ${
+                  activeTruckId === t.truck_id
+                    ? "bg-primary text-white border-primary"
+                    : "bg-white text-gray-700 border-gray-200 hover:bg-gray-50"
+                }`}
+              >
+                {t.truck_id}
+                <span
+                  className={`ml-1 ${activeTruckId === t.truck_id ? "text-white/80" : "text-gray-400"}`}
+                >
+                  · {t.compartment_count}
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
+
         {error && (
           <p
             role="alert"
@@ -1043,9 +1113,18 @@ export default function TruckCompartmentsPage() {
           </p>
         )}
 
-        {!activeTruckId && !error && (
+        {!activeTruckId && !error && !loading && (
           <div className="text-center py-16 text-gray-500 text-sm">
-            Enter a truck ID above to see its compartments.
+            {!truckOptionsLoaded ? (
+              <span className="inline-flex items-center gap-2">
+                <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
+                Loading tankers…
+              </span>
+            ) : truckOptions.length === 0 ? (
+              "No trucks have compartments configured yet."
+            ) : (
+              "Select a tanker above to see its compartments."
+            )}
           </div>
         )}
 

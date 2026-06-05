@@ -38,6 +38,7 @@ from fuel.depot_models import (
     CrossTenantAccessError,
     Depot,
     DepotRepository,
+    _safe_model_load,
 )
 from fuel.services.fuel_ops_es_mappings import DEPOTS_INDEX
 from fuel.services.fuel_product_catalog import UnknownFuelProductError
@@ -671,3 +672,73 @@ class TestDefaultDepotFlag:
         # Neither default was cleared because they belong to different tenants.
         assert es.docs["depot_a"]["is_default"] is True
         assert es.docs["depot_b"]["is_default"] is True
+
+
+# ---------------------------------------------------------------------------
+# _safe_model_load: tolerate ES-only / dual-write convenience fields
+# ---------------------------------------------------------------------------
+
+
+class TestSafeModelLoadStripsExtraFields:
+    """Regression: a depot doc carrying ES-only fields must still load.
+
+    The persisted ``depots`` document (whether served from ES or the
+    Postgres source-of-truth) historically carried a ``location``
+    geo_point convenience field that the strict ``Depot`` model
+    (``extra="forbid"``) does not define. Before the strip fix, every such
+    row was silently dropped on read, leaving the Depots tab empty even
+    though the data existed. ``_safe_model_load`` now drops unknown keys
+    before validation so a row written with the geo_point survives.
+    """
+
+    def test_strips_nested_location_geo_point(self):
+        source = {
+            "depot_id": "DEPOT-HOU",
+            "tenant_id": "demo-tenant",
+            "name": "Houston Main Depot",
+            "location_lat": 29.7604,
+            "location_lon": -95.3698,
+            "address": "1500 Industrial Blvd, Houston, TX 77020",
+            "timezone": "America/Chicago",
+            "fuel_types_supported": ["DIESEL_2", "GASOLINE_REG"],
+            "status": "active",
+            # ES-only convenience field absent from the strict model.
+            "location": {"lat": 29.7604, "lon": -95.3698},
+        }
+        model = _safe_model_load(source)
+        assert model is not None
+        assert model.depot_id == "DEPOT-HOU"
+        assert model.location_lat == 29.7604
+        assert model.location_lon == -95.3698
+
+    def test_drops_record_missing_required_flat_coords(self):
+        # A document that lacks the required flat coords (and only has the
+        # nested location) cannot be salvaged by stripping — it is dropped
+        # rather than raising, so one corrupt row never kills the list.
+        source = {
+            "depot_id": "DEPOT-BAD",
+            "tenant_id": "demo-tenant",
+            "name": "Broken Depot",
+            "address": "nowhere",
+            "timezone": "America/Chicago",
+            "fuel_types_supported": [],
+            "status": "active",
+            "location": {"lat": 1.0, "lon": 2.0},
+        }
+        assert _safe_model_load(source) is None
+
+    def test_canonicalizes_legacy_fuel_aliases_on_load(self):
+        source = {
+            "depot_id": "DEPOT-NG",
+            "tenant_id": "demo-tenant",
+            "name": "Legacy Depot",
+            "location_lat": 6.5,
+            "location_lon": 3.3,
+            "address": "Lagos",
+            "timezone": "Africa/Lagos",
+            "fuel_types_supported": ["AGO", "PMS"],
+            "status": "active",
+        }
+        model = _safe_model_load(source)
+        assert model is not None
+        assert model.fuel_types_supported == ["DIESEL_2", "GASOLINE_REG"]

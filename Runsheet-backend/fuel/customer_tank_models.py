@@ -728,7 +728,15 @@ def _safe_model_load(source: Dict[str, Any]) -> Optional[CustomerTank]:
     """
 
     try:
-        return CustomerTank(**source)
+        # The ``customer_tanks`` mapping includes a ``location`` geo_point
+        # convenience field that the strict ``CustomerTank`` model
+        # (``extra="forbid"``) does not define — it uses the flat
+        # ``location_lat`` / ``location_lon`` pair. Drop unknown keys before
+        # validation so a row written with the geo_point field is not
+        # silently discarded on read.
+        model_fields = CustomerTank.model_fields.keys()
+        cleaned = {k: v for k, v in source.items() if k in model_fields}
+        return CustomerTank(**cleaned)
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning(
             "CustomerTankRepository: dropping customer_tanks doc that failed "

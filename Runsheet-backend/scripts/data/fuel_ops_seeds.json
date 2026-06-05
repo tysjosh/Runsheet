@@ -192,6 +192,8 @@
         "lat": 29.7604,
         "lon": -95.3698
       },
+      "location_lat": 29.7604,
+      "location_lon": -95.3698,
       "address": "1500 Industrial Blvd, Houston, TX 77020",
       "timezone": "America/Chicago",
       "fuel_types_supported": ["DIESEL_2", "GASOLINE_REG", "GASOLINE_PREM", "HEATING_OIL", "KEROSENE"],
@@ -204,6 +206,8 @@
         "lat": 32.7767,
         "lon": -96.7970
       },
+      "location_lat": 32.7767,
+      "location_lon": -96.7970,
       "address": "2200 Terminal Dr, Dallas, TX 75247",
       "timezone": "America/Chicago",
       "fuel_types_supported": ["DIESEL_2", "GASOLINE_REG", "GASOLINE_PREM", "KEROSENE"],
@@ -216,6 +220,8 @@
         "lat": 41.8781,
         "lon": -87.6298
       },
+      "location_lat": 41.8781,
+      "location_lon": -87.6298,
       "address": "3400 Logistics Way, Chicago, IL 60609",
       "timezone": "America/Chicago",
       "fuel_types_supported": ["DIESEL_2", "GASOLINE_REG", "HEATING_OIL", "DEF"],
@@ -590,26 +596,7 @@
       "timestamp": "2026-05-10T15:45:00Z"
     }
   ],
-  "storm_road_restrictions": [
-    {
-      "restriction_id": "RESTRICT-001",
-      "polygon": {
-        "type": "Polygon",
-        "coordinates": [[
-          [-96.8500, 32.7500],
-          [-96.7500, 32.7500],
-          [-96.7500, 32.8500],
-          [-96.8500, 32.8500],
-          [-96.8500, 32.7500]
-        ]]
-      },
-      "effective_from": "2026-05-08T05:00:00Z",
-      "effective_to": "2026-05-08T18:00:00Z",
-      "source": "nws",
-      "severity": "high",
-      "reason": "Severe thunderstorm warning - flooding and high winds"
-    }
-  ],
+  "storm_road_restrictions": [],
   "integration_sync_runs": [
     {
       "run_id": "SYNC-001",

@@ -5,13 +5,27 @@ import { PageHeader } from "@/components/ui";
 import {
   approveKFactorAdjustment,
   getKFactorDashboard,
-  type KFactorDashboard,
   type KFactorEntry,
 } from "../../services/complianceApi";
 
+// ─── Derived status ──────────────────────────────────────────────────────────
+
+type KFactorStatus = "ok" | "review_needed" | "insufficient_data";
+
+/**
+ * Derive a display status from the backend entry. The backend exposes
+ * ``read_only`` (insufficient deliveries) and a ``suggested_kfactor``
+ * (present only when variance exceeds the recalibration threshold).
+ */
+function deriveStatus(entry: KFactorEntry): KFactorStatus {
+  if (entry.read_only) return "insufficient_data";
+  if (entry.suggested_kfactor !== null) return "review_needed";
+  return "ok";
+}
+
 // ─── Status badge helper ─────────────────────────────────────────────────────
 
-function statusBadge(status: KFactorEntry["status"]): {
+function statusBadge(status: KFactorStatus): {
   label: string;
   className: string;
 } {
@@ -33,7 +47,8 @@ function statusBadge(status: KFactorEntry["status"]): {
   }
 }
 
-function formatPercent(value: number): string {
+function formatPercent(value: number | null): string {
+  if (value === null) return "—";
   return `${value >= 0 ? "+" : ""}${value.toFixed(1)}%`;
 }
 
@@ -45,7 +60,7 @@ function formatKFactor(value: number | null): string {
 // ─── Main Component ──────────────────────────────────────────────────────────
 
 export default function KFactorCalibrationPage() {
-  const [dashboard, setDashboard] = useState<KFactorDashboard | null>(null);
+  const [entries, setEntries] = useState<KFactorEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -63,7 +78,7 @@ export default function KFactorCalibrationPage() {
     setError(null);
     try {
       const response = await getKFactorDashboard();
-      setDashboard(response.data);
+      setEntries(response.data ?? []);
     } catch (err) {
       setError(
         err instanceof Error
@@ -92,13 +107,13 @@ export default function KFactorCalibrationPage() {
   }
 
   async function handleConfirmApproval() {
-    if (!approvalTarget || approvalTarget.suggested_k_factor === null) return;
+    if (!approvalTarget || approvalTarget.suggested_kfactor === null) return;
 
     setApproving(true);
     setApprovalError(null);
     try {
       await approveKFactorAdjustment(approvalTarget.tank_id, {
-        new_kfactor: approvalTarget.suggested_k_factor,
+        new_kfactor: approvalTarget.suggested_kfactor,
         operator_id: "current_user", // In production, this would come from auth context
       });
       setApprovalTarget(null);
@@ -115,15 +130,27 @@ export default function KFactorCalibrationPage() {
     }
   }
 
-  // ─── Sort entries by variance (highest absolute variance first) ────────────
+  // ─── Derive view model from the flat entry list ────────────────────────────
 
-  const sortedEntries = dashboard?.entries
-    ? [...dashboard.entries].sort(
-        (a, b) =>
-          Math.abs(b.cumulative_variance_percent) -
-          Math.abs(a.cumulative_variance_percent),
-      )
-    : [];
+  // Annotate each entry with its derived status, then sort by absolute
+  // variance (highest first; null variance sorts last).
+  const decoratedEntries = entries.map((entry) => ({
+    entry,
+    status: deriveStatus(entry),
+  }));
+
+  const sortedEntries = [...decoratedEntries].sort(
+    (a, b) =>
+      Math.abs(b.entry.variance_percent ?? 0) -
+      Math.abs(a.entry.variance_percent ?? 0),
+  );
+
+  const totalReviewNeeded = decoratedEntries.filter(
+    (d) => d.status === "review_needed",
+  ).length;
+  const totalInsufficientData = decoratedEntries.filter(
+    (d) => d.status === "insufficient_data",
+  ).length;
 
   // ─── Render ────────────────────────────────────────────────────────────────
 
@@ -154,7 +181,7 @@ export default function KFactorCalibrationPage() {
       )}
 
       {/* Dashboard content */}
-      {!loading && !error && dashboard && (
+      {!loading && !error && (
         <>
           {/* Summary cards */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
@@ -163,7 +190,7 @@ export default function KFactorCalibrationPage() {
                 Review Needed
               </div>
               <div className="text-2xl font-bold text-warning-dark mt-1">
-                {dashboard.total_review_needed}
+                {totalReviewNeeded}
               </div>
               <div className="text-xs text-warning mt-1">
                 Tanks with variance exceeding threshold
@@ -174,7 +201,7 @@ export default function KFactorCalibrationPage() {
                 Insufficient Data
               </div>
               <div className="text-2xl font-bold text-gray-800 mt-1">
-                {dashboard.total_insufficient_data}
+                {totalInsufficientData}
               </div>
               <div className="text-xs text-gray-600 mt-1">
                 Tanks with fewer than 3 deliveries
@@ -203,30 +230,31 @@ export default function KFactorCalibrationPage() {
                 </tr>
               </thead>
               <tbody>
-                {sortedEntries.map((entry) => {
-                  const badge = statusBadge(entry.status);
+                {sortedEntries.map(({ entry, status }) => {
+                  const badge = statusBadge(status);
+                  const variance = entry.variance_percent;
                   return (
                     <tr
                       key={entry.tank_id}
                       className="border-b hover:bg-gray-50"
                     >
                       <td className="p-3 font-medium">{entry.tank_id}</td>
-                      <td className="p-3">{entry.customer_name}</td>
+                      <td className="p-3">{entry.customer_id}</td>
                       <td className="p-3 font-mono text-sm">
-                        {formatKFactor(entry.current_k_factor)}
+                        {formatKFactor(entry.current_kfactor)}
                       </td>
                       <td className="p-3 font-mono text-sm">
-                        {formatKFactor(entry.suggested_k_factor)}
+                        {formatKFactor(entry.suggested_kfactor)}
                       </td>
                       <td className="p-3">
                         <span
                           className={
-                            Math.abs(entry.cumulative_variance_percent) > 15
+                            variance !== null && Math.abs(variance) > 15
                               ? "text-error font-medium"
                               : "text-gray-700"
                           }
                         >
-                          {formatPercent(entry.cumulative_variance_percent)}
+                          {formatPercent(variance)}
                         </span>
                       </td>
                       <td className="p-3">
@@ -237,8 +265,8 @@ export default function KFactorCalibrationPage() {
                         </span>
                       </td>
                       <td className="p-3">
-                        {entry.status === "review_needed" &&
-                          entry.suggested_k_factor !== null && (
+                        {status === "review_needed" &&
+                          entry.suggested_kfactor !== null && (
                             <button
                               type="button"
                               onClick={() => handleApproveClick(entry)}
@@ -285,25 +313,25 @@ export default function KFactorCalibrationPage() {
               <div className="flex justify-between text-sm">
                 <span className="text-gray-600">Customer:</span>
                 <span className="font-medium">
-                  {approvalTarget.customer_name}
+                  {approvalTarget.customer_id}
                 </span>
               </div>
               <div className="flex justify-between text-sm">
                 <span className="text-gray-600">Current K-Factor:</span>
                 <span className="font-mono">
-                  {formatKFactor(approvalTarget.current_k_factor)}
+                  {formatKFactor(approvalTarget.current_kfactor)}
                 </span>
               </div>
               <div className="flex justify-between text-sm">
                 <span className="text-gray-600">New K-Factor:</span>
                 <span className="font-mono font-bold text-info-dark">
-                  {formatKFactor(approvalTarget.suggested_k_factor)}
+                  {formatKFactor(approvalTarget.suggested_kfactor)}
                 </span>
               </div>
               <div className="flex justify-between text-sm">
                 <span className="text-gray-600">Cumulative Variance:</span>
                 <span className="font-medium">
-                  {formatPercent(approvalTarget.cumulative_variance_percent)}
+                  {formatPercent(approvalTarget.variance_percent)}
                 </span>
               </div>
             </div>

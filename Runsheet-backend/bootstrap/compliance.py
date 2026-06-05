@@ -495,6 +495,21 @@ async def initialize(app, container: ServiceContainer) -> None:
             "AssetCertificationService wiring failed (task 8.10): %s", exc
         )
 
+    # ── MeterAuditService REST API wiring ──
+    # The meter-audit REST surface (register meters, list, audit-trail)
+    # is configured here so the MeterAuditPage in the Compliance hub can
+    # reach it. Router inclusion is performed by ``main.py``.
+    try:
+        from compliance.services.meter_audit_service import MeterAuditService
+        from compliance.api.meter_endpoints import configure_meter_api
+
+        meter_service = MeterAuditService(es_service=es_service)
+        container.meter_audit_service = meter_service
+        configure_meter_api(meter_service=meter_service)
+        logger.info("Meter Audit API configured")
+    except Exception as exc:
+        logger.warning("MeterAuditService wiring failed: %s", exc)
+
     # ── Asset Certification Expiry Cron (Task 8.11 / Req 13.2–13.4) ──
     # Daily autonomous agent that runs check_expiry_alerts() for all
     # tenants with asset certifications. Handles both alert generation

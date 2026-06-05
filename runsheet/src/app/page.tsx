@@ -719,7 +719,7 @@ export default function LandingPage() {
                 Sign In
               </Link>
               <Link
-                href="/demo"
+                href="/signin"
                 className="text-sm font-semibold px-6 py-2.5 rounded-full text-white transition-all hover:opacity-90 shadow-sm"
                 style={{ backgroundColor: landingColors.accent }}
               >
@@ -769,7 +769,7 @@ export default function LandingPage() {
                   Sign In
                 </Link>
                 <Link
-                  href="/demo"
+                  href="/signin"
                   className="text-sm font-semibold py-2.5 text-center rounded-full text-white"
                   style={{ backgroundColor: landingColors.accent }}
                 >
@@ -806,7 +806,7 @@ export default function LandingPage() {
 
             <FadeIn delay={200}>
               <Link
-                href="/demo"
+                href="/signin"
                 className="inline-flex items-center justify-center gap-2 px-8 py-3.5 rounded-full text-white font-semibold text-sm transition-all hover:opacity-90 shadow-lg shadow-emerald-500/20"
                 style={{ backgroundColor: landingColors.accent }}
               >
@@ -1800,7 +1800,7 @@ export default function LandingPage() {
                   will walk you through the platform with your data.
                 </p>
                 <Link
-                  href="/demo"
+                  href="/signin"
                   className="inline-flex items-center gap-2 px-8 py-4 rounded-full text-white font-semibold transition-all hover:opacity-90 shadow-lg"
                   style={{ backgroundColor: landingColors.accent }}
                 >

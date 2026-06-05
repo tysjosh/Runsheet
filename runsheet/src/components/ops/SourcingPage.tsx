@@ -49,7 +49,7 @@ import {
   Signal,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApiError } from "../../services/api";
 import type {
   RackPrice,
@@ -1336,6 +1336,57 @@ export default function SourcingPage({ initialQuery }: SourcingPageProps = {}) {
   const [contractsLoading, setContractsLoading] = useState(false);
   const [contractsError, setContractsError] = useState<string | null>(null);
 
+  // Pre-load the rack-price and supplier-contract side panels on mount so
+  // dispatchers see the latest market data without first running a
+  // recommendation query. Once a query is submitted, handleSubmit refreshes
+  // both panels filtered to the queried product_code. Guarded by a ref so
+  // the unfiltered preload only runs once and never clobbers query-scoped
+  // results.
+  const sidePanelsPreloaded = useRef(false);
+  useEffect(() => {
+    if (sidePanelsPreloaded.current) return;
+    sidePanelsPreloaded.current = true;
+    let cancelled = false;
+
+    setRackLoading(true);
+    listRackPrices({ size: SIDE_PANEL_PAGE_SIZE })
+      .then((res) => {
+        if (!cancelled) setRackPrices(res.items);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setRackError(
+            err instanceof Error ? err.message : "Failed to load rack prices.",
+          );
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setRackLoading(false);
+      });
+
+    setContractsLoading(true);
+    listSupplierContracts({ status: "active", size: SIDE_PANEL_PAGE_SIZE })
+      .then((res) => {
+        if (!cancelled) setContracts(res.items);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setContractsError(
+            err instanceof Error
+              ? err.message
+              : "Failed to load supplier contracts.",
+          );
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setContractsLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   /**
    * Load the recommendation, then refresh the rack-prices and contracts
    * side-panels using the same canonical product_code the backend
@@ -1417,10 +1468,33 @@ export default function SourcingPage({ initialQuery }: SourcingPageProps = {}) {
     setForm({ ...EMPTY_FORM });
     setRecommendation(null);
     setRecError(null);
+    // Re-preload the unfiltered side panels so Reset returns to the
+    // initial "latest market data" view rather than blank panels.
+    sidePanelsPreloaded.current = false;
     setRackPrices([]);
     setRackError(null);
     setContracts([]);
     setContractsError(null);
+    setRackLoading(true);
+    listRackPrices({ size: SIDE_PANEL_PAGE_SIZE })
+      .then((res) => setRackPrices(res.items))
+      .catch((err) =>
+        setRackError(
+          err instanceof Error ? err.message : "Failed to load rack prices.",
+        ),
+      )
+      .finally(() => setRackLoading(false));
+    setContractsLoading(true);
+    listSupplierContracts({ status: "active", size: SIDE_PANEL_PAGE_SIZE })
+      .then((res) => setContracts(res.items))
+      .catch((err) =>
+        setContractsError(
+          err instanceof Error
+            ? err.message
+            : "Failed to load supplier contracts.",
+        ),
+      )
+      .finally(() => setContractsLoading(false));
   }, []);
 
   const candidateCount = recommendation?.candidates.length ?? 0;
@@ -1589,13 +1663,13 @@ export default function SourcingPage({ initialQuery }: SourcingPageProps = {}) {
               prices={rackPrices}
               loading={rackLoading}
               error={rackError}
-              productFilter={productLabel || "—"}
+              productFilter={productLabel || "all products"}
             />
             <SupplierContractsPanel
               contracts={contracts}
               loading={contractsLoading}
               error={contractsError}
-              productFilter={productLabel || "—"}
+              productFilter={productLabel || "all products"}
             />
           </div>
         </div>

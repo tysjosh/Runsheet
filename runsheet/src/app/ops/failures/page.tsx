@@ -72,6 +72,32 @@ function getBucketForPreset(preset: TimeRangePreset): MetricsBucket {
   return preset === "today" ? "hourly" : "daily";
 }
 
+/**
+ * Normalize a failures-metric bucket into the ``count`` + ``breakdown``
+ * shape the charts and reason dropdown consume.
+ *
+ * The backend returns each bucket as ``{ timestamp, values }`` where
+ * ``values`` holds ``total_failures`` plus one entry per
+ * ``failure_reason`` (matching both the ES terms-agg and the Postgres
+ * read-cutover aggregator). The chart components read ``count`` (the
+ * bucket total) and ``breakdown`` (per-reason map), so without this
+ * derivation the bar chart, trend chart, and reason dropdown all render
+ * empty even when failures exist.
+ */
+function normalizeFailureBucket(entry: MetricsBucketEntry): MetricsBucketEntry {
+  const values = entry.values ?? {};
+  const breakdown: Record<string, number> = {};
+  for (const [key, count] of Object.entries(values)) {
+    if (key === "total_failures" || key === "total") continue;
+    breakdown[key] = count;
+  }
+  const count =
+    values.total_failures ??
+    values.total ??
+    Object.values(breakdown).reduce((sum, c) => sum + c, 0);
+  return { ...entry, count, breakdown };
+}
+
 // ─── Page Component ──────────────────────────────────────────────────────────
 
 /**
@@ -120,14 +146,19 @@ export default function OpsFailureAnalyticsPage() {
         getShipmentFailures(failureFilters),
       ]);
 
-      setMetrics(metricsRes.data);
-      setFailures(failuresRes.data);
+      // Backend buckets carry raw `values`; derive `count`/`breakdown` so
+      // the charts and reason dropdown have the fields they read.
+      const normalizedMetrics = (metricsRes.data ?? []).map(
+        normalizeFailureBucket,
+      );
+      setMetrics(normalizedMetrics);
+      setFailures(failuresRes.data ?? []);
 
       // Extract known failure reasons from unfiltered metrics for the dropdown
       // Only update the list when no filter is active to keep the full set of options
       if (!selectedReason) {
         const reasons = new Set<string>();
-        for (const bucket of metricsRes.data) {
+        for (const bucket of normalizedMetrics) {
           if (bucket.breakdown) {
             for (const reason of Object.keys(bucket.breakdown)) {
               reasons.add(reason);

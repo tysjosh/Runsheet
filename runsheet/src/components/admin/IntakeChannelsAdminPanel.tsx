@@ -76,7 +76,7 @@ export default function IntakeChannelsAdminPanel() {
     setError(null);
     try {
       const response = await listIntakeChannels();
-      setChannels(response.data);
+      setChannels(response.items ?? []);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load channels");
     } finally {

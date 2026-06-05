@@ -36,6 +36,7 @@ from fuel.customer_tank_models import (
     CrossTenantAccessError,
     CustomerTank,
     CustomerTankRepository,
+    _safe_model_load,
 )
 from fuel.services.fuel_ops_es_mappings import CUSTOMER_TANKS_INDEX
 from fuel.services.fuel_product_catalog import UnknownFuelProductError
@@ -619,3 +620,37 @@ class TestRepositoryDelete:
             await repo.delete("", "tank_001")
         with pytest.raises(ValueError):
             await repo.delete("tenant-A", "")
+
+
+# ---------------------------------------------------------------------------
+# _safe_model_load: tolerate ES-only / dual-write convenience fields
+# ---------------------------------------------------------------------------
+
+
+class TestSafeModelLoadStripsExtraFields:
+    """Regression: a customer-tank doc carrying ES-only fields must load.
+
+    The ``customer_tanks`` mapping includes a ``location`` geo_point
+    convenience field absent from the strict ``CustomerTank`` model
+    (``extra="forbid"``). Before the strip fix the geo_point caused every
+    seeded row to be dropped on read, leaving the Customer Tanks tab empty
+    even though the data existed. ``_safe_model_load`` now drops unknown
+    keys before validation.
+    """
+
+    def test_strips_nested_location_geo_point(self):
+        source = _base_tank_kwargs()
+        source["location"] = {"lat": 41.5, "lon": -72.5}
+        model = _safe_model_load(source)
+        assert model is not None
+        assert model.customer_tank_id == "tank_001"
+        assert model.location_lat == 41.5
+        assert model.location_lon == -72.5
+
+    def test_drops_record_missing_required_fields(self):
+        # A genuinely malformed row (missing required coords) is dropped,
+        # not raised, so one bad record never kills the whole list.
+        source = _base_tank_kwargs()
+        del source["location_lat"]
+        del source["location_lon"]
+        assert _safe_model_load(source) is None

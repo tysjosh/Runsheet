@@ -209,17 +209,27 @@ export default function ExpiryAlertWidget({
               driverAlerts.urgent > 0 ||
               driverAlerts.warning > 0) && (
               <div
-                className="flex items-center justify-between p-2.5 rounded-lg bg-gray-50 hover:bg-gray-100 transition-colors cursor-pointer"
+                className={`flex items-center justify-between p-2.5 rounded-lg bg-gray-50 transition-colors ${
+                  onViewDrivers
+                    ? "hover:bg-gray-100 cursor-pointer"
+                    : "cursor-default"
+                }`}
                 onClick={onViewDrivers}
-                role="button"
-                tabIndex={0}
-                aria-label="View driver qualification alerts"
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    onViewDrivers?.();
-                  }
-                }}
+                role={onViewDrivers ? "button" : undefined}
+                tabIndex={onViewDrivers ? 0 : undefined}
+                aria-label={
+                  onViewDrivers ? "View driver qualification alerts" : undefined
+                }
+                onKeyDown={
+                  onViewDrivers
+                    ? (e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          onViewDrivers();
+                        }
+                      }
+                    : undefined
+                }
               >
                 <div className="flex items-center gap-2">
                   <User className="w-4 h-4 text-gray-500" />
@@ -242,17 +252,29 @@ export default function ExpiryAlertWidget({
           {assetAlerts &&
             (assetAlerts.critical > 0 || assetAlerts.urgent > 0) && (
               <div
-                className="flex items-center justify-between p-2.5 rounded-lg bg-gray-50 hover:bg-gray-100 transition-colors cursor-pointer"
+                className={`flex items-center justify-between p-2.5 rounded-lg bg-gray-50 transition-colors ${
+                  onViewCertifications
+                    ? "hover:bg-gray-100 cursor-pointer"
+                    : "cursor-default"
+                }`}
                 onClick={onViewCertifications}
-                role="button"
-                tabIndex={0}
-                aria-label="View asset certification alerts"
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    onViewCertifications?.();
-                  }
-                }}
+                role={onViewCertifications ? "button" : undefined}
+                tabIndex={onViewCertifications ? 0 : undefined}
+                aria-label={
+                  onViewCertifications
+                    ? "View asset certification alerts"
+                    : undefined
+                }
+                onKeyDown={
+                  onViewCertifications
+                    ? (e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          onViewCertifications();
+                        }
+                      }
+                    : undefined
+                }
               >
                 <div className="flex items-center gap-2">
                   <Shield className="w-4 h-4 text-gray-500" />

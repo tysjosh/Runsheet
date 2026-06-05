@@ -1,7 +1,7 @@
 "use client";
 
 import { lazy, Suspense, useState } from "react";
-import { TabNavigation, type Tab } from "./ui";
+import { type Tab, TabNavigation } from "./ui";
 
 // Lazy load admin components
 const NotificationMetricsDashboard = lazy(
@@ -13,6 +13,12 @@ const AgentMonitoringDashboard = lazy(
   () => import("./admin/AgentMonitoringDashboard"),
 );
 const StripeIntegrationUI = lazy(() => import("./admin/StripeIntegrationUI"));
+const IntegrationMarketplacePage = lazy(
+  () => import("../app/admin/integrations/page"),
+);
+const IntakeChannelsAdminPanel = lazy(
+  () => import("./admin/IntakeChannelsAdminPanel"),
+);
 
 function LoadingPlaceholder() {
   return (
@@ -45,6 +51,14 @@ export default function AdminHub() {
     {
       id: "stripe",
       label: "Stripe Integration",
+    },
+    {
+      id: "integrations",
+      label: "Integrations",
+    },
+    {
+      id: "intake-channels",
+      label: "Intake Channels",
     },
   ];
 
@@ -80,6 +94,18 @@ export default function AdminHub() {
             <StripeIntegrationUI />
           </Suspense>
         );
+      case "integrations":
+        return (
+          <Suspense fallback={<LoadingPlaceholder />}>
+            <IntegrationMarketplacePage />
+          </Suspense>
+        );
+      case "intake-channels":
+        return (
+          <Suspense fallback={<LoadingPlaceholder />}>
+            <IntakeChannelsAdminPanel />
+          </Suspense>
+        );
       default:
         return null;
     }
@@ -96,7 +122,11 @@ export default function AdminHub() {
             Monitor system health and manage platform configuration
           </p>
         </div>
-        <TabNavigation tabs={tabs} activeTab={activeTab} onChange={setActiveTab} />
+        <TabNavigation
+          tabs={tabs}
+          activeTab={activeTab}
+          onChange={setActiveTab}
+        />
       </div>
       <div className="flex-1 overflow-auto">{renderContent()}</div>
     </div>

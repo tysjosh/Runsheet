@@ -3,8 +3,10 @@
 /**
  * Layout for the /ops/command route.
  *
- * Overrides the parent ops layout redirect so the Command Interface
- * page renders directly without being redirected to the main page.
+ * The parent ops layout only redirects the bare ``/ops`` landing route,
+ * so ``/ops/command`` already renders directly. This pass-through layout
+ * is kept as an explicit boundary for the Command Interface in case the
+ * parent redirect rules change in the future.
  */
 export default function CommandLayout({
   children,

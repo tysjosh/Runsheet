@@ -26,6 +26,13 @@ export interface SingleResponse<T> {
   request_id: string;
 }
 
+/** Envelope for endpoints that return a flat list with a ``count``. */
+export interface CountResponse<T> {
+  data: T[];
+  count: number;
+  request_id: string;
+}
+
 // ─── Tax Types ───────────────────────────────────────────────────────────────
 
 export interface JurisdictionRate {
@@ -206,17 +213,30 @@ export interface CreateAssetCertificationPayload {
   certificate_number: string;
 }
 
-export interface CertificationSummary {
+/**
+ * A single per-certification row in the fleet dashboard.
+ *
+ * Mirrors the backend ``CertificationSummary`` returned by
+ * ``GET /compliance/asset-certifications/dashboard`` — note the backend
+ * returns a **flat list of certifications** (one entry per cert), not a
+ * per-asset aggregate. The page groups these by ``asset_id`` for the
+ * table view (see {@link AssetCertificationSummary}).
+ */
+export interface FleetCertificationEntry {
   asset_id: string;
-  asset_name: string;
-  certifications: AssetCertification[];
-  overall_status: CertificationStatus;
-  next_expiry_date: string;
-  days_until_next_expiry: number;
+  certification_type: CertificationType;
+  cert_id: string;
+  certification_date: string;
+  expiry_date: string;
+  status: CertificationStatus;
+  days_until_expiry: number;
+  inspector_name: string;
+  certificate_number: string;
 }
 
 export interface AssetCertificationDashboard {
-  assets: CertificationSummary[];
+  /** Flat, per-certification rows as returned by the backend. */
+  assets: FleetCertificationEntry[];
   total_valid: number;
   total_expiring_soon: number;
   total_expired: number;
@@ -427,29 +447,24 @@ export interface IFTAReportFilters {
 
 // ─── K-Factor Calibration Types ──────────────────────────────────────────────
 
+/**
+ * A single tank's K-factor calibration status.
+ *
+ * Mirrors the backend ``KFactorEntry`` returned by
+ * ``GET /compliance/kfactor/dashboard`` (a flat array under ``data``).
+ * The dashboard derives a display ``status`` from ``read_only`` /
+ * ``suggested_kfactor`` client-side.
+ */
 export interface KFactorEntry {
   tank_id: string;
-  customer_name: string;
-  current_k_factor: number;
-  suggested_k_factor: number | null;
-  cumulative_variance_percent: number;
-  last_deliveries: KFactorDelivery[];
-  status: "ok" | "review_needed" | "insufficient_data";
-}
-
-export interface KFactorDelivery {
-  delivery_id: string;
-  delivery_date: string;
-  predicted_gallons: number;
-  actual_gallons: number;
-  variance_percent: number;
-  accumulated_hdd: number;
-}
-
-export interface KFactorDashboard {
-  entries: KFactorEntry[];
-  total_review_needed: number;
-  total_insufficient_data: number;
+  customer_id: string;
+  current_kfactor: number;
+  suggested_kfactor: number | null;
+  variance_percent: number | null;
+  last_delivery_date: string | null;
+  delivery_count: number;
+  read_only: boolean;
+  read_only_reason: string | null;
 }
 
 export interface ApproveKFactorPayload {
@@ -964,11 +979,18 @@ export async function createMileageAdjustment(
 
 // ─── K-Factor Calibration Endpoints ──────────────────────────────────────────
 
-/** GET /compliance/kfactor/dashboard — K-factor calibration dashboard */
+/**
+ * GET /compliance/kfactor/dashboard — K-factor calibration dashboard.
+ *
+ * Returns a flat array of per-tank {@link KFactorEntry} rows under
+ * ``data`` (plus a ``count``), NOT a wrapped ``{ entries, totals }``
+ * object. The page derives summary counts and a display status
+ * client-side.
+ */
 export async function getKFactorDashboard(): Promise<
-  SingleResponse<KFactorDashboard>
+  CountResponse<KFactorEntry>
 > {
-  return complianceRequest<SingleResponse<KFactorDashboard>>(
+  return complianceRequest<CountResponse<KFactorEntry>>(
     "/compliance/kfactor/dashboard",
   );
 }

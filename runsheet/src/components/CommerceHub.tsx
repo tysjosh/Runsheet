@@ -6,6 +6,8 @@ import {
   CreditCard,
   DollarSign,
   FileText,
+  Shield,
+  Sliders,
   TrendingUp,
 } from "lucide-react";
 import { lazy, Suspense, useState } from "react";
@@ -19,6 +21,14 @@ import LoadingSpinner from "./LoadingSpinner";
 import { PageHeader, type Tab, TabNavigation } from "./ui";
 
 const ARAgingDashboard = lazy(() => import("./commerce/ARAgingDashboard"));
+// Price-protection contracts and pricing rules are commercial features
+// (they consume the ``/commerce/*`` endpoints), so they live in the
+// Commerce hub even though the page components are physically under
+// ``components/compliance/``.
+const PriceProtectionContractsPage = lazy(
+  () => import("./compliance/PriceProtectionContractsPage"),
+);
+const PricingRulesPage = lazy(() => import("./compliance/PricingRulesPage"));
 
 const TABS: Tab[] = [
   {
@@ -31,6 +41,16 @@ const TABS: Tab[] = [
     id: "price-books",
     label: "Price Books",
     icon: <BookOpen className="w-4 h-4" />,
+  },
+  {
+    id: "pricing-rules",
+    label: "Pricing Rules",
+    icon: <Sliders className="w-4 h-4" />,
+  },
+  {
+    id: "contracts",
+    label: "Contracts",
+    icon: <Shield className="w-4 h-4" />,
   },
   {
     id: "payments",
@@ -106,11 +126,23 @@ export default function CommerceHub() {
             <InvoicesListPage onSelectInvoice={handleSelectInvoice} />
           ))}
         {activeTab === "price-books" && <PriceBookEditor />}
+        {activeTab === "pricing-rules" && (
+          <Suspense
+            fallback={<LoadingSpinner message="Loading pricing rules..." />}
+          >
+            <PricingRulesPage />
+          </Suspense>
+        )}
+        {activeTab === "contracts" && (
+          <Suspense
+            fallback={<LoadingSpinner message="Loading contracts..." />}
+          >
+            <PriceProtectionContractsPage />
+          </Suspense>
+        )}
         {activeTab === "payments" && <PaymentsListPage />}
         {activeTab === "ar-aging" && (
-          <Suspense
-            fallback={<LoadingSpinner message="Loading AR Aging..." />}
-          >
+          <Suspense fallback={<LoadingSpinner message="Loading AR Aging..." />}>
             <ARAgingDashboard />
           </Suspense>
         )}

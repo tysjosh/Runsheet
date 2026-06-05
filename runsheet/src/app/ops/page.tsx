@@ -1,5 +1,6 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import OrdersPage from "../../components/ops/OrdersPage";
 
 /**
@@ -8,7 +9,18 @@ import OrdersPage from "../../components/ops/OrdersPage";
  * Renders the fuel orders board as the primary ops view. This replaces
  * the legacy Dinee shipment board that was removed during the US fuel
  * distribution pivot.
+ *
+ * Clicking an order row routes to the order detail page at
+ * ``/orders/{orderId}``; without this wiring the detail route was
+ * unreachable from the UI.
  */
 export default function OpsPage() {
-  return <OrdersPage />;
+  const router = useRouter();
+  return (
+    <OrdersPage
+      onOrderClick={(orderId) =>
+        router.push(`/orders/${encodeURIComponent(orderId)}`)
+      }
+    />
+  );
 }

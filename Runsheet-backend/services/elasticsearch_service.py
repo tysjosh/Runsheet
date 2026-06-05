@@ -1121,6 +1121,7 @@ class ElasticsearchService:
                 "properties": {
                     "event_id": {"type": "keyword"},
                     "event_type": {"type": "keyword"},
+                    "tenant_id": {"type": "keyword"},
                     "timestamp": {"type": "date"},
                     "truck_id": {"type": "keyword"},
                     "order_id": {"type": "keyword"},

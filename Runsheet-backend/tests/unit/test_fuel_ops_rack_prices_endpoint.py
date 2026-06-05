@@ -619,3 +619,46 @@ class TestListRackPricesRobustness:
         assert resp.status_code == 200
         ids = [row["rack_price_id"] for row in resp.json()["items"]]
         assert ids == ["rp-good"]
+
+
+    def test_es_bookkeeping_fields_are_stripped_not_fatal(self):
+        """Regression: a row carrying ES-only ``created_at``/``updated_at``
+        bookkeeping fields must still load.
+
+        The persisted ``rack_prices`` mapping stamps ``created_at`` /
+        ``updated_at`` that the strict ``RackPrice`` model
+        (``extra="forbid"``) does not define. Before the strip fix every
+        seeded/synced row was rejected by validation, so the endpoint
+        returned ``total>0`` but ``items: []`` and the Rack Prices panel
+        rendered empty. The endpoint now drops unknown keys before
+        validation so the row survives.
+        """
+
+        app, es = _build_app()
+        es.docs[("rack_prices", "rp-stamped")] = {
+            "rack_price_id": "rp-stamped",
+            "tenant_id": "tenant-1",
+            "terminal_id": "t-1",
+            "product_code": "DIESEL_2",
+            "price_per_gallon_usd": 3.49,
+            "branded_flag": False,
+            "supplier_brand": None,
+            "provider": "opis",
+            "effective_at": "2025-01-15T12:00:00+00:00",
+            "retrieved_at": "2025-01-15T12:00:00+00:00",
+            # ES-only bookkeeping fields absent from the strict model.
+            "created_at": "2025-01-15T12:00:01+00:00",
+            "updated_at": "2025-01-15T12:00:02+00:00",
+        }
+
+        with TestClient(app) as client:
+            resp = client.get("/api/fuel/rack-prices")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        ids = [row["rack_price_id"] for row in body["items"]]
+        assert "rp-stamped" in ids
+        # The stripped fields are absent from the serialized model.
+        row = next(r for r in body["items"] if r["rack_price_id"] == "rp-stamped")
+        assert "created_at" not in row
+        assert "updated_at" not in row

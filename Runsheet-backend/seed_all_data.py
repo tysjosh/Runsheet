@@ -926,19 +926,20 @@ def seed_truck_compartments(force: bool = False):
 
     # Configure compartments for the actual tanker trucks (TNK-001, TNK-002)
     # Tuple: (truck_id, comp_id, capacity, allowed_grades, position, depot_city)
-    # FuelGrade enum values: AGO (diesel), PMS (gasoline), ATK (kerosene/jet fuel), LPG (propane)
+    # allowed_grades use canonical US product codes (Capability 6 migration):
+    # DIESEL_2 (was AGO), GASOLINE_REG (was PMS), KEROSENE (was ATK), PROPANE (was LPG).
     compartments = [
         # Truck TNK-001: 4 compartments, 40,000L total, all fuel types, Houston depot
-        ("TNK-001", "C1", 12000, ["AGO", "PMS"], 1, "Houston"),
-        ("TNK-001", "C2", 12000, ["AGO", "PMS"], 2, "Houston"),
-        ("TNK-001", "C3", 10000, ["AGO", "PMS"], 3, "Houston"),
-        ("TNK-001", "C4", 6000,  ["AGO", "PMS"], 4, "Houston"),
+        ("TNK-001", "C1", 12000, ["DIESEL_2", "GASOLINE_REG"], 1, "Houston"),
+        ("TNK-001", "C2", 12000, ["DIESEL_2", "GASOLINE_REG"], 2, "Houston"),
+        ("TNK-001", "C3", 10000, ["DIESEL_2", "GASOLINE_REG"], 3, "Houston"),
+        ("TNK-001", "C4", 6000,  ["DIESEL_2", "GASOLINE_REG"], 4, "Houston"),
         # Truck TNK-002: 5 compartments, 50,000L total, all grades, Denver depot
-        ("TNK-002", "C1", 14000, ["AGO", "PMS", "ATK", "LPG"], 1, "Denver"),
-        ("TNK-002", "C2", 12000, ["AGO", "PMS", "ATK", "LPG"], 2, "Denver"),
-        ("TNK-002", "C3", 10000, ["AGO", "PMS", "ATK", "LPG"], 3, "Denver"),
-        ("TNK-002", "C4", 8000,  ["AGO", "PMS", "ATK", "LPG"], 4, "Denver"),
-        ("TNK-002", "C5", 6000,  ["AGO", "PMS", "ATK", "LPG"], 5, "Denver"),
+        ("TNK-002", "C1", 14000, ["DIESEL_2", "GASOLINE_REG", "KEROSENE", "PROPANE"], 1, "Denver"),
+        ("TNK-002", "C2", 12000, ["DIESEL_2", "GASOLINE_REG", "KEROSENE", "PROPANE"], 2, "Denver"),
+        ("TNK-002", "C3", 10000, ["DIESEL_2", "GASOLINE_REG", "KEROSENE", "PROPANE"], 3, "Denver"),
+        ("TNK-002", "C4", 8000,  ["DIESEL_2", "GASOLINE_REG", "KEROSENE", "PROPANE"], 4, "Denver"),
+        ("TNK-002", "C5", 6000,  ["DIESEL_2", "GASOLINE_REG", "KEROSENE", "PROPANE"], 5, "Denver"),
     ]
 
     actions = []
@@ -1502,6 +1503,20 @@ def seed_customer_tanks(force: bool = False):
         "Denver": "80202", "Atlanta": "30303", "Phoenix": "85003",
         "Detroit": "48226", "Charlotte": "28202",
     }
+    # Map a catalog product_code to the narrow Consumption_Model fuel-family
+    # enum the ``CustomerTank`` model requires in ``fuel_type`` (distinct from
+    # the catalog ``fuel_product_code``). Without this the strict model
+    # rejects every seeded row (e.g. ``fuel_type="DIESEL_2"`` is not a valid
+    # family) and the list endpoint silently drops them.
+    _PRODUCT_TO_FAMILY = {
+        "GASOLINE_REG": "gasoline",
+        "GASOLINE_PREM": "gasoline",
+        "DIESEL_2": "diesel",
+        "DEF": "diesel",
+        "PROPANE": "propane",
+        "HEATING_OIL": "heating_oil",
+        "KEROSENE": "heating_oil",
+    }
     for tank_id, customer_id, product_code, capacity, current_level, reorder, city in tanks:
         geo = _geo(city)
         # Fields must match the strict CUSTOMER_TANKS_MAPPING exactly.
@@ -1510,7 +1525,8 @@ def seed_customer_tanks(force: bool = False):
             "tenant_id": TENANT,
             "customer_id": customer_id,
             "customer_type": "commercial",
-            "fuel_type": product_code,            # alias kept for compatibility
+            # Narrow fuel-family enum (NOT the catalog product_code).
+            "fuel_type": _PRODUCT_TO_FAMILY.get(product_code, "diesel"),
             "fuel_product_code": product_code,
             "capacity_gallons": float(capacity),
             "current_level_gallons": float(current_level),
@@ -1520,7 +1536,10 @@ def seed_customer_tanks(force: bool = False):
             "location_lon": geo["lon"],
             "zip_code": _CITY_ZIP.get(city, "00000"),
             "k_factor": round(random.uniform(1.5, 4.0), 2),
-            "use_case": "auto_fill",
+            # ``use_case`` is the UseCase enum (residential_heat |
+            # commercial_heat | generator | farm | other), NOT a
+            # customer_type. "auto_fill" was invalid and failed validation.
+            "use_case": "commercial_heat",
             "status": "active",
             "created_at": _ago(days=random.randint(90, 365)),
             "updated_at": _ago(hours=random.randint(0, 24)),
@@ -1728,6 +1747,240 @@ def seed_inventory(force: bool = False):
     
     _bulk(actions)
     logger.info(f"✅ Seeded {len(items)} inventory items → {index}")
+
+
+# ---------------------------------------------------------------------------
+# 15b. analytics_events (Analytics → Overview tab: metrics + route performance)
+# ---------------------------------------------------------------------------
+def seed_analytics_events(force: bool = False):
+    """Seed time-series analytics events read by the Analytics Overview tab.
+
+    Powers ``GET /api/analytics/metrics`` (latest ``daily_performance`` doc)
+    and ``GET /api/analytics/routes`` (``route_performance`` aggregation).
+    Without these the Overview tab renders no KPI cards or charts.
+    """
+    index = "analytics_events"
+    if not force and _index_count(index) > 0:
+        logger.info(f"⏭️  {index} already has data — skipping")
+        return
+
+    routes = [
+        ("Houston → Dallas", "houston-dallas"),
+        ("Chicago → Detroit", "chicago-detroit"),
+        ("Atlanta → Charlotte", "atlanta-charlotte"),
+        ("Denver → Phoenix", "denver-phoenix"),
+    ]
+
+    actions: list = []
+    # 30 days of daily performance + per-route performance events.
+    for days_back in range(30, 0, -1):
+        ts = _ago(days=days_back)
+        perf_id = f"PERF-{days_back:03d}"
+        actions.append({"index": {"_index": index, "_id": perf_id}})
+        actions.append({
+            "event_id": perf_id,
+            "event_type": "daily_performance",
+            "tenant_id": TENANT,
+            "timestamp": ts,
+            "region": "All",
+            "metrics": {
+                "delivery_performance_pct": round(85 + random.uniform(-10, 10), 1),
+                "average_delay_minutes": round(120 + random.uniform(-60, 120), 1),
+                "fleet_utilization_pct": round(90 + random.uniform(-15, 10), 1),
+                "customer_satisfaction": round(4.0 + random.uniform(-0.5, 1.0), 1),
+                "total_deliveries": random.randint(15, 35),
+                "on_time_deliveries": random.randint(12, 30),
+            },
+        })
+        for route_name, route_id in routes:
+            route_doc_id = f"ROUTE-{route_id}-{days_back:03d}"
+            actions.append({"index": {"_index": index, "_id": route_doc_id}})
+            actions.append({
+                "event_id": route_doc_id,
+                "event_type": "route_performance",
+                "tenant_id": TENANT,
+                "timestamp": ts,
+                "route_name": route_name,
+                "route_id": route_id,
+                "metrics": {
+                    "performance_pct": round(75 + random.uniform(-15, 20), 1),
+                    "avg_delivery_time": round(300 + random.uniform(-120, 180), 1),
+                    "delay_incidents": random.randint(0, 5),
+                    "completed_trips": random.randint(2, 8),
+                },
+            })
+
+    _bulk(actions)
+    logger.info(f"✅ Seeded analytics events ({len(actions) // 2} docs) → {index}")
+
+
+# ---------------------------------------------------------------------------
+# 15c. shipments_current (Ops Monitoring → Shipment/SLA metrics + Failure
+#      Analytics). Authoritative store is Postgres (read-cutover is on), so
+#      this seeds the ``shipments_current`` hybrid table directly rather than
+#      the ES index.
+# ---------------------------------------------------------------------------
+def seed_shipments(force: bool = False):
+    """Seed ops shipment current-state rows in Postgres.
+
+    The ops metrics endpoints (``/ops/metrics/shipments``, ``/ops/metrics/sla``,
+    ``/ops/metrics/failures`` and ``/ops/shipments/failures``) aggregate over
+    the ``shipment`` hybrid aggregate when ``COMMERCE_READ_FROM_POSTGRES`` is
+    on. Without rows here the Ops Monitoring shipment/SLA sections and the
+    Failure Analytics tab render empty.
+
+    No-op (with a warning) when the persistence layer is not configured.
+    """
+    try:
+        from persistence.database import is_persistence_enabled
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("shipments_current: persistence import failed (%s) — skipping", exc)
+        return
+
+    if not is_persistence_enabled():
+        logger.warning(
+            "shipments_current: persistence layer not enabled (no DATABASE_URL) — "
+            "skipping shipment seed"
+        )
+        return
+
+    import asyncio
+
+    asyncio.run(_seed_shipments_async(force))
+
+
+async def _seed_shipments_async(force: bool):
+    from persistence.database import session_scope
+    from persistence.read_repositories import HybridReadRepository
+    from persistence.repositories import CurrentStateRepository
+
+    read_repo = HybridReadRepository("shipment")
+    write_repo = CurrentStateRepository("shipment")
+
+    # Idempotency: skip when rows already exist for the tenant unless forced.
+    async with session_scope() as session:
+        existing = await read_repo.fetch_for_aggregation(session, TENANT)
+    if not force and existing:
+        logger.info(
+            "⏭️  shipments_current already has %d rows for tenant=%s — skipping",
+            len(existing),
+            TENANT,
+        )
+        return
+
+    statuses = ["delivered", "in_transit", "pending", "failed", "returned"]
+    failure_reasons = [
+        "customer_unavailable",
+        "access_denied",
+        "weather",
+        "vehicle_breakdown",
+        "address_not_found",
+    ]
+    riders = [f"rider-{i:03d}" for i in range(1, 6)]
+    cities = CITY_NAMES
+
+    count = 0
+    async with session_scope() as session:
+        for i in range(1, 61):
+            status = random.choice(statuses)
+            created = _ago(days=random.uniform(1, 28))
+            updated = _ago(days=random.uniform(0, 1), hours=random.uniform(0, 23))
+            est = _ago(days=random.uniform(-2, 2))  # some past (breached), some future
+            origin = random.choice(cities)
+            dest = random.choice([c for c in cities if c != origin])
+            doc = {
+                "shipment_id": f"SHP-{i:04d}",
+                "tenant_id": TENANT,
+                "status": status,
+                "rider_id": random.choice(riders),
+                "origin": origin,
+                "destination": dest,
+                "created_at": created,
+                "updated_at": updated,
+                "estimated_delivery": est,
+                "last_event_timestamp": updated,
+                "source_schema_version": SCHEMA_VERSION,
+                "trace_id": _uid(),
+            }
+            if status == "failed":
+                doc["failure_reason"] = random.choice(failure_reasons)
+            await write_repo.upsert(session, doc=doc, doc_id=doc["shipment_id"])
+            count += 1
+
+    logger.info("✅ Seeded %d shipment rows → shipments_current (Postgres)", count)
+
+
+# ---------------------------------------------------------------------------
+# 15d. storm_road_restrictions (Fuel Ops → Road Restrictions tab). Seeded
+#      programmatically (not from the static fixture) so the active window is
+#      always relative to "now" — the GET endpoint hides restrictions whose
+#      ``effective_to`` is in the past, so fixed fixture dates go stale and the
+#      tab renders empty.
+# ---------------------------------------------------------------------------
+def seed_road_restrictions(force: bool = False):
+    """Seed active Storm-Mode road-restriction polygons with a live window."""
+    index = "storm_road_restrictions"
+    if not force and _index_count(index) > 0:
+        logger.info(f"⏭️  {index} already has data — skipping")
+        return
+
+    # Active window: started 6h ago, ends 48h from now → always "current".
+    eff_from = _ago(hours=6)
+    eff_to = _future(hours=48)
+
+    restrictions = [
+        {
+            "restriction_id": "RESTRICT-001",
+            "tenant_id": TENANT,
+            "polygon": {
+                "type": "Polygon",
+                "coordinates": [[
+                    [-96.8500, 32.7500],
+                    [-96.7500, 32.7500],
+                    [-96.7500, 32.8500],
+                    [-96.8500, 32.8500],
+                    [-96.8500, 32.7500],
+                ]],
+            },
+            "effective_from": eff_from,
+            "effective_to": eff_to,
+            "source": "nws",
+            "severity": "severe",
+            "reason": "Severe thunderstorm warning - flooding and high winds",
+            "created_at": _now(),
+            "updated_at": _now(),
+        },
+        {
+            "restriction_id": "RESTRICT-002",
+            "tenant_id": TENANT,
+            "polygon": {
+                "type": "Polygon",
+                "coordinates": [[
+                    [-95.4500, 29.7000],
+                    [-95.3000, 29.7000],
+                    [-95.3000, 29.8200],
+                    [-95.4500, 29.8200],
+                    [-95.4500, 29.7000],
+                ]],
+            },
+            "effective_from": eff_from,
+            "effective_to": _future(hours=12),
+            "source": "manual",
+            "severity": "moderate",
+            "reason": "Localized street flooding near the ship channel",
+            "created_at": _now(),
+            "updated_at": _now(),
+        },
+    ]
+
+    actions = []
+    for doc in restrictions:
+        actions.append({"index": {"_index": index, "_id": doc["restriction_id"]}})
+        actions.append(doc)
+
+    _bulk(actions)
+    logger.info(f"✅ Seeded {len(restrictions)} docs → {index}")
+
 
 
 # ---------------------------------------------------------------------------
@@ -2036,6 +2289,9 @@ def main():
             ("ops_poison_queue",      seed_poison_queue),
             ("drivers_current",       seed_drivers_current),
             ("drivers",               seed_drivers_qualifications),
+            ("analytics_events",      seed_analytics_events),
+            ("shipments_current",     seed_shipments),
+            ("storm_road_restrictions", seed_road_restrictions),
             ("customers_current",     seed_commerce_customers),
             ("accounts_current",      seed_commerce_accounts),
             ("invoices_current",      seed_commerce_invoices),

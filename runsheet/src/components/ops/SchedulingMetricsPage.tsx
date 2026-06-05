@@ -541,28 +541,31 @@ export default function SchedulingMetricsPage() {
               </div>
 
               {/* Delays by type breakdown */}
-              {delayMetrics.delays_by_type &&
-                Object.keys(delayMetrics.delays_by_type).length > 0 && (
+              {delayMetrics.delays_by_job_type &&
+                delayMetrics.delays_by_job_type.length > 0 && (
                   <div>
                     <p className="text-xs font-medium text-gray-500 mb-2">
                       Delays by Type
                     </p>
                     <div className="space-y-1.5">
-                      {Object.entries(delayMetrics.delays_by_type).map(
-                        ([type, count]) => (
-                          <div
-                            key={type}
-                            className="flex items-center justify-between py-1.5"
-                          >
-                            <span className="text-sm text-gray-600">
-                              {type}
+                      {delayMetrics.delays_by_job_type.map((row) => (
+                        <div
+                          key={row.job_type}
+                          className="flex items-center justify-between py-1.5"
+                        >
+                          <span className="text-sm text-gray-600">
+                            {row.job_type}
+                          </span>
+                          <span className="flex items-center gap-2">
+                            <span className="text-xs text-gray-400">
+                              {row.avg_delay_minutes.toFixed(1)} min avg
                             </span>
                             <span className="text-sm font-semibold text-primary bg-gray-100 px-2 py-0.5 rounded">
-                              {count}
+                              {row.count}
                             </span>
-                          </div>
-                        ),
-                      )}
+                          </span>
+                        </div>
+                      ))}
                     </div>
                   </div>
                 )}

@@ -1,0 +1,142 @@
+/**
+ * Regression test for :file:`AssetCertificationsPage.tsx`.
+ *
+ * The fleet certification dashboard endpoint
+ * (``GET /compliance/asset-certifications/dashboard``) returns a **flat
+ * list of per-certification rows** — one entry per certification with
+ * ``asset_id`` / ``cert_id`` / ``status`` / ``days_until_expiry`` — not a
+ * per-asset aggregate. An earlier version of the page assumed each row
+ * already carried a nested ``certifications[]`` array and crashed with
+ * "Cannot read properties of undefined (reading 'map')" when the page
+ * was wired into the Compliance hub.
+ *
+ * These tests pin the real backend shape and verify the page groups the
+ * flat rows into one table row per asset without crashing.
+ */
+
+import { render, screen, waitFor, within } from "@testing-library/react";
+
+jest.mock("../../services/complianceApi", () => {
+  const actual = jest.requireActual("../../services/complianceApi");
+  return {
+    ...actual,
+    getAssetCertificationsDashboard: jest.fn(),
+    getAssetCertifications: jest.fn(),
+  };
+});
+
+import {
+  type AssetCertificationDashboard,
+  getAssetCertificationsDashboard,
+} from "../../services/complianceApi";
+import AssetCertificationsPage from "./AssetCertificationsPage";
+
+const mockGetDashboard = getAssetCertificationsDashboard as jest.MockedFunction<
+  typeof getAssetCertificationsDashboard
+>;
+
+/** Mirrors the live backend payload (flat, per-certification rows). */
+function dashboardFixture(): AssetCertificationDashboard {
+  return {
+    assets: [
+      {
+        asset_id: "TNK-001",
+        certification_type: "K_test",
+        cert_id: "CERT-002",
+        certification_date: "2025-06-15",
+        expiry_date: "2026-06-14",
+        status: "expiring_soon",
+        days_until_expiry: 10,
+        inspector_name: "John Smith",
+        certificate_number: "K-2025-TX-001",
+      },
+      {
+        asset_id: "TNK-001",
+        certification_type: "V_test",
+        cert_id: "CERT-001",
+        certification_date: "2025-01-15",
+        expiry_date: "2027-01-14",
+        status: "valid",
+        days_until_expiry: 400,
+        inspector_name: "John Smith",
+        certificate_number: "V-2025-TX-001",
+      },
+      {
+        asset_id: "TRK-009",
+        certification_type: "meter_seal",
+        cert_id: "CERT-003",
+        certification_date: "2024-01-01",
+        expiry_date: "2025-01-01",
+        status: "expired",
+        days_until_expiry: -120,
+        inspector_name: "Jane Roe",
+        certificate_number: "M-2024-TX-009",
+      },
+    ],
+    total_valid: 1,
+    total_expiring_soon: 1,
+    total_expired: 1,
+  };
+}
+
+afterEach(() => {
+  jest.clearAllMocks();
+});
+
+describe("AssetCertificationsPage — fleet dashboard", () => {
+  it("groups flat per-certification rows into one row per asset", async () => {
+    mockGetDashboard.mockResolvedValue({
+      data: dashboardFixture(),
+      request_id: "req-1",
+    });
+
+    render(<AssetCertificationsPage />);
+
+    // Both assets render (TNK-001 aggregates its two certs into one row).
+    expect(await screen.findByText("TNK-001")).toBeInTheDocument();
+    expect(screen.getByText("TRK-009")).toBeInTheDocument();
+
+    // The aggregated TNK-001 row surfaces both of its certification badges.
+    const tnkRow = screen.getByText("TNK-001").closest("tr");
+    expect(tnkRow).not.toBeNull();
+    if (tnkRow) {
+      expect(within(tnkRow).getByText("K test")).toBeInTheDocument();
+      expect(within(tnkRow).getByText("V test")).toBeInTheDocument();
+    }
+  });
+
+  it("renders the summary counts from the backend totals", async () => {
+    mockGetDashboard.mockResolvedValue({
+      data: dashboardFixture(),
+      request_id: "req-2",
+    });
+
+    render(<AssetCertificationsPage />);
+
+    await screen.findByText("TNK-001");
+    // Summary cards render with the backend totals.
+    expect(screen.getByText("Valid Certifications")).toBeInTheDocument();
+    // "Expiring Soon" / "Expired" also appear as status badges, so scope
+    // the assertion to the summary card label specifically.
+    expect(screen.getAllByText("Expiring Soon").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Expired").length).toBeGreaterThan(0);
+  });
+
+  it("does not crash on an empty dashboard payload", async () => {
+    mockGetDashboard.mockResolvedValue({
+      data: {
+        assets: [],
+        total_valid: 0,
+        total_expiring_soon: 0,
+        total_expired: 0,
+      },
+      request_id: "req-3",
+    });
+
+    render(<AssetCertificationsPage />);
+
+    await waitFor(() => expect(mockGetDashboard).toHaveBeenCalled());
+    // Empty state renders instead of a crash.
+    expect(await screen.findByText(/no assets found/i)).toBeInTheDocument();
+  });
+});

@@ -38,6 +38,7 @@ jest.mock("../../services/fuelApi", () => {
   return {
     ...actual,
     listTruckCompartments: jest.fn(),
+    listCompartmentTrucks: jest.fn(),
     recordCleaningEvent: jest.fn(),
     checkCompartmentLoadEligibility: jest.fn(),
   };
@@ -57,6 +58,7 @@ import type {
 } from "../../services/fuelApi";
 import {
   checkCompartmentLoadEligibility,
+  listCompartmentTrucks,
   listTruckCompartments,
   litersToGallons,
   recordCleaningEvent,
@@ -71,6 +73,9 @@ import TruckCompartmentsPage, {
 
 const mockList = listTruckCompartments as jest.MockedFunction<
   typeof listTruckCompartments
+>;
+const mockListTrucks = listCompartmentTrucks as jest.MockedFunction<
+  typeof listCompartmentTrucks
 >;
 const mockRecord = recordCleaningEvent as jest.MockedFunction<
   typeof recordCleaningEvent
@@ -240,6 +245,11 @@ describe("CompartmentStateBadge", () => {
 describe("TruckCompartmentsPage", () => {
   beforeEach(() => {
     mockList.mockReset();
+    mockListTrucks.mockReset();
+    // Default: no trucks have compartments, so the mount effect does not
+    // auto-select a truck and tests start from the empty state. Tests that
+    // need the picker populated override this.
+    mockListTrucks.mockResolvedValue({ items: [], total: 0 });
     mockRecord.mockReset();
     mockCheckEligibility.mockReset();
     mockPresign.mockReset();
@@ -255,11 +265,39 @@ describe("TruckCompartmentsPage", () => {
     });
   }
 
-  it("renders an empty hint before a lookup is submitted", () => {
+  it("renders an empty hint before a lookup is submitted", async () => {
     render(<TruckCompartmentsPage />);
+    // After the truck-list mount effect resolves to empty, the page shows
+    // the "no trucks configured" hint rather than auto-selecting one.
     expect(
-      screen.getByText(/Enter a truck ID above to see its compartments/i),
+      await screen.findByText(/No trucks have compartments configured yet/i),
     ).toBeInTheDocument();
+  });
+
+  it("auto-selects the first tanker and loads its compartments on mount", async () => {
+    mockListTrucks.mockResolvedValue({
+      items: [
+        { truck_id: "TNK-001", compartment_count: 4 },
+        { truck_id: "TNK-002", compartment_count: 5 },
+      ],
+      total: 2,
+    });
+    mockList.mockResolvedValue(
+      listResponseFixture(
+        [compartmentFixture({ truck_id: "TNK-001" })],
+        "TNK-001",
+      ),
+    );
+
+    render(<TruckCompartmentsPage />);
+
+    // The mount effect picks the first truck and fetches its compartments
+    // without any user interaction.
+    await waitFor(() => {
+      expect(mockList).toHaveBeenCalledWith("TNK-001");
+    });
+    // Both tankers appear as quick-pick chips.
+    expect(await screen.findByText("TNK-002")).toBeInTheDocument();
   });
 
   it("renders a row per compartment with its state badge and record action", async () => {

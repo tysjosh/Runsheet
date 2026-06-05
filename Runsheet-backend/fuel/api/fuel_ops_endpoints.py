@@ -1089,7 +1089,14 @@ async def list_rack_prices(
             )
             continue
         try:
-            items.append(RackPrice(**source))
+            # The persisted ``rack_prices`` document carries ES-only
+            # bookkeeping fields (``created_at`` / ``updated_at``) that the
+            # strict ``RackPrice`` model (``extra="forbid"``) does not
+            # define. Drop them before validation so a freshly-synced or
+            # seeded row is not silently discarded on read.
+            model_fields = RackPrice.model_fields.keys()
+            cleaned = {k: v for k, v in source.items() if k in model_fields}
+            items.append(RackPrice(**cleaned))
         except ValidationError as exc:
             # Corrupt row → drop it with a warning so a single bad
             # document does not take out the entire list response.
@@ -1983,9 +1990,112 @@ class TruckCompartmentListResponse(BaseModel):
     total: int
 
 
+class CompartmentTruckSummary(BaseModel):
+    """One truck that has at least one compartment configured.
+
+    Surfaced by ``GET /api/fuel/mvp/compartment-trucks`` so the
+    Truck Compartments UI can present a pick-list instead of forcing the
+    dispatcher to memorise tanker IDs. ``compartment_count`` lets the UI
+    show how many compartments each tanker carries without a second
+    round-trip per truck.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    truck_id: str
+    compartment_count: int
+
+
+class CompartmentTrucksResponse(BaseModel):
+    """Envelope for ``GET /api/fuel/mvp/compartment-trucks``.
+
+    ``items`` is sorted by ``truck_id`` so the dropdown renders in a
+    stable order. ``total`` matches ``len(items)``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: List[CompartmentTruckSummary]
+    total: int
+
+
 # ---------------------------------------------------------------------------
 # GET /api/fuel/mvp/trucks/{truck_id}/compartments (Req 7.1.1, 7.1.2, 7.1.3)
 # ---------------------------------------------------------------------------
+
+
+@mvp_router.get(
+    "/compartment-trucks",
+    response_model=CompartmentTrucksResponse,
+)
+async def list_compartment_trucks(
+    request: Request,
+    tenant: TenantContext = Depends(get_tenant_context),
+) -> CompartmentTrucksResponse:
+    """List trucks that have at least one compartment configured.
+
+    Powers the Truck Compartments tab's truck picker so a dispatcher can
+    select a tanker from a dropdown instead of having to know its id
+    up-front. Uses a tenant-scoped ``terms`` aggregation on ``truck_id``
+    over the ``truck_compartments`` index; the per-bucket ``doc_count``
+    becomes ``compartment_count``. An empty result returns
+    ``items: []`` (never 404) so the UI renders a clean empty state.
+
+    Error modes:
+
+        * 500 ``compartment_trucks_lookup_failed`` — ES query raised.
+    """
+
+    es = _get_es()
+
+    query = {
+        "query": {"bool": {"must": [{"term": {"tenant_id": tenant.tenant_id}}]}},
+        "size": 0,
+        "aggs": {
+            "trucks": {
+                "terms": {"field": "truck_id", "size": 1000},
+            },
+        },
+    }
+
+    try:
+        resp = await es.search_documents(TRUCK_COMPARTMENTS_INDEX, query, 0)
+    except Exception as exc:
+        logger.exception(
+            "fuel_ops.compartment_trucks.list: lookup failed for tenant=%s",
+            tenant.tenant_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error_code": "compartment_trucks_lookup_failed",
+                "message": str(exc),
+            },
+        )
+
+    aggs = resp.get("aggregations", {}) if hasattr(resp, "get") else {}
+    buckets = (aggs.get("trucks", {}) or {}).get("buckets", []) or []
+
+    items: List[CompartmentTruckSummary] = []
+    for bucket in buckets:
+        truck_id = bucket.get("key")
+        if not truck_id:
+            continue
+        items.append(
+            CompartmentTruckSummary(
+                truck_id=str(truck_id),
+                compartment_count=int(bucket.get("doc_count") or 0),
+            )
+        )
+
+    items.sort(key=lambda t: t.truck_id)
+
+    logger.debug(
+        "fuel_ops.compartment_trucks.list: tenant=%s count=%d",
+        tenant.tenant_id,
+        len(items),
+    )
+    return CompartmentTrucksResponse(items=items, total=len(items))
 
 
 @mvp_router.get(
