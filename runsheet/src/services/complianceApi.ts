@@ -428,15 +428,18 @@ export interface IFTATruckSummary {
   jurisdictions: IFTAJurisdictionEntry[];
   total_miles: number;
   total_gallons: number;
-  fleet_mpg: number;
+  /** Per-truck average MPG; null/absent when the truck has no fuel data. */
+  fleet_mpg: number | null;
 }
 
 export interface IFTAReport {
   tenant_id: string;
   quarter: string;
   trucks: IFTATruckSummary[];
-  fleet_mpg: number;
-  incomplete_trucks: string[];
+  /** Fleet average MPG; null when the quarter has no fuel gallons recorded. */
+  fleet_mpg: number | null;
+  /** Trucks flagged as ifta_data_incomplete and excluded from the report. */
+  incomplete_trucks: IFTAIncompleteDataFlag[];
   generated_at: string;
 }
 

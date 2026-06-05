@@ -51,7 +51,7 @@ const STATUS_STYLES: Record<
   { dot: string; bg: string; text: string; label: string }
 > = {
   running: {
-    dot: "bg-success-light0",
+    dot: "bg-success",
     bg: "bg-success-light",
     text: "text-success-dark",
     label: "Running",
@@ -63,7 +63,7 @@ const STATUS_STYLES: Record<
     label: "Paused",
   },
   error: {
-    dot: "bg-error-light0",
+    dot: "bg-error",
     bg: "bg-error-light",
     text: "text-error-dark",
     label: "Error",

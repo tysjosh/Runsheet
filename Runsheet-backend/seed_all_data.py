@@ -982,25 +982,55 @@ def seed_fuel_events(force: bool = False):
 
     actions = []
 
-    # 15 consumption events spread over last 7 days
-    for i in range(1, 16):
-        sid = random.choice(station_ids)
-        eid = f"FE-CON-{i:03d}"
-        doc = {
-            "event_id": eid,
-            "station_id": sid,
-            "event_type": "consumption",
-            "fuel_type": fuel_types[sid],
-            "quantity_liters": round(random.uniform(200, 2000), 1),
-            "asset_id": f"TRK-{random.randint(100, 999)}",
-            "operator_id": f"OP-{random.randint(1, 20):03d}",
-            "odometer_reading": round(random.uniform(50000, 200000), 1),
-            "tenant_id": TENANT,
-            "event_timestamp": _ago(days=random.uniform(0, 7)),
-            "ingested_at": _now(),
-        }
-        actions.append({"index": {"_index": index, "_id": eid}})
-        actions.append(doc)
+    # Consumption events. Fuel efficiency (GET /fuel/metrics/efficiency) is
+    # derived per asset_id from the min→max odometer spread across that
+    # asset's events, so a truck needs MULTIPLE events with increasing
+    # odometer readings to yield a non-null liters_per_km. We therefore seed
+    # a fixed fleet of trucks, each with several fill-ups whose odometer
+    # climbs by a per-truck km/L profile (so the Fleet Efficiency view shows
+    # a realistic spread across good/average/poor tiers).
+    #
+    # Tuple: (asset_id, start_odometer_km, km_per_fill, liters_per_fill, station)
+    # efficiency km/L ≈ km_per_fill / liters_per_fill:
+    #   TRK-100: 600/120  = 5.0 km/L  (good / green)
+    #   TRK-153: 520/130  = 4.0 km/L  (good / green)
+    #   TRK-176: 450/150  = 3.0 km/L  (average / yellow)
+    #   TRK-293: 360/180  = 2.0 km/L  (average / yellow)
+    #   TRK-412: 300/200  = 1.5 km/L  (poor / red)
+    fleet = [
+        ("TRK-100", 50_000.0, 600.0, 120.0, "FS-001"),
+        ("TRK-153", 82_000.0, 520.0, 130.0, "FS-002"),
+        ("TRK-176", 120_000.0, 450.0, 150.0, "FS-005"),
+        ("TRK-293", 64_000.0, 360.0, 180.0, "FS-006"),
+        ("TRK-412", 98_000.0, 300.0, 200.0, "FS-003"),
+    ]
+    fills_per_truck = 4  # 5 trucks × 4 fills = 20 consumption events
+    con_seq = 0
+    for asset_id, start_odo, km_per_fill, liters_per_fill, sid in fleet:
+        for fill in range(fills_per_truck):
+            con_seq += 1
+            eid = f"FE-CON-{con_seq:03d}"
+            # Odometer climbs each fill; spread events across the last 7 days
+            # oldest-first so timestamps line up with the rising odometer.
+            odometer = round(start_odo + km_per_fill * fill, 1)
+            days_ago = 7.0 - (fill * (7.0 / fills_per_truck))
+            doc = {
+                "event_id": eid,
+                "station_id": sid,
+                "event_type": "consumption",
+                "fuel_type": fuel_types[sid],
+                "quantity_liters": round(
+                    liters_per_fill * random.uniform(0.95, 1.05), 1
+                ),
+                "asset_id": asset_id,
+                "operator_id": f"OP-{random.randint(1, 20):03d}",
+                "odometer_reading": odometer,
+                "tenant_id": TENANT,
+                "event_timestamp": _ago(days=days_ago),
+                "ingested_at": _now(),
+            }
+            actions.append({"index": {"_index": index, "_id": eid}})
+            actions.append(doc)
 
     # 5 refill events
     for i in range(1, 6):
@@ -1024,7 +1054,7 @@ def seed_fuel_events(force: bool = False):
         actions.append(doc)
 
     _bulk(actions)
-    logger.info(f"✅ Seeded 20 docs → {index}")
+    logger.info(f"✅ Seeded 25 docs → {index}")
 
 
 

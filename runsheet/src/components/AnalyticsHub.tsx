@@ -1,5 +1,11 @@
 "use client";
-import { Activity, AlertTriangle, BarChart3, TrendingUp } from "lucide-react";
+import {
+  Activity,
+  AlertTriangle,
+  BarChart3,
+  Gauge,
+  TrendingUp,
+} from "lucide-react";
 import { lazy, Suspense, useState } from "react";
 import ErrorBoundary from "./ErrorBoundary";
 import LoadingSpinner from "./LoadingSpinner";
@@ -11,6 +17,7 @@ const FailureAnalytics = lazy(() => import("../app/ops/failures/page"));
 const OpsMonitoringDashboard = lazy(
   () => import("./ops/OpsMonitoringDashboard"),
 );
+const FuelEfficiencyChart = lazy(() => import("./ops/FuelEfficiencyChart"));
 
 const TABS: Tab[] = [
   {
@@ -22,6 +29,11 @@ const TABS: Tab[] = [
     id: "scheduling",
     label: "Scheduling Metrics",
     icon: <TrendingUp className="w-4 h-4" />,
+  },
+  {
+    id: "fleet-efficiency",
+    label: "Fleet Efficiency",
+    icon: <Gauge className="w-4 h-4" />,
   },
   {
     id: "failures",
@@ -58,6 +70,22 @@ export default function AnalyticsHub() {
           {activeTab === "scheduling" && (
             <ErrorBoundary componentName="Scheduling Metrics">
               <SchedulingMetricsPage />
+            </ErrorBoundary>
+          )}
+          {activeTab === "fleet-efficiency" && (
+            <ErrorBoundary componentName="Fleet Efficiency">
+              <div className="p-6">
+                <div className="mb-4">
+                  <h2 className="text-base font-semibold text-primary">
+                    Fleet Fuel Efficiency
+                  </h2>
+                  <p className="text-sm text-gray-500 mt-0.5">
+                    Per-vehicle fuel economy (km/L) derived from consumption
+                    events and odometer readings. Higher is better.
+                  </p>
+                </div>
+                <FuelEfficiencyChart />
+              </div>
             </ErrorBoundary>
           )}
           {activeTab === "failures" && (

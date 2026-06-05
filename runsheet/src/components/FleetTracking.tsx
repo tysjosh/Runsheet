@@ -204,11 +204,11 @@ export default function FleetTracking({ onTruckSelect }: FleetTrackingProps) {
   const getStatusDot = (status: string) => {
     switch (status) {
       case "on_time":
-        return "bg-success-light0";
+        return "bg-success";
       case "delayed":
-        return "bg-error-light0";
+        return "bg-error";
       case "stopped":
-        return "bg-warning-light0";
+        return "bg-warning";
       default:
         return "bg-gray-500";
     }

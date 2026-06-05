@@ -29,13 +29,13 @@ interface WebSocketStatusProps {
 function getStatusColor(state: WebSocketState): string {
   switch (state) {
     case "connected":
-      return "bg-success-light0";
+      return "bg-success";
     case "connecting":
-      return "bg-warning-light0 animate-pulse";
+      return "bg-warning animate-pulse";
     case "reconnecting":
-      return "bg-warning-light0 animate-pulse";
+      return "bg-warning animate-pulse";
     case "disconnected":
-      return "bg-error-light0";
+      return "bg-error";
     default:
       return "bg-gray-500";
   }
@@ -123,7 +123,7 @@ export function WebSocketStatusBadge({
   if (isConnected) {
     return (
       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-success-light text-success-dark">
-        <span className="w-1.5 h-1.5 rounded-full bg-success-light0" />
+        <span className="w-1.5 h-1.5 rounded-full bg-success" />
         Live
       </span>
     );
@@ -132,7 +132,7 @@ export function WebSocketStatusBadge({
   if (isReconnecting) {
     return (
       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-warning-light text-warning-dark">
-        <span className="w-1.5 h-1.5 rounded-full bg-warning-light0 animate-pulse" />
+        <span className="w-1.5 h-1.5 rounded-full bg-warning animate-pulse" />
         Reconnecting ({reconnectAttempt})
       </span>
     );
@@ -140,7 +140,7 @@ export function WebSocketStatusBadge({
 
   return (
     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-error-light text-error-dark">
-      <span className="w-1.5 h-1.5 rounded-full bg-error-light0" />
+      <span className="w-1.5 h-1.5 rounded-full bg-error" />
       Offline
     </span>
   );

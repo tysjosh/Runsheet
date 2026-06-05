@@ -490,7 +490,7 @@ export default function Analytics() {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div className="space-y-4">
                 <div className="flex items-center gap-3 p-4 bg-white rounded-xl border border-gray-200">
-                  <div className="w-2 h-2 bg-success-light0 rounded-full"></div>
+                  <div className="w-2 h-2 bg-success rounded-full"></div>
                   <span className="text-sm font-medium text-gray-700">
                     Best route:{" "}
                     <span className="text-primary font-semibold">
@@ -500,7 +500,7 @@ export default function Analytics() {
                   </span>
                 </div>
                 <div className="flex items-center gap-3 p-4 bg-white rounded-xl border border-gray-200">
-                  <div className="w-2 h-2 bg-error-light0 rounded-full"></div>
+                  <div className="w-2 h-2 bg-error rounded-full"></div>
                   <span className="text-sm font-medium text-gray-700">
                     Needs attention:{" "}
                     <span className="text-primary font-semibold">
@@ -512,7 +512,7 @@ export default function Analytics() {
               </div>
               <div className="space-y-4">
                 <div className="flex items-center gap-3 p-4 bg-white rounded-xl border border-gray-200">
-                  <div className="w-2 h-2 bg-warning-light0 rounded-full"></div>
+                  <div className="w-2 h-2 bg-warning rounded-full"></div>
                   <span className="text-sm font-medium text-gray-700">
                     Average route performance:{" "}
                     <span className="text-primary font-semibold">
@@ -528,7 +528,7 @@ export default function Analytics() {
                   </span>
                 </div>
                 <div className="flex items-center gap-3 p-4 bg-white rounded-xl border border-gray-200">
-                  <div className="w-2 h-2 bg-info-light0 rounded-full"></div>
+                  <div className="w-2 h-2 bg-info rounded-full"></div>
                   <span className="text-sm font-medium text-gray-700">
                     Fleet utilization:{" "}
                     <span className="text-primary font-semibold">

@@ -65,10 +65,10 @@ function ReadinessIndicator({
   lowParts,
 }: ReadinessIndicatorProps) {
   const colorMap: Record<ReadinessStatus, string> = {
-    ready: "bg-success-light0",
-    warning: "bg-warning-light0",
-    critical: "bg-error-light0",
-    blocked: "bg-error-light0",
+    ready: "bg-success",
+    warning: "bg-warning",
+    critical: "bg-error",
+    blocked: "bg-error",
   };
 
   const labelMap: Record<ReadinessStatus, string> = {

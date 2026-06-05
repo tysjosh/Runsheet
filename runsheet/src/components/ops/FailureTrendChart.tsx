@@ -68,7 +68,7 @@ export default function FailureTrendChart({ data }: FailureTrendChartProps) {
                 {(bucket.count ?? 0) > 0 ? bucket.count : ""}
               </span>
               <div
-                className="w-full bg-error rounded-t transition-all hover:bg-error-light0"
+                className="w-full bg-error rounded-t transition-all hover:bg-error-dark"
                 style={{
                   height: `${Math.max(heightPct, (bucket.count ?? 0) > 0 ? 4 : 0)}px`,
                   maxHeight: 100,

@@ -435,21 +435,21 @@ function AgentHealthSection() {
       case "running":
         return (
           <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full font-medium bg-success-light text-success-dark">
-            <span className="w-1.5 h-1.5 rounded-full bg-success-light0" />
+            <span className="w-1.5 h-1.5 rounded-full bg-success" />
             Running
           </span>
         );
       case "stopped":
         return (
           <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full font-medium bg-warning-light text-warning-dark">
-            <span className="w-1.5 h-1.5 rounded-full bg-warning-light0" />
+            <span className="w-1.5 h-1.5 rounded-full bg-warning" />
             Paused
           </span>
         );
       case "error":
         return (
           <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full font-medium bg-error-light text-error-dark">
-            <span className="w-1.5 h-1.5 rounded-full bg-error-light0" />
+            <span className="w-1.5 h-1.5 rounded-full bg-error" />
             Stopped
           </span>
         );

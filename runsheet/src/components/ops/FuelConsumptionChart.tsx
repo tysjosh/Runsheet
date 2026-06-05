@@ -10,14 +10,14 @@ interface FuelConsumptionChartProps {
 const LITERS_PER_GALLON = 3.785411784;
 
 const FUEL_TYPE_COLORS: Record<FuelType, { bar: string; label: string }> = {
-  DIESEL_2: { bar: "bg-info-light0", label: "Diesel #2" },
-  GASOLINE_REG: { bar: "bg-warning-light0", label: "Regular Unleaded" },
-  GASOLINE_PREM: { bar: "bg-error-light0", label: "Premium Unleaded" },
-  HEATING_OIL: { bar: "bg-warning-light0", label: "Heating Oil" },
-  PROPANE: { bar: "bg-success-light0", label: "Propane" },
-  KEROSENE: { bar: "bg-brand-secondary-soft0", label: "Kerosene" },
+  DIESEL_2: { bar: "bg-info", label: "Diesel #2" },
+  GASOLINE_REG: { bar: "bg-warning", label: "Regular Unleaded" },
+  GASOLINE_PREM: { bar: "bg-error", label: "Premium Unleaded" },
+  HEATING_OIL: { bar: "bg-warning", label: "Heating Oil" },
+  PROPANE: { bar: "bg-success", label: "Propane" },
+  KEROSENE: { bar: "bg-brand-secondary", label: "Kerosene" },
   OFF_ROAD_DIESEL: { bar: "bg-slate-500", label: "Off-Road Diesel" },
-  DEF: { bar: "bg-info-light0", label: "DEF" },
+  DEF: { bar: "bg-info", label: "DEF" },
 };
 
 const DEFAULT_COLOR = { bar: "bg-gray-400", label: "Other" };

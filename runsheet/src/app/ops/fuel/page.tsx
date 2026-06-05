@@ -4,7 +4,6 @@ import { BarChart3, Fuel, Plus, Search } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import LoadingSpinner from "../../../components/LoadingSpinner";
 import FuelConsumptionChart from "../../../components/ops/FuelConsumptionChart";
-import FuelEfficiencyChart from "../../../components/ops/FuelEfficiencyChart";
 import FuelStationDetail from "../../../components/ops/FuelStationDetail";
 import FuelStationForm from "../../../components/ops/FuelStationForm";
 import FuelStationList from "../../../components/ops/FuelStationList";
@@ -66,7 +65,7 @@ const EMPTY_SUMMARY: FuelNetworkSummary = {
 const TABS: Tab[] = [
   {
     id: "efficiency",
-    label: "Fuel Efficiency",
+    label: "Consumption",
     icon: <BarChart3 className="w-4 h-4" />,
   },
   {
@@ -115,8 +114,10 @@ export default function FuelDashboardPage() {
     null,
   );
 
-  // Tab state
-  const [activeTab, setActiveTab] = useState<TabId>("efficiency");
+  // Tab state. Default to the station list — the efficiency/consumption
+  // view is secondary, and landing on the station inventory matches the
+  // "Fuel Stations" tab label users click to get here.
+  const [activeTab, setActiveTab] = useState<TabId>("stations");
 
   const loadData = useCallback(async () => {
     try {
@@ -299,25 +300,11 @@ export default function FuelDashboardPage() {
           {activeTab === "efficiency" && (
             <div className="flex-1 overflow-y-auto">
               {/* Consumption Chart — Validates: Requirement 6.3 */}
-              <div className="border-b border-gray-100 px-8 py-6">
+              <div className="px-8 py-6">
                 <h2 className="text-sm font-medium text-gray-700 mb-3">
                   Daily Consumption Trend
                 </h2>
                 <FuelConsumptionChart data={consumptionData} />
-              </div>
-
-              {/* Efficiency Chart — Validates: Requirements 9.1, 9.2, 9.3, 9.4, 9.5, 9.6 */}
-              <div className="px-8 py-6">
-                <div className="flex items-center gap-2 mb-3">
-                  <BarChart3
-                    className="w-4 h-4 text-gray-500"
-                    aria-hidden="true"
-                  />
-                  <h2 className="text-sm font-medium text-gray-700">
-                    Fuel Efficiency by Asset
-                  </h2>
-                </div>
-                <FuelEfficiencyChart />
               </div>
             </div>
           )}

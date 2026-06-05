@@ -136,7 +136,7 @@ export default function AgentActivityFeed() {
         </div>
         <div className="flex items-center gap-1.5">
           <span
-            className={`w-2 h-2 rounded-full ${isConnected ? "bg-success-light0" : "bg-gray-300"}`}
+            className={`w-2 h-2 rounded-full ${isConnected ? "bg-success" : "bg-gray-300"}`}
           />
           <span className="text-xs text-gray-400">
             {isConnected ? "Live" : "Offline"}

@@ -47,31 +47,43 @@ jest.mock("../../services/fuelApi", () => {
   return {
     ...actual,
     listCustomerTanks: jest.fn(),
+    listCustomerTankForecasts: jest.fn(),
     createCustomerTank: jest.fn(),
     updateCustomerTank: jest.fn(),
     listFuelProducts: jest.fn(),
   };
 });
 
+jest.mock("../../services/tenant", () => ({
+  getCurrentTenantId: jest.fn(() => "tenant-a"),
+}));
+
 import type {
   CustomerTank,
+  CustomerTankForecast,
   CustomerTankListResponse,
   FuelProductItem,
   FuelProductsResponse,
+  PaginatedResponse,
 } from "../../services/fuelApi";
 import {
   createCustomerTank,
+  listCustomerTankForecasts,
   listCustomerTanks,
   listFuelProducts,
   updateCustomerTank,
 } from "../../services/fuelApi";
 import CustomerTankPage, {
   type CustomerTankFormValues,
+  formatRunoutForecast,
   validateCustomerTankForm,
 } from "./CustomerTankPage";
 
 const mockList = listCustomerTanks as jest.MockedFunction<
   typeof listCustomerTanks
+>;
+const mockListForecasts = listCustomerTankForecasts as jest.MockedFunction<
+  typeof listCustomerTankForecasts
 >;
 const mockCreate = createCustomerTank as jest.MockedFunction<
   typeof createCustomerTank
@@ -144,6 +156,21 @@ function productsResponseFixture(
   return { region, items, total: items.length };
 }
 
+function forecastListFixture(
+  items: CustomerTankForecast[],
+): PaginatedResponse<CustomerTankForecast> {
+  return {
+    data: items,
+    pagination: {
+      page: 1,
+      size: 100,
+      total: items.length,
+      total_pages: 1,
+    },
+    request_id: "test",
+  };
+}
+
 function validFormValues(
   overrides: Partial<CustomerTankFormValues> = {},
 ): CustomerTankFormValues {
@@ -167,12 +194,16 @@ function validFormValues(
 
 beforeEach(() => {
   mockList.mockReset();
+  mockListForecasts.mockReset();
   mockCreate.mockReset();
   mockUpdate.mockReset();
   mockListProducts.mockReset();
   // Default: products catalog resolves empty so modals that render before
   // the test asserts on the datalist don't leak unhandled rejections.
   mockListProducts.mockResolvedValue(productsResponseFixture([]));
+  // Default: no forecasts so the runout column shows "No forecast" unless
+  // a test opts into forecast data.
+  mockListForecasts.mockResolvedValue(forecastListFixture([]));
 });
 
 // ─── Pure helper tests ───────────────────────────────────────────────────────
@@ -587,5 +618,92 @@ describe("CustomerTankPage — fuel product datalist", () => {
     expect(
       container.querySelector("datalist#ct-product-code-options"),
     ).toBeNull();
+  });
+});
+
+describe("formatRunoutForecast", () => {
+  it("returns the no-forecast state for a null forecast", () => {
+    const r = formatRunoutForecast(null);
+    expect(r.label).toBe("No forecast");
+  });
+
+  it("flags a tank forecast to run dry within a day as Critical", () => {
+    const r = formatRunoutForecast({
+      customer_tank_id: "CT-1",
+      hours_to_runout_p90: 12,
+      runout_risk_24h: 0.85,
+    });
+    expect(r.label).toBe("Critical");
+    expect(r.detail).toMatch(/12h/);
+  });
+
+  it("labels a 2-day runway as Soon", () => {
+    const r = formatRunoutForecast({
+      customer_tank_id: "CT-1",
+      hours_to_runout_p90: 40,
+    });
+    expect(r.label).toBe("Soon");
+  });
+
+  it("labels a long runway as OK and reports days", () => {
+    const r = formatRunoutForecast({
+      customer_tank_id: "CT-1",
+      hours_to_runout_p90: 96,
+    });
+    expect(r.label).toBe("OK");
+    expect(r.detail).toMatch(/days/);
+  });
+
+  it("treats a high 24h risk as Critical even with longer hours", () => {
+    const r = formatRunoutForecast({
+      customer_tank_id: "CT-1",
+      hours_to_runout_p90: 60,
+      runout_risk_24h: 0.75,
+    });
+    expect(r.label).toBe("Critical");
+  });
+});
+
+describe("CustomerTankPage — runout forecast column", () => {
+  it("joins each tank to its forecast and renders the urgency label", async () => {
+    mockList.mockResolvedValue(
+      listResponseFixture([
+        tankFixture({ customer_tank_id: "CT-0001" }),
+        tankFixture({ customer_tank_id: "CT-0002" }),
+      ]),
+    );
+    mockListForecasts.mockResolvedValue(
+      forecastListFixture([
+        {
+          customer_tank_id: "CT-0001",
+          hours_to_runout_p90: 10,
+          runout_risk_24h: 0.9,
+        },
+      ]),
+    );
+
+    render(<CustomerTankPage />);
+
+    await waitFor(() => expect(mockListForecasts).toHaveBeenCalled());
+    // CT-0001 has a critical forecast; CT-0002 has none.
+    await waitFor(() => {
+      expect(screen.getByText("Critical")).toBeInTheDocument();
+    });
+    expect(screen.getAllByText("No forecast").length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("still renders the tank list when the forecast fetch fails", async () => {
+    mockList.mockResolvedValue(
+      listResponseFixture([tankFixture({ customer_tank_id: "CT-0001" })]),
+    );
+    mockListForecasts.mockRejectedValue(new Error("forecast boom"));
+
+    render(<CustomerTankPage />);
+
+    // The tank row renders regardless of the forecast failure.
+    await waitFor(() => {
+      expect(screen.getByText("CT-0001")).toBeInTheDocument();
+    });
+    expect(screen.getByText("No forecast")).toBeInTheDocument();
   });
 });

@@ -81,8 +81,8 @@ export default function FailureBarChart({
                 <div
                   className={`h-2 rounded-full transition-all ${
                     isSelected
-                      ? "bg-error-light0"
-                      : "bg-error group-hover:bg-error-light0"
+                      ? "bg-error"
+                      : "bg-error group-hover:bg-error-dark"
                   }`}
                   style={{ width: `${pct}%` }}
                 />

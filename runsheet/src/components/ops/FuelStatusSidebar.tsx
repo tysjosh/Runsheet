@@ -72,10 +72,10 @@ export default function FuelStatusSidebar({ alerts }: FuelStatusSidebarProps) {
                   <div
                     className={`h-full rounded-full ${
                       alert.status === "critical"
-                        ? "bg-error-light0"
+                        ? "bg-error"
                         : alert.status === "empty"
                           ? "bg-gray-400"
-                          : "bg-warning-light0"
+                          : "bg-warning"
                     }`}
                     style={{
                       width: `${Math.min(alert.stock_percentage, 100)}%`,

@@ -23,14 +23,16 @@ function isValidQuarter(value: string): boolean {
   return /^\d{4}-Q[1-4]$/.test(value);
 }
 
-function formatNumber(value: number, decimals = 1): string {
+function formatNumber(value: number | null | undefined, decimals = 1): string {
+  if (value == null || Number.isNaN(value)) return "—";
   return value.toLocaleString(undefined, {
     minimumFractionDigits: decimals,
     maximumFractionDigits: decimals,
   });
 }
 
-function formatCurrency(cents: number): string {
+function formatCurrency(cents: number | null | undefined): string {
+  if (cents == null || Number.isNaN(cents)) return "—";
   return `$${(cents / 100).toFixed(2)}`;
 }
 
@@ -409,12 +411,13 @@ export default function IFTAReportPage() {
                   . Manual mileage adjustments may be required.
                 </p>
                 <div className="flex flex-wrap gap-2">
-                  {report.incomplete_trucks.map((truckId) => (
+                  {report.incomplete_trucks.map((flag) => (
                     <span
-                      key={truckId}
+                      key={flag.truck_id}
+                      title={flag.reason}
                       className="inline-block bg-warning-light text-warning-dark px-3 py-1 rounded text-sm font-medium"
                     >
-                      {truckId}
+                      {flag.truck_id}
                     </span>
                   ))}
                 </div>

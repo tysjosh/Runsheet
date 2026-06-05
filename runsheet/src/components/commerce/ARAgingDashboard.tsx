@@ -73,22 +73,22 @@ export default function ARAgingDashboard({
     {
       label: "0–30 Days",
       cents: aging.bucket_0_30_cents,
-      color: "bg-success-light0",
+      color: "bg-success",
     },
     {
       label: "31–60 Days",
       cents: aging.bucket_31_60_cents,
-      color: "bg-warning-light0",
+      color: "bg-warning",
     },
     {
       label: "61–90 Days",
       cents: aging.bucket_61_90_cents,
-      color: "bg-warning-light0",
+      color: "bg-warning",
     },
     {
       label: "90+ Days",
       cents: aging.bucket_90_plus_cents,
-      color: "bg-error-light0",
+      color: "bg-error",
     },
   ];
 

@@ -225,13 +225,37 @@ export function getNetworkCurrentStockGallons(
 
 // ─── Efficiency Types ─────────────────────────────────────────────────────────
 
+/**
+ * Per-asset (truck/vehicle) fuel-economy row returned by
+ * ``GET /fuel/metrics/efficiency``. Mirrors the backend
+ * :class:`fuel.models.EfficiencyMetric` exactly.
+ *
+ * The backend aggregates ``fuel_events`` by ``asset_id`` and derives
+ * distance from the min→max ``odometer_reading`` in the window, so
+ * ``total_distance_km`` and the derived ``liters_per_km`` are ``null``
+ * when no odometer data was recorded. The canonical efficiency figure is
+ * **liters per km** (lower is better); the UI converts to km/L for
+ * display via :func:`efficiencyKmPerLiter`.
+ */
 export interface EfficiencyMetric {
   asset_id: string;
-  distance_km: number;
-  fuel_consumed_liters: number;
-  efficiency_km_per_liter: number;
-  period_start?: string;
-  period_end?: string;
+  total_liters: number;
+  total_distance_km?: number | null;
+  liters_per_km?: number | null;
+  event_count: number;
+}
+
+/**
+ * Convert the backend's ``liters_per_km`` into km/L for display.
+ * Returns ``null`` when efficiency is unknown (no odometer data) so the
+ * UI can render a distinct "no data" state rather than a misleading 0.
+ */
+export function efficiencyKmPerLiter(
+  metric: Pick<EfficiencyMetric, "liters_per_km">,
+): number | null {
+  const lpk = metric.liters_per_km;
+  if (lpk == null || !Number.isFinite(lpk) || lpk <= 0) return null;
+  return 1 / lpk;
 }
 
 export interface EfficiencyFilters {
@@ -1022,6 +1046,70 @@ export async function updateCustomerTank(
       method: "PATCH",
       body: JSON.stringify(payload),
     },
+  );
+}
+
+// ─── Customer Tank Forecast Types (Fuel Ops Hardening Capability 1) ──────────
+
+/**
+ * A per-customer-tank runout forecast row as persisted in
+ * ``mvp_tank_forecasts`` and returned by ``GET /api/fuel/mvp/forecasts``.
+ *
+ * This is the forecast-driven signal that distinguishes Customer Tanks
+ * from Fuel Stations: the TankForecastingAgent runs a per-tank
+ * Consumption_Model (propane k-factor, heating-oil HDD regression, etc.)
+ * and writes ``hours_to_runout_p50/p90`` plus a 24-hour runout
+ * probability. Only customer-tank forecasts carry ``customer_tank_id``;
+ * retail-station forecasts key off ``station_id`` instead.
+ *
+ * Every field beyond the identity pair is optional so the type tolerates
+ * both the legacy station shape and partial documents.
+ */
+export interface CustomerTankForecast {
+  forecast_id?: string;
+  customer_tank_id?: string | null;
+  station_id?: string | null;
+  customer_id?: string | null;
+  customer_type?: string | null;
+  fuel_type?: string | null;
+  fuel_grade?: string | null;
+  /** Median hours until the tank runs dry. */
+  hours_to_runout_p50?: number | null;
+  /** Conservative (90th percentile) hours until runout. */
+  hours_to_runout_p90?: number | null;
+  /** Probability (0–1) the tank runs out within the next 24 hours. */
+  runout_risk_24h?: number | null;
+  /** Model confidence (0–1). */
+  confidence?: number | null;
+  model_name?: string | null;
+  anomaly_flags?: string[];
+  timestamp?: string | null;
+}
+
+/** Filters accepted by ``GET /api/fuel/mvp/forecasts``. */
+export interface CustomerTankForecastFilters {
+  tenant_id: string;
+  customer_tank_id?: string;
+  customer_id?: string;
+  customer_type?: CustomerTankCustomerType;
+  fuel_type?: CustomerTankFuelType;
+  page?: number;
+  size?: number;
+}
+
+/**
+ * GET ``/api/fuel/mvp/forecasts`` — paginated tank runout forecasts.
+ *
+ * Used by the Customer Tanks tab to join each tank to its latest runout
+ * forecast. The backend sorts by ``timestamp`` desc, so the first
+ * forecast seen per ``customer_tank_id`` is the freshest.
+ */
+export async function listCustomerTankForecasts(
+  filters: CustomerTankForecastFilters,
+): Promise<PaginatedResponse<CustomerTankForecast>> {
+  const qs = buildQueryString(filters);
+  return fuelRequest<PaginatedResponse<CustomerTankForecast>>(
+    `/fuel/mvp/forecasts${qs}`,
   );
 }
 

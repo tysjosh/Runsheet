@@ -196,7 +196,7 @@ export default function ExpiryAlertWidget({
           {/* All clear state */}
           {totalAlerts === 0 && (
             <div className="flex items-center gap-2 py-2">
-              <div className="w-2 h-2 rounded-full bg-success-light0" />
+              <div className="w-2 h-2 rounded-full bg-success" />
               <span className="text-sm text-success-dark font-medium">
                 All qualifications and certifications current
               </span>

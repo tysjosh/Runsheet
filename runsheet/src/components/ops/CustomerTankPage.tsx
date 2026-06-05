@@ -43,6 +43,7 @@ import type {
   CustomerTank,
   CustomerTankCreatePayload,
   CustomerTankCustomerType,
+  CustomerTankForecast,
   CustomerTankFuelType,
   CustomerTankStatus,
   CustomerTankUpdatePayload,
@@ -51,10 +52,12 @@ import type {
 } from "../../services/fuelApi";
 import {
   createCustomerTank,
+  listCustomerTankForecasts,
   listCustomerTanks,
   listFuelProducts,
   updateCustomerTank,
 } from "../../services/fuelApi";
+import { getCurrentTenantId } from "../../services/tenant";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -235,6 +238,79 @@ function formatKFactor(k: number | null | undefined): {
     color: "text-warning-dark",
     bg: "bg-warning-light",
     title: "Low K-factor — tank may be under-used or seasonal.",
+  };
+}
+
+/**
+ * Describe a tank's runout forecast for the dispatcher. Uses the
+ * conservative ``hours_to_runout_p90`` (or p50 fallback) to label how
+ * soon a delivery is needed, colour-coded by urgency. This is the
+ * forecast-driven signal unique to Customer Tanks (vs. the static
+ * days-until-empty monitoring view on Fuel Stations).
+ */
+export function formatRunoutForecast(forecast: CustomerTankForecast | null): {
+  label: string;
+  detail: string;
+  color: string;
+  bg: string;
+  title: string;
+} {
+  if (!forecast) {
+    return {
+      label: "No forecast",
+      detail: "—",
+      color: "text-gray-400",
+      bg: "bg-gray-100",
+      title:
+        "No runout forecast yet. The forecaster needs consumption history and an active tank.",
+    };
+  }
+
+  const hours = forecast.hours_to_runout_p90 ?? forecast.hours_to_runout_p50;
+  const risk = forecast.runout_risk_24h;
+
+  if (hours == null) {
+    return {
+      label: "No forecast",
+      detail: risk != null ? `${Math.round(risk * 100)}% risk / 24h` : "—",
+      color: "text-gray-400",
+      bg: "bg-gray-100",
+      title: "Forecast exists but did not produce an hours-to-runout estimate.",
+    };
+  }
+
+  const days = hours / 24;
+  const detail =
+    hours < 48 ? `~${Math.round(hours)}h` : `~${days.toFixed(1)} days`;
+  const riskPct = risk != null ? `${Math.round(risk * 100)}% / 24h` : "";
+
+  // Urgency thresholds mirror the dispatch-priority buckets: a tank
+  // forecast to run dry within a day is critical, within two days high.
+  if (hours <= 24 || (risk != null && risk >= 0.7)) {
+    return {
+      label: "Critical",
+      detail: riskPct ? `${detail} · ${riskPct}` : detail,
+      color: "text-error-dark",
+      bg: "bg-error-light",
+      title:
+        "Forecast to run dry within ~24h (or ≥70% 24-hour runout risk). Schedule a delivery now.",
+    };
+  }
+  if (hours <= 48) {
+    return {
+      label: "Soon",
+      detail: riskPct ? `${detail} · ${riskPct}` : detail,
+      color: "text-warning-dark",
+      bg: "bg-warning-light",
+      title: "Forecast to run dry within ~2 days. Queue a delivery.",
+    };
+  }
+  return {
+    label: "OK",
+    detail,
+    color: "text-success-dark",
+    bg: "bg-success-light",
+    title: "Healthy runway before the next delivery is needed.",
   };
 }
 
@@ -1162,6 +1238,9 @@ export default function CustomerTankPage({
   );
   const [page, setPage] = useState(1);
   const [tanks, setTanks] = useState<CustomerTank[]>([]);
+  const [forecastsByTank, setForecastsByTank] = useState<
+    Record<string, CustomerTankForecast>
+  >({});
   const [totalWindow, setTotalWindow] = useState(0);
   const [hasNext, setHasNext] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -1185,6 +1264,43 @@ export default function CustomerTankPage({
         setTanks(response.items);
         setTotalWindow(response.total);
         setHasNext(response.has_next);
+
+        // Join each tank to its latest runout forecast. The forecasts index
+        // mixes retail-station forecasts (customer_type "retail") with
+        // customer-tank forecasts; filtering by the distinct customer_types
+        // present on this page returns only the customer-tank forecasts and
+        // keeps the fetch bounded (1–3 small requests) regardless of how many
+        // station forecasts exist. Failures here are non-fatal: the tank list
+        // still renders, the forecast column just shows "No forecast".
+        try {
+          const tenantId = getCurrentTenantId();
+          const types = Array.from(
+            new Set(response.items.map((t) => t.customer_type)),
+          );
+          const results = await Promise.all(
+            types.map((customer_type) =>
+              listCustomerTankForecasts({
+                tenant_id: tenantId,
+                customer_type,
+                size: 100,
+              }).catch(() => null),
+            ),
+          );
+          if (signal?.aborted) return;
+          const map: Record<string, CustomerTankForecast> = {};
+          for (const res of results) {
+            if (!res) continue;
+            for (const f of res.data) {
+              const id = f.customer_tank_id;
+              // Backend sorts by timestamp desc, so the first row seen per
+              // customer_tank_id is the freshest.
+              if (id && !(id in map)) map[id] = f;
+            }
+          }
+          setForecastsByTank(map);
+        } catch {
+          if (!signal?.aborted) setForecastsByTank({});
+        }
       } catch (err) {
         if (signal?.aborted) return;
         setError(
@@ -1320,6 +1436,9 @@ export default function CustomerTankPage({
                       K-Factor
                     </th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
+                      Runout Forecast
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
                       Status
                     </th>
                     <th className="px-6 py-3 text-right text-xs font-medium text-gray-600 uppercase tracking-wider">
@@ -1331,6 +1450,9 @@ export default function CustomerTankPage({
                   {tanks.map((tank) => {
                     const pct = levelPct(tank);
                     const k = formatKFactor(tank.k_factor);
+                    const fc = formatRunoutForecast(
+                      forecastsByTank[tank.customer_tank_id] ?? null,
+                    );
                     return (
                       <tr
                         key={tank.customer_tank_id}
@@ -1366,7 +1488,7 @@ export default function CustomerTankPage({
                               aria-label={`Fill level ${Math.round(pct)}%`}
                             >
                               <div
-                                className="h-full rounded-full bg-info-light0"
+                                className="h-full rounded-full bg-info"
                                 style={{ width: `${pct}%` }}
                               />
                             </div>
@@ -1396,6 +1518,17 @@ export default function CustomerTankPage({
                             <Gauge className="w-3 h-3" aria-hidden="true" />
                             {k.label}
                           </span>
+                        </td>
+                        <td className="px-6 py-3">
+                          <span
+                            title={fc.title}
+                            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium ${fc.bg} ${fc.color}`}
+                          >
+                            {fc.label}
+                          </span>
+                          <div className="text-xs text-gray-400 mt-0.5">
+                            {fc.detail}
+                          </div>
                         </td>
                         <td className="px-6 py-3">
                           <StatusBadge status={tank.status} />

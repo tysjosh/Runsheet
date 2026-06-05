@@ -737,7 +737,7 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
               >
                 <CalendarDays className="w-4 h-4" />
                 {startDate && endDate && (
-                  <span className="absolute -top-1 -right-1 w-2 h-2 bg-info-light0 rounded-full" />
+                  <span className="absolute -top-1 -right-1 w-2 h-2 bg-info rounded-full" />
                 )}
               </button>
               <div className="relative flex-1">

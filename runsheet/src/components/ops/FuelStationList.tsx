@@ -39,19 +39,19 @@ const STATUS_CONFIG: Record<
     label: "Normal",
     color: "text-success-dark",
     bg: "bg-success-light",
-    barColor: "bg-success-light0",
+    barColor: "bg-success",
   },
   low: {
     label: "Low",
     color: "text-warning-dark",
     bg: "bg-warning-light",
-    barColor: "bg-warning-light0",
+    barColor: "bg-warning",
   },
   critical: {
     label: "Critical",
     color: "text-error-dark",
     bg: "bg-error-light",
-    barColor: "bg-error-light0",
+    barColor: "bg-error",
   },
   empty: {
     label: "Empty",

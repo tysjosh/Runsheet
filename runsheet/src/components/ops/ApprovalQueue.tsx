@@ -141,7 +141,7 @@ export default function ApprovalQueue() {
       {/* Header */}
       <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
         <div className="flex items-center gap-2">
-          <div className="w-8 h-8 bg-warning-light0 rounded-lg flex items-center justify-center">
+          <div className="w-8 h-8 bg-warning rounded-lg flex items-center justify-center">
             <ShieldAlert className="w-4 h-4 text-white" />
           </div>
           <h3 className="text-sm font-semibold text-primary">Approval Queue</h3>

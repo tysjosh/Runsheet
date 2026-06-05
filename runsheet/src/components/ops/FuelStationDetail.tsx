@@ -50,9 +50,9 @@ const STATUS_CONFIG: Record<
 };
 
 const STATUS_BAR_COLORS: Record<StationStatus, string> = {
-  normal: "bg-success-light0",
-  low: "bg-warning-light0",
-  critical: "bg-error-light0",
+  normal: "bg-success",
+  low: "bg-warning",
+  critical: "bg-error",
   empty: "bg-gray-400",
 };
 

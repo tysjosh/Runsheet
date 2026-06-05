@@ -414,7 +414,7 @@ export default function SchedulingMetricsPage() {
                     </div>
                     <div className="w-full bg-gray-100 rounded-full h-1.5">
                       <div
-                        className="bg-success-light0 h-1.5 rounded-full transition-all"
+                        className="bg-success h-1.5 rounded-full transition-all"
                         style={{
                           width: `${Math.min(metric.completion_rate * 100, 100)}%`,
                         }}

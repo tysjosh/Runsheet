@@ -6,17 +6,20 @@ import type {
   EfficiencyFilters,
   EfficiencyMetric,
 } from "../../services/fuelApi";
-import { getEfficiencyMetrics } from "../../services/fuelApi";
+import {
+  efficiencyKmPerLiter,
+  getEfficiencyMetrics,
+} from "../../services/fuelApi";
 
 /**
- * Classify efficiency into a color tier.
+ * Classify km/L efficiency into a colour tier (higher km/L is better).
  * - ≥ 4 km/L → good (green)
  * - ≥ 2 km/L → average (yellow)
  * - < 2 km/L → poor (red)
  */
-function efficiencyTier(value: number): "good" | "average" | "poor" {
-  if (value >= 4) return "good";
-  if (value >= 2) return "average";
+function efficiencyTier(kmPerLiter: number): "good" | "average" | "poor" {
+  if (kmPerLiter >= 4) return "good";
+  if (kmPerLiter >= 2) return "average";
   return "poor";
 }
 
@@ -24,33 +27,42 @@ const TIER_STYLES: Record<string, { text: string; bg: string; bar: string }> = {
   good: {
     text: "text-success-dark",
     bg: "bg-success-light",
-    bar: "bg-success-light0",
+    bar: "bg-success",
   },
   average: {
     text: "text-warning-dark",
     bg: "bg-warning-light",
-    bar: "bg-warning-light0",
+    bar: "bg-warning",
   },
   poor: {
     text: "text-error-dark",
     bg: "bg-error-light",
-    bar: "bg-error-light0",
+    bar: "bg-error",
   },
 };
 
-function formatNumber(n: number, decimals = 1): string {
-  if (n == null || !Number.isFinite(n)) return "0";
+function formatNumber(n: number | null | undefined, decimals = 1): string {
+  if (n == null || !Number.isFinite(n)) return "—";
   if (n >= 1_000) return `${(n / 1_000).toFixed(decimals)}K`;
   return n.toFixed(decimals);
 }
 
 /**
- * Fuel Efficiency Chart — displays per-asset fuel efficiency as a table
- * with inline bar visualisation and color-coded efficiency values.
+ * Fleet Fuel Efficiency chart — per-vehicle fuel economy.
  *
- * Manages its own data fetching, filters, loading, and error state.
+ * This is a FLEET performance metric, not a storage-tank metric: it
+ * reads ``GET /fuel/metrics/efficiency``, which aggregates consumption
+ * events by ``asset_id`` (the truck/vehicle that received the fuel) and
+ * derives distance from the min→max ``odometer_reading`` recorded in the
+ * window. The backend reports ``liters_per_km`` (lower is better); this
+ * component converts to km/L for display (higher is better) and renders a
+ * colour-coded table with inline bars.
  *
- * Validates: Requirements 9.1, 9.2, 9.3, 9.4, 9.5, 9.6
+ * Vehicles whose consumption events lack odometer readings have no
+ * derivable efficiency — they render an explicit "No odometer data" state
+ * rather than a misleading 0.
+ *
+ * Validates: Requirements 5.2, 5.3 (fuel-monitoring).
  */
 export default function FuelEfficiencyChart() {
   const [data, setData] = useState<EfficiencyMetric[]>([]);
@@ -89,9 +101,11 @@ export default function FuelEfficiencyChart() {
     loadData();
   }, [loadData]);
 
+  // Scale bars against the best km/L in the current result set. Rows with
+  // no derivable efficiency (null) contribute 0 to the max.
   const maxEfficiency =
     data.length > 0
-      ? Math.max(...data.map((m) => m.efficiency_km_per_liter ?? 0), 1)
+      ? Math.max(...data.map((m) => efficiencyKmPerLiter(m) ?? 0), 1)
       : 1;
 
   return (
@@ -107,7 +121,7 @@ export default function FuelEfficiencyChart() {
             type="text"
             value={assetFilter}
             onChange={(e) => setAssetFilter(e.target.value)}
-            placeholder="Filter by asset ID..."
+            placeholder="Filter by vehicle/asset ID..."
             className="pl-8 pr-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300"
             aria-label="Filter by asset ID"
           />
@@ -181,11 +195,11 @@ export default function FuelEfficiencyChart() {
         <div className="overflow-x-auto">
           <table
             className="w-full text-sm"
-            aria-label="Fuel efficiency metrics"
+            aria-label="Fleet fuel efficiency metrics"
           >
             <thead>
               <tr className="border-b border-gray-200 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                <th className="px-3 py-2">Asset ID</th>
+                <th className="px-3 py-2">Vehicle / Asset</th>
                 <th className="px-3 py-2 text-right">Distance (km)</th>
                 <th className="px-3 py-2 text-right">Fuel Consumed (L)</th>
                 <th className="px-3 py-2 text-right">Efficiency (km/L)</th>
@@ -194,10 +208,15 @@ export default function FuelEfficiencyChart() {
             </thead>
             <tbody className="divide-y divide-gray-100">
               {data.map((metric) => {
-                const eff = metric.efficiency_km_per_liter ?? 0;
-                const tier = efficiencyTier(eff);
+                const kmPerLiter = efficiencyKmPerLiter(metric);
+                const hasEfficiency = kmPerLiter != null;
+                const tier = hasEfficiency
+                  ? efficiencyTier(kmPerLiter)
+                  : "average";
                 const styles = TIER_STYLES[tier];
-                const barWidth = (eff / maxEfficiency) * 100;
+                const barWidth = hasEfficiency
+                  ? (kmPerLiter / maxEfficiency) * 100
+                  : 0;
 
                 return (
                   <tr
@@ -208,24 +227,37 @@ export default function FuelEfficiencyChart() {
                       {metric.asset_id}
                     </td>
                     <td className="px-3 py-2.5 text-right text-gray-600">
-                      {formatNumber(metric.distance_km)}
+                      {formatNumber(metric.total_distance_km)}
                     </td>
                     <td className="px-3 py-2.5 text-right text-gray-600">
-                      {formatNumber(metric.fuel_consumed_liters)}
+                      {formatNumber(metric.total_liters)}
                     </td>
                     <td className="px-3 py-2.5 text-right">
-                      <span
-                        className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${styles.text} ${styles.bg}`}
-                      >
-                        {eff.toFixed(2)}
-                      </span>
+                      {hasEfficiency ? (
+                        <span
+                          className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${styles.text} ${styles.bg}`}
+                        >
+                          {kmPerLiter.toFixed(2)}
+                        </span>
+                      ) : (
+                        <span
+                          className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium text-gray-500 bg-gray-100"
+                          title="No odometer readings recorded for this vehicle in the selected window, so efficiency cannot be derived."
+                        >
+                          No odometer data
+                        </span>
+                      )}
                     </td>
                     <td className="px-3 py-2.5">
                       <div className="w-full bg-gray-100 rounded-full h-2">
                         <div
                           className={`h-2 rounded-full ${styles.bar} transition-all`}
                           style={{ width: `${Math.max(barWidth, 2)}%` }}
-                          title={`${eff.toFixed(2)} km/L`}
+                          title={
+                            hasEfficiency
+                              ? `${kmPerLiter.toFixed(2)} km/L`
+                              : "No efficiency data"
+                          }
                         />
                       </div>
                     </td>
