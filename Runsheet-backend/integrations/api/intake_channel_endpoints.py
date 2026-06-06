@@ -46,7 +46,8 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel, ConfigDict, Field
 
-from errors.exceptions import insufficient_role, resource_not_found
+from errors.exceptions import resource_not_found
+from auth.authorization import require_role
 from fuel.intake_channel_models import IntakeChannel, RegistrableChannelType
 from fuel.intake_channel_repository import (
     IntakeChannelCrossTenantAccessError,
@@ -110,12 +111,13 @@ def _get_repository() -> IntakeChannelRepository:
 
 
 def _require_admin(tenant: TenantContext) -> None:
-    """Raise ``insufficient_role`` if the caller is not an admin."""
-    if "admin" not in (tenant.roles or []):
-        raise insufficient_role(
-            message="Intake channel management requires the admin role",
-            details={"required_role": "admin"},
-        )
+    """Raise ``INSUFFICIENT_ROLE`` (HTTP 403) if the caller is not an admin.
+
+    Delegates to the shared :func:`auth.authorization.require_role` helper
+    so this router applies the one consistent, exact-match authorization
+    mechanism (Req 4.7).
+    """
+    require_role(tenant, "admin")
 
 
 # ---------------------------------------------------------------------------

@@ -8,11 +8,13 @@ Validates: Requirements 8.1, 8.2, 8.3, 8.4, 8.5
 """
 
 import sys
+from contextlib import nullcontext
 from typing import Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from jose import jwt
+
+from tests.support.auth_seam import auth_headers, install_test_auth
 
 # ---------------------------------------------------------------------------
 # Patch ElasticsearchService singleton BEFORE any scheduling imports
@@ -36,8 +38,6 @@ from driver.services.geo_utils import haversine_distance_meters
 # Constants
 # ---------------------------------------------------------------------------
 
-JWT_SECRET = "test-jwt-secret"
-JWT_ALGORITHM = "HS256"
 TENANT_ID = "t1"
 
 # File_refs in the tenant-prefixed layout
@@ -63,10 +63,9 @@ _CROSS_TENANT_SIGNATURE_REF = (
     "55555555-5555-5555-5555-555555555555.png"
 )
 
-_SETTINGS_PATCH = patch(
-    "ops.middleware.tenant_guard.get_settings",
-    return_value=MagicMock(jwt_secret=JWT_SECRET, jwt_algorithm=JWT_ALGORITHM),
-)
+# Endpoints authenticate via the Test_Auth_Path dependency-override seam
+# (installed per-app in ``_make_app``); no legacy-JWT settings patch needed.
+_SETTINGS_PATCH = nullcontext()
 
 
 # ---------------------------------------------------------------------------
@@ -74,14 +73,8 @@ _SETTINGS_PATCH = patch(
 # ---------------------------------------------------------------------------
 
 
-def _make_token(tenant_id: str = TENANT_ID, sub: str = "driver-1") -> str:
-    return jwt.encode(
-        {"tenant_id": tenant_id, "sub": sub}, JWT_SECRET, algorithm=JWT_ALGORITHM
-    )
-
-
 def _auth_headers(tenant_id: str = TENANT_ID) -> dict:
-    return {"Authorization": f"Bearer {_make_token(tenant_id)}"}
+    return auth_headers(tenant_id, sub="driver-1")
 
 
 def _make_es_service(tenant_policies: dict = None) -> MagicMock:
@@ -177,6 +170,7 @@ def _make_app(
         file_storage_service=file_storage or _make_file_storage(),
         ocr_service=ocr_service,
     )
+    install_test_auth(app)
     return app
 
 

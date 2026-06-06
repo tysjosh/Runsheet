@@ -35,7 +35,8 @@ router = APIRouter()
 
 # Auth policy declaration for this router (Req 5.2)
 # Default: JWT_REQUIRED for chat/upload endpoints; PUBLIC for health
-# Per-route overrides are declared in middleware/auth_policy.POLICY_EXCEPTIONS
+# Public-route exceptions are enumerated in
+# middleware.auth_enforcement.PUBLIC_ROUTE_ALLOWLIST
 ROUTER_AUTH_POLICY = "jwt_required"
 
 

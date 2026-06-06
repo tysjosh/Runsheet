@@ -44,7 +44,8 @@ router = APIRouter(prefix="/api/agent", tags=["agent"])
 
 # Auth policy declaration for this router (Req 5.2)
 # Default: JWT_REQUIRED for all agent endpoints
-# Exception: GET /api/agent/health → PUBLIC (declared in POLICY_EXCEPTIONS)
+# Exception: GET /api/agent/health → PUBLIC (see
+# middleware.auth_enforcement.PUBLIC_ROUTE_ALLOWLIST)
 ROUTER_AUTH_POLICY = "jwt_required"
 
 

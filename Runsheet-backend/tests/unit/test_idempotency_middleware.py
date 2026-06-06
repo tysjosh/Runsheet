@@ -9,11 +9,13 @@ Validates: Requirements 14.1, 14.2, 14.3, 14.4
 """
 
 import sys
+from contextlib import nullcontext
 from datetime import datetime, timezone, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from jose import jwt
+
+from tests.support.auth_seam import auth_headers, install_test_auth
 
 # ---------------------------------------------------------------------------
 # Patch ElasticsearchService singleton BEFORE any scheduling imports
@@ -39,24 +41,15 @@ from driver.services.driver_es_mappings import IDEMPOTENCY_KEYS_INDEX
 # Constants
 # ---------------------------------------------------------------------------
 
-JWT_SECRET = "test-jwt-secret"
-JWT_ALGORITHM = "HS256"
 TENANT_ID = "t1"
 
-_SETTINGS_PATCH = patch(
-    "ops.middleware.tenant_guard.get_settings",
-    return_value=MagicMock(jwt_secret=JWT_SECRET, jwt_algorithm=JWT_ALGORITHM),
-)
-
-
-def _make_token(tenant_id: str = TENANT_ID, sub: str = "driver-1") -> str:
-    return jwt.encode(
-        {"tenant_id": tenant_id, "sub": sub}, JWT_SECRET, algorithm=JWT_ALGORITHM
-    )
+# Endpoints authenticate via the Test_Auth_Path dependency-override seam
+# (installed per-app); no legacy-JWT settings patch needed.
+_SETTINGS_PATCH = nullcontext()
 
 
 def _auth_headers(tenant_id: str = TENANT_ID) -> dict:
-    return {"Authorization": f"Bearer {_make_token(tenant_id)}"}
+    return auth_headers(tenant_id, sub="driver-1")
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +269,7 @@ class TestIdempotencyEndpointIntegration:
             import driver.middleware.idempotency as idem_mod
             idem_mod._idempotency_middleware = idempotency_mw
 
+        install_test_auth(app)
         return app
 
     def test_request_without_idempotency_header_processes_normally(self):

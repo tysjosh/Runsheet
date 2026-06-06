@@ -32,13 +32,15 @@ export default function SignIn({ onSignIn }: SignInProps) {
     }
 
     try {
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-
       if (onSignIn) {
-        onSignIn(email, password);
+        await onSignIn(email, password);
       }
-    } catch (_err) {
-      setError("Invalid credentials. Please try again.");
+    } catch (err) {
+      setError(
+        err instanceof Error && err.message
+          ? err.message
+          : "Invalid credentials. Please try again.",
+      );
     } finally {
       setIsLoading(false);
     }

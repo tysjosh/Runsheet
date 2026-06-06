@@ -19,10 +19,12 @@ test_scheduling_tenant_scoping.py. This file adds the remaining gaps:
 """
 
 import sys
+from contextlib import nullcontext
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from jose import jwt
+
+from tests.support.auth_seam import auth_headers, install_test_auth
 
 # ---------------------------------------------------------------------------
 # Patch ElasticsearchService singleton BEFORE any scheduling imports
@@ -46,15 +48,12 @@ from scheduling.services.job_service import JobService
 # Constants
 # ---------------------------------------------------------------------------
 
-JWT_SECRET = "test-jwt-secret"
-JWT_ALGORITHM = "HS256"
 TENANT_A = "tenant-alpha"
 TENANT_B = "tenant-beta"
 
-_SETTINGS_PATCH = patch(
-    "ops.middleware.tenant_guard.get_settings",
-    return_value=MagicMock(jwt_secret=JWT_SECRET, jwt_algorithm=JWT_ALGORITHM),
-)
+# Endpoints authenticate via the Test_Auth_Path dependency-override seam
+# (installed per-app in ``_build_app``); no legacy-JWT settings patch needed.
+_SETTINGS_PATCH = nullcontext()
 
 
 # ---------------------------------------------------------------------------
@@ -62,14 +61,8 @@ _SETTINGS_PATCH = patch(
 # ---------------------------------------------------------------------------
 
 
-def _make_token(tenant_id: str, sub: str = "user-1") -> str:
-    return jwt.encode(
-        {"tenant_id": tenant_id, "sub": sub}, JWT_SECRET, algorithm=JWT_ALGORITHM
-    )
-
-
 def _auth_headers(tenant_id: str = TENANT_A) -> dict:
-    return {"Authorization": f"Bearer {_make_token(tenant_id)}"}
+    return auth_headers(tenant_id, sub="user-1")
 
 
 def _make_es_mock() -> MagicMock:
@@ -117,6 +110,7 @@ def _build_app(es_mock: MagicMock) -> tuple[FastAPI, TestClient]:
 
         return JSONResponse(status_code=exc.status_code, content=exc.to_dict())
 
+    install_test_auth(app)
     client = TestClient(app)
     return app, client
 

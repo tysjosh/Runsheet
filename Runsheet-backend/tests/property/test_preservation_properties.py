@@ -30,34 +30,11 @@ import pytest
 from hypothesis import given, settings, assume, HealthCheck
 from hypothesis.strategies import from_regex, sampled_from, just
 
-from jose import jwt as jose_jwt
+from tests.support.auth_seam import auth_headers, install_test_auth
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-JWT_SECRET = "dev-jwt-secret-change-me-in-production"
-JWT_ALGORITHM = "HS256"
-
-
-def _make_jwt(
-    tenant_id: str,
-    user_id: str = "test-user",
-    has_pii_access: bool = False,
-    roles: list = None,
-    expired: bool = False,
-) -> str:
-    """Create a signed JWT token for testing."""
-    payload = {
-        "tenant_id": tenant_id,
-        "sub": user_id,
-        "user_id": user_id,
-        "has_pii_access": has_pii_access,
-    }
-    if roles is not None:
-        payload["roles"] = roles
-    if expired:
-        payload["exp"] = int(time.time()) - 3600
-    return jose_jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
 # ---------------------------------------------------------------------------
@@ -202,8 +179,10 @@ def preservation_app():
         # Set up container
         container = ServiceContainer()
         container.settings = MagicMock()
-        container.settings.jwt_secret = JWT_SECRET
-        container.settings.jwt_algorithm = JWT_ALGORITHM
+        # Auth is exercised via the Test_Auth_Path dependency-override seam, so
+        # these legacy-JWT fields are only placeholders for the mock container.
+        container.settings.jwt_secret = "unused-legacy-secret"
+        container.settings.jwt_algorithm = "HS256"
         container.health_check_service = mock_health_svc
 
         # Mock WS managers
@@ -215,18 +194,27 @@ def preservation_app():
         app.state.container = container
 
         from starlette.testclient import TestClient
+        # Install the Test_Auth_Path dependency-override seam so endpoints
+        # authenticate via a verified TenantContext instead of a legacy dev JWT.
+        install_test_auth(app)
         client = TestClient(app, raise_server_exceptions=False)
-        yield {
-            "client": client,
-            "app": app,
-            "mock_es": mock_es,
-            "mock_ops_es": mock_ops_es,
-            "mock_ff_service": mock_ff_service,
-            "mock_fuel_service": mock_fuel_service,
-            "mock_job_service": mock_job_service,
-            "mock_health_svc": mock_health_svc,
-            "container": container,
-        }
+        try:
+            yield {
+                "client": client,
+                "app": app,
+                "mock_es": mock_es,
+                "mock_ops_es": mock_ops_es,
+                "mock_ff_service": mock_ff_service,
+                "mock_fuel_service": mock_fuel_service,
+                "mock_job_service": mock_job_service,
+                "mock_health_svc": mock_health_svc,
+                "container": container,
+            }
+        finally:
+            # ``main.app`` is a process-global singleton; drop the override so
+            # the seam does not leak into other tests sharing the app.
+            from ops.middleware.tenant_guard import get_tenant_context
+            app.dependency_overrides.pop(get_tenant_context, None)
 
 
 # ===========================================================================
@@ -252,10 +240,10 @@ class TestOpsTenantScoping:
         mock_ops_es = preservation_app["mock_ops_es"]
         mock_ops_es.client.search.reset_mock()
 
-        token = _make_jwt(tid)
+        token_headers = auth_headers(tid, sub="test-user")
         resp = client.get(
             "/api/ops/shipments",
-            headers={"Authorization": f"Bearer {token}"},
+            headers=token_headers,
         )
 
         # The ops endpoint uses inject_tenant_filter which wraps the query
@@ -295,10 +283,10 @@ class TestOpsTenantScoping:
         mock_fuel = preservation_app["mock_fuel_service"]
         mock_fuel.list_stations.reset_mock()
 
-        token = _make_jwt(tid)
+        token_headers = auth_headers(tid, sub="test-user")
         resp = client.get(
             "/api/fuel/stations",
-            headers={"Authorization": f"Bearer {token}"},
+            headers=token_headers,
         )
 
         assert mock_fuel.list_stations.called, "FuelService.list_stations was not called"
@@ -321,10 +309,10 @@ class TestOpsTenantScoping:
         mock_job = preservation_app["mock_job_service"]
         mock_job.list_jobs.reset_mock()
 
-        token = _make_jwt(tid)
+        token_headers = auth_headers(tid, sub="test-user")
         resp = client.get(
             "/api/scheduling/jobs",
-            headers={"Authorization": f"Bearer {token}"},
+            headers=token_headers,
         )
 
         assert mock_job.list_jobs.called, "JobService.list_jobs was not called"
@@ -362,10 +350,10 @@ class TestCentralizedErrorHandler:
             "hits": {"hits": [], "total": {"value": 0, "relation": "eq"}},
         }
 
-        token = _make_jwt("test-tenant")
+        token_headers = auth_headers("test-tenant", sub="test-user")
         resp = client.get(
             "/api/ops/shipments/nonexistent-shipment",
-            headers={"Authorization": f"Bearer {token}"},
+            headers=token_headers,
         )
 
         # The ops endpoint raises HTTPException(404) for not found
@@ -746,11 +734,11 @@ class TestPIIMasking:
             },
         }
 
-        # JWT without PII access
-        token = _make_jwt(tid, has_pii_access=False)
+        # Session without PII access
+        token_headers = auth_headers(tid, sub="test-user", has_pii_access=False)
         resp = client.get(
             "/api/ops/shipments",
-            headers={"Authorization": f"Bearer {token}"},
+            headers=token_headers,
         )
 
         if resp.status_code == 200:
@@ -786,10 +774,10 @@ class TestFeatureFlagTenantDisabled:
         # Disable the tenant
         mock_ff.is_enabled = AsyncMock(return_value=False)
 
-        token = _make_jwt("disabled-tenant")
+        token_headers = auth_headers("disabled-tenant", sub="test-user")
         resp = client.get(
             "/api/ops/shipments",
-            headers={"Authorization": f"Bearer {token}"},
+            headers=token_headers,
         )
 
         assert resp.status_code == 404, (

@@ -117,11 +117,14 @@ introduced in Capabilities 1 and 6 of the fuel-ops-hardening spec:
 * ``POST /api/fuel/storm-mode/override`` — persist a dispatcher or
   admin Storm_Mode override (Req 9.4.2, 9.4.4, Task 10.5). Accepts
   ``action`` (one of activate/deactivate/snooze/clear), ``reason``,
-  ``actor_id``, and optional ``expires_at``. The router stamps
-  ``tenant_id`` from the JWT context and mints ``override_id``
+  and optional ``expires_at``. The router stamps ``tenant_id`` from
+  the JWT context, derives ``actor_id`` from the verified session
+  (``tenant.user_id``) so audit attribution cannot be spoofed by a
+  client-supplied value (Req 5.5), and mints ``override_id``
   (``smo_<uuid4>``) so callers cannot spoof ownership or reuse an
   existing id. Role-restricted to dispatcher or admin per Req 9.4.4 —
-  other callers receive HTTP 403 ``forbidden_role``. The persisted
+  other callers receive HTTP 403 ``INSUFFICIENT_ROLE`` via the shared
+  exact-match Role_Authorizer. The persisted
   record is visible to the :class:`StormModeEvaluator` on its next
   5-minute tick, and the status endpoint reads overrides out of band
   so the dispatcher banner reflects the submission immediately.
@@ -172,6 +175,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
+from auth.authorization import require_role
 from Agents.confirmation_protocol import ConfirmationProtocol, MutationRequest
 from Agents.support.mvp_es_mappings import (
     MVP_LOAD_PLANS_INDEX,
@@ -8235,24 +8239,20 @@ async def get_storm_mode_status(
 # ---------------------------------------------------------------------------
 
 
-#: Roles permitted to submit Storm_Mode overrides (Req 9.4.4). The frontend
-#: Storm_Mode banner (Task 11.7) gates the UI to the same roles, and the
-#: backend re-checks here for defense-in-depth so a caller cannot bypass
-#: the UI guard by hitting the endpoint directly. Any role containing
-#: ``dispatcher`` or ``admin`` (case-insensitive) is accepted so tenant
-#: role lexicons like ``dispatcher_lead`` / ``admin_ops`` still pass
-#: without requiring per-tenant config.
-_STORM_MODE_OVERRIDE_ROLES: frozenset[str] = frozenset({"dispatcher", "admin"})
-
-
 class StormModeOverrideCreateRequest(BaseModel):
     """Request body for ``POST /api/fuel/storm-mode/override``.
 
     Mirrors :class:`fuel.storm_mode_models.StormModeOverride` but omits
     repository-managed fields (``override_id``, ``tenant_id``,
-    ``created_at``, ``updated_at``) so the caller cannot spoof ownership
-    or reuse an existing override id. ``action`` is constrained to the
-    same enum the :class:`StormModeOverride` model enforces.
+    ``actor_id``, ``created_at``, ``updated_at``) so the caller cannot
+    spoof ownership, audit attribution, or reuse an existing override id.
+    ``action`` is constrained to the same enum the
+    :class:`StormModeOverride` model enforces.
+
+    ``actor_id`` is intentionally **not** part of the request body: the
+    router derives it server-side from the verified session
+    (``tenant.user_id``) so the audit actor cannot be spoofed by a
+    client-supplied value (Req 5.5).
 
     The request body intentionally accepts ``expires_at`` as optional:
     ``clear`` overrides are instantaneous by design (they remove any
@@ -8283,18 +8283,6 @@ class StormModeOverrideCreateRequest(BaseModel):
             "Required so every override is explainable at incident review."
         ),
     )
-    actor_id: str = Field(
-        ...,
-        min_length=1,
-        description=(
-            "Identifier of the user or service account issuing the "
-            "override. The router does not overwrite this with the JWT "
-            "``user_id`` so operators can submit on behalf of another "
-            "actor (e.g. a dispatcher submitting for an incident "
-            "commander); the JWT role check still gates who may call "
-            "the endpoint."
-        ),
-    )
     expires_at: Optional[datetime] = Field(
         default=None,
         description=(
@@ -8309,39 +8297,19 @@ class StormModeOverrideCreateRequest(BaseModel):
 def _ensure_storm_mode_override_role(tenant: TenantContext) -> None:
     """Enforce the Req 9.4.4 role gate on Storm_Mode override submissions.
 
-    Accepts any tenant role whose lowered form contains ``dispatcher`` or
-    ``admin`` so tenant role lexicons like ``dispatcher_lead`` /
-    ``admin_ops`` still pass without per-tenant config. Raises HTTP 403
-    with a structured ``forbidden_role`` error payload when the caller
-    has neither. We deliberately do not echo the caller's role list in
-    the response — that would leak role lexicon details to an attacker
-    probing the endpoint.
+    Thin wrapper over the shared :func:`auth.authorization.require_role`
+    helper so every router applies one consistent authorization mechanism
+    (Req 4.7). Matching is **exact**: only the canonical ``dispatcher`` /
+    ``admin`` roles satisfy the gate — a tenant role lexicon such as
+    ``dispatcher_lead`` / ``admin_ops`` no longer passes (the previous
+    substring match was over-permissive; exact matching is the security
+    fix mandated by Req 4.2). Raises HTTP 403 ``INSUFFICIENT_ROLE`` when
+    the caller holds neither role; the shared helper deliberately does not
+    echo the caller's held roles back so the tenant's role lexicon is not
+    leaked to a probing attacker.
     """
 
-    for raw_role in tenant.roles or ():
-        if not isinstance(raw_role, str):
-            continue
-        normalized = raw_role.strip().lower()
-        if not normalized:
-            continue
-        if any(allowed in normalized for allowed in _STORM_MODE_OVERRIDE_ROLES):
-            return
-
-    logger.warning(
-        "fuel_ops.storm_mode_override: forbidden role tenant=%s user=%s",
-        tenant.tenant_id,
-        tenant.user_id,
-    )
-    raise HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail={
-            "error_code": "forbidden_role",
-            "message": (
-                "Storm_Mode overrides are restricted to dispatcher or "
-                "admin roles."
-            ),
-        },
-    )
+    require_role(tenant, "dispatcher", "admin")
 
 
 @router.post(
@@ -8360,13 +8328,16 @@ async def submit_storm_mode_override(
 
         1. Enforce the role gate (Req 9.4.4) — only ``dispatcher`` or
            ``admin`` roles may submit. Other callers receive HTTP 403
-           with ``forbidden_role``.
+           with ``INSUFFICIENT_ROLE``.
         2. Validate the body through :class:`StormModeOverride` itself
            so the same invariants enforced on evaluator-side reads
            (non-blank reason / actor, enum action) are enforced on the
            write path. The router stamps ``tenant_id`` from the JWT
-           context and mints an ``override_id`` (``smo_<uuid4>``) so
-           the caller cannot spoof ownership or reuse an existing id.
+           context, derives ``actor_id`` from the verified session
+           (``tenant.user_id``) so audit attribution cannot be spoofed
+           by a client-supplied value (Req 5.5), and mints an
+           ``override_id`` (``smo_<uuid4>``) so the caller cannot spoof
+           ownership or reuse an existing id.
         3. Persist to the ``storm_mode_overrides`` ES index via
            :meth:`es.index_document`. Bootstrap indexing is idempotent
            — the mapping is ``dynamic: strict`` so any rogue field the
@@ -8387,7 +8358,7 @@ async def submit_storm_mode_override(
 
     Error modes:
 
-        * 403 ``forbidden_role`` — caller lacks dispatcher/admin role.
+        * 403 ``INSUFFICIENT_ROLE`` — caller lacks dispatcher/admin role.
         * 422 ``validation_error`` — body failed Pydantic validation
           (blank reason, unknown action, etc.).
         * 503 — persistence layer unreachable. We surface ``str(exc)``
@@ -8408,7 +8379,7 @@ async def submit_storm_mode_override(
             tenant_id=tenant.tenant_id,
             action=body.action,
             reason=body.reason,
-            actor_id=body.actor_id,
+            actor_id=tenant.user_id,
             expires_at=body.expires_at,
             created_at=now,
             updated_at=now,
@@ -8562,7 +8533,7 @@ async def upload_storm_road_restriction(
 
         1. Enforce the Req 9.4.4 role gate — only ``dispatcher`` or
            ``admin`` roles may upload restrictions. Other callers
-           receive HTTP 403 with ``forbidden_role``. The same role
+           receive HTTP 403 with ``INSUFFICIENT_ROLE``. The same role
            lexicon the Storm_Mode override endpoint uses is applied
            here so tenants don't need a parallel authorization
            surface.
@@ -8585,7 +8556,7 @@ async def upload_storm_road_restriction(
 
     Error modes:
 
-        * 403 ``forbidden_role`` — caller lacks dispatcher/admin role.
+        * 403 ``INSUFFICIENT_ROLE`` — caller lacks dispatcher/admin role.
         * 422 ``validation_error`` — body failed Pydantic validation
           (malformed polygon, unknown severity, closed ring missing,
           etc.).

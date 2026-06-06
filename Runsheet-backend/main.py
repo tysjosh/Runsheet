@@ -130,6 +130,38 @@ app = FastAPI(title="Runsheet Logistics API", version="1.0.0", lifespan=lifespan
 # Register structured error handlers (AppException → proper JSON, not 500)
 register_exception_handlers(app)
 
+# ---------------------------------------------------------------------------
+# Global auth enforcement (SuperTokens Auth Migration, Req 6.1, 6.2, 6.7)
+#
+# Middleware MUST be registered here at import time — Starlette refuses
+# ``add_middleware`` once the app has started, so registrations done later in
+# the lifespan (bootstrap/middleware.py) never take effect. We initialize the
+# SuperTokens SDK (only when the provider enforces) and then register the SDK
+# middleware + AuthEnforcementMiddleware. Both are added BEFORE CORS so CORS
+# remains the outermost middleware and attaches CORS headers to the 401s the
+# auth gate returns. Under auth_provider="legacy" (the default, incl. tests)
+# the gate self-gates to a no-op, preserving the pre-migration per-handler
+# auth so the existing suite and legacy clients are unaffected (Req 9.2).
+# ---------------------------------------------------------------------------
+from config.settings import get_settings as _get_auth_settings
+from middleware.auth_enforcement import (
+    provider_enforces as _provider_enforces,
+    register_auth_enforcement as _register_auth_enforcement,
+)
+
+_auth_settings = _get_auth_settings()
+if _provider_enforces(getattr(_auth_settings, "auth_provider", "legacy")):
+    # Initialize the SDK before registering enforcement so the fail-closed
+    # check in register_auth_enforcement passes (Req 6.7). A missing managed
+    # core endpoint raises here, refusing to boot a broken auth path.
+    from auth.supertokens_init import init_supertokens as _init_supertokens
+
+    _init_supertokens(_auth_settings)
+
+# Always register the gate; it is a no-op under "legacy" and activates when the
+# Migration_Controller flag flips, without re-wiring (Req 9.1).
+_register_auth_enforcement(app, _auth_settings)
+
 # CORS must be added before the app starts (cannot be added in lifespan/bootstrap)
 from fastapi.middleware.cors import CORSMiddleware
 import json as _json
@@ -149,10 +181,17 @@ app.add_middleware(
     allow_headers=[
         "Accept", "Accept-Language", "Content-Language", "Content-Type",
         "Authorization", "X-Request-ID", "X-Requested-With", "X-Idempotency-Key",
+        # SuperTokens SDK headers so the frontend session/anti-CSRF flow passes
+        # CORS preflight (Req 2.5, 8.4): anti-csrf token + recipe/FDI routing +
+        # the cookie-vs-header session transport mode selector.
+        "anti-csrf", "rid", "fdi-version", "st-auth-mode",
     ],
     expose_headers=[
         "X-Request-ID", "X-RateLimit-Limit", "X-RateLimit-Remaining",
         "X-RateLimit-Reset", "X-Idempotent-Replayed",
+        # SuperTokens issues the new session via these response headers; the
+        # browser SDK must be able to read them across origins (Req 2.3, 8.4).
+        "front-token", "anti-csrf",
     ],
     max_age=600,
 )

@@ -18,9 +18,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
+from errors.exceptions import AppException
 from fuel.api.fuel_ops_endpoints import (
     configure_fuel_ops_endpoints,
     router,
@@ -83,6 +85,17 @@ def _build_app(
 
     app = FastAPI()
     app.include_router(router)
+
+    # The shared Role_Authorizer raises AppException; register the same
+    # structured handler the app uses in production so the role-gate
+    # response renders as the canonical error envelope (nested under
+    # ``detail`` to match the other error-mode assertions in this module).
+    @app.exception_handler(AppException)
+    async def _app_exception_handler(request: Request, exc: AppException):
+        return JSONResponse(
+            status_code=exc.status_code, content={"detail": exc.to_dict()}
+        )
+
     app.dependency_overrides[get_tenant_context] = _tenant_ctx_factory(
         tenant_id=tenant_id, roles=roles
     )
@@ -107,7 +120,6 @@ class TestStormModeOverrideEndpoint:
             json={
                 "action": "activate",
                 "reason": "hurricane approaching",
-                "actor_id": "dispatcher-42",
                 "expires_at": expires,
             },
         )
@@ -116,7 +128,9 @@ class TestStormModeOverrideEndpoint:
         body = resp.json()
         assert body["action"] == "activate"
         assert body["reason"] == "hurricane approaching"
-        assert body["actor_id"] == "dispatcher-42"
+        # actor_id is derived server-side from the verified session
+        # (tenant.user_id), never from the request body (Req 5.5).
+        assert body["actor_id"] == "user-1"
         assert body["tenant_id"] == "tenant-A"
         assert body["override_id"].startswith("smo_")
         assert body["expires_at"] is not None
@@ -142,13 +156,13 @@ class TestStormModeOverrideEndpoint:
             json={
                 "action": "deactivate",
                 "reason": "storm cleared early",
-                "actor_id": "admin-ops-1",
             },
         )
 
         assert resp.status_code == 201, resp.text
         body = resp.json()
         assert body["action"] == "deactivate"
+        assert body["actor_id"] == "user-1"
         assert body["expires_at"] is None
         assert len(es.writes) == 1
 
@@ -161,7 +175,6 @@ class TestStormModeOverrideEndpoint:
                 json={
                     "action": action,
                     "reason": "reason",
-                    "actor_id": "actor",
                 },
             )
             assert resp.status_code == 201, f"{action}: {resp.text}"
@@ -181,7 +194,6 @@ class TestStormModeOverrideEndpoint:
             json={
                 "action": "activate",
                 "reason": "spoof attempt",
-                "actor_id": "actor",
                 "tenant_id": "tenant-EVIL",
             },
         )
@@ -193,7 +205,6 @@ class TestStormModeOverrideEndpoint:
             json={
                 "action": "activate",
                 "reason": "legit",
-                "actor_id": "actor",
             },
         )
         assert resp.status_code == 201
@@ -216,12 +227,11 @@ class TestStormModeOverrideRoleGate:
             json={
                 "action": "activate",
                 "reason": "reason",
-                "actor_id": "actor",
             },
         )
         assert resp.status_code == 403
         detail = resp.json()["detail"]
-        assert detail["error_code"] == "forbidden_role"
+        assert detail["error_code"] == "INSUFFICIENT_ROLE"
         assert es.writes == []
 
     def test_rejects_caller_with_empty_roles(self):
@@ -233,14 +243,20 @@ class TestStormModeOverrideRoleGate:
             json={
                 "action": "activate",
                 "reason": "reason",
-                "actor_id": "actor",
             },
         )
         assert resp.status_code == 403
         assert es.writes == []
 
-    def test_accepts_compound_role_names(self):
-        """Tenants with lexicons like ``dispatcher_lead`` still pass."""
+    def test_rejects_compound_role_names(self):
+        """Exact-match security fix (Req 4.2): a tenant lexicon role like
+        ``dispatcher_lead`` no longer satisfies the ``dispatcher`` gate.
+
+        Previously the substring matcher accepted any role *containing*
+        ``dispatcher``/``admin``; the shared Role_Authorizer requires exact
+        membership, so a superstring role is now correctly rejected with
+        HTTP 403 and no write is persisted.
+        """
         app, es = _build_app(roles=["dispatcher_lead"])
         client = TestClient(app)
 
@@ -249,11 +265,11 @@ class TestStormModeOverrideRoleGate:
             json={
                 "action": "snooze",
                 "reason": "reason",
-                "actor_id": "actor",
             },
         )
-        assert resp.status_code == 201
-        assert len(es.writes) == 1
+        assert resp.status_code == 403
+        assert resp.json()["detail"]["error_code"] == "INSUFFICIENT_ROLE"
+        assert es.writes == []
 
 
 # ---------------------------------------------------------------------------
@@ -271,13 +287,16 @@ class TestStormModeOverrideValidation:
             json={
                 "action": "activate",
                 "reason": "",
-                "actor_id": "actor",
             },
         )
         assert resp.status_code == 422
         assert es.writes == []
 
-    def test_rejects_blank_actor_id(self):
+    def test_rejects_client_supplied_actor_id(self):
+        """actor_id is server-derived from the verified session and is not
+        an accepted request field; supplying one is rejected by the
+        ``extra=forbid`` request model (Req 5.5).
+        """
         app, es = _build_app(roles=["dispatcher"])
         client = TestClient(app)
 
@@ -286,7 +305,7 @@ class TestStormModeOverrideValidation:
             json={
                 "action": "activate",
                 "reason": "reason",
-                "actor_id": "",
+                "actor_id": "spoofed-actor",
             },
         )
         assert resp.status_code == 422
@@ -301,7 +320,6 @@ class TestStormModeOverrideValidation:
             json={
                 "action": "pause",
                 "reason": "reason",
-                "actor_id": "actor",
             },
         )
         assert resp.status_code == 422
@@ -324,7 +342,6 @@ class TestStormModeOverridePersistenceFailure:
             json={
                 "action": "activate",
                 "reason": "reason",
-                "actor_id": "actor",
             },
         )
         assert resp.status_code == 503

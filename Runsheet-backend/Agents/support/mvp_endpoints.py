@@ -15,8 +15,10 @@ Validates: Requirements 1.1–1.5, 2.1–2.6, 3.1–3.9, 4.1–4.7, 5.1–5.6, 6
 import logging
 from typing import Dict, List, Optional
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
+
+from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 
 from errors.exceptions import (
     AppException,
@@ -204,13 +206,14 @@ def _get_ws_manager():
 @router.post("/plan/generate")
 async def generate_plan(
     request: Request,
-    tenant_id: str = Query(..., description="Tenant identifier"),
+    tenant: TenantContext = Depends(get_tenant_context),
 ):
     """Trigger a full pipeline run, returning run_id and status.
 
     Validates: Requirement 8.1
     """
     pipeline = _get_pipeline()
+    tenant_id = tenant.tenant_id
     try:
         run_id = await pipeline.run(tenant_id=tenant_id)
         status_info = await pipeline.get_status(run_id)
@@ -232,13 +235,14 @@ async def generate_plan(
 async def get_plan(
     plan_id: str,
     request: Request,
-    tenant_id: str = Query(..., description="Tenant identifier"),
+    tenant: TenantContext = Depends(get_tenant_context),
 ):
     """Retrieve a complete plan (loading + route) by plan_id or run_id.
 
     Validates: Requirement 8.2
     """
     es = _get_es()
+    tenant_id = tenant.tenant_id
 
     # Try plan_id first, then fall back to run_id (the generate endpoint
     # returns run_id, which is what the frontend passes here).
@@ -320,7 +324,7 @@ async def replan(
     plan_id: str,
     request: Request,
     body: ReplanRequest = None,
-    tenant_id: str = Query(..., description="Tenant identifier"),
+    tenant: TenantContext = Depends(get_tenant_context),
 ):
     """Trigger exception replanning for an existing plan.
 
@@ -328,6 +332,8 @@ async def replan(
     """
     if body is None:
         body = ReplanRequest()
+
+    tenant_id = tenant.tenant_id
 
     if _exception_replanning_agent is None:
         raise AppException(
@@ -378,7 +384,7 @@ async def replan(
 @router.get("/forecasts")
 async def get_forecasts(
     request: Request,
-    tenant_id: str = Query(..., description="Tenant identifier"),
+    tenant: TenantContext = Depends(get_tenant_context),
     station_id: Optional[str] = Query(None, description="Filter by station ID"),
     fuel_grade: Optional[str] = Query(None, description="Filter by fuel grade"),
     customer_tank_id: Optional[str] = Query(
@@ -428,6 +434,7 @@ async def get_forecasts(
     """
     es = _get_es()
 
+    tenant_id = tenant.tenant_id
     must_clauses = [{"term": {"tenant_id": tenant_id}}]
     if station_id:
         must_clauses.append({"term": {"station_id": station_id}})
@@ -499,7 +506,7 @@ async def configure_compartments(
     truck_id: str,
     body: CompartmentConfigRequest,
     request: Request,
-    tenant_id: str = Query(..., description="Tenant identifier"),
+    tenant: TenantContext = Depends(get_tenant_context),
 ):
     """Configure compartments for a fuel tanker.
 
@@ -509,6 +516,7 @@ async def configure_compartments(
     Validates: Requirements 6.1, 6.3
     """
     es = _get_es()
+    tenant_id = tenant.tenant_id
 
     from Agents.support.mvp_es_mappings import TRUCK_COMPARTMENTS_INDEX
 
@@ -598,7 +606,7 @@ async def configure_compartments(
 @router.get("/plans")
 async def list_plans(
     request: Request,
-    tenant_id: str = Query(..., description="Tenant identifier"),
+    tenant: TenantContext = Depends(get_tenant_context),
     status: Optional[str] = Query(None, description="Filter by plan status"),
     page: int = Query(1, ge=1, description="Page number"),
     size: int = Query(20, ge=1, le=100, description="Page size"),
@@ -612,6 +620,7 @@ async def list_plans(
     """
     es = _get_es()
 
+    tenant_id = tenant.tenant_id
     must_clauses = [{"term": {"tenant_id": tenant_id}}]
     if status:
         must_clauses.append({"term": {"status": status}})
@@ -652,8 +661,7 @@ async def list_plans(
 async def approve_plan(
     plan_id: str,
     request: Request,
-    tenant_id: str = Query(..., description="Tenant identifier"),
-    dispatcher_id: str = Query(..., description="Dispatcher identifier"),
+    tenant: TenantContext = Depends(get_tenant_context),
 ):
     """Approve a plan, transitioning from draft to dispatched.
 
@@ -661,12 +669,18 @@ async def approve_plan(
     dispatcher_id and approved_at timestamp, then creates execution
     records for each route associated with the plan.
 
+    The ``dispatcher_id`` is derived server-side from the verified
+    session (``tenant.user_id``); it is never accepted from the client.
+
     Returns 409 if plan is not in draft status.
 
     Validates: Requirements 2.1, 2.3, 2.4
     """
     es = _get_es()
     execution_service = _get_execution_service()
+
+    tenant_id = tenant.tenant_id
+    dispatcher_id = tenant.user_id
 
     # Fetch the plan
     plan_query = {
@@ -772,20 +786,25 @@ async def approve_plan(
 async def reject_plan(
     plan_id: str,
     request: Request,
-    tenant_id: str = Query(..., description="Tenant identifier"),
-    dispatcher_id: str = Query(..., description="Dispatcher identifier"),
     body: Optional[RejectRequest] = None,
+    tenant: TenantContext = Depends(get_tenant_context),
 ):
     """Reject a plan, transitioning from draft to rejected.
 
     Validates plan is in "draft" status, updates to "rejected" with
     dispatcher_id, rejected_at, and optional reason.
 
+    The ``dispatcher_id`` is derived server-side from the verified
+    session (``tenant.user_id``); it is never accepted from the client.
+
     Returns 409 if plan is not in draft status.
 
     Validates: Requirements 2.2, 2.3, 2.5
     """
     es = _get_es()
+
+    tenant_id = tenant.tenant_id
+    dispatcher_id = tenant.user_id
 
     # Fetch the plan
     plan_query = {
@@ -868,7 +887,7 @@ async def driver_checkin(
     plan_id: str,
     body: CheckinRequest,
     request: Request,
-    tenant_id: str = Query(..., description="Tenant identifier"),
+    tenant: TenantContext = Depends(get_tenant_context),
 ):
     """Record a driver check-in at a stop.
 
@@ -883,6 +902,8 @@ async def driver_checkin(
     """
     execution_service = _get_execution_service()
     ws_manager = _get_ws_manager()
+
+    tenant_id = tenant.tenant_id
 
     try:
         # record_checkin validates plan status and stop state internally
@@ -985,7 +1006,7 @@ async def driver_checkin(
 async def get_plan_outcomes(
     plan_id: str,
     request: Request,
-    tenant_id: str = Query(..., description="Tenant identifier"),
+    tenant: TenantContext = Depends(get_tenant_context),
 ):
     """Retrieve outcome data for a completed plan.
 
@@ -995,6 +1016,7 @@ async def get_plan_outcomes(
     Validates: Requirements 4.5, 4.6
     """
     es = _get_es()
+    tenant_id = tenant.tenant_id
 
     # Verify plan is completed
     plan_query = {
@@ -1070,7 +1092,7 @@ async def get_plan_outcomes(
 async def get_plan_costs(
     plan_id: str,
     request: Request,
-    tenant_id: str = Query(..., description="Tenant identifier"),
+    tenant: TenantContext = Depends(get_tenant_context),
 ):
     """Retrieve cost data for a plan.
 
@@ -1082,6 +1104,8 @@ async def get_plan_costs(
     """
     es = _get_es()
     execution_service = _get_execution_service()
+
+    tenant_id = tenant.tenant_id
 
     # Check cost config exists for tenant
     cost_config = await execution_service.get_cost_config(tenant_id)
@@ -1148,7 +1172,7 @@ async def get_plan_costs(
 async def update_cost_config(
     request: Request,
     body: CostConfigRequest,
-    tenant_id: str = Query(..., description="Tenant identifier"),
+    tenant: TenantContext = Depends(get_tenant_context),
 ):
     """Upsert tenant cost configuration.
 
@@ -1158,6 +1182,8 @@ async def update_cost_config(
     Validates: Requirement 5.5
     """
     execution_service = _get_execution_service()
+
+    tenant_id = tenant.tenant_id
 
     try:
         config = {

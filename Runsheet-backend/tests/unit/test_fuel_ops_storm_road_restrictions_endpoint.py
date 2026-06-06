@@ -21,9 +21,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
+from errors.exceptions import AppException
 from fuel.api.fuel_ops_endpoints import (
     configure_fuel_ops_endpoints,
     router,
@@ -135,6 +137,16 @@ def _build_app(
 
     app = FastAPI()
     app.include_router(router)
+
+    # The shared Role_Authorizer raises AppException; register the same
+    # structured handler the app uses in production (nested under
+    # ``detail`` to match the validation/persistence error assertions).
+    @app.exception_handler(AppException)
+    async def _app_exception_handler(request: Request, exc: AppException):
+        return JSONResponse(
+            status_code=exc.status_code, content={"detail": exc.to_dict()}
+        )
+
     app.dependency_overrides[get_tenant_context] = _tenant_ctx_factory(
         tenant_id=tenant_id, roles=roles
     )
@@ -283,7 +295,7 @@ class TestUploadValidation:
             },
         )
         assert resp.status_code == 403
-        assert resp.json()["detail"]["error_code"] == "forbidden_role"
+        assert resp.json()["detail"]["error_code"] == "INSUFFICIENT_ROLE"
 
     def test_unclosed_ring_is_rejected(self):
         app, _ = _build_app(roles=["dispatcher"])

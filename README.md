@@ -179,7 +179,7 @@ Runsheet-backend/
 │   ├── exceptions.py              # AppException base & factories
 │   └── handlers.py                # Exception-to-JSON-envelope handlers
 ├── middleware/                     # Cross-cutting middleware
-│   ├── auth_policy.py             # Route-level auth policy matrix
+│   ├── auth_enforcement.py        # Global fail-closed session enforcement + allowlist
 │   ├── rate_limiter.py            # Rate limiting configuration
 │   ├── request_id.py              # Request ID propagation
 │   └── security_headers.py        # Security response headers

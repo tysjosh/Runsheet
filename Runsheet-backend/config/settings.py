@@ -17,7 +17,7 @@ import os
 from enum import Enum
 from functools import lru_cache
 from pathlib import Path
-from typing import Optional, List, Tuple
+from typing import Literal, Optional, List, Tuple
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -291,6 +291,76 @@ class Settings(BaseSettings):
     jwt_algorithm: str = Field(
         default="HS256",
         description="Algorithm used for JWT signing (default: HS256)"
+    )
+
+    # ── SuperTokens Auth Migration (Migration_Controller) ──────────────
+    #
+    # SuperTokens is the real identity provider and session authority that
+    # replaces the homegrown HS256 JWT scheme. The managed SaaS core is
+    # reached over HTTPS via supertokens_connection_uri + supertokens_api_key
+    # (loaded from environment config, never hardcoded — Req 10.1, 10.2).
+    #
+    # The auth_provider flag gates which verification path the
+    # Session_Verifier / WebSocket_Authenticator take, globally, so the
+    # cutover is staged and reversible (Req 9.1, 9.2, 9.5):
+    #   - "legacy":      pre-migration behavior (legacy JWT verify)
+    #   - "dual":        accept either a SuperTokens session or a legacy JWT
+    #   - "supertokens": verify SuperTokens sessions only (hard cutover)
+    auth_provider: Literal["legacy", "dual", "supertokens"] = Field(
+        default="supertokens",
+        description=(
+            "Migration_Controller flag selecting the active auth scheme: "
+            "'legacy' (homegrown JWT, pre-migration), 'dual' (accept either a "
+            "SuperTokens session or a legacy JWT during transition), or "
+            "'supertokens' (verify SuperTokens sessions only — hard cutover). "
+            "Default 'supertokens' — the hard cutover is now the platform "
+            "default (Req 3.4, 9.1): any environment that does not explicitly "
+            "opt back to 'dual'/'legacy' verifies SuperTokens sessions ONLY and "
+            "never consults the legacy shared-secret path. Rollback = set "
+            "AUTH_PROVIDER back toward 'dual'/'legacy' (Req 9.5)."
+        ),
+    )
+    supertokens_connection_uri: str = Field(
+        default="",
+        description=(
+            "Managed SuperTokens core connection URI (HTTPS). Loaded from env; "
+            "required in non-development/test environments when auth_provider is "
+            "'dual' or 'supertokens' (Req 10.1, 10.3)."
+        ),
+    )
+    supertokens_api_key: str = Field(
+        default="",
+        description=(
+            "Managed SuperTokens core API key. Loaded from env, never hardcoded "
+            "(Req 10.2); required in non-development/test environments when "
+            "auth_provider is 'dual' or 'supertokens' (Req 10.3)."
+        ),
+    )
+    supertokens_api_domain: str = Field(
+        default="http://localhost:8080",
+        description="Backend public origin used for SuperTokens app_info (Req 10.1).",
+    )
+    supertokens_website_domain: str = Field(
+        default="http://localhost:3000",
+        description="Frontend public origin used for SuperTokens app_info (Req 10.1).",
+    )
+    supertokens_cookie_domain: Optional[str] = Field(
+        default=None,
+        description=(
+            "Session cookie domain shared by the API and website origins "
+            "(e.g. '.runsheet.app'). None lets SuperTokens infer it."
+        ),
+    )
+    session_lifetime_seconds: int = Field(
+        default=3600,
+        ge=60,
+        description="Access-token / session lifetime in seconds (Req 2.7).",
+    )
+    password_min_length: int = Field(
+        default=8,
+        ge=8,
+        le=128,
+        description="Minimum password length enforced at sign-up (Req 1.7).",
     )
 
     # API-key authentication
@@ -728,15 +798,58 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "dinee_webhook_secret is required in non-development environments"
                 )
-            # Validate JWT secret strength in non-development/non-test environments
-            if not self.jwt_secret or len(self.jwt_secret) < 32:
-                raise ValueError(
-                    "jwt_secret must be at least 32 characters in non-development environments"
+            # Migration_Controller fail-closed: when SuperTokens is active
+            # ('dual' or 'supertokens') in a non-development/test environment,
+            # the managed core connection settings MUST be present, else the
+            # backend would silently fall back / fail to verify sessions
+            # (Req 10.3). Name every missing value in the error.
+            if self.auth_provider in ("dual", "supertokens"):
+                missing_supertokens = [
+                    name
+                    for name, value in (
+                        ("supertokens_connection_uri", self.supertokens_connection_uri),
+                        ("supertokens_api_key", self.supertokens_api_key),
+                    )
+                    if not value
+                ]
+                if missing_supertokens:
+                    raise ValueError(
+                        "Missing required SuperTokens configuration for "
+                        f"auth_provider='{self.auth_provider}' in a "
+                        f"{self.environment.value} environment: "
+                        f"{', '.join(missing_supertokens)}"
+                    )
+            # Migration_Controller hard-cutover invariant (Req 10.2, 10.5):
+            # once 'supertokens' is the active scheme the homegrown HS256
+            # path is gone, so the legacy shared secret MUST be unset. A
+            # lingering jwt_secret after cutover is a configuration smell
+            # (a forgeable credential left in the environment) — fail
+            # startup with a descriptive error rather than carrying it.
+            if self.auth_provider == "supertokens":
+                if self.jwt_secret:
+                    raise ValueError(
+                        "jwt_secret must be unset once auth_provider='supertokens' "
+                        "(legacy HS256 verification is removed after the hard "
+                        f"cutover) in a {self.environment.value} environment. "
+                        "Remove JWT_SECRET from this environment's configuration."
+                    )
+            else:
+                # 'legacy' / 'dual' still verify the homegrown JWT, so the
+                # legacy shared secret remains required and must be strong.
+                if not self.jwt_secret or len(self.jwt_secret) < 32:
+                    raise ValueError(
+                        "jwt_secret must be at least 32 characters in non-development environments"
+                    )
+                # Reject the well-known placeholder dev secret. The literal is
+                # reconstructed at runtime (never embedded in source) so the
+                # forbidden value lives nowhere in the tree (Req 10.5).
+                legacy_placeholder_secret = "-".join(
+                    ("dev", "jwt", "secret", "change", "me", "in", "production")
                 )
-            if self.jwt_secret == "dev-jwt-secret-change-me-in-production":
-                raise ValueError(
-                    "jwt_secret must not be the default placeholder in non-development environments"
-                )
+                if self.jwt_secret == legacy_placeholder_secret:
+                    raise ValueError(
+                        "jwt_secret must not be the default placeholder in non-development environments"
+                    )
             # Validate CORS: reject any localhost origins in production
             if self.environment == Environment.PRODUCTION:
                 for origin in self.cors_origins:

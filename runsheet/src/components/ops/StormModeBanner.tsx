@@ -54,6 +54,7 @@ import {
   getStormModeStatus,
   submitStormModeOverride,
 } from "../../services/fuelApi";
+import { getCurrentUserId, getCurrentUserRoles } from "../../utils/auth";
 
 // ─── Role gate (Req 9.4.4) ───────────────────────────────────────────────────
 
@@ -300,17 +301,21 @@ function OverrideForm({ actorId, onSubmitted, onClose }: OverrideFormProps) {
 
 export interface StormModeBannerProps {
   /**
-   * Caller's role list for the UI-side gate (Req 9.4.4). The backend
-   * re-checks the JWT context so a caller with no roles will still get
-   * HTTP 403 on submit; the prop exists so non-permitted operators
-   * don't even see the "Request override" button.
+   * Optional override for the caller's role list driving the UI-side gate
+   * (Req 8.6, 9.4.4). When omitted, the banner reads roles from the verified
+   * SuperTokens session's access-token claims (`getCurrentUserRoles`) rather
+   * than relying on a hardcoded prop. The backend independently re-verifies
+   * the session so a caller with no roles still receives HTTP 403 on submit;
+   * the gate only hides the control from operators who may not use it.
+   * Primarily injected by tests.
    */
   roles?: readonly string[] | null;
   /**
-   * Actor identifier stamped on submitted overrides. Typically the
-   * current user's id from the session store. Defaults to ``dispatcher``
-   * for backwards compatibility with pages that haven't wired an
-   * auth context yet.
+   * Optional override for the actor identifier stamped on submitted overrides.
+   * When omitted, the banner derives it from the verified session's user id
+   * (`getCurrentUserId`). The backend derives the audit actor from the session
+   * and ignores any client-supplied value, so this is presentation-only.
+   * Primarily injected by tests.
    */
   actorId?: string;
   /**
@@ -336,8 +341,8 @@ export interface StormModeBannerProps {
  * ``state === "active"`` (Req 9.4.1).
  */
 export default function StormModeBanner({
-  roles,
-  actorId = "dispatcher",
+  roles: rolesProp,
+  actorId: actorIdProp,
   detailsHref = "/admin/weather-alerts",
   fetchStatus = getStormModeStatus,
   pollIntervalMs = STATUS_POLL_INTERVAL_MS,
@@ -346,6 +351,11 @@ export default function StormModeBanner({
   const [loading, setLoading] = useState(true);
   const [transientError, setTransientError] = useState<string | null>(null);
   const [showOverrideForm, setShowOverrideForm] = useState(false);
+  // Roles/actor read from the verified session's claims (Req 8.6). When the
+  // caller passes explicit props (e.g. tests) those win; otherwise we hydrate
+  // from `getCurrentUserRoles` / `getCurrentUserId` on mount.
+  const [sessionRoles, setSessionRoles] = useState<string[]>([]);
+  const [sessionActorId, setSessionActorId] = useState<string>("");
   const cancelledRef = useRef(false);
 
   const reload = useCallback(async () => {
@@ -382,7 +392,31 @@ export default function StormModeBanner({
     };
   }, [reload, pollIntervalMs]);
 
-  const canOverride = useMemo(() => canSubmitStormModeOverride(roles), [roles]);
+  // Hydrate roles + actor from the verified session unless the caller supplied
+  // explicit props (Req 8.6). Role-gating is presentation-only; the backend
+  // re-verifies the session and derives the audit actor on every request.
+  useEffect(() => {
+    if (rolesProp !== undefined && actorIdProp !== undefined) return;
+    let cancelled = false;
+    void Promise.all([getCurrentUserRoles(), getCurrentUserId()]).then(
+      ([r, id]) => {
+        if (cancelled) return;
+        setSessionRoles(r);
+        if (id) setSessionActorId(id);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [rolesProp, actorIdProp]);
+
+  const effectiveRoles = rolesProp ?? sessionRoles;
+  const effectiveActorId = actorIdProp ?? sessionActorId ?? "";
+
+  const canOverride = useMemo(
+    () => canSubmitStormModeOverride(effectiveRoles),
+    [effectiveRoles],
+  );
 
   // Keep the hook order stable: only render-gate after memoization.
   if (loading && !status) {
@@ -517,7 +551,7 @@ export default function StormModeBanner({
 
         {canOverride && showOverrideForm && (
           <OverrideForm
-            actorId={actorId}
+            actorId={effectiveActorId}
             onSubmitted={() => {
               setShowOverrideForm(false);
               // Immediately re-poll so the banner reflects the change

@@ -13,12 +13,14 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from jose import jwt
+
+from tests.support.auth_seam import auth_headers, install_test_auth
 
 # ---------------------------------------------------------------------------
 # Patch ElasticsearchService singleton BEFORE any fuel imports
@@ -44,19 +46,12 @@ from fuel.order_models import Driver
 # Constants
 # ---------------------------------------------------------------------------
 
-JWT_SECRET = "test-jwt-secret"
-JWT_ALGORITHM = "HS256"
 TENANT_A = "tenant-alpha"
 TENANT_B = "tenant-beta"
 
-_SETTINGS_PATCH = patch(
-    "ops.middleware.tenant_guard.get_settings",
-    return_value=MagicMock(
-        jwt_secret=JWT_SECRET,
-        jwt_algorithm=JWT_ALGORITHM,
-        environment=MagicMock(value="production"),
-    ),
-)
+# Endpoints authenticate via the Test_Auth_Path dependency-override seam
+# (installed per-app in ``_make_app``); no legacy-JWT settings patch needed.
+_SETTINGS_PATCH = nullcontext()
 
 
 # ---------------------------------------------------------------------------
@@ -64,25 +59,11 @@ _SETTINGS_PATCH = patch(
 # ---------------------------------------------------------------------------
 
 
-def _make_token(
-    tenant_id: str = TENANT_A,
-    sub: str = "user-1",
-    roles: Optional[List[str]] = None,
-) -> str:
-    """Create a signed JWT with the given tenant and roles."""
-    payload = {
-        "tenant_id": tenant_id,
-        "sub": sub,
-        "roles": roles or ["admin"],
-    }
-    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
-
-
 def _auth_headers(
     tenant_id: str = TENANT_A,
     roles: Optional[List[str]] = None,
 ) -> dict:
-    return {"Authorization": f"Bearer {_make_token(tenant_id, roles=roles)}"}
+    return auth_headers(tenant_id, sub="user-1", roles=roles or ["admin"])
 
 
 def _make_driver(
@@ -215,6 +196,7 @@ def _make_app(driver_repo: FakeDriverRepository) -> FastAPI:
     register_exception_handlers(app)
     app.include_router(driver_router)
     configure_driver_endpoints(driver_repository=driver_repo)
+    install_test_auth(app)
     return app
 
 
@@ -667,6 +649,7 @@ class TestDriverAvailabilityInAssign:
             order_repository=order_repo,
             driver_repository=driver_repo,
         )
+        install_test_auth(app)
 
         with _SETTINGS_PATCH:
             client = TestClient(app)
@@ -711,6 +694,7 @@ class TestDriverAvailabilityInAssign:
             order_repository=order_repo,
             driver_repository=driver_repo,
         )
+        install_test_auth(app)
 
         with _SETTINGS_PATCH:
             client = TestClient(app)

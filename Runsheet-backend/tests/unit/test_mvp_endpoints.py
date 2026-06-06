@@ -24,6 +24,25 @@ from Agents.support.mvp_endpoints import (
     GeneratePlanResponse,
     ReplanRequest,
 )
+from ops.middleware.tenant_guard import TenantContext, get_tenant_context
+
+
+# Default identity injected into authenticated test requests. The tenant
+# guard is bypassed via a FastAPI dependency override so these unit tests
+# exercise the handler logic without minting real sessions; the override
+# mirrors the production contract where tenant_id / user_id come only from
+# the verified session, never from a client query param.
+TEST_TENANT_ID = "tenant-1"
+TEST_USER_ID = "dispatcher-user-1"
+
+
+def _fake_tenant_context() -> TenantContext:
+    return TenantContext(
+        tenant_id=TEST_TENANT_ID,
+        user_id=TEST_USER_ID,
+        has_pii_access=True,
+        roles=["dispatcher"],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +94,11 @@ def _create_test_app(pipeline=None, es_service=None, replanning_agent=None):
     register_exception_handlers(app)
     app.include_router(router)
 
+    # Override the tenant guard so handlers receive a verified TenantContext
+    # without a live session. Identity (tenant_id / user_id) is supplied by
+    # the override — never by a client query param (Req 5.1, 5.2, 6.4, 6.5).
+    app.dependency_overrides[get_tenant_context] = _fake_tenant_context
+
     if pipeline is None:
         pipeline = _make_mock_pipeline()
     if es_service is None:
@@ -99,7 +123,7 @@ class TestGeneratePlan:
         app, pipeline, _ = _create_test_app()
         client = TestClient(app)
 
-        resp = client.post("/api/fuel/mvp/plan/generate?tenant_id=tenant-1")
+        resp = client.post("/api/fuel/mvp/plan/generate")
         assert resp.status_code == 200
         data = resp.json()
         assert data["run_id"] == "run_test_123"
@@ -109,15 +133,21 @@ class TestGeneratePlan:
         app, pipeline, _ = _create_test_app()
         client = TestClient(app)
 
-        client.post("/api/fuel/mvp/plan/generate?tenant_id=tenant-1")
-        pipeline.run.assert_called_once_with(tenant_id="tenant-1")
+        client.post("/api/fuel/mvp/plan/generate")
+        pipeline.run.assert_called_once_with(tenant_id=TEST_TENANT_ID)
 
-    def test_requires_tenant_id(self):
-        app, _, _ = _create_test_app()
+    def test_ignores_client_tenant_id_query_param(self):
+        """tenant_id is derived from the session, never from the client.
+
+        Passing ``?tenant_id=other`` must not change the scoped tenant —
+        the pipeline still runs for the session tenant (Req 5.1, 5.2, 6.5).
+        """
+        app, pipeline, _ = _create_test_app()
         client = TestClient(app)
 
-        resp = client.post("/api/fuel/mvp/plan/generate")
-        assert resp.status_code == 422  # Missing required query param
+        resp = client.post("/api/fuel/mvp/plan/generate?tenant_id=attacker")
+        assert resp.status_code == 200
+        pipeline.run.assert_called_once_with(tenant_id=TEST_TENANT_ID)
 
     def test_handles_pipeline_error(self):
         pipeline = _make_mock_pipeline()
@@ -125,7 +155,7 @@ class TestGeneratePlan:
         app, _, _ = _create_test_app(pipeline=pipeline)
         client = TestClient(app)
 
-        resp = client.post("/api/fuel/mvp/plan/generate?tenant_id=tenant-1")
+        resp = client.post("/api/fuel/mvp/plan/generate")
         assert resp.status_code == 500
 
 
@@ -162,7 +192,7 @@ class TestGetPlan:
         app, _, _ = _create_test_app(es_service=es)
         client = TestClient(app)
 
-        resp = client.get("/api/fuel/mvp/plan/plan-1?tenant_id=tenant-1")
+        resp = client.get("/api/fuel/mvp/plan/plan-1")
         assert resp.status_code == 200
         data = resp.json()
         assert data["plan_id"] == "plan-1"
@@ -173,7 +203,7 @@ class TestGetPlan:
         app, _, _ = _create_test_app()
         client = TestClient(app)
 
-        resp = client.get("/api/fuel/mvp/plan/nonexistent?tenant_id=tenant-1")
+        resp = client.get("/api/fuel/mvp/plan/nonexistent")
         assert resp.status_code == 200
         data = resp.json()
         assert data["plan_id"] == "nonexistent"
@@ -198,7 +228,7 @@ class TestGetPlan:
         app, _, _ = _create_test_app(es_service=es)
         client = TestClient(app)
 
-        resp = client.get("/api/fuel/mvp/plan/plan-1?tenant_id=tenant-1")
+        resp = client.get("/api/fuel/mvp/plan/plan-1")
         assert resp.status_code == 200
         data = resp.json()
         assert data["loading_plan"] is not None
@@ -217,7 +247,7 @@ class TestReplan:
         client = TestClient(app)
 
         resp = client.post(
-            "/api/fuel/mvp/plan/plan-1/replan?tenant_id=tenant-1",
+            "/api/fuel/mvp/plan/plan-1/replan",
             json={
                 "disruption_type": "truck_breakdown",
                 "description": "Truck broke down",
@@ -235,7 +265,7 @@ class TestReplan:
         client = TestClient(app)
 
         resp = client.post(
-            "/api/fuel/mvp/plan/plan-1/replan?tenant_id=tenant-1",
+            "/api/fuel/mvp/plan/plan-1/replan",
             json={"disruption_type": "delay"},
         )
         assert resp.status_code == 503
@@ -266,7 +296,7 @@ class TestGetForecasts:
         app, _, _ = _create_test_app(es_service=es)
         client = TestClient(app)
 
-        resp = client.get("/api/fuel/mvp/forecasts?tenant_id=tenant-1")
+        resp = client.get("/api/fuel/mvp/forecasts")
         assert resp.status_code == 200
         data = resp.json()
         assert data["total"] == 1
@@ -281,7 +311,7 @@ class TestGetForecasts:
         client = TestClient(app)
 
         client.get(
-            "/api/fuel/mvp/forecasts?tenant_id=tenant-1&station_id=s1"
+            "/api/fuel/mvp/forecasts?station_id=s1"
         )
 
         # Verify the ES query includes station_id filter
@@ -297,7 +327,7 @@ class TestGetForecasts:
         client = TestClient(app)
 
         client.get(
-            "/api/fuel/mvp/forecasts?tenant_id=tenant-1&fuel_grade=AGO"
+            "/api/fuel/mvp/forecasts?fuel_grade=AGO"
         )
 
         call_args = es.search_documents.call_args
@@ -312,7 +342,7 @@ class TestGetForecasts:
         client = TestClient(app)
 
         resp = client.get(
-            "/api/fuel/mvp/forecasts?tenant_id=tenant-1&page=2&size=10"
+            "/api/fuel/mvp/forecasts?page=2&size=10"
         )
         assert resp.status_code == 200
 

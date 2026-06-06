@@ -11,10 +11,16 @@ Requirements: 8.1-8.5
 """
 
 import sys
+from contextlib import nullcontext
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from jose import jwt
+
+from tests.support.auth_seam import (
+    TENANT_HEADER,
+    auth_headers,
+    install_test_auth,
+)
 
 # ---------------------------------------------------------------------------
 # Patch ElasticsearchService singleton BEFORE any scheduling imports
@@ -45,8 +51,6 @@ from scheduling.services.delay_detection_service import DelayDetectionService
 
 TENANT_A = "tenant-alpha"
 TENANT_B = "tenant-beta"
-JWT_SECRET = "test-jwt-secret"
-JWT_ALGORITHM = "HS256"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -84,11 +88,6 @@ def _make_cargo_service(es_mock: MagicMock) -> CargoService:
 def _make_delay_service(es_mock: MagicMock) -> DelayDetectionService:
     """Create a DelayDetectionService with mocked dependencies."""
     return DelayDetectionService(es_service=es_mock, ws_manager=None)
-
-
-def _make_token(claims: dict) -> str:
-    """Create a signed JWT with the given claims."""
-    return jwt.encode(claims, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
 def _extract_tenant_from_query(es_mock: MagicMock) -> str | None:
@@ -297,10 +296,7 @@ class TestQueryMethodsTenantFilter:
 # Validates: Requirement 8.2
 # ---------------------------------------------------------------------------
 
-_SETTINGS_PATCH = patch(
-    "ops.middleware.tenant_guard.get_settings",
-    return_value=MagicMock(jwt_secret=JWT_SECRET, jwt_algorithm=JWT_ALGORITHM),
-)
+_SETTINGS_PATCH = nullcontext()
 
 
 def _build_scheduling_app(es_mock: MagicMock) -> tuple[FastAPI, TestClient]:
@@ -329,52 +325,57 @@ def _build_scheduling_app(es_mock: MagicMock) -> tuple[FastAPI, TestClient]:
             content=exc.to_dict(),
         )
 
+    install_test_auth(app)
     client = TestClient(app)
     return app, client
 
 
 class TestMissingTenantReturns403:
-    """Requests without a valid JWT tenant_id are rejected with 403."""
+    """Requests without a Test_Auth_Path scope are rejected (no context).
 
-    def test_no_auth_header_returns_403(self):
-        """Request without Authorization header returns 403."""
+    With the SuperTokens migration the Session_Verifier rejects a request that
+    carries no verified session with a 401 (rather than the legacy 403). These
+    tests assert the request is rejected and no handler runs.
+    """
+
+    def test_no_auth_header_returns_401(self):
+        """Request without any auth scope is rejected."""
         es = _make_es_mock()
         _, client = _build_scheduling_app(es)
 
         with _SETTINGS_PATCH:
             resp = client.get("/api/scheduling/jobs")
 
-        assert resp.status_code == 403
+        assert resp.status_code == 401
 
-    def test_invalid_jwt_returns_403(self):
-        """Request with an invalid JWT returns 403."""
+    def test_blank_tenant_scope_returns_401(self):
+        """Request with a blank tenant scope is rejected."""
         es = _make_es_mock()
         _, client = _build_scheduling_app(es)
 
         with _SETTINGS_PATCH:
             resp = client.get(
                 "/api/scheduling/jobs",
-                headers={"Authorization": "Bearer invalid-token"},
+                headers={TENANT_HEADER: ""},
             )
 
-        assert resp.status_code == 403
+        assert resp.status_code == 401
 
-    def test_jwt_missing_tenant_id_returns_403(self):
-        """JWT without tenant_id claim returns 403."""
+    def test_missing_tenant_scope_returns_401(self):
+        """Request carrying other headers but no tenant scope is rejected."""
         es = _make_es_mock()
         _, client = _build_scheduling_app(es)
-        token = _make_token({"sub": "user-1"})
 
         with _SETTINGS_PATCH:
             resp = client.get(
                 "/api/scheduling/jobs",
-                headers={"Authorization": f"Bearer {token}"},
+                headers={"X-Test-User-Id": "user-1"},
             )
 
-        assert resp.status_code == 403
+        assert resp.status_code == 401
 
-    def test_post_job_without_auth_returns_403(self):
-        """POST /scheduling/jobs without auth returns 403."""
+    def test_post_job_without_auth_returns_401(self):
+        """POST /scheduling/jobs without auth scope is rejected."""
         es = _make_es_mock()
         _, client = _build_scheduling_app(es)
 
@@ -389,7 +390,7 @@ class TestMissingTenantReturns403:
                 },
             )
 
-        assert resp.status_code == 403
+        assert resp.status_code == 401
 
 
 # ---------------------------------------------------------------------------
@@ -402,46 +403,43 @@ class TestQueryParamTenantIgnored:
     """tenant_id in query params must be ignored; JWT claim is authoritative."""
 
     def test_query_param_tenant_id_ignored_on_list_jobs(self):
-        """tenant_id query param does not override JWT tenant_id."""
+        """tenant_id query param does not override the session tenant_id."""
         es = _make_es_mock()
         _, client = _build_scheduling_app(es)
-        token = _make_token({"tenant_id": TENANT_A, "sub": "user-1"})
 
         with _SETTINGS_PATCH:
             resp = client.get(
                 "/api/scheduling/jobs?tenant_id=spoofed-tenant",
-                headers={"Authorization": f"Bearer {token}"},
+                headers=auth_headers(TENANT_A, sub="user-1"),
             )
 
         assert resp.status_code == 200
-        # Verify the ES query used the JWT tenant, not the spoofed one
+        # Verify the ES query used the session tenant, not the spoofed one
         assert _extract_tenant_from_query(es) == TENANT_A
 
     def test_query_param_tenant_id_ignored_on_active_jobs(self):
-        """tenant_id query param does not override JWT on active jobs endpoint."""
+        """tenant_id query param does not override the session on active jobs endpoint."""
         es = _make_es_mock()
         _, client = _build_scheduling_app(es)
-        token = _make_token({"tenant_id": TENANT_A, "sub": "user-1"})
 
         with _SETTINGS_PATCH:
             resp = client.get(
                 "/api/scheduling/jobs/active?tenant_id=spoofed-tenant",
-                headers={"Authorization": f"Bearer {token}"},
+                headers=auth_headers(TENANT_A, sub="user-1"),
             )
 
         assert resp.status_code == 200
         assert _extract_tenant_from_query(es) == TENANT_A
 
     def test_query_param_tenant_id_ignored_on_delayed_jobs(self):
-        """tenant_id query param does not override JWT on delayed jobs endpoint."""
+        """tenant_id query param does not override the session on delayed jobs endpoint."""
         es = _make_es_mock()
         _, client = _build_scheduling_app(es)
-        token = _make_token({"tenant_id": TENANT_A, "sub": "user-1"})
 
         with _SETTINGS_PATCH:
             resp = client.get(
                 "/api/scheduling/jobs/delayed?tenant_id=spoofed-tenant",
-                headers={"Authorization": f"Bearer {token}"},
+                headers=auth_headers(TENANT_A, sub="user-1"),
             )
 
         assert resp.status_code == 200
@@ -492,15 +490,14 @@ class TestJobCreationTenantFromJWT:
         assert indexed_doc["tenant_id"] == TENANT_A
 
     def test_api_create_job_passes_jwt_tenant_to_service(self):
-        """The API endpoint passes tenant.tenant_id from JWT to the service."""
+        """The API endpoint passes tenant.tenant_id from the session to the service."""
         es = _make_es_mock()
         _, client = _build_scheduling_app(es)
-        token = _make_token({"tenant_id": TENANT_A, "sub": "user-1"})
 
         with _SETTINGS_PATCH:
             resp = client.post(
                 "/api/scheduling/jobs",
-                headers={"Authorization": f"Bearer {token}"},
+                headers=auth_headers(TENANT_A, sub="user-1"),
                 json={
                     "job_type": "cargo_transport",
                     "origin": "Port Harcourt",

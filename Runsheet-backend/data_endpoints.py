@@ -18,6 +18,7 @@ from services.time_utils import utcnow
 from middleware.rate_limiter import limiter
 from config.settings import Environment, get_settings
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context, inject_tenant_filter
+from auth.authorization import require_role
 from errors.exceptions import AppException, forbidden, internal_error, resource_not_found, validation_error
 
 logger = logging.getLogger(__name__)
@@ -1078,11 +1079,10 @@ async def cleanup_duplicate_data(request: Request, tenant: TenantContext = Depen
             message="Data cleanup is not available in production",
             details={"environment": settings.environment.value},
         )
-    if "admin" not in (tenant.roles or []):
-        raise forbidden(
-            message="Data cleanup requires the admin role",
-            details={"required_role": "admin"},
-        )
+    # Admin-only — delegate to the shared, exact-match Role_Authorizer
+    # (Req 4.7) so this destructive endpoint uses the one consistent
+    # authorization mechanism rather than an ad-hoc membership check.
+    require_role(tenant, "admin")
     try:
         from services.data_seeder import data_seeder
 

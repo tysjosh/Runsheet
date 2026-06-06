@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { SuperTokensProvider } from "../components/SuperTokensProvider";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -25,7 +26,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className="antialiased">
-        {children}
+        <SuperTokensProvider>{children}</SuperTokensProvider>
       </body>
     </html>
   );

@@ -14,7 +14,20 @@ logger = logging.getLogger(__name__)
 
 
 async def initialize(app, container: ServiceContainer) -> None:
-    """Register all middleware on the FastAPI application."""
+    """Register all middleware on the FastAPI application.
+
+    .. note::
+        The global auth enforcement layer (the SuperTokens SDK middleware and
+        :class:`middleware.auth_enforcement.AuthEnforcementMiddleware`) and the
+        CORS middleware are registered in ``main.py`` at **import time**, not
+        here. Starlette builds its middleware stack before the lifespan startup
+        runs, so ``add_middleware`` calls made during this bootstrap step raise
+        ``RuntimeError("Cannot add middleware after an application has
+        started")`` and have no effect. The CORS config below is kept in sync
+        with ``main.py`` (including the SuperTokens headers) for parity, and the
+        dead ``validate_policy_matrix`` startup call has been removed now that
+        global enforcement is live (Req 6.1).
+    """
     from fastapi.middleware.cors import CORSMiddleware
     from middleware.request_id import RequestIDMiddleware
     from middleware.rate_limiter import setup_rate_limiting
@@ -22,7 +35,9 @@ async def initialize(app, container: ServiceContainer) -> None:
 
     settings = container.settings
 
-    # CORS — only configured origins, no wildcards
+    # CORS — only configured origins, no wildcards. Header lists mirror
+    # ``main.py`` and include the SuperTokens session/anti-CSRF headers so the
+    # frontend SDK flow passes CORS preflight (Req 2.5, 2.3, 8.4).
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
@@ -36,12 +51,22 @@ async def initialize(app, container: ServiceContainer) -> None:
             "Authorization",
             "X-Request-ID",
             "X-Requested-With",
+            # SuperTokens SDK request headers (anti-CSRF token, recipe/FDI
+            # routing, session transport mode).
+            "anti-csrf",
+            "rid",
+            "fdi-version",
+            "st-auth-mode",
         ],
         expose_headers=[
             "X-Request-ID",
             "X-RateLimit-Limit",
             "X-RateLimit-Remaining",
             "X-RateLimit-Reset",
+            # SuperTokens session-issuance response headers the browser SDK
+            # reads across origins.
+            "front-token",
+            "anti-csrf",
         ],
         max_age=600,
     )
@@ -58,9 +83,5 @@ async def initialize(app, container: ServiceContainer) -> None:
 
     # Security headers
     setup_security_headers(app)
-
-    # Auth policy matrix validation at startup (Req 5.5, 5.7)
-    from middleware.auth_policy import validate_policy_matrix
-    validate_policy_matrix(app)
 
     logger.info("Middleware registered")

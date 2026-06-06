@@ -48,97 +48,118 @@ def _make_mock_settings(environment="development", jwt_secret="test-secret", jwt
 
 
 class TestWsAuthenticateDriver:
-    """Tests for the _ws_authenticate_driver helper. Validates: Req 9.1, 9.2"""
+    """Tests for the _ws_authenticate_driver helper. Validates: Req 9.1, 9.2, 7.1-7.3
 
-    def test_no_token_dev_mode_returns_none(self):
+    These exercise the legacy JWT path (``auth_provider`` defaults to legacy),
+    which the WebSocket_Authenticator retains for the ``legacy``/``dual``
+    branches. The helper is now async (SuperTokens session verification is
+    async), so each case awaits it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_no_token_dev_mode_returns_none(self):
         """Missing tokens are rejected even in development mode."""
         from main import _ws_authenticate_driver
 
         ws = MagicMock()
         ws.query_params = {"token": ""}
+        ws.headers = {}
 
         with patch("config.settings.get_settings", return_value=_make_mock_settings("development")):
-            result = _ws_authenticate_driver(ws)
+            result = await _ws_authenticate_driver(ws)
 
         assert result is None
 
-    def test_no_token_production_returns_none(self):
+    @pytest.mark.asyncio
+    async def test_no_token_production_returns_none(self):
         """In production mode, missing token returns None."""
         from main import _ws_authenticate_driver
 
         ws = MagicMock()
         ws.query_params = {"token": ""}
+        ws.headers = {}
 
         with patch("config.settings.get_settings", return_value=_make_mock_settings("production")):
-            result = _ws_authenticate_driver(ws)
+            result = await _ws_authenticate_driver(ws)
 
         assert result is None
 
-    def test_valid_token_returns_tenant_and_driver(self):
+    @pytest.mark.asyncio
+    async def test_valid_token_returns_tenant_and_driver(self):
         """A valid JWT with tenant_id and driver_id returns both."""
         from main import _ws_authenticate_driver
 
         token = _make_jwt_token({"tenant_id": "t-1", "driver_id": "d-1"})
         ws = MagicMock()
         ws.query_params = {"token": token}
+        ws.headers = {}
 
         with patch("config.settings.get_settings", return_value=_make_mock_settings()):
-            result = _ws_authenticate_driver(ws)
+            result = await _ws_authenticate_driver(ws)
 
         assert result == ("t-1", "d-1")
 
-    def test_valid_token_missing_driver_id_returns_none(self):
+    @pytest.mark.asyncio
+    async def test_valid_token_missing_driver_id_returns_none(self):
         """A JWT with tenant_id but no driver_id returns None."""
         from main import _ws_authenticate_driver
 
         token = _make_jwt_token({"tenant_id": "t-1"})
         ws = MagicMock()
         ws.query_params = {"token": token}
+        ws.headers = {}
 
         with patch("config.settings.get_settings", return_value=_make_mock_settings()):
-            result = _ws_authenticate_driver(ws)
+            result = await _ws_authenticate_driver(ws)
 
         assert result is None
 
-    def test_valid_token_missing_tenant_id_returns_none(self):
+    @pytest.mark.asyncio
+    async def test_valid_token_missing_tenant_id_returns_none(self):
         """A JWT with driver_id but no tenant_id returns None."""
         from main import _ws_authenticate_driver
 
         token = _make_jwt_token({"driver_id": "d-1"})
         ws = MagicMock()
         ws.query_params = {"token": token}
+        ws.headers = {}
 
         with patch("config.settings.get_settings", return_value=_make_mock_settings()):
-            result = _ws_authenticate_driver(ws)
+            result = await _ws_authenticate_driver(ws)
 
         assert result is None
 
-    def test_expired_token_returns_none(self):
+    @pytest.mark.asyncio
+    async def test_expired_token_returns_none(self):
         """An expired JWT returns None."""
         from main import _ws_authenticate_driver
 
         token = _make_expired_jwt_token({"tenant_id": "t-1", "driver_id": "d-1"})
         ws = MagicMock()
         ws.query_params = {"token": token}
+        ws.headers = {}
 
         with patch("config.settings.get_settings", return_value=_make_mock_settings()):
-            result = _ws_authenticate_driver(ws)
+            result = await _ws_authenticate_driver(ws)
 
         assert result is None
 
-    def test_invalid_token_returns_none(self):
+    @pytest.mark.asyncio
+    async def test_invalid_token_returns_none(self):
         """A malformed JWT returns None."""
         from main import _ws_authenticate_driver
 
         ws = MagicMock()
         ws.query_params = {"token": "not-a-valid-jwt"}
+        ws.headers = {}
 
         with patch("config.settings.get_settings", return_value=_make_mock_settings()):
-            result = _ws_authenticate_driver(ws)
+            result = await _ws_authenticate_driver(ws)
 
         assert result is None
 
-    def test_wrong_secret_returns_none(self):
+    @pytest.mark.asyncio
+    async def test_wrong_secret_returns_none(self):
         """A JWT signed with a different secret returns None."""
         from main import _ws_authenticate_driver
 
@@ -148,35 +169,40 @@ class TestWsAuthenticateDriver:
         )
         ws = MagicMock()
         ws.query_params = {"token": token}
+        ws.headers = {}
 
         with patch("config.settings.get_settings", return_value=_make_mock_settings()):
-            result = _ws_authenticate_driver(ws)
+            result = await _ws_authenticate_driver(ws)
 
         assert result is None
 
-    def test_empty_tenant_id_returns_none(self):
+    @pytest.mark.asyncio
+    async def test_empty_tenant_id_returns_none(self):
         """A JWT with empty string tenant_id returns None."""
         from main import _ws_authenticate_driver
 
         token = _make_jwt_token({"tenant_id": "", "driver_id": "d-1"})
         ws = MagicMock()
         ws.query_params = {"token": token}
+        ws.headers = {}
 
         with patch("config.settings.get_settings", return_value=_make_mock_settings()):
-            result = _ws_authenticate_driver(ws)
+            result = await _ws_authenticate_driver(ws)
 
         assert result is None
 
-    def test_empty_driver_id_returns_none(self):
+    @pytest.mark.asyncio
+    async def test_empty_driver_id_returns_none(self):
         """A JWT with empty string driver_id returns None."""
         from main import _ws_authenticate_driver
 
         token = _make_jwt_token({"tenant_id": "t-1", "driver_id": ""})
         ws = MagicMock()
         ws.query_params = {"token": token}
+        ws.headers = {}
 
         with patch("config.settings.get_settings", return_value=_make_mock_settings()):
-            result = _ws_authenticate_driver(ws)
+            result = await _ws_authenticate_driver(ws)
 
         assert result is None
 

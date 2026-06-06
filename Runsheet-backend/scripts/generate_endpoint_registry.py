@@ -77,11 +77,18 @@ def _import_app_with_mocks() -> Any:
 
 
 def _get_auth_policy(method: str, path: str) -> str:
-    """Determine the auth policy for a given method + path."""
+    """Determine the auth policy for a given method + path.
+
+    Auth is now enforced globally and fail-closed by
+    ``middleware.auth_enforcement.AuthEnforcementMiddleware`` against an explicit
+    Public_Route_Allowlist (the dead ``POLICY_MATRIX`` machinery was removed).
+    Every route that is not on the allowlist requires a verified session, so the
+    registry reports either ``public`` (allowlisted) or ``session_required``.
+    """
     try:
-        from middleware.auth_policy import get_policy_for_route
-        policy = get_policy_for_route(method, path)
-        return policy.value
+        from middleware.auth_enforcement import is_public_route
+
+        return "public" if is_public_route(path) else "session_required"
     except Exception:
         return "—"
 

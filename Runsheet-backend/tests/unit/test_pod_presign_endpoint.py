@@ -14,10 +14,10 @@ Validates: Requirements 4.1.3, 4.1.5
 from __future__ import annotations
 
 import sys
+from contextlib import nullcontext
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from jose import jwt
 
 
 # ---------------------------------------------------------------------------
@@ -36,21 +36,19 @@ from driver.api.pod_endpoints import (
     configure_pod_endpoints,
     router as pod_router,
 )
+from tests.support.auth_seam import auth_headers, install_test_auth
 
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-JWT_SECRET = "test-jwt-secret"
-JWT_ALGORITHM = "HS256"
 TENANT_ID = "t1"
 USER_ID = "driver-1"
 
-_SETTINGS_PATCH = patch(
-    "ops.middleware.tenant_guard.get_settings",
-    return_value=MagicMock(jwt_secret=JWT_SECRET, jwt_algorithm=JWT_ALGORITHM),
-)
+# Endpoints authenticate via the Test_Auth_Path dependency-override seam
+# (installed per-app in ``_make_app``); no legacy-JWT settings patch needed.
+_SETTINGS_PATCH = nullcontext()
 
 
 # ---------------------------------------------------------------------------
@@ -58,14 +56,8 @@ _SETTINGS_PATCH = patch(
 # ---------------------------------------------------------------------------
 
 
-def _make_token(tenant_id: str = TENANT_ID, sub: str = USER_ID) -> str:
-    return jwt.encode(
-        {"tenant_id": tenant_id, "sub": sub}, JWT_SECRET, algorithm=JWT_ALGORITHM
-    )
-
-
 def _auth_headers(tenant_id: str = TENANT_ID) -> dict:
-    return {"Authorization": f"Bearer {_make_token(tenant_id)}"}
+    return auth_headers(tenant_id, sub=USER_ID)
 
 
 def _make_es_service() -> MagicMock:
@@ -142,6 +134,7 @@ def _make_app(
         file_storage_service=file_storage,
         redis_client=redis_client,
     )
+    install_test_auth(app)
     return app
 
 
@@ -320,27 +313,20 @@ class TestPresignPodUpload:
         assert resp.status_code == 400, resp.text
 
     def test_requires_auth_header(self):
-        """Unauthenticated requests are rejected by the tenant guard."""
+        """Unauthenticated requests are rejected by the Test_Auth_Path seam."""
         fs = _StubFileStorage()
         app = _make_app(file_storage=fs)
 
-        # Patch the environment to non-development so the tenant guard enforces
-        # the Bearer token requirement.
-        with patch(
-            "ops.middleware.tenant_guard.get_settings",
-            return_value=MagicMock(
-                jwt_secret=JWT_SECRET,
-                jwt_algorithm=JWT_ALGORITHM,
-                environment=MagicMock(value="production"),
-            ),
-        ):
-            client = TestClient(app)
-            resp = client.post(
-                "/api/driver/pod/uploads/presign",
-                json={"category": "photo", "content_type": "image/jpeg"},
-            )
+        # No Test_Auth_Path scope headers → the overridden get_tenant_context
+        # rejects the request just as the real Session_Verifier rejects a
+        # request with no verified session.
+        client = TestClient(app)
+        resp = client.post(
+            "/api/driver/pod/uploads/presign",
+            json={"category": "photo", "content_type": "image/jpeg"},
+        )
 
-        assert resp.status_code == 403, resp.text
+        assert resp.status_code == 401, resp.text
         assert fs.calls == []
 
     def test_requires_file_storage_service_configured(self):

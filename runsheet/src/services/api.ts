@@ -1,3 +1,4 @@
+import Session from "supertokens-auth-react/recipe/session";
 import type {
   ApiResponse,
   Asset,
@@ -62,6 +63,102 @@ export class ApiError extends Error {
     this.name = "ApiError";
     this.status = status;
   }
+}
+
+// HTTP statuses that indicate the session is missing/expired and should
+// trigger a refresh-then-redirect cycle (Req 8.5).
+const AUTH_FAILURE_STATUSES = new Set([401, 403]);
+
+// Path the user is redirected to when session recovery fails (Req 8.5).
+export const SIGN_IN_PATH = "/signin";
+
+/**
+ * Merge SuperTokens session credentials into a request's options.
+ *
+ * The SuperTokens SDK attaches the session cookie + anti-CSRF token to
+ * `fetch`/`XMLHttpRequest` automatically once `credentials: "include"` is set,
+ * so the API_Client no longer reads a token from `sessionStorage` or sets an
+ * `Authorization` header itself (Req 8.4). `credentials: "include"` ensures the
+ * HttpOnly session cookie rides along on cross-origin API calls.
+ */
+export function withSessionCredentials(options: RequestInit = {}): RequestInit {
+  return {
+    ...options,
+    credentials: "include",
+  };
+}
+
+/**
+ * Redirect the browser to the sign-in page. No-op on the server.
+ */
+function redirectToSignIn(): void {
+  if (typeof window === "undefined") return;
+  window.location.assign(SIGN_IN_PATH);
+}
+
+/**
+ * Recover from an authentication-failure response.
+ *
+ * Attempts a SuperTokens session refresh (Req 8.5). Returns `true` when the
+ * session was successfully refreshed and the caller should retry the request.
+ * When refresh fails (no recoverable session), redirects the user to sign-in
+ * and returns `false`.
+ */
+export async function handleAuthFailure(): Promise<boolean> {
+  if (typeof window === "undefined") return false;
+
+  try {
+    const refreshed = await Session.attemptRefreshingSession();
+    if (refreshed) {
+      return true;
+    }
+  } catch {
+    // Fall through to redirect — the session is unrecoverable.
+  }
+
+  redirectToSignIn();
+  return false;
+}
+
+/**
+ * Returns true when the response is an authentication failure that the
+ * session-recovery flow should act on.
+ */
+export function isAuthFailure(status: number): boolean {
+  return AUTH_FAILURE_STATUSES.has(status);
+}
+
+/**
+ * Issue a request with SuperTokens session credentials attached, transparently
+ * recovering from an authentication failure.
+ *
+ * `fetcher` is the caller's own timeout/retry-aware fetch wrapper. The request
+ * is sent with `credentials: "include"` so the SDK attaches the session cookie
+ * + anti-CSRF token (Req 8.4). When the response is an auth failure (401/403),
+ * a single SuperTokens session refresh is attempted; on success the request is
+ * retried once, and on failure the user is redirected to sign-in (Req 8.5).
+ */
+export async function fetchWithSession(
+  fetcher: (
+    url: string,
+    options: RequestInit,
+    timeout?: number,
+  ) => Promise<Response>,
+  url: string,
+  options: RequestInit = {},
+  timeout?: number,
+): Promise<Response> {
+  const requestInit = withSessionCredentials(options);
+  let response = await fetcher(url, requestInit, timeout);
+
+  if (isAuthFailure(response.status)) {
+    const refreshed = await handleAuthFailure();
+    if (refreshed) {
+      response = await fetcher(url, requestInit, timeout);
+    }
+  }
+
+  return response;
 }
 
 // Helper function to create a fetch with timeout
@@ -202,26 +299,34 @@ class ApiService {
     timeout: number = API_TIMEOUTS.STANDARD,
   ): Promise<ApiResponse<T>> {
     try {
-      // Get auth token if available (async)
-      const token = await getAuthToken();
       const headers: Record<string, string> = {
         "Content-Type": "application/json",
         ...(options?.headers as Record<string, string> | undefined),
       };
 
-      // Add Authorization header if token exists
-      if (token) {
-        headers.Authorization = `Bearer ${token}`;
-      }
+      // The SuperTokens SDK attaches the session cookie + anti-CSRF token to
+      // the request automatically; we only need to opt into credentialed
+      // requests and stop reading a token from sessionStorage (Req 8.4).
+      const requestInit = withSessionCredentials({ ...options, headers });
 
-      const response = await fetchWithRetry(
+      let response = await fetchWithRetry(
         `${API_BASE_URL}${endpoint}`,
-        {
-          ...options,
-          headers,
-        },
+        requestInit,
         timeout,
       );
+
+      // On an auth failure, attempt a session refresh and retry once; if the
+      // refresh fails the user is redirected to sign-in (Req 8.5).
+      if (isAuthFailure(response.status)) {
+        const refreshed = await handleAuthFailure();
+        if (refreshed) {
+          response = await fetchWithRetry(
+            `${API_BASE_URL}${endpoint}`,
+            requestInit,
+            timeout,
+          );
+        }
+      }
 
       if (!response.ok) {
         throw new ApiError(
@@ -545,11 +650,13 @@ class ApiService {
   ): Promise<() => void> {
     // WebSocket connection for real-time updates with reconnection
     // For better reconnection handling, use the useFleetWebSocket hook in React components
-    
+
     // Get auth token for WebSocket connection
     const token = await getAuthToken();
     const baseWsUrl = `${API_BASE_URL.replace("http", "ws")}/fleet/live`;
-    const wsUrl = token ? `${baseWsUrl}?token=${encodeURIComponent(token)}` : baseWsUrl;
+    const wsUrl = token
+      ? `${baseWsUrl}?token=${encodeURIComponent(token)}`
+      : baseWsUrl;
 
     let ws: WebSocket | null = null;
     let reconnectAttempt = 0;
@@ -582,10 +689,10 @@ class ApiService {
       try {
         // Get fresh token on each reconnect attempt
         const freshToken = await getAuthToken();
-        const reconnectWsUrl = freshToken 
+        const reconnectWsUrl = freshToken
           ? `${API_BASE_URL.replace("http", "ws")}/fleet/live?token=${encodeURIComponent(freshToken)}`
           : `${API_BASE_URL.replace("http", "ws")}/fleet/live`;
-        
+
         ws = new WebSocket(reconnectWsUrl);
 
         ws.onopen = () => {

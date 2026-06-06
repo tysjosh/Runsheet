@@ -25,7 +25,8 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from errors.exceptions import insufficient_role, resource_not_found
+from errors.exceptions import resource_not_found
+from auth.authorization import require_role
 from fuel.order_models import Driver, DriverStatus
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 from services.time_utils import utcnow
@@ -78,13 +79,13 @@ def _get_driver_repository():
 
 
 def _require_admin_role(tenant: TenantContext) -> None:
-    """Raise ``insufficient_role`` if the caller is not admin."""
-    roles = tenant.roles or []
-    if "admin" not in roles:
-        raise insufficient_role(
-            message="This operation requires the admin role",
-            details={"required_roles": ["admin"]},
-        )
+    """Raise ``INSUFFICIENT_ROLE`` (HTTP 403) if the caller is not admin.
+
+    Delegates to the shared :func:`auth.authorization.require_role` helper
+    so this router applies the one consistent, exact-match authorization
+    mechanism (Req 4.7).
+    """
+    require_role(tenant, "admin")
 
 
 # ---------------------------------------------------------------------------

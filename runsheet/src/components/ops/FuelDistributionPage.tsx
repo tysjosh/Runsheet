@@ -3609,9 +3609,9 @@ export default function FuelDistributionPage() {
     <div className="flex-1 flex flex-col h-full bg-gray-50">
       {/* Storm_Mode banner (Task 11.7, Req 9.4.1) — pinned to the top of
           operations control pages, visible only when the backend reports
-          Storm_Mode is active. Dispatcher/admin roles see the override
-          form inline; other roles see the advisory without the control. */}
-      <StormModeBanner roles={["dispatcher"]} actorId={DISPATCHER_ID} />
+          Storm_Mode is active. The override form is gated on the verified
+          session's role claims (Req 8.6). */}
+      <StormModeBanner />
 
       <PageHeader
         title="Fuel Distribution"

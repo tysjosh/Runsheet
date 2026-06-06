@@ -1,5 +1,9 @@
-import { getAuthToken } from "../utils/auth";
-import { API_TIMEOUTS, ApiError, ApiTimeoutError } from "./api";
+import {
+  API_TIMEOUTS,
+  ApiError,
+  ApiTimeoutError,
+  fetchWithSession,
+} from "./api";
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -224,17 +228,15 @@ async function adminRequest<T>(
 ): Promise<T> {
   const url = `${API_BASE_URL}${endpoint}`;
   try {
-    const token = await getAuthToken();
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       ...(options?.headers as Record<string, string> | undefined),
     };
 
-    if (token) {
-      headers.Authorization = `Bearer ${token}`;
-    }
-
-    const response = await fetchWithTimeout(url, {
+    // Session cookie + anti-CSRF token are attached by the SuperTokens SDK;
+    // an auth failure triggers a refresh-then-retry, else a redirect to
+    // sign-in (Req 8.4, 8.5).
+    const response = await fetchWithSession(fetchWithTimeout, url, {
       ...options,
       headers,
     });
@@ -349,7 +351,9 @@ export async function getAgentHealth(): Promise<AgentHealthResponse> {
 }
 
 /** POST /api/agent/{agent_id}/pause — pause an agent */
-export async function pauseAgent(agentId: string): Promise<{ agent_id: string; status: string }> {
+export async function pauseAgent(
+  agentId: string,
+): Promise<{ agent_id: string; status: string }> {
   return adminRequest<{ agent_id: string; status: string }>(
     `/agent/${encodeURIComponent(agentId)}/pause`,
     { method: "POST" },
@@ -357,7 +361,9 @@ export async function pauseAgent(agentId: string): Promise<{ agent_id: string; s
 }
 
 /** POST /api/agent/{agent_id}/resume — resume an agent */
-export async function resumeAgent(agentId: string): Promise<{ agent_id: string; status: string }> {
+export async function resumeAgent(
+  agentId: string,
+): Promise<{ agent_id: string; status: string }> {
   return adminRequest<{ agent_id: string; status: string }>(
     `/agent/${encodeURIComponent(agentId)}/resume`,
     { method: "POST" },
@@ -374,7 +380,9 @@ export async function getActivityLog(params: {
   page?: number;
   size?: number;
 }): Promise<ActivityLogResponse> {
-  const qs = buildQueryString(params as Record<string, string | number | boolean | undefined | null>);
+  const qs = buildQueryString(
+    params as Record<string, string | number | boolean | undefined | null>,
+  );
   return adminRequest<ActivityLogResponse>(`/agent/activity${qs}`);
 }
 
@@ -388,7 +396,9 @@ export async function getApprovals(params: {
   page?: number;
   size?: number;
 }): Promise<ApprovalsResponse> {
-  const qs = buildQueryString(params as Record<string, string | number | boolean | undefined | null>);
+  const qs = buildQueryString(
+    params as Record<string, string | number | boolean | undefined | null>,
+  );
   return adminRequest<ApprovalsResponse>(`/agent/approvals${qs}`);
 }
 
@@ -434,6 +444,10 @@ export async function getStripePayments(params: {
   created_gte?: string;
   created_lte?: string;
 }): Promise<StripePaymentsResponse> {
-  const qs = buildQueryString(params as Record<string, string | number | boolean | undefined | null>);
-  return adminRequest<StripePaymentsResponse>(`/integrations/stripe/payments${qs}`);
+  const qs = buildQueryString(
+    params as Record<string, string | number | boolean | undefined | null>,
+  );
+  return adminRequest<StripePaymentsResponse>(
+    `/integrations/stripe/payments${qs}`,
+  );
 }

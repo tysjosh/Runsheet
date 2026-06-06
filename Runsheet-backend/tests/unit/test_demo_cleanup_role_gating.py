@@ -99,9 +99,13 @@ class TestDataCleanupGating:
 
         assert resp.status_code == 403, resp.text
         body = resp.json()
-        # The error envelope surfaces the admin-role requirement.
+        # The error envelope surfaces the admin-role requirement. The shared
+        # Role_Authorizer reports the requirement under ``details.required_roles``
+        # (a list) via the canonical ``INSUFFICIENT_ROLE`` error.
+        details = body.get("details") or {}
         assert "admin" in (body.get("message") or "").lower() \
-            or "admin" in (body.get("details", {}).get("required_role", "").lower())
+            or "admin" in details.get("required_role", "").lower() \
+            or "admin" in details.get("required_roles", [])
 
     def test_admin_in_production_returns_403(self):
         import data_endpoints

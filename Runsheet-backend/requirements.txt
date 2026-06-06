@@ -53,6 +53,13 @@ hypothesis==6.115.0
 # JWT token verification (Requirement 9.6)
 python-jose[cryptography]==3.3.0
 
+# SuperTokens identity provider / session authority (SuperTokens Auth Migration
+# Req 10.1). Python SDK for the FastAPI-side integration: initializes the
+# EmailPassword + Session + UserRoles recipes, serves the SDK-owned auth routes,
+# and verifies SuperTokens sessions server-side against the managed SaaS core.
+# Pinned for reproducible builds.
+supertokens-python==0.31.3
+
 # AWS SDK for KMS envelope encryption (Fuel Ops Hardening Req 5.1 — credentials vault)
 # boto3 + cryptography are brought in transitively today; pin them explicitly
 # because services/credentials_vault.py imports them directly.

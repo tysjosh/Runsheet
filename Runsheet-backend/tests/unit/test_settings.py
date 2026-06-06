@@ -167,7 +167,12 @@ class TestSettings:
             if env != "development":
                 env_vars["REDIS_URL"] = "redis://localhost:6379"
                 env_vars["DINEE_WEBHOOK_SECRET"] = "test-webhook-secret"
-                env_vars["JWT_SECRET"] = "test-jwt-secret-that-is-at-least-32-chars-long"
+                # auth_provider now defaults to 'supertokens' (hard cutover), so
+                # a non-development environment must supply managed-core config
+                # to satisfy the fail-closed validator (Req 10.3) AND must NOT
+                # carry a legacy jwt_secret once cut over (Req 10.5).
+                env_vars["SUPERTOKENS_CONNECTION_URI"] = "https://core.supertokens.example.com"
+                env_vars["SUPERTOKENS_API_KEY"] = "st-managed-core-api-key"
             if env == "production":
                 env_vars["CORS_ORIGINS"] = '["https://app.runsheet.com"]'
             with patch.dict(os.environ, env_vars, clear=True):
@@ -225,6 +230,157 @@ class TestSettings:
             
             assert "http" in str(exc_info.value).lower() or "invalid" in str(exc_info.value).lower()
     
+
+class TestSuperTokensSettings:
+    """Tests for the SuperTokens auth-migration settings (Task 1.2)."""
+
+    @pytest.fixture
+    def valid_env_vars(self):
+        """Provide valid environment variables for testing."""
+        return {
+            "ELASTIC_ENDPOINT": "https://elasticsearch.example.com:9200",
+            "ELASTIC_API_KEY": "test-api-key-12345",
+            "GOOGLE_CLOUD_PROJECT": "test-project-id",
+            "ENVIRONMENT": "development",
+        }
+
+    @pytest.fixture
+    def non_dev_env_vars(self, valid_env_vars):
+        """Base env vars for a non-development (staging) environment."""
+        return {
+            **valid_env_vars,
+            "ENVIRONMENT": "staging",
+            "REDIS_URL": "redis://localhost:6379",
+            "DINEE_WEBHOOK_SECRET": "test-webhook-secret",
+            "JWT_SECRET": "test-jwt-secret-that-is-at-least-32-chars-long",
+        }
+
+    def test_supertokens_defaults(self, valid_env_vars):
+        """Test that SuperTokens fields use their documented defaults."""
+        with patch.dict(os.environ, valid_env_vars, clear=True):
+            settings = Settings()
+
+            # Hard cutover is the platform default (Req 3.4, 9.1): an
+            # environment that does not explicitly opt back to dual/legacy
+            # verifies SuperTokens sessions only.
+            assert settings.auth_provider == "supertokens"
+            assert settings.supertokens_connection_uri == ""
+            assert settings.supertokens_api_key == ""
+            assert settings.supertokens_api_domain == "http://localhost:8080"
+            assert settings.supertokens_website_domain == "http://localhost:3000"
+            assert settings.supertokens_cookie_domain is None
+            assert settings.session_lifetime_seconds == 3600
+            assert settings.password_min_length == 8
+
+    def test_auth_provider_accepts_valid_values(self, valid_env_vars):
+        """Test that auth_provider accepts all three migration states."""
+        for value in ["legacy", "dual", "supertokens"]:
+            env_vars = {**valid_env_vars, "AUTH_PROVIDER": value}
+            with patch.dict(os.environ, env_vars, clear=True):
+                settings = Settings()
+                assert settings.auth_provider == value
+
+    def test_auth_provider_rejects_invalid_value(self, valid_env_vars):
+        """Test that an unknown auth_provider value is rejected."""
+        env_vars = {**valid_env_vars, "AUTH_PROVIDER": "oauth"}
+        with patch.dict(os.environ, env_vars, clear=True):
+            with pytest.raises(Exception) as exc_info:
+                Settings()
+            assert "auth_provider" in str(exc_info.value).lower()
+
+    def test_session_lifetime_seconds_rejects_below_minimum(self, valid_env_vars):
+        """Test that session_lifetime_seconds enforces the ge=60 bound."""
+        env_vars = {**valid_env_vars, "SESSION_LIFETIME_SECONDS": "30"}
+        with patch.dict(os.environ, env_vars, clear=True):
+            with pytest.raises(Exception) as exc_info:
+                Settings()
+            assert "session_lifetime_seconds" in str(exc_info.value).lower()
+
+    def test_password_min_length_bounds(self, valid_env_vars):
+        """Test that password_min_length enforces ge=8 and le=128 bounds."""
+        for bad_value in ["4", "200"]:
+            env_vars = {**valid_env_vars, "PASSWORD_MIN_LENGTH": bad_value}
+            with patch.dict(os.environ, env_vars, clear=True):
+                with pytest.raises(Exception) as exc_info:
+                    Settings()
+                assert "password_min_length" in str(exc_info.value).lower()
+
+    def test_legacy_provider_does_not_require_supertokens_in_non_dev(self, non_dev_env_vars):
+        """Test that auth_provider=legacy needs no SuperTokens config in non-dev."""
+        env_vars = {**non_dev_env_vars, "AUTH_PROVIDER": "legacy"}
+        with patch.dict(os.environ, env_vars, clear=True):
+            settings = Settings()
+            assert settings.auth_provider == "legacy"
+
+    def test_supertokens_config_optional_in_development(self, valid_env_vars):
+        """Test that SuperTokens config is optional in development even when active."""
+        env_vars = {**valid_env_vars, "ENVIRONMENT": "development", "AUTH_PROVIDER": "supertokens"}
+        with patch.dict(os.environ, env_vars, clear=True):
+            settings = Settings()
+            assert settings.auth_provider == "supertokens"
+            assert settings.supertokens_connection_uri == ""
+
+    def test_supertokens_config_optional_in_test(self, valid_env_vars):
+        """Test that SuperTokens config is optional in the test environment."""
+        env_vars = {
+            **valid_env_vars,
+            "ENVIRONMENT": "test",
+            "REDIS_URL": "redis://localhost:6379",
+            "AUTH_PROVIDER": "dual",
+        }
+        with patch.dict(os.environ, env_vars, clear=True):
+            settings = Settings()
+            assert settings.auth_provider == "dual"
+
+    def test_dual_provider_requires_supertokens_config_in_non_dev(self, non_dev_env_vars):
+        """Test fail-closed: dual mode in staging needs SuperTokens config (Req 10.3)."""
+        env_vars = {**non_dev_env_vars, "AUTH_PROVIDER": "dual"}
+        with patch.dict(os.environ, env_vars, clear=True):
+            with pytest.raises(Exception) as exc_info:
+                Settings()
+            message = str(exc_info.value)
+            assert "supertokens_connection_uri" in message
+            assert "supertokens_api_key" in message
+
+    def test_supertokens_provider_requires_config_in_non_dev(self, non_dev_env_vars):
+        """Test fail-closed: supertokens mode in staging needs SuperTokens config (Req 10.3)."""
+        env_vars = {**non_dev_env_vars, "AUTH_PROVIDER": "supertokens"}
+        with patch.dict(os.environ, env_vars, clear=True):
+            with pytest.raises(Exception) as exc_info:
+                Settings()
+            assert "supertokens" in str(exc_info.value).lower()
+
+    def test_error_names_only_the_missing_supertokens_value(self, non_dev_env_vars):
+        """Test that the error names only the missing value when one is present."""
+        env_vars = {
+            **non_dev_env_vars,
+            "AUTH_PROVIDER": "supertokens",
+            "SUPERTOKENS_CONNECTION_URI": "https://core.supertokens.example.com",
+            # api_key intentionally omitted
+        }
+        with patch.dict(os.environ, env_vars, clear=True):
+            with pytest.raises(Exception) as exc_info:
+                Settings()
+            message = str(exc_info.value)
+            assert "supertokens_api_key" in message
+            assert "supertokens_connection_uri" not in message
+
+    def test_supertokens_config_present_passes_in_non_dev(self, non_dev_env_vars):
+        """Test that providing both required values passes validation in staging."""
+        env_vars = {
+            **non_dev_env_vars,
+            "AUTH_PROVIDER": "supertokens",
+            "SUPERTOKENS_CONNECTION_URI": "https://core.supertokens.example.com",
+            "SUPERTOKENS_API_KEY": "st-managed-core-api-key",
+            # After the hard cutover the legacy secret must be unset (Req 10.5).
+            "JWT_SECRET": "",
+        }
+        with patch.dict(os.environ, env_vars, clear=True):
+            settings = Settings()
+            assert settings.auth_provider == "supertokens"
+            assert settings.supertokens_connection_uri == "https://core.supertokens.example.com"
+            assert settings.supertokens_api_key == "st-managed-core-api-key"
+
 
 class TestConfigurationError:
     """Tests for the ConfigurationError class."""
@@ -422,7 +578,7 @@ class TestEnvironmentSpecificConfiguration:
         """Test creating settings for staging environment."""
         from config.settings import create_settings_for_environment
         
-        env_vars = {**valid_env_vars, "REDIS_URL": "redis://localhost:6379", "DINEE_WEBHOOK_SECRET": "test-webhook-secret", "JWT_SECRET": "test-jwt-secret-that-is-at-least-32-chars-long"}
+        env_vars = {**valid_env_vars, "REDIS_URL": "redis://localhost:6379", "DINEE_WEBHOOK_SECRET": "test-webhook-secret", "SUPERTOKENS_CONNECTION_URI": "https://core.supertokens.example.com", "SUPERTOKENS_API_KEY": "st-managed-core-api-key"}
         with patch.dict(os.environ, env_vars, clear=True):
             settings = create_settings_for_environment(Environment.STAGING)
             assert isinstance(settings, Settings)
@@ -431,7 +587,7 @@ class TestEnvironmentSpecificConfiguration:
         """Test creating settings for production environment."""
         from config.settings import create_settings_for_environment
         
-        env_vars = {**valid_env_vars, "REDIS_URL": "redis://localhost:6379", "DINEE_WEBHOOK_SECRET": "test-webhook-secret", "JWT_SECRET": "test-jwt-secret-that-is-at-least-32-chars-long", "CORS_ORIGINS": '["https://app.runsheet.com"]'}
+        env_vars = {**valid_env_vars, "REDIS_URL": "redis://localhost:6379", "DINEE_WEBHOOK_SECRET": "test-webhook-secret", "CORS_ORIGINS": '["https://app.runsheet.com"]', "SUPERTOKENS_CONNECTION_URI": "https://core.supertokens.example.com", "SUPERTOKENS_API_KEY": "st-managed-core-api-key"}
         with patch.dict(os.environ, env_vars, clear=True):
             settings = create_settings_for_environment(Environment.PRODUCTION)
             assert isinstance(settings, Settings)
@@ -440,7 +596,7 @@ class TestEnvironmentSpecificConfiguration:
         """Test that create_settings_for_environment auto-detects environment."""
         from config.settings import create_settings_for_environment
         
-        env_vars = {**valid_env_vars, "ENVIRONMENT": "staging", "REDIS_URL": "redis://localhost:6379", "DINEE_WEBHOOK_SECRET": "test-webhook-secret", "JWT_SECRET": "test-jwt-secret-that-is-at-least-32-chars-long"}
+        env_vars = {**valid_env_vars, "ENVIRONMENT": "staging", "REDIS_URL": "redis://localhost:6379", "DINEE_WEBHOOK_SECRET": "test-webhook-secret", "SUPERTOKENS_CONNECTION_URI": "https://core.supertokens.example.com", "SUPERTOKENS_API_KEY": "st-managed-core-api-key"}
         with patch.dict(os.environ, env_vars, clear=True):
             settings = create_settings_for_environment()
             assert settings.environment == Environment.STAGING
@@ -472,3 +628,269 @@ class TestEnvironmentSpecificConfiguration:
         with patch.dict(os.environ, env_vars_2, clear=True):
             settings2 = get_settings()
             assert settings2.log_level == "ERROR"
+
+
+class TestSuperTokensMigrationValidators:
+    """Unit tests for the SuperTokens migration settings validators (Task 1.3).
+
+    Covers the fail-closed migration validator and field bounds called out by
+    task 1.3:
+      - missing SuperTokens config in production with auth_provider in
+        {dual, supertokens} raises a descriptive error naming the missing
+        values (Req 10.3, 6.7);
+      - auth_provider=legacy in development tolerates missing SuperTokens
+        config (Req 10.3, 9.2);
+      - session_lifetime_seconds bounds (Req 2.7);
+      - password_min_length bounds (Req 1.7).
+    """
+
+    @pytest.fixture
+    def dev_env_vars(self):
+        """Minimal valid environment variables for a development environment."""
+        return {
+            "ELASTIC_ENDPOINT": "https://elasticsearch.example.com:9200",
+            "ELASTIC_API_KEY": "test-api-key-12345",
+            "GOOGLE_CLOUD_PROJECT": "test-project-id",
+            "ENVIRONMENT": "development",
+        }
+
+    @pytest.fixture
+    def prod_env_vars(self, dev_env_vars):
+        """Base env vars for a production environment.
+
+        Production additionally requires redis_url, the Dinee webhook secret,
+        a >=32-char JWT secret, and non-localhost CORS origins, so a Settings()
+        construction reaches (and isolates) the SuperTokens migration validator
+        rather than failing on an unrelated production check.
+        """
+        return {
+            **dev_env_vars,
+            "ENVIRONMENT": "production",
+            "REDIS_URL": "redis://redis.internal:6379",
+            "DINEE_WEBHOOK_SECRET": "prod-webhook-secret",
+            "JWT_SECRET": "prod-jwt-secret-that-is-at-least-32-chars-long",
+            "CORS_ORIGINS": '["https://app.runsheet.com"]',
+        }
+
+    # ── Production fail-closed: missing ST config raises (Req 10.3, 6.7) ──
+
+    def test_dual_in_production_missing_st_config_raises_naming_both(self, prod_env_vars):
+        """auth_provider=dual in production with no ST config fails closed,
+        naming both missing values."""
+        env_vars = {**prod_env_vars, "AUTH_PROVIDER": "dual"}
+        with patch.dict(os.environ, env_vars, clear=True):
+            with pytest.raises(Exception) as exc_info:
+                Settings()
+            message = str(exc_info.value)
+            assert "supertokens_connection_uri" in message
+            assert "supertokens_api_key" in message
+
+    def test_supertokens_in_production_missing_st_config_raises_naming_both(self, prod_env_vars):
+        """auth_provider=supertokens in production with no ST config fails
+        closed, naming both missing values."""
+        env_vars = {**prod_env_vars, "AUTH_PROVIDER": "supertokens"}
+        with patch.dict(os.environ, env_vars, clear=True):
+            with pytest.raises(Exception) as exc_info:
+                Settings()
+            message = str(exc_info.value)
+            assert "supertokens_connection_uri" in message
+            assert "supertokens_api_key" in message
+
+    def test_production_error_names_only_missing_value(self, prod_env_vars):
+        """When only one ST value is missing, the error names only that one."""
+        env_vars = {
+            **prod_env_vars,
+            "AUTH_PROVIDER": "dual",
+            "SUPERTOKENS_API_KEY": "prod-st-api-key",
+            # connection_uri intentionally omitted
+        }
+        with patch.dict(os.environ, env_vars, clear=True):
+            with pytest.raises(Exception) as exc_info:
+                Settings()
+            message = str(exc_info.value)
+            assert "supertokens_connection_uri" in message
+            assert "supertokens_api_key" not in message
+
+    def test_production_supertokens_config_present_passes(self, prod_env_vars):
+        """Providing both required ST values lets production validation pass."""
+        env_vars = {
+            **prod_env_vars,
+            "AUTH_PROVIDER": "supertokens",
+            "SUPERTOKENS_CONNECTION_URI": "https://core.supertokens.example.com",
+            "SUPERTOKENS_API_KEY": "prod-st-api-key",
+            # After the hard cutover the legacy secret must be unset (Req 10.5).
+            "JWT_SECRET": "",
+        }
+        with patch.dict(os.environ, env_vars, clear=True):
+            settings = Settings()
+            assert settings.environment == Environment.PRODUCTION
+            assert settings.auth_provider == "supertokens"
+            assert settings.supertokens_connection_uri == "https://core.supertokens.example.com"
+            assert settings.supertokens_api_key == "prod-st-api-key"
+
+    def test_legacy_in_production_does_not_require_st_config(self, prod_env_vars):
+        """auth_provider=legacy in production needs no ST config (Req 9.2)."""
+        env_vars = {**prod_env_vars, "AUTH_PROVIDER": "legacy"}
+        with patch.dict(os.environ, env_vars, clear=True):
+            settings = Settings()
+            assert settings.auth_provider == "legacy"
+            assert settings.supertokens_connection_uri == ""
+            assert settings.supertokens_api_key == ""
+
+    # ── Hard-cutover invariant: jwt_secret must be unset (Req 10.2, 10.5) ─
+
+    def test_supertokens_in_production_with_jwt_secret_raises(self, prod_env_vars):
+        """After cutover, a lingering legacy jwt_secret fails startup with a
+        descriptive error (Req 10.2, 10.5)."""
+        env_vars = {
+            **prod_env_vars,  # prod_env_vars sets a 32+ char JWT_SECRET
+            "AUTH_PROVIDER": "supertokens",
+            "SUPERTOKENS_CONNECTION_URI": "https://core.supertokens.example.com",
+            "SUPERTOKENS_API_KEY": "prod-st-api-key",
+        }
+        with patch.dict(os.environ, env_vars, clear=True):
+            with pytest.raises(Exception) as exc_info:
+                Settings()
+            message = str(exc_info.value).lower()
+            assert "jwt_secret" in message
+            assert "unset" in message
+
+    def test_supertokens_in_production_without_jwt_secret_passes(self, prod_env_vars):
+        """With the legacy secret removed, supertokens mode validates cleanly."""
+        env_vars = {
+            **prod_env_vars,
+            "AUTH_PROVIDER": "supertokens",
+            "SUPERTOKENS_CONNECTION_URI": "https://core.supertokens.example.com",
+            "SUPERTOKENS_API_KEY": "prod-st-api-key",
+            "JWT_SECRET": "",
+        }
+        with patch.dict(os.environ, env_vars, clear=True):
+            settings = Settings()
+            assert settings.auth_provider == "supertokens"
+            assert settings.jwt_secret == ""
+
+    def test_supertokens_missing_st_config_takes_precedence_over_jwt_check(self, prod_env_vars):
+        """When ST config is missing under supertokens, the fail-closed
+        missing-config error is raised (Req 10.3)."""
+        env_vars = {**prod_env_vars, "AUTH_PROVIDER": "supertokens"}
+        with patch.dict(os.environ, env_vars, clear=True):
+            with pytest.raises(Exception) as exc_info:
+                Settings()
+            message = str(exc_info.value)
+            assert "supertokens_connection_uri" in message
+            assert "supertokens_api_key" in message
+
+    def test_legacy_in_production_with_jwt_secret_still_passes(self, prod_env_vars):
+        """legacy mode still verifies the homegrown JWT, so a strong
+        jwt_secret remains valid (the cutover invariant is supertokens-only)."""
+        env_vars = {**prod_env_vars, "AUTH_PROVIDER": "legacy"}
+        with patch.dict(os.environ, env_vars, clear=True):
+            settings = Settings()
+            assert settings.auth_provider == "legacy"
+            assert settings.jwt_secret  # the legacy secret is preserved
+
+    def test_dual_in_production_requires_strong_jwt_secret(self, prod_env_vars):
+        """dual mode still falls back to legacy JWT verification, so a missing
+        jwt_secret is rejected (the secret is not yet retired)."""
+        env_vars = {
+            **prod_env_vars,
+            "AUTH_PROVIDER": "dual",
+            "SUPERTOKENS_CONNECTION_URI": "https://core.supertokens.example.com",
+            "SUPERTOKENS_API_KEY": "prod-st-api-key",
+            "JWT_SECRET": "",
+        }
+        with patch.dict(os.environ, env_vars, clear=True):
+            with pytest.raises(Exception) as exc_info:
+                Settings()
+            assert "jwt_secret" in str(exc_info.value).lower()
+
+    def test_supertokens_jwt_invariant_not_enforced_in_development(self, dev_env_vars):
+        """The jwt_secret-must-be-unset check applies only to
+        non-development/test environments, so development tolerates it."""
+        env_vars = {
+            **dev_env_vars,
+            "AUTH_PROVIDER": "supertokens",
+            "JWT_SECRET": "dev-jwt-secret-change-me-in-production",
+        }
+        with patch.dict(os.environ, env_vars, clear=True):
+            settings = Settings()
+            assert settings.auth_provider == "supertokens"
+            assert settings.jwt_secret == "dev-jwt-secret-change-me-in-production"
+
+    # ── legacy in development tolerates missing ST config (Req 10.3) ──────
+
+    def test_legacy_in_development_tolerates_missing_st_config(self, dev_env_vars):
+        """An explicit legacy opt-back in development needs no ST config."""
+        env_vars = {**dev_env_vars, "AUTH_PROVIDER": "legacy"}
+        with patch.dict(os.environ, env_vars, clear=True):
+            settings = Settings()
+            assert settings.environment == Environment.DEVELOPMENT
+            assert settings.auth_provider == "legacy"
+            assert settings.supertokens_connection_uri == ""
+            assert settings.supertokens_api_key == ""
+
+    def test_active_provider_in_development_tolerates_missing_st_config(self, dev_env_vars):
+        """Even dual/supertokens in development tolerate missing ST config:
+        the fail-closed check applies only to non-development/test envs."""
+        for provider in ("dual", "supertokens"):
+            env_vars = {**dev_env_vars, "AUTH_PROVIDER": provider}
+            with patch.dict(os.environ, env_vars, clear=True):
+                settings = Settings()
+                assert settings.auth_provider == provider
+                assert settings.supertokens_connection_uri == ""
+
+    # ── session_lifetime_seconds bounds (Req 2.7) ─────────────────────────
+
+    def test_session_lifetime_seconds_below_minimum_rejected(self, dev_env_vars):
+        """session_lifetime_seconds < 60 violates the ge=60 bound."""
+        env_vars = {**dev_env_vars, "SESSION_LIFETIME_SECONDS": "59"}
+        with patch.dict(os.environ, env_vars, clear=True):
+            with pytest.raises(Exception) as exc_info:
+                Settings()
+            assert "session_lifetime_seconds" in str(exc_info.value).lower()
+
+    def test_session_lifetime_seconds_at_minimum_accepted(self, dev_env_vars):
+        """session_lifetime_seconds == 60 (the lower bound) is accepted."""
+        env_vars = {**dev_env_vars, "SESSION_LIFETIME_SECONDS": "60"}
+        with patch.dict(os.environ, env_vars, clear=True):
+            settings = Settings()
+            assert settings.session_lifetime_seconds == 60
+
+    def test_session_lifetime_seconds_above_minimum_accepted(self, dev_env_vars):
+        """A typical session_lifetime_seconds value above the bound is accepted."""
+        env_vars = {**dev_env_vars, "SESSION_LIFETIME_SECONDS": "7200"}
+        with patch.dict(os.environ, env_vars, clear=True):
+            settings = Settings()
+            assert settings.session_lifetime_seconds == 7200
+
+    # ── password_min_length bounds (Req 1.7) ──────────────────────────────
+
+    def test_password_min_length_below_minimum_rejected(self, dev_env_vars):
+        """password_min_length < 8 violates the ge=8 bound."""
+        env_vars = {**dev_env_vars, "PASSWORD_MIN_LENGTH": "7"}
+        with patch.dict(os.environ, env_vars, clear=True):
+            with pytest.raises(Exception) as exc_info:
+                Settings()
+            assert "password_min_length" in str(exc_info.value).lower()
+
+    def test_password_min_length_above_maximum_rejected(self, dev_env_vars):
+        """password_min_length > 128 violates the le=128 bound."""
+        env_vars = {**dev_env_vars, "PASSWORD_MIN_LENGTH": "129"}
+        with patch.dict(os.environ, env_vars, clear=True):
+            with pytest.raises(Exception) as exc_info:
+                Settings()
+            assert "password_min_length" in str(exc_info.value).lower()
+
+    def test_password_min_length_at_lower_bound_accepted(self, dev_env_vars):
+        """password_min_length == 8 (the lower bound) is accepted."""
+        env_vars = {**dev_env_vars, "PASSWORD_MIN_LENGTH": "8"}
+        with patch.dict(os.environ, env_vars, clear=True):
+            settings = Settings()
+            assert settings.password_min_length == 8
+
+    def test_password_min_length_at_upper_bound_accepted(self, dev_env_vars):
+        """password_min_length == 128 (the upper bound) is accepted."""
+        env_vars = {**dev_env_vars, "PASSWORD_MIN_LENGTH": "128"}
+        with patch.dict(os.environ, env_vars, clear=True):
+            settings = Settings()
+            assert settings.password_min_length == 128

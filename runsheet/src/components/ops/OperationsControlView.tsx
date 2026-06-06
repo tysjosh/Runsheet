@@ -228,9 +228,9 @@ export default function OperationsControlView() {
     <div className="h-full flex flex-col bg-gray-50 overflow-hidden">
       {/* Storm_Mode banner (Task 11.7, Req 9.4.1) — pinned to the top of
           the operations control center. Banner hides itself when
-          Storm_Mode is inactive; dispatcher/admin roles see the
-          override form inline. */}
-      <StormModeBanner roles={["dispatcher"]} />
+          Storm_Mode is inactive; the override form is gated on the
+          verified session's role claims (Req 8.6). */}
+      <StormModeBanner />
 
       <div className="h-full flex flex-col gap-4 p-6 overflow-hidden">
         {/* Top: Summary Bar */}

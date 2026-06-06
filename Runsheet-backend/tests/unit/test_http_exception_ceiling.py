@@ -37,7 +37,6 @@ from pathlib import Path
 #
 # Paths are relative to the backend repo root.
 EXPECTED_HTTPEXCEPTION_COUNTS: dict[str, int] = {
-    "middleware/auth_policy.py": 4,
     "inline_endpoints.py": 4,
     "ops/api/endpoints.py": 10,
     "integrations/api/integrations_endpoints.py": 7,
