@@ -116,6 +116,17 @@ class TerminalBOL(BaseModel):
         ...,
         description="Name of the loading terminal (rack)",
     )
+    terminal_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Canonical reference to the loading terminal record "
+            "(``fuel.terminal_models.Terminal``), resolvable via the shared "
+            "RefResolver's ``terminal`` loader. Nullable/additive so existing "
+            "BOLs remain valid without backfill; when set it supersedes the "
+            "free-text ``terminal_name`` snapshot as the source of truth for "
+            "the terminal identity (cross-module-entity-linkage Req 9.2, 6.1)."
+        ),
+    )
 
     # ------------------------------------------------------------------
     # Driver reference
@@ -223,3 +234,30 @@ class TerminalBOL(BaseModel):
         if v <= 0:
             raise ValueError("net_gallons must be positive")
         return v
+
+    # ------------------------------------------------------------------
+    # Uniform cross-module subject reference (cross-module-entity-linkage
+    # task 10, Req 11.1). A terminal BOL's compliance subject is the
+    # **driver** who loaded the product; the uniform ``subject_ref`` is a
+    # view over the existing ``driver_id``.
+    # ------------------------------------------------------------------
+    @property
+    def subject_ref(self) -> "SubjectRef":
+        """The driver who loaded this BOL, as a uniform ``SubjectRef``."""
+        from compliance.services.compliance_subject_ref import SubjectRef
+
+        return SubjectRef(subject_type="driver", subject_id=self.driver_id)
+
+    @field_validator("terminal_id")
+    @classmethod
+    def terminal_id_strip_optional(cls, v: Optional[str]) -> Optional[str]:
+        """Normalize a blank ``terminal_id`` to ``None``.
+
+        An empty / whitespace-only id is treated as "no canonical reference"
+        rather than a dangling blank, so the shared RefResolver surfaces it as
+        ``empty`` (reference absent) instead of ``unresolved``.
+        """
+        if v is None:
+            return None
+        stripped = v.strip()
+        return stripped or None

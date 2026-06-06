@@ -12,7 +12,7 @@ Validates: Requirements 2.1, 3.1-3.6, 4.1-4.8, 5.1-5.7, 6.1-6.6,
 
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, Query, Request
 
@@ -30,6 +30,7 @@ from scheduling.services.cargo_service import CargoService
 from scheduling.services.delay_detection_service import DelayDetectionService
 from scheduling.services.job_service import JobService
 from scheduling.services.scheduling_es_mappings import JOBS_CURRENT_INDEX
+from services.ref_resolver import get_ref_resolver
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,9 @@ _scheduling_rate = f"{_settings.ops_api_rate_limit}/minute"
 _job_service: Optional[JobService] = None
 _cargo_service: Optional[CargoService] = None
 _delay_service: Optional[DelayDetectionService] = None
+#: Resolver used to expand cross-module references on reads. Defaults to the
+#: process-wide resolver; tests may inject one pre-loaded with fake loaders.
+_ref_resolver: Any = None
 
 router = APIRouter(prefix="/api/scheduling", tags=["scheduling"])
 
@@ -59,17 +63,29 @@ def configure_scheduling_api(
     job_service: JobService,
     cargo_service: CargoService,
     delay_service: DelayDetectionService,
+    ref_resolver: Any = None,
 ) -> None:
     """
     Wire service dependencies into the scheduling API module.
 
     Called once during application startup (from main.py) so that the
     router handlers can access the shared services.
+
+    ``ref_resolver`` overrides the process-wide resolver used to expand
+    ``?expand=...`` links on job reads (cross-module-entity-linkage Req 5.2);
+    when omitted the shared process-wide resolver is used. Existing callers
+    that omit it are unaffected (additive/backward-compatible).
     """
-    global _job_service, _cargo_service, _delay_service
+    global _job_service, _cargo_service, _delay_service, _ref_resolver
     _job_service = job_service
     _cargo_service = cargo_service
     _delay_service = delay_service
+    _ref_resolver = ref_resolver
+
+
+def _get_ref_resolver():
+    """Return the resolver used to expand reference links (Req 5.2, 5.4)."""
+    return _ref_resolver if _ref_resolver is not None else get_ref_resolver()
 
 
 def _get_job_service() -> JobService:
@@ -303,20 +319,91 @@ async def get_delayed_jobs(
     )
 
 
+#: Reference types ``GET /api/scheduling/jobs/{id}?expand=...`` can resolve.
+#: ``asset`` resolves the job's ``asset_assigned`` (the canonical asset ref).
+_VALID_JOB_EXPAND = ("order", "customer", "asset", "driver")
+
+
+def _parse_job_expand(expand: Optional[str]) -> set[str]:
+    """Parse a comma-separated ``expand`` query into a set of known tokens.
+
+    Unknown tokens are ignored so the param stays additive/forward-compatible.
+    """
+    if not expand:
+        return set()
+    requested = {tok.strip() for tok in expand.split(",") if tok.strip()}
+    return requested & set(_VALID_JOB_EXPAND)
+
+
+async def _build_job_links(
+    tenant_id: str, job: Any, expand: set[str]
+) -> dict:
+    """Resolve the requested job references into a ``links`` object.
+
+    Symmetric to the order resolver read (Req 5.2): resolves ``order`` /
+    ``customer`` / ``asset`` / ``driver`` via the shared ``RefResolver``. The
+    asset link resolves the job's ``asset_assigned`` (the canonical fleet asset
+    reference). All resolution is tenant-scoped via the loaders; references
+    never cross tenants (Req 5.3). Each reference is returned resolved or
+    explicitly ``unresolved``/``empty`` — never silently dropped (Req 5.4 /
+    Property 4).
+    """
+    refs: dict[str, tuple[str, Optional[str]]] = {}
+    if "order" in expand:
+        refs["order"] = ("order", getattr(job, "order_id", None))
+    if "customer" in expand:
+        refs["customer"] = ("customer", getattr(job, "customer_id", None))
+    if "asset" in expand:
+        refs["asset"] = ("asset", getattr(job, "asset_assigned", None))
+    if "driver" in expand:
+        refs["driver"] = ("driver", getattr(job, "driver_id", None))
+
+    resolver = _get_ref_resolver()
+    resolved = await resolver.resolve_many(tenant_id, refs)
+    return {key: ref.to_dict() for key, ref in resolved.items()}
+
+
 @router.get("/jobs/{job_id}")
 @limiter.limit(_scheduling_rate)
 async def get_job(
     job_id: str,
     request: Request,
     tenant: TenantContext = Depends(get_tenant_context),
+    expand: Optional[str] = Query(
+        default=None,
+        description=(
+            "Comma-separated cross-module references to resolve into a `links` "
+            "object: any of order,customer,asset,driver. Omit for the unchanged, "
+            "additive-only job contract."
+        ),
+    ),
 ) -> dict:
     """
     Get a single job with its event history.
 
-    Validates: Requirement 5.3
+    When ``expand`` is supplied (cross-module-entity-linkage Req 5.2, 5.4), the
+    response additionally carries a ``links`` object resolving the requested
+    references (order / customer / asset / driver) via the shared
+    ``RefResolver``. The asset link resolves the job's ``asset_assigned``. Each
+    link is either a resolved summary or an explicit ``unresolved``/``empty``
+    marker, never silently dropped. Reads without ``expand`` return the
+    pre-existing contract unchanged (Req 6.3).
+
+    All resolution is tenant-scoped; references never cross tenants (Req 5.3).
+
+    Validates: Requirement 5.3, 5.2, 5.4
     """
     svc = _get_job_service()
     job = await svc.get_job(job_id, tenant.tenant_id)
+
+    requested = _parse_job_expand(expand)
+    if requested:
+        # Additive: attach resolved cross-module links alongside job/events.
+        job = {
+            **job,
+            "links": await _build_job_links(tenant.tenant_id, job["job"], requested),
+        }
+
     return {
         "data": job,
         "request_id": _get_request_id(request),

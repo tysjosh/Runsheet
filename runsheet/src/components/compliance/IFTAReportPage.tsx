@@ -2,7 +2,7 @@
 
 import type React from "react";
 import { useCallback, useEffect, useState } from "react";
-import { type Column, PageHeader, Table } from "@/components/ui";
+import { type Column, EntityLink, PageHeader, Table } from "@/components/ui";
 import {
   type CreateMileageAdjustmentPayload,
   createMileageAdjustment,
@@ -193,7 +193,11 @@ export default function IFTAReportPage() {
     {
       key: "truck_id",
       label: "Truck ID",
-      render: (t) => <span className="font-medium">{t.truck_id}</span>,
+      // The per-truck IFTA subject is navigable to the Fleet module as a
+      // canonical asset (Req 11.3, 13.1).
+      render: (t) => (
+        <EntityLink type="asset" id={t.truck_id} className="font-medium" />
+      ),
     },
     { key: "truck_name", label: "Truck Name", render: (t) => t.truck_name },
     {
@@ -439,7 +443,7 @@ export default function IFTAReportPage() {
                       title={flag.reason}
                       className="inline-block bg-warning-light text-warning-dark px-3 py-1 rounded text-sm font-medium"
                     >
-                      {flag.truck_id}
+                      <EntityLink type="asset" id={flag.truck_id} />
                     </span>
                   ))}
                 </div>

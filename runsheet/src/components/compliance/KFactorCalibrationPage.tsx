@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { type Column, PageHeader, Table } from "@/components/ui";
+import { type Column, EntityLink, PageHeader, Table } from "@/components/ui";
 import {
   approveKFactorAdjustment,
   getKFactorDashboard,
@@ -70,14 +70,19 @@ function getKFactorColumns(
     {
       key: "tank_id",
       label: "Tank ID",
+      // The k-factor subject is its tank, navigable to the Fuel Ops tank
+      // surface (Req 11.3, 13.1).
       render: ({ entry }) => (
-        <span className="font-medium">{entry.tank_id}</span>
+        <EntityLink type="tank" id={entry.tank_id} className="font-medium" />
       ),
     },
     {
       key: "customer_id",
       label: "Customer",
-      render: ({ entry }) => entry.customer_id,
+      // The owning customer is also navigable to the Commerce module.
+      render: ({ entry }) => (
+        <EntityLink type="customer" id={entry.customer_id} />
+      ),
     },
     {
       key: "current_kfactor",
@@ -323,12 +328,14 @@ export default function KFactorCalibrationPage() {
             <div className="space-y-3 mb-6">
               <div className="flex justify-between text-sm">
                 <span className="text-gray-600">Tank ID:</span>
-                <span className="font-medium">{approvalTarget.tank_id}</span>
+                <span className="font-medium">
+                  <EntityLink type="tank" id={approvalTarget.tank_id} />
+                </span>
               </div>
               <div className="flex justify-between text-sm">
                 <span className="text-gray-600">Customer:</span>
                 <span className="font-medium">
-                  {approvalTarget.customer_id}
+                  <EntityLink type="customer" id={approvalTarget.customer_id} />
                 </span>
               </div>
               <div className="flex justify-between text-sm">

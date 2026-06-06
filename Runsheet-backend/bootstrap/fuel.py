@@ -228,6 +228,26 @@ async def initialize(app, container: ServiceContainer) -> None:
                 driver_counter_service=driver_counter_service,
             )
             logger.info("Order REST endpoints configured")
+
+            # Register cross-module reference loaders (customer/asset/driver)
+            # on the process-wide RefResolver so ``GET /api/orders/{id}?expand=``
+            # resolves links instead of degrading to "unresolved"
+            # (cross-module-entity-linkage task 2.1, Req 1.1/5.1/5.4).
+            try:
+                from services.ref_loaders import register_order_link_loaders
+                from services.ref_resolver import get_ref_resolver
+
+                register_order_link_loaders(
+                    get_ref_resolver(),
+                    es_service=es_service,
+                    driver_repository=driver_repository,
+                    order_repository=order_repository,
+                )
+                logger.info("Cross-module reference loaders registered")
+            except Exception as e:  # noqa: BLE001 — resolver degrades gracefully
+                logger.warning(
+                    "Failed to register cross-module reference loaders: %s", e
+                )
         else:
             logger.warning(
                 "Order REST endpoints not configured — "
@@ -241,7 +261,32 @@ async def initialize(app, container: ServiceContainer) -> None:
         from fuel.api.driver_endpoints import configure_driver_endpoints
 
         if driver_repository is not None:
-            configure_driver_endpoints(driver_repository=driver_repository)
+            # Register the shared cross-module reference loaders (customer /
+            # asset / driver) on the process-wide resolver so resolver reads —
+            # the order ?expand= links (task 2.1) and the driver profile
+            # truck → asset link (task 4) — resolve instead of dangling as
+            # "unresolved". Registration is idempotent.
+            ref_resolver = None
+            try:
+                from services.ref_resolver import get_ref_resolver
+                from services.ref_loaders import register_order_link_loaders
+
+                ref_resolver = get_ref_resolver()
+                register_order_link_loaders(
+                    ref_resolver,
+                    es_service=es_service,
+                    driver_repository=driver_repository,
+                )
+                logger.info("Cross-module reference loaders registered")
+            except Exception as exc:
+                logger.warning(
+                    "Failed to register cross-module reference loaders: %s", exc
+                )
+
+            configure_driver_endpoints(
+                driver_repository=driver_repository,
+                ref_resolver=ref_resolver,
+            )
             logger.info("Driver REST endpoints configured")
         else:
             logger.warning(
@@ -250,6 +295,29 @@ async def initialize(app, container: ServiceContainer) -> None:
             )
     except Exception as e:
         logger.warning("Failed to configure driver REST endpoints: %s", e)
+
+    # ---------------------------------------------------------------
+    # Cross-module reference loaders — depot (Req 10.1)
+    # ---------------------------------------------------------------
+    # Register a ``depot`` loader on the process-wide RefResolver so an
+    # asset's ``assigned_depot_id`` and the tenant's ``default_depot_id``
+    # resolve to a depot record (round-tripping ``is_default``) instead of
+    # degrading to "unresolved" (cross-module-entity-linkage task 9). The
+    # DepotRepository is tenant-scoped, so a cross-tenant reference resolves
+    # to ``None`` → ``unresolved`` (Req 5.3 / Property 2).
+    try:
+        from fuel.depot_models import DepotRepository
+        from services.ref_loaders import register_depot_loader
+        from services.ref_resolver import get_ref_resolver
+
+        depot_repository = DepotRepository(es_service)
+        container.depot_repository = depot_repository
+        register_depot_loader(
+            get_ref_resolver(), depot_repository=depot_repository
+        )
+        logger.info("Depot reference loader registered")
+    except Exception as e:  # noqa: BLE001 — resolver degrades gracefully
+        logger.warning("Failed to register depot reference loader: %s", e)
 
     # ---------------------------------------------------------------
     # Legacy mirror backfill worker (60-second cadence)

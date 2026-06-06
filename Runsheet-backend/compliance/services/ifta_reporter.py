@@ -124,6 +124,19 @@ class TripSegment(BaseModel):
     )
     created_at: datetime = Field(default_factory=utcnow)
 
+    # ------------------------------------------------------------------
+    # Uniform cross-module subject reference (cross-module-entity-linkage
+    # task 10, Req 11.1). An IFTA trip segment is recorded against a truck,
+    # which is a fleet **asset** (``truck_id == asset_id``); the uniform
+    # ``subject_ref`` is a view over ``truck_id``.
+    # ------------------------------------------------------------------
+    @property
+    def subject_ref(self) -> "SubjectRef":
+        """The asset (truck) this segment was driven by, as a ``SubjectRef``."""
+        from compliance.services.compliance_subject_ref import SubjectRef
+
+        return SubjectRef(subject_type="asset", subject_id=self.truck_id)
+
 
 class JurisdictionMileage(BaseModel):
     """Aggregated mileage for a single jurisdiction within a quarter.

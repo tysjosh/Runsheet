@@ -198,3 +198,17 @@ class AssetCertification(BaseModel):
         if not stripped:
             raise ValueError("certificate_number must not be empty or whitespace")
         return stripped
+
+    # ------------------------------------------------------------------
+    # Uniform cross-module subject reference (cross-module-entity-linkage
+    # task 10, Req 11.1). A certification is about a fleet **asset**; the
+    # uniform ``subject_ref`` is a view over the existing ``asset_id`` (no
+    # second copy) so the reference can be rendered/validated/resolved the
+    # same way as every other compliance record.
+    # ------------------------------------------------------------------
+    @property
+    def subject_ref(self) -> "SubjectRef":
+        """The asset this certification is about, as a uniform ``SubjectRef``."""
+        from compliance.services.compliance_subject_ref import SubjectRef
+
+        return SubjectRef(subject_type="asset", subject_id=self.asset_id)

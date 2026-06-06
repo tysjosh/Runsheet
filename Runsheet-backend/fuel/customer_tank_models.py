@@ -131,6 +131,16 @@ class CustomerTank(BaseModel):
         description="Owning tenant; repositories re-assert this on every read.",
     )
     customer_id: str = Field(..., min_length=1, description="Owning customer_id.")
+    last_refill_order_id: Optional[str] = Field(
+        None,
+        description=(
+            "Optional reference to the fuel order (``order_id``) whose "
+            "delivery most recently refilled this tank. Nullable so existing "
+            "records remain valid without backfill; resolved to the order "
+            "module by the customer-tank resolver read "
+            "(cross-module-entity-linkage Req 7.2)."
+        ),
+    )
     customer_type: CustomerType = Field(
         ...,
         description=(

@@ -24,10 +24,30 @@ export default function DriverUtilizationView() {
       // Session-aware fetch (SuperTokens cookie + anti-CSRF). Replaces the
       // legacy raw-fetch + Bearer-token path so Drivers matches every other
       // module's auth posture.
-      const data = await apiService.getDriverUtilization(
+      const data = (await apiService.getDriverUtilization(
         statusFilter || undefined,
+      )) as DriverUtilization[];
+
+      // Correlate each driver's compliance qualification status via the
+      // profile read so the list can surface a qualification-status chip
+      // (cross-module-entity-linkage task 4 / Req 4.2, 4.3). Failures degrade
+      // gracefully — the row simply renders an "unlinked" chip.
+      const enriched = await Promise.all(
+        data.map(async (driver) => {
+          try {
+            const profile = await apiService.getDriverProfile(driver.driver_id);
+            const qualification_status =
+              profile.qualification.status === "resolved"
+                ? (profile.qualification.summary?.overall_status ?? null)
+                : null;
+            return { ...driver, qualification_status };
+          } catch {
+            return { ...driver, qualification_status: null };
+          }
+        }),
       );
-      setDrivers(data as DriverUtilization[]);
+
+      setDrivers(enriched);
     } catch (error) {
       console.error("Failed to load driver utilization data:", error);
     } finally {

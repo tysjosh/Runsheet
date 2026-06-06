@@ -11,9 +11,9 @@ import {
   TrendingUp,
 } from "lucide-react";
 import { lazy, Suspense, useState } from "react";
-import AccountDetailView from "./commerce/AccountDetailView";
+import AccountDetailPage from "./commerce/AccountDetailPage";
 import AccountsListPage from "./commerce/AccountsListPage";
-import InvoiceDetailView from "./commerce/InvoiceDetailView";
+import InvoiceDetailPage from "./commerce/InvoiceDetailPage";
 import InvoicesListPage from "./commerce/InvoicesListPage";
 import PaymentsListPage from "./commerce/PaymentsListPage";
 import PriceBookEditor from "./commerce/PriceBookEditor";
@@ -91,6 +91,15 @@ export default function CommerceHub() {
     setSelectedInvoiceId(null);
   };
 
+  // Invoice → Account is in-hub navigation: accounts live as a tab in this hub
+  // rather than at a standalone route, so traversing an invoice's account
+  // switches tabs and selects the account (Req 12.1).
+  const handleViewAccountFromInvoice = (accountId: string) => {
+    setSelectedInvoiceId(null);
+    setSelectedAccountId(accountId);
+    setActiveTab("accounts");
+  };
+
   return (
     <div className="flex flex-col h-full">
       <PageHeader
@@ -109,7 +118,7 @@ export default function CommerceHub() {
       <div className="flex-1 overflow-auto">
         {activeTab === "accounts" &&
           (selectedAccountId ? (
-            <AccountDetailView
+            <AccountDetailPage
               accountId={selectedAccountId}
               onBack={handleBackToAccountList}
             />
@@ -118,9 +127,10 @@ export default function CommerceHub() {
           ))}
         {activeTab === "invoices" &&
           (selectedInvoiceId ? (
-            <InvoiceDetailView
+            <InvoiceDetailPage
               invoiceId={selectedInvoiceId}
               onBack={handleBackToInvoiceList}
+              onViewAccount={handleViewAccountFromInvoice}
             />
           ) : (
             <InvoicesListPage onSelectInvoice={handleSelectInvoice} />

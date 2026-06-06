@@ -30,6 +30,13 @@ export interface DriverUtilization {
   cdl_class?: string | null;
   hazmat_endorsement?: boolean | null;
   utilization_percentage?: number | null;
+  /**
+   * Collapsed compliance qualification signal sourced from the correlated
+   * driver profile read (GET /api/ops/drivers/{driver_id}/profile). Drives the
+   * qualification-status chip. `null`/absent when no compliance record
+   * correlates by driver_id (rendered as an "unlinked" affordance).
+   */
+  qualification_status?: "valid" | "expiring" | "expired" | null;
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -135,6 +142,29 @@ function formatDate(dateStr?: string | null): string {
     minute: "2-digit",
   });
 }
+
+// Navigate into the Fleet module. There is no per-asset deep-link route yet —
+// the reusable <EntityLink> + asset detail surface land in task 5 — so for now
+// the truck links to the Fleet module. The dashboard reads `activeMenuItem`
+// from sessionStorage on mount (see app/dashboard/page.tsx), so we set it and
+// navigate there.
+function navigateToFleet(): void {
+  if (typeof window !== "undefined") {
+    window.sessionStorage.setItem("activeMenuItem", "fleet");
+  }
+}
+
+const QUALIFICATION_CHIP: Record<
+  NonNullable<DriverUtilization["qualification_status"]>,
+  { className: string; label: string }
+> = {
+  expired: { className: "text-error-dark bg-error-light", label: "Expired" },
+  expiring: {
+    className: "text-warning-dark bg-warning-light",
+    label: "Expiring",
+  },
+  valid: { className: "text-success-dark bg-success-light", label: "Valid" },
+};
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
@@ -320,6 +350,51 @@ export default function DriverUtilizationList({
           );
         }
         return <span className="text-xs text-gray-400">—</span>;
+      },
+    },
+    {
+      key: "assigned_truck",
+      label: "Truck",
+      render: (driver: DriverUtilization) => {
+        if (!driver.assigned_truck_id) {
+          return <span className="text-xs text-gray-400">—</span>;
+        }
+        return (
+          <a
+            href="/dashboard"
+            onClick={navigateToFleet}
+            className="text-sm font-medium text-info hover:underline"
+            title={`View ${driver.assigned_truck_id} in Fleet`}
+          >
+            {driver.assigned_truck_id}
+          </a>
+        );
+      },
+    },
+    {
+      key: "qualification",
+      label: "Qualification",
+      render: (driver: DriverUtilization) => {
+        const qs = driver.qualification_status;
+        if (!qs) {
+          return (
+            <span
+              className="text-xs text-gray-400"
+              title="No qualification record"
+            >
+              Unlinked
+            </span>
+          );
+        }
+        const chip = QUALIFICATION_CHIP[qs];
+        return (
+          <span
+            className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md text-xs font-medium ${chip.className}`}
+          >
+            {qs !== "valid" && <AlertTriangle className="w-3 h-3" />}
+            {chip.label}
+          </span>
+        );
       },
     },
   ];

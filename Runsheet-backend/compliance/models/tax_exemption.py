@@ -331,3 +331,22 @@ class TaxExemption(BaseModel):
         if self.status in ("expired", "revoked"):
             return True
         return reference_date > self.expiry_date
+
+    # ------------------------------------------------------------------
+    # Uniform cross-module subject reference (cross-module-entity-linkage
+    # task 10, Req 11.1). An exemption is about a **customer**, or the more
+    # specific **account** when it is account-scoped (``account_id`` set).
+    # The uniform ``subject_ref`` is a view over the existing
+    # ``customer_id`` / ``account_id`` — no second copy.
+    # ------------------------------------------------------------------
+    @property
+    def subject_ref(self) -> "SubjectRef":
+        """The customer/account this exemption applies to, as a ``SubjectRef``."""
+        from compliance.services.compliance_subject_ref import subject_ref_for_kind
+
+        ref = subject_ref_for_kind(
+            "exemption", subject_id=self.customer_id, account_id=self.account_id
+        )
+        # customer_id is required on the model, so a ref is always derivable.
+        assert ref is not None  # noqa: S101 - invariant guard, not a runtime check
+        return ref

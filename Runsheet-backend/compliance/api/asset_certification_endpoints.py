@@ -42,8 +42,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from compliance.services.asset_certification_service import (
     AssetCertificationService,
 )
+from compliance.services.compliance_subject_ref import (
+    subject_ref_for_kind,
+    validate_subject_ref,
+)
 from errors.exceptions import AppException
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
+from services.ref_resolver import get_ref_resolver
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +59,12 @@ logger = logging.getLogger(__name__)
 
 _asset_cert_service: Optional[AssetCertificationService] = None
 
+#: Shared cross-module :class:`RefResolver` used to validate the certification's
+#: ``subject_ref`` (an ``asset``) at write time (cross-module-entity-linkage
+#: task 10, Req 11.1). Defaults to the process-wide resolver; tests may inject
+#: one pre-loaded with fakes via :func:`configure_asset_certification_api`.
+_ref_resolver: Any = None
+
 router = APIRouter(
     prefix="/api/compliance/asset-certifications",
     tags=["Compliance"],
@@ -61,7 +72,9 @@ router = APIRouter(
 
 
 def configure_asset_certification_api(
-    *, asset_certification_service: AssetCertificationService
+    *,
+    asset_certification_service: AssetCertificationService,
+    ref_resolver: Any = None,
 ) -> None:
     """Wire the AssetCertificationService into this module.
 
@@ -72,9 +85,15 @@ def configure_asset_certification_api(
     Args:
         asset_certification_service: The application-scoped
             AssetCertificationService instance.
+        ref_resolver: Optional shared :class:`RefResolver` used to validate
+            the certification's asset ``subject_ref`` at write time. When
+            omitted the process-wide resolver is used; when no ``asset`` loader
+            is registered validation is skipped so partially-wired environments
+            stay additive (cross-module-entity-linkage task 10).
     """
-    global _asset_cert_service
+    global _asset_cert_service, _ref_resolver
     _asset_cert_service = asset_certification_service
+    _ref_resolver = ref_resolver
 
 
 def _get_asset_cert_service() -> AssetCertificationService:
@@ -85,6 +104,11 @@ def _get_asset_cert_service() -> AssetCertificationService:
             "Call configure_asset_certification_api() during startup."
         )
     return _asset_cert_service
+
+
+def _get_ref_resolver():
+    """Return the resolver used for write-time subject validation (Req 11.1)."""
+    return _ref_resolver if _ref_resolver is not None else get_ref_resolver()
 
 
 def _get_request_id(request: Request) -> str:
@@ -314,6 +338,15 @@ async def create_asset_certification(
     Validates: Requirement 13.1
     """
     svc = _get_asset_cert_service()
+
+    # Validate the certification's subject reference (an asset) resolves in the
+    # same tenant before persisting (cross-module-entity-linkage task 10,
+    # Req 11.1). Skipped when no ``asset`` loader is registered so a
+    # partially-wired environment stays additive/backward-compatible.
+    subject_ref = subject_ref_for_kind("certification", subject_id=body.asset_id)
+    await validate_subject_ref(
+        _get_ref_resolver(), tenant.tenant_id, subject_ref, required=True
+    )
 
     try:
         cert_doc = await svc.create(

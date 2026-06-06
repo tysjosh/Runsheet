@@ -28,9 +28,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
+from errors.exceptions import AppException
 from fuel.api.fuel_ops_endpoints import (
     configure_fuel_ops_endpoints,
     router,
@@ -140,13 +142,19 @@ class _FakeESService:
 # ---------------------------------------------------------------------------
 
 
-def _tenant_ctx_factory(tenant_id: str = "tenant-1", region: str = "US"):
+def _tenant_ctx_factory(
+    tenant_id: str = "tenant-1", region: str = "US", roles: Optional[List[str]] = None
+):
     def _factory() -> TenantContext:
         return TenantContext(
             tenant_id=tenant_id,
             user_id="user-1",
             has_pii_access=False,
-            roles=["dispatcher"],
+            # The Terminal write surface is admin-gated (Task 8.1). Default
+            # the harness to an admin caller so the existing create/update/
+            # delete tests exercise the success path; the admin-gating tests
+            # override ``roles`` to assert the 403.
+            roles=roles if roles is not None else ["dispatcher", "admin"],
             region=region,
             measurement_units={"volume": "gal", "distance": "mi"},
         )
@@ -154,15 +162,27 @@ def _tenant_ctx_factory(tenant_id: str = "tenant-1", region: str = "US"):
     return _factory
 
 
-def _build_app(tenant_id: str = "tenant-1") -> tuple[FastAPI, _FakeESService]:
+def _build_app(
+    tenant_id: str = "tenant-1", roles: Optional[List[str]] = None
+) -> tuple[FastAPI, _FakeESService]:
     es = _FakeESService()
     repo = TerminalRepository(es_service=es)
     configure_fuel_ops_endpoints(es_service=es, terminal_repository=repo)
 
     app = FastAPI()
     app.include_router(router)
+
+    # The shared Role_Authorizer raises AppException; register the same
+    # structured handler the app uses in production so the admin-gate
+    # response renders as the canonical 403 error envelope.
+    @app.exception_handler(AppException)
+    async def _app_exception_handler(request: Request, exc: AppException):
+        return JSONResponse(
+            status_code=exc.status_code, content={"detail": exc.to_dict()}
+        )
+
     app.dependency_overrides[get_tenant_context] = _tenant_ctx_factory(
-        tenant_id=tenant_id
+        tenant_id=tenant_id, roles=roles
     )
     return app, es
 
@@ -674,3 +694,117 @@ class TestProposedLoad:
         stamped = datetime.fromisoformat(data["as_of"])
         now = datetime.now(timezone.utc)
         assert abs((now - stamped).total_seconds()) < 30
+
+
+# ---------------------------------------------------------------------------
+# Admin-gating on the Terminal write surface (Task 8.1, Req 9.1, 9.2)
+# ---------------------------------------------------------------------------
+
+
+class TestTerminalAdminGating:
+    """The thin management surface (Task 8.1) restricts every state-changing
+    Terminal operation to the canonical ``admin`` role. Reads stay open so
+    the Sourcing UI / ``<EntityLink>`` resolver can still resolve a
+    reference for a non-admin caller."""
+
+    def test_non_admin_cannot_create(self):
+        app, _ = _build_app(roles=["dispatcher"])
+        client = TestClient(app)
+
+        resp = client.post("/api/fuel/terminals", json=_base_create_payload())
+
+        assert resp.status_code == 403
+
+    def test_non_admin_cannot_update(self):
+        app, es = _build_app(roles=["dispatcher"])
+        client = TestClient(app)
+        _seed_terminal(es)
+
+        resp = client.patch(
+            "/api/fuel/terminals/term_001", json={"status": "inactive"}
+        )
+
+        assert resp.status_code == 403
+        # The terminal is untouched — still active.
+        assert es.docs["term_001"]["status"] == "active"
+
+    def test_non_admin_cannot_delete(self):
+        app, es = _build_app(roles=["dispatcher"])
+        client = TestClient(app)
+        _seed_terminal(es)
+
+        resp = client.delete("/api/fuel/terminals/term_001")
+
+        assert resp.status_code == 403
+        assert "term_001" in es.docs
+
+    def test_non_admin_cannot_deactivate(self):
+        app, es = _build_app(roles=["dispatcher"])
+        client = TestClient(app)
+        _seed_terminal(es)
+
+        resp = client.post("/api/fuel/terminals/term_001/deactivate")
+
+        assert resp.status_code == 403
+        assert es.docs["term_001"]["status"] == "active"
+
+    def test_reads_stay_open_to_non_admin(self):
+        app, es = _build_app(roles=["dispatcher"])
+        client = TestClient(app)
+        _seed_terminal(es)
+
+        list_resp = client.get("/api/fuel/terminals")
+        get_resp = client.get("/api/fuel/terminals/term_001")
+
+        assert list_resp.status_code == 200
+        assert get_resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# POST /api/fuel/terminals/{id}/deactivate (Task 8.1, Req 9.1, 9.2)
+# ---------------------------------------------------------------------------
+
+
+class TestDeactivateTerminal:
+    def test_deactivates_owned_terminal(self):
+        app, es = _build_app()
+        client = TestClient(app)
+        _seed_terminal(es)
+
+        resp = client.post("/api/fuel/terminals/term_001/deactivate")
+
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "inactive"
+        assert es.docs["term_001"]["status"] == "inactive"
+
+    def test_deactivate_is_idempotent(self):
+        app, es = _build_app()
+        client = TestClient(app)
+        _seed_terminal(es, status="inactive")
+
+        resp = client.post("/api/fuel/terminals/term_001/deactivate")
+
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "inactive"
+
+    def test_returns_404_for_missing(self):
+        app, _ = _build_app()
+        client = TestClient(app)
+
+        resp = client.post("/api/fuel/terminals/does-not-exist/deactivate")
+
+        assert resp.status_code == 404
+        assert resp.json()["detail"]["error_code"] == "terminal_not_found"
+
+    def test_returns_404_for_cross_tenant(self):
+        # A cross-tenant id is indistinguishable from "missing" on the read
+        # path, so the load-or-404 guard surfaces 404 (never leaks existence).
+        app, es = _build_app(tenant_id="tenant-1")
+        client = TestClient(app)
+        _seed_terminal(es, terminal_id="term_001", tenant_id="tenant-2")
+
+        resp = client.post("/api/fuel/terminals/term_001/deactivate")
+
+        assert resp.status_code == 404
+        # Cross-tenant terminal is untouched.
+        assert es.docs["term_001"]["status"] == "active"

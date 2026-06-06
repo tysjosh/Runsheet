@@ -139,6 +139,11 @@ class FuelOrder(BaseModel):
 
     status: OrderStatus = "placed"
     assigned_driver_id: Optional[str] = None
+    # Optional reference to the fleet asset/truck carrying this order. Nullable so
+    # existing records remain valid without backfill (Req 2.1, 6.1). Set
+    # consistently with the assigned run/job's asset (Req 2.2); validated to an
+    # existing same-tenant asset at write time (Req 2.3).
+    assigned_asset_id: Optional[str] = None
     assigned_run_id: Optional[str] = None
     legacy_origin_snapshot: Optional[str] = None
 

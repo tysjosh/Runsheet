@@ -233,20 +233,17 @@
       "terminal_id": "TERM-001",
       "name": "Houston Ship Channel Terminal",
       "operator": "Marathon Petroleum",
-      "location": {
-        "lat": 29.7350,
-        "lon": -95.2650
-      },
+      "location_lat": 29.7350,
+      "location_lon": -95.2650,
       "address": "8700 Manchester St, Houston, TX 77012",
       "timezone": "America/Chicago",
       "operating_hours": [
-        {"day_of_week": "monday", "open": "06:00", "close": "22:00"},
-        {"day_of_week": "tuesday", "open": "06:00", "close": "22:00"},
-        {"day_of_week": "wednesday", "open": "06:00", "close": "22:00"},
-        {"day_of_week": "thursday", "open": "06:00", "close": "22:00"},
-        {"day_of_week": "friday", "open": "06:00", "close": "22:00"},
-        {"day_of_week": "saturday", "open": "08:00", "close": "18:00"},
-        {"day_of_week": "sunday", "open": "closed", "close": "closed"}
+        {"day_of_week": "mon", "open": "06:00", "close": "22:00"},
+        {"day_of_week": "tue", "open": "06:00", "close": "22:00"},
+        {"day_of_week": "wed", "open": "06:00", "close": "22:00"},
+        {"day_of_week": "thu", "open": "06:00", "close": "22:00"},
+        {"day_of_week": "fri", "open": "06:00", "close": "22:00"},
+        {"day_of_week": "sat", "open": "08:00", "close": "18:00"}
       ],
       "supported_products": ["DIESEL_2", "GASOLINE_REG", "GASOLINE_PREM", "KEROSENE"],
       "branded": true,
@@ -257,20 +254,17 @@
       "terminal_id": "TERM-002",
       "name": "Dallas Fort Worth Rack",
       "operator": "Valero Energy",
-      "location": {
-        "lat": 32.8500,
-        "lon": -96.8500
-      },
+      "location_lat": 32.8500,
+      "location_lon": -96.8500,
       "address": "5500 Refinery Rd, Dallas, TX 75212",
       "timezone": "America/Chicago",
       "operating_hours": [
-        {"day_of_week": "monday", "open": "05:00", "close": "23:00"},
-        {"day_of_week": "tuesday", "open": "05:00", "close": "23:00"},
-        {"day_of_week": "wednesday", "open": "05:00", "close": "23:00"},
-        {"day_of_week": "thursday", "open": "05:00", "close": "23:00"},
-        {"day_of_week": "friday", "open": "05:00", "close": "23:00"},
-        {"day_of_week": "saturday", "open": "07:00", "close": "19:00"},
-        {"day_of_week": "sunday", "open": "closed", "close": "closed"}
+        {"day_of_week": "mon", "open": "05:00", "close": "23:00"},
+        {"day_of_week": "tue", "open": "05:00", "close": "23:00"},
+        {"day_of_week": "wed", "open": "05:00", "close": "23:00"},
+        {"day_of_week": "thu", "open": "05:00", "close": "23:00"},
+        {"day_of_week": "fri", "open": "05:00", "close": "23:00"},
+        {"day_of_week": "sat", "open": "07:00", "close": "19:00"}
       ],
       "supported_products": ["DIESEL_2", "GASOLINE_REG", "GASOLINE_PREM"],
       "branded": true,
@@ -281,20 +275,17 @@
       "terminal_id": "TERM-003",
       "name": "Chicago Lemont Terminal",
       "operator": "Phillips 66",
-      "location": {
-        "lat": 41.6700,
-        "lon": -87.9900
-      },
+      "location_lat": 41.6700,
+      "location_lon": -87.9900,
       "address": "14500 S Bell Rd, Lemont, IL 60439",
       "timezone": "America/Chicago",
       "operating_hours": [
-        {"day_of_week": "monday", "open": "06:00", "close": "22:00"},
-        {"day_of_week": "tuesday", "open": "06:00", "close": "22:00"},
-        {"day_of_week": "wednesday", "open": "06:00", "close": "22:00"},
-        {"day_of_week": "thursday", "open": "06:00", "close": "22:00"},
-        {"day_of_week": "friday", "open": "06:00", "close": "22:00"},
-        {"day_of_week": "saturday", "open": "08:00", "close": "16:00"},
-        {"day_of_week": "sunday", "open": "closed", "close": "closed"}
+        {"day_of_week": "mon", "open": "06:00", "close": "22:00"},
+        {"day_of_week": "tue", "open": "06:00", "close": "22:00"},
+        {"day_of_week": "wed", "open": "06:00", "close": "22:00"},
+        {"day_of_week": "thu", "open": "06:00", "close": "22:00"},
+        {"day_of_week": "fri", "open": "06:00", "close": "22:00"},
+        {"day_of_week": "sat", "open": "08:00", "close": "16:00"}
       ],
       "supported_products": ["DIESEL_2", "GASOLINE_REG", "HEATING_OIL", "DEF"],
       "branded": false,

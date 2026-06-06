@@ -78,6 +78,7 @@ CUSTOMER_TANKS_MAPPING = {
             "customer_tank_id":       {"type": "keyword"},
             "tenant_id":              {"type": "keyword"},
             "customer_id":            {"type": "keyword"},
+            "last_refill_order_id":   {"type": "keyword"},
             "customer_type":          {"type": "keyword"},
             "fuel_type":              {"type": "keyword"},
             "fuel_product_code":      {"type": "keyword"},
@@ -235,6 +236,9 @@ MVP_RECONCILIATION_MAPPING = {
             "plan_id":                               {"type": "keyword"},
             "pod_id":                                {"type": "keyword"},
             "invoice_id":                            {"type": "keyword"},
+            "customer_id":                           {"type": "keyword"},
+            "assigned_asset_id":                     {"type": "keyword"},
+            "assigned_driver_id":                    {"type": "keyword"},
             "ordered_gallons":                       {"type": "double"},
             "loaded_gallons":                        {"type": "double"},
             "delivered_gallons":                     {"type": "double"},
@@ -385,6 +389,13 @@ COMPARTMENT_CLEANING_EVENTS_MAPPING = {
             "truck_id":          {"type": "keyword"},
             "method":            {"type": "keyword"},
             "actor_id":          {"type": "keyword"},
+            # --- cross-module-entity-linkage Req 8.2 ---
+            # Canonical driver reference for the actor that performed the
+            # cleaning. Nullable/additive: legacy events that only carried
+            # the free-text ``actor_id`` continue to index cleanly. The
+            # ``actor_id`` above is retained as a DEPRECATED alias for
+            # backward compatibility and is never removed.
+            "driver_id":         {"type": "keyword"},
             "notes":             {"type": "text"},
             "evidence_refs":     {"type": "keyword"},
             "cleaned_at":        {"type": "date"},

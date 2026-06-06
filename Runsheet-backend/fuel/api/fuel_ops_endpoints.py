@@ -306,6 +306,7 @@ from services.reconciliation_service import (
     ReconciliationRecord,
     ReconciliationService,
 )
+from services.ref_resolver import get_ref_resolver
 
 logger = logging.getLogger(__name__)
 
@@ -330,6 +331,11 @@ _redis_client: Any = None
 _cleaning_event_service: Optional[CleaningEventService] = None
 _compartment_state_repository: Optional[CompartmentStateRepository] = None
 _file_storage_service: Any = None
+#: Shared cross-module :class:`RefResolver` used to validate canonical
+#: references (e.g. a Cleaning_Event's ``driver_id``) at write time. Defaults
+#: to the process-wide resolver; tests may inject one pre-loaded with fakes.
+#: cross-module-entity-linkage Req 8.2 / 5.3.
+_ref_resolver: Any = None
 _confirmation_protocol: Optional[ConfirmationProtocol] = None
 _fuel_planning_ws_manager: Optional[FuelPlanningWSManager] = None
 _combinable_group_repository: Optional[CombinableGroupRepository] = None
@@ -462,6 +468,7 @@ def configure_fuel_ops_endpoints(
     compartment_state_repository: Optional[CompartmentStateRepository] = None,
     cleaning_event_service: Optional[CleaningEventService] = None,
     file_storage_service: Any = None,
+    ref_resolver: Any = None,
     combinable_group_repository: Optional[CombinableGroupRepository] = None,
     confirmation_protocol: Optional[ConfirmationProtocol] = None,
     fuel_planning_ws_manager: Optional[FuelPlanningWSManager] = None,
@@ -601,6 +608,7 @@ def configure_fuel_ops_endpoints(
     global _confirmation_protocol, _fuel_planning_ws_manager, _tenant_config
     global _sourcing_recommender, _sourcing_recommendation_repository
     global _storm_mode_evaluator
+    global _ref_resolver
     _es_service = es_service
     _destination_service = destination_service or DeliveryDestinationService(es_service)
     _customer_tank_repository = (
@@ -628,6 +636,12 @@ def configure_fuel_ops_endpoints(
         state_repository=_compartment_state_repository,
         file_storage=file_storage_service,
     )
+    # Shared resolver used to validate a Cleaning_Event's optional canonical
+    # ``driver_id`` at write time (cross-module-entity-linkage Req 8.2). When
+    # omitted the process-wide resolver is used; validation is skipped when no
+    # ``driver`` loader is registered so partially-wired environments stay
+    # additive/backward-compatible.
+    _ref_resolver = ref_resolver
     _combinable_group_repository = (
         combinable_group_repository or CombinableGroupRepository(es_service)
     )
@@ -729,6 +743,15 @@ def _get_redis_client() -> Any:
     """
 
     return _redis_client
+
+
+def _get_ref_resolver():
+    """Return the shared :class:`RefResolver` used for write-time validation.
+
+    Defaults to the process-wide resolver when one was not injected via
+    :func:`configure_fuel_ops_endpoints` (cross-module-entity-linkage Req 8.2).
+    """
+    return _ref_resolver if _ref_resolver is not None else get_ref_resolver()
 
 
 def _get_cleaning_event_service() -> CleaningEventService:
@@ -1170,6 +1193,15 @@ class CustomerTankCreateRequest(BaseModel):
     k_factor: Optional[float] = Field(default=None, ge=0)
     use_case: Optional[str] = None
     status: CustomerTankStatus = "active"
+    last_refill_order_id: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Optional reference to the fuel order whose delivery most "
+            "recently refilled this tank (cross-module-entity-linkage "
+            "Req 7.2)."
+        ),
+    )
 
 
 class CustomerTankUpdateRequest(BaseModel):
@@ -1196,6 +1228,14 @@ class CustomerTankUpdateRequest(BaseModel):
     k_factor: Optional[float] = Field(default=None, ge=0)
     use_case: Optional[str] = None
     status: Optional[CustomerTankStatus] = None
+    last_refill_order_id: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Associate the fulfilling delivery order with this tank "
+            "(cross-module-entity-linkage Req 7.2)."
+        ),
+    )
 
 
 class CustomerTankListResponse(BaseModel):
@@ -1208,6 +1248,84 @@ class CustomerTankListResponse(BaseModel):
     page: int
     page_size: int
     has_next: bool
+
+
+#: Reference types ``GET /api/fuel/mvp/customer-tanks/{id}?expand=...`` resolves.
+_VALID_CUSTOMER_TANK_EXPAND = ("customer", "last_refill_order")
+
+
+def _parse_customer_tank_expand(expand: Optional[str]) -> set[str]:
+    """Parse a comma-separated ``expand`` query into a set of known tokens.
+
+    Unknown tokens are ignored so the param stays additive/forward-compatible
+    (cross-module-entity-linkage Req 6.3).
+    """
+    if not expand:
+        return set()
+    requested = {tok.strip() for tok in expand.split(",") if tok.strip()}
+    return requested & set(_VALID_CUSTOMER_TANK_EXPAND)
+
+
+class CustomerTankDetailResponse(CustomerTank):
+    """``CustomerTank`` plus a resolved cross-module ``links`` object.
+
+    Returned by ``GET /api/fuel/mvp/customer-tanks/{id}`` only when ``expand``
+    is supplied; each link is either a resolved summary (``{status, id,
+    summary}``) or an explicit ``{status: "unresolved", id}`` / ``{status:
+    "empty", id}`` marker so the UI can render an "unlinked" affordance rather
+    than a silently-dropped field (cross-module-entity-linkage Req 5.4 /
+    Property 4 / 7.3).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    links: Dict[str, Any]
+
+
+async def _build_customer_tank_links(
+    tenant_id: str, tank: CustomerTank, expand: set[str]
+) -> Dict[str, Any]:
+    """Resolve the requested customer-tank references into a ``links`` object.
+
+    All resolution is tenant-scoped via the loaders; references never cross
+    tenants (Req 5.3). A reference is returned resolved or explicitly
+    unresolved — never omitted (Req 5.4). ``last_refill_order`` resolves
+    against the ``order`` entity type since the refilling delivery is a fuel
+    order (Req 7.2).
+    """
+    refs: Dict[str, tuple[str, Optional[str]]] = {}
+    if "customer" in expand:
+        refs["customer"] = ("customer", tank.customer_id)
+    if "last_refill_order" in expand:
+        refs["last_refill_order"] = ("order", tank.last_refill_order_id)
+
+    resolver = _get_ref_resolver()
+    resolved = await resolver.resolve_many(tenant_id, refs)
+    return {key: ref.to_dict() for key, ref in resolved.items()}
+
+
+async def _validate_customer_ref(tenant_id: str, customer_id: Optional[str]) -> None:
+    """Reject a customer-tank write whose ``customer_id`` does not resolve.
+
+    Enforces that the tank's ``customer_id`` references an existing commerce
+    customer in the same tenant at write time (cross-module-entity-linkage
+    Req 7.1). Validation is delegated to the shared ``RefResolver`` and is only
+    enforced when a ``customer`` loader is registered, so a partially-wired
+    environment (e.g. a focused unit test that injects no resolver) stays
+    additive/backward-compatible rather than rejecting every write. Raises
+    ``validation_error`` (HTTP 400, ``details.reason = customer_not_found``)
+    when the reference is non-existent or cross-tenant.
+    """
+    if not customer_id:
+        return
+    resolver = _get_ref_resolver()
+    try:
+        registered = "customer" in resolver.registered_types()
+    except Exception:  # noqa: BLE001 - defensive; never block a write on this
+        registered = False
+    if not registered:
+        return
+    await resolver.validate_ref(tenant_id, "customer", customer_id, required=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1373,20 +1491,37 @@ async def list_customer_tanks(
 
 @mvp_router.get(
     "/customer-tanks/{customer_tank_id}",
-    response_model=CustomerTank,
+    response_model=None,
 )
 async def get_customer_tank(
     customer_tank_id: str,
     request: Request,
     tenant: TenantContext = Depends(get_tenant_context),
-) -> CustomerTank:
+    expand: Optional[str] = Query(
+        default=None,
+        description=(
+            "Comma-separated cross-module references to resolve into a `links` "
+            "object: any of customer,last_refill_order. Omit for the unchanged, "
+            "additive-only customer-tank contract."
+        ),
+    ),
+) -> CustomerTank | CustomerTankDetailResponse:
     """Fetch a single Customer_Tank by id.
 
     Returns HTTP 404 for both "not found" and "owned by another tenant"
     so existence is never leaked across tenants (the repository already
     degrades cross-tenant reads to ``None``).
 
-    Validates: Requirement 1.6.2.
+    When ``expand`` is supplied (cross-module-entity-linkage Req 7.2, 7.3,
+    5.4), the response additionally carries a ``links`` object resolving the
+    requested references (customer / last_refill_order) via the shared
+    ``RefResolver``. Each link is either a resolved summary or an explicit
+    ``unresolved``/``empty`` marker, never silently dropped. Reads without
+    ``expand`` return the pre-existing :class:`CustomerTank` contract unchanged
+    (Req 6.3). All resolution is tenant-scoped; references never cross tenants
+    (Req 5.3).
+
+    Validates: Requirements 1.6.2, 7.2, 7.3, 5.3, 5.4.
     """
 
     repo = _get_customer_tank_repository()
@@ -1403,7 +1538,15 @@ async def get_customer_tank(
                 "customer_tank_id": customer_tank_id,
             },
         )
-    return tank
+
+    requested = _parse_customer_tank_expand(expand)
+    if not requested:
+        # Backward-compatible path: unchanged customer-tank contract (Req 6.3).
+        return tank
+
+    links = await _build_customer_tank_links(tenant.tenant_id, tank, requested)
+    base = tank.model_dump()
+    return CustomerTankDetailResponse(**base, links=links)
 
 
 # ---------------------------------------------------------------------------
@@ -1435,6 +1578,11 @@ async def create_customer_tank(
 
     payload: Dict[str, Any] = body.model_dump(exclude_none=True)
     payload["tenant_id"] = tenant.tenant_id
+
+    # Write-time reference validation: the tank's customer_id must resolve to an
+    # existing commerce customer in this tenant (Req 7.1). Rejected with a
+    # structured 400 (``customer_not_found``) before the tank is persisted.
+    await _validate_customer_ref(tenant.tenant_id, payload.get("customer_id"))
 
     try:
         tank = await repo.create(tenant.tenant_id, payload)
@@ -1505,6 +1653,11 @@ async def update_customer_tank(
                 },
             )
         return existing
+
+    # If the patch reassigns the tank's customer, validate the new reference
+    # resolves to an existing same-tenant commerce customer (Req 7.1).
+    if "customer_id" in patch:
+        await _validate_customer_ref(tenant.tenant_id, patch.get("customer_id"))
 
     try:
         updated = await repo.update(
@@ -1619,6 +1772,44 @@ class DepotListResponse(BaseModel):
     has_next: bool
 
 
+class DepotAssetSummary(BaseModel):
+    """A single asset assigned to a depot (Req 10.2).
+
+    Returned by ``GET /api/fuel/mvp/depots/{depot_id}?expand=assets``. ``name``
+    falls back across the ``asset_name`` / ``name`` document fields so both the
+    fleet-asset and legacy-truck document vintages render a label.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    asset_id: str
+    name: Optional[str] = None
+    asset_type: Optional[str] = None
+    status: Optional[str] = None
+
+
+class DepotReadResponse(BaseModel):
+    """Envelope for ``GET /api/fuel/mvp/depots/{depot_id}`` (Req 10.2, 10.3).
+
+    ``depot`` round-trips the full :class:`Depot` record — including the
+    ``is_default`` flag — so the UI never has to infer the tenant-default depot
+    from a loosely-typed shape. ``assigned_assets`` is populated only when the
+    caller passes ``?expand=assets`` and lists the assets whose
+    ``assigned_depot_id`` points at this depot.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    depot: Depot
+    assigned_assets: Optional[List[DepotAssetSummary]] = Field(
+        default=None,
+        description=(
+            "Present only when ?expand=assets is requested; the tenant's "
+            "assets whose assigned_depot_id references this depot."
+        ),
+    )
+
+
 def _translate_depot_cross_tenant_error(
     exc: DepotCrossTenantAccessError,
 ) -> HTTPException:
@@ -1713,6 +1904,138 @@ async def list_depots(
         page_size=size,
         has_next=has_next,
     )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/fuel/mvp/depots/{depot_id} (Req 10.2, 10.3)
+# ---------------------------------------------------------------------------
+
+
+async def _enumerate_depot_assets(
+    tenant_id: str,
+    depot_id: str,
+    *,
+    size: int = 500,
+) -> List[DepotAssetSummary]:
+    """Return the tenant's assets whose ``assigned_depot_id`` is ``depot_id``.
+
+    Queries the ``assets`` alias (→ ``trucks`` index) tenant-scoped two ways for
+    defense-in-depth: the ES query filters on ``tenant_id`` *and* every returned
+    source is re-validated against the caller's ``tenant_id`` before it is
+    summarised, so a mis-labelled document can never leak across tenants
+    (Req 5.3 / Property 2). A backing-store failure degrades to an empty list
+    rather than failing the depot read.
+
+    Validates: Requirement 10.2.
+    """
+
+    es = _get_es()
+    query = {
+        "query": {
+            "bool": {
+                "must": [
+                    {"term": {"tenant_id": tenant_id}},
+                    {"term": {"assigned_depot_id": depot_id}},
+                ]
+            }
+        },
+        "size": size,
+    }
+    try:
+        resp = await es.search_documents("assets", query, size)
+    except Exception as exc:  # noqa: BLE001 — never 500 the depot read
+        logger.warning(
+            "fuel_ops.depots.get: asset enumeration failed for depot=%s "
+            "tenant=%s: %s",
+            depot_id,
+            tenant_id,
+            exc,
+        )
+        return []
+
+    hits = (resp.get("hits") or {}).get("hits") or [] if resp else []
+    out: List[DepotAssetSummary] = []
+    for hit in hits:
+        source = hit.get("_source") if isinstance(hit, dict) else None
+        if not isinstance(source, dict):
+            continue
+        if source.get("tenant_id") != tenant_id:
+            continue
+        asset_id = source.get("asset_id") or source.get("truck_id")
+        if not asset_id:
+            continue
+        out.append(
+            DepotAssetSummary(
+                asset_id=str(asset_id),
+                name=source.get("asset_name") or source.get("name"),
+                asset_type=source.get("asset_type"),
+                status=source.get("status"),
+            )
+        )
+    return out
+
+
+@mvp_router.get("/depots/{depot_id}", response_model=DepotReadResponse)
+async def get_depot(
+    depot_id: str,
+    request: Request,
+    tenant: TenantContext = Depends(get_tenant_context),
+    expand: Optional[str] = Query(
+        default=None,
+        description=(
+            "Comma-separated expansions. Pass 'assets' to enumerate the "
+            "assets assigned to this depot (Req 10.2)."
+        ),
+    ),
+) -> DepotReadResponse:
+    """Fetch a single Depot owned by the tenant, round-tripping ``is_default``.
+
+    The depot record is returned in full — including the ``is_default`` flag —
+    so the UI renders the tenant-default affordance from the canonical field
+    rather than inferring it (Req 10.3). Passing ``?expand=assets`` additionally
+    lists the assets whose ``assigned_depot_id`` references this depot
+    (Req 10.2).
+
+    Returns 404 when the depot does not exist or belongs to another tenant —
+    a cross-tenant fetch is suppressed to a 404 so depot existence does not
+    leak across tenants.
+
+    Validates: Requirements 10.2, 10.3.
+    """
+
+    repo = _get_depot_repository()
+
+    try:
+        depot = await repo.get(tenant.tenant_id, depot_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    if depot is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error_code": "depot_not_found",
+                "depot_id": depot_id,
+            },
+        )
+
+    expansions = {
+        part.strip() for part in (expand or "").split(",") if part.strip()
+    }
+    assigned_assets: Optional[List[DepotAssetSummary]] = None
+    if "assets" in expansions:
+        assigned_assets = await _enumerate_depot_assets(
+            tenant.tenant_id, depot_id
+        )
+
+    logger.debug(
+        "fuel_ops.depots.get: tenant=%s depot=%s expand=%s assets=%s",
+        tenant.tenant_id,
+        depot_id,
+        sorted(expansions),
+        None if assigned_assets is None else len(assigned_assets),
+    )
+    return DepotReadResponse(depot=depot, assigned_assets=assigned_assets)
 
 
 # ---------------------------------------------------------------------------
@@ -2259,7 +2582,23 @@ class CleaningEventCreateRequest(BaseModel):
     actor_id: str = Field(
         ...,
         min_length=1,
-        description="User / service principal that recorded the cleaning.",
+        description=(
+            "User / service principal that recorded the cleaning. "
+            "DEPRECATED as a canonical reference — prefer ``driver_id`` "
+            "below. Retained as a free-text alias for backward "
+            "compatibility (cross-module-entity-linkage Req 8.2)."
+        ),
+    )
+    driver_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Canonical, resolvable driver reference for the actor that "
+            "performed the cleaning (cross-module-entity-linkage Req 8.2). "
+            "Supersedes the free-text ``actor_id`` alias. Optional/nullable; "
+            "when supplied it is validated against the Drivers module in the "
+            "requesting tenant and a non-existent driver is rejected with "
+            "HTTP 400 ``driver_not_found``."
+        ),
     )
     notes: Optional[str] = Field(
         default=None,
@@ -2401,6 +2740,31 @@ async def record_cleaning_event(
                     },
                 )
 
+    # Validate the optional canonical driver reference (Req 8.2). When a
+    # ``driver_id`` is supplied we assert it resolves to an existing driver in
+    # this tenant via the shared RefResolver; a non-existent / cross-tenant id
+    # is rejected with HTTP 400 ``driver_not_found``. Validation is skipped when
+    # no ``driver`` loader is registered so partially-wired environments remain
+    # additive/backward-compatible (the field simply persists unvalidated).
+    if body.driver_id and body.driver_id.strip():
+        resolver = _get_ref_resolver()
+        if resolver is not None and "driver" in resolver.registered_types():
+            driver_ref = await resolver.resolve(
+                tenant.tenant_id, "driver", body.driver_id.strip()
+            )
+            if not driver_ref.is_resolved:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "error_code": "driver_not_found",
+                        "message": (
+                            "Referenced driver does not exist in this tenant."
+                        ),
+                        "field": "driver_id",
+                        "driver_id": body.driver_id,
+                    },
+                )
+
     try:
         event = await cleaning_service.record(
             tenant_id=tenant.tenant_id,
@@ -2410,6 +2774,7 @@ async def record_cleaning_event(
             actor_id=body.actor_id,
             notes=body.notes,
             evidence_refs=body.evidence_refs,
+            driver_id=body.driver_id,
         )
     except CompartmentNotFoundError:
         # Another caller deleted the compartment between our pre-flight
@@ -4913,6 +5278,25 @@ def _terminal_local_datetime(
     return _to_local_datetime(value, terminal.timezone)
 
 
+def _ensure_fuel_admin_role(tenant: TenantContext) -> None:
+    """Admin-gate the Terminal / Supplier_Contract management surface.
+
+    Task 8.1 of cross-module-entity-linkage scopes the canonical Terminal
+    and Supplier_Contract records to a *thin* admin-managed surface:
+    reads (list / get) stay open to any authenticated tenant member so
+    the Sourcing UI and the ``<EntityLink>`` resolver can resolve a
+    reference, but every state-changing operation (create / update /
+    deactivate / delete) is restricted to the canonical ``admin`` role
+    via the shared exact-match :func:`auth.authorization.require_role`
+    helper. A non-admin caller receives HTTP 403 ``INSUFFICIENT_ROLE``
+    without the held-role lexicon being echoed back.
+
+    Validates: Requirements 9.1, 9.2.
+    """
+
+    require_role(tenant, "admin")
+
+
 @router.get("/terminals", response_model=TerminalListResponse)
 async def list_terminals(
     request: Request,
@@ -5023,6 +5407,8 @@ async def create_terminal(
     Validates: Requirement 8.1.2.
     """
 
+    _ensure_fuel_admin_role(tenant)
+
     repo = _get_terminal_repository()
 
     payload: Dict[str, Any] = body.model_dump(exclude_none=True)
@@ -5088,6 +5474,8 @@ async def update_terminal(
 
     Validates: Requirement 8.1.2.
     """
+
+    _ensure_fuel_admin_role(tenant)
 
     repo = _get_terminal_repository()
 
@@ -5161,6 +5549,8 @@ async def delete_terminal(
     Validates: Requirement 8.1.2.
     """
 
+    _ensure_fuel_admin_role(tenant)
+
     repo = _get_terminal_repository()
 
     try:
@@ -5184,6 +5574,68 @@ async def delete_terminal(
         terminal_id,
     )
     return None
+
+
+@router.post("/terminals/{terminal_id}/deactivate", response_model=Terminal)
+async def deactivate_terminal(
+    terminal_id: str,
+    request: Request,
+    tenant: TenantContext = Depends(get_tenant_context),
+) -> Terminal:
+    """Deactivate a Terminal by flipping its ``status`` to ``inactive``.
+
+    The minimal admin management surface (Task 8.1) prefers a reversible
+    deactivation over the hard ``DELETE`` so a terminal referenced by
+    historical sourcing recommendations, terminal BOLs, or wait reports
+    still resolves through the ``<EntityLink>`` resolver (the reference
+    stays "linked" rather than dangling as "unlinked") while being
+    excluded from the active picker. Deactivation is idempotent — calling
+    it on an already-inactive terminal returns the record unchanged.
+
+    * Owned → HTTP 200 with the updated Terminal (``status=inactive``).
+    * Not-found / cross-tenant read → HTTP 404 ``terminal_not_found``.
+    * Cross-tenant write → HTTP 403 ``cross_tenant_access_denied``.
+    * Non-admin caller → HTTP 403 ``INSUFFICIENT_ROLE``.
+
+    Validates: Requirements 9.1, 9.2.
+    """
+
+    _ensure_fuel_admin_role(tenant)
+
+    repo = _get_terminal_repository()
+
+    # Load-or-404 first so a missing/cross-tenant id never leaks existence
+    # and an already-inactive terminal short-circuits to an idempotent 200.
+    existing = await _ensure_terminal_owned(tenant.tenant_id, terminal_id)
+    if existing.status == "inactive":
+        return existing
+
+    try:
+        updated = await repo.update(
+            tenant_id=tenant.tenant_id,
+            terminal_id=terminal_id,
+            patch={"status": "inactive"},
+        )
+    except TerminalCrossTenantAccessError as exc:
+        raise _translate_terminal_cross_tenant_error(exc)
+    except (ValidationError, ValueError, TypeError) as exc:
+        raise _translate_validation_error(exc)
+
+    if updated is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error_code": "terminal_not_found",
+                "terminal_id": terminal_id,
+            },
+        )
+
+    logger.info(
+        "fuel_ops.terminals.deactivate: tenant=%s terminal=%s",
+        tenant.tenant_id,
+        terminal_id,
+    )
+    return updated
 
 
 @router.post(
@@ -6625,6 +7077,8 @@ async def create_supplier_contract(
     Validates: Requirement 8.3.2.
     """
 
+    _ensure_fuel_admin_role(tenant)
+
     repo = _get_supplier_contract_repository()
 
     payload: Dict[str, Any] = body.model_dump(exclude_none=True)
@@ -6684,6 +7138,8 @@ async def update_supplier_contract(
 
     Validates: Requirement 8.3.2.
     """
+
+    _ensure_fuel_admin_role(tenant)
 
     repo = _get_supplier_contract_repository()
 
@@ -6771,6 +7227,8 @@ async def delete_supplier_contract(
     Validates: Requirement 8.3.2.
     """
 
+    _ensure_fuel_admin_role(tenant)
+
     repo = _get_supplier_contract_repository()
 
     try:
@@ -6795,6 +7253,83 @@ async def delete_supplier_contract(
         contract_id,
     )
     return None
+
+
+# ---------------------------------------------------------------------------
+# POST /api/fuel/supplier-contracts/{contract_id}/deactivate (Task 8.1)
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/supplier-contracts/{contract_id}/deactivate",
+    response_model=SupplierContractResponse,
+)
+async def deactivate_supplier_contract(
+    contract_id: str,
+    request: Request,
+    tenant: TenantContext = Depends(get_tenant_context),
+) -> SupplierContractResponse:
+    """Deactivate a Supplier_Contract by flipping ``status`` to ``inactive``.
+
+    Mirrors :func:`deactivate_terminal`: the thin admin management
+    surface (Task 8.1) prefers a reversible deactivation over the hard
+    ``DELETE`` so a contract still referenced by historical sourcing
+    recommendations resolves through the ``<EntityLink>`` resolver
+    (the reference stays "linked") while dropping out of the active
+    picker. Deactivation is idempotent.
+
+    * Owned → HTTP 200 with the updated contract (``status=inactive``).
+    * Not-found / cross-tenant read → HTTP 404 ``supplier_contract_not_found``.
+    * Cross-tenant write → HTTP 403 ``cross_tenant_access_denied``.
+    * Non-admin caller → HTTP 403 ``INSUFFICIENT_ROLE``.
+
+    Validates: Requirements 9.1, 9.2.
+    """
+
+    _ensure_fuel_admin_role(tenant)
+
+    repo = _get_supplier_contract_repository()
+
+    # Load-or-404 first so a missing/cross-tenant id never leaks existence
+    # and an already-inactive contract short-circuits to an idempotent 200.
+    existing = await repo.get(tenant.tenant_id, contract_id)
+    if existing is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error_code": "supplier_contract_not_found",
+                "contract_id": contract_id,
+            },
+        )
+    if existing.status == "inactive":
+        return await _build_contract_response(existing)
+
+    try:
+        updated = await repo.update(
+            tenant_id=tenant.tenant_id,
+            contract_id=contract_id,
+            patch={"status": "inactive"},
+        )
+    except TerminalCrossTenantAccessError as exc:
+        raise _translate_supplier_contract_cross_tenant_error(exc)
+    except (ValidationError, ValueError, TypeError) as exc:
+        raise _translate_validation_error(exc)
+
+    if updated is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error_code": "supplier_contract_not_found",
+                "contract_id": contract_id,
+            },
+        )
+
+    logger.info(
+        "fuel_ops.supplier_contracts.deactivate: tenant=%s contract=%s",
+        tenant.tenant_id,
+        contract_id,
+    )
+    return await _build_contract_response(updated)
 
 
 __all__ = [

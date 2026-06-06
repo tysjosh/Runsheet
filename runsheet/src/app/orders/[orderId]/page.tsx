@@ -16,6 +16,7 @@ import {
   Truck,
   User,
 } from "lucide-react";
+import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { ApiError } from "../../../services/api";
@@ -29,6 +30,7 @@ import {
   getOrderEvents,
   holdOrder,
   type OrderStatus,
+  type ResolvedLink,
   releaseHoldOrder,
   updateOrderStatus,
 } from "../../../services/ordersApi";
@@ -60,6 +62,80 @@ function getStatusColor(status: OrderStatus): string {
     on_hold: "bg-warning-light text-warning-dark",
   };
   return map[status] ?? "bg-gray-100 text-gray-700";
+}
+
+// ─── Linked Reference Field (cross-module-entity-linkage Req 2.4, 13.1) ───────
+
+/** Pull a human label out of a resolved reference summary. */
+function summaryLabel(summary: Record<string, unknown>): string | undefined {
+  for (const key of [
+    "display_name",
+    "legal_name",
+    "name",
+    "driver_name",
+    "customer_name",
+  ]) {
+    const value = summary[key];
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return undefined;
+}
+
+interface LinkedRefFieldProps {
+  /** The resolver link for this reference (undefined when not expanded). */
+  link: ResolvedLink | undefined;
+  /** Fallback id from the order document when the link was not expanded. */
+  fallbackId?: string | null;
+  /** Builds the destination href for a resolvable id. */
+  href: (id: string) => string;
+}
+
+/**
+ * Renders a cross-module reference as navigation to the owning module when it
+ * resolves, or an explicit "Unlinked" affordance when it does not — never an
+ * inert id string for a dangling reference (Req 2.4, 13.1, 13.3). Mirrors the
+ * ``LinkedRefField`` used by the Job detail view for cross-module consistency.
+ */
+function LinkedRefField({ link, fallbackId, href }: LinkedRefFieldProps) {
+  if (link?.status === "resolved") {
+    const display = summaryLabel(link.summary) ?? link.id;
+    return (
+      <Link
+        href={href(link.id)}
+        className="text-info hover:text-info-dark underline underline-offset-2"
+      >
+        {display}
+        {display !== link.id && (
+          <span className="text-gray-400"> ({link.id})</span>
+        )}
+      </Link>
+    );
+  }
+
+  if (link?.status === "unresolved") {
+    return (
+      <span className="inline-flex items-center gap-1.5">
+        <span className="text-gray-500">{link.id}</span>
+        <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium text-warning-dark bg-warning-light">
+          Unlinked
+        </span>
+      </span>
+    );
+  }
+
+  if (fallbackId) {
+    // Not expanded but the order document carries the id — link optimistically.
+    return (
+      <Link
+        href={href(fallbackId)}
+        className="text-info hover:text-info-dark underline underline-offset-2"
+      >
+        {fallbackId}
+      </Link>
+    );
+  }
+
+  return <span className="text-gray-400">—</span>;
 }
 
 // ─── Toast ───────────────────────────────────────────────────────────────────
@@ -675,7 +751,7 @@ export default function OrderDetailPage() {
     setError(null);
     try {
       const [orderRes, eventsRes] = await Promise.all([
-        getOrder(orderId),
+        getOrder(orderId, { expand: ["customer", "asset", "driver"] }),
         getOrderEvents(orderId),
       ]);
       setOrder(orderRes.data);
@@ -795,7 +871,27 @@ export default function OrderDetailPage() {
               <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
                 <dt className="text-gray-500">Customer</dt>
                 <dd className="text-gray-900">
-                  {order.customer_name} ({order.customer_id})
+                  {order.links?.customer?.status === "unresolved" ? (
+                    <span className="inline-flex items-center gap-1.5">
+                      <span className="text-gray-500">
+                        {order.customer_name || order.customer_id}
+                      </span>
+                      <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium text-warning-dark bg-warning-light">
+                        Unlinked
+                      </span>
+                    </span>
+                  ) : (
+                    <Link
+                      href={`/commerce/customers/${encodeURIComponent(order.customer_id)}`}
+                      className="text-info hover:text-info-dark underline underline-offset-2"
+                    >
+                      {(order.links?.customer?.status === "resolved"
+                        ? (summaryLabel(order.links.customer.summary) ??
+                          order.customer_name)
+                        : order.customer_name) || order.customer_id}{" "}
+                      ({order.customer_id})
+                    </Link>
+                  )}
                 </dd>
 
                 <dt className="text-gray-500">Address</dt>
@@ -879,14 +975,18 @@ export default function OrderDetailPage() {
 
           {/* Sidebar */}
           <div className="space-y-6">
-            {/* Assigned Driver Card */}
-            {order.assigned_driver_id && (
+            {/* Assigned Driver Card — navigable to the Drivers module (Req 2.4,
+                13.1); an unresolved reference shows an explicit "Unlinked"
+                affordance rather than a dead id string (Req 13.3). */}
+            {(order.assigned_driver_id ||
+              order.links?.driver?.status === "resolved" ||
+              order.links?.driver?.status === "unresolved") && (
               <div
                 className="bg-white rounded-xl shadow-sm border border-gray-100 p-4"
                 data-testid="assigned-driver-card"
               >
                 <h3 className="text-sm font-semibold text-primary mb-3 flex items-center gap-2">
-                  <Truck className="w-4 h-4" />
+                  <User className="w-4 h-4" />
                   Assigned Driver
                 </h3>
                 <div className="flex items-center gap-3">
@@ -894,8 +994,14 @@ export default function OrderDetailPage() {
                     <User className="w-5 h-5 text-gray-500" />
                   </div>
                   <div>
-                    <p className="text-sm font-medium text-primary">
-                      {order.assigned_driver_id}
+                    <p className="text-sm font-medium">
+                      <LinkedRefField
+                        link={order.links?.driver}
+                        fallbackId={order.assigned_driver_id}
+                        href={(id) =>
+                          `/ops/drivers?driver=${encodeURIComponent(id)}`
+                        }
+                      />
                     </p>
                     {order.assigned_run_id && (
                       <p className="text-xs text-gray-500">
@@ -903,6 +1009,34 @@ export default function OrderDetailPage() {
                       </p>
                     )}
                   </div>
+                </div>
+              </div>
+            )}
+
+            {/* Assigned Asset Card — navigable to the Fleet/tracking module
+                (Req 2.4, 13.1); unresolved references render "Unlinked". */}
+            {(order.assigned_asset_id ||
+              order.links?.asset?.status === "resolved" ||
+              order.links?.asset?.status === "unresolved") && (
+              <div
+                className="bg-white rounded-xl shadow-sm border border-gray-100 p-4"
+                data-testid="assigned-asset-card"
+              >
+                <h3 className="text-sm font-semibold text-primary mb-3 flex items-center gap-2">
+                  <Truck className="w-4 h-4" />
+                  Assigned Asset
+                </h3>
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-full bg-gray-100 flex items-center justify-center">
+                    <Truck className="w-5 h-5 text-gray-500" />
+                  </div>
+                  <p className="text-sm font-medium">
+                    <LinkedRefField
+                      link={order.links?.asset}
+                      fallbackId={order.assigned_asset_id}
+                      href={(id) => `/ops/tracking/${encodeURIComponent(id)}`}
+                    />
+                  </p>
                 </div>
               </div>
             )}

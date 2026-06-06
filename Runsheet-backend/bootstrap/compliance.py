@@ -306,6 +306,27 @@ async def initialize(app, container: ServiceContainer) -> None:
         # Configure the REST API endpoints
         configure_driver_api(driver_service=driver_service)
         logger.info("Driver Qualification API configured")
+
+        # Cross-module-entity-linkage task 4: inject the qualification service
+        # into the ops Drivers endpoints so the correlated profile read
+        # (GET /api/ops/drivers/{driver_id}/profile) can surface qualification
+        # status by driver_id. Fuel bootstrap runs before compliance, so this
+        # is a deferred injection.
+        try:
+            from fuel.api.driver_endpoints import (
+                set_driver_qualification_service,
+            )
+
+            set_driver_qualification_service(driver_service)
+            logger.info(
+                "Driver profile correlation wired with qualification service"
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to wire qualification service into ops driver "
+                "endpoints (task 4): %s",
+                exc,
+            )
     except Exception as exc:
         logger.warning(
             "Driver Qualification API wiring failed (task 6.9): %s", exc
@@ -468,9 +489,14 @@ async def initialize(app, container: ServiceContainer) -> None:
         asset_cert_service = AssetCertificationService(es_service=es_service)
         container.asset_certification_service = asset_cert_service
 
-        # Configure the REST API endpoints
+        # Configure the REST API endpoints. Pass the shared RefResolver so the
+        # create path validates the certification's asset subject_ref in-tenant
+        # (cross-module-entity-linkage task 10, Req 11.1).
+        from services.ref_resolver import get_ref_resolver as _get_ref_resolver
+
         configure_asset_certification_api(
-            asset_certification_service=asset_cert_service
+            asset_certification_service=asset_cert_service,
+            ref_resolver=_get_ref_resolver(),
         )
         logger.info("Asset Certification API configured")
 
@@ -509,6 +535,42 @@ async def initialize(app, container: ServiceContainer) -> None:
         logger.info("Meter Audit API configured")
     except Exception as exc:
         logger.warning("MeterAuditService wiring failed: %s", exc)
+
+    # ── Asset Compliance Status API (cross-module-entity-linkage task 10.2) ──
+    # Aggregates an asset's certification + meter status into a single
+    # chip-friendly ``overall_status`` consumable by the Fleet assignment
+    # surface (GET /api/fleet/assets/{asset_id}/compliance) so an operator does
+    # not dispatch a non-compliant asset (Req 11.2). Depends on both the asset
+    # certification and meter services wired above; wired here once both exist.
+    try:
+        from compliance.services.asset_compliance_status_service import (
+            AssetComplianceStatusService,
+        )
+        from compliance.api.asset_compliance_endpoints import (
+            configure_asset_compliance_api,
+        )
+
+        if container.has("asset_certification_service") and container.has(
+            "meter_audit_service"
+        ):
+            asset_compliance_service = AssetComplianceStatusService(
+                certification_service=container.asset_certification_service,
+                meter_audit_service=container.meter_audit_service,
+            )
+            container.asset_compliance_status_service = asset_compliance_service
+            configure_asset_compliance_api(
+                asset_compliance_status_service=asset_compliance_service
+            )
+            logger.info("Asset Compliance Status API configured (task 10.2)")
+        else:
+            logger.warning(
+                "Asset Compliance Status API not wired (task 10.2): "
+                "certification or meter service missing from container."
+            )
+    except Exception as exc:
+        logger.warning(
+            "Asset Compliance Status API wiring failed (task 10.2): %s", exc
+        )
 
     # ── Asset Certification Expiry Cron (Task 8.11 / Req 13.2–13.4) ──
     # Daily autonomous agent that runs check_expiry_alerts() for all

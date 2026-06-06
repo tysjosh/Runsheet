@@ -107,6 +107,28 @@ class DriverDashboardEntry(BaseModel):
     qualifications: List[QualificationAlert] = Field(default_factory=list)
 
 
+class DriverQualificationSummary(BaseModel):
+    """Compact per-driver qualification summary keyed by ``driver_id``.
+
+    Returned by :meth:`DriverQualificationService.get_qualification_summary`
+    for the cross-module driver correlation profile read
+    (``GET /api/ops/drivers/{driver_id}/profile``). ``overall_status`` collapses
+    the per-qualification alerts into a single chip-friendly signal so the
+    Drivers → Utilization surface can flag expired/expiring drivers at the
+    assignment decision point.
+
+    Validates: cross-module-entity-linkage Requirements 4.2, 4.3.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    driver_id: str
+    full_name: str
+    driver_status: str  # active | suspended | expired
+    overall_status: str  # valid | expiring | expired
+    qualifications: List[QualificationAlert] = Field(default_factory=list)
+
+
 class DQFDashboard(BaseModel):
     """Driver Qualification File compliance dashboard."""
 
@@ -606,6 +628,90 @@ class DriverQualificationService:
             driver_id=driver_id,
             eligible=eligible,
             reasons=reasons,
+        )
+
+    # ------------------------------------------------------------------
+    # Qualification summary (cross-module-entity-linkage Task 4)
+    # ------------------------------------------------------------------
+
+    async def get_qualification_summary(
+        self, tenant_id: str, driver_id: str
+    ) -> DriverQualificationSummary:
+        """Return a compact qualification summary for a single driver.
+
+        Correlates the compliance qualification record (the ``drivers`` index)
+        for ``driver_id`` and collapses the per-qualification expiry signals
+        into a single ``overall_status`` (``valid`` / ``expiring`` / ``expired``)
+        suitable for a status chip on the ops Drivers → Utilization surface.
+
+        The expiry thresholds mirror :meth:`get_dqf_dashboard`:
+
+        * past expiry            → ``expired``
+        * ≤60 days until expiry  → ``expiring``
+        * otherwise              → ``valid``
+
+        A driver whose compliance ``status`` is ``suspended``/``expired`` is
+        always surfaced as ``expired`` regardless of individual expiry dates,
+        since they are not road-legal for assignment (Req 4.3).
+
+        Raises ``resource_not_found`` when the driver has no compliance
+        qualification record in this tenant; callers correlating from the ops
+        utilization store treat that as an unresolved reference.
+
+        Validates: Requirements 4.2, 4.3.
+        """
+        driver = await self.get(tenant_id, driver_id)
+        today = date.today()
+
+        qualifications: List[QualificationAlert] = []
+        worst = "valid"
+
+        for field_name, qualification_type in self._QUALIFICATION_FIELDS:
+            expiry_raw = driver.get(field_name)
+            if expiry_raw is None:
+                continue
+
+            expiry_date = self._parse_date(expiry_raw)
+            if expiry_date is None:
+                continue
+
+            days_until_expiry = (expiry_date - today).days
+
+            if days_until_expiry < 0:
+                alert_level, qual_status = "expired", "expired"
+            elif days_until_expiry <= ALERT_THRESHOLD_CRITICAL_DAYS:
+                alert_level, qual_status = "critical", "expiring_soon"
+            elif days_until_expiry <= ALERT_THRESHOLD_URGENT_DAYS:
+                alert_level, qual_status = "urgent", "expiring_soon"
+            elif days_until_expiry <= ALERT_THRESHOLD_WARNING_DAYS:
+                alert_level, qual_status = "warning", "expiring_soon"
+            else:
+                alert_level, qual_status = "ok", "valid"
+
+            qualifications.append(
+                QualificationAlert(
+                    qualification_type=qualification_type,
+                    expiry_date=expiry_date,
+                    days_until_expiry=days_until_expiry,
+                    alert_level=alert_level,
+                    status=qual_status,
+                )
+            )
+
+            if qual_status == "expired":
+                worst = "expired"
+            elif qual_status == "expiring_soon" and worst != "expired":
+                worst = "expiring"
+
+        driver_status = driver.get("status", "active")
+        overall_status = "expired" if driver_status in ("suspended", "expired") else worst
+
+        return DriverQualificationSummary(
+            driver_id=driver_id,
+            full_name=driver.get("full_name", ""),
+            driver_status=driver_status,
+            overall_status=overall_status,
+            qualifications=qualifications,
         )
 
     @staticmethod

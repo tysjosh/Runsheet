@@ -25,10 +25,11 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from errors.exceptions import resource_not_found
+from errors.exceptions import AppException, resource_not_found
 from auth.authorization import require_role
 from fuel.order_models import Driver, DriverStatus
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
+from services.ref_resolver import get_ref_resolver
 from services.time_utils import utcnow
 
 logger = logging.getLogger(__name__)
@@ -48,19 +49,51 @@ ROUTER_AUTH_POLICY = "jwt_required"
 # ---------------------------------------------------------------------------
 
 _driver_repository: Any = None
+#: Resolver used to expand cross-module references on reads (the
+#: ``assigned_truck_id`` → fleet asset link for the profile read). Defaults to
+#: the process-wide resolver; tests may inject one pre-loaded with fake loaders.
+_ref_resolver: Any = None
+#: Compliance driver-qualification service used to correlate qualification
+#: status by ``driver_id``. Wired by the compliance bootstrap (which runs after
+#: fuel), so it is injected via :func:`set_driver_qualification_service`.
+_driver_qualification_service: Any = None
 
 
 def configure_driver_endpoints(
     *,
     driver_repository: Any,
+    ref_resolver: Any = None,
+    driver_qualification_service: Any = None,
 ) -> None:
     """Wire service dependencies into the driver endpoints module.
 
     Called once during application startup (from ``bootstrap/fuel.py``).
     Tests inject fakes so the router can be exercised without ES.
+
+    ``ref_resolver`` overrides the process-wide resolver used to resolve the
+    ``assigned_truck_id`` → fleet asset link on the profile read; when omitted
+    the shared resolver is used. ``driver_qualification_service`` correlates the
+    compliance qualification record by ``driver_id`` (may also be injected later
+    via :func:`set_driver_qualification_service`).
     """
-    global _driver_repository
+    global _driver_repository, _ref_resolver, _driver_qualification_service
     _driver_repository = driver_repository
+    if ref_resolver is not None:
+        _ref_resolver = ref_resolver
+    if driver_qualification_service is not None:
+        _driver_qualification_service = driver_qualification_service
+
+
+def set_driver_qualification_service(driver_qualification_service: Any) -> None:
+    """Inject the compliance ``DriverQualificationService`` post-construction.
+
+    Compliance bootstrap runs after fuel, so the qualification service is
+    wired here once it exists. When absent, the profile read degrades the
+    qualification correlation to an explicit ``unresolved`` marker rather than
+    failing the read.
+    """
+    global _driver_qualification_service
+    _driver_qualification_service = driver_qualification_service
 
 
 def _get_driver_repository():
@@ -71,6 +104,11 @@ def _get_driver_repository():
             "Call configure_driver_endpoints() during startup."
         )
     return _driver_repository
+
+
+def _get_ref_resolver():
+    """Return the resolver used to resolve the truck → asset link."""
+    return _ref_resolver if _ref_resolver is not None else get_ref_resolver()
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +251,29 @@ class DriverUtilizationResponse(BaseModel):
     total: int
 
 
+class DriverProfileResponse(BaseModel):
+    """Correlated driver profile for ``GET /api/ops/drivers/{driver_id}/profile``.
+
+    Joins the ops ``driver_utilization`` record with two cross-module
+    references resolved by ``driver_id`` (Req 4.1–4.3):
+
+    * ``assigned_truck`` — the driver's ``assigned_truck_id`` resolved to a
+      fleet asset summary via the shared ``RefResolver`` (or an explicit
+      ``{status: "unresolved", id}`` / ``{status: "empty", id}`` marker).
+    * ``qualification`` — the compliance qualification summary keyed by the
+      same ``driver_id`` (``{status: "resolved", summary: {...}}`` or an
+      explicit ``{status: "unresolved", driver_id}`` when no compliance record
+      exists in this tenant).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    driver_id: str
+    utilization: DriverUtilizationItem
+    assigned_truck: Dict[str, Any]
+    qualification: Dict[str, Any]
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -280,6 +341,66 @@ def _compute_on_duty_minutes_today(driver: Driver) -> int:
     return max(0, minutes)
 
 
+def _build_utilization_item(driver: Driver) -> DriverUtilizationItem:
+    """Build a :class:`DriverUtilizationItem` from a Driver model.
+
+    Shared by the utilization list and the correlated profile read so both
+    surfaces compute identical warnings / on-duty estimates.
+    """
+    warnings = _compute_qualification_warnings(driver)
+    on_duty = _compute_on_duty_minutes_today(driver)
+    dumped = driver.model_dump(mode="json")
+    return DriverUtilizationItem(
+        driver_id=driver.driver_id,
+        driver_name=driver.driver_name,
+        status=driver.status,
+        active_order_count=driver.active_order_count,
+        completed_today=driver.completed_today,
+        last_seen=dumped.get("last_seen"),
+        current_location=dumped.get("current_location"),
+        on_duty_minutes_today=on_duty,
+        qualification_warnings=warnings,
+        medical_card_expiry=dumped.get("medical_card_expiry"),
+        assigned_truck_id=driver.assigned_truck_id,
+        cdl_class=driver.cdl_class,
+        hazmat_endorsement=driver.hazmat_endorsement,
+    )
+
+
+async def _resolve_qualification_summary(
+    tenant_id: str, driver_id: str
+) -> Dict[str, Any]:
+    """Correlate the compliance qualification record for ``driver_id``.
+
+    Returns a resolution-marked payload mirroring ``RefResolver`` semantics so
+    the reference is never silently dropped (Req 4.2, 5.4):
+
+    * service unavailable / no compliance record → ``{status: "unresolved", ...}``
+    * compliance record found → ``{status: "resolved", summary: {...}}``
+    """
+    svc = _driver_qualification_service
+    if svc is None:
+        return {"status": "unresolved", "driver_id": driver_id}
+    try:
+        summary = await svc.get_qualification_summary(tenant_id, driver_id)
+    except AppException:
+        # No compliance qualification record in this tenant — unresolved.
+        return {"status": "unresolved", "driver_id": driver_id}
+    except Exception as exc:  # noqa: BLE001 - defensive; never 500 the read
+        logger.warning(
+            "Qualification correlation failed for driver %s (tenant %s): %s",
+            driver_id,
+            tenant_id,
+            exc,
+        )
+        return {"status": "unresolved", "driver_id": driver_id}
+    return {
+        "status": "resolved",
+        "driver_id": driver_id,
+        "summary": summary.model_dump(mode="json"),
+    }
+
+
 # ---------------------------------------------------------------------------
 # GET /api/ops/drivers (Req 3.1.2)
 # ---------------------------------------------------------------------------
@@ -332,28 +453,9 @@ async def get_driver_utilization(
     repo = _get_driver_repository()
     drivers = await repo.list_for_tenant(tenant.tenant_id)
 
-    items: List[DriverUtilizationItem] = []
-    for driver in drivers:
-        warnings = _compute_qualification_warnings(driver)
-        on_duty = _compute_on_duty_minutes_today(driver)
-        dumped = driver.model_dump(mode="json")
-        items.append(
-            DriverUtilizationItem(
-                driver_id=driver.driver_id,
-                driver_name=driver.driver_name,
-                status=driver.status,
-                active_order_count=driver.active_order_count,
-                completed_today=driver.completed_today,
-                last_seen=dumped.get("last_seen"),
-                current_location=dumped.get("current_location"),
-                on_duty_minutes_today=on_duty,
-                qualification_warnings=warnings,
-                medical_card_expiry=dumped.get("medical_card_expiry"),
-                assigned_truck_id=driver.assigned_truck_id,
-                cdl_class=driver.cdl_class,
-                hazmat_endorsement=driver.hazmat_endorsement,
-            )
-        )
+    items: List[DriverUtilizationItem] = [
+        _build_utilization_item(driver) for driver in drivers
+    ]
 
     return DriverUtilizationResponse(items=items, total=len(items))
 
@@ -382,6 +484,59 @@ async def get_driver(
             details={"driver_id": driver_id},
         )
     return DriverResponse.from_model(driver)
+
+
+# ---------------------------------------------------------------------------
+# GET /api/ops/drivers/{driver_id}/profile (Req 4.1, 4.2, 4.3, 13.1)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/{driver_id}/profile", response_model=DriverProfileResponse)
+async def get_driver_profile(
+    driver_id: str,
+    tenant: TenantContext = Depends(get_tenant_context),
+) -> DriverProfileResponse:
+    """Return a correlated driver profile keyed by ``driver_id``.
+
+    Joins the ops ``driver_utilization`` record with (a) the
+    ``assigned_truck_id`` resolved to a fleet asset summary via the shared
+    ``RefResolver`` and (b) the compliance qualification summary keyed by the
+    same ``driver_id``. References that do not resolve in this tenant are
+    returned with an explicit ``unresolved`` marker rather than omitted
+    (Req 5.4); all reads are tenant-scoped and never cross tenants (Req 5.3).
+
+    Returns 404 on a missing or cross-tenant driver. Any authenticated role
+    can read the profile.
+
+    Validates: Requirements 4.1, 4.2, 4.3, 13.1.
+    """
+    repo = _get_driver_repository()
+    driver = await repo.get(tenant.tenant_id, driver_id)
+    if driver is None:
+        raise resource_not_found(
+            message=f"Driver '{driver_id}' not found",
+            details={"driver_id": driver_id},
+        )
+
+    utilization = _build_utilization_item(driver)
+
+    # Resolve assigned_truck_id → fleet asset (tenant-scoped; cross-tenant or
+    # missing ids resolve to an explicit "unresolved" marker).
+    resolver = _get_ref_resolver()
+    truck_ref = await resolver.resolve(
+        tenant.tenant_id, "asset", driver.assigned_truck_id
+    )
+
+    qualification = await _resolve_qualification_summary(
+        tenant.tenant_id, driver_id
+    )
+
+    return DriverProfileResponse(
+        driver_id=driver_id,
+        utilization=utilization,
+        assigned_truck=truck_ref.to_dict(),
+        qualification=qualification,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -480,4 +635,5 @@ async def update_driver(
 __all__ = [
     "router",
     "configure_driver_endpoints",
+    "set_driver_qualification_service",
 ]

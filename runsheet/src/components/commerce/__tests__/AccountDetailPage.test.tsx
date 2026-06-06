@@ -262,4 +262,29 @@ describe("AccountDetailPage", () => {
     );
     expect(onViewCustomer).toHaveBeenCalledWith("cust_001");
   });
+
+  it("renders a navigable EntityLink to the customer when no callback is supplied", async () => {
+    mockGetAccount.mockResolvedValue({
+      data: accountFixture(),
+      request_id: "r1",
+    } as any);
+    mockGetAccountAging.mockResolvedValue({
+      data: agingFixture(),
+      request_id: "r2",
+    } as any);
+
+    render(<AccountDetailPage accountId="acc_001" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Acme Main Account")).toBeInTheDocument();
+    });
+
+    // Without an in-hub callback the customer reference links to the canonical
+    // customer detail route (Req 12.4, 13.1).
+    const customerLink = screen.getByRole("link", { name: /cust_001/ });
+    expect(customerLink).toHaveAttribute(
+      "href",
+      "/commerce/customers/cust_001",
+    );
+  });
 });

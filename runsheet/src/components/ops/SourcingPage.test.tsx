@@ -39,6 +39,7 @@ jest.mock("../../services/fuelApi", () => {
     getSourcingRecommendations: jest.fn(),
     listRackPrices: jest.fn(),
     listSupplierContracts: jest.fn(),
+    listTerminals: jest.fn(),
     getTerminalWaitSummary: jest.fn(),
     submitTerminalWaitReport: jest.fn(),
   };
@@ -48,6 +49,7 @@ import type {
   RackPriceListResponse,
   SourcingRecommendation,
   SupplierContractListResponse,
+  TerminalListResponse,
   TerminalWaitReport,
   TerminalWaitSummary,
 } from "../../services/fuelApi";
@@ -56,6 +58,7 @@ import {
   getTerminalWaitSummary,
   listRackPrices,
   listSupplierContracts,
+  listTerminals,
   submitTerminalWaitReport,
 } from "../../services/fuelApi";
 import SourcingPage, {
@@ -77,6 +80,9 @@ const mockGetWait = getTerminalWaitSummary as jest.MockedFunction<
 >;
 const mockSubmitWait = submitTerminalWaitReport as jest.MockedFunction<
   typeof submitTerminalWaitReport
+>;
+const mockListTerminals = listTerminals as jest.MockedFunction<
+  typeof listTerminals
 >;
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
@@ -130,6 +136,10 @@ function emptyRackList(): RackPriceListResponse {
 }
 
 function emptyContractList(): SupplierContractListResponse {
+  return { items: [], total: 0, page: 1, page_size: 50, has_next: false };
+}
+
+function emptyTerminalList(): TerminalListResponse {
   return { items: [], total: 0, page: 1, page_size: 50, has_next: false };
 }
 
@@ -271,8 +281,10 @@ describe("SourcingPage", () => {
     mockListContracts.mockReset();
     mockGetWait.mockReset();
     mockSubmitWait.mockReset();
+    mockListTerminals.mockReset();
     mockListRack.mockResolvedValue(emptyRackList());
     mockListContracts.mockResolvedValue(emptyContractList());
+    mockListTerminals.mockResolvedValue(emptyTerminalList());
     // The best candidate is auto-expanded and lazy-loads its wait
     // summary — return a default so tests that don't explicitly
     // override it still resolve the fetch cleanly.

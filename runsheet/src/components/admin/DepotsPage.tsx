@@ -180,16 +180,14 @@ function useToasts() {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /**
- * A depot is treated as the tenant default whenever its record exposes
- * an `is_default` flag. The backend does not currently echo that field
- * back on list responses, so this helper is tolerant: it walks any
- * loosely-typed shape attached to the record. This keeps the UI forward-
- * compatible with the tenant-config mirror referenced in the task notes
- * without requiring a hard schema change.
+ * A depot is the tenant default when its record's `is_default` flag is set.
+ * The backend :class:`fuel.depot_models.Depot` model round-trips `is_default`
+ * on every read (list and single-depot reads), and the `Depot` type now
+ * declares the field, so this reads it directly rather than inferring the
+ * default from a loosely-typed shape (cross-module-entity-linkage Req 10.3).
  */
 export function isDefaultDepot(depot: Depot): boolean {
-  const raw = depot as unknown as Record<string, unknown>;
-  return raw.is_default === true;
+  return depot.is_default === true;
 }
 
 function formatCoordinates(depot: Depot): string {

@@ -471,6 +471,26 @@ async def initialize(app, container: ServiceContainer) -> None:
         except Exception as exc:
             logger.warning("Commerce payment API wiring failed: %s", exc)
 
+        # ── Commerce billing reference loaders (cross-module-entity-linkage
+        #    task 12, Req 12.3) ──────────────────────────────────────────
+        # Register invoice / account / payment loaders on the process-wide
+        # RefResolver so a payment's invoice_id/account_id resolve to
+        # navigable references (and a canonical payment_id resolves to a
+        # summary). Idempotent + degrades to "unresolved" when ES is absent.
+        try:
+            from services.ref_loaders import register_billing_link_loaders
+            from services.ref_resolver import get_ref_resolver
+
+            register_billing_link_loaders(
+                get_ref_resolver(),
+                es_service=elasticsearch_service,
+            )
+            logger.info("Commerce billing reference loaders registered")
+        except Exception as exc:
+            logger.warning(
+                "Commerce billing reference loader registration failed: %s", exc
+            )
+
         # ── Commerce AR Aging API wiring (Task 10.3) ──────────────────
         # Wire the ARAgingService into the ar_aging_endpoints module so
         # the router handlers can access it without circular imports.

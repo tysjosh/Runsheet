@@ -87,16 +87,29 @@ WEBHOOK_ROUTER_AUTH_POLICY = "webhook_signature"
 ConnectorFactory = Callable[[str], Awaitable[Optional[StripeConnector]]]
 
 
+#: A callable that maps a batch of external Stripe charge ids to their
+#: canonical commerce ``payment_id`` (and the invoice/account they were
+#: applied to) for the supplied tenant. Returns a dict keyed by the
+#: external id; ids absent from the result are unmapped. Bootstrap wires
+#: this from the commerce ``PaymentService`` so the integrations layer
+#: stays decoupled from commerce internals (Req 12.3). ``None`` when no
+#: payment service is available — every Stripe payment then surfaces as
+#: ``unmapped`` rather than failing.
+PaymentMapper = Callable[[str, List[str]], Awaitable[Dict[str, Dict[str, Any]]]]
+
+
 # ---------------------------------------------------------------------------
 # Module-level wiring (same pattern as integrations_endpoints.py)
 # ---------------------------------------------------------------------------
 
 _connector_factory: Optional[ConnectorFactory] = None
+_payment_mapper: Optional[PaymentMapper] = None
 
 
 def configure_stripe_endpoints(
     *,
     connector_factory: ConnectorFactory,
+    payment_mapper: Optional[PaymentMapper] = None,
 ) -> None:
     """Wire the Stripe connector factory into the REST routers.
 
@@ -110,12 +123,19 @@ def configure_stripe_endpoints(
             has not yet completed the Stripe connect flow; the
             handlers then return HTTP 404 so clients uniformly see
             "this tenant has no Stripe integration" rather than a 500.
+        payment_mapper: optional ``async def (tenant_id, external_ids)
+            -> dict[external_id, {payment_id, invoice_id, account_id,
+            ...}]`` used to label each Stripe payment with its canonical
+            commerce ``payment_id`` or flag it ``unmapped`` (Req 12.3).
+            When omitted, payments are returned without canonical mapping
+            (all ``unmapped``).
     """
 
-    global _connector_factory
+    global _connector_factory, _payment_mapper
     if connector_factory is None:
         raise ValueError("connector_factory must not be None")
     _connector_factory = connector_factory
+    _payment_mapper = payment_mapper
 
 
 def _get_connector_factory() -> ConnectorFactory:
@@ -125,6 +145,11 @@ def _get_connector_factory() -> ConnectorFactory:
             "configure_stripe_endpoints() during startup."
         )
     return _connector_factory
+
+
+def _get_payment_mapper() -> Optional[PaymentMapper]:
+    """Return the configured canonical-payment mapper, or ``None``."""
+    return _payment_mapper
 
 
 async def _resolve_connector_or_404(tenant_id: str) -> StripeConnector:
@@ -214,6 +239,16 @@ class StripePaymentItem(BaseModel):
     customer: Optional[str] = None
     description: Optional[str] = None
     metadata: Dict[str, str] = {}
+
+    # ── Canonical commerce mapping (cross-module-entity-linkage Req 12.3) ──
+    # An external Stripe charge either maps to a canonical commerce payment
+    # (``mapping_status="mapped"`` with ``canonical_payment_id`` set and the
+    # invoice/account it was applied to) or is explicitly ``unmapped`` so the
+    # Admin Stripe view never renders a dangling, non-navigable id.
+    mapping_status: str = "unmapped"
+    canonical_payment_id: Optional[str] = None
+    invoice_id: Optional[str] = None
+    account_id: Optional[str] = None
 
 
 class StripePaymentsListResponse(BaseModel):
@@ -398,11 +433,57 @@ async def list_payments(
             },
         )
 
+    items = [StripePaymentItem(**item) for item in page.get("items", [])]
+    await _apply_canonical_mapping(tenant.tenant_id, items)
+
     return StripePaymentsListResponse(
-        items=[StripePaymentItem(**item) for item in page.get("items", [])],
+        items=items,
         has_more=bool(page.get("has_more", False)),
         next_starting_after=page.get("next_starting_after"),
     )
+
+
+async def _apply_canonical_mapping(
+    tenant_id: str, items: List["StripePaymentItem"]
+) -> None:
+    """Label each Stripe payment with its canonical commerce mapping (Req 12.3).
+
+    For every external Stripe charge id on the page, look up the canonical
+    commerce payment (``source=stripe``, ``external_id=<charge id>``) via the
+    wired :data:`PaymentMapper`. Matched items become ``mapping_status="mapped"``
+    and carry the canonical ``payment_id`` plus the ``invoice_id`` / ``account_id``
+    the payment was applied to so the Admin Stripe view can render navigable
+    `<EntityLink>`s; unmatched items stay ``mapping_status="unmapped"``.
+
+    Mapping is best-effort: a missing mapper or a lookup failure leaves the page
+    ``unmapped`` rather than failing the read.
+    """
+    mapper = _get_payment_mapper()
+    if mapper is None or not items:
+        return
+
+    external_ids = [item.id for item in items if item.id]
+    if not external_ids:
+        return
+
+    try:
+        mapping = await mapper(tenant_id, external_ids)
+    except Exception as exc:  # pragma: no cover - defensive; never 500 the read
+        logger.warning(
+            "Stripe payments list: canonical mapping failed tenant=%s: %s",
+            tenant_id,
+            exc,
+        )
+        return
+
+    for item in items:
+        canonical = mapping.get(item.id)
+        if not canonical:
+            continue
+        item.mapping_status = "mapped"
+        item.canonical_payment_id = canonical.get("payment_id")
+        item.invoice_id = canonical.get("invoice_id")
+        item.account_id = canonical.get("account_id")
 
 
 # ---------------------------------------------------------------------------

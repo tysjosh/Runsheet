@@ -35,6 +35,79 @@ export interface CreateAssetPayload {
   container_number?: string;
 }
 
+// ─── Driver correlation profile (cross-module-entity-linkage task 4) ─────────
+
+/** A resolved reference marker mirroring the backend RefResolver payload. */
+export type ResolvedRefStatus = "resolved" | "unresolved" | "empty";
+
+export interface DriverProfileAssetRef {
+  status: ResolvedRefStatus;
+  id?: string | null;
+  summary?: {
+    asset_id?: string;
+    name?: string;
+    asset_type?: string;
+    asset_subtype?: string;
+    status?: string;
+  };
+}
+
+export interface DriverQualificationItem {
+  qualification_type: string;
+  expiry_date?: string | null;
+  days_until_expiry?: number | null;
+  alert_level: string;
+  status: string;
+}
+
+export interface DriverQualificationRef {
+  status: ResolvedRefStatus;
+  driver_id?: string;
+  summary?: {
+    driver_id: string;
+    full_name: string;
+    driver_status: string;
+    /** Chip-friendly collapsed signal: valid | expiring | expired. */
+    overall_status: "valid" | "expiring" | "expired";
+    qualifications: DriverQualificationItem[];
+  };
+}
+
+export interface DriverProfile {
+  driver_id: string;
+  utilization: Record<string, unknown> & {
+    driver_id: string;
+    assigned_truck_id?: string | null;
+  };
+  assigned_truck: DriverProfileAssetRef;
+  qualification: DriverQualificationRef;
+}
+
+/** A single compliance record contributing to an asset's status. */
+export interface AssetComplianceItem {
+  kind: "certification" | "meter";
+  reference_id: string;
+  label: string;
+  status: "valid" | "expiring" | "expired";
+  expiry_date?: string | null;
+  days_until_expiry?: number | null;
+  detail?: string | null;
+}
+
+/**
+ * Per-asset compliance signal for the Fleet assignment surface
+ * (GET /api/fleet/assets/{asset_id}/compliance). `overall_status` collapses the
+ * contributing certification/meter items (worst wins). `unknown` /
+ * `has_records: false` means the asset has no compliance records — rendered as
+ * an "unlinked" affordance rather than a misleading green chip.
+ */
+export interface AssetComplianceSummary {
+  asset_id: string;
+  overall_status: "valid" | "expiring" | "expired" | "unknown";
+  has_records: boolean;
+  items: AssetComplianceItem[];
+}
+
 // API base URL - replace with actual API endpoint
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
@@ -373,7 +446,53 @@ class ApiService {
     return Array.isArray(data) ? data : [];
   }
 
-  // Account / self-service auth
+  // Driver correlation profile (Drivers → Utilization)
+  //
+  // Session-aware fetch of the correlated driver profile
+  // (GET /api/ops/drivers/{driver_id}/profile). Joins the utilization record
+  // with the assigned_truck_id resolved to a fleet asset and the compliance
+  // qualification summary keyed by the same driver_id. References that do not
+  // resolve are returned with an explicit { status: "unresolved" | "empty" }
+  // marker rather than omitted.
+  async getDriverProfile(driverId: string): Promise<DriverProfile> {
+    const response = await fetchWithSession(
+      fetchWithTimeout,
+      `${API_BASE_URL}/ops/drivers/${encodeURIComponent(driverId)}/profile`,
+      { method: "GET", headers: { "Content-Type": "application/json" } },
+    );
+    if (!response.ok) {
+      throw new ApiError(
+        `Failed to load driver profile (status ${response.status})`,
+        response.status,
+      );
+    }
+    return (await response.json()) as DriverProfile;
+  }
+
+  // Asset compliance status (Fleet assignment surface)
+  //
+  // Session-aware fetch of the per-asset compliance signal
+  // (GET /api/fleet/assets/{asset_id}/compliance). Collapses the asset's
+  // certification + meter-calibration records into a single overall_status
+  // (valid | expiring | expired | unknown) so the Fleet assignment surface can
+  // flag a non-compliant asset before dispatch (cross-module-entity-linkage
+  // task 10.2 / Req 11.2). An asset with no compliance records returns
+  // overall_status="unknown" / has_records=false rather than an error.
+  async getAssetCompliance(assetId: string): Promise<AssetComplianceSummary> {
+    const response = await fetchWithSession(
+      fetchWithTimeout,
+      `${API_BASE_URL}/fleet/assets/${encodeURIComponent(assetId)}/compliance`,
+      { method: "GET", headers: { "Content-Type": "application/json" } },
+    );
+    if (!response.ok) {
+      throw new ApiError(
+        `Failed to load asset compliance (status ${response.status})`,
+        response.status,
+      );
+    }
+    const json = await response.json();
+    return (json?.data ?? json) as AssetComplianceSummary;
+  }
   //
   // Fetch the signed-in user's identity (email / roles / tenant), derived by
   // the backend from the verified session. Returns null when unauthenticated.

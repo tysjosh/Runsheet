@@ -834,7 +834,20 @@ class CleaningEvent(BaseModel):
         description=(
             "User or driver id that recorded the cleaning — required for "
             "audit. Platforms that use service accounts still pass a "
-            "deterministic principal here."
+            "deterministic principal here. DEPRECATED as a canonical "
+            "reference: prefer the resolvable ``driver_id`` below. Retained "
+            "as a free-text alias for backward compatibility (never removed; "
+            "cross-module-entity-linkage Req 8.2)."
+        ),
+    )
+    driver_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Canonical, resolvable driver reference for the actor that "
+            "performed the cleaning (cross-module-entity-linkage Req 8.2). "
+            "Supersedes the free-text ``actor_id`` alias. Nullable/additive "
+            "so legacy events without it remain valid; when present it is "
+            "validated against the Drivers module at write time."
         ),
     )
     notes: Optional[str] = Field(
@@ -896,6 +909,19 @@ class CleaningEvent(BaseModel):
             return None
         if isinstance(value, str) and not value.strip():
             return None
+        return value
+
+    @field_validator("driver_id", mode="before")
+    @classmethod
+    def _normalize_driver_id(cls, value: Any) -> Any:
+        # Optional canonical reference: strip surrounding whitespace and
+        # collapse blanks to ``None`` so an empty string is treated as
+        # "absent" rather than a dangling reference (Req 8.2 / 6.1).
+        if value is None:
+            return None
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped or None
         return value
 
     @field_validator("evidence_refs", mode="before")
@@ -1040,6 +1066,7 @@ class CleaningEventService:
         evidence_refs: Optional[Sequence[str]] = None,
         cleaned_at: Optional[datetime] = None,
         cleaning_event_id: Optional[str] = None,
+        driver_id: Optional[str] = None,
     ) -> CleaningEvent:
         """Persist a Cleaning_Event and reset the compartment to ``clean``.
 
@@ -1074,6 +1101,11 @@ class CleaningEventService:
             cleaning_event_id: Optional caller-supplied event id. Useful
                 for idempotent retries; the service otherwise mints a
                 uuid4-derived id.
+            driver_id: Optional canonical driver reference for the actor
+                that performed the cleaning (cross-module-entity-linkage
+                Req 8.2). Supersedes the free-text ``actor_id`` alias.
+                Nullable/additive; callers validate it against the
+                Drivers module before invoking this method.
 
         Returns:
             The validated :class:`CleaningEvent` with ``updated_at`` and
@@ -1133,6 +1165,7 @@ class CleaningEventService:
             truck_id=truck_id,
             method=method,
             actor_id=actor_id,
+            driver_id=driver_id,
             notes=notes,
             evidence_refs=normalized_refs,
             cleaned_at=stamp,

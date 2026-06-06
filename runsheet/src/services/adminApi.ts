@@ -172,6 +172,13 @@ export interface StripePaymentItem {
   customer?: string | null;
   description?: string | null;
   metadata: Record<string, string>;
+  // Canonical commerce mapping (cross-module-entity-linkage Req 12.3): an
+  // external Stripe charge is either "mapped" to a canonical commerce payment
+  // (carrying the canonical payment/invoice/account ids) or "unmapped".
+  mapping_status?: "mapped" | "unmapped";
+  canonical_payment_id?: string | null;
+  invoice_id?: string | null;
+  account_id?: string | null;
 }
 
 export interface StripePaymentsResponse {

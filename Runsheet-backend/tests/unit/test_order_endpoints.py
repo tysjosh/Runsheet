@@ -837,3 +837,172 @@ class TestHappyPath:
         )
         assert resp.status_code == 200
         assert resp.json()["status"] == "placed"
+
+
+# ---------------------------------------------------------------------------
+# Tests — Order resolver read (cross-module-entity-linkage task 2.1)
+# ---------------------------------------------------------------------------
+
+
+def _build_app_with_resolver(
+    *,
+    tenant_id: str = "tenant-A",
+    repo: Optional[FakeOrderRepository] = None,
+    resolver: Optional[Any] = None,
+) -> Tuple[FastAPI, TestClient, FakeOrderRepository]:
+    """Build an app wiring a custom RefResolver into the order endpoints."""
+    repo = repo or FakeOrderRepository()
+    pipeline = FakePipeline()
+    driver_repo = FakeDriverRepository()
+
+    configure_order_endpoints(
+        order_intake_pipeline=pipeline,
+        order_repository=repo,
+        driver_repository=driver_repo,
+        ref_resolver=resolver,
+    )
+
+    app = FastAPI()
+    app.include_router(router)
+
+    @app.exception_handler(AppException)
+    async def _app_exception_handler(request: Request, exc: AppException):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.to_dict()},
+        )
+
+    ctx = _tenant_ctx(tenant_id=tenant_id, roles=["dispatcher"])
+    app.dependency_overrides[get_tenant_context] = lambda: ctx
+
+    client = TestClient(app)
+    return app, client, repo
+
+
+class TestOrderResolverRead:
+    """``GET /api/orders/{id}?expand=customer,asset,driver`` (Req 1.1, 5.1, 5.4)."""
+
+    def test_non_expanded_read_unchanged_no_links(self):
+        """Without ``expand`` the response carries no ``links`` key (Req 6.3)."""
+        repo = FakeOrderRepository()
+        repo.seed_order(_make_order())
+        _, client, *_ = _build_app(repo=repo)
+
+        resp = client.get("/api/orders/ord_abc123")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["order_id"] == "ord_abc123"
+        assert "links" not in body
+
+    def test_expand_resolves_customer_asset_driver(self):
+        """Resolvable references come back as ``resolved`` summaries (Req 1.1)."""
+        from services.ref_resolver import RefResolver
+
+        order = _make_order()
+        order = order.model_copy(
+            update={"assigned_asset_id": "TRUCK_1", "assigned_driver_id": "DRV_1"}
+        )
+        repo = FakeOrderRepository()
+        repo.seed_order(order)
+
+        resolver = RefResolver()
+
+        async def _customer(tenant_id, entity_id):
+            return {"customer_id": entity_id, "display_name": "Acme Fuel"}
+
+        async def _asset(tenant_id, entity_id):
+            return {"asset_id": entity_id, "name": "Truck 1", "asset_type": "vehicle"}
+
+        async def _driver(tenant_id, entity_id):
+            return {"driver_id": entity_id, "driver_name": "Pat"}
+
+        resolver.register("customer", _customer)
+        resolver.register("asset", _asset)
+        resolver.register("driver", _driver)
+
+        _, client, *_ = _build_app_with_resolver(repo=repo, resolver=resolver)
+
+        resp = client.get("/api/orders/ord_abc123?expand=customer,asset,driver")
+        assert resp.status_code == 200
+        body = resp.json()
+        links = body["links"]
+        assert links["customer"]["status"] == "resolved"
+        assert links["customer"]["summary"]["display_name"] == "Acme Fuel"
+        assert links["asset"]["status"] == "resolved"
+        assert links["asset"]["summary"]["name"] == "Truck 1"
+        assert links["driver"]["status"] == "resolved"
+        assert links["driver"]["summary"]["driver_name"] == "Pat"
+        # Base order contract is still present and unchanged.
+        assert body["order_id"] == "ord_abc123"
+        assert body["customer_id"] == "cust-1"
+
+    def test_expand_unresolved_reference_marked_not_dropped(self):
+        """A dangling reference returns an explicit ``unresolved`` marker (Req 5.4)."""
+        from services.ref_resolver import RefResolver
+
+        order = _make_order().model_copy(update={"assigned_asset_id": "GHOST"})
+        repo = FakeOrderRepository()
+        repo.seed_order(order)
+
+        resolver = RefResolver()
+
+        async def _none(tenant_id, entity_id):
+            return None
+
+        resolver.register("asset", _none)
+
+        _, client, *_ = _build_app_with_resolver(repo=repo, resolver=resolver)
+
+        resp = client.get("/api/orders/ord_abc123?expand=asset")
+        assert resp.status_code == 200
+        link = resp.json()["links"]["asset"]
+        assert link["status"] == "unresolved"
+        assert link["id"] == "GHOST"
+        assert "summary" not in link
+
+    def test_expand_absent_reference_marked_empty(self):
+        """A null reference id resolves to ``empty`` (absent, not dangling)."""
+        from services.ref_resolver import RefResolver
+
+        repo = FakeOrderRepository()
+        repo.seed_order(_make_order())  # assigned_asset_id is None
+        resolver = RefResolver()
+
+        _, client, *_ = _build_app_with_resolver(repo=repo, resolver=resolver)
+
+        resp = client.get("/api/orders/ord_abc123?expand=asset")
+        assert resp.status_code == 200
+        link = resp.json()["links"]["asset"]
+        assert link["status"] == "empty"
+        assert link["id"] is None
+
+    def test_unknown_expand_token_ignored(self):
+        """Unknown ``expand`` tokens are ignored (forward-compatible)."""
+        from services.ref_resolver import RefResolver
+
+        repo = FakeOrderRepository()
+        repo.seed_order(_make_order())
+        resolver = RefResolver()
+
+        _, client, *_ = _build_app_with_resolver(repo=repo, resolver=resolver)
+
+        resp = client.get("/api/orders/ord_abc123?expand=bogus")
+        assert resp.status_code == 200
+        # No valid token -> treated as a non-expanded read (no links).
+        assert "links" not in resp.json()
+
+    def test_cross_tenant_order_still_404_with_expand(self):
+        """Expand does not bypass tenant scoping (Req 5.3)."""
+        from services.ref_resolver import RefResolver
+
+        repo = FakeOrderRepository()
+        repo.seed_order(_make_order(order_id="ord_b1", tenant_id="tenant-B"))
+        resolver = RefResolver()
+
+        _, client, *_ = _build_app_with_resolver(
+            tenant_id="tenant-A", repo=repo, resolver=resolver
+        )
+
+        resp = client.get("/api/orders/ord_b1?expand=customer")
+        assert resp.status_code == 404
+        _assert_error_envelope(resp.json())

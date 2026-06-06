@@ -465,3 +465,201 @@ class TestUpdateCustomerTank:
             json={"current_level_gallons": 9_999.0},
         )
         assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Cross-module entity linkage (Task 6) — customer ref validation + resolver read
+# (Req 7.1, 7.2, 7.3, 13.1)
+# ---------------------------------------------------------------------------
+
+
+def _build_app_with_resolver(
+    resolver: Any, tenant_id: str = "tenant-1"
+) -> tuple[FastAPI, _FakeESService]:
+    """Build an app whose customer-tank endpoints use an injected resolver.
+
+    Registers the shared exception handlers so a write-time
+    ``validation_error`` (raised by ``RefResolver.validate_ref``) surfaces as
+    an HTTP 400 rather than an unhandled 500.
+    """
+    from errors.handlers import register_exception_handlers
+
+    es = _FakeESService()
+    repo = CustomerTankRepository(es_service=es)
+    configure_fuel_ops_endpoints(
+        es_service=es, customer_tank_repository=repo, ref_resolver=resolver
+    )
+
+    app = FastAPI()
+    register_exception_handlers(app)
+    app.include_router(router)
+    app.include_router(mvp_router)
+    app.dependency_overrides[get_tenant_context] = _tenant_ctx_factory(
+        tenant_id=tenant_id
+    )
+    return app, es
+
+
+def _resolver_with(customers: Dict[str, set], orders: Dict[str, set]):
+    """A RefResolver whose customer/order loaders resolve seeded ids per tenant.
+
+    ``customers`` / ``orders`` map ``tenant_id -> {id, ...}``. An id present for
+    the caller's tenant resolves to a small summary; anything else resolves to
+    ``None`` (surfaced as ``unresolved`` / rejected on write).
+    """
+    from services.ref_resolver import RefResolver
+
+    resolver = RefResolver()
+
+    async def _customer_loader(tenant_id: str, entity_id: str):
+        if entity_id in customers.get(tenant_id, set()):
+            return {"customer_id": entity_id, "display_name": f"Cust {entity_id}"}
+        return None
+
+    async def _order_loader(tenant_id: str, entity_id: str):
+        if entity_id in orders.get(tenant_id, set()):
+            return {"order_id": entity_id, "status": "delivered"}
+        return None
+
+    resolver.register("customer", _customer_loader)
+    resolver.register("order", _order_loader)
+    return resolver
+
+
+class TestCustomerTankCustomerRefValidation:
+    """Write-time validation of ``customer_id`` as a reference (Req 7.1)."""
+
+    def test_create_rejects_nonexistent_customer(self):
+        resolver = _resolver_with(customers={"tenant-1": {"cust_ok"}}, orders={})
+        app, _ = _build_app_with_resolver(resolver)
+        client = TestClient(app)
+
+        body = _base_create_payload(customer_id="cust_missing")
+        resp = client.post("/api/fuel/mvp/customer-tanks", json=body)
+
+        assert resp.status_code == 400
+        detail = resp.json()
+        # The structured validation_error carries a stable reason.
+        assert "customer_not_found" in str(detail)
+
+    def test_create_accepts_existing_customer(self):
+        resolver = _resolver_with(customers={"tenant-1": {"cust_001"}}, orders={})
+        app, _ = _build_app_with_resolver(resolver)
+        client = TestClient(app)
+
+        body = _base_create_payload(customer_id="cust_001")
+        resp = client.post("/api/fuel/mvp/customer-tanks", json=body)
+
+        assert resp.status_code == 201
+        assert resp.json()["customer_id"] == "cust_001"
+
+    def test_create_persists_last_refill_order_id(self):
+        resolver = _resolver_with(customers={"tenant-1": {"cust_001"}}, orders={})
+        app, _ = _build_app_with_resolver(resolver)
+        client = TestClient(app)
+
+        body = _base_create_payload(
+            customer_id="cust_001", last_refill_order_id="ORD-9"
+        )
+        resp = client.post("/api/fuel/mvp/customer-tanks", json=body)
+
+        assert resp.status_code == 201
+        assert resp.json()["last_refill_order_id"] == "ORD-9"
+
+    def test_patch_rejects_nonexistent_customer(self):
+        resolver = _resolver_with(customers={"tenant-1": {"cust_001"}}, orders={})
+        app, es = _build_app_with_resolver(resolver)
+        client = TestClient(app)
+        es.docs["tank_001"] = {
+            **_base_create_payload(customer_id="cust_001"),
+            "tenant_id": "tenant-1",
+        }
+
+        resp = client.patch(
+            "/api/fuel/mvp/customer-tanks/tank_001",
+            json={"customer_id": "cust_missing"},
+        )
+        assert resp.status_code == 400
+        assert "customer_not_found" in str(resp.json())
+
+    def test_create_skips_validation_when_no_customer_loader(self):
+        """A partially-wired resolver (no ``customer`` loader) stays additive."""
+        from services.ref_resolver import RefResolver
+
+        app, _ = _build_app_with_resolver(RefResolver())
+        client = TestClient(app)
+
+        body = _base_create_payload(customer_id="anything")
+        resp = client.post("/api/fuel/mvp/customer-tanks", json=body)
+        assert resp.status_code == 201
+
+
+class TestCustomerTankResolverRead:
+    """``GET /customer-tanks/{id}?expand=customer,last_refill_order`` (Req 7.2/7.3/5.4)."""
+
+    def _seed_tank(self, es: _FakeESService, **overrides: Any) -> None:
+        es.docs["tank_001"] = {
+            **_base_create_payload(**overrides),
+            "tenant_id": "tenant-1",
+        }
+
+    def test_no_expand_returns_unchanged_contract(self):
+        resolver = _resolver_with(customers={"tenant-1": {"cust_001"}}, orders={})
+        app, es = _build_app_with_resolver(resolver)
+        self._seed_tank(es, customer_id="cust_001")
+        client = TestClient(app)
+
+        resp = client.get("/api/fuel/mvp/customer-tanks/tank_001")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["customer_tank_id"] == "tank_001"
+        assert "links" not in body
+
+    def test_expand_resolves_customer_and_order(self):
+        resolver = _resolver_with(
+            customers={"tenant-1": {"cust_001"}}, orders={"tenant-1": {"ORD-9"}}
+        )
+        app, es = _build_app_with_resolver(resolver)
+        self._seed_tank(es, customer_id="cust_001", last_refill_order_id="ORD-9")
+        client = TestClient(app)
+
+        resp = client.get(
+            "/api/fuel/mvp/customer-tanks/tank_001",
+            params={"expand": "customer,last_refill_order"},
+        )
+        assert resp.status_code == 200
+        links = resp.json()["links"]
+        assert links["customer"]["status"] == "resolved"
+        assert links["customer"]["id"] == "cust_001"
+        assert links["last_refill_order"]["status"] == "resolved"
+        assert links["last_refill_order"]["id"] == "ORD-9"
+
+    def test_expand_marks_unresolved_not_dropped(self):
+        # last_refill_order_id points at an order that does not resolve.
+        resolver = _resolver_with(customers={"tenant-1": {"cust_001"}}, orders={})
+        app, es = _build_app_with_resolver(resolver)
+        self._seed_tank(es, customer_id="cust_001", last_refill_order_id="GHOST")
+        client = TestClient(app)
+
+        resp = client.get(
+            "/api/fuel/mvp/customer-tanks/tank_001",
+            params={"expand": "customer,last_refill_order"},
+        )
+        assert resp.status_code == 200
+        links = resp.json()["links"]
+        assert links["last_refill_order"]["status"] == "unresolved"
+        assert links["last_refill_order"]["id"] == "GHOST"
+
+    def test_expand_marks_absent_order_empty(self):
+        resolver = _resolver_with(customers={"tenant-1": {"cust_001"}}, orders={})
+        app, es = _build_app_with_resolver(resolver)
+        self._seed_tank(es, customer_id="cust_001")  # no last_refill_order_id
+        client = TestClient(app)
+
+        resp = client.get(
+            "/api/fuel/mvp/customer-tanks/tank_001",
+            params={"expand": "last_refill_order"},
+        )
+        assert resp.status_code == 200
+        links = resp.json()["links"]
+        assert links["last_refill_order"]["status"] == "empty"

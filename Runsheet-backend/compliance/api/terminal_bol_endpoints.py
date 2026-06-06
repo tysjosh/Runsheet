@@ -161,6 +161,14 @@ class BOLConfirmRequest(BaseModel):
         default=None,
         description="Name of the loading terminal (rack).",
     )
+    terminal_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Canonical reference to the loading terminal record, resolvable "
+            "via the shared RefResolver. Nullable/additive; supersedes the "
+            "free-text terminal_name snapshot when set (Req 9.2)."
+        ),
+    )
     driver_id: Optional[str] = Field(
         default=None,
         description="Identifier of the driver who loaded the product.",

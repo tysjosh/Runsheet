@@ -2,7 +2,7 @@
 
 import type React from "react";
 import { useCallback, useEffect, useState } from "react";
-import { type Column, Table } from "@/components/ui";
+import { type Column, EntityLink, Table } from "@/components/ui";
 import {
   type ContractStatus,
   type ContractType,
@@ -166,8 +166,14 @@ function getContractColumns(
     {
       key: "customer_id",
       label: "Customer ID",
+      // The contract's subject is its customer, navigable to the Commerce
+      // module (Req 11.3, 13.1).
       render: (contract) => (
-        <span className="font-medium">{contract.customer_id}</span>
+        <EntityLink
+          type="customer"
+          id={contract.customer_id}
+          className="font-medium"
+        />
       ),
     },
     {

@@ -281,6 +281,14 @@ class TestCleaningEventModel:
         with pytest.raises(ValidationError):
             CleaningEvent(**self._base_kwargs(evidence_refs=["   "]))
 
+    def test_driver_id_roundtrips_and_strips(self):
+        event = CleaningEvent(**self._base_kwargs(driver_id="  DRV-9  "))
+        assert event.driver_id == "DRV-9"
+
+    def test_blank_driver_id_normalizes_to_none(self):
+        assert CleaningEvent(**self._base_kwargs(driver_id="   ")).driver_id is None
+        assert CleaningEvent(**self._base_kwargs()).driver_id is None
+
 
 # ---------------------------------------------------------------------------
 # Service construction
@@ -376,6 +384,51 @@ class TestRecordHappyPath:
         assert refreshed.state == "clean"
         assert refreshed.last_loaded_product is None
         assert refreshed.last_cleaned_at == when
+
+    async def test_persists_canonical_driver_id_when_supplied(
+        self,
+        service: CleaningEventService,
+        es: _FakeESService,
+        state_repo: _FakeStateRepository,
+    ):
+        # cross-module-entity-linkage Req 8.2: the optional canonical
+        # ``driver_id`` is persisted alongside the deprecated free-text
+        # ``actor_id`` alias.
+        _seed_needs_cleaning(state_repo)
+
+        event = await service.record(
+            "tenant-A",
+            "T1_c1",
+            truck_id="T1",
+            method="flush",
+            actor_id="user_42",
+            driver_id="DRV-7",
+        )
+
+        assert event.driver_id == "DRV-7"
+        assert event.actor_id == "user_42"
+        assert es.index_calls[0]["doc"]["driver_id"] == "DRV-7"
+
+    async def test_driver_id_defaults_to_none_when_omitted(
+        self,
+        service: CleaningEventService,
+        es: _FakeESService,
+        state_repo: _FakeStateRepository,
+    ):
+        # Additive/backward-compatible: a cleaning event without a
+        # ``driver_id`` persists ``None`` so legacy events stay valid.
+        _seed_needs_cleaning(state_repo)
+
+        event = await service.record(
+            "tenant-A",
+            "T1_c1",
+            truck_id="T1",
+            method="flush",
+            actor_id="user_42",
+        )
+
+        assert event.driver_id is None
+        assert es.index_calls[0]["doc"]["driver_id"] is None
 
     async def test_defaults_cleaned_at_when_omitted(
         self,

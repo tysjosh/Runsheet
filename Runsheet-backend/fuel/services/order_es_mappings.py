@@ -88,6 +88,7 @@ FUEL_ORDERS_CURRENT_MAPPING = {
             },
             "status": {"type": "keyword"},
             "assigned_driver_id": {"type": "keyword"},
+            "assigned_asset_id": {"type": "keyword"},
             "assigned_run_id": {"type": "keyword"},
             "legacy_origin_snapshot": {"type": "text"},
             "source_schema_version": {"type": "keyword"},

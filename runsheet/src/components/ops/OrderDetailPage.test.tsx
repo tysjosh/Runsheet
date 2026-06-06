@@ -306,6 +306,110 @@ describe("OrderDetailPage — POD section", () => {
   });
 });
 
+describe("OrderDetailPage — cross-module resolved links", () => {
+  it("renders the resolved customer name and links to the customer module", async () => {
+    mockGetOrder.mockResolvedValue({
+      data: orderFixture({
+        customer_name: "Stale Snapshot Name",
+        links: {
+          customer: {
+            status: "resolved",
+            id: "CUST-001",
+            summary: { display_name: "Acme Fuel Co" },
+          },
+        },
+      }),
+      request_id: "r1",
+    });
+    mockGetOrderEvents.mockResolvedValue({ data: [], request_id: "r2" });
+
+    render(<OrderDetailPage />);
+
+    // Resolved name is preferred over the snapshot (Req 1.4).
+    const customerLink = await screen.findByRole("link", {
+      name: /acme fuel co/i,
+    });
+    expect(customerLink).toHaveAttribute(
+      "href",
+      "/commerce/customers/CUST-001",
+    );
+    expect(screen.queryByText(/stale snapshot name/i)).not.toBeInTheDocument();
+  });
+
+  it("renders a navigable asset card and driver card from resolved links", async () => {
+    mockGetOrder.mockResolvedValue({
+      data: orderFixture({
+        assigned_driver_id: "drv-007",
+        assigned_asset_id: "asset-123",
+        links: {
+          asset: {
+            status: "resolved",
+            id: "asset-123",
+            summary: { name: "Tanker 9" },
+          },
+          driver: {
+            status: "resolved",
+            id: "drv-007",
+            summary: { driver_name: "Jane Driver" },
+          },
+        },
+      }),
+      request_id: "r1",
+    });
+    mockGetOrderEvents.mockResolvedValue({ data: [], request_id: "r2" });
+
+    render(<OrderDetailPage />);
+
+    expect(
+      await screen.findByTestId("assigned-asset-card"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /tanker 9/i })).toHaveAttribute(
+      "href",
+      "/ops/tracking/asset-123",
+    );
+    expect(screen.getByRole("link", { name: /jane driver/i })).toHaveAttribute(
+      "href",
+      "/ops/drivers?driver=drv-007",
+    );
+  });
+
+  it("shows an explicit Unlinked affordance for an unresolved asset reference", async () => {
+    mockGetOrder.mockResolvedValue({
+      data: orderFixture({
+        assigned_asset_id: "asset-gone",
+        links: {
+          asset: { status: "unresolved", id: "asset-gone" },
+        },
+      }),
+      request_id: "r1",
+    });
+    mockGetOrderEvents.mockResolvedValue({ data: [], request_id: "r2" });
+
+    render(<OrderDetailPage />);
+
+    const card = await screen.findByTestId("assigned-asset-card");
+    expect(card).toHaveTextContent("asset-gone");
+    expect(card).toHaveTextContent(/unlinked/i);
+    // An unresolved reference must NOT be a dead link.
+    expect(
+      screen.queryByRole("link", { name: /asset-gone/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("links optimistically on the document id when links are absent", async () => {
+    mockGetOrder.mockResolvedValue({
+      data: orderFixture({ assigned_driver_id: "drv-007" }),
+      request_id: "r1",
+    });
+    mockGetOrderEvents.mockResolvedValue({ data: [], request_id: "r2" });
+
+    render(<OrderDetailPage />);
+
+    const driverLink = await screen.findByRole("link", { name: /drv-007/i });
+    expect(driverLink).toHaveAttribute("href", "/ops/drivers?driver=drv-007");
+  });
+});
+
 describe("OrderDetailPage — mutation controls", () => {
   it("hides mutation buttons for terminal statuses", async () => {
     mockGetOrder.mockResolvedValue({

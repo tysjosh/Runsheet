@@ -148,6 +148,87 @@ describe("OrdersPage — list render", () => {
   });
 });
 
+describe("OrdersPage — customer linkage", () => {
+  it("links the customer cell to the commerce customer record (optimistic on customer_id)", async () => {
+    mockListOrders.mockResolvedValue(
+      paginatedResponse([
+        orderFixture({
+          customer_id: "CUST-001",
+          customer_name: "Acme Fuel Co",
+        }),
+      ]),
+    );
+
+    render(<OrdersPage tenantId="tenant-a" />);
+
+    const link = await screen.findByRole("link", { name: "Acme Fuel Co" });
+    expect(link).toHaveAttribute("href", "/commerce/customers/CUST-001");
+  });
+
+  it("shows an Unlinked badge when the order has no customer_id", async () => {
+    mockListOrders.mockResolvedValue(
+      paginatedResponse([
+        orderFixture({ customer_id: "", customer_name: "Stale Snapshot" }),
+      ]),
+    );
+
+    render(<OrdersPage tenantId="tenant-a" />);
+
+    expect(await screen.findByText(/unlinked/i)).toBeInTheDocument();
+    // The row must not be a navigable customer link.
+    expect(
+      screen.queryByRole("link", { name: /stale snapshot/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("prefers the resolved customer name over the snapshot and links to the customer", async () => {
+    mockListOrders.mockResolvedValue(
+      paginatedResponse([
+        orderFixture({
+          customer_id: "CUST-OLD",
+          customer_name: "Old Snapshot Name",
+          links: {
+            customer: {
+              status: "resolved",
+              id: "CUST-7",
+              summary: { display_name: "Acme Fuels (current)" },
+            },
+          },
+        }),
+      ]),
+    );
+
+    render(<OrdersPage tenantId="tenant-a" />);
+
+    const link = await screen.findByRole("link", {
+      name: "Acme Fuels (current)",
+    });
+    expect(link).toHaveAttribute("href", "/commerce/customers/CUST-7");
+    // The stale snapshot name is not rendered.
+    expect(screen.queryByText("Old Snapshot Name")).not.toBeInTheDocument();
+  });
+
+  it("shows an Unlinked affordance for an explicitly unresolved customer reference", async () => {
+    mockListOrders.mockResolvedValue(
+      paginatedResponse([
+        orderFixture({
+          customer_id: "CUST-MISSING",
+          customer_name: "Ghost Co",
+          links: { customer: { status: "unresolved", id: "CUST-MISSING" } },
+        }),
+      ]),
+    );
+
+    render(<OrdersPage tenantId="tenant-a" />);
+
+    expect(await screen.findByText(/unlinked/i)).toBeInTheDocument();
+    // No navigation offered for a dangling reference.
+    expect(
+      screen.queryByRole("link", { name: /ghost co/i }),
+    ).not.toBeInTheDocument();
+  });
+});
+
 describe("OrdersPage — intake channel badge", () => {
   it("shows an intake_channel badge on every order row", async () => {
     mockListOrders.mockResolvedValue(

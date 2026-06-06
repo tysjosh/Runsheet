@@ -2,7 +2,7 @@
 
 import type React from "react";
 import { useCallback, useEffect, useState } from "react";
-import { type Column, Table } from "@/components/ui";
+import { type Column, EntityLink, Table } from "@/components/ui";
 import {
   type CreatePricingRulePayload,
   createPricingRule,
@@ -67,9 +67,19 @@ const pricingRuleColumns: Column<PricingRule>[] = [
   {
     key: "customer_id",
     label: "Customer ID",
-    render: (rule) => (
-      <span className="font-medium">{rule.customer_id || "Default"}</span>
-    ),
+    // A pricing rule's subject is its customer when scoped to one; a rule with
+    // no customer is a product-level default. The scoped customer is navigable
+    // to the Commerce module (Req 11.3, 13.1).
+    render: (rule) =>
+      rule.customer_id ? (
+        <EntityLink
+          type="customer"
+          id={rule.customer_id}
+          className="font-medium"
+        />
+      ) : (
+        <span className="font-medium">Default</span>
+      ),
   },
   {
     key: "product_code",

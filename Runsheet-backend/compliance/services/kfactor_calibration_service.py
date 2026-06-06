@@ -140,6 +140,18 @@ class KFactorAdjustment(BaseModel):
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 
+    # ------------------------------------------------------------------
+    # Uniform cross-module subject reference (cross-module-entity-linkage
+    # task 10, Req 11.1). A k-factor adjustment is about a customer **tank**;
+    # the uniform ``subject_ref`` is a view over the existing ``tank_id``.
+    # ------------------------------------------------------------------
+    @property
+    def subject_ref(self) -> "SubjectRef":
+        """The tank this k-factor adjustment is about, as a ``SubjectRef``."""
+        from compliance.services.compliance_subject_ref import SubjectRef
+
+        return SubjectRef(subject_type="tank", subject_id=self.tank_id)
+
 
 # ---------------------------------------------------------------------------
 # Service

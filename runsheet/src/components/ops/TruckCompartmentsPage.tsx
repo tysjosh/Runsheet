@@ -42,7 +42,7 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { type Column, Table } from "@/components/ui";
+import { type Column, EntityLink, Table } from "@/components/ui";
 import { ApiError } from "../../services/api";
 import {
   type PodUploadContentType,
@@ -229,6 +229,7 @@ export function CompartmentStateBadge({
 export interface CleaningFormValues {
   method: CleaningMethod;
   actor_id: string;
+  driver_id: string;
   notes: string;
 }
 
@@ -276,6 +277,7 @@ function CleaningEventModal({
   const [form, setForm] = useState<CleaningFormValues>({
     method: "flush",
     actor_id: "",
+    driver_id: "",
     notes: "",
   });
   const [fieldErrors, setFieldErrors] = useState<CleaningFormErrors>({});
@@ -406,6 +408,7 @@ function CleaningEventModal({
       const event = await recordCleaningEvent(compartment.compartment_id, {
         method: form.method,
         actor_id: form.actor_id.trim(),
+        driver_id: form.driver_id.trim() ? form.driver_id.trim() : undefined,
         notes: form.notes.trim() ? form.notes.trim() : undefined,
         evidence_refs: uploadedRefs,
       });
@@ -533,6 +536,27 @@ function CleaningEventModal({
               onChange={(e) => updateField("notes", e.target.value)}
               placeholder="Anything the next driver should know."
             />
+          </div>
+
+          <div>
+            <label
+              htmlFor="ce-driver"
+              className="block text-xs font-medium text-gray-600 mb-1"
+            >
+              Driver (optional)
+            </label>
+            <input
+              id="ce-driver"
+              type="text"
+              className={inputClass}
+              value={form.driver_id}
+              onChange={(e) => updateField("driver_id", e.target.value)}
+              placeholder="e.g. DRV-001"
+            />
+            <p className="text-[10px] text-gray-400 mt-1">
+              Canonical driver reference linked to the Drivers module. Preferred
+              over the free-text actor id, which is retained for back-compat.
+            </p>
           </div>
 
           <div>
@@ -1090,6 +1114,20 @@ export default function TruckCompartmentsPage() {
               </span>
               .
             </p>
+            {activeTruckId && (
+              <p
+                className="text-xs text-gray-500 mt-2 flex items-center gap-1.5"
+                data-testid="truck-fleet-link"
+              >
+                <TruckIcon className="w-3.5 h-3.5" aria-hidden="true" />
+                Fleet asset:{" "}
+                <EntityLink
+                  type="asset"
+                  id={activeTruckId}
+                  className="text-xs"
+                />
+              </p>
+            )}
           </div>
           {activeTruckId && (
             <button

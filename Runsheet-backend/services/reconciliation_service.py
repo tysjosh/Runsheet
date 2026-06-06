@@ -117,6 +117,13 @@ class ReconciliationRecord(BaseModel):
     plan_id: str = Field(..., min_length=1)
     pod_id: str = Field(..., min_length=1)
     invoice_id: Optional[str] = None
+    # Cross-module-entity-linkage Req 12.2: who/what was responsible for the
+    # delivery, derived from the underlying order so a variance can be pivoted
+    # to the responsible customer / asset / driver. All nullable/additive
+    # (Req 6.1) so historical records without them remain valid.
+    customer_id: Optional[str] = None
+    assigned_asset_id: Optional[str] = None
+    assigned_driver_id: Optional[str] = None
     ordered_gallons: float = Field(..., ge=0.0)
     loaded_gallons: float = Field(..., ge=0.0)
     delivered_gallons: float = Field(..., ge=0.0)
@@ -241,6 +248,15 @@ class ReconciliationService:
             # variance formula — downgrade to no-invoice state.
             invoice_id = None
 
+        # Cross-module-entity-linkage Req 12.2: derive the customer / asset /
+        # driver responsible for this delivery from the underlying order so a
+        # variance can be pivoted to who/what was responsible. These are
+        # optional snapshots — orders that predate the linkage fields simply
+        # leave them ``None`` (rendered "unlinked" in the UI).
+        customer_id = _optional_ref(order, "customer_id")
+        assigned_asset_id = _optional_ref(order, "assigned_asset_id")
+        assigned_driver_id = _optional_ref(order, "assigned_driver_id")
+
         variance_load_vs_order_pct = _percent_variance(
             numerator=loaded_gallons, denominator=ordered_gallons
         )
@@ -270,6 +286,9 @@ class ReconciliationService:
             plan_id=plan_id,
             pod_id=pod_id,
             invoice_id=invoice_id if isinstance(invoice_id, str) else None,
+            customer_id=customer_id,
+            assigned_asset_id=assigned_asset_id,
+            assigned_driver_id=assigned_driver_id,
             ordered_gallons=ordered_gallons,
             loaded_gallons=loaded_gallons,
             delivered_gallons=delivered_gallons,
@@ -882,6 +901,21 @@ def _require_str(
     if not isinstance(value, str) or not value:
         raise ValueError(f"{label}.{key} is required and must be a non-empty string")
     return value
+
+
+def _optional_ref(mapping: Mapping[str, Any], key: str) -> Optional[str]:
+    """Return a non-empty string reference from ``mapping[key]`` or ``None``.
+
+    Used for the optional cross-module reference snapshots
+    (``customer_id`` / ``assigned_asset_id`` / ``assigned_driver_id``)
+    derived from the underlying order (Req 12.2). Empty strings and
+    missing keys collapse to ``None`` so the row is rendered "unlinked"
+    rather than carrying a dead id.
+    """
+    value = mapping.get(key)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
 
 
 def _require_non_negative_float(

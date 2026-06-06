@@ -195,3 +195,99 @@ describe("DriverUtilizationList — utilization bar", () => {
     expect(progressbar).toHaveAttribute("aria-valuenow", "50");
   });
 });
+
+describe("DriverUtilizationList — Fleet truck link (Req 4.1, 13.1)", () => {
+  it("renders assigned_truck_id as a link into the Fleet module", () => {
+    render(
+      <DriverUtilizationList
+        drivers={[driverFixture({ assigned_truck_id: "TRK-100" })]}
+      />,
+    );
+    const link = screen.getByRole("link", { name: "TRK-100" });
+    expect(link).toBeInTheDocument();
+    expect(link).toHaveAttribute("href", "/dashboard");
+  });
+
+  it("sets the Fleet module as active when the truck link is clicked", () => {
+    render(
+      <DriverUtilizationList
+        drivers={[driverFixture({ assigned_truck_id: "TRK-100" })]}
+      />,
+    );
+    fireEvent.click(screen.getByRole("link", { name: "TRK-100" }));
+    expect(window.sessionStorage.getItem("activeMenuItem")).toBe("fleet");
+  });
+
+  it("renders a dash when no truck is assigned", () => {
+    render(
+      <DriverUtilizationList
+        drivers={[driverFixture({ assigned_truck_id: null })]}
+      />,
+    );
+    expect(
+      screen.queryByRole("link", { name: /TRK-/ }),
+    ).not.toBeInTheDocument();
+  });
+});
+
+describe("DriverUtilizationList — qualification chip (Req 4.3, 13.3)", () => {
+  // Use a far-future medical card so the medical-card column does not also
+  // render an "Expired"/"Expiring" label that collides with the chip assertion.
+  const farFuture = "2099-01-01T00:00:00Z";
+
+  it("shows an Expired chip when qualification_status is expired", () => {
+    render(
+      <DriverUtilizationList
+        drivers={[
+          driverFixture({
+            qualification_status: "expired",
+            medical_card_expiry: farFuture,
+          }),
+        ]}
+      />,
+    );
+    expect(screen.getByText("Expired")).toBeInTheDocument();
+  });
+
+  it("shows an Expiring chip when qualification_status is expiring", () => {
+    render(
+      <DriverUtilizationList
+        drivers={[
+          driverFixture({
+            qualification_status: "expiring",
+            medical_card_expiry: farFuture,
+          }),
+        ]}
+      />,
+    );
+    expect(screen.getByText("Expiring")).toBeInTheDocument();
+  });
+
+  it("shows a Valid chip when qualification_status is valid", () => {
+    render(
+      <DriverUtilizationList
+        drivers={[
+          driverFixture({
+            qualification_status: "valid",
+            medical_card_expiry: farFuture,
+          }),
+        ]}
+      />,
+    );
+    expect(screen.getByText("Valid")).toBeInTheDocument();
+  });
+
+  it("shows an Unlinked affordance when qualification is unresolved", () => {
+    render(
+      <DriverUtilizationList
+        drivers={[
+          driverFixture({
+            qualification_status: null,
+            medical_card_expiry: farFuture,
+          }),
+        ]}
+      />,
+    );
+    expect(screen.getByText("Unlinked")).toBeInTheDocument();
+  });
+});

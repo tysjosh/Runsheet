@@ -15,7 +15,14 @@ import {
   getStripePublicConfig,
   type StripePaymentItem,
 } from "../../services/adminApi";
-import { Badge, Button, PageHeader, Table, type Column } from "../ui";
+import {
+  Badge,
+  Button,
+  type Column,
+  EntityLink,
+  PageHeader,
+  Table,
+} from "../ui";
 
 // ─── Helper Functions ────────────────────────────────────────────────────────
 
@@ -190,6 +197,48 @@ export default function StripeIntegrationUI() {
           {payment.description || "—"}
         </span>
       ),
+    },
+    {
+      key: "mapping",
+      label: "Canonical Mapping",
+      render: (payment) => {
+        // An external Stripe charge maps to a canonical commerce payment, or
+        // is explicitly flagged "Unmapped" rather than rendered as a dead id
+        // (cross-module-entity-linkage Req 12.3).
+        if (payment.mapping_status !== "mapped") {
+          return (
+            <Badge variant="warning" size="sm">
+              Unmapped
+            </Badge>
+          );
+        }
+        return (
+          <div className="flex flex-col gap-1">
+            <div className="flex items-center gap-2">
+              <Badge variant="success" size="sm">
+                Mapped
+              </Badge>
+              {payment.canonical_payment_id && (
+                <span className="font-mono text-xs text-gray-500">
+                  {payment.canonical_payment_id}
+                </span>
+              )}
+            </div>
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+              <EntityLink
+                type="invoice"
+                id={payment.invoice_id}
+                label={payment.invoice_id ?? undefined}
+              />
+              <EntityLink
+                type="account"
+                id={payment.account_id}
+                label={payment.account_id ?? undefined}
+              />
+            </div>
+          </div>
+        );
+      },
     },
     {
       key: "actions",

@@ -654,6 +654,9 @@ class FuelOrderCurrentORM(_ComplianceConfigBase, Base):
     order_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     customer_id: Mapped[Optional[str]] = mapped_column(String(64))
     assigned_driver_id: Mapped[Optional[str]] = mapped_column(String(64))
+    # Optional fleet asset/truck reference (cross-module-entity-linkage Req 2.1).
+    # Nullable; indexed per-tenant for "orders on this truck" reads.
+    assigned_asset_id: Mapped[Optional[str]] = mapped_column(String(64))
     # Stale-event guard: the last applied event timestamp (ISO string), used to
     # reject out-of-order upserts the way the ES scripted upsert does.
     last_event_timestamp: Mapped[Optional[str]] = mapped_column(String(40))
@@ -662,6 +665,7 @@ class FuelOrderCurrentORM(_ComplianceConfigBase, Base):
         Index("ix_fuel_order_tenant_status", "tenant_id", "status"),
         Index("ix_fuel_order_tenant_customer", "tenant_id", "customer_id"),
         Index("ix_fuel_order_tenant_driver", "tenant_id", "assigned_driver_id"),
+        Index("ix_fuel_order_tenant_asset", "tenant_id", "assigned_asset_id"),
     )
 
 

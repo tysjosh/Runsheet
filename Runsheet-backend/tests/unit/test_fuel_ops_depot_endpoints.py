@@ -614,3 +614,133 @@ class TestConfigureWiring:
         resp = client.post("/api/fuel/mvp/depots", json=body)
         assert resp.status_code == 201
         assert "depot_001" in es.docs
+
+
+# ---------------------------------------------------------------------------
+# GET /api/fuel/mvp/depots/{depot_id} (cross-module-entity-linkage Req 10.2, 10.3)
+# ---------------------------------------------------------------------------
+
+
+def _seed_asset(
+    es: _FakeESService,
+    asset_id: str,
+    *,
+    tenant_id: str = "tenant-1",
+    assigned_depot_id: str | None = None,
+    asset_name: str = "Tanker",
+    asset_type: str = "vehicle",
+    status: str = "active",
+) -> None:
+    """Insert an asset/truck source into the shared fake index.
+
+    The endpoint enumerates assets via the ``assets`` alias; the fake stub
+    ignores the index argument, so seeding into the same dict is sufficient to
+    exercise the ``assigned_depot_id`` term filter.
+    """
+
+    doc: Dict[str, Any] = {
+        "truck_id": asset_id,
+        "asset_id": asset_id,
+        "asset_name": asset_name,
+        "asset_type": asset_type,
+        "status": status,
+        "tenant_id": tenant_id,
+    }
+    if assigned_depot_id is not None:
+        doc["assigned_depot_id"] = assigned_depot_id
+    es.docs[asset_id] = doc
+
+
+class TestGetDepot:
+    def test_returns_depot_and_round_trips_is_default_true(self):
+        """A depot read echoes the canonical ``is_default`` flag (Req 10.3)."""
+
+        app, es = _build_app(tenant_id="tenant-1")
+        client = TestClient(app)
+        _seed_depot(es, depot_id="depot_001", is_default=True)
+
+        resp = client.get("/api/fuel/mvp/depots/depot_001")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["depot"]["depot_id"] == "depot_001"
+        assert data["depot"]["is_default"] is True
+        # No expand requested → assets omitted (None), not an empty list.
+        assert data["assigned_assets"] is None
+
+    def test_round_trips_is_default_false(self):
+        app, es = _build_app(tenant_id="tenant-1")
+        client = TestClient(app)
+        _seed_depot(es, depot_id="depot_002", is_default=False)
+
+        resp = client.get("/api/fuel/mvp/depots/depot_002")
+        assert resp.status_code == 200
+        assert resp.json()["depot"]["is_default"] is False
+
+    def test_expand_assets_enumerates_assigned_assets(self):
+        """``?expand=assets`` lists assets whose assigned_depot_id matches (Req 10.2)."""
+
+        app, es = _build_app(tenant_id="tenant-1")
+        client = TestClient(app)
+        _seed_depot(es, depot_id="depot_001")
+        _seed_asset(es, "AST-1", assigned_depot_id="depot_001", asset_name="Tanker 1")
+        _seed_asset(es, "AST-2", assigned_depot_id="depot_001", asset_name="Tanker 2")
+        # An asset assigned elsewhere must not appear.
+        _seed_asset(es, "AST-3", assigned_depot_id="depot_999")
+        # An unassigned asset must not appear.
+        _seed_asset(es, "AST-4", assigned_depot_id=None)
+
+        resp = client.get("/api/fuel/mvp/depots/depot_001", params={"expand": "assets"})
+        assert resp.status_code == 200
+        data = resp.json()
+        ids = sorted(a["asset_id"] for a in data["assigned_assets"])
+        assert ids == ["AST-1", "AST-2"]
+        first = next(a for a in data["assigned_assets"] if a["asset_id"] == "AST-1")
+        assert first["name"] == "Tanker 1"
+        assert first["asset_type"] == "vehicle"
+        assert first["status"] == "active"
+
+    def test_expand_assets_empty_when_none_assigned(self):
+        app, es = _build_app(tenant_id="tenant-1")
+        client = TestClient(app)
+        _seed_depot(es, depot_id="depot_001")
+
+        resp = client.get("/api/fuel/mvp/depots/depot_001", params={"expand": "assets"})
+        assert resp.status_code == 200
+        assert resp.json()["assigned_assets"] == []
+
+    def test_asset_enumeration_is_tenant_scoped(self):
+        """Another tenant's asset never appears in the enumeration (Req 5.3)."""
+
+        app, es = _build_app(tenant_id="tenant-1")
+        client = TestClient(app)
+        _seed_depot(es, depot_id="depot_001", tenant_id="tenant-1")
+        _seed_asset(
+            es, "AST-MINE", tenant_id="tenant-1", assigned_depot_id="depot_001"
+        )
+        # Foreign-tenant asset referencing the same depot id must be excluded.
+        _seed_asset(
+            es, "AST-OTHER", tenant_id="tenant-2", assigned_depot_id="depot_001"
+        )
+
+        resp = client.get("/api/fuel/mvp/depots/depot_001", params={"expand": "assets"})
+        assert resp.status_code == 200
+        ids = [a["asset_id"] for a in resp.json()["assigned_assets"]]
+        assert ids == ["AST-MINE"]
+
+    def test_missing_depot_returns_404(self):
+        app, _ = _build_app(tenant_id="tenant-1")
+        client = TestClient(app)
+
+        resp = client.get("/api/fuel/mvp/depots/does_not_exist")
+        assert resp.status_code == 404
+        assert resp.json()["detail"]["error_code"] == "depot_not_found"
+
+    def test_cross_tenant_depot_is_404(self):
+        """Fetching another tenant's depot is suppressed to a 404, not 403."""
+
+        app, es = _build_app(tenant_id="tenant-1")
+        client = TestClient(app)
+        _seed_depot(es, depot_id="depot_other", tenant_id="tenant-2")
+
+        resp = client.get("/api/fuel/mvp/depots/depot_other")
+        assert resp.status_code == 404

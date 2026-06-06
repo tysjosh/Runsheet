@@ -30,9 +30,11 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
+from errors.exceptions import AppException
 from fuel.api.fuel_ops_endpoints import (
     configure_fuel_ops_endpoints,
     mvp_router,
@@ -158,13 +160,19 @@ class _FakeRedis:
 # ---------------------------------------------------------------------------
 
 
-def _tenant_ctx_factory(tenant_id: str = "tenant-1"):
+def _tenant_ctx_factory(
+    tenant_id: str = "tenant-1", roles: Optional[List[str]] = None
+):
     def _factory() -> TenantContext:
         return TenantContext(
             tenant_id=tenant_id,
             user_id="user-1",
             has_pii_access=False,
-            roles=["dispatcher"],
+            # The Supplier_Contract write surface is admin-gated (Task 8.1).
+            # Default the harness to an admin caller so the existing
+            # create/update/delete tests exercise the success path; the
+            # admin-gating tests override ``roles`` to assert the 403.
+            roles=roles if roles is not None else ["dispatcher", "admin"],
             region="US",
             measurement_units={"volume": "gal", "distance": "mi"},
         )
@@ -174,6 +182,7 @@ def _tenant_ctx_factory(tenant_id: str = "tenant-1"):
 
 def _build_app(
     tenant_id: str = "tenant-1",
+    roles: Optional[List[str]] = None,
 ) -> tuple[FastAPI, _FakeESService, _FakeRedis]:
     es = _FakeESService()
     redis = _FakeRedis()
@@ -188,8 +197,18 @@ def _build_app(
     app = FastAPI()
     app.include_router(router)
     app.include_router(mvp_router)
+
+    # The shared Role_Authorizer raises AppException; register the same
+    # structured handler the app uses in production so the admin-gate
+    # response renders as the canonical 403 error envelope.
+    @app.exception_handler(AppException)
+    async def _app_exception_handler(request: Request, exc: AppException):
+        return JSONResponse(
+            status_code=exc.status_code, content={"detail": exc.to_dict()}
+        )
+
     app.dependency_overrides[get_tenant_context] = _tenant_ctx_factory(
-        tenant_id=tenant_id
+        tenant_id=tenant_id, roles=roles
     )
     return app, es, redis
 
@@ -562,3 +581,117 @@ class TestDeleteSupplierContract:
         # The counter key persists so the admin UI can still render a
         # retrospective lift summary for the deleted contract.
         assert redis.store[key] == 12345.0
+
+
+# ---------------------------------------------------------------------------
+# Admin-gating on the Supplier_Contract write surface (Task 8.1, Req 9.1, 9.2)
+# ---------------------------------------------------------------------------
+
+
+class TestSupplierContractAdminGating:
+    """The thin management surface (Task 8.1) restricts every state-changing
+    Supplier_Contract operation to the canonical ``admin`` role. Reads stay
+    open so the Sourcing UI / ``<EntityLink>`` resolver can still resolve a
+    reference for a non-admin caller."""
+
+    def test_non_admin_cannot_create(self):
+        app, _, _ = _build_app(roles=["dispatcher"])
+        client = TestClient(app)
+
+        resp = client.post(
+            "/api/fuel/supplier-contracts", json=_base_create_payload()
+        )
+
+        assert resp.status_code == 403
+
+    def test_non_admin_cannot_update(self):
+        app, es, _ = _build_app(roles=["dispatcher"])
+        _seed_contract(es, contract_id="sc_001", tenant_id="tenant-1")
+        client = TestClient(app)
+
+        resp = client.patch(
+            "/api/fuel/supplier-contracts/sc_001", json={"status": "inactive"}
+        )
+
+        assert resp.status_code == 403
+        assert es.docs["sc_001"]["status"] == "active"
+
+    def test_non_admin_cannot_delete(self):
+        app, es, _ = _build_app(roles=["dispatcher"])
+        _seed_contract(es, contract_id="sc_001", tenant_id="tenant-1")
+        client = TestClient(app)
+
+        resp = client.delete("/api/fuel/supplier-contracts/sc_001")
+
+        assert resp.status_code == 403
+        assert "sc_001" in es.docs
+
+    def test_non_admin_cannot_deactivate(self):
+        app, es, _ = _build_app(roles=["dispatcher"])
+        _seed_contract(es, contract_id="sc_001", tenant_id="tenant-1")
+        client = TestClient(app)
+
+        resp = client.post("/api/fuel/supplier-contracts/sc_001/deactivate")
+
+        assert resp.status_code == 403
+        assert es.docs["sc_001"]["status"] == "active"
+
+    def test_reads_stay_open_to_non_admin(self):
+        app, es, _ = _build_app(roles=["dispatcher"])
+        _seed_contract(es, contract_id="sc_001", tenant_id="tenant-1")
+        client = TestClient(app)
+
+        list_resp = client.get("/api/fuel/supplier-contracts")
+        get_resp = client.get("/api/fuel/supplier-contracts/sc_001")
+
+        assert list_resp.status_code == 200
+        assert get_resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# POST /api/fuel/supplier-contracts/{id}/deactivate (Task 8.1, Req 9.1, 9.2)
+# ---------------------------------------------------------------------------
+
+
+class TestDeactivateSupplierContract:
+    def test_deactivates_owned_contract(self):
+        app, es, _ = _build_app(tenant_id="tenant-1")
+        _seed_contract(es, contract_id="sc_001", tenant_id="tenant-1")
+        client = TestClient(app)
+
+        resp = client.post("/api/fuel/supplier-contracts/sc_001/deactivate")
+
+        assert resp.status_code == 200
+        assert resp.json()["contract"]["status"] == "inactive"
+        assert es.docs["sc_001"]["status"] == "inactive"
+
+    def test_deactivate_is_idempotent(self):
+        app, es, _ = _build_app(tenant_id="tenant-1")
+        _seed_contract(
+            es, contract_id="sc_001", tenant_id="tenant-1", status="inactive"
+        )
+        client = TestClient(app)
+
+        resp = client.post("/api/fuel/supplier-contracts/sc_001/deactivate")
+
+        assert resp.status_code == 200
+        assert resp.json()["contract"]["status"] == "inactive"
+
+    def test_returns_404_for_missing(self):
+        app, _, _ = _build_app()
+        client = TestClient(app)
+
+        resp = client.post("/api/fuel/supplier-contracts/missing/deactivate")
+
+        assert resp.status_code == 404
+        assert resp.json()["detail"]["error_code"] == "supplier_contract_not_found"
+
+    def test_returns_404_for_cross_tenant(self):
+        app, es, _ = _build_app(tenant_id="tenant-1")
+        _seed_contract(es, contract_id="sc_001", tenant_id="tenant-other")
+        client = TestClient(app)
+
+        resp = client.post("/api/fuel/supplier-contracts/sc_001/deactivate")
+
+        assert resp.status_code == 404
+        assert es.docs["sc_001"]["status"] == "active"

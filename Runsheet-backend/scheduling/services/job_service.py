@@ -159,6 +159,12 @@ class JobService:
             "status": JobStatus.SCHEDULED.value,
             "tenant_id": tenant_id,
             "asset_assigned": data.asset_assigned,
+            # Cross-module linkage references (cross-module-entity-linkage
+            # Req 3.1/3.2). Nullable; populated when a job is created from an
+            # order. Persisted into jobs_current alongside the asset reference.
+            "order_id": data.order_id,
+            "customer_id": data.customer_id,
+            "driver_id": data.driver_id,
             "origin": data.origin,
             "destination": data.destination,
             "scheduled_time": data.scheduled_time,
@@ -258,6 +264,79 @@ class JobService:
             )
 
         return hits[0]["_source"]
+
+    # ------------------------------------------------------------------
+    # Cross-module linkage  (cross-module-entity-linkage Req 3.1, 3.4)
+    # ------------------------------------------------------------------
+
+    async def get_job_doc(self, job_id: str, tenant_id: str) -> dict:
+        """Public, tenant-scoped fetch of the raw job document.
+
+        Thin wrapper over the internal fetch so cross-domain callers (the
+        order→job assignment service) can read a job without reaching into a
+        private method. Raises 404 if the job is not found for this tenant.
+        """
+        return await self._get_job_doc(job_id, tenant_id)
+
+    async def set_link_fields(
+        self,
+        job_id: str,
+        tenant_id: str,
+        link_fields: dict,
+        *,
+        job_doc: Optional[dict] = None,
+    ) -> dict:
+        """Write the cross-module linkage fields onto a job and return the doc.
+
+        ``link_fields`` may contain any subset of ``order_id`` / ``customer_id``
+        / ``driver_id`` (values may be ``None`` to clear a reference — used by
+        the assignment service's rollback path). The job's ``asset_assigned``
+        is NOT touched here; it remains the canonical asset reference.
+
+        This is the single low-level job-side write used by the
+        consistency-preserving order→job assignment (Req 3.4). It mirrors the
+        ``assign_asset`` persistence pattern: partial ES update + a full
+        current-state mirror to the Postgres source-of-truth so a read-cutover
+        deployment sees the new references.
+
+        Validates: Requirements 3.1, 3.4
+
+        Args:
+            job_id: The job to update.
+            tenant_id: Tenant scope from the verified session.
+            link_fields: Subset of {order_id, customer_id, driver_id}.
+            job_doc: The already-fetched job document, if available (avoids a
+                redundant read). Fetched when omitted.
+
+        Returns:
+            The merged job document dict (raw, not normalized).
+        """
+        allowed = {"order_id", "customer_id", "driver_id"}
+        unknown = set(link_fields) - allowed
+        if unknown:
+            raise ValueError(
+                f"set_link_fields only accepts {sorted(allowed)}; "
+                f"got unexpected {sorted(unknown)}"
+            )
+
+        if job_doc is None:
+            job_doc = await self._get_job_doc(job_id, tenant_id)
+
+        now = datetime.now(timezone.utc).isoformat()
+        update_fields = {**link_fields, "updated_at": now}
+
+        await self._es.update_document(JOBS_CURRENT_INDEX, job_id, update_fields)
+
+        job_doc.update(update_fields)
+
+        # Dual-write the merged current-state to Postgres (read-cutover serves
+        # from PG), mirroring create_job / assign_asset / transition_status.
+        from commerce.services.commerce_persistence_bridge import (
+            mirror_current_state_upsert,
+        )
+        await mirror_current_state_upsert("job", job_doc)
+
+        return job_doc
 
     # ------------------------------------------------------------------
     # Assignment  (Requirements 3.1-3.6)

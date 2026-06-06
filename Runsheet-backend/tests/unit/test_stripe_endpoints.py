@@ -574,3 +574,106 @@ class TestListPaymentsEndpoint:
             resp.json()["detail"]["error_code"]
             == "stripe_list_payments_failed"
         )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/integrations/stripe/payments — canonical mapping (Req 12.3)
+# ---------------------------------------------------------------------------
+
+
+def _build_app_with_mapper(
+    *,
+    connector: Optional[StripeConnector],
+    mapping: Dict[str, Dict[str, Any]],
+) -> tuple[FastAPI, "List[str]"]:
+    """Wire the routers with a connector factory AND a payment mapper.
+
+    ``mapping`` maps an external Stripe charge id → canonical payment summary
+    (cross-module-entity-linkage Req 12.3). The returned ``mapper_calls`` list
+    records the external ids the mapper was asked to resolve.
+    """
+
+    mapper_calls: List[List[str]] = []
+
+    async def _factory(tenant_id: str) -> Optional[StripeConnector]:
+        return connector
+
+    async def _mapper(
+        tenant_id: str, external_ids: List[str]
+    ) -> Dict[str, Dict[str, Any]]:
+        mapper_calls.append(list(external_ids))
+        return {eid: mapping[eid] for eid in external_ids if eid in mapping}
+
+    configure_stripe_endpoints(
+        connector_factory=_factory, payment_mapper=_mapper
+    )
+
+    app = FastAPI()
+    app.include_router(router)
+    app.include_router(webhook_router)
+    app.dependency_overrides[get_tenant_context] = _tenant_ctx_factory()
+    return app, mapper_calls
+
+
+class TestListPaymentsCanonicalMapping:
+    """An external Stripe charge maps to a canonical payment or is unmapped."""
+
+    def test_mapped_payment_carries_canonical_ids(self):
+        raw = _sensitive_payment_intent("pi_mapped")
+        pi_api = _FakeListingPaymentIntentAPI(raw_items=[raw])
+        connector = _build_connector(
+            stripe_module=_FakeStripeSDK(payment_intent_api=pi_api)
+        )
+        app, mapper_calls = _build_app_with_mapper(
+            connector=connector,
+            mapping={
+                "pi_mapped": {
+                    "payment_id": "pay_canonical_1",
+                    "invoice_id": "inv_1",
+                    "account_id": "acct_1",
+                    "status": "applied",
+                }
+            },
+        )
+        with TestClient(app) as client:
+            resp = client.get("/api/integrations/stripe/payments")
+        assert resp.status_code == 200
+        item = resp.json()["items"][0]
+        assert item["mapping_status"] == "mapped"
+        assert item["canonical_payment_id"] == "pay_canonical_1"
+        assert item["invoice_id"] == "inv_1"
+        assert item["account_id"] == "acct_1"
+        # The mapper was asked to resolve the Stripe charge id.
+        assert mapper_calls == [["pi_mapped"]]
+
+    def test_unmapped_payment_is_flagged(self):
+        raw = _sensitive_payment_intent("pi_orphan")
+        pi_api = _FakeListingPaymentIntentAPI(raw_items=[raw])
+        connector = _build_connector(
+            stripe_module=_FakeStripeSDK(payment_intent_api=pi_api)
+        )
+        # Empty mapping → nothing resolves.
+        app, _ = _build_app_with_mapper(connector=connector, mapping={})
+        with TestClient(app) as client:
+            resp = client.get("/api/integrations/stripe/payments")
+        assert resp.status_code == 200
+        item = resp.json()["items"][0]
+        assert item["mapping_status"] == "unmapped"
+        assert item["canonical_payment_id"] is None
+        assert item["invoice_id"] is None
+        assert item["account_id"] is None
+
+    def test_no_mapper_defaults_to_unmapped(self):
+        raw = _sensitive_payment_intent("pi_x")
+        pi_api = _FakeListingPaymentIntentAPI(raw_items=[raw])
+        connector = _build_connector(
+            stripe_module=_FakeStripeSDK(payment_intent_api=pi_api)
+        )
+        # _build_app wires NO payment_mapper.
+        app, _ = _build_app(connector=connector)
+        with TestClient(app) as client:
+            resp = client.get("/api/integrations/stripe/payments")
+        assert resp.status_code == 200
+        item = resp.json()["items"][0]
+        assert item["mapping_status"] == "unmapped"
+        assert item["canonical_payment_id"] is None

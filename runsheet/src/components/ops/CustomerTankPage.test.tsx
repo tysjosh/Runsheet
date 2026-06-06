@@ -58,6 +58,14 @@ jest.mock("../../services/tenant", () => ({
   getCurrentTenantId: jest.fn(() => "tenant-a"),
 }));
 
+// The create/edit modal loads commerce customers for the validated customer
+// picker (cross-module-entity-linkage Req 7.1). These tests exercise the
+// free-text fallback path, so we mock the fetch to reject — the modal then
+// renders the legacy free-text Customer ID input the assertions target.
+jest.mock("../../services/commerceApi", () => ({
+  getCustomers: jest.fn(() => Promise.reject(new Error("no commerce in test"))),
+}));
+
 import type {
   CustomerTank,
   CustomerTankForecast,
@@ -313,6 +321,51 @@ describe("CustomerTankPage — list render", () => {
     expect(await screen.findByText("CT-0001")).toBeInTheDocument();
     expect(screen.getByText("CT-0002")).toBeInTheDocument();
     expect(screen.getByText("CUST-0100")).toBeInTheDocument();
+  });
+
+  it("links the customer and the refilling order in each row (Req 7.2/7.3/13.1)", async () => {
+    mockList.mockResolvedValue(
+      listResponseFixture([
+        tankFixture({
+          customer_tank_id: "CT-0001",
+          customer_id: "CUST-0042",
+          last_refill_order_id: "ORD-9",
+        }),
+      ]),
+    );
+
+    render(<CustomerTankPage />);
+
+    await waitFor(() => expect(mockList).toHaveBeenCalledTimes(1));
+    // Customer renders as a navigable link to the commerce module.
+    const customerLink = await screen.findByRole("link", { name: "CUST-0042" });
+    expect(customerLink).toHaveAttribute(
+      "href",
+      "/commerce/customers/CUST-0042",
+    );
+    // Refilling order renders as a navigable link to the orders module.
+    const orderLink = screen.getByRole("link", { name: "ORD-9" });
+    expect(orderLink).toHaveAttribute("href", "/orders/ORD-9");
+  });
+
+  it("renders a neutral placeholder when a tank has no refilling order", async () => {
+    mockList.mockResolvedValue(
+      listResponseFixture([
+        tankFixture({
+          customer_tank_id: "CT-0001",
+          last_refill_order_id: null,
+        }),
+      ]),
+    );
+
+    render(<CustomerTankPage />);
+
+    await waitFor(() => expect(mockList).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText("CT-0001")).toBeInTheDocument();
+    // No order link is rendered for a tank without last_refill_order_id.
+    expect(
+      screen.queryByRole("link", { name: /^ORD-/ }),
+    ).not.toBeInTheDocument();
   });
 
   it("renders the empty-state copy when no tanks come back", async () => {

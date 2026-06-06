@@ -59,6 +59,44 @@ export interface PaginatedResponse<T> {
   request_id: string;
 }
 
+// ─── Cross-Module Resolver Links (cross-module-entity-linkage Req 1.x/5.4) ────
+
+/**
+ * A single resolved reference as returned in an order resolver read's
+ * ``links`` object. Mirrors the backend ``RefResolver``/``ResolvedRef``
+ * contract (and the identical {@link schedulingApi.ResolvedLink} shape used by
+ * the job resolver read):
+ *
+ * - ``resolved``  — the id resolved to a same-tenant entity; ``summary`` holds
+ *   a small display payload (e.g. ``customer_id`` + ``display_name``). The
+ *   resolved name is the source of truth for display (Req 1.4).
+ * - ``unresolved`` — an id was present but did not resolve in this tenant; the
+ *   UI renders an explicit "unlinked" affordance rather than a stale name
+ *   (Req 1.2).
+ * - ``empty`` — no id was supplied (the reference is simply absent).
+ */
+export type ResolvedLink =
+  | { status: "resolved"; id: string; summary: Record<string, unknown> }
+  | { status: "unresolved"; id: string }
+  | { status: "empty"; id?: string | null };
+
+/**
+ * The ``links`` object on an order resolver read
+ * (``GET /orders/{order_id}?expand=customer,asset,driver``). Each key is
+ * present only when requested via ``expand``; absent keys mean the caller did
+ * not ask to expand that reference. List reads (``GET /orders``) do not carry
+ * ``links`` — the Orders table links optimistically on ``customer_id`` and
+ * uses the ``customer_name`` snapshot as the display fallback.
+ */
+export interface OrderLinks {
+  customer?: ResolvedLink;
+  asset?: ResolvedLink;
+  driver?: ResolvedLink;
+}
+
+/** The entity references an order resolver read can expand. */
+export type OrderExpand = "customer" | "asset" | "driver";
+
 // ─── Order Types ─────────────────────────────────────────────────────────────
 
 export interface IntakeMetadata {
@@ -102,6 +140,7 @@ export interface FuelOrder {
   intake_metadata: IntakeMetadata;
   status: OrderStatus;
   assigned_driver_id?: string | null;
+  assigned_asset_id?: string | null;
   assigned_run_id?: string | null;
   legacy_origin_snapshot?: string | null;
   source_schema_version: string;
@@ -109,6 +148,13 @@ export interface FuelOrder {
   created_at: string;
   updated_at: string;
   last_event_timestamp: string;
+  /**
+   * Resolved cross-module references, present only on resolver reads that pass
+   * ``expand`` (cross-module-entity-linkage Req 5.1/5.4). Absent on plain list
+   * reads. When present, the resolved customer ``summary`` name is preferred
+   * over the {@link FuelOrder.customer_name} snapshot for display (Req 1.4).
+   */
+  links?: OrderLinks;
 }
 
 export interface FuelOrderEvent {
@@ -286,9 +332,25 @@ export async function listOrders(
   return ordersRequest<PaginatedResponse<FuelOrder>>(`/orders${qs}`);
 }
 
-/** GET /api/orders/:order_id — fetch a single order by ID */
-export async function getOrder(orderId: string): Promise<OrderResponse> {
-  return ordersRequest<OrderResponse>(`/orders/${encodeURIComponent(orderId)}`);
+/**
+ * GET /api/orders/:order_id — fetch a single order by ID.
+ *
+ * Pass ``options.expand`` (cross-module-entity-linkage Req 1.1/5.1/5.4) to
+ * resolve cross-module references into the order's ``links`` object — each
+ * either a resolved summary or an explicit ``unresolved``/``empty`` marker so
+ * the UI can render an "unlinked" affordance. Omitting ``expand`` keeps the
+ * pre-existing, additive-only order contract unchanged (Req 6.3).
+ */
+export async function getOrder(
+  orderId: string,
+  options?: { expand?: OrderExpand[] },
+): Promise<OrderResponse> {
+  const qs = options?.expand?.length
+    ? `?expand=${options.expand.join(",")}`
+    : "";
+  return ordersRequest<OrderResponse>(
+    `/orders/${encodeURIComponent(orderId)}${qs}`,
+  );
 }
 
 /** GET /api/orders/:order_id/events — fetch the event timeline for an order */

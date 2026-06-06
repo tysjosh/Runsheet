@@ -939,6 +939,7 @@ export interface CustomerTank {
   customer_tank_id: string;
   tenant_id: string;
   customer_id: string;
+  last_refill_order_id?: string | null;
   customer_type: CustomerTankCustomerType;
   fuel_type: CustomerTankFuelType;
   fuel_product_code: string;
@@ -955,6 +956,42 @@ export interface CustomerTank {
   created_at?: string | null;
 }
 
+// ─── Cross-Module Resolver Links (cross-module-entity-linkage Req 7.2/7.3/5.4) ─
+
+/**
+ * A single resolved reference as returned in a customer-tank resolver read's
+ * ``links`` object. Structurally identical to the backend ``RefResolver`` /
+ * ``ResolvedRef`` payload and the ``ResolvedLink`` exported by ``ordersApi``,
+ * and accepted directly by the shared ``<EntityLink>`` component.
+ *
+ * - ``resolved``  — the id resolved to a same-tenant entity; ``summary`` holds
+ *   a small display payload.
+ * - ``unresolved`` — an id was present but did not resolve; render "Unlinked".
+ * - ``empty`` — no id was supplied (the reference is simply absent).
+ */
+export type CustomerTankResolvedLink =
+  | { status: "resolved"; id: string; summary: Record<string, unknown> }
+  | { status: "unresolved"; id: string }
+  | { status: "empty"; id?: string | null };
+
+/**
+ * The ``links`` object on a customer-tank resolver read
+ * (``GET /api/fuel/mvp/customer-tanks/{id}?expand=customer,last_refill_order``).
+ * Each key is present only when requested via ``expand``.
+ */
+export interface CustomerTankLinks {
+  customer?: CustomerTankResolvedLink;
+  last_refill_order?: CustomerTankResolvedLink;
+}
+
+/** The entity references a customer-tank resolver read can expand. */
+export type CustomerTankExpand = "customer" | "last_refill_order";
+
+/** A customer tank plus its resolved cross-module ``links`` (expand read). */
+export interface CustomerTankWithLinks extends CustomerTank {
+  links: CustomerTankLinks;
+}
+
 export interface CustomerTankListResponse {
   items: CustomerTank[];
   total: number;
@@ -966,6 +1003,7 @@ export interface CustomerTankListResponse {
 export interface CustomerTankCreatePayload {
   customer_tank_id?: string;
   customer_id: string;
+  last_refill_order_id?: string;
   customer_type: CustomerTankCustomerType;
   fuel_type: CustomerTankFuelType;
   fuel_product_code: string;
@@ -982,6 +1020,7 @@ export interface CustomerTankCreatePayload {
 
 export interface CustomerTankUpdatePayload {
   customer_id?: string;
+  last_refill_order_id?: string;
   customer_type?: CustomerTankCustomerType;
   fuel_type?: CustomerTankFuelType;
   fuel_product_code?: string;
@@ -1022,6 +1061,24 @@ export async function getCustomerTank(
 ): Promise<CustomerTank> {
   return fuelRequest<CustomerTank>(
     `/fuel/mvp/customer-tanks/${encodeURIComponent(customerTankId)}`,
+  );
+}
+
+/**
+ * GET /api/fuel/mvp/customer-tanks/{id}?expand=... — fetch a tank together with
+ * a resolved ``links`` object for the requested cross-module references
+ * (customer, last_refill_order). Mirrors the order resolver read contract
+ * (cross-module-entity-linkage Req 7.2, 7.3, 5.4).
+ */
+export async function getCustomerTankWithLinks(
+  customerTankId: string,
+  expand: CustomerTankExpand[] = ["customer", "last_refill_order"],
+): Promise<CustomerTankWithLinks> {
+  const qs = expand.length
+    ? `?expand=${encodeURIComponent(expand.join(","))}`
+    : "";
+  return fuelRequest<CustomerTankWithLinks>(
+    `/fuel/mvp/customer-tanks/${encodeURIComponent(customerTankId)}${qs}`,
   );
 }
 
@@ -1345,6 +1402,13 @@ export interface Depot {
   timezone: string;
   fuel_types_supported: string[];
   status: DepotStatus;
+  /**
+   * Whether this depot is the tenant's default. The backend
+   * :class:`fuel.depot_models.Depot` model round-trips this flag on every
+   * read (list and single-depot reads), so the UI reads it directly rather
+   * than inferring the default from a loosely-typed shape (Req 10.3).
+   */
+  is_default?: boolean;
   created_at?: string | null;
   updated_at?: string | null;
 }
@@ -1397,6 +1461,30 @@ export interface DepotListResponse {
   has_next: boolean;
 }
 
+/** Expansions accepted by ``GET /api/fuel/mvp/depots/{depot_id}``. */
+export type DepotExpand = "assets";
+
+/**
+ * One asset assigned to a depot, returned under ``assigned_assets`` by
+ * ``GET /api/fuel/mvp/depots/{depot_id}?expand=assets`` (Req 10.2).
+ */
+export interface DepotAssetSummary {
+  asset_id: string;
+  name?: string | null;
+  asset_type?: string | null;
+  status?: string | null;
+}
+
+/**
+ * Envelope returned by ``GET /api/fuel/mvp/depots/{depot_id}``. ``depot``
+ * round-trips the full record (including ``is_default``); ``assigned_assets``
+ * is present only when ``?expand=assets`` was requested (Req 10.2, 10.3).
+ */
+export interface DepotReadResponse {
+  depot: Depot;
+  assigned_assets?: DepotAssetSummary[] | null;
+}
+
 // ─── Depot Endpoints ─────────────────────────────────────────────────────────
 
 /** GET /api/fuel/mvp/depots — list depots for the tenant (Req 2.2.2). */
@@ -1405,6 +1493,23 @@ export async function listDepots(
 ): Promise<DepotListResponse> {
   const qs = buildQueryString(filters);
   return fuelRequest<DepotListResponse>(`/fuel/mvp/depots${qs}`);
+}
+
+/**
+ * GET /api/fuel/mvp/depots/{depot_id} — fetch a single depot, round-tripping
+ * the ``is_default`` flag (Req 10.3). Pass ``expand=["assets"]`` to enumerate
+ * the assets assigned to the depot (Req 10.2).
+ */
+export async function getDepot(
+  depotId: string,
+  options: { expand?: DepotExpand[] } = {},
+): Promise<DepotReadResponse> {
+  const expand = options.expand?.length
+    ? `?expand=${encodeURIComponent(options.expand.join(","))}`
+    : "";
+  return fuelRequest<DepotReadResponse>(
+    `/fuel/mvp/depots/${encodeURIComponent(depotId)}${expand}`,
+  );
 }
 
 /** POST /api/fuel/mvp/depots — create a depot (Req 2.2.2). */
@@ -1480,6 +1585,15 @@ export interface ReconciliationRecord {
   plan_id: string;
   pod_id: string;
   invoice_id?: string | null;
+  /**
+   * Cross-module-entity-linkage Req 12.2: who/what was responsible for the
+   * delivery, derived from the underlying order so a variance can be pivoted
+   * to the responsible customer / asset / driver. Nullable/additive — orders
+   * that predate the linkage fields leave these absent (rendered "unlinked").
+   */
+  customer_id?: string | null;
+  assigned_asset_id?: string | null;
+  assigned_driver_id?: string | null;
   ordered_gallons: number;
   loaded_gallons: number;
   delivered_gallons: number;
@@ -1924,6 +2038,54 @@ export interface TerminalWaitSummary {
 /** Active/inactive lifecycle status on supplier contracts and terminals. */
 export type SupplierContractStatus = "active" | "inactive";
 
+// ─── Terminal Types (Req 8.1.2 / cross-module-entity-linkage Req 9) ──────────
+
+/** Terminal lifecycle status (alias of {@link SupplierContractStatus}). */
+export type TerminalStatus = "active" | "inactive";
+
+/**
+ * Canonical Terminal record — matches the backend
+ * :class:`fuel.terminal_models.Terminal`. The Sourcing UI uses the
+ * ``terminal_id`` → ``name`` mapping to render a picker instead of a
+ * free-text id box, and `<EntityLink type="terminal">` resolves the same
+ * canonical record (cross-module-entity-linkage Req 9.1, 9.2, 13.1).
+ */
+export interface Terminal {
+  terminal_id: string;
+  tenant_id: string;
+  name: string;
+  operator: string;
+  location_lat: number;
+  location_lon: number;
+  address: string;
+  timezone: string;
+  supported_products: string[];
+  branded: boolean;
+  supplier_brand?: string | null;
+  status: TerminalStatus;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+/** Envelope returned by ``GET /api/fuel/terminals``. */
+export interface TerminalListResponse {
+  items: Terminal[];
+  total: number;
+  page: number;
+  page_size: number;
+  has_next: boolean;
+}
+
+/** Query filters accepted by ``GET /api/fuel/terminals``. */
+export interface TerminalListFilters {
+  status?: TerminalStatus;
+  operator?: string;
+  /** Canonical product_code or legacy alias; server canonicalizes. */
+  product_code?: string;
+  page?: number;
+  size?: number;
+}
+
 /** Supplier_Contract persisted shape — matches backend pydantic model. */
 export interface SupplierContract {
   contract_id: string;
@@ -2061,6 +2223,20 @@ export async function getTerminalWaitSummary(
   return fuelRequest<TerminalWaitSummary>(
     `/fuel/terminals/${encodeURIComponent(terminalId)}/wait-summary`,
   );
+}
+
+/**
+ * GET ``/api/fuel/terminals`` — paginated canonical Terminals for the
+ * tenant (Req 8.1.2). Used by the Sourcing UI to back the terminal
+ * picker (replacing the free-text id box) and to resolve a
+ * ``terminal_id`` to its canonical display name (cross-module-entity-
+ * linkage Req 9.1, 9.2, 13.1).
+ */
+export async function listTerminals(
+  filters: TerminalListFilters = {},
+): Promise<TerminalListResponse> {
+  const qs = buildQueryString(filters);
+  return fuelRequest<TerminalListResponse>(`/fuel/terminals${qs}`);
 }
 
 /**
@@ -2239,6 +2415,14 @@ export interface CompartmentTrucksResponse {
 export interface CleaningEventCreateRequest {
   method: CleaningMethod;
   actor_id: string;
+  /**
+   * Canonical, resolvable driver reference for the actor that performed the
+   * cleaning (cross-module-entity-linkage Req 8.2). Supersedes the free-text
+   * ``actor_id`` alias. Optional/nullable; when supplied the backend validates
+   * it against the Drivers module and rejects a non-existent driver with
+   * HTTP 400 ``driver_not_found``.
+   */
+  driver_id?: string;
   notes?: string;
   evidence_refs?: string[];
 }
@@ -2259,6 +2443,11 @@ export interface CleaningEvent {
   truck_id: string;
   method: CleaningMethod;
   actor_id: string;
+  /**
+   * Canonical, resolvable driver reference (cross-module-entity-linkage
+   * Req 8.2). Nullable for legacy events that only carried ``actor_id``.
+   */
+  driver_id?: string | null;
   notes?: string | null;
   evidence_refs: string[];
   cleaned_at: string;

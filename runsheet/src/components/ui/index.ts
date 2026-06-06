@@ -13,6 +13,12 @@ export type { CardProps } from "./Card";
 export { Card } from "./Card";
 export type { EmptyStateProps } from "./EmptyState";
 export { EmptyState } from "./EmptyState";
+export type {
+  EntityLinkProps,
+  EntityType,
+  ResolvedLink,
+} from "./EntityLink";
+export { EntityLink, entityHref, summaryLabel } from "./EntityLink";
 export type { FilterBarProps, FilterSelectProps } from "./FilterBar";
 export { FilterBar, FilterSelect } from "./FilterBar";
 export type { ModalFooterProps, ModalProps } from "./Modal";

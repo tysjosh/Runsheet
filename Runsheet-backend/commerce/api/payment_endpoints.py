@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 from config.settings import get_settings
 from commerce.services.payment_service import PaymentService
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
+from services.ref_resolver import get_ref_resolver
 
 logger = logging.getLogger(__name__)
 
@@ -31,18 +32,27 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _payment_service: Optional[PaymentService] = None
+#: Optional resolver override (tests inject a fake); falls back to the
+#: process-wide resolver registered at bootstrap.
+_ref_resolver = None
 
 router = APIRouter(prefix="/api/commerce/payments", tags=["commerce-payments"])
 
 
-def configure_payment_api(*, payment_service: PaymentService) -> None:
+def configure_payment_api(
+    *, payment_service: PaymentService, ref_resolver=None
+) -> None:
     """Wire service dependencies into the payment API module.
 
     Called once during application startup so that the router handlers
-    can access the shared PaymentService without circular imports.
+    can access the shared PaymentService without circular imports. An
+    optional ``ref_resolver`` overrides the process-wide resolver used to
+    expand ``invoice`` / ``account`` reference links (Req 12.3); when omitted
+    the handlers fall back to :func:`services.ref_resolver.get_ref_resolver`.
     """
-    global _payment_service
+    global _payment_service, _ref_resolver
     _payment_service = payment_service
+    _ref_resolver = ref_resolver
 
 
 def _get_payment_service() -> PaymentService:
@@ -52,6 +62,11 @@ def _get_payment_service() -> PaymentService:
             "Payment API not configured. Call configure_payment_api() during startup."
         )
     return _payment_service
+
+
+def _get_ref_resolver():
+    """Return the resolver used to expand reference links (Req 12.3)."""
+    return _ref_resolver if _ref_resolver is not None else get_ref_resolver()
 
 
 # ---------------------------------------------------------------------------
@@ -273,28 +288,81 @@ async def list_payments(
 # GET /api/commerce/payments/{payment_id}
 # ---------------------------------------------------------------------------
 
+#: Reference types ``GET /api/commerce/payments/{id}?expand=...`` can resolve.
+_VALID_PAYMENT_EXPAND = ("invoice", "account")
+
+
+def _parse_expand(expand: Optional[str]) -> set:
+    """Parse a comma-separated ``expand`` query into a set of known tokens.
+
+    Unknown tokens are ignored so the param stays additive/forward-compatible.
+    """
+    if not expand:
+        return set()
+    requested = {tok.strip() for tok in expand.split(",") if tok.strip()}
+    return requested & set(_VALID_PAYMENT_EXPAND)
+
+
+async def _build_payment_links(
+    tenant_id: str, payment: Dict[str, Any], expand: set
+) -> Dict[str, Any]:
+    """Resolve the requested payment references into a ``links`` object.
+
+    A payment's ``invoice_id`` / ``account_id`` become resolvable references
+    (Req 12.3). All resolution is tenant-scoped via the loaders; references
+    never cross tenants (Req 5.3) and are returned resolved or explicitly
+    ``unresolved`` — never silently omitted (Req 5.4 / Property 4).
+    """
+    refs: Dict[str, Any] = {}
+    if "invoice" in expand:
+        refs["invoice"] = ("invoice", payment.get("invoice_id"))
+    if "account" in expand:
+        refs["account"] = ("account", payment.get("account_id"))
+
+    resolver = _get_ref_resolver()
+    resolved = await resolver.resolve_many(tenant_id, refs)
+    return {key: ref.to_dict() for key, ref in resolved.items()}
+
 
 @router.get("/{payment_id}")
 async def get_payment(
     payment_id: str,
     request: Request,
     tenant: TenantContext = Depends(require_payments_enabled),
+    expand: Optional[str] = Query(
+        default=None,
+        description=(
+            "Comma-separated references to resolve into a `links` object: "
+            "invoice, account. Omitted → no `links` key (additive, Req 6.3)."
+        ),
+    ),
 ) -> dict:
     """Retrieve a single Payment by ID.
 
     Returns the full payment document including source, method,
-    status, and external references.
+    status, and external references. When ``expand`` is supplied, a
+    ``links`` object resolves the payment's ``invoice_id`` / ``account_id``
+    into navigable references (each resolved or explicitly ``unresolved``)
+    so the billing chain can be traversed end to end (Req 12.3).
 
-    Validates: Constraint C3
+    Validates: Constraint C3, Requirement 12.3
     """
     service = _get_payment_service()
 
     payment = await service.get(tenant_id=tenant.tenant_id, payment_id=payment_id)
 
-    return {
+    response: Dict[str, Any] = {
         "data": payment,
         "request_id": _get_request_id(request),
     }
+
+    requested = _parse_expand(expand)
+    if requested:
+        response["links"] = await _build_payment_links(
+            tenant.tenant_id, payment, requested
+        )
+
+    return response
 
 
 # ---------------------------------------------------------------------------

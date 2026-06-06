@@ -606,6 +606,7 @@ class TerminalBOLIngestionService:
             "api_gravity",
             "supplier_name",
             "terminal_name",
+            "terminal_id",
             "driver_id",
             "timestamp",
         }

@@ -47,7 +47,7 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { type Column, Table } from "@/components/ui";
+import { type Column, EntityLink, Table } from "@/components/ui";
 import type {
   BOLDownloadResponse,
   HashChainMismatch,
@@ -500,8 +500,12 @@ function PodDetailDrawer({ record, onClose, onError }: PodDetailDrawerProps) {
             <dl className="grid grid-cols-2 gap-3 text-sm">
               <div>
                 <dt className="text-xs text-gray-500">Order</dt>
-                <dd className="text-gray-900 font-mono break-all">
-                  {record.order_id}
+                <dd className="text-gray-900 break-all">
+                  <EntityLink
+                    type="order"
+                    id={record.order_id}
+                    showId={false}
+                  />
                 </dd>
               </div>
               <div>
@@ -518,8 +522,54 @@ function PodDetailDrawer({ record, onClose, onError }: PodDetailDrawerProps) {
               </div>
               <div>
                 <dt className="text-xs text-gray-500">Invoice</dt>
-                <dd className="text-gray-900 font-mono break-all">
-                  {record.invoice_id ?? "—"}
+                <dd className="text-gray-900 break-all">
+                  {record.invoice_id ? (
+                    <EntityLink
+                      type="invoice"
+                      id={record.invoice_id}
+                      showId={false}
+                    />
+                  ) : (
+                    "—"
+                  )}
+                </dd>
+              </div>
+            </dl>
+          </section>
+
+          <section>
+            <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
+              Responsible (from order)
+            </h3>
+            <dl className="grid grid-cols-3 gap-3 text-sm">
+              <div>
+                <dt className="text-xs text-gray-500">Customer</dt>
+                <dd className="text-gray-900 break-all">
+                  <EntityLink
+                    type="customer"
+                    id={record.customer_id}
+                    showId={false}
+                  />
+                </dd>
+              </div>
+              <div>
+                <dt className="text-xs text-gray-500">Asset</dt>
+                <dd className="text-gray-900 break-all">
+                  <EntityLink
+                    type="asset"
+                    id={record.assigned_asset_id}
+                    showId={false}
+                  />
+                </dd>
+              </div>
+              <div>
+                <dt className="text-xs text-gray-500">Driver</dt>
+                <dd className="text-gray-900 break-all">
+                  <EntityLink
+                    type="driver"
+                    id={record.assigned_driver_id}
+                    showId={false}
+                  />
                 </dd>
               </div>
             </dl>
@@ -1030,6 +1080,62 @@ function VarianceRow({
   );
 }
 
+// ─── Reconciliation chain (Req 12.2, 13.1) ───────────────────────────────────
+
+/**
+ * Render the `order_id → plan_id → pod_id → invoice_id` chain navigably.
+ *
+ * `order` and `invoice` resolve to owning-module routes via the shared
+ * `<EntityLink>` component (Req 13.1). `plan` and `pod` have no dedicated
+ * owning-module route / `EntityLink` type yet, so they are rendered as their
+ * existing monospace display rather than dead links — keeping the chain
+ * coherent without fabricating a destination (cf. task note: "render the chain
+ * navigable where an EntityLink type exists, otherwise keep the existing
+ * display"). A missing invoice (no QBO leg yet) renders an em dash.
+ */
+function ReconciliationChain({
+  record,
+  stopPropagation = false,
+}: {
+  record: ReconciliationRecord;
+  stopPropagation?: boolean;
+}) {
+  const sep = <span className="text-gray-300">→</span>;
+  return (
+    <span className="inline-flex flex-wrap items-center gap-1.5 font-mono text-xs">
+      <EntityLink
+        type="order"
+        id={record.order_id}
+        showId={false}
+        stopPropagation={stopPropagation}
+        data-testid={`chain-order-${record.reconciliation_id}`}
+      />
+      {sep}
+      <span className="text-gray-700 break-all" title="Loading plan">
+        {record.plan_id}
+      </span>
+      {sep}
+      <span className="text-gray-700 break-all" title="Proof of delivery">
+        {record.pod_id}
+      </span>
+      {sep}
+      {record.invoice_id ? (
+        <EntityLink
+          type="invoice"
+          id={record.invoice_id}
+          showId={false}
+          stopPropagation={stopPropagation}
+          data-testid={`chain-invoice-${record.reconciliation_id}`}
+        />
+      ) : (
+        <span className="text-gray-400" title="Invoice (pending)">
+          —
+        </span>
+      )}
+    </span>
+  );
+}
+
 // ─── Table ───────────────────────────────────────────────────────────────────
 
 interface ReconciliationTableProps {
@@ -1040,16 +1146,12 @@ interface ReconciliationTableProps {
 function ReconciliationTable({ records, onSelect }: ReconciliationTableProps) {
   const columns: Column<ReconciliationRecord>[] = [
     {
-      key: "pod_id",
-      label: "POD",
-      className: "font-mono text-xs text-gray-700 break-all",
-      render: (record) => record.pod_id,
-    },
-    {
-      key: "order_id",
-      label: "Order",
-      className: "font-mono text-xs text-gray-700 break-all",
-      render: (record) => record.order_id,
+      key: "chain",
+      label: "Chain (order → plan → pod → invoice)",
+      className: "break-all",
+      render: (record) => (
+        <ReconciliationChain record={record} stopPropagation />
+      ),
     },
     {
       key: "ordered_gallons",
@@ -1116,6 +1218,48 @@ function ReconciliationTable({ records, onSelect }: ReconciliationTableProps) {
         >
           {formatVariancePct(record.variance_invoiced_vs_delivered_pct)}
         </span>
+      ),
+    },
+    {
+      key: "customer_id",
+      label: "Customer",
+      className: "text-xs break-all",
+      render: (record) => (
+        <EntityLink
+          type="customer"
+          id={record.customer_id}
+          showId={false}
+          stopPropagation
+          data-testid={`pivot-customer-${record.reconciliation_id}`}
+        />
+      ),
+    },
+    {
+      key: "assigned_asset_id",
+      label: "Asset",
+      className: "text-xs break-all",
+      render: (record) => (
+        <EntityLink
+          type="asset"
+          id={record.assigned_asset_id}
+          showId={false}
+          stopPropagation
+          data-testid={`pivot-asset-${record.reconciliation_id}`}
+        />
+      ),
+    },
+    {
+      key: "assigned_driver_id",
+      label: "Driver",
+      className: "text-xs break-all",
+      render: (record) => (
+        <EntityLink
+          type="driver"
+          id={record.assigned_driver_id}
+          showId={false}
+          stopPropagation
+          data-testid={`pivot-driver-${record.reconciliation_id}`}
+        />
       ),
     },
     {

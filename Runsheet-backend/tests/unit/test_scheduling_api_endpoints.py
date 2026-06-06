@@ -818,3 +818,201 @@ class TestRateLimiting:
                 resp = client.get(path, headers=_auth_headers())
                 assert resp.status_code == 200, f"{path} returned {resp.status_code}"
 
+
+
+# ---------------------------------------------------------------------------
+# Test: Job resolver read (cross-module-entity-linkage task 3.2)
+# Validates: Requirements 5.2, 5.3, 5.4 / Property 4
+# ---------------------------------------------------------------------------
+
+
+def _build_app_with_resolver(
+    es_mock: MagicMock, resolver
+) -> tuple[FastAPI, TestClient]:
+    """Build the scheduling app wiring an explicit RefResolver for ?expand=."""
+    app = FastAPI()
+    job_svc = _make_job_service(es_mock)
+    cargo_svc = _make_cargo_service(es_mock)
+    delay_svc = _make_delay_service(es_mock)
+    configure_scheduling_api(
+        job_service=job_svc,
+        cargo_service=cargo_svc,
+        delay_service=delay_svc,
+        ref_resolver=resolver,
+    )
+    app.include_router(scheduling_router)
+
+    @app.exception_handler(AppException)
+    async def _handler(request: Request, exc: AppException):
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=exc.status_code, content=exc.to_dict())
+
+    install_test_auth(app)
+    return app, TestClient(app)
+
+
+def _linked_job_hit() -> dict:
+    """A job hit carrying all four cross-module references."""
+    return _job_hit(
+        "JOB_1",
+        asset_assigned="ASSET_1",
+        order_id="ORDER_1",
+        customer_id="CUST_1",
+        driver_id="DRIVER_1",
+    )
+
+
+def _resolver_with(tenant: str = TENANT_ID, **entities):
+    """Build a RefResolver with in-memory tenant-scoped loaders.
+
+    ``entities`` maps ``entity_type`` -> {id: summary}; only ids present (in the
+    given tenant) resolve, everything else is unresolved/cross-tenant.
+    """
+    from services.ref_resolver import RefResolver
+
+    resolver = RefResolver()
+
+    def _make_loader(table: dict):
+        async def _loader(tenant_id: str, entity_id: str):
+            if tenant_id != tenant:
+                return None
+            return table.get(entity_id)
+        return _loader
+
+    for entity_type, table in entities.items():
+        resolver.register(entity_type, _make_loader(table))
+    return resolver
+
+
+class TestJobResolverRead:
+    """GET /scheduling/jobs/{id}?expand=... resolves cross-module links."""
+
+    def test_non_expanded_read_has_no_links(self):
+        """Backward-compatible: a read without ?expand has no links field."""
+        es = _make_es_mock()
+        es.search_documents = AsyncMock(
+            side_effect=[_es_search_response([_linked_job_hit()]), _es_search_response([])]
+        )
+        resolver = _resolver_with()
+        _, client = _build_app_with_resolver(es, resolver)
+
+        with _SETTINGS_PATCH:
+            resp = client.get("/api/scheduling/jobs/JOB_1", headers=_auth_headers())
+
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert "links" not in data
+        assert data["job"]["job_id"] == "JOB_1"
+
+    def test_expand_resolves_all_references(self):
+        """All four references resolve to summaries when present in tenant."""
+        es = _make_es_mock()
+        es.search_documents = AsyncMock(
+            side_effect=[_es_search_response([_linked_job_hit()]), _es_search_response([])]
+        )
+        resolver = _resolver_with(
+            order={"ORDER_1": {"status": "placed"}},
+            customer={"CUST_1": {"display_name": "Acme Fuel"}},
+            asset={"ASSET_1": {"asset_type": "vehicle"}},
+            driver={"DRIVER_1": {"display_name": "Pat Driver"}},
+        )
+        _, client = _build_app_with_resolver(es, resolver)
+
+        with _SETTINGS_PATCH:
+            resp = client.get(
+                "/api/scheduling/jobs/JOB_1?expand=order,customer,asset,driver",
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 200
+        links = resp.json()["data"]["links"]
+        assert set(links) == {"order", "customer", "asset", "driver"}
+        assert links["order"]["status"] == "resolved"
+        assert links["customer"]["summary"]["display_name"] == "Acme Fuel"
+        # The asset link resolves the job's canonical asset_assigned.
+        assert links["asset"]["id"] == "ASSET_1"
+        assert links["asset"]["status"] == "resolved"
+        assert links["driver"]["status"] == "resolved"
+
+    def test_expand_marks_dangling_reference_unresolved(self):
+        """A reference id that does not resolve is marked unresolved, not dropped."""
+        es = _make_es_mock()
+        es.search_documents = AsyncMock(
+            side_effect=[_es_search_response([_linked_job_hit()]), _es_search_response([])]
+        )
+        # customer loader registered but ORDER_1's customer absent => unresolved
+        resolver = _resolver_with(customer={})
+        _, client = _build_app_with_resolver(es, resolver)
+
+        with _SETTINGS_PATCH:
+            resp = client.get(
+                "/api/scheduling/jobs/JOB_1?expand=customer",
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 200
+        links = resp.json()["data"]["links"]
+        assert links["customer"] == {"status": "unresolved", "id": "CUST_1"}
+
+    def test_expand_marks_absent_reference_empty(self):
+        """A null reference id is marked empty (absent), never silently dropped."""
+        es = _make_es_mock()
+        # Job with no driver link.
+        hit = _job_hit("JOB_1", asset_assigned="ASSET_1", order_id="ORDER_1",
+                       customer_id="CUST_1", driver_id=None)
+        es.search_documents = AsyncMock(
+            side_effect=[_es_search_response([hit]), _es_search_response([])]
+        )
+        resolver = _resolver_with(driver={"DRIVER_1": {"display_name": "Pat"}})
+        _, client = _build_app_with_resolver(es, resolver)
+
+        with _SETTINGS_PATCH:
+            resp = client.get(
+                "/api/scheduling/jobs/JOB_1?expand=driver",
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 200
+        links = resp.json()["data"]["links"]
+        assert links["driver"] == {"status": "empty", "id": None}
+
+    def test_expand_does_not_cross_tenants(self):
+        """A reference whose entity belongs to another tenant resolves unresolved."""
+        es = _make_es_mock()
+        es.search_documents = AsyncMock(
+            side_effect=[_es_search_response([_linked_job_hit()]), _es_search_response([])]
+        )
+        # Customer CUST_1 exists only in a different tenant.
+        resolver = _resolver_with(
+            tenant="other-tenant", customer={"CUST_1": {"display_name": "X"}}
+        )
+        _, client = _build_app_with_resolver(es, resolver)
+
+        with _SETTINGS_PATCH:
+            resp = client.get(
+                "/api/scheduling/jobs/JOB_1?expand=customer",
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 200
+        links = resp.json()["data"]["links"]
+        assert links["customer"]["status"] == "unresolved"
+
+    def test_unknown_expand_tokens_ignored(self):
+        """Unknown expand tokens are ignored, keeping the param forward-compatible."""
+        es = _make_es_mock()
+        es.search_documents = AsyncMock(
+            side_effect=[_es_search_response([_linked_job_hit()]), _es_search_response([])]
+        )
+        resolver = _resolver_with(customer={"CUST_1": {"display_name": "Acme"}})
+        _, client = _build_app_with_resolver(es, resolver)
+
+        with _SETTINGS_PATCH:
+            resp = client.get(
+                "/api/scheduling/jobs/JOB_1?expand=customer,bogus",
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 200
+        links = resp.json()["data"]["links"]
+        assert set(links) == {"customer"}

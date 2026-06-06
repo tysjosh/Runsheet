@@ -38,23 +38,53 @@ import {
   Truck,
   User,
 } from "lucide-react";
+import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
+import { apiService } from "../../services/api";
 import {
   getCargo,
   getJob,
   getJobEta,
+  type JobLinks,
+  type ResolvedLink,
   reassignAsset,
   transitionStatus,
 } from "../../services/schedulingApi";
 import type {
+  Asset,
+  AssetType,
   Job,
   JobEvent,
   JobStatus,
+  JobType,
   SchedulingCargoItem,
 } from "../../types/api";
 import LoadingSpinner from "../LoadingSpinner";
 import CargoManifestEditor from "./CargoManifestEditor";
 import JobActionButtons from "./JobActionButtons";
+
+// ─── Cross-Module Linkage Helpers (cross-module-entity-linkage Req 3.3, 13.1) ─
+
+/**
+ * Asset type required to service each job type. Mirrors the backend dispatch
+ * compatibility map (``Agents/autonomous/delay_response_agent`` /
+ * ``dispatch_optimizer``) so the asset picker only offers type-compatible
+ * assets — enforcing logistics-scheduling Req 3.3 at the point of selection.
+ */
+const JOB_TYPE_TO_ASSET_TYPE: Record<JobType, AssetType> = {
+  cargo_transport: "vehicle",
+  passenger_transport: "vehicle",
+  vessel_movement: "vessel",
+  airport_transfer: "vehicle",
+  crane_booking: "equipment",
+};
+
+/** Read an asset's type tolerating camelCase (`assetType`) or snake_case. */
+function readAssetType(asset: Asset): AssetType | undefined {
+  const camel = (asset as { assetType?: AssetType }).assetType;
+  const snake = (asset as unknown as { asset_type?: AssetType }).asset_type;
+  return camel ?? snake;
+}
 
 // ─── Props ───────────────────────────────────────────────────────────────────
 
@@ -338,6 +368,97 @@ function DetailField({ icon, label, value }: DetailFieldProps) {
   );
 }
 
+// ─── Linked Reference Field (cross-module-entity-linkage Req 13.1, 13.3) ──────
+
+/** Pull a human label out of a resolved reference summary. */
+function summaryLabel(summary: Record<string, unknown>): string | undefined {
+  for (const key of [
+    "display_name",
+    "legal_name",
+    "name",
+    "driver_name",
+    "customer_name",
+  ]) {
+    const value = summary[key];
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return undefined;
+}
+
+interface LinkedRefFieldProps {
+  icon: React.ReactNode;
+  label: string;
+  /** The resolver link for this reference (may be undefined when not expanded). */
+  link: ResolvedLink | undefined;
+  /** Fallback id from the job document when the link was not expanded. */
+  fallbackId?: string;
+  /** Builds the destination href for a resolvable id. */
+  href: (id: string) => string;
+}
+
+/**
+ * Renders a cross-module reference as navigation to the owning module when it
+ * resolves, or an explicit "Unlinked" affordance when it does not — never an
+ * inert id string for a dangling reference (Req 13.1, 13.3).
+ */
+function LinkedRefField({
+  icon,
+  label,
+  link,
+  fallbackId,
+  href,
+}: LinkedRefFieldProps) {
+  let content: React.ReactNode;
+
+  if (link?.status === "resolved") {
+    const display = summaryLabel(link.summary) ?? link.id;
+    content = (
+      <Link
+        href={href(link.id)}
+        className="text-info hover:text-info-dark underline underline-offset-2"
+      >
+        {display}
+        {display !== link.id && (
+          <span className="text-gray-400"> ({link.id})</span>
+        )}
+      </Link>
+    );
+  } else if (link?.status === "unresolved") {
+    content = (
+      <span className="inline-flex items-center gap-1.5">
+        <span className="text-gray-500">{link.id}</span>
+        <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium text-warning-dark bg-warning-light">
+          Unlinked
+        </span>
+      </span>
+    );
+  } else if (fallbackId) {
+    // Not expanded but the job document carries the id — link optimistically.
+    content = (
+      <Link
+        href={href(fallbackId)}
+        className="text-info hover:text-info-dark underline underline-offset-2"
+      >
+        {fallbackId}
+      </Link>
+    );
+  } else {
+    content = <span className="text-gray-400">—</span>;
+  }
+
+  return (
+    <div className="flex items-start gap-3 py-2">
+      <div className="flex-shrink-0 mt-0.5 text-gray-400">{icon}</div>
+      <div className="min-w-0">
+        <p className="text-xs font-medium text-gray-500 uppercase tracking-wider">
+          {label}
+        </p>
+        <p className="text-sm mt-0.5">{content}</p>
+      </div>
+    </div>
+  );
+}
+
 // ─── Main Component ──────────────────────────────────────────────────────────
 
 export default function JobDetailPage({
@@ -346,6 +467,7 @@ export default function JobDetailPage({
   onTransition,
 }: JobDetailPageProps) {
   const [job, setJob] = useState<(Job & { events?: JobEvent[] }) | null>(null);
+  const [links, setLinks] = useState<JobLinks>({});
   const [cargo, setCargo] = useState<SchedulingCargoItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -357,25 +479,40 @@ export default function JobDetailPage({
   const [showReassign, setShowReassign] = useState(false);
   const [reassignAssetId, setReassignAssetId] = useState("");
   const [reassigning, setReassigning] = useState(false);
+  // Asset picker state (Req 3.3): type-compatible assets backed by /fleet/assets.
+  const [assetOptions, setAssetOptions] = useState<Asset[]>([]);
+  const [assetsLoading, setAssetsLoading] = useState(false);
+  const [assetsError, setAssetsError] = useState("");
+
+  /**
+   * Apply a job resolver read response, normalizing the two envelope shapes
+   * (``{ job, events, links }`` vs a flat job) and capturing the ``links``
+   * object so linked order/customer can be rendered (Req 5.2/5.4).
+   */
+  const applyJobResponse = useCallback((jobData: any) => {
+    if (jobData?.job) {
+      setJob({ ...jobData.job, events: jobData.events ?? [] });
+    } else {
+      setJob(jobData);
+    }
+    const resolved: JobLinks | undefined =
+      jobData?.links ?? jobData?.job?.links;
+    if (resolved) setLinks(resolved);
+  }, []);
 
   const loadData = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
       const [jobRes, cargoRes, etaRes] = await Promise.allSettled([
-        getJob(jobId),
+        getJob(jobId, { expand: ["order", "customer", "asset", "driver"] }),
         getCargo(jobId),
         getJobEta(jobId),
       ]);
 
       if (jobRes.status === "fulfilled") {
-        const jobData = jobRes.value.data as any;
-        // Backend returns { job: {...}, events: [...] } or flat job object
-        if (jobData?.job) {
-          setJob({ ...jobData.job, events: jobData.events ?? [] });
-        } else {
-          setJob(jobData);
-        }
+        // Backend returns { job: {...}, events: [...], links: {...} } or flat
+        applyJobResponse(jobRes.value.data as any);
       } else {
         throw jobRes.reason;
       }
@@ -396,11 +533,49 @@ export default function JobDetailPage({
     } finally {
       setLoading(false);
     }
-  }, [jobId]);
+  }, [jobId, applyJobResponse]);
 
   useEffect(() => {
     loadData();
   }, [loadData]);
+
+  /**
+   * Load type-compatible assets for the reassign picker when it opens
+   * (Req 3.3). Filtering by the job's required asset type means the picker can
+   * only offer assets that exist and are type-compatible — invalid free-text
+   * ids are no longer possible.
+   */
+  useEffect(() => {
+    if (!showReassign || !job) return;
+    let cancelled = false;
+    const compatibleType = JOB_TYPE_TO_ASSET_TYPE[job.job_type] ?? "vehicle";
+    setAssetsLoading(true);
+    setAssetsError("");
+    apiService
+      .getAssets({ asset_type: compatibleType })
+      .then((res) => {
+        if (cancelled) return;
+        // Defensive client-side filter in case the backend ignores the param.
+        const compatible = (res.data ?? []).filter((a) => {
+          const t = readAssetType(a);
+          return t === undefined || t === compatibleType;
+        });
+        setAssetOptions(compatible);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setAssetsError(
+          err instanceof Error ? err.message : "Failed to load assets",
+        );
+        setAssetOptions([]);
+      })
+      .finally(() => {
+        if (!cancelled) setAssetsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [showReassign, job]);
 
   /**
    * Handle status transition and update local job state.
@@ -418,12 +593,12 @@ export default function JobDetailPage({
         onTransition(id, targetStatus, failureReason).catch(() => {});
         // Re-fetch to get updated job data and events
         try {
-          const jobRes = await getJob(jobId);
+          const jobRes = await getJob(jobId, {
+            expand: ["order", "customer", "asset", "driver"],
+          });
           const jobData = jobRes.data as any;
-          if (jobData?.job) {
-            setJob({ ...jobData.job, events: jobData.events ?? [] });
-          } else if (jobData?.status) {
-            setJob(jobData);
+          if (jobData?.job || jobData?.status) {
+            applyJobResponse(jobData);
           }
         } catch {
           // Re-fetch failed — use the transition response as fallback
@@ -436,7 +611,7 @@ export default function JobDetailPage({
         );
       }
     },
-    [onTransition, jobId],
+    [onTransition, jobId, applyJobResponse],
   );
 
   const handleReassign = useCallback(async () => {
@@ -566,32 +741,56 @@ export default function JobDetailPage({
         </div>
       </div>
 
-      {/* Reassign form */}
+      {/* Reassign form — asset picker backed by /fleet/assets (Req 3.3) */}
       {showReassign && (
-        <div className="mx-8 mt-2 flex items-center gap-3 bg-gray-50 px-4 py-3 rounded-lg border border-gray-200">
-          <input
-            type="text"
-            value={reassignAssetId}
-            onChange={(e) => setReassignAssetId(e.target.value)}
-            placeholder="New asset ID (e.g. TRK-005)"
-            className="flex-1 px-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200"
-          />
-          <button
-            onClick={handleReassign}
-            disabled={reassigning || !reassignAssetId.trim()}
-            className="px-3 py-1.5 text-xs font-medium text-white rounded-lg disabled:opacity-50 bg-primary hover:bg-primary-hover"
-          >
-            {reassigning ? "Reassigning..." : "Confirm"}
-          </button>
-          <button
-            onClick={() => {
-              setShowReassign(false);
-              setReassignAssetId("");
-            }}
-            className="px-3 py-1.5 text-xs text-gray-500 hover:text-gray-700"
-          >
-            Cancel
-          </button>
+        <div className="mx-8 mt-2 bg-gray-50 px-4 py-3 rounded-lg border border-gray-200">
+          <div className="flex items-center gap-3">
+            <select
+              value={reassignAssetId}
+              onChange={(e) => setReassignAssetId(e.target.value)}
+              disabled={assetsLoading}
+              aria-label="Select replacement asset"
+              className="flex-1 px-3 py-1.5 text-sm border border-gray-200 rounded-lg bg-white focus:ring-2 focus:ring-gray-200 disabled:opacity-50"
+            >
+              <option value="">
+                {assetsLoading
+                  ? "Loading assets…"
+                  : assetOptions.length === 0
+                    ? "No compatible assets available"
+                    : "Select a compatible asset…"}
+              </option>
+              {assetOptions.map((asset) => (
+                <option key={asset.id} value={asset.id}>
+                  {asset.name ? `${asset.name} (${asset.id})` : asset.id}
+                  {asset.status ? ` — ${asset.status}` : ""}
+                </option>
+              ))}
+            </select>
+            <button
+              onClick={handleReassign}
+              disabled={reassigning || !reassignAssetId.trim()}
+              className="px-3 py-1.5 text-xs font-medium text-white rounded-lg disabled:opacity-50 bg-primary hover:bg-primary-hover"
+            >
+              {reassigning ? "Reassigning..." : "Confirm"}
+            </button>
+            <button
+              onClick={() => {
+                setShowReassign(false);
+                setReassignAssetId("");
+              }}
+              className="px-3 py-1.5 text-xs text-gray-500 hover:text-gray-700"
+            >
+              Cancel
+            </button>
+          </div>
+          <p className="mt-2 text-[11px] text-gray-500">
+            Only {JOB_TYPE_TO_ASSET_TYPE[job.job_type] ?? "vehicle"}-type assets
+            are shown — they are validated to exist and be compatible with this{" "}
+            {formatJobType(job.job_type)} job.
+          </p>
+          {assetsError && (
+            <p className="mt-1 text-[11px] text-error">{assetsError}</p>
+          )}
         </div>
       )}
 
@@ -733,6 +932,45 @@ export default function JobDetailPage({
                   value={job.notes}
                 />
               )}
+            </div>
+          </div>
+
+          {/* Linked Records Card (cross-module-entity-linkage Req 3.3, 13.1) */}
+          <div className="bg-white border border-gray-100 rounded-xl overflow-hidden">
+            <div className="px-6 py-4 border-b border-gray-100">
+              <h2 className="text-sm font-medium text-gray-600 uppercase tracking-wider">
+                Linked Records
+              </h2>
+            </div>
+            <div className="px-6 py-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-x-8 gap-y-1">
+              <LinkedRefField
+                icon={<FileText className="w-4 h-4" />}
+                label="Order"
+                link={links.order}
+                fallbackId={job.order_id}
+                href={(id) => `/orders/${encodeURIComponent(id)}`}
+              />
+              <LinkedRefField
+                icon={<User className="w-4 h-4" />}
+                label="Customer"
+                link={links.customer}
+                fallbackId={job.customer_id}
+                href={(id) => `/commerce/customers/${encodeURIComponent(id)}`}
+              />
+              <LinkedRefField
+                icon={<Truck className="w-4 h-4" />}
+                label="Asset"
+                link={links.asset}
+                fallbackId={job.asset_assigned}
+                href={(id) => `/ops/tracking/${encodeURIComponent(id)}`}
+              />
+              <LinkedRefField
+                icon={<User className="w-4 h-4" />}
+                label="Driver"
+                link={links.driver}
+                fallbackId={job.driver_id}
+                href={(id) => `/ops/drivers?driver=${encodeURIComponent(id)}`}
+              />
             </div>
           </div>
 

@@ -166,7 +166,15 @@ export interface Job {
   job_type: JobType;
   status: JobStatus;
   tenant_id: string;
+  /** Canonical fleet asset reference (asset_assigned == asset_id). */
   asset_assigned?: string;
+  /**
+   * Cross-module linkage references (cross-module-entity-linkage Req 3.1).
+   * All optional/nullable; historical jobs read as "unlinked" when absent.
+   */
+  order_id?: string;
+  customer_id?: string;
+  driver_id?: string;
   origin: string;
   destination: string;
   scheduled_time: string;

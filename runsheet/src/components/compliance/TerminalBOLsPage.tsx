@@ -2,7 +2,7 @@
 
 import type React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { type Column, Table } from "@/components/ui";
+import { type Column, EntityLink, Table } from "@/components/ui";
 import {
   getTerminalBOLs,
   type TerminalBOL,
@@ -83,7 +83,9 @@ const bolColumns: Column<TerminalBOL>[] = [
   {
     key: "driver_id",
     label: "Driver ID",
-    render: (bol) => bol.driver_id,
+    // The terminal BOL's subject is its driver, navigable to the Drivers
+    // module (Req 11.3, 13.1).
+    render: (bol) => <EntityLink type="driver" id={bol.driver_id} />,
   },
   {
     key: "timestamp",

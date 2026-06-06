@@ -50,7 +50,7 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { type Column, Table } from "@/components/ui";
+import { type Column, EntityLink, Table } from "@/components/ui";
 import { ApiError } from "../../services/api";
 import type {
   RackPrice,
@@ -58,6 +58,7 @@ import type {
   SourcingRecommendationsQuery,
   SourcingTerminalCandidate,
   SupplierContractResponse,
+  Terminal,
   TerminalWaitReportCreateRequest,
   TerminalWaitSummary,
 } from "../../services/fuelApi";
@@ -66,6 +67,7 @@ import {
   getTerminalWaitSummary,
   listRackPrices,
   listSupplierContracts,
+  listTerminals,
   submitTerminalWaitReport,
 } from "../../services/fuelApi";
 
@@ -252,6 +254,8 @@ interface QueryFormProps {
   onSubmit: () => void;
   onReset: () => void;
   loading: boolean;
+  /** Canonical terminals backing the terminal-restriction picker. */
+  terminals: Terminal[];
 }
 
 /**
@@ -265,6 +269,7 @@ function QueryForm({
   onSubmit,
   onReset,
   loading,
+  terminals,
 }: QueryFormProps) {
   const inputClass =
     "w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white";
@@ -275,6 +280,27 @@ function QueryForm({
     value: QueryFormState[K],
   ) => {
     onChange({ ...form, [field]: value });
+  };
+
+  // The terminal-restriction field is stored internally as a comma-separated
+  // string (so the pure ``validateQueryForm`` contract is unchanged) but is
+  // edited through a canonical terminal picker rather than a free-text id box
+  // (cross-module-entity-linkage Req 9.2 — references resolve to canonical
+  // terminal records, not free text).
+  const selectedTerminalIds = useMemo(
+    () =>
+      form.terminal_ids
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean),
+    [form.terminal_ids],
+  );
+
+  const handleTerminalSelection = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const chosen = Array.from(e.target.selectedOptions)
+      .map((opt) => opt.value)
+      .filter(Boolean);
+    handleChange("terminal_ids", chosen.join(","));
   };
 
   return (
@@ -427,16 +453,39 @@ function QueryForm({
 
         <div className="md:col-span-2 lg:col-span-4">
           <label htmlFor="sourcing-terminal-ids" className={labelClass}>
-            Restrict to terminals (optional, comma-separated)
+            Restrict to terminals (optional)
           </label>
-          <input
-            id="sourcing-terminal-ids"
-            type="text"
-            placeholder="e.g. term_001, term_042"
-            className={inputClass}
-            value={form.terminal_ids}
-            onChange={(e) => handleChange("terminal_ids", e.target.value)}
-          />
+          {terminals.length > 0 ? (
+            <>
+              <select
+                id="sourcing-terminal-ids"
+                multiple
+                className={`${inputClass} h-28`}
+                value={selectedTerminalIds}
+                onChange={handleTerminalSelection}
+                aria-label="Restrict to terminals"
+              >
+                {terminals.map((t) => (
+                  <option key={t.terminal_id} value={t.terminal_id}>
+                    {t.name} ({t.terminal_id})
+                  </option>
+                ))}
+              </select>
+              <p className="mt-1 text-[11px] text-gray-500">
+                Select one or more canonical terminals to restrict the ranking.
+                Hold ⌘/Ctrl to choose several; leave empty to rank all.
+              </p>
+            </>
+          ) : (
+            <p
+              id="sourcing-terminal-ids"
+              className="text-[11px] text-gray-500 px-3 py-2 border border-dashed border-gray-200 rounded-lg"
+            >
+              No canonical terminals available yet — the ranking will consider
+              every eligible terminal. Add terminals in the Terminals admin to
+              restrict by terminal.
+            </p>
+          )}
         </div>
       </div>
 
@@ -982,6 +1031,24 @@ function CandidateRow({ candidate, rank, isBest }: CandidateRowProps) {
 
       {expanded && (
         <div className="px-4 pb-4 pt-0 border-t border-gray-100 space-y-3">
+          <div className="pt-3 text-sm">
+            <span className="text-[10px] uppercase tracking-wide text-gray-500 mr-2">
+              Terminal
+            </span>
+            <EntityLink
+              type="terminal"
+              id={candidate.terminal_id}
+              data-testid={`sourcing-candidate-link-${candidate.terminal_id}`}
+            />
+            {candidate.contract_id && (
+              <span className="ml-3 text-xs text-gray-600">
+                <span className="text-[10px] uppercase tracking-wide text-gray-500 mr-1">
+                  Contract
+                </span>
+                <span className="font-mono">{candidate.contract_id}</span>
+              </span>
+            )}
+          </div>
           {candidate.reasons.length > 0 && (
             <div>
               <div className="text-[10px] uppercase tracking-wide text-gray-500 mb-1">
@@ -1083,9 +1150,11 @@ const rackPriceColumns: Column<RackPrice>[] = [
     label: "Terminal",
     className: "font-mono text-xs text-gray-700 break-all",
     render: (price) => (
-      <span data-testid={`rack-price-row-${price.rack_price_id}`}>
-        {price.terminal_id}
-      </span>
+      <EntityLink
+        type="terminal"
+        id={price.terminal_id}
+        data-testid={`rack-price-row-${price.rack_price_id}`}
+      />
     ),
   },
   {
@@ -1292,13 +1361,18 @@ function SupplierContractsPanel({
                   </div>
                 </dl>
                 {contract.preferred_terminal_ids.length > 0 && (
-                  <div className="mt-1 text-[11px] text-gray-600">
+                  <div className="mt-1 text-[11px] text-gray-600 flex flex-wrap items-center gap-x-2 gap-y-1">
                     <span className="uppercase text-[9px] text-gray-500 mr-1">
                       Terminals:
                     </span>
-                    <span className="font-mono">
-                      {contract.preferred_terminal_ids.join(", ")}
-                    </span>
+                    {contract.preferred_terminal_ids.map((tid) => (
+                      <EntityLink
+                        key={tid}
+                        type="terminal"
+                        id={tid}
+                        className="text-xs"
+                      />
+                    ))}
                   </div>
                 )}
               </li>
@@ -1342,6 +1416,12 @@ export default function SourcingPage({ initialQuery }: SourcingPageProps = {}) {
   const [contracts, setContracts] = useState<SupplierContractResponse[]>([]);
   const [contractsLoading, setContractsLoading] = useState(false);
   const [contractsError, setContractsError] = useState<string | null>(null);
+
+  // Canonical terminals backing the terminal-restriction picker (replacing the
+  // free-text id box — cross-module-entity-linkage Req 9.2). Best-effort: a
+  // failed/empty load degrades the picker to an "all terminals" hint rather
+  // than blocking the page.
+  const [terminals, setTerminals] = useState<Terminal[]>([]);
 
   // Pre-load the rack-price and supplier-contract side panels on mount so
   // dispatchers see the latest market data without first running a
@@ -1387,6 +1467,16 @@ export default function SourcingPage({ initialQuery }: SourcingPageProps = {}) {
       })
       .finally(() => {
         if (!cancelled) setContractsLoading(false);
+      });
+
+    // Load the canonical terminals that back the picker. Best-effort — a
+    // failure leaves the picker in its "all terminals" fallback state.
+    listTerminals({ status: "active", size: SIDE_PANEL_PAGE_SIZE })
+      .then((res) => {
+        if (!cancelled) setTerminals(res.items);
+      })
+      .catch(() => {
+        /* picker degrades to the "all terminals" hint */
       });
 
     return () => {
@@ -1556,6 +1646,7 @@ export default function SourcingPage({ initialQuery }: SourcingPageProps = {}) {
           onSubmit={handleSubmit}
           onReset={handleReset}
           loading={loadingRec}
+          terminals={terminals}
         />
       </div>
 
@@ -1600,8 +1691,12 @@ export default function SourcingPage({ initialQuery }: SourcingPageProps = {}) {
               <div className="text-xs text-gray-500 uppercase tracking-wide">
                 Top terminal
               </div>
-              <div className="text-sm font-semibold text-gray-900 font-mono break-all">
-                {summary.bestTerminal ?? "—"}
+              <div className="text-sm font-semibold text-gray-900 break-all">
+                {summary.bestTerminal ? (
+                  <EntityLink type="terminal" id={summary.bestTerminal} />
+                ) : (
+                  "—"
+                )}
               </div>
             </div>
           </div>

@@ -6,6 +6,7 @@ import {
   type BadgeVariant,
   Button,
   type Column,
+  EntityLink,
   PageHeader,
   Pagination,
   Table,
@@ -337,8 +338,15 @@ export default function AssetCertificationsPage() {
       {
         key: "asset_id",
         label: "Asset",
+        // The compliance subject (asset) is navigable to the Fleet module
+        // (Req 11.3, 13.1). The dashboard list carries no resolver `links`, so
+        // link optimistically on the raw asset_id.
         render: (asset) => (
-          <span className="font-medium">{asset.asset_id}</span>
+          <EntityLink
+            type="asset"
+            id={asset.asset_id}
+            className="font-medium"
+          />
         ),
       },
       {
@@ -439,7 +447,12 @@ export default function AssetCertificationsPage() {
       <div>
         <div className="mb-4">
           <h2 className="text-lg font-bold">
-            Certifications for Asset: {selectedAssetId}
+            Certifications for Asset:{" "}
+            {selectedAssetId ? (
+              <EntityLink type="asset" id={selectedAssetId} />
+            ) : (
+              "—"
+            )}
           </h2>
         </div>
 

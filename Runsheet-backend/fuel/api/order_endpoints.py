@@ -50,6 +50,7 @@ from fuel.order_state_machine import (
 )
 from fuel.services.order_id_generator import mint_event_id
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
+from services.ref_resolver import get_ref_resolver
 from services.time_utils import utcnow
 
 logger = logging.getLogger(__name__)
@@ -73,6 +74,9 @@ _order_intake_pipeline: Any = None
 _order_repository: Any = None
 _driver_repository: Any = None
 _driver_counter_service: Any = None
+#: Resolver used to expand cross-module references on reads. Defaults to the
+#: process-wide resolver; tests may inject one pre-loaded with fake loaders.
+_ref_resolver: Any = None
 
 
 def configure_order_endpoints(
@@ -81,17 +85,28 @@ def configure_order_endpoints(
     order_repository: Any,
     driver_repository: Any = None,
     driver_counter_service: Any = None,
+    ref_resolver: Any = None,
 ) -> None:
     """Wire service dependencies into the order endpoints module.
 
     Called once during application startup (from ``bootstrap/fuel.py``).
     Tests inject fakes so the router can be exercised without ES.
+
+    ``ref_resolver`` overrides the process-wide resolver used to expand
+    ``?expand=...`` links; when omitted the shared resolver is used.
     """
     global _order_intake_pipeline, _order_repository, _driver_repository, _driver_counter_service
+    global _ref_resolver
     _order_intake_pipeline = order_intake_pipeline
     _order_repository = order_repository
     _driver_repository = driver_repository
     _driver_counter_service = driver_counter_service
+    _ref_resolver = ref_resolver
+
+
+def _get_ref_resolver():
+    """Return the resolver used to expand reference links (Req 5.1, 5.4)."""
+    return _ref_resolver if _ref_resolver is not None else get_ref_resolver()
 
 
 def _get_pipeline():
@@ -291,6 +306,7 @@ class OrderResponse(BaseModel):
     intake_channel_id: str
     status: str
     assigned_driver_id: Optional[str] = None
+    assigned_asset_id: Optional[str] = None
     assigned_run_id: Optional[str] = None
     source_schema_version: str
     trace_id: str
@@ -325,6 +341,7 @@ class OrderResponse(BaseModel):
             intake_channel_id=dumped["intake_channel_id"],
             status=dumped["status"],
             assigned_driver_id=dumped.get("assigned_driver_id"),
+            assigned_asset_id=dumped.get("assigned_asset_id"),
             assigned_run_id=dumped.get("assigned_run_id"),
             source_schema_version=dumped["source_schema_version"],
             trace_id=dumped["trace_id"],
@@ -341,6 +358,55 @@ class OrderListResponse(BaseModel):
     total: int
     page: int
     size: int
+
+
+#: Reference types ``GET /api/orders/{id}?expand=...`` can resolve.
+_VALID_ORDER_EXPAND = ("customer", "asset", "driver")
+
+
+def _parse_expand(expand: Optional[str]) -> set[str]:
+    """Parse a comma-separated ``expand`` query into a set of known tokens.
+
+    Unknown tokens are ignored so the param stays additive/forward-compatible.
+    """
+    if not expand:
+        return set()
+    requested = {tok.strip() for tok in expand.split(",") if tok.strip()}
+    return requested & set(_VALID_ORDER_EXPAND)
+
+
+class OrderDetailResponse(OrderResponse):
+    """``OrderResponse`` plus a resolved cross-module ``links`` object.
+
+    Returned by ``GET /api/orders/{order_id}`` only when ``expand`` is supplied;
+    each link is either a resolved summary (``{status, id, summary}``) or an
+    explicit ``{status: "unresolved", id}`` / ``{status: "empty", id}`` marker so
+    the UI can render an "unlinked" affordance rather than a silently-dropped
+    field (Req 5.4 / Property 4).
+    """
+    links: Dict[str, Any]
+
+
+async def _build_order_links(
+    tenant_id: str, order: FuelOrder, expand: set[str]
+) -> Dict[str, Any]:
+    """Resolve the requested order references into a ``links`` object.
+
+    All resolution is tenant-scoped via the loaders; references never cross
+    tenants (Req 5.3). A reference is returned resolved or explicitly
+    unresolved — never omitted (Req 5.4).
+    """
+    refs: Dict[str, tuple[str, Optional[str]]] = {}
+    if "customer" in expand:
+        refs["customer"] = ("customer", order.customer_id)
+    if "asset" in expand:
+        refs["asset"] = ("asset", order.assigned_asset_id)
+    if "driver" in expand:
+        refs["driver"] = ("driver", order.assigned_driver_id)
+
+    resolver = _get_ref_resolver()
+    resolved = await resolver.resolve_many(tenant_id, refs)
+    return {key: ref.to_dict() for key, ref in resolved.items()}
 
 
 class OrderEventResponse(BaseModel):
@@ -624,15 +690,33 @@ async def list_orders(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/{order_id}", response_model=OrderResponse)
+@router.get("/{order_id}", response_model=None)
 async def get_order(
     order_id: str,
     tenant: TenantContext = Depends(get_tenant_context),
-) -> OrderResponse:
+    expand: Optional[str] = Query(
+        default=None,
+        description=(
+            "Comma-separated cross-module references to resolve into a `links` "
+            "object: any of customer,asset,driver. Omit for the unchanged, "
+            "additive-only order contract."
+        ),
+    ),
+) -> OrderResponse | OrderDetailResponse:
     """Fetch a single fuel order by ID.
-    Returns 404 on missing or cross-tenant access.
-    Any authenticated role can read orders.
-    Validates: Requirement 2.5.
+
+    Returns 404 on missing or cross-tenant access. Any authenticated role can
+    read orders.
+
+    When ``expand`` is supplied (cross-module-entity-linkage Req 1.1, 5.1, 5.4),
+    the response additionally carries a ``links`` object resolving the requested
+    references (customer / asset / driver) via the shared ``RefResolver``. Each
+    link is either a resolved summary or an explicit ``unresolved``/``empty``
+    marker, never silently dropped. Reads without ``expand`` return the
+    pre-existing :class:`OrderResponse` contract unchanged (Req 6.3).
+
+    All resolution is tenant-scoped; references never cross tenants (Req 5.3).
+    Validates: Requirements 2.5, 1.1, 5.1, 5.3, 5.4.
     """
     repo = _get_repository()
     order = await repo.get(tenant.tenant_id, order_id)
@@ -641,7 +725,15 @@ async def get_order(
             message=f"Order '{order_id}' not found",
             details={"order_id": order_id},
         )
-    return OrderResponse.from_model(order)
+
+    requested = _parse_expand(expand)
+    if not requested:
+        # Backward-compatible path: unchanged order contract (Req 6.3).
+        return OrderResponse.from_model(order)
+
+    links = await _build_order_links(tenant.tenant_id, order, requested)
+    base = OrderResponse.from_model(order).model_dump()
+    return OrderDetailResponse(**base, links=links)
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,7 @@
 import { FileText, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { type LocationUpdateData, useFleetWebSocket } from "../hooks";
+import type { AssetComplianceSummary } from "../services/api";
 import { apiService } from "../services/api";
 import type {
   AssetSubtype,
@@ -40,6 +41,21 @@ const ASSET_TYPE_LABELS: Record<AssetType, { label: string; icon: string }> = {
   container: { label: "Containers", icon: "📦" },
 };
 
+/**
+ * Chip styling for the per-asset compliance signal sourced from
+ * GET /api/fleet/assets/{asset_id}/compliance (Req 11.2). `valid`/`expiring`/
+ * `expired` mirror the Drivers qualification chip; `unknown` (no records) and a
+ * missing entry render as an "unlinked" affordance.
+ */
+const COMPLIANCE_CHIP: Record<
+  Exclude<AssetComplianceSummary["overall_status"], "unknown">,
+  { variant: BadgeVariant; label: string }
+> = {
+  expired: { variant: "error", label: "Expired" },
+  expiring: { variant: "warning", label: "Expiring" },
+  valid: { variant: "success", label: "Valid" },
+};
+
 interface FleetTrackingProps {
   onTruckSelect?: (truck: Truck) => void;
 }
@@ -54,6 +70,16 @@ export default function FleetTracking({ onTruckSelect }: FleetTrackingProps) {
     "all",
   );
   const [page, setPage] = useState(1);
+
+  /**
+   * Per-asset compliance signal keyed by asset id, lazily fetched for the
+   * visible page so the assignment surface can flag a non-compliant asset
+   * (Req 11.2). `undefined` while loading / "unknown" when the asset has no
+   * compliance records (rendered as an "unlinked" chip).
+   */
+  const [compliance, setCompliance] = useState<
+    Record<string, AssetComplianceSummary["overall_status"]>
+  >({});
 
   /**
    * Handle real-time location updates from WebSocket
@@ -245,6 +271,40 @@ export default function FleetTracking({ onTruckSelect }: FleetTrackingProps) {
     (page - 1) * PAGE_SIZE,
     page * PAGE_SIZE,
   );
+
+  // Lazily correlate compliance status for the visible assets (Req 11.2).
+  // Keyed on the visible ids so it refetches when the page/filter changes;
+  // failures degrade gracefully to "unknown" (rendered as an unlinked chip).
+  const visibleIds = paginatedTrucks.map((t) => t.id).join(",");
+  useEffect(() => {
+    const ids = visibleIds ? visibleIds.split(",") : [];
+    if (ids.length === 0) return;
+    let cancelled = false;
+
+    (async () => {
+      const entries = await Promise.all(
+        ids.map(async (id) => {
+          try {
+            const summary = await apiService.getAssetCompliance(id);
+            return [id, summary.overall_status] as const;
+          } catch {
+            return [id, "unknown"] as const;
+          }
+        }),
+      );
+      if (cancelled) return;
+      setCompliance((prev) => {
+        const next = { ...prev };
+        for (const [id, status] of entries) next[id] = status;
+        return next;
+      });
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [visibleIds]);
+
   const fleetColumns: Column<Truck>[] = [
     {
       key: "asset",
@@ -291,6 +351,29 @@ export default function FleetTracking({ onTruckSelect }: FleetTrackingProps) {
           {formatStatus(truck.status)}
         </Badge>
       ),
+    },
+    {
+      key: "compliance",
+      label: "Compliance",
+      render: (truck) => {
+        const status = compliance[truck.id];
+        if (!status || status === "unknown") {
+          return (
+            <span
+              className="text-xs text-gray-400"
+              title="No compliance records"
+            >
+              Unlinked
+            </span>
+          );
+        }
+        const chip = COMPLIANCE_CHIP[status];
+        return (
+          <Badge variant={chip.variant} size="sm">
+            {chip.label}
+          </Badge>
+        );
+      },
     },
     {
       key: "eta",

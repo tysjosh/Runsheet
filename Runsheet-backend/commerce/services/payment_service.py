@@ -787,3 +787,96 @@ class PaymentService:
         if hits:
             return hits[0]["_source"]
         return None
+
+    # ------------------------------------------------------------------
+    # External (Stripe) → canonical payment mapping (Req 12.3)
+    # ------------------------------------------------------------------
+
+    async def find_by_external_id(
+        self,
+        *,
+        tenant_id: str,
+        source: str,
+        external_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Resolve an external payment id to its canonical Payment document.
+
+        Public wrapper over the source+external_id lookup. Returns the
+        canonical Payment dict when a record exists for this tenant whose
+        ``source``/``external_id`` match the external charge (e.g. a Stripe
+        ``PaymentIntent`` id), else ``None``. Tenant-scoped via
+        ``inject_tenant_filter`` so a charge belonging to another tenant is
+        never returned (Req 12.3, C3).
+        """
+        if not external_id:
+            return None
+        return await self._find_payment_by_external_id(
+            tenant_id, source, external_id
+        )
+
+    async def map_external(
+        self,
+        *,
+        tenant_id: str,
+        external_ids: List[str],
+        source: str = PaymentSource.STRIPE.value,
+    ) -> Dict[str, Dict[str, Any]]:
+        """Map a batch of external payment ids to canonical payment summaries.
+
+        Used by the Admin Stripe view to label each external Stripe payment
+        with its canonical ``payment_id`` (and the ``invoice_id`` / ``account_id``
+        it was applied to) or to flag it ``unmapped`` when no canonical record
+        exists (Req 12.3). One tenant-scoped ``terms`` query resolves the whole
+        page rather than N point lookups.
+
+        Args:
+            tenant_id: Tenant identifier for data isolation.
+            external_ids: External charge ids to resolve (e.g. Stripe
+                ``PaymentIntent`` ids). Empty / falsy ids are skipped.
+            source: System-of-record to match against (defaults to ``stripe``).
+
+        Returns:
+            A dict keyed by ``external_id`` whose values are
+            ``{payment_id, status, invoice_id, account_id, amount_cents}``
+            for every external id that maps to a canonical payment. External
+            ids absent from the result are unmapped.
+
+        Validates: Requirement 12.3, C3
+        """
+        wanted = [eid for eid in (external_ids or []) if eid]
+        if not wanted:
+            return {}
+
+        base_query: Dict[str, Any] = {
+            "query": {
+                "bool": {
+                    "must": [
+                        {"term": {"source": source}},
+                        {"terms": {"external_id": wanted}},
+                    ]
+                }
+            },
+            "size": min(len(wanted), _MAX_PAGE_LIMIT),
+        }
+        query = inject_tenant_filter(base_query, tenant_id)
+
+        response = await self._es.search_documents(
+            PAYMENTS_CURRENT_INDEX, query, size=base_query["size"]
+        )
+
+        out: Dict[str, Dict[str, Any]] = {}
+        for hit in response.get("hits", {}).get("hits", []):
+            src = hit.get("_source", {})
+            external_id = src.get("external_id")
+            if not external_id or external_id in out:
+                # First match wins; canonical (tenant, source, external_id) is
+                # unique under the authoritative persistence path.
+                continue
+            out[external_id] = {
+                "payment_id": src.get("payment_id"),
+                "status": src.get("status"),
+                "invoice_id": src.get("invoice_id"),
+                "account_id": src.get("account_id"),
+                "amount_cents": src.get("amount_cents"),
+            }
+        return out

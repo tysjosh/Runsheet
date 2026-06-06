@@ -2,7 +2,7 @@
 
 import type React from "react";
 import { useCallback, useEffect, useState } from "react";
-import { Badge, Button } from "@/components/ui";
+import { Badge, Button, EntityLink } from "@/components/ui";
 import type {
   Account,
   AgingBuckets,
@@ -238,14 +238,24 @@ export default function AccountDetailPage({
         </section>
       )}
 
-      {/* Customer link */}
+      {/* Customer link — navigation to the owning customer (Req 12.4, 13.1).
+          When an in-hub navigation callback is supplied it is used (keeps the
+          caller in control of routing); otherwise the canonical customer route
+          is linked via <EntityLink>. */}
       <section className="mb-8">
-        <Button
-          variant="ghost"
-          onClick={() => onViewCustomer?.(account.customer_id)}
-        >
-          View Parent Customer →
-        </Button>
+        {onViewCustomer ? (
+          <Button
+            variant="ghost"
+            onClick={() => onViewCustomer(account.customer_id)}
+          >
+            View Parent Customer →
+          </Button>
+        ) : (
+          <div className="flex items-center gap-1.5 text-sm">
+            <span className="text-gray-500">Parent Customer:</span>
+            <EntityLink type="customer" id={account.customer_id} />
+          </div>
+        )}
       </section>
 
       {/* Credit Override Drawer */}

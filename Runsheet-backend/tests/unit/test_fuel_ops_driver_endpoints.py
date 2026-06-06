@@ -29,10 +29,15 @@ from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
 from errors.exceptions import AppException
-from fuel.api.driver_endpoints import configure_driver_endpoints, router
+from fuel.api.driver_endpoints import (
+    configure_driver_endpoints,
+    router,
+    set_driver_qualification_service,
+)
 from fuel.order_models import Driver
 from fuel.services.driver_counter_service import DriverCounterService
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
+from services.ref_resolver import RefResolver
 
 
 # ---------------------------------------------------------------------------
@@ -492,6 +497,196 @@ class TestQualificationWarnings:
         assert resp.status_code == 200
         body = resp.json()
         assert "medical_card_expiring_soon" in body["qualification_warnings"]
+
+
+# ---------------------------------------------------------------------------
+# Tests — Driver correlation profile read (Req 4.1, 4.2, 4.3, 13.1)
+# ---------------------------------------------------------------------------
+
+
+class _FakeQualificationSummary:
+    """Mimics DriverQualificationSummary's model_dump for the profile read."""
+
+    def __init__(self, payload: Dict[str, Any]) -> None:
+        self._payload = payload
+
+    def model_dump(self, *args, **kwargs) -> Dict[str, Any]:
+        return self._payload
+
+
+class FakeQualificationService:
+    """In-memory fake of the compliance DriverQualificationService."""
+
+    def __init__(self) -> None:
+        self._summaries: Dict[str, Dict[str, Any]] = {}
+
+    def seed(self, tenant_id: str, driver_id: str, summary: Dict[str, Any]) -> None:
+        self._summaries[f"{tenant_id}::{driver_id}"] = summary
+
+    async def get_qualification_summary(self, tenant_id: str, driver_id: str):
+        key = f"{tenant_id}::{driver_id}"
+        if key not in self._summaries:
+            from errors.exceptions import resource_not_found
+
+            raise resource_not_found(
+                f"Driver '{driver_id}' not found", details={"driver_id": driver_id}
+            )
+        return _FakeQualificationSummary(self._summaries[key])
+
+
+def _make_asset_resolver(assets: Dict[str, str]) -> RefResolver:
+    """RefResolver with a tenant-scoped fake asset loader.
+
+    ``assets`` maps asset_id -> tenant_id; a lookup in a different tenant
+    resolves to None (surfaced as ``unresolved``).
+    """
+    resolver = RefResolver()
+
+    async def asset_loader(tenant_id: str, asset_id: str):
+        owner = assets.get(asset_id)
+        if owner is None or owner != tenant_id:
+            return None
+        return {"asset_id": asset_id, "name": f"Truck {asset_id}", "asset_type": "vehicle"}
+
+    resolver.register("asset", asset_loader)
+    return resolver
+
+
+def _build_profile_app(
+    *,
+    tenant_id: str = "tenant-A",
+    repo: Optional[FakeDriverRepository] = None,
+    resolver: Optional[RefResolver] = None,
+    qual_service: Optional[FakeQualificationService] = None,
+) -> Tuple[TestClient, FakeDriverRepository]:
+    repo = repo or FakeDriverRepository()
+    configure_driver_endpoints(driver_repository=repo, ref_resolver=resolver)
+    # Reset / inject the qualification source explicitly so tests do not leak
+    # state into one another via the module global.
+    set_driver_qualification_service(qual_service)
+
+    app = FastAPI()
+    app.include_router(router)
+
+    @app.exception_handler(AppException)
+    async def _app_exception_handler(request: Request, exc: AppException):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.to_dict()},
+        )
+
+    ctx = _tenant_ctx(tenant_id=tenant_id)
+    app.dependency_overrides[get_tenant_context] = lambda: ctx
+    return TestClient(app), repo
+
+
+class TestDriverProfileRead:
+    """GET /api/ops/drivers/{driver_id}/profile correlation read."""
+
+    def test_profile_resolves_truck_and_qualification(self):
+        """Profile returns utilization + resolved truck + qualification summary."""
+        repo = FakeDriverRepository()
+        repo.seed_driver(_make_driver(driver_id="drv-001", tenant_id="tenant-A"))
+
+        resolver = _make_asset_resolver({"truck-1": "tenant-A"})
+        qual = FakeQualificationService()
+        qual.seed(
+            "tenant-A",
+            "drv-001",
+            {
+                "driver_id": "drv-001",
+                "full_name": "Test Driver",
+                "driver_status": "active",
+                "overall_status": "expiring",
+                "qualifications": [],
+            },
+        )
+
+        client, _ = _build_profile_app(repo=repo, resolver=resolver, qual_service=qual)
+
+        resp = client.get("/api/ops/drivers/drv-001/profile")
+        assert resp.status_code == 200
+        body = resp.json()
+
+        assert body["driver_id"] == "drv-001"
+        assert body["utilization"]["driver_id"] == "drv-001"
+        assert body["utilization"]["assigned_truck_id"] == "truck-1"
+
+        # Truck reference resolved to an asset summary.
+        assert body["assigned_truck"]["status"] == "resolved"
+        assert body["assigned_truck"]["id"] == "truck-1"
+        assert body["assigned_truck"]["summary"]["asset_type"] == "vehicle"
+
+        # Qualification correlated by driver_id.
+        assert body["qualification"]["status"] == "resolved"
+        assert body["qualification"]["summary"]["overall_status"] == "expiring"
+
+    def test_profile_unresolved_truck_marker(self):
+        """A truck id not in this tenant resolves to an explicit unresolved marker."""
+        repo = FakeDriverRepository()
+        repo.seed_driver(_make_driver(driver_id="drv-001", tenant_id="tenant-A"))
+
+        # Asset owned by another tenant — must not resolve cross-tenant.
+        resolver = _make_asset_resolver({"truck-1": "tenant-B"})
+        client, _ = _build_profile_app(repo=repo, resolver=resolver, qual_service=None)
+
+        resp = client.get("/api/ops/drivers/drv-001/profile")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["assigned_truck"]["status"] == "unresolved"
+        assert body["assigned_truck"]["id"] == "truck-1"
+
+    def test_profile_unresolved_qualification_when_no_record(self):
+        """No compliance qualification record → explicit unresolved marker."""
+        repo = FakeDriverRepository()
+        repo.seed_driver(_make_driver(driver_id="drv-001", tenant_id="tenant-A"))
+
+        resolver = _make_asset_resolver({"truck-1": "tenant-A"})
+        qual = FakeQualificationService()  # empty — no record seeded
+        client, _ = _build_profile_app(repo=repo, resolver=resolver, qual_service=qual)
+
+        resp = client.get("/api/ops/drivers/drv-001/profile")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["qualification"]["status"] == "unresolved"
+        assert body["qualification"]["driver_id"] == "drv-001"
+
+    def test_profile_unresolved_qualification_when_service_absent(self):
+        """No qualification service wired → qualification is unresolved, not a 500."""
+        repo = FakeDriverRepository()
+        repo.seed_driver(_make_driver(driver_id="drv-001", tenant_id="tenant-A"))
+
+        resolver = _make_asset_resolver({"truck-1": "tenant-A"})
+        client, _ = _build_profile_app(repo=repo, resolver=resolver, qual_service=None)
+
+        resp = client.get("/api/ops/drivers/drv-001/profile")
+        assert resp.status_code == 200
+        assert resp.json()["qualification"]["status"] == "unresolved"
+
+    def test_profile_cross_tenant_driver_returns_404(self):
+        """Tenant A cannot read Tenant B's driver profile — gets 404."""
+        repo = FakeDriverRepository()
+        repo.seed_driver(_make_driver(driver_id="drv-b1", tenant_id="tenant-B"))
+
+        client, _ = _build_profile_app(tenant_id="tenant-A", repo=repo)
+
+        resp = client.get("/api/ops/drivers/drv-b1/profile")
+        assert resp.status_code == 404
+        _assert_error_envelope(resp.json())
+
+    def test_profile_empty_truck_when_unassigned(self):
+        """A driver with no assigned_truck_id yields an 'empty' truck marker."""
+        repo = FakeDriverRepository()
+        driver = _make_driver(driver_id="drv-001", tenant_id="tenant-A")
+        driver = driver.model_copy(update={"assigned_truck_id": None})
+        repo.seed_driver(driver)
+
+        resolver = _make_asset_resolver({})
+        client, _ = _build_profile_app(repo=repo, resolver=resolver, qual_service=None)
+
+        resp = client.get("/api/ops/drivers/drv-001/profile")
+        assert resp.status_code == 200
+        assert resp.json()["assigned_truck"]["status"] == "empty"
 
 
 # ---------------------------------------------------------------------------

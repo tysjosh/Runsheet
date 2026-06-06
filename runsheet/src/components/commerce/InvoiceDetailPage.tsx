@@ -2,7 +2,14 @@
 
 import type React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Badge, Button, EmptyState, StatsBar, Table } from "@/components/ui";
+import {
+  Badge,
+  Button,
+  EmptyState,
+  EntityLink,
+  StatsBar,
+  Table,
+} from "@/components/ui";
 import type {
   Invoice,
   InvoiceEvent,
@@ -214,16 +221,43 @@ export default function InvoiceDetailPage({
             <h1 className="text-2xl font-bold">
               Invoice {invoice.invoice_number}
             </h1>
-            <p className="text-gray-600">
-              Due: {invoice.due_date} · Account:{" "}
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => onViewAccount?.(invoice.account_id)}
-              >
-                {invoice.account_id}
-              </Button>
-            </p>
+            <p className="text-gray-600">Due: {invoice.due_date}</p>
+            {/* Navigable references to the order, account, and customer this
+                invoice belongs to (Req 12.1, 13.1). Account is an in-hub
+                destination (it lives as a tab in CommerceHub) so it navigates
+                via the onViewAccount callback rather than a standalone route;
+                customer and order have canonical routes and link via
+                <EntityLink>. */}
+            <dl className="mt-2 flex flex-wrap gap-x-6 gap-y-1 text-sm">
+              <div className="flex items-center gap-1.5">
+                <dt className="text-gray-500">Account:</dt>
+                <dd>
+                  {onViewAccount ? (
+                    <button
+                      type="button"
+                      onClick={() => onViewAccount(invoice.account_id)}
+                      className="text-info hover:text-info-dark underline underline-offset-2"
+                    >
+                      {invoice.account_id}
+                    </button>
+                  ) : (
+                    <EntityLink type="account" id={invoice.account_id} />
+                  )}
+                </dd>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <dt className="text-gray-500">Customer:</dt>
+                <dd>
+                  <EntityLink type="customer" id={invoice.customer_id} />
+                </dd>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <dt className="text-gray-500">Order:</dt>
+                <dd>
+                  <EntityLink type="order" id={invoice.order_id} />
+                </dd>
+              </div>
+            </dl>
           </div>
           <div className="flex items-center gap-3">
             <Badge

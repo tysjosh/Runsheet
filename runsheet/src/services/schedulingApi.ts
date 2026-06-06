@@ -39,6 +39,39 @@ export interface SingleResponse<T> {
   request_id: string;
 }
 
+// ─── Cross-Module Resolver Links (cross-module-entity-linkage Req 5.2/5.4) ────
+
+/**
+ * A single resolved reference as returned in a resolver read's ``links``
+ * object. Mirrors the backend ``RefResolver``/``ResolvedRef`` contract:
+ *
+ * - ``resolved``  — the id resolved to a same-tenant entity; ``summary`` holds
+ *   a small display payload (e.g. ``customer_id`` + ``display_name``).
+ * - ``unresolved`` — an id was present but did not resolve in this tenant; the
+ *   UI renders an explicit "unlinked" affordance rather than dropping it.
+ * - ``empty`` — no id was supplied (the reference is simply absent).
+ */
+export type ResolvedLink =
+  | { status: "resolved"; id: string; summary: Record<string, unknown> }
+  | { status: "unresolved"; id: string }
+  | { status: "empty"; id?: string | null };
+
+/**
+ * The ``links`` object on a job resolver read
+ * (``GET /scheduling/jobs/{id}?expand=order,customer,asset,driver``). Each key
+ * is present only when requested via ``expand``; absent keys mean the caller
+ * did not ask to expand that reference.
+ */
+export interface JobLinks {
+  order?: ResolvedLink;
+  customer?: ResolvedLink;
+  asset?: ResolvedLink;
+  driver?: ResolvedLink;
+}
+
+/** The entity references a job resolver read can expand. */
+export type JobExpand = "order" | "customer" | "asset" | "driver";
+
 // ─── Filter Types ────────────────────────────────────────────────────────────
 
 export interface JobFilters {
@@ -77,6 +110,13 @@ export interface CreateJobPayload {
   destination: string;
   scheduled_time: string;
   asset_assigned?: string;
+  /**
+   * Cross-module linkage references (cross-module-entity-linkage Req 3.1).
+   * Optional/nullable; populated when a job is created from an order.
+   */
+  order_id?: string;
+  customer_id?: string;
+  driver_id?: string;
   cargo_manifest?: Omit<SchedulingCargoItem, "item_id">[];
   priority?: Priority;
   notes?: string;
@@ -228,10 +268,14 @@ export async function getJobs(
 /** GET /scheduling/jobs/:id — single job with event history */
 export async function getJob(
   jobId: string,
-): Promise<SingleResponse<Job & { events?: JobEvent[] }>> {
-  return schedulingRequest<SingleResponse<Job & { events?: JobEvent[] }>>(
-    `/scheduling/jobs/${encodeURIComponent(jobId)}`,
-  );
+  options?: { expand?: JobExpand[] },
+): Promise<SingleResponse<Job & { events?: JobEvent[]; links?: JobLinks }>> {
+  const expand = options?.expand?.length
+    ? `?expand=${options.expand.join(",")}`
+    : "";
+  return schedulingRequest<
+    SingleResponse<Job & { events?: JobEvent[]; links?: JobLinks }>
+  >(`/scheduling/jobs/${encodeURIComponent(jobId)}${expand}`);
 }
 
 /** GET /scheduling/jobs/active — active jobs (scheduled, assigned, in_progress) */

@@ -163,6 +163,19 @@ class MeterRegistration(BaseModel):
             raise ValueError("tenant_id must not be empty or whitespace")
         return stripped
 
+    # ------------------------------------------------------------------
+    # Uniform cross-module subject reference (cross-module-entity-linkage
+    # task 10, Req 11.1). A meter is installed on a truck, which is a fleet
+    # **asset**; ``truck_id == asset_id`` (design §Data Models), so the
+    # uniform ``subject_ref`` is a view over ``truck_id``.
+    # ------------------------------------------------------------------
+    @property
+    def subject_ref(self) -> "SubjectRef":
+        """The asset (truck) this meter is installed on, as a ``SubjectRef``."""
+        from compliance.services.compliance_subject_ref import SubjectRef
+
+        return SubjectRef(subject_type="asset", subject_id=self.truck_id)
+
 
 # ---------------------------------------------------------------------------
 # MeterAuditEntry Model

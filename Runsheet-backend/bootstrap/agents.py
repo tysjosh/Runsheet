@@ -895,6 +895,59 @@ async def initialize(app, container: ServiceContainer) -> None:
         storm_mode_evaluator=None,  # populated further below
     )
 
+    # Register the customer-tank (``tank``) loader on the process-wide
+    # RefResolver so the customer-tank resolver read
+    # (``GET /api/fuel/mvp/customer-tanks/{id}?expand=customer,last_refill_order``)
+    # and ``<EntityLink type="tank">`` resolve a tank reference to a summary
+    # instead of dangling as "unresolved" (cross-module-entity-linkage task 6,
+    # Req 7.2/7.3/13.1). The customer + order loaders this read also needs are
+    # registered by ``bootstrap/fuel.py`` on the same shared resolver; this
+    # registration is idempotent and additive.
+    try:
+        from fuel.customer_tank_models import CustomerTankRepository
+        from services.ref_loaders import register_customer_tank_link_loader
+        from services.ref_resolver import get_ref_resolver
+
+        register_customer_tank_link_loader(
+            get_ref_resolver(),
+            customer_tank_repository=CustomerTankRepository(es_service),
+        )
+        logger.info("Customer-tank reference loader registered")
+    except Exception as exc:  # noqa: BLE001 — resolver degrades gracefully
+        logger.warning(
+            "Failed to register customer-tank reference loader: %s", exc
+        )
+
+    # Register the canonical ``terminal`` / ``contract`` loaders on the
+    # process-wide RefResolver so a sourcing recommendation, terminal BOL, or
+    # wait report's ``terminal_id`` resolves to the canonical terminal record
+    # and a recommendation candidate's ``contract_id`` resolves to a supplier
+    # contract — instead of dangling as "unresolved" (cross-module-entity-
+    # linkage task 8, Req 9.1/9.2/13.1). The TerminalRepository /
+    # SupplierContractRepository are tenant-scoped, so a cross-tenant reference
+    # resolves to ``None`` → ``unresolved`` (Req 5.3 / Property 2). Registration
+    # is idempotent and additive.
+    try:
+        from fuel.terminal_models import (
+            SupplierContractRepository,
+            TerminalRepository,
+        )
+        from services.ref_loaders import register_terminal_link_loaders
+        from services.ref_resolver import get_ref_resolver
+
+        register_terminal_link_loaders(
+            get_ref_resolver(),
+            terminal_repository=TerminalRepository(es_service=es_service),
+            supplier_contract_repository=SupplierContractRepository(
+                es_service=es_service
+            ),
+        )
+        logger.info("Terminal / supplier-contract reference loaders registered")
+    except Exception as exc:  # noqa: BLE001 — resolver degrades gracefully
+        logger.warning(
+            "Failed to register terminal/contract reference loaders: %s", exc
+        )
+
     # Task 7.10: inject the same recommender into the Route_Planning_Agent
     # so Loading_Plans that carry an external ``terminal_id`` stamp the
     # chosen terminal id + reasons on the persisted Route_Plan
@@ -1271,8 +1324,31 @@ async def initialize(app, container: ServiceContainer) -> None:
                 es_service=es_service,
             )
 
+        async def _stripe_payment_mapper(tenant_id: str, external_ids):
+            """Map external Stripe charge ids → canonical commerce payments.
+
+            Resolves the commerce ``PaymentService`` from the container lazily
+            (it is wired in a separate bootstrap phase) so a partially-wired or
+            commerce-disabled environment simply yields no mappings — every
+            Stripe payment then surfaces as ``unmapped`` (Req 12.3) rather than
+            failing the Admin Stripe view.
+            """
+
+            pay_svc = (
+                container.commerce_payment_service
+                if container.has("commerce_payment_service")
+                else None
+            )
+            if pay_svc is None:
+                return {}
+            return await pay_svc.map_external(
+                tenant_id=tenant_id,
+                external_ids=list(external_ids),
+            )
+
         configure_stripe_endpoints(
             connector_factory=_stripe_connector_factory,
+            payment_mapper=_stripe_payment_mapper,
         )
         logger.info(
             "Stripe REST endpoints + webhook router configured "

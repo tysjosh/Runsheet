@@ -8,6 +8,7 @@
  */
 
 import { Package, Plus, RefreshCw } from "lucide-react";
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Badge,
@@ -123,6 +124,84 @@ function formatDate(dateStr?: string | null): string {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+// ─── Customer Cell (cross-module-entity-linkage Req 1.2, 1.3, 1.4, 13.1, 13.3) ─
+
+/** Pull a human display name out of a resolved customer reference summary. */
+function summaryLabel(summary: Record<string, unknown>): string | undefined {
+  for (const key of ["display_name", "legal_name", "name", "customer_name"]) {
+    const value = summary[key];
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return undefined;
+}
+
+/**
+ * Renders the Orders-table customer cell as navigation to the commerce
+ * customer record when the reference is resolvable, or an explicit "Unlinked"
+ * affordance when it is not (Req 1.2, 1.3, 13.1, 13.3).
+ *
+ * Display-name precedence honours the commerce record as the source of truth
+ * (Req 1.4): a resolved ``links.customer`` summary name wins over the
+ * denormalized ``customer_name`` snapshot. List reads carry no ``links`` object
+ * — there the cell links optimistically on ``customer_id`` and uses the
+ * snapshot as the display label (mirroring the JobDetailPage fallback path).
+ */
+function CustomerCell({ order }: { order: FuelOrder }) {
+  const link = order.links?.customer;
+  const snapshot = order.customer_name?.trim() || undefined;
+
+  // Explicitly unresolved reference — never show a stale name as if linked.
+  if (link?.status === "unresolved") {
+    return (
+      <span className="inline-flex items-center gap-1.5">
+        {snapshot && <span className="text-sm text-gray-500">{snapshot}</span>}
+        <Badge variant="warning" size="sm">
+          Unlinked
+        </Badge>
+      </span>
+    );
+  }
+
+  // Resolved reference — prefer the resolved name (source of truth, Req 1.4).
+  if (link?.status === "resolved") {
+    const display = summaryLabel(link.summary) ?? snapshot ?? link.id;
+    return (
+      <Link
+        href={`/commerce/customers/${encodeURIComponent(link.id)}`}
+        className="text-sm font-medium text-info hover:text-info-dark underline underline-offset-2"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {display}
+      </Link>
+    );
+  }
+
+  // No links payload (list read): link optimistically when a customer_id is
+  // present, otherwise surface the row as unlinked.
+  const customerId = order.customer_id?.trim();
+  if (customerId) {
+    const display = snapshot ?? customerId;
+    return (
+      <Link
+        href={`/commerce/customers/${encodeURIComponent(customerId)}`}
+        className="text-sm font-medium text-info hover:text-info-dark underline underline-offset-2"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {display}
+      </Link>
+    );
+  }
+
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      {snapshot && <span className="text-sm text-gray-500">{snapshot}</span>}
+      <Badge variant="warning" size="sm">
+        Unlinked
+      </Badge>
+    </span>
+  );
 }
 
 // ─── Props ───────────────────────────────────────────────────────────────────
@@ -255,9 +334,7 @@ export default function OrdersPage({
     {
       key: "customer",
       label: "Customer",
-      render: (order) => (
-        <span className="text-sm text-gray-700">{order.customer_name}</span>
-      ),
+      render: (order) => <CustomerCell order={order} />,
     },
     {
       key: "product",

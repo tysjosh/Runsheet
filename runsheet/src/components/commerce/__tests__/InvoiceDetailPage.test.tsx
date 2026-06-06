@@ -346,4 +346,71 @@ describe("InvoiceDetailPage", () => {
       screen.queryByRole("button", { name: /Void Invoice/i }),
     ).not.toBeInTheDocument();
   });
+
+  it("links the customer reference to the canonical customer route", async () => {
+    mockGetInvoice.mockResolvedValue({
+      data: invoiceFixture(),
+      request_id: "r1",
+    } as any);
+    mockGetInvoiceEvents.mockResolvedValue({
+      data: [eventFixture()],
+      request_id: "r2",
+    } as any);
+
+    render(<InvoiceDetailPage invoiceId="inv_001" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Invoice INV-2024-0001")).toBeInTheDocument();
+    });
+
+    // Customer reference is navigable to its owning module (Req 12.1, 13.1).
+    const customerLink = screen.getByRole("link", { name: /cust_001/ });
+    expect(customerLink).toHaveAttribute(
+      "href",
+      "/commerce/customers/cust_001",
+    );
+  });
+
+  it("links a present order reference to the orders route", async () => {
+    mockGetInvoice.mockResolvedValue({
+      data: invoiceFixture({ order_id: "ord_777" }),
+      request_id: "r1",
+    } as any);
+    mockGetInvoiceEvents.mockResolvedValue({
+      data: [eventFixture()],
+      request_id: "r2",
+    } as any);
+
+    render(<InvoiceDetailPage invoiceId="inv_001" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Invoice INV-2024-0001")).toBeInTheDocument();
+    });
+
+    const orderLink = screen.getByRole("link", { name: /ord_777/ });
+    expect(orderLink).toHaveAttribute("href", "/orders/ord_777");
+  });
+
+  it("navigates to the account in-hub via the onViewAccount callback", async () => {
+    mockGetInvoice.mockResolvedValue({
+      data: invoiceFixture(),
+      request_id: "r1",
+    } as any);
+    mockGetInvoiceEvents.mockResolvedValue({
+      data: [eventFixture()],
+      request_id: "r2",
+    } as any);
+
+    const onViewAccount = jest.fn();
+    render(
+      <InvoiceDetailPage invoiceId="inv_001" onViewAccount={onViewAccount} />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("Invoice INV-2024-0001")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /acc_001/ }));
+    expect(onViewAccount).toHaveBeenCalledWith("acc_001");
+  });
 });

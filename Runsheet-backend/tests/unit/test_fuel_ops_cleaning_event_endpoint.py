@@ -154,6 +154,7 @@ def _build_app(
     file_storage: Any = None,
     cleaning_service: Optional[_FakeCleaningEventService] = None,
     state_repo: Optional[_FakeStateRepository] = None,
+    ref_resolver: Any = None,
 ):
     state_repo = state_repo or _FakeStateRepository()
     for state in seed_states or []:
@@ -176,6 +177,7 @@ def _build_app(
         compartment_state_repository=state_repo,
         cleaning_event_service=cleaning_service,
         file_storage_service=file_storage,
+        ref_resolver=ref_resolver,
     )
 
     app = FastAPI()
@@ -579,3 +581,86 @@ class TestTenantScoping:
         )
         assert resp.status_code == 201
         assert state_repo.get_calls[0] == ("tenant-a", state.compartment_id)
+
+
+# ---------------------------------------------------------------------------
+# Canonical driver_id reference (cross-module-entity-linkage Req 8.2)
+# ---------------------------------------------------------------------------
+
+
+class TestCleaningEventDriverIdLinkage:
+    """The cleaning-event endpoint accepts an optional canonical ``driver_id``
+    that supersedes the free-text ``actor_id`` alias, validating it against the
+    Drivers module when a resolver is wired (Req 8.2)."""
+
+    @staticmethod
+    def _resolver_with_drivers(*driver_ids: str):
+        from services.ref_resolver import RefResolver
+
+        known = set(driver_ids)
+
+        async def _driver_loader(tenant_id: str, entity_id: str):
+            if entity_id in known:
+                return {"driver_id": entity_id, "driver_name": entity_id.upper()}
+            return None
+
+        resolver = RefResolver()
+        resolver.register("driver", _driver_loader)
+        return resolver
+
+    def test_forwards_driver_id_to_service(self):
+        state = _clean_compartment_state()
+        resolver = self._resolver_with_drivers("DRV-1")
+        app, _state_repo, svc = _build_app(
+            seed_states=[state], ref_resolver=resolver
+        )
+        client = TestClient(app)
+
+        resp = client.post(
+            f"/api/fuel/mvp/compartments/{state.compartment_id}/cleaning-events",
+            json={
+                "method": "flush",
+                "actor_id": "driver-42",
+                "driver_id": "DRV-1",
+            },
+        )
+
+        assert resp.status_code == 201, resp.text
+        assert svc.calls[0]["driver_id"] == "DRV-1"
+        # actor_id remains accepted as the deprecated free-text alias.
+        assert svc.calls[0]["actor_id"] == "driver-42"
+
+    def test_rejects_unknown_driver_id(self):
+        state = _clean_compartment_state()
+        resolver = self._resolver_with_drivers("DRV-1")
+        app, _state_repo, svc = _build_app(
+            seed_states=[state], ref_resolver=resolver
+        )
+        client = TestClient(app)
+
+        resp = client.post(
+            f"/api/fuel/mvp/compartments/{state.compartment_id}/cleaning-events",
+            json={
+                "method": "flush",
+                "actor_id": "driver-42",
+                "driver_id": "DRV-NOPE",
+            },
+        )
+
+        # Unknown / cross-tenant driver is rejected before the event is written.
+        assert resp.status_code == 400, resp.text
+        assert svc.calls == []
+
+    def test_driver_id_optional_without_resolver(self):
+        # No resolver wired (and the process-wide resolver has no driver
+        # loader) → the field is accepted unvalidated for back-compat.
+        state = _clean_compartment_state()
+        app, _state_repo, svc = _build_app(seed_states=[state])
+        client = TestClient(app)
+
+        resp = client.post(
+            f"/api/fuel/mvp/compartments/{state.compartment_id}/cleaning-events",
+            json={"method": "flush", "actor_id": "driver-1"},
+        )
+        assert resp.status_code == 201, resp.text
+        assert svc.calls[0]["driver_id"] is None

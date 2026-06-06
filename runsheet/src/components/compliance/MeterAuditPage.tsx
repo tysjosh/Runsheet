@@ -2,7 +2,7 @@
 
 import type React from "react";
 import { useCallback, useEffect, useState } from "react";
-import { type Column, Table } from "@/components/ui";
+import { type Column, EntityLink, Table } from "@/components/ui";
 import {
   type CreateMeterPayload,
   createMeter,
@@ -68,7 +68,9 @@ function getMeterColumns(
     {
       key: "truck_id",
       label: "Truck ID",
-      render: (meter) => meter.truck_id,
+      // The meter's subject is its truck, navigable to the Fleet module as a
+      // canonical asset (Req 11.3, 13.1).
+      render: (meter) => <EntityLink type="asset" id={meter.truck_id} />,
     },
     {
       key: "calibration_certificate_number",
@@ -362,7 +364,9 @@ export default function MeterAuditPage() {
             </div>
             <div>
               <span className="text-gray-500 block">Truck ID</span>
-              <span className="font-medium">{selectedMeter.truck_id}</span>
+              <span className="font-medium">
+                <EntityLink type="asset" id={selectedMeter.truck_id} />
+              </span>
             </div>
             <div>
               <span className="text-gray-500 block">Calibration Expiry</span>

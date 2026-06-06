@@ -1052,6 +1052,11 @@ class ElasticsearchService:
                     "weight_tonnes": {"type": "float"},
                     # Fuel monitoring fields
                     "fuel_level_pct": {"type": "float"},
+                    # Depot assignment (cross-module-entity-linkage Req 10.1/10.2).
+                    # Nullable/additive: an asset's home/operating depot. Used to
+                    # resolve the asset → depot reference and to enumerate the
+                    # assets assigned to a depot.
+                    "assigned_depot_id": {"type": "keyword"},
                     "tenant_id": {"type": "keyword"},
                 }
             }

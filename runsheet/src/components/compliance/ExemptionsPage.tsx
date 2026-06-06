@@ -2,7 +2,7 @@
 
 import type React from "react";
 import { useCallback, useEffect, useState } from "react";
-import { type Column, Table } from "@/components/ui";
+import { type Column, EntityLink, Table } from "@/components/ui";
 import {
   type CreateTaxExemptionPayload,
   createTaxExemption,
@@ -81,7 +81,11 @@ const exemptionColumns: Column<TaxExemption>[] = [
   {
     key: "customer_id",
     label: "Customer ID",
-    render: (e) => <span className="font-medium">{e.customer_id}</span>,
+    // The exemption's subject is its customer, navigable to the Commerce
+    // module (Req 11.3, 13.1).
+    render: (e) => (
+      <EntityLink type="customer" id={e.customer_id} className="font-medium" />
+    ),
   },
   {
     key: "exemption_type",

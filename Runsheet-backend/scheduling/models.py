@@ -89,7 +89,17 @@ class CreateJob(BaseModel):
     origin: str
     destination: str
     scheduled_time: str  # ISO 8601
+    # ``asset_assigned`` IS the canonical fleet asset reference for the job
+    # (``asset_assigned == asset_id``). The name is retained to avoid churn
+    # across existing callers (see cross-module-entity-linkage design,
+    # Open Question 1).
     asset_assigned: Optional[str] = None
+    # Cross-module linkage references (cross-module-entity-linkage Req 3.1).
+    # All nullable so existing payloads remain valid (Req 6.1, 6.3). Populated
+    # from the order when a job is created from / linked to an order.
+    order_id: Optional[str] = None
+    customer_id: Optional[str] = None
+    driver_id: Optional[str] = None
     cargo_manifest: Optional[list[CargoItem]] = None
     priority: Priority = Priority.NORMAL
     notes: Optional[str] = None
@@ -138,7 +148,17 @@ class Job(BaseModel):
     job_type: JobType
     status: JobStatus
     tenant_id: str
+    # ``asset_assigned`` IS the canonical fleet asset reference
+    # (``asset_assigned == asset_id``); retained verbatim to avoid churn
+    # (cross-module-entity-linkage design, Open Question 1).
     asset_assigned: Optional[str] = None
+    # Cross-module linkage references (cross-module-entity-linkage Req 3.1).
+    # Nullable/optional so historical jobs read as "unlinked" without backfill
+    # (Req 6.1, 6.2). Kept mutually consistent with the order's assigned_*
+    # fields by the order→job assignment service (Req 3.4).
+    order_id: Optional[str] = None
+    customer_id: Optional[str] = None
+    driver_id: Optional[str] = None
     origin: str
     destination: str
     origin_location: Optional[GeoPoint] = None

@@ -38,7 +38,8 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { type Column, Table } from "@/components/ui";
+import { type Column, EntityLink, Table } from "@/components/ui";
+import { type Customer, getCustomers } from "../../services/commerceApi";
 import type {
   CustomerTank,
   CustomerTankCreatePayload,
@@ -510,6 +511,7 @@ function FiltersRow({
 export interface CustomerTankFormValues {
   customer_tank_id: string;
   customer_id: string;
+  last_refill_order_id: string;
   customer_type: CustomerTankCustomerType;
   fuel_type: CustomerTankFuelType;
   fuel_product_code: string;
@@ -628,9 +630,19 @@ function CustomerTankFormModal({
   // free-text input. Logged via ``console.error`` per the spec.
   const [fuelProductsFailed, setFuelProductsFailed] = useState(false);
 
+  // Commerce customers for the validated customer picker (cross-module-entity-
+  // linkage Req 7.1/7.3): the customer_id field is no longer free-text — the
+  // dispatcher selects from the tenant's canonical commerce customers so the
+  // backend write-time reference validation always passes. ``null`` means the
+  // list is still loading; a failed fetch falls back to a free-text input so a
+  // commerce outage never blocks tank creation.
+  const [customers, setCustomers] = useState<Customer[] | null>(null);
+  const [customersFailed, setCustomersFailed] = useState(false);
+
   const [form, setForm] = useState<CustomerTankFormValues>(() => ({
     customer_tank_id: tank?.customer_tank_id ?? "",
     customer_id: tank?.customer_id ?? "",
+    last_refill_order_id: tank?.last_refill_order_id ?? "",
     customer_type: tank?.customer_type ?? "residential",
     fuel_type: tank?.fuel_type ?? "propane",
     fuel_product_code: tank?.fuel_product_code ?? DEFAULT_PRODUCT_CODE.propane,
@@ -668,6 +680,24 @@ function CustomerTankFormModal({
         if (cancelled) return;
         console.error("Failed to load fuel product catalog", err);
         setFuelProductsFailed(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Load commerce customers once per modal open for the validated picker
+  // (Req 7.1). A failed fetch falls back to free-text entry.
+  useEffect(() => {
+    let cancelled = false;
+    getCustomers({ limit: 200 })
+      .then((res) => {
+        if (!cancelled) setCustomers(res.data ?? []);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.error("Failed to load commerce customers", err);
+        setCustomersFailed(true);
       });
     return () => {
       cancelled = true;
@@ -730,6 +760,9 @@ function CustomerTankFormModal({
         if (form.customer_tank_id.trim()) {
           payload.customer_tank_id = form.customer_tank_id.trim();
         }
+        if (form.last_refill_order_id.trim()) {
+          payload.last_refill_order_id = form.last_refill_order_id.trim();
+        }
         if (form.k_factor != null) payload.k_factor = form.k_factor;
         if (form.use_case) payload.use_case = form.use_case;
         result = await createCustomerTank(payload);
@@ -753,6 +786,11 @@ function CustomerTankFormModal({
           patch.location_lon = form.location_lon;
         if (form.zip_code.trim() !== tank.zip_code)
           patch.zip_code = form.zip_code.trim();
+        if (
+          form.last_refill_order_id.trim() &&
+          form.last_refill_order_id.trim() !== (tank.last_refill_order_id ?? "")
+        )
+          patch.last_refill_order_id = form.last_refill_order_id.trim();
         if ((form.k_factor ?? null) !== (tank.k_factor ?? null))
           patch.k_factor = form.k_factor;
         const currentUseCase = tank.use_case ?? "";
@@ -806,17 +844,53 @@ function CustomerTankFormModal({
               >
                 Customer ID
               </label>
-              <input
-                id="ct-customer-id"
-                type="text"
-                className={
-                  fieldErrors.customer_id ? errorInputClass : inputClass
-                }
-                value={form.customer_id}
-                onChange={(e) => updateField("customer_id", e.target.value)}
-                placeholder="e.g. CUST-0042"
-                required
-              />
+              {customers !== null && !customersFailed ? (
+                // Validated picker (cross-module-entity-linkage Req 7.1): the
+                // dispatcher selects a canonical commerce customer rather than
+                // typing a free-text id, so the backend write-time reference
+                // validation always resolves. In edit mode we surface the
+                // tank's current customer_id even when it falls outside the
+                // loaded page so the selection is never silently lost.
+                <select
+                  id="ct-customer-id"
+                  className={
+                    fieldErrors.customer_id ? errorInputClass : inputClass
+                  }
+                  value={form.customer_id}
+                  onChange={(e) => updateField("customer_id", e.target.value)}
+                  required
+                >
+                  <option value="">Select a customer…</option>
+                  {form.customer_id &&
+                    !customers.some(
+                      (c) => c.customer_id === form.customer_id,
+                    ) && (
+                      <option value={form.customer_id}>
+                        {form.customer_id} (current)
+                      </option>
+                    )}
+                  {customers.map((c) => (
+                    <option key={c.customer_id} value={c.customer_id}>
+                      {c.display_name} ({c.customer_id})
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                // Fallback: a commerce-customer fetch failed (or is still
+                // loading) — degrade to free-text so a commerce outage never
+                // blocks tank management. The backend still validates the ref.
+                <input
+                  id="ct-customer-id"
+                  type="text"
+                  className={
+                    fieldErrors.customer_id ? errorInputClass : inputClass
+                  }
+                  value={form.customer_id}
+                  onChange={(e) => updateField("customer_id", e.target.value)}
+                  placeholder="e.g. CUST-0042"
+                  required
+                />
+              )}
               {fieldErrors.customer_id && (
                 <p className="text-xs text-error mt-1">
                   {fieldErrors.customer_id}
@@ -846,6 +920,30 @@ function CustomerTankFormModal({
                 }
                 disabled={mode === "edit"}
               />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label
+                htmlFor="ct-refill-order"
+                className="block text-xs font-medium text-gray-600 mb-1"
+              >
+                Refilling Order ID (optional)
+              </label>
+              <input
+                id="ct-refill-order"
+                type="text"
+                className={inputClass}
+                value={form.last_refill_order_id}
+                onChange={(e) =>
+                  updateField("last_refill_order_id", e.target.value)
+                }
+                placeholder="e.g. ORD-0042"
+              />
+              <p className="text-xs text-gray-400 mt-1">
+                The delivery order that most recently refilled this tank.
+              </p>
             </div>
           </div>
 
@@ -1361,7 +1459,33 @@ export default function CustomerTankPage({
           <div className="font-medium text-primary">
             {tank.customer_tank_id}
           </div>
-          <div className="text-xs text-gray-500">{tank.customer_id}</div>
+          <div className="text-xs">
+            {/* Navigable link to the owning commerce customer (Req 7.3, 13.1).
+                List reads carry no resolver `links`, so link optimistically on
+                the raw customer_id. */}
+            <EntityLink
+              type="customer"
+              id={tank.customer_id}
+              showId={false}
+              stopPropagation
+            />
+          </div>
+        </div>
+      ),
+    },
+    {
+      key: "last_refill_order",
+      label: "Refilling Order",
+      render: (tank) => (
+        // The order whose delivery most recently refilled this tank (Req 7.2).
+        // Renders a navigable link, or a neutral placeholder when unset.
+        <div className="text-sm">
+          <EntityLink
+            type="order"
+            id={tank.last_refill_order_id ?? null}
+            showId={false}
+            stopPropagation
+          />
         </div>
       ),
     },

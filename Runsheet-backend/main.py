@@ -99,6 +99,9 @@ from compliance.api.asset_certification_endpoints import (
 from compliance.api.meter_endpoints import (
     router as compliance_meter_router,
 )
+from compliance.api.asset_compliance_endpoints import (
+    router as compliance_asset_compliance_router,
+)
 from commerce.api.price_protection_endpoints import (
     router as commerce_price_protection_router,
 )
@@ -218,6 +221,7 @@ for _router in (
     compliance_driver_router,
     compliance_asset_cert_router,
     compliance_meter_router,
+    compliance_asset_compliance_router,
     commerce_price_protection_router,
     commerce_pricing_rules_router,
     mvp_fuel_router,
