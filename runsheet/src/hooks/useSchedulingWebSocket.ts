@@ -11,8 +11,8 @@
  */
 
 import { useCallback, useMemo, useState } from "react";
-import { getAuthToken } from "../utils/auth";
 import type { Job, SchedulingCargoItem } from "../types/api";
+import { getAuthToken } from "../utils/auth";
 import {
   useWebSocket,
   type WebSocketOptions,
@@ -28,10 +28,12 @@ const SCHEDULING_WS_BASE_URL = `${WS_BASE}/ws/scheduling`;
 /**
  * Build WebSocket URL with JWT token for authentication
  */
-async function buildSchedulingWebSocketUrl(subscriptions: SchedulingEventType[]): Promise<string> {
+async function buildSchedulingWebSocketUrl(
+  subscriptions: SchedulingEventType[],
+): Promise<string> {
   const token = await getAuthToken();
   if (!token) return SCHEDULING_WS_BASE_URL;
-  
+
   const params = new URLSearchParams();
   params.set("token", token);
   subscriptions.forEach((sub) => {

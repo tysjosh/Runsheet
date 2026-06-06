@@ -26,10 +26,14 @@ import {
 
 // ─── Helper Functions ────────────────────────────────────────────────────────
 
-function formatAmount(amount: number | null | undefined, currency: string | null | undefined): string {
+function formatAmount(
+  amount: number | null | undefined,
+  currency: string | null | undefined,
+): string {
   if (amount === null || amount === undefined) return "—";
   const dollars = amount / 100;
-  const currencySymbol = currency?.toUpperCase() === "USD" ? "$" : currency || "";
+  const currencySymbol =
+    currency?.toUpperCase() === "USD" ? "$" : currency || "";
   return `${currencySymbol}${dollars.toFixed(2)}`;
 }
 
@@ -46,7 +50,7 @@ function formatTimestamp(timestamp: number | null | undefined): string {
 
 function getStatusBadge(status: string | null | undefined) {
   if (!status) return <Badge variant="default">Unknown</Badge>;
-  
+
   switch (status.toLowerCase()) {
     case "succeeded":
       return <Badge variant="success">Succeeded</Badge>;
@@ -72,7 +76,7 @@ export default function StripeIntegrationUI() {
   const [payments, setPayments] = useState<StripePaymentItem[]>([]);
   const [hasMore, setHasMore] = useState(false);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
-  
+
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
@@ -93,38 +97,45 @@ export default function StripeIntegrationUI() {
         setError("Stripe integration is not configured for this tenant");
       } else {
         setError(
-          err instanceof Error ? err.message : "Failed to load Stripe configuration",
+          err instanceof Error
+            ? err.message
+            : "Failed to load Stripe configuration",
         );
       }
     }
   }, []);
 
-  const fetchPayments = useCallback(async (cursor?: string) => {
-    setLoading(true);
-    setError(null);
-    try {
-      const params: any = { limit };
-      if (cursor) params.starting_after = cursor;
-      if (dateFrom) params.created_gte = new Date(dateFrom).toISOString();
-      if (dateTo) params.created_lte = new Date(dateTo).toISOString();
+  const fetchPayments = useCallback(
+    async (cursor?: string) => {
+      setLoading(true);
+      setError(null);
+      try {
+        const params: any = { limit };
+        if (cursor) params.starting_after = cursor;
+        if (dateFrom) params.created_gte = new Date(dateFrom).toISOString();
+        if (dateTo) params.created_lte = new Date(dateTo).toISOString();
 
-      const response = await getStripePayments(params);
-      setPayments(response.items);
-      setHasMore(response.has_more);
-      setNextCursor(response.next_starting_after || null);
-    } catch (err: any) {
-      if (err?.status === 404 || err?.message?.includes("not_configured")) {
-        setIsConfigured(false);
-        setError("Stripe integration is not configured for this tenant");
-      } else {
-        setError(
-          err instanceof Error ? err.message : "Failed to load Stripe payments",
-        );
+        const response = await getStripePayments(params);
+        setPayments(response.items);
+        setHasMore(response.has_more);
+        setNextCursor(response.next_starting_after || null);
+      } catch (err: any) {
+        if (err?.status === 404 || err?.message?.includes("not_configured")) {
+          setIsConfigured(false);
+          setError("Stripe integration is not configured for this tenant");
+        } else {
+          setError(
+            err instanceof Error
+              ? err.message
+              : "Failed to load Stripe payments",
+          );
+        }
+      } finally {
+        setLoading(false);
       }
-    } finally {
-      setLoading(false);
-    }
-  }, [limit, dateFrom, dateTo]);
+    },
+    [limit, dateFrom, dateTo],
+  );
 
   useEffect(() => {
     fetchConfig();
@@ -184,9 +195,7 @@ export default function StripeIntegrationUI() {
       key: "customer",
       label: "Customer",
       render: (payment) => (
-        <span className="text-sm text-gray-700">
-          {payment.customer || "—"}
-        </span>
+        <span className="text-sm text-gray-700">{payment.customer || "—"}</span>
       ),
     },
     {
@@ -302,10 +311,14 @@ export default function StripeIntegrationUI() {
             Stripe Not Configured
           </h3>
           <p className="text-gray-600 mb-6">
-            Connect your Stripe account from the Integration Marketplace to start
-            accepting payments.
+            Connect your Stripe account from the Integration Marketplace to
+            start accepting payments.
           </p>
-          <Button onClick={() => window.location.href = "/dashboard"}>
+          <Button
+            onClick={() => {
+              window.location.href = "/dashboard";
+            }}
+          >
             Go to Integrations
           </Button>
         </div>
@@ -330,9 +343,9 @@ export default function StripeIntegrationUI() {
                 <div className="text-sm text-blue-900">
                   <p className="font-medium mb-1">About Stripe Integration</p>
                   <p>
-                    This integration allows you to accept payments through Stripe.
-                    The secret key and webhook secret are securely stored and never
-                    exposed through this UI.
+                    This integration allows you to accept payments through
+                    Stripe. The secret key and webhook secret are securely
+                    stored and never exposed through this UI.
                   </p>
                 </div>
               </div>
@@ -396,7 +409,8 @@ export default function StripeIntegrationUI() {
                 Recent Payments
               </h3>
               <p className="text-sm text-gray-600 mt-1">
-                {payments.length} payment{payments.length !== 1 ? "s" : ""} loaded
+                {payments.length} payment{payments.length !== 1 ? "s" : ""}{" "}
+                loaded
               </p>
             </div>
 

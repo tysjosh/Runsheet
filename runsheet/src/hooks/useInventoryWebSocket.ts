@@ -31,7 +31,9 @@ const INVENTORY_WS_URL = `${WS_BASE}/ws/inventory`;
  */
 async function buildInventoryWebSocketUrl(): Promise<string> {
   const token = await getAuthToken();
-  return token ? `${INVENTORY_WS_URL}?token=${encodeURIComponent(token)}` : INVENTORY_WS_URL;
+  return token
+    ? `${INVENTORY_WS_URL}?token=${encodeURIComponent(token)}`
+    : INVENTORY_WS_URL;
 }
 
 /**

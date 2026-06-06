@@ -11,8 +11,8 @@
  */
 
 import { useCallback, useMemo, useState } from "react";
-import { getAuthToken } from "../utils/auth";
 import type { OpsRider, OpsShipment } from "../services/opsApi";
+import { getAuthToken } from "../utils/auth";
 import {
   useWebSocket,
   type WebSocketOptions,
@@ -28,10 +28,12 @@ const OPS_WS_BASE_URL = `${WS_BASE}/ws/ops`;
 /**
  * Build WebSocket URL with JWT token for authentication
  */
-async function buildOpsWebSocketUrl(subscriptions: OpsEventType[]): Promise<string> {
+async function buildOpsWebSocketUrl(
+  subscriptions: OpsEventType[],
+): Promise<string> {
   const token = await getAuthToken();
   if (!token) return OPS_WS_BASE_URL;
-  
+
   const params = new URLSearchParams();
   params.set("token", token);
   subscriptions.forEach((sub) => {

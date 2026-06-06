@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { useCallback, useEffect, useState } from "react";
 import {
   Badge,
   Button,
@@ -159,7 +159,9 @@ export default function CustomersListPage({
                         if (onSelectCustomer) {
                           onSelectCustomer(customer.customer_id);
                         } else {
-                          router.push(`/commerce/customers/${customer.customer_id}`);
+                          router.push(
+                            `/commerce/customers/${customer.customer_id}`,
+                          );
                         }
                       }}
                     >

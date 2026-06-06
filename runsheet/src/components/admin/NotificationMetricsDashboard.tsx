@@ -1,6 +1,13 @@
 "use client";
 
-import { Activity, AlertCircle, Bell, Clock, Send, TrendingUp } from "lucide-react";
+import {
+  Activity,
+  AlertCircle,
+  Bell,
+  Clock,
+  Send,
+  TrendingUp,
+} from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import {
   type CommunicationMetrics,
@@ -22,28 +29,38 @@ function formatPercentage(rate: number): string {
 }
 
 function getLatestValue(dataPoints: MetricDataPoint[]): number | null {
-  if (!dataPoints || !Array.isArray(dataPoints) || dataPoints.length === 0) return null;
+  if (!dataPoints || !Array.isArray(dataPoints) || dataPoints.length === 0)
+    return null;
   return dataPoints[dataPoints.length - 1]?.value ?? null;
 }
 
 function calculateAverage(dataPoints: MetricDataPoint[]): number | null {
-  if (!dataPoints || !Array.isArray(dataPoints) || dataPoints.length === 0) return null;
+  if (!dataPoints || !Array.isArray(dataPoints) || dataPoints.length === 0)
+    return null;
   const sum = dataPoints.reduce((acc, dp) => acc + (dp.value ?? 0), 0);
   return sum / dataPoints.length;
 }
 
-function getStatusBadge(value: number | null, thresholds: { warning: number; critical: number }, isRate = false) {
+function getStatusBadge(
+  value: number | null,
+  thresholds: { warning: number; critical: number },
+  isRate = false,
+) {
   if (value === null) return <Badge variant="default">No Data</Badge>;
-  
+
   if (isRate) {
     // For failure rates, higher is worse
-    if (value >= thresholds.critical) return <Badge variant="error">Critical</Badge>;
-    if (value >= thresholds.warning) return <Badge variant="warning">Warning</Badge>;
+    if (value >= thresholds.critical)
+      return <Badge variant="error">Critical</Badge>;
+    if (value >= thresholds.warning)
+      return <Badge variant="warning">Warning</Badge>;
     return <Badge variant="success">Healthy</Badge>;
   } else {
     // For latencies, higher is worse
-    if (value >= thresholds.critical) return <Badge variant="error">Critical</Badge>;
-    if (value >= thresholds.warning) return <Badge variant="warning">Warning</Badge>;
+    if (value >= thresholds.critical)
+      return <Badge variant="error">Critical</Badge>;
+    if (value >= thresholds.warning)
+      return <Badge variant="warning">Warning</Badge>;
     return <Badge variant="success">Healthy</Badge>;
   }
 }
@@ -56,7 +73,9 @@ export default function NotificationMetricsDashboard() {
   const [error, setError] = useState<string | null>(null);
   const [interval, setInterval] = useState<string>("1d");
   const [dateRange, setDateRange] = useState<{ start: string; end: string }>({
-    start: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split("T")[0],
+    start: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
+      .toISOString()
+      .split("T")[0],
     end: new Date().toISOString().split("T")[0],
   });
 
@@ -73,7 +92,9 @@ export default function NotificationMetricsDashboard() {
       setMetrics(data);
     } catch (err) {
       setError(
-        err instanceof Error ? err.message : "Failed to load communication metrics",
+        err instanceof Error
+          ? err.message
+          : "Failed to load communication metrics",
       );
     } finally {
       setLoading(false);
@@ -85,17 +106,61 @@ export default function NotificationMetricsDashboard() {
   }, [fetchMetrics]);
 
   // Calculate summary stats
-  const ackLatencyLatest = metrics ? getLatestValue(Array.isArray(metrics.ack_latency) ? metrics.ack_latency : []) : null;
-  const ackLatencyAvg = metrics ? calculateAverage(Array.isArray(metrics.ack_latency) ? metrics.ack_latency : []) : null;
-  
-  const sendLatencyLatest = metrics ? getLatestValue(Array.isArray(metrics.notification_send_latency) ? metrics.notification_send_latency : []) : null;
-  const sendLatencyAvg = metrics ? calculateAverage(Array.isArray(metrics.notification_send_latency) ? metrics.notification_send_latency : []) : null;
-  
-  const responseLatencyLatest = metrics ? getLatestValue(Array.isArray(metrics.driver_response_latency) ? metrics.driver_response_latency : []) : null;
-  const responseLatencyAvg = metrics ? calculateAverage(Array.isArray(metrics.driver_response_latency) ? metrics.driver_response_latency : []) : null;
-  
-  const failureRateLatest = metrics ? getLatestValue(Array.isArray(metrics.failed_notification_rate) ? metrics.failed_notification_rate : []) : null;
-  const failureRateAvg = metrics ? calculateAverage(Array.isArray(metrics.failed_notification_rate) ? metrics.failed_notification_rate : []) : null;
+  const ackLatencyLatest = metrics
+    ? getLatestValue(
+        Array.isArray(metrics.ack_latency) ? metrics.ack_latency : [],
+      )
+    : null;
+  const ackLatencyAvg = metrics
+    ? calculateAverage(
+        Array.isArray(metrics.ack_latency) ? metrics.ack_latency : [],
+      )
+    : null;
+
+  const sendLatencyLatest = metrics
+    ? getLatestValue(
+        Array.isArray(metrics.notification_send_latency)
+          ? metrics.notification_send_latency
+          : [],
+      )
+    : null;
+  const sendLatencyAvg = metrics
+    ? calculateAverage(
+        Array.isArray(metrics.notification_send_latency)
+          ? metrics.notification_send_latency
+          : [],
+      )
+    : null;
+
+  const responseLatencyLatest = metrics
+    ? getLatestValue(
+        Array.isArray(metrics.driver_response_latency)
+          ? metrics.driver_response_latency
+          : [],
+      )
+    : null;
+  const responseLatencyAvg = metrics
+    ? calculateAverage(
+        Array.isArray(metrics.driver_response_latency)
+          ? metrics.driver_response_latency
+          : [],
+      )
+    : null;
+
+  const failureRateLatest = metrics
+    ? getLatestValue(
+        Array.isArray(metrics.failed_notification_rate)
+          ? metrics.failed_notification_rate
+          : [],
+      )
+    : null;
+  const failureRateAvg = metrics
+    ? calculateAverage(
+        Array.isArray(metrics.failed_notification_rate)
+          ? metrics.failed_notification_rate
+          : [],
+      )
+    : null;
 
   return (
     <div className="p-6">
@@ -186,13 +251,19 @@ export default function NotificationMetricsDashboard() {
                     Ack Latency
                   </span>
                 </div>
-                {getStatusBadge(ackLatencyLatest, { warning: 5000, critical: 10000 })}
+                {getStatusBadge(ackLatencyLatest, {
+                  warning: 5000,
+                  critical: 10000,
+                })}
               </div>
               <div className="text-2xl font-bold text-gray-900 mb-1">
-                {ackLatencyLatest !== null ? formatLatency(ackLatencyLatest) : "—"}
+                {ackLatencyLatest !== null
+                  ? formatLatency(ackLatencyLatest)
+                  : "—"}
               </div>
               <div className="text-xs text-gray-500">
-                Avg: {ackLatencyAvg !== null ? formatLatency(ackLatencyAvg) : "—"}
+                Avg:{" "}
+                {ackLatencyAvg !== null ? formatLatency(ackLatencyAvg) : "—"}
               </div>
             </div>
 
@@ -205,13 +276,19 @@ export default function NotificationMetricsDashboard() {
                     Send Latency
                   </span>
                 </div>
-                {getStatusBadge(sendLatencyLatest, { warning: 3000, critical: 5000 })}
+                {getStatusBadge(sendLatencyLatest, {
+                  warning: 3000,
+                  critical: 5000,
+                })}
               </div>
               <div className="text-2xl font-bold text-gray-900 mb-1">
-                {sendLatencyLatest !== null ? formatLatency(sendLatencyLatest) : "—"}
+                {sendLatencyLatest !== null
+                  ? formatLatency(sendLatencyLatest)
+                  : "—"}
               </div>
               <div className="text-xs text-gray-500">
-                Avg: {sendLatencyAvg !== null ? formatLatency(sendLatencyAvg) : "—"}
+                Avg:{" "}
+                {sendLatencyAvg !== null ? formatLatency(sendLatencyAvg) : "—"}
               </div>
             </div>
 
@@ -224,13 +301,21 @@ export default function NotificationMetricsDashboard() {
                     Response Latency
                   </span>
                 </div>
-                {getStatusBadge(responseLatencyLatest, { warning: 300000, critical: 600000 })}
+                {getStatusBadge(responseLatencyLatest, {
+                  warning: 300000,
+                  critical: 600000,
+                })}
               </div>
               <div className="text-2xl font-bold text-gray-900 mb-1">
-                {responseLatencyLatest !== null ? formatLatency(responseLatencyLatest) : "—"}
+                {responseLatencyLatest !== null
+                  ? formatLatency(responseLatencyLatest)
+                  : "—"}
               </div>
               <div className="text-xs text-gray-500">
-                Avg: {responseLatencyAvg !== null ? formatLatency(responseLatencyAvg) : "—"}
+                Avg:{" "}
+                {responseLatencyAvg !== null
+                  ? formatLatency(responseLatencyAvg)
+                  : "—"}
               </div>
             </div>
 
@@ -243,13 +328,22 @@ export default function NotificationMetricsDashboard() {
                     Failure Rate
                   </span>
                 </div>
-                {getStatusBadge(failureRateLatest, { warning: 0.05, critical: 0.1 }, true)}
+                {getStatusBadge(
+                  failureRateLatest,
+                  { warning: 0.05, critical: 0.1 },
+                  true,
+                )}
               </div>
               <div className="text-2xl font-bold text-gray-900 mb-1">
-                {failureRateLatest !== null ? formatPercentage(failureRateLatest) : "—"}
+                {failureRateLatest !== null
+                  ? formatPercentage(failureRateLatest)
+                  : "—"}
               </div>
               <div className="text-xs text-gray-500">
-                Avg: {failureRateAvg !== null ? formatPercentage(failureRateAvg) : "—"}
+                Avg:{" "}
+                {failureRateAvg !== null
+                  ? formatPercentage(failureRateAvg)
+                  : "—"}
               </div>
             </div>
           </div>
@@ -259,7 +353,9 @@ export default function NotificationMetricsDashboard() {
             {/* Ack Latency Chart */}
             <MetricChart
               title="Acknowledgment Latency"
-              data={Array.isArray(metrics.ack_latency) ? metrics.ack_latency : []}
+              data={
+                Array.isArray(metrics.ack_latency) ? metrics.ack_latency : []
+              }
               formatValue={formatLatency}
               color="blue"
             />
@@ -267,7 +363,11 @@ export default function NotificationMetricsDashboard() {
             {/* Send Latency Chart */}
             <MetricChart
               title="Notification Send Latency"
-              data={Array.isArray(metrics.notification_send_latency) ? metrics.notification_send_latency : []}
+              data={
+                Array.isArray(metrics.notification_send_latency)
+                  ? metrics.notification_send_latency
+                  : []
+              }
               formatValue={formatLatency}
               color="green"
             />
@@ -275,7 +375,11 @@ export default function NotificationMetricsDashboard() {
             {/* Response Latency Chart */}
             <MetricChart
               title="Driver Response Latency"
-              data={Array.isArray(metrics.driver_response_latency) ? metrics.driver_response_latency : []}
+              data={
+                Array.isArray(metrics.driver_response_latency)
+                  ? metrics.driver_response_latency
+                  : []
+              }
               formatValue={formatLatency}
               color="purple"
             />
@@ -283,7 +387,11 @@ export default function NotificationMetricsDashboard() {
             {/* Failure Rate Chart */}
             <MetricChart
               title="Failed Notification Rate"
-              data={Array.isArray(metrics.failed_notification_rate) ? metrics.failed_notification_rate : []}
+              data={
+                Array.isArray(metrics.failed_notification_rate)
+                  ? metrics.failed_notification_rate
+                  : []
+              }
               formatValue={formatPercentage}
               color="red"
             />
@@ -316,7 +424,7 @@ function MetricChart({ title, data, formatValue, color }: MetricChartProps) {
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
       <h3 className="text-lg font-semibold text-gray-900 mb-4">{title}</h3>
-      
+
       {data.length === 0 ? (
         <div className="text-center py-8 text-gray-500">No data available</div>
       ) : (

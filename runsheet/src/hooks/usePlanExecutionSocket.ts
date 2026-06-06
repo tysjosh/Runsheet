@@ -29,7 +29,9 @@ const PLAN_EXECUTION_WS_BASE_URL = `${WS_BASE_URL}/ws/plan-execution`;
  */
 async function buildPlanExecutionWebSocketUrl(): Promise<string> {
   const token = await getAuthToken();
-  return token ? `${PLAN_EXECUTION_WS_BASE_URL}?token=${encodeURIComponent(token)}` : PLAN_EXECUTION_WS_BASE_URL;
+  return token
+    ? `${PLAN_EXECUTION_WS_BASE_URL}?token=${encodeURIComponent(token)}`
+    : PLAN_EXECUTION_WS_BASE_URL;
 }
 
 /**

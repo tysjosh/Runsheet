@@ -237,6 +237,7 @@ export default function DataImport() {
         return (
           <Suspense fallback={<StepFallback />}>
             <SourceUploader
+              // biome-ignore lint/style/noNonNullAssertion: the "upload" step is only reached after a data type is selected
               dataType={state.dataType!}
               onParsed={handleSourceParsed}
               onBack={() => goToStep("select-type")}
@@ -248,6 +249,7 @@ export default function DataImport() {
         return (
           <Suspense fallback={<StepFallback />}>
             <FieldMapper
+              // biome-ignore lint/style/noNonNullAssertion: the "map-fields" step is only reached after a data type is selected
               dataType={state.dataType!}
               sourceColumns={state.sourceColumns}
               sampleRows={state.sampleRows}
@@ -262,6 +264,7 @@ export default function DataImport() {
         return (
           <Suspense fallback={<StepFallback />}>
             <ValidationPreview
+              // biome-ignore lint/style/noNonNullAssertion: the "validate" step is only reached after a session is created
               sessionId={state.sessionId!}
               fieldMapping={state.fieldMapping}
               validationResult={state.validationResult}
@@ -277,6 +280,7 @@ export default function DataImport() {
         return (
           <Suspense fallback={<StepFallback />}>
             <ImportProgress
+              // biome-ignore lint/style/noNonNullAssertion: the "commit" step is only reached after a session is created
               sessionId={state.sessionId!}
               skipErrors={(state.validationResult?.error_count ?? 0) > 0}
               onComplete={handleImportComplete}
@@ -288,6 +292,7 @@ export default function DataImport() {
         return (
           <Suspense fallback={<StepFallback />}>
             <ImportComplete
+              // biome-ignore lint/style/noNonNullAssertion: the "complete" step is only reached after an import result exists
               result={state.importResult!}
               onStartNew={handleStartNewImport}
             />

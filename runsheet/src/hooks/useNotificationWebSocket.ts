@@ -18,9 +18,9 @@
  *   navigating away.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { getAuthToken } from "../utils/auth";
+import { useCallback, useMemo, useState } from "react";
 import type { Notification } from "../services/notificationApi";
+import { getAuthToken } from "../utils/auth";
 import {
   useWebSocket,
   type WebSocketOptions,
@@ -38,7 +38,9 @@ const NOTIFICATION_WS_URL = `${WS_BASE}/ws/notifications`;
  */
 async function buildNotificationWebSocketUrl(): Promise<string> {
   const token = await getAuthToken();
-  return token ? `${NOTIFICATION_WS_URL}?token=${encodeURIComponent(token)}` : NOTIFICATION_WS_URL;
+  return token
+    ? `${NOTIFICATION_WS_URL}?token=${encodeURIComponent(token)}`
+    : NOTIFICATION_WS_URL;
 }
 
 /**

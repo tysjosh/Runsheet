@@ -21,7 +21,7 @@ import {
   rotateChannelSecret,
   updateIntakeChannel,
 } from "../../services/adminApi";
-import { Badge, Button, Modal, PageHeader, Table, type Column } from "../ui";
+import { Badge, Button, type Column, Modal, PageHeader, Table } from "../ui";
 
 // ─── Helper Functions ────────────────────────────────────────────────────────
 
@@ -153,9 +153,7 @@ export default function OrderWebhooksAdmin() {
         `Channel ${channel.enabled ? "disabled" : "enabled"} successfully`,
       );
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to update channel",
-      );
+      setError(err instanceof Error ? err.message : "Failed to update channel");
     }
   };
 
@@ -174,9 +172,7 @@ export default function OrderWebhooksAdmin() {
       setSuccess("HMAC secret rotated successfully");
       await fetchChannels();
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to rotate secret",
-      );
+      setError(err instanceof Error ? err.message : "Failed to rotate secret");
     } finally {
       setLoading(false);
     }
@@ -198,9 +194,7 @@ export default function OrderWebhooksAdmin() {
       await fetchChannels();
       setSuccess("Intake channel deleted successfully");
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to delete channel",
-      );
+      setError(err instanceof Error ? err.message : "Failed to delete channel");
     } finally {
       setLoading(false);
     }
@@ -247,9 +241,7 @@ export default function OrderWebhooksAdmin() {
       key: "webhook_count",
       label: "Webhook Count",
       render: (channel) => (
-        <span className="text-gray-700">
-          {channel.webhook_count ?? 0}
-        </span>
+        <span className="text-gray-700">{channel.webhook_count ?? 0}</span>
       ),
     },
     {

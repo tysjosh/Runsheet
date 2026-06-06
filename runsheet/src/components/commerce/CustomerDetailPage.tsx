@@ -1,11 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { useCallback, useEffect, useState } from "react";
 import { Badge, Button } from "@/components/ui";
 import {
-  getCustomer,
   type CustomerWithProjections,
+  getCustomer,
 } from "../../services/commerceApi";
 
 interface CustomerDetailPageProps {

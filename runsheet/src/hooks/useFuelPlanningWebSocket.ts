@@ -53,7 +53,9 @@ const FUEL_PLANNING_WS_URL = `${WS_BASE}/ws/fuel-planning`;
  */
 async function buildFuelPlanningWebSocketUrl(): Promise<string> {
   const token = await getAuthToken();
-  return token ? `${FUEL_PLANNING_WS_URL}?token=${encodeURIComponent(token)}` : FUEL_PLANNING_WS_URL;
+  return token
+    ? `${FUEL_PLANNING_WS_URL}?token=${encodeURIComponent(token)}`
+    : FUEL_PLANNING_WS_URL;
 }
 
 // ─── Event Types ─────────────────────────────────────────────────────────────

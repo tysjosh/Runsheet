@@ -12,8 +12,8 @@
  */
 
 import { useCallback, useMemo, useState } from "react";
-import { getAuthToken } from "../utils/auth";
 import type { ActivityLogEntry, ApprovalEntry } from "../services/agentApi";
+import { getAuthToken } from "../utils/auth";
 import {
   useWebSocket,
   type WebSocketOptions,
@@ -31,7 +31,9 @@ const AGENT_WS_URL = `${WS_BASE}/ws/agent-activity`;
  */
 async function buildAgentWebSocketUrl(): Promise<string> {
   const token = await getAuthToken();
-  return token ? `${AGENT_WS_URL}?token=${encodeURIComponent(token)}` : AGENT_WS_URL;
+  return token
+    ? `${AGENT_WS_URL}?token=${encodeURIComponent(token)}`
+    : AGENT_WS_URL;
 }
 
 /**

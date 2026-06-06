@@ -2,6 +2,7 @@
 
 import type React from "react";
 import { useCallback, useEffect, useState } from "react";
+import { Badge, Button, EmptyState, PageHeader, Table } from "@/components/ui";
 import type {
   PriceBook,
   PricingResolveRequest,
@@ -16,13 +17,6 @@ import {
   resolvePricing,
   updatePriceBook,
 } from "../../services/commerceApi";
-import {
-  PageHeader,
-  Button,
-  Table,
-  Badge,
-  EmptyState,
-} from "@/components/ui";
 
 interface PriceBookEditorProps {
   priceBookId?: string;
@@ -317,11 +311,7 @@ export default function PriceBookEditor({
             <h2 id="books-heading" className="text-lg font-semibold">
               Select a Price Book
             </h2>
-            <Button
-              variant="primary"
-              size="sm"
-              onClick={openCreateModal}
-            >
+            <Button variant="primary" size="sm" onClick={openCreateModal}>
               Create Price Book
             </Button>
           </div>

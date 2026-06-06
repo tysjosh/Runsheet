@@ -9,7 +9,7 @@
  *   SHALL automatically attempt reconnection with exponential backoff
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { getAuthToken } from "../utils/auth";
 import {
   useWebSocket,

@@ -15,11 +15,11 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import {
-  approveAction,
   type ActivityLogEntry,
   type ActivityStats,
   type AgentHealth,
   type ApprovalEntry,
+  approveAction,
   getActivityLog,
   getActivityStats,
   getAgentHealth,
@@ -28,7 +28,7 @@ import {
   rejectAction,
   resumeAgent,
 } from "../../services/adminApi";
-import { Badge, Button, Modal, PageHeader, Table, type Column } from "../ui";
+import { Badge, Button, type Column, Modal, PageHeader, Table } from "../ui";
 
 // ─── Helper Functions ────────────────────────────────────────────────────────
 
@@ -82,13 +82,16 @@ export default function AgentMonitoringDashboard() {
   const [activityLog, setActivityLog] = useState<ActivityLogEntry[]>([]);
   const [stats, setStats] = useState<ActivityStats | null>(null);
   const [approvals, setApprovals] = useState<ApprovalEntry[]>([]);
-  
+
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
-  const [activeTab, setActiveTab] = useState<"agents" | "activity" | "approvals">("agents");
-  const [selectedApproval, setSelectedApproval] = useState<ApprovalEntry | null>(null);
+  const [activeTab, setActiveTab] = useState<
+    "agents" | "activity" | "approvals"
+  >("agents");
+  const [selectedApproval, setSelectedApproval] =
+    useState<ApprovalEntry | null>(null);
   const [showApprovalModal, setShowApprovalModal] = useState(false);
   const [rejectReason, setRejectReason] = useState("");
 
@@ -96,19 +99,22 @@ export default function AgentMonitoringDashboard() {
     setLoading(true);
     setError(null);
     try {
-      const [healthData, activityData, statsData, approvalsData] = await Promise.all([
-        getAgentHealth(),
-        getActivityLog({ page: 1, size: 50 }),
-        getActivityStats(),
-        getApprovals({ page: 1, size: 20 }),
-      ]);
+      const [healthData, activityData, statsData, approvalsData] =
+        await Promise.all([
+          getAgentHealth(),
+          getActivityLog({ page: 1, size: 50 }),
+          getActivityStats(),
+          getApprovals({ page: 1, size: 20 }),
+        ]);
       setAgents(healthData.agents);
       setActivityLog(activityData.items);
       setStats(statsData);
       setApprovals(approvalsData.items);
     } catch (err) {
       setError(
-        err instanceof Error ? err.message : "Failed to load agent monitoring data",
+        err instanceof Error
+          ? err.message
+          : "Failed to load agent monitoring data",
       );
     } finally {
       setLoading(false);
@@ -462,18 +468,15 @@ export default function AgentMonitoringDashboard() {
               {activeTab === "activity" && (
                 <Table columns={activityColumns} data={activityLog} />
               )}
-              {activeTab === "approvals" && (
-                <>
-                  {approvals.length === 0 ? (
-                    <div className="text-center py-12 text-gray-500">
-                      <CheckCircle className="w-12 h-12 text-gray-400 mx-auto mb-4" />
-                      <p>No pending approvals</p>
-                    </div>
-                  ) : (
-                    <Table columns={approvalColumns} data={approvals} />
-                  )}
-                </>
-              )}
+              {activeTab === "approvals" &&
+                (approvals.length === 0 ? (
+                  <div className="text-center py-12 text-gray-500">
+                    <CheckCircle className="w-12 h-12 text-gray-400 mx-auto mb-4" />
+                    <p>No pending approvals</p>
+                  </div>
+                ) : (
+                  <Table columns={approvalColumns} data={approvals} />
+                ))}
             </>
           )}
         </div>

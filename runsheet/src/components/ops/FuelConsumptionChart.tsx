@@ -33,8 +33,11 @@ function groupByDay(data: ConsumptionMetric[]): DayBucket[] {
 
   for (const metric of data) {
     const date = metric.timestamp.slice(0, 10); // YYYY-MM-DD
-    if (!map.has(date)) map.set(date, {});
-    const bucket = map.get(date)!;
+    let bucket = map.get(date);
+    if (!bucket) {
+      bucket = {};
+      map.set(date, bucket);
+    }
     const fuelType = metric.fuel_type ?? "Other";
     const gallons =
       metric.total_gallons ?? metric.total_liters / LITERS_PER_GALLON;

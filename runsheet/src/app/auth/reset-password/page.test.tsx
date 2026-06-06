@@ -75,9 +75,7 @@ describe("ResetPasswordPage", () => {
     fillPasswords("Demo1234!", "Different1!");
     fireEvent.click(screen.getByRole("button", { name: /set password/i }));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      /do not match/i,
-    );
+    expect(await screen.findByRole("alert")).toHaveTextContent(/do not match/i);
     expect(submitMock).not.toHaveBeenCalled();
   });
 

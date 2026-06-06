@@ -338,7 +338,7 @@
 
   /* Fonts */
   --font-sans: Arial, Helvetica, sans-serif;
-  --font-mono: 'Courier New', Courier, monospace;
+  --font-mono: "Courier New", Courier, monospace;
 }
 
 /* Removed dark mode styles to ensure consistent light theme */

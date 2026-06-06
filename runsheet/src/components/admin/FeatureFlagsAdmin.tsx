@@ -44,8 +44,10 @@ function getStateDescription(state: FeatureFlagState): string {
 
 export default function FeatureFlagsAdmin() {
   const [tenantId, setTenantId] = useState("demo-tenant");
-  const [currentState, setCurrentState] = useState<FeatureFlagState>("disabled");
-  const [selectedState, setSelectedState] = useState<FeatureFlagState>("disabled");
+  const [currentState, setCurrentState] =
+    useState<FeatureFlagState>("disabled");
+  const [selectedState, setSelectedState] =
+    useState<FeatureFlagState>("disabled");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
@@ -61,23 +63,29 @@ export default function FeatureFlagsAdmin() {
     setSuccess(null);
 
     try {
-      const response = await setOrderIntakePipelineState(tenantId, selectedState);
+      const response = await setOrderIntakePipelineState(
+        tenantId,
+        selectedState,
+      );
       setCurrentState(response.data.new_state);
       setSuccess(
         `Feature flag updated successfully. ${response.data.ws_broadcast ? "WebSocket broadcast sent." : ""}`,
       );
     } catch (err) {
       setError(
-        err instanceof Error
-          ? err.message
-          : "Failed to update feature flag",
+        err instanceof Error ? err.message : "Failed to update feature flag",
       );
     } finally {
       setLoading(false);
     }
   };
 
-  const states: FeatureFlagState[] = ["disabled", "shadow", "active_gated", "active_auto"];
+  const states: FeatureFlagState[] = [
+    "disabled",
+    "shadow",
+    "active_gated",
+    "active_auto",
+  ];
 
   return (
     <div className="p-6">
@@ -93,8 +101,9 @@ export default function FeatureFlagsAdmin() {
         <div className="text-sm text-blue-900">
           <p className="font-medium mb-1">About Feature Flags</p>
           <p>
-            Feature flags allow you to control feature rollout without code deployments.
-            Changes take effect within 60 seconds and are broadcast to all active WebSocket clients.
+            Feature flags allow you to control feature rollout without code
+            deployments. Changes take effect within 60 seconds and are broadcast
+            to all active WebSocket clients.
           </p>
         </div>
       </div>
@@ -211,9 +220,12 @@ export default function FeatureFlagsAdmin() {
               1
             </div>
             <div>
-              <p className="font-medium text-gray-900">Start with Shadow Mode</p>
+              <p className="font-medium text-gray-900">
+                Start with Shadow Mode
+              </p>
               <p className="text-sm text-gray-600">
-                Test the new pipeline without affecting production. Review logs to ensure correctness.
+                Test the new pipeline without affecting production. Review logs
+                to ensure correctness.
               </p>
             </div>
           </div>
@@ -225,7 +237,8 @@ export default function FeatureFlagsAdmin() {
             <div>
               <p className="font-medium text-gray-900">Enable Active (Gated)</p>
               <p className="text-sm text-gray-600">
-                Process real orders with manual dispatcher approval. Catch edge cases before full automation.
+                Process real orders with manual dispatcher approval. Catch edge
+                cases before full automation.
               </p>
             </div>
           </div>
@@ -235,9 +248,12 @@ export default function FeatureFlagsAdmin() {
               3
             </div>
             <div>
-              <p className="font-medium text-gray-900">Full Rollout (Active Auto)</p>
+              <p className="font-medium text-gray-900">
+                Full Rollout (Active Auto)
+              </p>
               <p className="text-sm text-gray-600">
-                Enable automatic processing once confidence is high. Monitor metrics closely.
+                Enable automatic processing once confidence is high. Monitor
+                metrics closely.
               </p>
             </div>
           </div>
@@ -249,7 +265,8 @@ export default function FeatureFlagsAdmin() {
             <div>
               <p className="font-medium text-gray-900">Emergency Rollback</p>
               <p className="text-sm text-gray-600">
-                If issues arise, immediately set to Disabled to route all traffic through legacy pipeline.
+                If issues arise, immediately set to Disabled to route all
+                traffic through legacy pipeline.
               </p>
             </div>
           </div>

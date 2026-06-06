@@ -251,7 +251,8 @@ export default function DriverQualificationsView() {
                       }
                       size="sm"
                     >
-                      {qual?.qualification_type?.replace(/_/g, " ") ?? "Unknown"}
+                      {qual?.qualification_type?.replace(/_/g, " ") ??
+                        "Unknown"}
                     </Badge>
                   ))}
                 </div>
