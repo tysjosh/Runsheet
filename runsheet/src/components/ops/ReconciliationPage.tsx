@@ -47,7 +47,13 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { type Column, EntityLink, Table } from "@/components/ui";
+import {
+  type Column,
+  EntityLink,
+  Table,
+  ToastContainer,
+  useToasts,
+} from "@/components/ui";
 import type {
   BOLDownloadResponse,
   HashChainMismatch,
@@ -76,73 +82,6 @@ const DEFAULT_ALERT_PCT = 3.0;
 /** Alert flag emitted by :class:`ReconciliationService` when any
  *  variance crosses the tenant-configured threshold (Req 4.4.3). */
 const VARIANCE_ALERT_FLAG = "variance_exceeds_threshold";
-
-// ─── Toast System (mirrors CustomerTankPage.tsx) ─────────────────────────────
-
-interface Toast {
-  id: number;
-  message: string;
-  type: "success" | "error";
-}
-
-let toastIdCounter = 0;
-
-function ToastContainer({
-  toasts,
-  onDismiss,
-}: {
-  toasts: Toast[];
-  onDismiss: (id: number) => void;
-}) {
-  if (toasts.length === 0) return null;
-  return (
-    <div className="fixed top-4 right-4 z-[100] space-y-2">
-      {toasts.map((toast) => (
-        <div
-          key={toast.id}
-          className={`flex items-center gap-2 px-4 py-3 rounded-lg shadow-lg text-sm font-medium ${
-            toast.type === "success"
-              ? "bg-success text-white"
-              : "bg-error text-white"
-          }`}
-        >
-          {toast.type === "success" ? (
-            <Check className="w-4 h-4" />
-          ) : (
-            <AlertTriangle className="w-4 h-4" />
-          )}
-          <span>{toast.message}</span>
-          <button
-            type="button"
-            onClick={() => onDismiss(toast.id)}
-            className="ml-2 p-0.5 hover:bg-white/20 rounded"
-            aria-label="Dismiss notification"
-          >
-            <X className="w-3 h-3" />
-          </button>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function useToasts() {
-  const [toasts, setToasts] = useState<Toast[]>([]);
-
-  const addToast = useCallback((message: string, type: "success" | "error") => {
-    const id = ++toastIdCounter;
-    setToasts((prev) => [...prev, { id, message, type }]);
-    setTimeout(() => {
-      setToasts((prev) => prev.filter((t) => t.id !== id));
-    }, 4000);
-  }, []);
-
-  const dismissToast = useCallback((id: number) => {
-    setToasts((prev) => prev.filter((t) => t.id !== id));
-  }, []);
-
-  return { toasts, addToast, dismissToast };
-}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 

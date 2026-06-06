@@ -15,12 +15,8 @@
  * Validates: Requirements 2.1.1, 2.1.4, 2.1.6.
  */
 
-import {
-  API_TIMEOUTS,
-  ApiError,
-  ApiTimeoutError,
-  fetchWithSession,
-} from "./api";
+import { ApiError, ApiTimeoutError, fetchWithSession } from "./api";
+import { fetchWithTimeout } from "./utils";
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -104,32 +100,6 @@ export interface UpdateIntakeChannelPayload {
 }
 
 // ─── HTTP Helpers ────────────────────────────────────────────────────────────
-
-async function fetchWithTimeout(
-  url: string,
-  options: RequestInit = {},
-  timeout: number = API_TIMEOUTS.STANDARD,
-): Promise<Response> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeout);
-
-  try {
-    const response = await fetch(url, {
-      ...options,
-      signal: controller.signal,
-    });
-    return response;
-  } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") {
-      throw new ApiTimeoutError(
-        `Request timed out after ${timeout / 1000} seconds`,
-      );
-    }
-    throw error;
-  } finally {
-    clearTimeout(timeoutId);
-  }
-}
 
 async function intakeChannelsRequest<T>(
   endpoint: string,

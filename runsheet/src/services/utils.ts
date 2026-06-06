@@ -4,7 +4,42 @@
  * Extracted to avoid duplication across opsApi, fuelApi, schedulingApi, agentApi.
  */
 
-import { API_TIMEOUTS, ApiTimeoutError } from "./api";
+import { API_TIMEOUTS, ApiError, ApiTimeoutError } from "./api";
+
+// Re-export the canonical error types so consumers can import error types and
+// the shared HTTP helpers from a single module. `utils.ts` already depends on
+// `./api`; the reverse import must never happen (it would create a circular
+// dependency — `api.ts` owns these definitions and stays dependency-free of
+// `utils.ts`).
+export { ApiError, ApiTimeoutError };
+
+// ─── Pagination / response envelope types ────────────────────────────────────
+//
+// Shared shapes for the paginated/single response envelopes returned by the
+// typed service clients. Identical to the per-client copies they replace (see
+// schedulingApi/fuelApi/inventoryApi/etc.), centralized here as the single
+// source of truth.
+
+/** Pagination metadata block returned alongside a paginated list. */
+export interface PaginationMeta {
+  page: number;
+  size: number;
+  total: number;
+  total_pages: number;
+}
+
+/** A paginated list response envelope. */
+export interface PaginatedResponse<T> {
+  data: T[];
+  pagination: PaginationMeta;
+  request_id: string;
+}
+
+/** A single-entity response envelope. */
+export interface SingleResponse<T> {
+  data: T;
+  request_id: string;
+}
 
 /**
  * Build a URL query string from a params object.

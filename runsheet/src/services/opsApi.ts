@@ -1,9 +1,13 @@
+import { ApiError, ApiTimeoutError, fetchWithSession } from "./api";
 import {
-  API_TIMEOUTS,
-  ApiError,
-  ApiTimeoutError,
-  fetchWithSession,
-} from "./api";
+  buildQueryString,
+  fetchWithTimeout,
+  type PaginatedResponse,
+} from "./utils";
+
+// Re-export the shared pagination/response envelope types so existing
+// downstream imports keep resolving them from this module (Req 2.4/4.3).
+export type { PaginatedResponse, PaginationMeta } from "./utils";
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -11,19 +15,6 @@ const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
 
 // ─── Shared Types ────────────────────────────────────────────────────────────
-
-export interface PaginationMeta {
-  page: number;
-  size: number;
-  total: number;
-  total_pages: number;
-}
-
-export interface PaginatedResponse<T> {
-  data: T[];
-  pagination: PaginationMeta;
-  request_id: string;
-}
 
 export interface PaginationParams {
   page?: number;
@@ -206,46 +197,6 @@ export interface MetricsFilters extends DateRangeParams {
 }
 
 // ─── HTTP Helper ─────────────────────────────────────────────────────────────
-
-async function fetchWithTimeout(
-  url: string,
-  options: RequestInit = {},
-  timeout: number = API_TIMEOUTS.STANDARD,
-): Promise<Response> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeout);
-
-  try {
-    const response = await fetch(url, {
-      ...options,
-      signal: controller.signal,
-    });
-    return response;
-  } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") {
-      throw new ApiTimeoutError(
-        `Request timed out after ${timeout / 1000} seconds`,
-      );
-    }
-    throw error;
-  } finally {
-    clearTimeout(timeoutId);
-  }
-}
-
-function buildQueryString(
-  params: Record<string, string | number | boolean | undefined | null> | object,
-): string {
-  const entries = Object.entries(params).filter(
-    ([, v]) => v !== undefined && v !== null && v !== "",
-  );
-  if (entries.length === 0) return "";
-  const searchParams = new URLSearchParams();
-  for (const [key, value] of entries) {
-    searchParams.set(key, String(value));
-  }
-  return `?${searchParams.toString()}`;
-}
 
 async function opsRequest<T>(
   endpoint: string,

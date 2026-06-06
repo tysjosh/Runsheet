@@ -5,12 +5,11 @@ import type {
   SchemaTemplate,
   ValidationResult,
 } from "../types/import";
-import {
-  API_TIMEOUTS,
-  ApiError,
-  ApiTimeoutError,
-  fetchWithSession,
-} from "./api";
+import { ApiError, ApiTimeoutError, fetchWithSession } from "./api";
+// `importApi` previously declared a narrower `buildQueryString`
+// (`Record<string, string | undefined>`); the shared signature is a superset,
+// so it adopts the shared helper with no behavior change (Req 2.5/4.3).
+import { buildQueryString, fetchWithTimeout } from "./utils";
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -18,44 +17,6 @@ const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
 
 // ─── HTTP Helpers ────────────────────────────────────────────────────────────
-
-async function fetchWithTimeout(
-  url: string,
-  options: RequestInit = {},
-  timeout: number = API_TIMEOUTS.STANDARD,
-): Promise<Response> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeout);
-
-  try {
-    const response = await fetch(url, {
-      ...options,
-      signal: controller.signal,
-    });
-    return response;
-  } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") {
-      throw new ApiTimeoutError(
-        `Request timed out after ${timeout / 1000} seconds`,
-      );
-    }
-    throw error;
-  } finally {
-    clearTimeout(timeoutId);
-  }
-}
-
-function buildQueryString(params: Record<string, string | undefined>): string {
-  const entries = Object.entries(params).filter(
-    ([, v]) => v !== undefined && v !== null && v !== "",
-  );
-  if (entries.length === 0) return "";
-  const searchParams = new URLSearchParams();
-  for (const [key, value] of entries) {
-    searchParams.set(key, String(value));
-  }
-  return `?${searchParams.toString()}`;
-}
 
 async function importRequest<T>(
   endpoint: string,

@@ -22,12 +22,12 @@
  * Validates: Requirements 4.1.3, 4.1.5.
  */
 
-import {
-  API_TIMEOUTS,
-  ApiError,
-  ApiTimeoutError,
-  fetchWithSession,
-} from "./api";
+import { ApiError, ApiTimeoutError, fetchWithSession } from "./api";
+import { fetchWithTimeout, type PaginationMeta } from "./utils";
+
+// Re-export the shared pagination metadata type so existing downstream imports
+// keep resolving it from this module (Req 2.4/4.3).
+export type { PaginationMeta } from "./utils";
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -83,32 +83,6 @@ export interface PresignResponse {
 }
 
 // ─── HTTP helpers (kept local so the client is self-contained) ───────────────
-
-async function fetchWithTimeout(
-  url: string,
-  options: RequestInit = {},
-  timeout: number = API_TIMEOUTS.STANDARD,
-): Promise<Response> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeout);
-
-  try {
-    const response = await fetch(url, {
-      ...options,
-      signal: controller.signal,
-    });
-    return response;
-  } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") {
-      throw new ApiTimeoutError(
-        `Request timed out after ${timeout / 1000} seconds`,
-      );
-    }
-    throw error;
-  } finally {
-    clearTimeout(timeoutId);
-  }
-}
 
 async function driverRequest<T>(
   endpoint: string,
@@ -284,13 +258,6 @@ export interface JobMessage {
   body: string;
   timestamp: string;
   tenant_id: string;
-}
-
-export interface PaginationMeta {
-  page: number;
-  size: number;
-  total: number;
-  total_pages: number;
 }
 
 /**

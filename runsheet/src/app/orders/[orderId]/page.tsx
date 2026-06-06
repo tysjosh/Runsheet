@@ -19,6 +19,7 @@ import {
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
+import { ToastContainer, useToasts } from "@/components/ui";
 import { ApiError } from "../../../services/api";
 import {
   type AssignDriverPayload,
@@ -136,50 +137,6 @@ function LinkedRefField({ link, fallbackId, href }: LinkedRefFieldProps) {
   }
 
   return <span className="text-gray-400">—</span>;
-}
-
-// ─── Toast ───────────────────────────────────────────────────────────────────
-
-interface Toast {
-  id: number;
-  message: string;
-  type: "success" | "error";
-}
-
-let toastCounter = 0;
-
-function ToastContainer({
-  toasts,
-  onDismiss,
-}: {
-  toasts: Toast[];
-  onDismiss: (id: number) => void;
-}) {
-  if (toasts.length === 0) return null;
-  return (
-    <div className="fixed top-4 right-4 z-[100] space-y-2">
-      {toasts.map((t) => (
-        <div
-          key={t.id}
-          className={`flex items-center gap-2 px-4 py-3 rounded-lg shadow-lg text-sm font-medium ${
-            t.type === "success"
-              ? "bg-success text-white"
-              : "bg-error text-white"
-          }`}
-        >
-          <span>{t.message}</span>
-          <button
-            type="button"
-            onClick={() => onDismiss(t.id)}
-            className="ml-2 hover:bg-white/20 rounded p-0.5"
-            aria-label="Dismiss"
-          >
-            ×
-          </button>
-        </div>
-      ))}
-    </div>
-  );
 }
 
 // ─── Intake Metadata Renderer ────────────────────────────────────────────────
@@ -730,20 +687,7 @@ export default function OrderDetailPage() {
   const [events, setEvents] = useState<FuelOrderEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [toasts, setToasts] = useState<Toast[]>([]);
-
-  const addToast = useCallback((message: string, type: "success" | "error") => {
-    const id = ++toastCounter;
-    setToasts((prev) => [...prev, { id, message, type }]);
-    setTimeout(
-      () => setToasts((prev) => prev.filter((t) => t.id !== id)),
-      4000,
-    );
-  }, []);
-
-  const dismissToast = useCallback((id: number) => {
-    setToasts((prev) => prev.filter((t) => t.id !== id));
-  }, []);
+  const { toasts, addToast, dismissToast } = useToasts();
 
   const fetchData = useCallback(async () => {
     if (!orderId) return;

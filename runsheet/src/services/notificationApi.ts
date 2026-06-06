@@ -1,10 +1,9 @@
+import { ApiError, ApiTimeoutError, fetchWithSession } from "./api";
 import {
-  API_TIMEOUTS,
-  ApiError,
-  ApiTimeoutError,
-  fetchWithSession,
-} from "./api";
-import type { PaginatedResponse } from "./schedulingApi";
+  buildQueryString,
+  fetchWithTimeout,
+  type PaginatedResponse,
+} from "./utils";
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -135,46 +134,6 @@ export interface TemplateUpdatePayload {
 }
 
 // ─── HTTP Helper ─────────────────────────────────────────────────────────────
-
-async function fetchWithTimeout(
-  url: string,
-  options: RequestInit = {},
-  timeout: number = API_TIMEOUTS.STANDARD,
-): Promise<Response> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeout);
-
-  try {
-    const response = await fetch(url, {
-      ...options,
-      signal: controller.signal,
-    });
-    return response;
-  } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") {
-      throw new ApiTimeoutError(
-        `Request timed out after ${timeout / 1000} seconds`,
-      );
-    }
-    throw error;
-  } finally {
-    clearTimeout(timeoutId);
-  }
-}
-
-function buildQueryString(
-  params: Record<string, string | number | boolean | undefined | null>,
-): string {
-  const entries = Object.entries(params).filter(
-    ([, v]) => v !== undefined && v !== null && v !== "",
-  );
-  if (entries.length === 0) return "";
-  const searchParams = new URLSearchParams();
-  for (const [key, value] of entries) {
-    searchParams.set(key, String(value));
-  }
-  return `?${searchParams.toString()}`;
-}
 
 async function notificationRequest<T>(
   endpoint: string,

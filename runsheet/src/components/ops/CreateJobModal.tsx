@@ -110,6 +110,11 @@ function ReadinessIndicator({
 
 // ─── Toast Notification Component ───────────────────────────────────────────
 
+// NOTE: This modal intentionally keeps its own divergent toast (warning/error
+// variants, string ids, bottom-right placement, aria-live) and is excluded from
+// the shared-toast consolidation in @/components/ui (see ui-scaffolding-
+// consolidation Req 1.5 / 4.3). Do not migrate it onto the canonical toast.
+
 interface ToastNotification {
   id: string;
   message: string;
