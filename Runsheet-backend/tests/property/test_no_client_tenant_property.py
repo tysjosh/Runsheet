@@ -74,10 +74,7 @@ class _FixedTenantVerifier:
 
 
 # Settings stub forcing the SuperTokens hard-cutover verification path.
-_SUPERTOKENS_SETTINGS = patch(
-    "ops.middleware.tenant_guard.get_settings",
-    return_value=MagicMock(auth_provider="supertokens"),
-)
+# (Removed: get_tenant_context now always verifies a SuperTokens session.)
 
 
 def _build_request(
@@ -198,8 +195,7 @@ class TestNoClientTenantResolution:
             channels=channels,
         )
 
-        with _SUPERTOKENS_SETTINGS:
-            context = asyncio.run(get_tenant_context(request))
+        context = asyncio.run(get_tenant_context(request))
 
         assert context.tenant_id == SESSION_TENANT, (
             f"supplied tenant_id={supplied_tenant!r} via {sorted(channels)} "

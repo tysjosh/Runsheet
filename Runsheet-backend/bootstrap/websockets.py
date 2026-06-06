@@ -20,14 +20,9 @@ Endpoints registered:
 Auth helpers (:func:`_authenticate_tenant` / :func:`_authenticate_driver`)
 authenticate the WebSocket handshake against a **SuperTokens session** and
 derive ``tenant_id`` (and ``driver_id`` for the per-driver channel) from the
-verified, server-signed access-token payload (Req 7.1, 7.3). They branch on the
-``auth_provider`` Migration_Controller flag exactly like the HTTP
-Session_Verifier (``ops.middleware.tenant_guard.get_tenant_context``):
-
-* ``"supertokens"`` — verify a SuperTokens session only.
-* ``"dual"`` — prefer a SuperTokens session; fall back to a legacy JWT when no
-  SuperTokens session is present on the handshake.
-* ``"legacy"`` (and any unrecognized value) — the pre-migration legacy JWT path.
+verified, server-signed access-token payload (Req 7.1, 7.3). The homegrown
+HS256 legacy/dual paths were removed once the SuperTokens hard cutover
+completed.
 
 The SuperTokens session credential is taken **cookie-first** from the handshake
 (``sAccessToken``); where a browser cannot attach the cookie to a WS handshake,
@@ -105,7 +100,7 @@ def configure_ws_session_verifier(verifier: Optional[WSSessionVerifier]) -> None
     """Install the verifier used to validate a SuperTokens session on a WS handshake.
 
     Passing ``None`` resets to the default SDK-backed verifier. This is the seam
-    tests use to exercise the ``supertokens`` / ``dual`` branching without a live
+    tests use to exercise SuperTokens session verification without a live
     managed core.
     """
     global _ws_session_verifier
@@ -170,58 +165,17 @@ async def _default_ws_verify(
     return dict(session.get_access_token_payload() or {})
 
 
-def _legacy_ws_claims(websocket: WebSocket) -> Optional[Dict[str, Any]]:
-    """Legacy homegrown-JWT verification for the ``token`` query param.
-
-    Used by the ``legacy`` branch and as the ``dual`` fallback when no
-    SuperTokens session is present on the handshake. Returns the decoded claims
-    or ``None``. The token value is never logged (Req 7.4).
-    """
-    from jose import JWTError, jwt as jose_jwt
-    from config.settings import get_settings
-
-    settings = get_settings()
-    token = websocket.query_params.get("token", "") or ""
-    if not token:
-        return None
-    try:
-        return jose_jwt.decode(
-            token, settings.jwt_secret, algorithms=[settings.jwt_algorithm]
-        )
-    except JWTError:
-        return None
-
-
 async def _resolve_ws_claims(websocket: WebSocket) -> Optional[Dict[str, Any]]:
-    """Resolve verified session claims for a WS handshake, branching on auth_provider.
+    """Resolve verified SuperTokens session claims for a WS handshake.
 
-    Mirrors ``get_tenant_context``:
-
-      * ``"supertokens"`` — verify a SuperTokens session only.
-      * ``"dual"`` — prefer a SuperTokens session; fall back to the legacy JWT
-        only when no SuperTokens session is present on the handshake.
-      * ``"legacy"`` / anything else — the legacy JWT path.
-
-    Returns the verified claims mapping, or ``None`` when the connection cannot
-    be associated with a verified session (Req 7.1, 7.2).
+    Always verifies a SuperTokens session only: the credential is taken
+    cookie-first (``sAccessToken``) with a short-lived ``token`` query-param
+    fallback (Req 7.5). Returns the verified claims mapping, or ``None`` when
+    the connection cannot be associated with a verified session (Req 7.1, 7.2).
     """
-    from config.settings import get_settings
-
-    provider = getattr(get_settings(), "auth_provider", "legacy")
     verifier = _ws_session_verifier or _default_ws_verify
-
-    if provider in ("supertokens", "dual"):
-        access_token, anti_csrf = _extract_session_credential(websocket)
-        claims = await verifier(access_token, anti_csrf)
-        if claims is not None:
-            return claims
-        if provider == "supertokens":
-            return None
-        # dual: fall back to legacy only when no SuperTokens session was present.
-        return _legacy_ws_claims(websocket)
-
-    # "legacy" (and any unrecognized value): pre-migration behavior.
-    return _legacy_ws_claims(websocket)
+    access_token, anti_csrf = _extract_session_credential(websocket)
+    return await verifier(access_token, anti_csrf)
 
 
 async def _authenticate_tenant(websocket: WebSocket) -> Optional[str]:

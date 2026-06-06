@@ -29,8 +29,7 @@ revoked SuperTokens session must be rejected, never downgraded to legacy
 
 import asyncio
 import sys
-from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 from hypothesis import given, settings
@@ -44,7 +43,6 @@ sys.modules.setdefault("services.elasticsearch_service", MagicMock())
 
 from errors.codes import ErrorCode  # noqa: E402
 from errors.exceptions import AppException, unauthorized  # noqa: E402
-from ops.middleware import tenant_guard  # noqa: E402
 from ops.middleware.tenant_guard import (  # noqa: E402
     TenantContext,
     configure_session_verifier,
@@ -133,7 +131,7 @@ _paths = st.sampled_from(
         "/api/drivers/me",
     ]
 )
-_providers = st.sampled_from(["supertokens", "dual"])
+_providers = st.sampled_from(["supertokens"])
 
 
 @st.composite
@@ -182,26 +180,19 @@ class TestRevokedSessionRejection:
     def test_revoked_session_is_rejected_and_no_context_returned(
         self, request: _FakeRequest, provider: str
     ):
-        """A revoked SuperTokens session is rejected with 401 for both
-        ``supertokens`` and ``dual`` providers; no TenantContext is returned,
-        and ``dual`` never silently falls back to the legacy path."""
+        """A revoked SuperTokens session is rejected with 401 under the
+        ``supertokens`` provider; no TenantContext is returned, and the
+        legacy path is never consulted (it no longer exists)."""
         configure_session_verifier(_RevokedSessionVerifier())
 
-        fake_settings = SimpleNamespace(
-            auth_provider=provider,
-            jwt_secret=_JWT_SECRET,
-            jwt_algorithm=_JWT_ALGORITHM,
-        )
-
-        with patch.object(tenant_guard, "get_settings", return_value=fake_settings):
-            with pytest.raises(AppException) as exc_info:
-                result = asyncio.run(get_tenant_context(request))
-                # If we ever get here, the contract was violated — surface the
-                # offending return value for the counterexample report.
-                assert not isinstance(result, TenantContext), (
-                    f"get_tenant_context returned a TenantContext for a revoked "
-                    f"session under provider={provider!r}: {result!r}"
-                )
+        with pytest.raises(AppException) as exc_info:
+            result = asyncio.run(get_tenant_context(request))
+            # If we ever get here, the contract was violated — surface the
+            # offending return value for the counterexample report.
+            assert not isinstance(result, TenantContext), (
+                f"get_tenant_context returned a TenantContext for a revoked "
+                f"session under provider={provider!r}: {result!r}"
+            )
 
         # The rejection must be an authentication error (HTTP 401 / UNAUTHORIZED),
         # matching the real verifier's behavior on SuperTokensSessionError.

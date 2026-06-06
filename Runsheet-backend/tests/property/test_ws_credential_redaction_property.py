@@ -92,8 +92,6 @@ def _capture_all_logs():
 def _make_settings(auth_provider="supertokens"):
     settings_obj = MagicMock()
     settings_obj.auth_provider = auth_provider
-    settings_obj.jwt_secret = "test-secret"
-    settings_obj.jwt_algorithm = "HS256"
     return settings_obj
 
 
@@ -124,7 +122,7 @@ _tokens = st.text(
     max_size=64,
 )
 _transports = st.sampled_from(["cookie", "query"])
-_providers = st.sampled_from(["supertokens", "dual", "legacy"])
+_providers = st.sampled_from(["supertokens"])
 _verify_behaviors = st.sampled_from(["valid", "none", "raise_default"])
 
 

@@ -188,11 +188,22 @@ def is_test_auth_bypass_active(app: Optional[object] = None) -> bool:
     """
     if get_settings().environment not in _TEST_AUTH_ENVIRONMENTS:
         return False
-    if not _active_app_refcounts:
-        return False
-    if app is None:
-        return True
-    return id(app) in _active_app_refcounts
+    # An explicit ``override_auth`` / ``register_test_auth_bypass`` registration.
+    if _active_app_refcounts:
+        if app is None:
+            return True
+        if id(app) in _active_app_refcounts:
+            return True
+    # Or an app-level Test_Auth_Path dependency override (installed by
+    # ``tests/support/auth_seam.install_test_auth``). Detecting it here means
+    # the bypass is automatically released when the test clears
+    # ``app.dependency_overrides`` — no separate cleanup is required, so a
+    # stray registration cannot leak across tests sharing the global app.
+    if app is not None:
+        overrides = getattr(app, "dependency_overrides", None)
+        if overrides and get_tenant_context in overrides:
+            return True
+    return False
 
 
 @contextmanager

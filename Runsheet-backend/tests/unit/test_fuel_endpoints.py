@@ -667,24 +667,26 @@ class TestNetworkSummary:
 class TestTenantScoping:
 
     @pytest.fixture(autouse=True)
-    def _force_non_dev(self):
-        """Force non-development environment so tenant guard rejects unauthenticated requests."""
-        with patch(
-            "ops.middleware.tenant_guard.get_settings",
-            return_value=MagicMock(
-                environment=MagicMock(value="production"),
-                jwt_secret="test-secret",
-                jwt_algorithm="HS256",
-            ),
-        ):
-            yield
+    def _no_session_verifier(self):
+        """Install a Session_Verifier that reports no SuperTokens session, so
+        the real get_tenant_context rejects unauthenticated requests with 401
+        without needing a live managed core."""
+        from ops.middleware.tenant_guard import configure_session_verifier
 
-    def test_no_auth_header_returns_403(self, no_tenant_client):
-        """Requests without Authorization header should be rejected."""
+        class _NoSession:
+            async def verify(self, request):
+                return None
+
+        configure_session_verifier(_NoSession())
+        yield
+        configure_session_verifier(None)
+
+    def test_no_auth_header_returns_401(self, no_tenant_client):
+        """Requests without a verified session should be rejected (401)."""
         resp = no_tenant_client.get("/api/fuel/stations")
-        assert resp.status_code == 403
+        assert resp.status_code == 401
 
-    def test_no_auth_on_post_returns_403(self, no_tenant_client):
+    def test_no_auth_on_post_returns_401(self, no_tenant_client):
         payload = {
             "station_id": "STN-001",
             "name": "Test",
@@ -693,9 +695,9 @@ class TestTenantScoping:
             "initial_stock_liters": 30000.0,
         }
         resp = no_tenant_client.post("/api/fuel/stations", json=payload)
-        assert resp.status_code == 403
+        assert resp.status_code == 401
 
-    def test_no_auth_on_consumption_returns_403(self, no_tenant_client):
+    def test_no_auth_on_consumption_returns_401(self, no_tenant_client):
         payload = {
             "station_id": "STN-001",
             "fuel_type": "AGO",
@@ -704,9 +706,9 @@ class TestTenantScoping:
             "operator_id": "OP-001",
         }
         resp = no_tenant_client.post("/api/fuel/consumption", json=payload)
-        assert resp.status_code == 403
+        assert resp.status_code == 401
 
-    def test_no_auth_on_refill_returns_403(self, no_tenant_client):
+    def test_no_auth_on_refill_returns_401(self, no_tenant_client):
         payload = {
             "station_id": "STN-001",
             "fuel_type": "AGO",
@@ -715,15 +717,15 @@ class TestTenantScoping:
             "operator_id": "OP-001",
         }
         resp = no_tenant_client.post("/api/fuel/refill", json=payload)
-        assert resp.status_code == 403
+        assert resp.status_code == 401
 
-    def test_no_auth_on_alerts_returns_403(self, no_tenant_client):
+    def test_no_auth_on_alerts_returns_401(self, no_tenant_client):
         resp = no_tenant_client.get("/api/fuel/alerts")
-        assert resp.status_code == 403
+        assert resp.status_code == 401
 
-    def test_no_auth_on_metrics_returns_403(self, no_tenant_client):
+    def test_no_auth_on_metrics_returns_401(self, no_tenant_client):
         resp = no_tenant_client.get("/api/fuel/metrics/summary")
-        assert resp.status_code == 403
+        assert resp.status_code == 401
 
 
 # ---------------------------------------------------------------------------

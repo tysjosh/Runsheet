@@ -27,7 +27,7 @@ Usage:
     python -m scripts.set_user_password admin@runsheet.com --link
 
 Prerequisites:
-    * AUTH_PROVIDER must be 'dual' or 'supertokens' with SUPERTOKENS_CONNECTION_URI
+    * AUTH_PROVIDER must be 'supertokens' with SUPERTOKENS_CONNECTION_URI
       + SUPERTOKENS_API_KEY configured (the SDK must be able to reach the core).
     * DATABASE_URL must point at the PostgreSQL source of truth, and the user
       must already be provisioned (run scripts/provision_auth_users.py first).

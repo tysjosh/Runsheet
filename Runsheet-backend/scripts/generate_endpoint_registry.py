@@ -35,8 +35,6 @@ def _setup_mock_env() -> None:
         "ELASTIC_API_KEY": "mock-key-for-registry-gen",
         "ELASTICSEARCH_API_KEY": "mock-key-for-registry-gen",
         "REDIS_URL": "redis://localhost:6379",
-        "JWT_SECRET": "mock-jwt-secret-for-registry-generation",
-        "JWT_ALGORITHM": "HS256",
         "ENVIRONMENT": "development",
     }
     for key, value in defaults.items():

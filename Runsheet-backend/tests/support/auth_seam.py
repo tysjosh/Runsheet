@@ -119,4 +119,11 @@ def install_test_auth(app) -> None:
             user_id=user_id,
         )
 
+    # Installing this app-level override also activates the Test_Auth_Path
+    # bypass for the global AuthEnforcementMiddleware (active under
+    # auth_provider=supertokens): ``is_test_auth_bypass_active`` detects the
+    # presence of this override and lets the request through to the override
+    # instead of rejecting it for lacking a real SuperTokens session (Req 11.2).
+    # Because the bypass is keyed off the override's presence, clearing
+    # ``app.dependency_overrides`` automatically releases it (Req 11.3).
     app.dependency_overrides[get_tenant_context] = _override

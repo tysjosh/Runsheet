@@ -11,8 +11,6 @@ These cover the re-implemented behavior from the SuperTokens Auth Migration:
 * Unverifiable connections return ``None`` so the endpoint closes with 4001
   (Req 7.2).
 * The session-token value is never written to logs (Req 7.4).
-* ``auth_provider`` branching: ``supertokens`` verifies the session only;
-  ``dual`` falls back to the legacy JWT only when no session is present.
 
 Validates: Requirements 7.1, 7.2, 7.3, 7.4, 7.5
 """
@@ -24,12 +22,9 @@ import pytest
 import bootstrap.websockets as ws
 
 
-def _make_settings(auth_provider="supertokens", jwt_secret="test-secret",
-                   jwt_algorithm="HS256"):
+def _make_settings(auth_provider="supertokens"):
     settings = MagicMock()
     settings.auth_provider = auth_provider
-    settings.jwt_secret = jwt_secret
-    settings.jwt_algorithm = jwt_algorithm
     return settings
 
 
@@ -176,47 +171,6 @@ class TestAuthenticateDriverSupertokens:
             result = await ws._authenticate_driver(websocket)
 
         assert result is None
-
-
-# ---------------------------------------------------------------------------
-# dual-mode fallback to legacy JWT
-# ---------------------------------------------------------------------------
-
-
-class TestDualModeFallback:
-    @pytest.mark.asyncio
-    async def test_prefers_supertokens_session(self):
-        async def fake_verify(access_token, anti_csrf):
-            return {"tenant_id": "t-st"}
-
-        ws.configure_ws_session_verifier(fake_verify)
-        websocket = _make_ws(headers={"cookie": "sAccessToken=tok"})
-
-        with patch("config.settings.get_settings",
-                   return_value=_make_settings(auth_provider="dual")):
-            result = await ws._authenticate_tenant(websocket)
-
-        assert result == "t-st"
-
-    @pytest.mark.asyncio
-    async def test_falls_back_to_legacy_when_no_session(self):
-        from jose import jwt as jose_jwt
-
-        legacy_token = jose_jwt.encode(
-            {"tenant_id": "t-legacy"}, "test-secret", algorithm="HS256"
-        )
-
-        async def fake_verify(access_token, anti_csrf):
-            return None  # no SuperTokens session present
-
-        ws.configure_ws_session_verifier(fake_verify)
-        websocket = _make_ws(query_params={"token": legacy_token})
-
-        with patch("config.settings.get_settings",
-                   return_value=_make_settings(auth_provider="dual")):
-            result = await ws._authenticate_tenant(websocket)
-
-        assert result == "t-legacy"
 
 
 # ---------------------------------------------------------------------------

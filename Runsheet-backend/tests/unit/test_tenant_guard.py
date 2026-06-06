@@ -1,21 +1,25 @@
 """
-Unit tests for the Tenant Guard middleware.
+Unit tests for the Tenant Guard / Session_Verifier middleware.
+
+After the SuperTokens hard cutover ``get_tenant_context`` verifies a
+SuperTokens session only — the homegrown HS256 JWT path was removed. These
+tests exercise the verifier via the :class:`SessionVerifier` seam
+(``configure_session_verifier``) so no live managed core is required.
 
 Tests cover:
-- Valid JWT with tenant_id claim extracts TenantContext correctly
-- Missing JWT / missing tenant_id claim returns 403
-- Spoofed query param tenant_id is ignored (JWT claim is authoritative)
-- pii_access permission extraction from JWT claims
-- inject_tenant_filter wraps ES queries with tenant_id filter
+- A verified session with a tenant_id claim yields the correct TenantContext
+- A missing session / missing tenant_id claim is rejected with 401
+- A spoofed query-param / header tenant_id is ignored (the claim is authoritative)
+- has_pii_access extraction from the verified claims
+- inject_tenant_filter wraps ES queries with a tenant_id filter
 
-Validates: Requirements 9.1-9.8
+Validates: Requirements 2.6, 3.1, 3.2, 3.3, 3.5, 5.1, 5.3, 5.4
 """
 
 import sys
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
-from jose import jwt
 
 # ---------------------------------------------------------------------------
 # Patch the ElasticsearchService singleton BEFORE any ops imports so that
@@ -29,9 +33,11 @@ sys.modules.setdefault("services.elasticsearch_service", _mock_es_module)
 from fastapi import Depends, FastAPI, Request
 from fastapi.testclient import TestClient
 
-from errors.exceptions import AppException
+from errors.exceptions import AppException, unauthorized
 from ops.middleware.tenant_guard import (
     TenantContext,
+    VerifiedSession,
+    configure_session_verifier,
     configure_tenant_guard,
     get_tenant_context,
     inject_tenant_filter,
@@ -42,17 +48,32 @@ from services.tenant_settings import (
     TenantSettingsService,
 )
 
+
 # ---------------------------------------------------------------------------
-# Constants
+# SessionVerifier fakes
 # ---------------------------------------------------------------------------
 
-JWT_SECRET = "test-jwt-secret"
-JWT_ALGORITHM = "HS256"
+
+class _ClaimsVerifier:
+    """A verifier that returns a fixed :class:`VerifiedSession` from claims."""
+
+    def __init__(self, claims: dict):
+        self._claims = claims
+
+    async def verify(self, request: Request):
+        user_id = self._claims.get("sub") or self._claims.get("user_id") or "unknown"
+        return VerifiedSession(user_id=user_id, claims=dict(self._claims))
 
 
-def _make_token(claims: dict) -> str:
-    """Create a signed JWT with the given claims."""
-    return jwt.encode(claims, JWT_SECRET, algorithm=JWT_ALGORITHM)
+class _NoSessionVerifier:
+    """A verifier that reports no SuperTokens session on the request."""
+
+    async def verify(self, request: Request):
+        return None
+
+
+def _install_verifier(claims: dict) -> None:
+    configure_session_verifier(_ClaimsVerifier(claims))
 
 
 def _build_app() -> tuple[FastAPI, TestClient]:
@@ -72,7 +93,7 @@ def _build_app() -> tuple[FastAPI, TestClient]:
             "measurement_units": tenant.measurement_units,
         }
 
-    # Register the AppException handler so 403s come back as JSON
+    # Register the AppException handler so 401s come back as JSON
     @app.exception_handler(AppException)
     async def app_exception_handler(request: Request, exc: AppException):
         from fastapi.responses import JSONResponse
@@ -86,28 +107,27 @@ def _build_app() -> tuple[FastAPI, TestClient]:
     return app, client
 
 
-# Shared mock for settings
-_SETTINGS_PATCH = patch(
-    "ops.middleware.tenant_guard.get_settings",
-    return_value=MagicMock(jwt_secret=JWT_SECRET, jwt_algorithm=JWT_ALGORITHM),
-)
+@pytest.fixture(autouse=True)
+def _reset_verifier():
+    """Reset the verifier seam after every test."""
+    yield
+    configure_session_verifier(None)
 
 
 # ---------------------------------------------------------------------------
-# Valid JWT Tests — Validates: Req 9.1, 9.6
+# Valid session Tests — Validates: Req 3.1, 3.3, 3.5
 # ---------------------------------------------------------------------------
 
 
-class TestValidJWT:
-    """Verify that a valid JWT with tenant_id claim is accepted."""
+class TestValidSession:
+    """Verify that a verified session with a tenant_id claim is accepted."""
 
-    def test_valid_jwt_returns_tenant_context(self):
-        """A properly signed JWT with tenant_id returns 200 with correct context."""
+    def test_valid_session_returns_tenant_context(self):
+        """A verified session with tenant_id returns 200 with correct context."""
         _, client = _build_app()
-        token = _make_token({"tenant_id": "t-100", "sub": "user-42", "has_pii_access": False})
+        _install_verifier({"tenant_id": "t-100", "sub": "user-42", "has_pii_access": False})
 
-        with _SETTINGS_PATCH:
-            resp = client.get("/test", headers={"Authorization": f"Bearer {token}"})
+        resp = client.get("/test")
 
         assert resp.status_code == 200
         body = resp.json()
@@ -116,169 +136,128 @@ class TestValidJWT:
         assert body["has_pii_access"] is False
 
     def test_user_id_falls_back_to_user_id_claim(self):
-        """When 'sub' is absent, user_id is read from 'user_id' claim."""
+        """When 'sub' is absent, user_id is read from the verified user id."""
         _, client = _build_app()
-        token = _make_token({"tenant_id": "t-200", "user_id": "uid-7"})
+        _install_verifier({"tenant_id": "t-200", "user_id": "uid-7"})
 
-        with _SETTINGS_PATCH:
-            resp = client.get("/test", headers={"Authorization": f"Bearer {token}"})
+        resp = client.get("/test")
 
         assert resp.status_code == 200
         assert resp.json()["user_id"] == "uid-7"
 
-    def test_user_id_defaults_to_unknown(self):
-        """When neither 'sub' nor 'user_id' is present, user_id defaults to 'unknown'."""
-        _, client = _build_app()
-        token = _make_token({"tenant_id": "t-300"})
-
-        with _SETTINGS_PATCH:
-            resp = client.get("/test", headers={"Authorization": f"Bearer {token}"})
-
-        assert resp.status_code == 200
-        assert resp.json()["user_id"] == "unknown"
-
 
 # ---------------------------------------------------------------------------
-# Missing / Invalid JWT Tests — Validates: Req 9.3, 9.6
+# Missing / Invalid session Tests — Validates: Req 2.6, 5.3
 # ---------------------------------------------------------------------------
 
 
-class TestMissingOrInvalidJWT:
-    """Requests without a valid JWT or missing tenant_id claim get 403."""
+class TestMissingOrInvalidSession:
+    """Requests without a verified session or missing tenant_id claim get 401."""
 
-    def test_no_authorization_header_returns_403(self):
+    def test_no_session_returns_401(self):
         _, client = _build_app()
+        configure_session_verifier(_NoSessionVerifier())
 
-        with _SETTINGS_PATCH:
-            resp = client.get("/test")
+        resp = client.get("/test")
 
-        assert resp.status_code == 403
+        assert resp.status_code == 401
 
-    def test_empty_bearer_token_returns_403(self):
+    def test_invalid_session_returns_401(self):
+        """A present-but-invalid session (verifier raises) is rejected with 401."""
+
+        class _RaisingVerifier:
+            async def verify(self, request: Request):
+                raise unauthorized(
+                    message="Invalid or expired session",
+                    details={"reason": "SuperTokens session verification failed"},
+                )
+
         _, client = _build_app()
+        configure_session_verifier(_RaisingVerifier())
 
-        with _SETTINGS_PATCH:
-            resp = client.get("/test", headers={"Authorization": "Bearer "})
+        resp = client.get("/test")
 
-        assert resp.status_code == 403
+        assert resp.status_code == 401
 
-    def test_non_bearer_scheme_returns_403(self):
+    def test_session_missing_tenant_id_claim_returns_401(self):
+        """A verified session that lacks the tenant_id claim is rejected."""
         _, client = _build_app()
+        _install_verifier({"sub": "user-1"})
 
-        with _SETTINGS_PATCH:
-            resp = client.get("/test", headers={"Authorization": "Basic abc123"})
+        resp = client.get("/test")
 
-        assert resp.status_code == 403
+        assert resp.status_code == 401
 
-    def test_invalid_jwt_signature_returns_403(self):
-        """JWT signed with a different secret is rejected."""
+    def test_session_with_empty_tenant_id_returns_401(self):
+        """A verified session with an empty-string tenant_id is rejected."""
         _, client = _build_app()
-        token = jwt.encode(
-            {"tenant_id": "t-evil", "sub": "hacker"},
-            "wrong-secret",
-            algorithm=JWT_ALGORITHM,
-        )
+        _install_verifier({"tenant_id": "", "sub": "user-1"})
 
-        with _SETTINGS_PATCH:
-            resp = client.get("/test", headers={"Authorization": f"Bearer {token}"})
+        resp = client.get("/test")
 
-        assert resp.status_code == 403
-
-    def test_jwt_missing_tenant_id_claim_returns_403(self):
-        """A valid JWT that lacks the tenant_id claim is rejected."""
-        _, client = _build_app()
-        token = _make_token({"sub": "user-1"})
-
-        with _SETTINGS_PATCH:
-            resp = client.get("/test", headers={"Authorization": f"Bearer {token}"})
-
-        assert resp.status_code == 403
-
-    def test_jwt_with_empty_tenant_id_returns_403(self):
-        """A JWT with an empty-string tenant_id is rejected."""
-        _, client = _build_app()
-        token = _make_token({"tenant_id": "", "sub": "user-1"})
-
-        with _SETTINGS_PATCH:
-            resp = client.get("/test", headers={"Authorization": f"Bearer {token}"})
-
-        assert resp.status_code == 403
+        assert resp.status_code == 401
 
 
 # ---------------------------------------------------------------------------
-# Spoofed Query Param Tests — Validates: Req 9.8
+# Spoofed Query Param Tests — Validates: Req 5.1, 5.2
 # ---------------------------------------------------------------------------
 
 
 class TestSpoofedTenantId:
-    """Tenant_id from query params or extra headers is ignored; JWT is authoritative."""
+    """Tenant_id from query params or extra headers is ignored; the claim wins."""
 
     def test_query_param_tenant_id_is_ignored(self):
-        """Even if tenant_id is passed as a query param, the JWT claim wins."""
+        """Even if tenant_id is passed as a query param, the verified claim wins."""
         _, client = _build_app()
-        token = _make_token({"tenant_id": "real-tenant", "sub": "user-1"})
+        _install_verifier({"tenant_id": "real-tenant", "sub": "user-1"})
 
-        with _SETTINGS_PATCH:
-            resp = client.get(
-                "/test?tenant_id=spoofed-tenant",
-                headers={"Authorization": f"Bearer {token}"},
-            )
+        resp = client.get("/test?tenant_id=spoofed-tenant")
 
         assert resp.status_code == 200
         assert resp.json()["tenant_id"] == "real-tenant"
 
     def test_header_tenant_id_is_ignored(self):
-        """A custom X-Tenant-Id header does not override the JWT claim."""
+        """A custom X-Tenant-Id header does not override the verified claim."""
         _, client = _build_app()
-        token = _make_token({"tenant_id": "real-tenant", "sub": "user-1"})
+        _install_verifier({"tenant_id": "real-tenant", "sub": "user-1"})
 
-        with _SETTINGS_PATCH:
-            resp = client.get(
-                "/test",
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "X-Tenant-Id": "spoofed-tenant",
-                },
-            )
+        resp = client.get("/test", headers={"X-Tenant-Id": "spoofed-tenant"})
 
         assert resp.status_code == 200
         assert resp.json()["tenant_id"] == "real-tenant"
 
 
 # ---------------------------------------------------------------------------
-# PII Access Permission Tests — Validates: Req 9.6 (pii_access extraction)
+# PII Access Permission Tests — Validates: Req 3.5 (pii_access extraction)
 # ---------------------------------------------------------------------------
 
 
 class TestPIIAccessExtraction:
-    """Verify has_pii_access is correctly extracted from JWT claims."""
+    """Verify has_pii_access is correctly extracted from the verified claims."""
 
     def test_pii_access_true(self):
         _, client = _build_app()
-        token = _make_token({"tenant_id": "t-1", "sub": "u-1", "has_pii_access": True})
+        _install_verifier({"tenant_id": "t-1", "sub": "u-1", "has_pii_access": True})
 
-        with _SETTINGS_PATCH:
-            resp = client.get("/test", headers={"Authorization": f"Bearer {token}"})
+        resp = client.get("/test")
 
         assert resp.status_code == 200
         assert resp.json()["has_pii_access"] is True
 
     def test_pii_access_false(self):
         _, client = _build_app()
-        token = _make_token({"tenant_id": "t-1", "sub": "u-1", "has_pii_access": False})
+        _install_verifier({"tenant_id": "t-1", "sub": "u-1", "has_pii_access": False})
 
-        with _SETTINGS_PATCH:
-            resp = client.get("/test", headers={"Authorization": f"Bearer {token}"})
+        resp = client.get("/test")
 
         assert resp.status_code == 200
         assert resp.json()["has_pii_access"] is False
 
     def test_pii_access_defaults_to_false_when_absent(self):
         _, client = _build_app()
-        token = _make_token({"tenant_id": "t-1", "sub": "u-1"})
+        _install_verifier({"tenant_id": "t-1", "sub": "u-1"})
 
-        with _SETTINGS_PATCH:
-            resp = client.get("/test", headers={"Authorization": f"Bearer {token}"})
+        resp = client.get("/test")
 
         assert resp.status_code == 200
         assert resp.json()["has_pii_access"] is False
@@ -320,7 +299,7 @@ class TestInjectTenantFilter:
 
 
 # ---------------------------------------------------------------------------
-# Tenant Defaults (Region + measurement_units) — Validates: Req 6.1.5, 6.3.1
+# Tenant Defaults (Region + measurement_units) — Validates: Req 5.4
 # ---------------------------------------------------------------------------
 
 
@@ -353,10 +332,9 @@ class TestTenantDefaultsInContext:
         """When no settings service is wired, context carries US/imperial defaults."""
         configure_tenant_guard(None)
         _, client = _build_app()
-        token = _make_token({"tenant_id": "tenant-new", "sub": "user-1"})
+        _install_verifier({"tenant_id": "tenant-new", "sub": "user-1"})
 
-        with _SETTINGS_PATCH:
-            resp = client.get("/test", headers={"Authorization": f"Bearer {token}"})
+        resp = client.get("/test")
 
         assert resp.status_code == 200
         body = resp.json()
@@ -364,7 +342,7 @@ class TestTenantDefaultsInContext:
         assert body["measurement_units"] == {"volume": "gal", "distance": "mi"}
 
     def test_context_reflects_us_tenant_from_service(self):
-        """Req 6.1.5: US tenants carry gallons + miles."""
+        """Req 5.4: US tenants carry gallons + miles."""
         service = _StubTenantSettingsService(
             {
                 "tenant-us": TenantSettings(
@@ -376,10 +354,9 @@ class TestTenantDefaultsInContext:
         configure_tenant_guard(service)
 
         _, client = _build_app()
-        token = _make_token({"tenant_id": "tenant-us", "sub": "user-1"})
+        _install_verifier({"tenant_id": "tenant-us", "sub": "user-1"})
 
-        with _SETTINGS_PATCH:
-            resp = client.get("/test", headers={"Authorization": f"Bearer {token}"})
+        resp = client.get("/test")
 
         assert resp.status_code == 200
         body = resp.json()
@@ -389,7 +366,7 @@ class TestTenantDefaultsInContext:
         assert service.calls == ["tenant-us"]
 
     def test_context_reflects_ng_tenant_from_service(self):
-        """Req 6.1.5: pre-pivot NG tenants carry liters + kilometers."""
+        """Req 5.4: pre-pivot NG tenants carry liters + kilometers."""
         service = _StubTenantSettingsService(
             {
                 "tenant-ng": TenantSettings(
@@ -401,10 +378,9 @@ class TestTenantDefaultsInContext:
         configure_tenant_guard(service)
 
         _, client = _build_app()
-        token = _make_token({"tenant_id": "tenant-ng", "sub": "user-1"})
+        _install_verifier({"tenant_id": "tenant-ng", "sub": "user-1"})
 
-        with _SETTINGS_PATCH:
-            resp = client.get("/test", headers={"Authorization": f"Bearer {token}"})
+        resp = client.get("/test")
 
         assert resp.status_code == 200
         body = resp.json()
@@ -421,10 +397,9 @@ class TestTenantDefaultsInContext:
         configure_tenant_guard(_BoomService())
 
         _, client = _build_app()
-        token = _make_token({"tenant_id": "tenant-xyz", "sub": "user-1"})
+        _install_verifier({"tenant_id": "tenant-xyz", "sub": "user-1"})
 
-        with _SETTINGS_PATCH:
-            resp = client.get("/test", headers={"Authorization": f"Bearer {token}"})
+        resp = client.get("/test")
 
         assert resp.status_code == 200
         body = resp.json()

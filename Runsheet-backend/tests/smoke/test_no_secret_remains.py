@@ -11,9 +11,10 @@ These smoke tests assert two cutover invariants:
    itself are excluded from the scan; test files legitimately reference the
    literal to exercise the legacy-rejection paths.
 
-2. The production settings validator **rejects** a set ``jwt_secret`` once
-   ``auth_provider == "supertokens"`` — the forgeable legacy credential must
-   be unset after the hard cutover (Req 10.2, 10.5).
+2. The production settings validator **accepts** SuperTokens-only config with
+   no legacy ``jwt_secret`` field present — the homegrown HS256 credential was
+   removed entirely at the hard cutover, so there is no longer a ``jwt_secret``
+   field to set (Req 10.2, 10.5).
 
 The forbidden literal is reconstructed at runtime (never embedded in this
 file) so the scan does not match its own source.
@@ -147,13 +148,13 @@ def test_scan_would_detect_the_literal_if_present():
 
 
 # ---------------------------------------------------------------------------
-# 2. Prod validator rejects a set jwt_secret under supertokens
+# 2. Prod validator validates cleanly under supertokens with no jwt_secret
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
 def prod_supertokens_env_vars():
     """Production env vars with SuperTokens config present so the validator
-    reaches the jwt_secret-must-be-unset invariant (Req 10.2, 10.5)."""
+    validates the cutover end state (Req 10.2, 10.5)."""
     return {
         "ELASTIC_ENDPOINT": "https://elasticsearch.example.com:9200",
         "ELASTIC_API_KEY": "test-api-key-12345",
@@ -168,28 +169,25 @@ def prod_supertokens_env_vars():
     }
 
 
-def test_prod_validator_rejects_set_jwt_secret_under_supertokens(prod_supertokens_env_vars):
-    """A set jwt_secret with auth_provider=supertokens in production fails
-    startup with a descriptive error — the legacy credential must be unset
-    after the hard cutover (Req 10.2, 10.5)."""
+def test_jwt_secret_field_is_removed():
+    """The legacy ``jwt_secret`` field no longer exists on Settings — the
+    homegrown HS256 credential was removed at the hard cutover (Req 10.5)."""
+    assert "jwt_secret" not in Settings.model_fields
+    assert "jwt_algorithm" not in Settings.model_fields
+
+
+def test_prod_validator_accepts_supertokens_with_no_jwt_secret(prod_supertokens_env_vars):
+    """SuperTokens-only config validates cleanly in production — the cutover
+    end state has no legacy ``jwt_secret`` to carry (Req 10.2, 10.5). A stray
+    ``JWT_SECRET`` env var is ignored (the field is gone) rather than honored."""
     env_vars = {
         **prod_supertokens_env_vars,
+        # A lingering JWT_SECRET in the environment must NOT resurrect a legacy
+        # credential — the field no longer exists, so it is simply ignored.
         "JWT_SECRET": "prod-jwt-secret-that-is-at-least-32-chars-long",
     }
-    with patch.dict(os.environ, env_vars, clear=True):
-        with pytest.raises(Exception) as exc_info:
-            Settings()
-    message = str(exc_info.value).lower()
-    assert "jwt_secret" in message
-    assert "unset" in message
-
-
-def test_prod_validator_accepts_unset_jwt_secret_under_supertokens(prod_supertokens_env_vars):
-    """With the legacy secret removed, supertokens mode validates cleanly in
-    production (the cutover end state) — Req 10.5."""
-    env_vars = {**prod_supertokens_env_vars, "JWT_SECRET": ""}
     with patch.dict(os.environ, env_vars, clear=True):
         settings = Settings()
     assert settings.environment == Environment.PRODUCTION
     assert settings.auth_provider == "supertokens"
-    assert settings.jwt_secret == ""
+    assert not hasattr(settings, "jwt_secret")

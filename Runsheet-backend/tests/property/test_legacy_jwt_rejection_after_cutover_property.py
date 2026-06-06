@@ -28,8 +28,7 @@ request is rejected with 401 instead.
 
 import asyncio
 import sys
-from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 from hypothesis import given, settings
@@ -43,7 +42,6 @@ sys.modules.setdefault("services.elasticsearch_service", MagicMock())
 
 from errors.codes import ErrorCode  # noqa: E402
 from errors.exceptions import AppException  # noqa: E402
-from ops.middleware import tenant_guard  # noqa: E402
 from ops.middleware.tenant_guard import (  # noqa: E402
     TenantContext,
     configure_session_verifier,
@@ -182,21 +180,14 @@ class TestLegacyJwtRejectionAfterCutover:
         401 and never produces a TenantContext via the legacy path."""
         configure_session_verifier(_NoSuperTokensSessionVerifier())
 
-        fake_settings = SimpleNamespace(
-            auth_provider="supertokens",
-            jwt_secret=_JWT_SECRET,
-            jwt_algorithm=_JWT_ALGORITHM,
-        )
-
-        with patch.object(tenant_guard, "get_settings", return_value=fake_settings):
-            with pytest.raises(AppException) as exc_info:
-                result = asyncio.run(get_tenant_context(request))
-                # If we ever get here, the contract was violated — surface the
-                # offending return value for the counterexample report.
-                assert not isinstance(result, TenantContext), (
-                    "get_tenant_context returned a TenantContext for a legacy-"
-                    f"only request under auth_provider='supertokens': {result!r}"
-                )
+        with pytest.raises(AppException) as exc_info:
+            result = asyncio.run(get_tenant_context(request))
+            # If we ever get here, the contract was violated — surface the
+            # offending return value for the counterexample report.
+            assert not isinstance(result, TenantContext), (
+                "get_tenant_context returned a TenantContext for a legacy-"
+                f"only request under auth_provider='supertokens': {result!r}"
+            )
 
         # The rejection must be an authentication error (HTTP 401 / UNAUTHORIZED).
         # A 403 (the legacy path's `forbidden`) would mean the legacy decode was

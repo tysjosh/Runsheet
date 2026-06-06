@@ -58,10 +58,6 @@ import bootstrap.websockets as ws
 def _make_settings(auth_provider: str) -> MagicMock:
     settings_obj = MagicMock()
     settings_obj.auth_provider = auth_provider
-    # Present so the dual-mode legacy fallback path can run without AttributeError;
-    # no valid legacy token is ever supplied, so the fallback always fails.
-    settings_obj.jwt_secret = "legacy-secret-never-matches"
-    settings_obj.jwt_algorithm = "HS256"
     return settings_obj
 
 
@@ -75,7 +71,7 @@ def _make_ws(query_params=None, headers=None) -> MagicMock:
 # ---------------------------------------------------------------------------
 # Strategies — generate UNVERIFIABLE handshakes
 # ---------------------------------------------------------------------------
-_providers = st.sampled_from(["supertokens", "dual"])
+_providers = st.sampled_from(["supertokens"])
 
 # A "no usable identifier" claim value. ``tenant_id`` / ``driver_id`` are
 # server-set string claims (sourced from the ``auth_users`` table where

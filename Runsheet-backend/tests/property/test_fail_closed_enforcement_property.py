@@ -128,7 +128,7 @@ _paths = st.lists(_segment, min_size=1, max_size=4).map(
 )
 
 _methods = st.sampled_from(["GET", "POST", "PUT", "PATCH", "DELETE"])
-_providers = st.sampled_from(["supertokens", "dual"])
+_providers = st.sampled_from(["supertokens"])
 _behaviors = st.sampled_from(["absent", "invalid"])
 
 

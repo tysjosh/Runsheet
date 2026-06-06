@@ -283,57 +283,41 @@ class Settings(BaseSettings):
         description="Allowed CORS origins"
     )
     
-    # JWT Configuration
-    jwt_secret: str = Field(
-        default="",
-        description="Secret key for signing and verifying JWT tokens"
-    )
-    jwt_algorithm: str = Field(
-        default="HS256",
-        description="Algorithm used for JWT signing (default: HS256)"
-    )
-
-    # ── SuperTokens Auth Migration (Migration_Controller) ──────────────
+    # ── SuperTokens Auth (Migration complete — hard cutover) ───────────
     #
     # SuperTokens is the real identity provider and session authority that
-    # replaces the homegrown HS256 JWT scheme. The managed SaaS core is
+    # replaced the homegrown HS256 JWT scheme. The managed SaaS core is
     # reached over HTTPS via supertokens_connection_uri + supertokens_api_key
     # (loaded from environment config, never hardcoded — Req 10.1, 10.2).
     #
-    # The auth_provider flag gates which verification path the
-    # Session_Verifier / WebSocket_Authenticator take, globally, so the
-    # cutover is staged and reversible (Req 9.1, 9.2, 9.5):
-    #   - "legacy":      pre-migration behavior (legacy JWT verify)
-    #   - "dual":        accept either a SuperTokens session or a legacy JWT
-    #   - "supertokens": verify SuperTokens sessions only (hard cutover)
-    auth_provider: Literal["legacy", "dual", "supertokens"] = Field(
+    # The legacy ('legacy') and transitional ('dual') providers — and the
+    # homegrown ``jwt_secret`` / ``jwt_algorithm`` shared-secret path they
+    # used — have been removed now that the cutover is complete. The only
+    # supported value is "supertokens": every protected route and WebSocket
+    # handshake is authenticated against a verified SuperTokens session
+    # (Req 3.4, 9.1). The field is retained (as a single-value Literal) so
+    # config and tests that reference ``auth_provider`` keep working.
+    auth_provider: Literal["supertokens"] = Field(
         default="supertokens",
         description=(
-            "Migration_Controller flag selecting the active auth scheme: "
-            "'legacy' (homegrown JWT, pre-migration), 'dual' (accept either a "
-            "SuperTokens session or a legacy JWT during transition), or "
-            "'supertokens' (verify SuperTokens sessions only — hard cutover). "
-            "Default 'supertokens' — the hard cutover is now the platform "
-            "default (Req 3.4, 9.1): any environment that does not explicitly "
-            "opt back to 'dual'/'legacy' verifies SuperTokens sessions ONLY and "
-            "never consults the legacy shared-secret path. Rollback = set "
-            "AUTH_PROVIDER back toward 'dual'/'legacy' (Req 9.5)."
+            "The active auth scheme. SuperTokens is the sole supported "
+            "provider after the hard cutover: every protected route and "
+            "WebSocket handshake verifies a SuperTokens session only. The "
+            "homegrown HS256 legacy/dual paths have been removed (Req 3.4, 9.1)."
         ),
     )
     supertokens_connection_uri: str = Field(
         default="",
         description=(
             "Managed SuperTokens core connection URI (HTTPS). Loaded from env; "
-            "required in non-development/test environments when auth_provider is "
-            "'dual' or 'supertokens' (Req 10.1, 10.3)."
+            "required in non-development/test environments (Req 10.1, 10.3)."
         ),
     )
     supertokens_api_key: str = Field(
         default="",
         description=(
             "Managed SuperTokens core API key. Loaded from env, never hardcoded "
-            "(Req 10.2); required in non-development/test environments when "
-            "auth_provider is 'dual' or 'supertokens' (Req 10.3)."
+            "(Req 10.2); required in non-development/test environments (Req 10.3)."
         ),
     )
     supertokens_api_domain: str = Field(
@@ -736,13 +720,6 @@ class Settings(BaseSettings):
         # Allow empty in development; production validation is handled by model_validator
         return v.strip() if v else v
     
-    @field_validator("jwt_secret")
-    @classmethod
-    def validate_jwt_secret(cls, v: str) -> str:
-        """Validate JWT secret strength."""
-        # Allow empty in development (model_validator handles production check)
-        return v.strip() if v else v
-    
     @field_validator("dinee_api_base_url")
     @classmethod
     def validate_dinee_api_base_url(cls, v: Optional[str]) -> Optional[str]:
@@ -798,58 +775,26 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "dinee_webhook_secret is required in non-development environments"
                 )
-            # Migration_Controller fail-closed: when SuperTokens is active
-            # ('dual' or 'supertokens') in a non-development/test environment,
-            # the managed core connection settings MUST be present, else the
-            # backend would silently fall back / fail to verify sessions
-            # (Req 10.3). Name every missing value in the error.
-            if self.auth_provider in ("dual", "supertokens"):
-                missing_supertokens = [
-                    name
-                    for name, value in (
-                        ("supertokens_connection_uri", self.supertokens_connection_uri),
-                        ("supertokens_api_key", self.supertokens_api_key),
-                    )
-                    if not value
-                ]
-                if missing_supertokens:
-                    raise ValueError(
-                        "Missing required SuperTokens configuration for "
-                        f"auth_provider='{self.auth_provider}' in a "
-                        f"{self.environment.value} environment: "
-                        f"{', '.join(missing_supertokens)}"
-                    )
-            # Migration_Controller hard-cutover invariant (Req 10.2, 10.5):
-            # once 'supertokens' is the active scheme the homegrown HS256
-            # path is gone, so the legacy shared secret MUST be unset. A
-            # lingering jwt_secret after cutover is a configuration smell
-            # (a forgeable credential left in the environment) — fail
-            # startup with a descriptive error rather than carrying it.
-            if self.auth_provider == "supertokens":
-                if self.jwt_secret:
-                    raise ValueError(
-                        "jwt_secret must be unset once auth_provider='supertokens' "
-                        "(legacy HS256 verification is removed after the hard "
-                        f"cutover) in a {self.environment.value} environment. "
-                        "Remove JWT_SECRET from this environment's configuration."
-                    )
-            else:
-                # 'legacy' / 'dual' still verify the homegrown JWT, so the
-                # legacy shared secret remains required and must be strong.
-                if not self.jwt_secret or len(self.jwt_secret) < 32:
-                    raise ValueError(
-                        "jwt_secret must be at least 32 characters in non-development environments"
-                    )
-                # Reject the well-known placeholder dev secret. The literal is
-                # reconstructed at runtime (never embedded in source) so the
-                # forbidden value lives nowhere in the tree (Req 10.5).
-                legacy_placeholder_secret = "-".join(
-                    ("dev", "jwt", "secret", "change", "me", "in", "production")
+            # Migration_Controller fail-closed: SuperTokens is the sole auth
+            # provider after the hard cutover, so in a non-development/test
+            # environment the managed core connection settings MUST be present,
+            # else the backend would fail to verify sessions (Req 10.3). Name
+            # every missing value in the error.
+            missing_supertokens = [
+                name
+                for name, value in (
+                    ("supertokens_connection_uri", self.supertokens_connection_uri),
+                    ("supertokens_api_key", self.supertokens_api_key),
                 )
-                if self.jwt_secret == legacy_placeholder_secret:
-                    raise ValueError(
-                        "jwt_secret must not be the default placeholder in non-development environments"
-                    )
+                if not value
+            ]
+            if missing_supertokens:
+                raise ValueError(
+                    "Missing required SuperTokens configuration for "
+                    f"auth_provider='{self.auth_provider}' in a "
+                    f"{self.environment.value} environment: "
+                    f"{', '.join(missing_supertokens)}"
+                )
             # Validate CORS: reject any localhost origins in production
             if self.environment == Environment.PRODUCTION:
                 for origin in self.cors_origins:

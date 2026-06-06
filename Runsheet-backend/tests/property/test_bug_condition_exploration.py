@@ -2,9 +2,18 @@
 Bug Condition Exploration Property Tests — Production Readiness Hardening.
 
 These tests encode the EXPECTED correct behavior for the production-readiness
-defects identified in the bugfix spec. They are designed to FAIL on unfixed
-code, confirming the bugs exist. Once the fixes are applied, these tests
-should PASS.
+defects identified in the bugfix spec.
+
+Auth model after the SuperTokens hard cutover
+---------------------------------------------
+The homegrown HS256 JWT path was removed. HTTP endpoints are reached via the
+Test_Auth_Path dependency-override seam (``tests/support/auth_seam.py``):
+``install_test_auth(app)`` makes ``get_tenant_context`` yield a verified
+``TenantContext`` derived from ``X-Test-*`` headers, and ``auth_headers(...)``
+builds those headers (carrying tenant_id / roles / pii). WebSocket handshakes
+are authenticated against a verified SuperTokens session via the WS
+session-verifier seam (``bootstrap.websockets.configure_ws_session_verifier``);
+an absent/invalid session yields a 4001 close.
 
 **Validates: Requirements 2.1, 2.2, 2.3, 2.4, 2.5, 2.7, 2.19, 2.20, 2.21, 2.22**
 
@@ -13,42 +22,20 @@ Bug categories covered:
 2. Tenant Spoofing on Agent Endpoints (bug 1.4)
 3. Admin Privilege Escalation (bug 1.5)
 4. WebSocket No-Auth Rejection (bug 1.1)
-5. WebSocket Ops Invalid JWT (bug 1.2)
+5. WebSocket Invalid Session (bug 1.2)
 6. Error Envelope Consistency (bugs 1.20, 1.22)
 7. WebSocket Exception Logging (bug 1.7)
 """
 
 import json
-import logging
-import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from hypothesis import given, settings, assume, HealthCheck
 from hypothesis.strategies import from_regex
 
-from jose import jwt as jose_jwt
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-JWT_SECRET = "dev-jwt-secret-change-me-in-production"
-JWT_ALGORITHM = "HS256"
-
-
-def _make_jwt(tenant_id: str, roles: list = None, expired: bool = False) -> str:
-    """Create a signed JWT token for testing."""
-    payload = {
-        "tenant_id": tenant_id,
-        "sub": "test-user",
-        "user_id": "test-user",
-        "has_pii_access": False,
-    }
-    if roles is not None:
-        payload["roles"] = roles
-    if expired:
-        payload["exp"] = int(time.time()) - 3600  # expired 1 hour ago
-    return jose_jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+import bootstrap.websockets as ws
+from tests.support.auth_seam import auth_headers, install_test_auth
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +62,15 @@ class MockWSManager:
 
     async def handle_client_message(self, websocket, raw):
         pass
+
+
+def _ws_session(claims):
+    """Return an async WS session verifier yielding ``claims`` (or None)."""
+
+    async def _verify(access_token, anti_csrf):
+        return claims
+
+    return _verify
 
 
 # ---------------------------------------------------------------------------
@@ -145,13 +141,11 @@ def test_app():
         )
 
         # Set up a minimal container with mock WebSocket managers
-        # so that WebSocket handlers can access them via _c(app)
+        # so that WebSocket handlers can access them via _container(app)
         container = ServiceContainer()
         container.settings = MagicMock()
-        container.settings.jwt_secret = JWT_SECRET
-        container.settings.jwt_algorithm = JWT_ALGORITHM
 
-        # Create mock WS managers that accept all connections (simulating unfixed code)
+        # Create mock WS managers that accept all connections
         container.ops_ws_manager = MockWSManager()
         container.scheduling_ws_manager = MockWSManager()
         container.agent_ws_manager = MockWSManager()
@@ -159,17 +153,24 @@ def test_app():
 
         app.state.container = container
 
+        # HTTP endpoints authenticate via the Test_Auth_Path seam.
+        install_test_auth(app)
+
         from starlette.testclient import TestClient
         client = TestClient(app, raise_server_exceptions=False)
-        yield {
-            "client": client,
-            "app": app,
-            "mock_es": mock_es,
-            "mock_approval_svc": mock_approval_svc,
-            "mock_activity_svc": mock_activity_svc,
-            "mock_autonomy_svc": mock_autonomy_svc,
-            "container": container,
-        }
+        try:
+            yield {
+                "client": client,
+                "app": app,
+                "mock_es": mock_es,
+                "mock_approval_svc": mock_approval_svc,
+                "mock_activity_svc": mock_activity_svc,
+                "mock_autonomy_svc": mock_autonomy_svc,
+                "container": container,
+            }
+        finally:
+            app.dependency_overrides.clear()
+            ws.configure_ws_session_verifier(None)
 
 
 # ===========================================================================
@@ -179,18 +180,22 @@ class TestTenantIsolationDataEndpoints:
     """
     **Validates: Requirements 2.3**
 
-    For any tenant_id, calling GET /api/fleet/trucks with a JWT containing
-    that tenant_id should result in an ES query that includes a bool.filter
-    clause matching tenant_id. On unfixed code, the query has NO tenant
-    filter → FAIL (confirms bug 1.3).
+    For any tenant_id, calling GET /api/fleet/trucks while authenticated for
+    that tenant should result in an ES query that includes a bool.filter
+    clause matching tenant_id.
     """
 
     @given(tid=tenant_id_strategy)
     @settings(max_examples=20, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
     def test_fleet_trucks_includes_tenant_filter(self, tid: str, test_app):
         """
-        Property: For all tenant_ids, GET /api/fleet/trucks with a valid JWT
-        must produce an ES query containing a tenant_id filter.
+        Property: For all tenant_ids, GET /api/fleet/trucks for an authenticated
+        tenant must produce an ES query containing a tenant_id filter.
+
+        The fleet reads can be served from the Postgres source-of-truth (the
+        read-cutover path) in environments where it is enabled; this test
+        targets the Elasticsearch query shape, so it forces the ES read path by
+        pinning ``read_from_postgres`` to False.
         """
         client = test_app["client"]
         mock_es = test_app["mock_es"]
@@ -200,11 +205,11 @@ class TestTenantIsolationDataEndpoints:
             "hits": {"hits": [], "total": {"value": 0, "relation": "eq"}},
         }
 
-        token = _make_jwt(tid)
-        resp = client.get(
-            "/api/fleet/trucks",
-            headers={"Authorization": f"Bearer {token}"},
-        )
+        with patch(
+            "commerce.services.commerce_persistence_bridge.read_from_postgres",
+            return_value=False,
+        ):
+            resp = client.get("/api/fleet/trucks", headers=auth_headers(tid))
 
         assert mock_es.search_documents.called, "ES search_documents was not called"
 
@@ -240,20 +245,19 @@ class TestTenantSpoofingAgentEndpoints:
     """
     **Validates: Requirements 2.4**
 
-    Calling GET /api/agent/approvals?tenant_id=victim with a JWT for
-    tenant_id=attacker should result in the service receiving 'attacker'
-    (from JWT), not 'victim' (from query param). On unfixed code, the
-    query param is used → FAIL (confirms bug 1.4).
+    Calling GET /api/agent/approvals?tenant_id=victim while authenticated for
+    tenant_id=attacker should result in the service receiving 'attacker' (from
+    the verified context), not 'victim' (from the query param).
     """
 
     @given(attacker_tid=tenant_id_strategy, victim_tid=tenant_id_strategy)
     @settings(max_examples=20, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
-    def test_agent_approvals_uses_jwt_tenant_not_query_param(
+    def test_agent_approvals_uses_context_tenant_not_query_param(
         self, attacker_tid: str, victim_tid: str, test_app
     ):
         """
-        Property: For all attacker/victim tenant_id pairs, the service
-        must receive the JWT tenant_id, not the query param tenant_id.
+        Property: For all attacker/victim tenant_id pairs, the service must
+        receive the verified-context tenant_id, not the query param tenant_id.
         """
         assume(attacker_tid != victim_tid)
 
@@ -261,10 +265,9 @@ class TestTenantSpoofingAgentEndpoints:
         mock_svc = test_app["mock_approval_svc"]
         mock_svc.list_pending.reset_mock()
 
-        token = _make_jwt(attacker_tid)
         resp = client.get(
             f"/api/agent/approvals?tenant_id={victim_tid}",
-            headers={"Authorization": f"Bearer {token}"},
+            headers=auth_headers(attacker_tid),
         )
 
         assert mock_svc.list_pending.called, "list_pending was not called"
@@ -273,12 +276,12 @@ class TestTenantSpoofingAgentEndpoints:
         all_args_str = str(call_kwargs)
 
         assert attacker_tid in all_args_str, (
-            f"Service was not called with JWT tenant_id '{attacker_tid}'. "
+            f"Service was not called with the verified tenant_id '{attacker_tid}'. "
             f"Call args: {all_args_str}"
         )
         assert victim_tid not in all_args_str, (
             f"Service was called with spoofed query param tenant_id '{victim_tid}' "
-            f"instead of JWT tenant_id '{attacker_tid}'. Call args: {all_args_str}"
+            f"instead of the verified tenant_id '{attacker_tid}'. Call args: {all_args_str}"
         )
 
 
@@ -290,34 +293,32 @@ class TestAdminPrivilegeEscalation:
     **Validates: Requirements 2.5**
 
     Calling PATCH /api/agent/config/autonomy with header x-user-role: admin
-    but a JWT without admin role should return 403 Forbidden. On unfixed
-    code, the header is trusted → FAIL (confirms bug 1.5).
+    but a verified context WITHOUT the admin role should return 403 Forbidden.
+    The admin check must trust the verified roles, not the spoofable header.
     """
 
     @given(tid=tenant_id_strategy)
     @settings(max_examples=10, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
     def test_admin_escalation_via_header_rejected(self, tid: str, test_app):
         """
-        Property: For all tenant_ids, a non-admin JWT with x-user-role: admin
-        header must be rejected with 403.
+        Property: For all tenant_ids, a non-admin verified context with
+        x-user-role: admin header must be rejected with 403.
         """
         client = test_app["client"]
 
-        token = _make_jwt(tid, roles=["viewer"])
+        headers = auth_headers(tid, roles=["viewer"])
+        headers["x-user-role"] = "admin"
+        headers["Content-Type"] = "application/json"
         resp = client.patch(
             "/api/agent/config/autonomy",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "x-user-role": "admin",
-                "Content-Type": "application/json",
-            },
+            headers=headers,
             json={"level": "auto-low"},
         )
 
         assert resp.status_code == 403, (
-            f"Expected 403 Forbidden for non-admin JWT with x-user-role header, "
-            f"got {resp.status_code}. The admin check trusts the header instead "
-            f"of JWT claims (bug 1.5). Response: {resp.text}"
+            f"Expected 403 Forbidden for non-admin context with x-user-role header, "
+            f"got {resp.status_code}. The admin check must trust the verified roles "
+            f"instead of the header (bug 1.5). Response: {resp.text}"
         )
 
 
@@ -328,10 +329,9 @@ class TestWebSocketNoAuthRejection:
     """
     **Validates: Requirements 2.1**
 
-    Connecting to /ws/scheduling, /ws/agent-activity, /api/fleet/live
-    without a JWT token should result in connection rejection with close
-    code 4001. On unfixed code, connection is accepted → FAIL (confirms
-    bug 1.1).
+    Connecting to /ws/scheduling, /ws/agent-activity, /api/fleet/live without
+    a verifiable session should result in connection rejection with close code
+    4001.
     """
 
     @pytest.mark.parametrize("ws_path", [
@@ -341,84 +341,78 @@ class TestWebSocketNoAuthRejection:
     ])
     def test_websocket_rejects_unauthenticated_connection(self, ws_path, test_app):
         """
-        For each WebSocket endpoint, connecting without a JWT must be
-        rejected with close code 4001 in non-development environments.
+        For each WebSocket endpoint, connecting without a verifiable session
+        must be rejected with close code 4001.
         """
         client = test_app["client"]
 
-        # Use production settings while verifying anonymous WebSockets are
-        # rejected.
-        mock_settings = MagicMock()
-        mock_settings.environment.value = "production"
-        mock_settings.jwt_secret = JWT_SECRET
-        mock_settings.jwt_algorithm = JWT_ALGORITHM
+        # No session present on the handshake: the verifier yields None.
+        ws.configure_ws_session_verifier(_ws_session(None))
 
-        with patch("config.settings.get_settings", return_value=mock_settings):
-            # Attempt WebSocket connection without any token.
+        connection_accepted = False
+        try:
+            with client.websocket_connect(ws_path):
+                connection_accepted = True
+        except Exception:
             connection_accepted = False
-            try:
-                with client.websocket_connect(ws_path) as ws:
-                    connection_accepted = True
-            except Exception:
-                connection_accepted = False
 
-            assert not connection_accepted, (
-                f"WebSocket connection to {ws_path} was ACCEPTED without JWT auth. "
-                f"Expected rejection with close code 4001 (bug 1.1). "
-                f"The handler has no authentication check."
-            )
+        assert not connection_accepted, (
+            f"WebSocket connection to {ws_path} was ACCEPTED without a verified "
+            f"session. Expected rejection with close code 4001 (bug 1.1)."
+        )
 
 
 # ===========================================================================
-# 5. WebSocket Ops Invalid JWT (Bug 1.2)
+# 5. WebSocket Invalid Session (Bug 1.2)
 # ===========================================================================
-class TestWebSocketOpsInvalidJWT:
+class TestWebSocketInvalidSession:
     """
     **Validates: Requirements 2.2**
 
-    Connecting to /ws/ops with an expired/invalid JWT should result in
-    connection rejection with close code 4001. On unfixed code, the
-    connection is silently accepted with empty tenant_id → FAIL (confirms
-    bug 1.2).
+    Connecting to /ws/ops with an unverifiable session credential should result
+    in connection rejection with close code 4001 (no silent accept with an
+    empty tenant_id).
     """
 
-    def test_ws_ops_rejects_expired_jwt(self, test_app):
+    def test_ws_ops_rejects_unverifiable_session(self, test_app):
         """
-        Connecting to /ws/ops with an expired JWT must be rejected.
+        Connecting to /ws/ops with a credential that fails verification must be
+        rejected.
         """
         client = test_app["client"]
-        expired_token = _make_jwt("some-tenant", expired=True)
+        # An unverifiable credential: the verifier reports no session.
+        ws.configure_ws_session_verifier(_ws_session(None))
 
         connection_accepted = False
         try:
-            with client.websocket_connect(f"/ws/ops?token={expired_token}") as ws:
+            with client.websocket_connect("/ws/ops?token=unverifiable-token"):
                 connection_accepted = True
         except Exception:
             connection_accepted = False
 
         assert not connection_accepted, (
-            "WebSocket connection to /ws/ops was ACCEPTED with an expired JWT. "
-            "Expected rejection with close code 4001 (bug 1.2). "
-            "The handler silently falls through JWTError with pass."
+            "WebSocket connection to /ws/ops was ACCEPTED with an unverifiable "
+            "session. Expected rejection with close code 4001 (bug 1.2)."
         )
 
-    def test_ws_ops_rejects_invalid_jwt(self, test_app):
+    def test_ws_ops_rejects_session_without_tenant(self, test_app):
         """
-        Connecting to /ws/ops with a completely invalid JWT must be rejected.
+        A verified session whose claims lack a tenant_id must be rejected (no
+        silent accept with an empty tenant_id).
         """
         client = test_app["client"]
+        ws.configure_ws_session_verifier(_ws_session({"roles": ["admin"]}))
 
         connection_accepted = False
         try:
-            with client.websocket_connect("/ws/ops?token=not-a-valid-jwt") as ws:
+            with client.websocket_connect("/ws/ops?token=session-without-tenant"):
                 connection_accepted = True
         except Exception:
             connection_accepted = False
 
         assert not connection_accepted, (
-            "WebSocket connection to /ws/ops was ACCEPTED with an invalid JWT. "
-            "Expected rejection with close code 4001 (bug 1.2). "
-            "The handler silently falls through JWTError with pass."
+            "WebSocket connection to /ws/ops was ACCEPTED with a session lacking "
+            "a tenant_id claim. Expected rejection with close code 4001 (bug 1.2)."
         )
 
 
@@ -430,9 +424,7 @@ class TestErrorEnvelopeConsistency:
     **Validates: Requirements 2.19, 2.20, 2.21, 2.22**
 
     Error responses from data_endpoints and agent_endpoints must contain
-    structured error envelopes with error_code, message, and request_id
-    fields. On unfixed code, returns plain {"detail": "..."} → FAIL
-    (confirms bugs 1.20, 1.22).
+    structured error envelopes with error_code, message, and request_id fields.
     """
 
     def test_fleet_summary_500_has_structured_envelope(self, test_app):
@@ -446,11 +438,12 @@ class TestErrorEnvelopeConsistency:
         # The refactored endpoint uses search_documents (tenant-scoped) instead of get_all_documents
         mock_es.search_documents.side_effect = Exception("ConnectionTimeout: simulated ES failure")
 
-        token = _make_jwt("test-tenant")
-        resp = client.get(
-            "/api/fleet/summary",
-            headers={"Authorization": f"Bearer {token}"},
-        )
+        # Force the ES read path (reads may otherwise be served from Postgres).
+        with patch(
+            "commerce.services.commerce_persistence_bridge.read_from_postgres",
+            return_value=False,
+        ):
+            resp = client.get("/api/fleet/summary", headers=auth_headers("test-tenant"))
 
         mock_es.search_documents.side_effect = None
         # Restore the default return value for search_documents
@@ -487,13 +480,10 @@ class TestErrorEnvelopeConsistency:
 
         mock_es.get_document.side_effect = Exception("Document not found")
 
-        token = _make_jwt("test-tenant")
         resp = client.get(
             "/api/fleet/trucks/nonexistent-truck-id",
-            headers={"Authorization": f"Bearer {token}"},
+            headers=auth_headers("test-tenant"),
         )
-
-        mock_es.get_document.side_effect = Exception("Document not found")
 
         body = resp.json()
 
@@ -516,41 +506,34 @@ class TestWebSocketExceptionLogging:
     """
     **Validates: Requirements 2.7**
 
-    When an unexpected exception occurs in a WebSocket handler loop, it
-    must be logged at ERROR level with structured context. On unfixed code,
-    the exception is silently swallowed by bare `except ... pass` → FAIL
-    (confirms bug 1.7).
+    When an unexpected exception occurs in a WebSocket handler loop, it must be
+    logged at ERROR level with structured context.
     """
 
     def test_ws_ops_exception_is_logged(self, test_app):
         """
-        Simulating an exception in the /ws/ops handler loop must result
-        in an ERROR-level log entry with structured context.
-
-        On unfixed code, the bare `except (WebSocketDisconnect, Exception): pass`
-        swallows all exceptions without logging.
+        Simulating an exception in the /ws/ops handler loop must result in an
+        ERROR-level log entry with structured context.
         """
         client = test_app["client"]
 
-        # Create a valid token for connection
-        token = _make_jwt("test-tenant")
+        # Authenticate the handshake with a verified session carrying a tenant.
+        ws.configure_ws_session_verifier(_ws_session({"tenant_id": "test-tenant"}))
 
         # Patch the ops_ws_manager to raise an exception during message handling
         container = test_app["container"]
         original_handler = container.ops_ws_manager.handle_client_message
 
-        async def raise_on_message(ws, raw):
+        async def raise_on_message(ws_conn, raw):
             raise RuntimeError("Simulated ES timeout in WebSocket handler")
 
         container.ops_ws_manager.handle_client_message = raise_on_message
 
         with patch("main.logger") as mock_logger:
             try:
-                with client.websocket_connect(f"/ws/ops?token={token}") as ws:
-                    # Send a message that triggers the exception in the handler
-                    ws.send_text('{"type": "subscribe", "channel": "test"}')
-                    # The handler should catch the exception and log it
-                    # On unfixed code, it's caught by bare except...pass
+                with client.websocket_connect("/ws/ops?token=session-token") as conn:
+                    # Send a message that triggers the exception in the handler.
+                    conn.send_text('{"type": "subscribe", "channel": "test"}')
             except Exception:
                 pass
 

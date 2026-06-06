@@ -1,35 +1,27 @@
 """
 Tenant Guard / Session_Verifier for the Runsheet backend.
 
-Historically this module extracted tenant identity from a homegrown HS256 JWT
-(`Authorization: Bearer <token>`) signed with ``settings.jwt_secret``. As part
-of the SuperTokens Auth Migration it becomes the central **Session_Verifier**
-seam: ``get_tenant_context`` now branches on the ``auth_provider``
-Migration_Controller flag and, for the SuperTokens paths, derives identity
-exclusively from a verified SuperTokens session's signed access-token payload.
+This module is the central **Session_Verifier** seam: ``get_tenant_context``
+derives tenant identity exclusively from a verified SuperTokens session's
+signed access-token payload. The homegrown HS256 JWT scheme (and the
+``legacy`` / ``dual`` ``auth_provider`` paths that used it) was removed once
+the SuperTokens hard cutover completed.
 
 The critical architectural property is that **the returned ``TenantContext``
 shape and the ``get_tenant_context`` signature are unchanged**, so the dozens of
 ``Depends(get_tenant_context)`` handlers across the app do not change.
 
-``auth_provider`` behavior (Req 9.1, 9.2, 9.5):
+``get_tenant_context`` always verifies a SuperTokens session only (Req 3.1,
+3.4). A request with no/invalid session, or a session lacking a ``tenant_id``
+claim, is rejected with **401** and no context is produced (Req 2.6, 3.2, 5.3).
 
-* ``"supertokens"`` — verify a SuperTokens session only (Req 3.1, 3.4). A
-  request with no/invalid session, or a session lacking a ``tenant_id`` claim,
-  is rejected with **401** and no context is produced (Req 2.6, 3.2, 5.3).
-* ``"dual"`` — prefer a SuperTokens session; when no SuperTokens session is
-  present on the request, fall back to verifying a legacy JWT. A *present but
-  invalid* SuperTokens session is rejected rather than silently downgraded.
-* ``"legacy"`` (and any unrecognized value, e.g. a test ``MagicMock``) — the
-  pre-migration legacy JWT path, unchanged (rejects with 403).
+Identity (``user_id`` / ``tenant_id`` / ``roles`` / ``has_pii_access``) comes
+only from the verified token; any ``tenant_id`` from a query param, header,
+path, or body is ignored for scoping (Req 5.1, 5.2). The context continues to
+hydrate ``region`` / ``measurement_units`` from ``TenantSettingsService``
+exactly as before.
 
-In every branch identity (``user_id`` / ``tenant_id`` / ``roles`` /
-``has_pii_access``) comes only from the verified token; any ``tenant_id`` from
-a query param, header, path, or body is ignored for scoping (Req 5.1, 5.2). The
-context continues to hydrate ``region`` / ``measurement_units`` from
-``TenantSettingsService`` exactly as before.
-
-Validates: Requirements 2.6, 3.1, 3.2, 3.3, 3.5, 5.1, 5.3, 5.4, 9.1, 9.2, 9.6
+Validates: Requirements 2.6, 3.1, 3.2, 3.3, 3.5, 5.1, 5.3, 5.4, 9.1, 9.6
 """
 
 import logging
@@ -38,10 +30,8 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Protocol, Tuple, runtime_checkable
 
 from fastapi import Request
-from jose import JWTError, jwt
 
-from config.settings import get_settings
-from errors.exceptions import forbidden, unauthorized
+from errors.exceptions import unauthorized
 from services.tenant_settings import (
     TenantSettings,
     TenantSettingsService,
@@ -86,9 +76,8 @@ class TenantContext:
     """Verified tenant identity for a request (the requirements' ``Auth_Context``).
 
     The identity fields (``tenant_id``, ``user_id``, ``has_pii_access``,
-    ``roles``) are derived exclusively from the verified session — a SuperTokens
-    access-token payload under the SuperTokens paths, or the legacy JWT claims
-    under the legacy path. The remaining fields (``region`` and
+    ``roles``) are derived exclusively from the verified SuperTokens
+    access-token payload. The remaining fields (``region`` and
     ``measurement_units``) come from the tenant settings service and default to
     the platform's US/imperial values when a tenant has no explicit record. The
     tenant guard populates them on every request so downstream handlers can
@@ -142,8 +131,7 @@ class SessionVerifier(Protocol):
     Contract:
       * Return a :class:`VerifiedSession` when the request carries a valid
         SuperTokens session.
-      * Return ``None`` when the request carries **no** SuperTokens session
-        (so the ``dual`` path can fall back to a legacy JWT).
+      * Return ``None`` when the request carries **no** SuperTokens session.
       * Raise an authentication error (``AppException`` / HTTP 401) when a
         session is present but invalid, expired, or revoked (Req 2.4, 2.6) —
         such a session must never be silently downgraded.
@@ -199,7 +187,7 @@ def configure_session_verifier(verifier: Optional[SessionVerifier]) -> None:
     """Install the :class:`SessionVerifier` used by the SuperTokens paths.
 
     Passing ``None`` resets to the default SDK-backed verifier. This is the
-    seam tests use to exercise the ``supertokens`` / ``dual`` branching without
+    seam tests use to exercise SuperTokens session verification without
     a live managed core.
     """
     global _session_verifier
@@ -264,48 +252,18 @@ def _build_context(
 async def get_tenant_context(request: Request) -> TenantContext:
     """FastAPI dependency producing a verified :class:`TenantContext`.
 
-    Branches on the ``auth_provider`` Migration_Controller flag:
-
-      * ``"supertokens"`` — verify a SuperTokens session only (Req 3.1, 3.4).
-      * ``"dual"`` — prefer a SuperTokens session; fall back to the legacy JWT
-        only when no SuperTokens session is present on the request.
-      * ``"legacy"`` / anything else — the legacy JWT path (unchanged).
-
-    All branches yield the **same** ``TenantContext`` shape and then hydrate
-    ``region`` / ``measurement_units`` from ``TenantSettingsService`` (Req 5.4).
-    Identity is derived exclusively from the verified token; any ``tenant_id``
-    supplied via query/header/path/body is ignored for scoping (Req 5.1, 5.2).
+    Always verifies a SuperTokens session only (Req 3.1, 3.4) and builds the
+    context from its signed claims. A request with no/invalid session, or a
+    session lacking a ``tenant_id`` claim, is rejected with **401** and no
+    context is produced. The context then hydrates ``region`` /
+    ``measurement_units`` from ``TenantSettingsService`` (Req 5.4). Identity is
+    derived exclusively from the verified token; any ``tenant_id`` supplied via
+    query/header/path/body is ignored for scoping (Req 5.1, 5.2).
 
     Validates: Requirements 2.6, 3.1, 3.2, 3.3, 3.5, 5.1, 5.3, 5.4
     """
-    settings_obj = get_settings()
-    # Default to the legacy path for any value that is not explicitly one of the
-    # SuperTokens modes. This keeps backward compatibility with code/tests that
-    # provide settings without a real ``auth_provider`` string.
-    provider = getattr(settings_obj, "auth_provider", "legacy")
-
-    if provider == "supertokens":
-        # Hard-cutover path (Req 3.4): verify a SuperTokens session ONLY and
-        # build the context from its signed claims. This branch must NEVER reach
-        # ``_legacy_context`` / the ``jwt_secret`` shared-secret decode — a
-        # request that carries only a legacy HS256 token (and no valid
-        # SuperTokens session) is rejected with 401 by the ``required=True``
-        # verification below, not silently accepted via the legacy path.
-        user_id, claims = await _verify_supertokens_session(request, required=True)
-        return await _context_from_session_claims(user_id, claims)
-
-    if provider == "dual":
-        verified = await _verify_supertokens_session(request, required=False)
-        if verified is not None:
-            user_id, claims = verified
-            return await _context_from_session_claims(user_id, claims)
-        # No SuperTokens session present — fall back to the legacy JWT path so
-        # existing clients (and the test suite minting dev JWTs) keep working
-        # through the transition.
-        return await _legacy_context(request, settings_obj)
-
-    # "legacy" (and any unrecognized value): pre-migration behavior.
-    return await _legacy_context(request, settings_obj)
+    user_id, claims = await _verify_supertokens_session(request, required=True)
+    return await _context_from_session_claims(user_id, claims)
 
 
 async def _verify_supertokens_session(
@@ -314,10 +272,9 @@ async def _verify_supertokens_session(
     """Verify the request's SuperTokens session via the Session_Verifier seam.
 
     Returns ``(user_id, claims)`` for a valid session. When no session is
-    present: returns ``None`` if ``required`` is False (lets ``dual`` fall back
-    to the legacy path), or raises 401 if ``required`` is True (the
-    ``supertokens`` hard-cutover path) (Req 2.6, 3.1, 3.2). A present-but-invalid
-    session always raises (handled inside the verifier).
+    present: raises 401 if ``required`` is True (the normal call path), or
+    returns ``None`` if ``required`` is False (Req 2.6, 3.1, 3.2). A
+    present-but-invalid session always raises (handled inside the verifier).
     """
     verifier = _get_session_verifier()
     verified = await verifier.verify(request)
@@ -365,90 +322,6 @@ async def _context_from_session_claims(
     return _build_context(
         tenant_id=tenant_id,
         user_id=resolved_user_id,
-        has_pii_access=has_pii_access,
-        roles=roles,
-        settings=tenant_settings,
-    )
-
-
-async def _legacy_context(request: Request, settings_obj: Any) -> TenantContext:
-    """Legacy homegrown-JWT verification path (pre-migration behavior).
-
-    Extracts ``tenant_id`` exclusively from the signed legacy JWT ``tenant_id``
-    claim, rejecting (403) when the token is missing/invalid or the claim is
-    absent, and ignoring any ``tenant_id`` supplied via query/header. Retained
-    intact for the ``legacy`` and ``dual`` (fallback) branches.
-
-    Validates: Requirements 9.1, 9.6, 9.8, 6.1.5, 6.3.1
-    """
-    # Extract the Authorization header
-    auth_header: str | None = request.headers.get("Authorization")
-
-    if not auth_header or not auth_header.startswith("Bearer "):
-        logger.debug(
-            "Tenant guard rejected request: missing or malformed Authorization header "
-            "for %s %s",
-            request.method,
-            request.url.path,
-        )
-        raise forbidden(
-            message="Missing or invalid authentication token",
-            details={"reason": "Authorization header with Bearer token is required"},
-        )
-
-    token = auth_header.removeprefix("Bearer ").strip()
-    if not token:
-        raise forbidden(
-            message="Missing or invalid authentication token",
-            details={"reason": "Bearer token is empty"},
-        )
-
-    # Decode and verify the JWT
-    try:
-        payload = jwt.decode(
-            token,
-            settings_obj.jwt_secret,
-            algorithms=[settings_obj.jwt_algorithm],
-        )
-    except JWTError as exc:
-        logger.debug("Tenant guard JWT verification failed: %s", exc)
-        raise forbidden(
-            message="Invalid authentication token",
-            details={"reason": "JWT verification failed"},
-        )
-
-    # Extract tenant_id — must be present in the signed claims
-    tenant_id: str | None = payload.get("tenant_id")
-    if not tenant_id:
-        logger.debug(
-            "Tenant guard rejected request: JWT missing tenant_id claim for %s %s",
-            request.method,
-            request.url.path,
-        )
-        raise forbidden(
-            message="Missing tenant_id in authentication token",
-            details={"reason": "JWT must contain a tenant_id claim"},
-        )
-
-    request_tenant_id_var.set(tenant_id)
-    user_id: str = payload.get("sub", payload.get("user_id", "unknown"))
-    has_pii_access: bool = payload.get("has_pii_access", False)
-    roles: list[str] = payload.get("roles", [])
-
-    tenant_settings = await _load_tenant_settings(tenant_id)
-
-    logger.debug(
-        "Tenant scope enforced: tenant_id=%s user_id=%s region=%s endpoint=%s %s",
-        tenant_id,
-        user_id,
-        tenant_settings.region,
-        request.method,
-        request.url.path,
-    )
-
-    return _build_context(
-        tenant_id=tenant_id,
-        user_id=user_id,
         has_pii_access=has_pii_access,
         roles=roles,
         settings=tenant_settings,

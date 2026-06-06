@@ -5,31 +5,21 @@ Verifies that /ws/agent-activity and /api/fleet/live send an error frame
 and log a WARNING when they receive malformed (non-JSON) input, instead
 of silently swallowing the JSONDecodeError.
 
+After the SuperTokens hard cutover the WS handshake is authenticated against a
+verified SuperTokens session (the homegrown JWT path was removed). These tests
+authenticate via the WS session-verifier seam
+(``bootstrap.websockets.configure_ws_session_verifier``) so no live managed
+core is required.
+
 Requirements: 2.9
 """
-import time
 import logging
 from unittest.mock import MagicMock, AsyncMock, patch
 
 import pytest
-from jose import jwt as jose_jwt
 from starlette.testclient import TestClient
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-JWT_SECRET = "dev-jwt-secret-change-me-in-production"
-JWT_ALGORITHM = "HS256"
-
-
-def _make_jwt(tenant_id: str) -> str:
-    """Create a signed JWT token for testing."""
-    payload = {
-        "tenant_id": tenant_id,
-        "sub": "test-user",
-        "user_id": "test-user",
-    }
-    return jose_jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+import bootstrap.websockets as ws
 
 
 # ---------------------------------------------------------------------------
@@ -69,8 +59,6 @@ def test_client():
 
         container = ServiceContainer()
         container.settings = MagicMock()
-        container.settings.jwt_secret = JWT_SECRET
-        container.settings.jwt_algorithm = JWT_ALGORITHM
 
         container.ops_ws_manager = MockWSManager()
         container.scheduling_ws_manager = MockWSManager()
@@ -79,8 +67,18 @@ def test_client():
 
         app.state.container = container
 
+        # Authenticate the WS handshake against a verified SuperTokens session
+        # by installing a fake WS session verifier that yields a tenant claim.
+        async def _verify(access_token, anti_csrf):
+            return {"tenant_id": "tenant-abc", "roles": ["admin"]}
+
+        ws.configure_ws_session_verifier(_verify)
+
         client = TestClient(app, raise_server_exceptions=False)
-        yield client
+        try:
+            yield client
+        finally:
+            ws.configure_ws_session_verifier(None)
 
 
 # ---------------------------------------------------------------------------
@@ -91,8 +89,7 @@ class TestAgentActivityJsonDecode:
 
     def test_malformed_json_returns_error_frame(self, test_client):
         """Sending non-JSON text should return an error frame, not be silently ignored."""
-        token = _make_jwt("tenant-abc")
-        with test_client.websocket_connect(f"/ws/agent-activity?token={token}") as ws:
+        with test_client.websocket_connect("/ws/agent-activity?token=session-token") as ws:
             ws.send_text("this is not json")
             response = ws.receive_json(mode="text")
             assert response["type"] == "error"
@@ -100,9 +97,8 @@ class TestAgentActivityJsonDecode:
 
     def test_malformed_json_logs_warning(self, test_client):
         """Malformed JSON should be logged at WARNING level."""
-        token = _make_jwt("tenant-abc")
         with patch("main.logger") as mock_logger:
-            with test_client.websocket_connect(f"/ws/agent-activity?token={token}") as ws:
+            with test_client.websocket_connect("/ws/agent-activity?token=session-token") as ws:
                 ws.send_text("{broken json")
                 ws.receive_json(mode="text")  # consume the error response
 
@@ -112,8 +108,7 @@ class TestAgentActivityJsonDecode:
 
     def test_valid_json_still_works(self, test_client):
         """Valid JSON ping should still get a pong response."""
-        token = _make_jwt("tenant-abc")
-        with test_client.websocket_connect(f"/ws/agent-activity?token={token}") as ws:
+        with test_client.websocket_connect("/ws/agent-activity?token=session-token") as ws:
             ws.send_json({"type": "ping"})
             response = ws.receive_json(mode="text")
             assert response["type"] == "pong"
@@ -128,8 +123,7 @@ class TestFleetLiveJsonDecode:
 
     def test_malformed_json_returns_error_frame(self, test_client):
         """Sending non-JSON text should return an error frame, not be silently ignored."""
-        token = _make_jwt("tenant-xyz")
-        with test_client.websocket_connect(f"/api/fleet/live?token={token}") as ws:
+        with test_client.websocket_connect("/api/fleet/live?token=session-token") as ws:
             ws.send_text("not valid json at all")
             response = ws.receive_json(mode="text")
             assert response["type"] == "error"
@@ -137,9 +131,8 @@ class TestFleetLiveJsonDecode:
 
     def test_malformed_json_logs_warning(self, test_client):
         """Malformed JSON should be logged at WARNING level."""
-        token = _make_jwt("tenant-xyz")
         with patch("main.logger") as mock_logger:
-            with test_client.websocket_connect(f"/api/fleet/live?token={token}") as ws:
+            with test_client.websocket_connect("/api/fleet/live?token=session-token") as ws:
                 ws.send_text("<<<not json>>>")
                 ws.receive_json(mode="text")  # consume the error response
 
@@ -149,8 +142,7 @@ class TestFleetLiveJsonDecode:
 
     def test_valid_json_ping_still_works(self, test_client):
         """Valid JSON ping should still get a pong response."""
-        token = _make_jwt("tenant-xyz")
-        with test_client.websocket_connect(f"/api/fleet/live?token={token}") as ws:
+        with test_client.websocket_connect("/api/fleet/live?token=session-token") as ws:
             ws.send_json({"type": "ping"})
             response = ws.receive_json(mode="text")
             assert response["type"] == "pong"
@@ -158,8 +150,7 @@ class TestFleetLiveJsonDecode:
 
     def test_valid_json_subscribe_still_works(self, test_client):
         """Valid JSON subscribe should still get a subscribed response."""
-        token = _make_jwt("tenant-xyz")
-        with test_client.websocket_connect(f"/api/fleet/live?token={token}") as ws:
+        with test_client.websocket_connect("/api/fleet/live?token=session-token") as ws:
             ws.send_json({"type": "subscribe"})
             response = ws.receive_json(mode="text")
             assert response["type"] == "subscribed"

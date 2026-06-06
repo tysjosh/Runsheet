@@ -134,9 +134,10 @@ WEBHOOK_HMAC_PREFIXES: tuple[str, ...] = (
     "/webhooks/stripe/",
 )
 
-#: auth_provider values under which global enforcement is active. ``legacy``
-#: keeps the pre-migration per-handler behavior (Req 9.2).
-_ENFORCING_PROVIDERS: frozenset[str] = frozenset({"dual", "supertokens"})
+#: auth_provider values under which global enforcement is active. After the
+#: hard cutover ``supertokens`` is the only supported (and only enforcing)
+#: provider.
+_ENFORCING_PROVIDERS: frozenset[str] = frozenset({"supertokens"})
 
 
 class AuthEnforcementConfigError(RuntimeError):
@@ -151,10 +152,12 @@ class AuthEnforcementConfigError(RuntimeError):
 def provider_enforces(provider: Any) -> bool:
     """Return whether ``provider`` activates global session enforcement.
 
-    ``dual`` and ``supertokens`` enforce; ``legacy`` (and any unrecognized
-    value, e.g. a test ``MagicMock``) does not (Req 9.2).
+    After the hard cutover ``supertokens`` is the only supported provider and
+    enforcement is always on for it. Any unrecognized value (e.g. a test
+    ``MagicMock``) does not enforce, so test harnesses that supply a stub
+    settings object are unaffected.
     """
-    return isinstance(provider, str) and provider in _ENFORCING_PROVIDERS
+    return isinstance(provider, str) and provider == "supertokens"
 
 
 def is_public_route(path: str) -> bool:
@@ -228,15 +231,12 @@ async def _has_verifiable_session(request: Request) -> bool:
 
 
 def _has_legacy_bearer(request: Request) -> bool:
-    """Return whether the request carries a legacy ``Authorization: Bearer`` token.
+    """Deprecated no-op retained for backward import compatibility.
 
-    Used only in ``dual`` mode: when no SuperTokens session is present the
-    request may still be a legacy client, whose token the per-handler
-    ``get_tenant_context`` validates. The middleware only checks for presence
-    here — it never trusts the token's contents.
+    The legacy ``Authorization: Bearer`` (homegrown JWT) acceptance window was
+    removed with the SuperTokens hard cutover. Always returns ``False``.
     """
-    auth_header = request.headers.get("Authorization", "")
-    return auth_header.startswith("Bearer ") and bool(auth_header[len("Bearer ") :].strip())
+    return False
 
 
 class AuthEnforcementMiddleware(BaseHTTPMiddleware):
@@ -245,13 +245,13 @@ class AuthEnforcementMiddleware(BaseHTTPMiddleware):
     For every request the middleware:
 
     1. lets ``OPTIONS`` (CORS preflight) through untouched;
-    2. is a no-op when ``auth_provider`` is not enforcing (``legacy``), so the
-       pre-migration per-handler auth is preserved (Req 9.2);
+    2. is a no-op when ``auth_provider`` is not enforcing (a stubbed/unknown
+       value), so test harnesses that supply a stub settings object are
+       unaffected;
     3. lets Public_Route_Allowlist paths through (Req 6.3);
     4. honors the Test_Auth_Path bypass in test/development only;
-    5. otherwise requires a verified session (``supertokens``) or a verified
-       session / legacy Bearer token (``dual``), returning **401** when the
-       requirement is not met so the handler never executes.
+    5. otherwise requires a verified SuperTokens session, returning **401**
+       when one is not present so the handler never executes.
     """
 
     async def dispatch(self, request: Request, call_next):
@@ -296,12 +296,6 @@ class AuthEnforcementMiddleware(BaseHTTPMiddleware):
             )
 
         if has_session:
-            return await call_next(request)
-
-        # No SuperTokens session present.
-        if provider == "dual" and _has_legacy_bearer(request):
-            # Legacy client during the dual-accept window — let the per-handler
-            # get_tenant_context verify the legacy JWT (Req 9.2).
             return await call_next(request)
 
         logger.debug(

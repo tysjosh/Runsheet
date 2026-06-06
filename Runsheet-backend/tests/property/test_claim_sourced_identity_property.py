@@ -21,7 +21,6 @@ live managed core, and patches the ``auth_provider`` flag to ``"supertokens"``.
 
 import asyncio
 import json
-from types import SimpleNamespace
 
 import pytest
 from hypothesis import given, settings
@@ -102,12 +101,6 @@ _conflict_values = st.from_regex(r"[a-zA-Z0-9_\-]{0,48}", fullmatch=True)
 # ---------------------------------------------------------------------------
 @pytest.fixture(autouse=True)
 def _supertokens_provider(monkeypatch):
-    fake_settings = SimpleNamespace(
-        auth_provider="supertokens",
-        jwt_secret="unused-in-supertokens-mode",
-        jwt_algorithm="HS256",
-    )
-    monkeypatch.setattr(tenant_guard, "get_settings", lambda: fake_settings)
     # Ensure no tenant settings service is wired so hydration uses safe defaults.
     monkeypatch.setattr(tenant_guard, "_tenant_settings_service", None)
     yield

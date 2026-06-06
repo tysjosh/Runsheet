@@ -49,13 +49,6 @@ from ops.middleware.tenant_guard import (
 SESSION_TENANT = "tenant-A"
 SESSION_USER = "user-A"
 
-# Patch target that forces the SuperTokens hard-cutover verification path so an
-# unverifiable request yields 401 (the legacy path would yield 403).
-_SUPERTOKENS_SETTINGS = patch(
-    "ops.middleware.tenant_guard.get_settings",
-    return_value=MagicMock(auth_provider="supertokens"),
-)
-
 
 class _NoSessionVerifier:
     """A :class:`SessionVerifier` that models a request with no session.
@@ -162,14 +155,13 @@ class TestMvpRoutesRequireAuth:
         routes = _mvp_routes()
         assert routes, "expected the MVP router to register at least one route"
 
-        with _SUPERTOKENS_SETTINGS:
-            for route, method in routes:
-                url = _concrete_path(route.path)
-                resp = client.request(method, url, json={})
-                assert resp.status_code == 401, (
-                    f"{method} {url} returned {resp.status_code}, expected 401 "
-                    f"for an unauthenticated request"
-                )
+        for route, method in routes:
+            url = _concrete_path(route.path)
+            resp = client.request(method, url, json={})
+            assert resp.status_code == 401, (
+                f"{method} {url} returned {resp.status_code}, expected 401 "
+                f"for an unauthenticated request"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -235,8 +227,7 @@ class TestMvpNoClientTenant:
         configure_session_verifier(_FixedTenantVerifier())
         client = TestClient(app, raise_server_exceptions=False)
 
-        with _SUPERTOKENS_SETTINGS:
-            resp = client.get("/api/fuel/mvp/forecasts?tenant_id=tenant-B")
+        resp = client.get("/api/fuel/mvp/forecasts?tenant_id=tenant-B")
 
         assert resp.status_code == 200
         assert es.search_documents.await_count >= 1
