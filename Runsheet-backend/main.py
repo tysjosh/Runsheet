@@ -47,6 +47,7 @@ from integrations.api.intake_channel_endpoints import router as intake_channel_r
 from fuel.api.order_endpoints import router as order_router
 from fuel.api.order_webhook_endpoints import router as order_webhook_router
 from fuel.api.driver_endpoints import router as driver_ops_router
+from auth.api.password_admin_endpoints import router as auth_admin_router
 from integrations.api.stripe_endpoints import (
     router as stripe_router,
     webhook_router as stripe_webhook_router,
@@ -221,6 +222,7 @@ for _router in (
     mvp_fuel_router,
     fuel_ops_router,
     fuel_ops_mvp_router,
+    auth_admin_router,
 ):
     app.include_router(_router)
 

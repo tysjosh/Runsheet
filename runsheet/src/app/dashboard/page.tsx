@@ -3,6 +3,7 @@
 import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import { lazy, Suspense, useEffect, useState } from "react";
+import Session from "supertokens-auth-react/recipe/session";
 import ErrorBoundary from "../../components/ErrorBoundary";
 import Header from "../../components/Header";
 import LoadingSpinner from "../../components/LoadingSpinner";
@@ -78,16 +79,28 @@ export default function Home() {
   };
 
   useEffect(() => {
-    if (typeof window !== "undefined") {
-      const authStatus = sessionStorage.getItem("isAuthenticated");
-      if (authStatus === "true") {
-        setIsAuthenticated(true);
-      } else {
-        sessionStorage.removeItem("isAuthenticated");
-        router.replace("/signin");
+    // Auth is now backed by a verified SuperTokens session (cookie-managed by
+    // the SDK), not a sessionStorage flag. Check whether a session exists and
+    // bounce to sign-in if not.
+    let cancelled = false;
+    (async () => {
+      try {
+        const exists = await Session.doesSessionExist();
+        if (cancelled) return;
+        if (exists) {
+          setIsAuthenticated(true);
+        } else {
+          router.replace("/signin");
+        }
+      } catch {
+        if (!cancelled) router.replace("/signin");
+      } finally {
+        if (!cancelled) setIsLoading(false);
       }
-      setIsLoading(false);
-    }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [router]);
 
   const handleTruckSelect = (truck: Truck) => {

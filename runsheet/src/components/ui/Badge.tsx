@@ -20,6 +20,8 @@ export interface BadgeProps {
   variant?: BadgeVariant;
   size?: BadgeSize;
   className?: string;
+  /** Forwarded test hook so callers can target a specific badge. */
+  "data-testid"?: string;
 }
 
 const variantStyles: Record<BadgeVariant, string> = {
@@ -41,9 +43,11 @@ export const Badge: React.FC<BadgeProps> = ({
   variant = "default",
   size = "md",
   className = "",
+  "data-testid": testId,
 }) => {
   return (
     <span
+      data-testid={testId}
       className={`inline-flex items-center rounded-lg font-medium ${variantStyles[variant]} ${sizeStyles[size]} ${className}`}
     >
       {children}

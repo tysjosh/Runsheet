@@ -15,6 +15,7 @@ import {
   Users,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
+import Session from "supertokens-auth-react/recipe/session";
 
 interface SidebarProps {
   activeItem?: string;
@@ -31,9 +32,14 @@ export default function Sidebar({
 }: SidebarProps) {
   const router = useRouter();
 
-  const handleLogout = () => {
-    sessionStorage.removeItem("isAuthenticated");
-    router.push("/signin");
+  const handleLogout = async () => {
+    // Revoke the SuperTokens session (clears the session cookies) before
+    // returning to sign-in. Navigate regardless of revoke outcome.
+    try {
+      await Session.signOut();
+    } finally {
+      router.push("/signin");
+    }
   };
 
   const menuItems = [

@@ -165,7 +165,7 @@ export default function SignIn({ onSignIn }: SignInProps) {
                   Password *
                 </label>
                 <a
-                  href="#"
+                  href="/auth/reset-password"
                   className="text-sm text-gray-900 hover:underline transition-all"
                 >
                   Forgot?
@@ -226,15 +226,6 @@ export default function SignIn({ onSignIn }: SignInProps) {
                 "Sign In"
               )}
             </button>
-
-            {/* Demo Credentials */}
-            <div className="mt-6 p-4 bg-gray-50 border border-gray-200 rounded-lg">
-              <p className="text-sm font-medium text-gray-900 mb-2">
-                Demo Credentials:
-              </p>
-              <p className="text-xs text-gray-600">Email: admin@runsheet.com</p>
-              <p className="text-xs text-gray-600">Password: demo123</p>
-            </div>
           </div>
         </div>
       </div>

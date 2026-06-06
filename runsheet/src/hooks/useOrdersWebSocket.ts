@@ -8,8 +8,8 @@
  */
 
 import { useCallback, useMemo, useState } from "react";
-import { getAuthToken } from "../utils/auth";
 import type { FuelOrder } from "../services/ordersApi";
+import { getAuthToken } from "../utils/auth";
 import {
   useWebSocket,
   type WebSocketOptions,
@@ -25,10 +25,12 @@ const ORDERS_WS_BASE_URL = `${WS_BASE}/ws/orders`;
 /**
  * Build WebSocket URL with JWT token for authentication
  */
-async function buildOrdersWebSocketUrl(subscriptions: OrdersEventType[]): Promise<string> {
+async function buildOrdersWebSocketUrl(
+  subscriptions: OrdersEventType[],
+): Promise<string> {
   const token = await getAuthToken();
   if (!token) return ORDERS_WS_BASE_URL;
-  
+
   const params = new URLSearchParams();
   params.set("token", token);
   subscriptions.forEach((sub) => {
@@ -105,10 +107,13 @@ export interface UseOrdersWebSocketReturn {
  * for order events. Uses exponential backoff (1s initial, 30s max) for
  * auto-reconnection.
  *
+ * @param tenantId - Tenant scope for the connection (reserved for server-side
+ *   channel scoping; the session also carries the verified tenant).
  * @param options - Configuration options
  * @returns Orders WebSocket state and control functions
  */
 export function useOrdersWebSocket(
+  tenantId?: string,
   options: OrdersWebSocketOptions = {},
 ): UseOrdersWebSocketReturn {
   const [lastOrderUpdate, setLastOrderUpdate] = useState<FuelOrder | null>(

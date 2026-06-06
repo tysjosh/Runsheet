@@ -380,15 +380,17 @@ class SDKSuperTokensAdmin:
         self._tenant_id = tenant_id
 
     async def get_user_id_by_email(self, email: str) -> Optional[str]:
-        from supertokens_python.asyncio import list_users_by_account_info
-        from supertokens_python.types import AccountInfoInput
+        from supertokens_python.asyncio import (
+            AccountInfoInput,
+            list_users_by_account_info,
+        )
 
-        result = await list_users_by_account_info(
+        # The SDK returns a List[User] directly (each User exposes ``user_id``).
+        users = await list_users_by_account_info(
             self._tenant_id, AccountInfoInput(email=email)
         )
-        users = getattr(result, "users", result) or []
-        for user in users:
-            user_id = getattr(user, "id", None) or getattr(user, "user_id", None)
+        for user in users or []:
+            user_id = getattr(user, "user_id", None) or getattr(user, "id", None)
             if user_id:
                 return user_id
         return None
@@ -411,7 +413,7 @@ class SDKSuperTokensAdmin:
                 f"{type(result).__name__}"
             )
         user = result.user
-        return getattr(user, "id", None) or getattr(user, "user_id")
+        return getattr(user, "user_id", None) or getattr(user, "id")
 
     async def set_user_roles(self, user_id: str, roles: Sequence[str]) -> None:
         from supertokens_python.recipe.userroles.asyncio import (
