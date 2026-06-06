@@ -165,7 +165,7 @@ export default function SignIn({ onSignIn }: SignInProps) {
                   Password *
                 </label>
                 <a
-                  href="/auth/reset-password"
+                  href="/auth/forgot-password"
                   className="text-sm text-gray-900 hover:underline transition-all"
                 >
                   Forgot?

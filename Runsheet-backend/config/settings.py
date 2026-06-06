@@ -347,6 +347,49 @@ class Settings(BaseSettings):
         description="Minimum password length enforced at sign-up (Req 1.7).",
     )
 
+    # SuperTokens email transport (password-reset / forgot-password delivery).
+    #
+    # When smtp_host + smtp_from_email are set, the EmailPassword recipe sends
+    # password-reset emails through this SMTP relay (credentials loaded from
+    # env, never hardcoded). When unset, the SDK falls back to SuperTokens'
+    # built-in email service so the flow still works in development without an
+    # operator-run relay. See auth/supertokens_init.py:_build_email_delivery.
+    smtp_host: str = Field(
+        default="",
+        description="SMTP relay host for password-reset email (e.g. smtp.sendgrid.net).",
+    )
+    smtp_port: int = Field(
+        default=587,
+        ge=1,
+        le=65535,
+        description="SMTP relay port. 587 = STARTTLS, 465 = implicit TLS.",
+    )
+    smtp_username: str = Field(
+        default="",
+        description="SMTP auth username. Loaded from env, never hardcoded.",
+    )
+    smtp_password: str = Field(
+        default="",
+        description="SMTP auth password / API key. Loaded from env, never hardcoded.",
+    )
+    smtp_from_email: str = Field(
+        default="",
+        description="From address for outbound auth email (e.g. no-reply@runsheet.app).",
+    )
+    smtp_from_name: str = Field(
+        default="Runsheet",
+        description="Human-readable From name for outbound auth email.",
+    )
+    smtp_secure: bool = Field(
+        default=False,
+        description="True for implicit TLS (port 465); False for STARTTLS (port 587).",
+    )
+
+    @property
+    def smtp_configured(self) -> bool:
+        """True when a custom SMTP relay is fully configured for auth email."""
+        return bool(self.smtp_host.strip() and self.smtp_from_email.strip())
+
     # API-key authentication
     #
     # Comma-separated list of valid API keys for routes that declare the

@@ -350,6 +350,58 @@ class ApiService {
     }
   }
 
+  // Account / self-service auth
+  //
+  // Fetch the signed-in user's identity (email / roles / tenant), derived by
+  // the backend from the verified session. Returns null when unauthenticated.
+  async getAccountProfile(): Promise<{
+    user_id: string;
+    email: string;
+    tenant_id: string;
+    roles: string[];
+    has_pii_access: boolean;
+  } | null> {
+    const response = await fetchWithSession(
+      fetchWithTimeout,
+      `${API_BASE_URL}/auth/account/me`,
+      { method: "GET", headers: { "Content-Type": "application/json" } },
+    );
+    if (!response.ok) return null;
+    return response.json();
+  }
+
+  // Change the signed-in user's password. Uses the session-aware fetch so the
+  // SuperTokens cookie + anti-CSRF token ride along, and surfaces the backend's
+  // structured error message (e.g. wrong current password) to the caller.
+  async changePassword(
+    currentPassword: string,
+    newPassword: string,
+  ): Promise<void> {
+    const response = await fetchWithSession(
+      fetchWithTimeout,
+      `${API_BASE_URL}/auth/account/change-password`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          current_password: currentPassword,
+          new_password: newPassword,
+        }),
+      },
+    );
+
+    if (!response.ok) {
+      let message = "Could not change your password. Please try again.";
+      try {
+        const body = await response.json();
+        if (body?.message) message = body.message;
+      } catch {
+        // Non-JSON error body — keep the generic message.
+      }
+      throw new ApiError(message, response.status);
+    }
+  }
+
   // Fleet Management
   async getFleetSummary(): Promise<ApiResponse<AssetSummary>> {
     return this.request<AssetSummary>("/fleet/summary");

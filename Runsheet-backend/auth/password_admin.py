@@ -181,7 +181,9 @@ async def create_password_set_link(email: str) -> PasswordSetLink:
             f"SuperTokens does not recognize a user id for {normalized!r}.",
         )
 
-    link = getattr(result, "link", None)
+    # SDK 0.31.3 returns the reset link directly as a ``str`` (older docs return
+    # an object with a ``.link`` attribute). Support both shapes.
+    link = result if isinstance(result, str) else getattr(result, "link", None)
     if not link:
         raise PasswordAdminError(
             "link_unavailable",
@@ -243,10 +245,111 @@ async def set_password_for_email(
     )
 
 
+async def _email_for_st_user_id(st_user_id: str) -> str:
+    """Resolve the primary email for a SuperTokens user id (must exist)."""
+    from supertokens_python.asyncio import get_user
+
+    user = await get_user(st_user_id)
+    emails = getattr(user, "emails", None) if user is not None else None
+    if not emails:
+        raise PasswordAdminError(
+            "no_supertokens_user",
+            f"No SuperTokens user / email for user id {st_user_id!r}.",
+        )
+    return emails[0]
+
+
+async def change_password(
+    st_user_id: str, current_password: str, new_password: str
+) -> str:
+    """Change a signed-in user's own password after verifying the current one.
+
+    Unlike :func:`set_password_for_email` (an admin/break-glass operation), this
+    is the self-service path: the caller proves they know the *current*
+    password before the new one is accepted. The ``st_user_id`` is taken from
+    the caller's verified session — never from the request body — so a user can
+    only ever change their own credential.
+
+    Steps:
+      1. Resolve the user's email from the verified SuperTokens user id.
+      2. Re-authenticate with ``current_password`` via the EmailPassword recipe;
+         a wrong/missing current password is rejected (``reason='wrong_password'``).
+      3. Update the credential to ``new_password`` under the configured policy.
+
+    Returns the SuperTokens recipe user id on success.
+
+    Raises:
+        PasswordAdminError: ``wrong_password`` when the current password does
+            not match, ``password_policy`` when the new password is too weak,
+            or ``no_supertokens_user`` / ``update_failed`` for SDK errors.
+    """
+    if not isinstance(current_password, str) or not current_password:
+        raise PasswordAdminError(
+            "wrong_password", "The current password is required"
+        )
+    if not isinstance(new_password, str) or not new_password:
+        raise PasswordAdminError(
+            "password_policy", "A new password is required"
+        )
+
+    email = await _email_for_st_user_id(st_user_id)
+
+    from supertokens_python.recipe.emailpassword.asyncio import sign_in
+    from supertokens_python.recipe.emailpassword.interfaces import (
+        SignInOkResult,
+    )
+
+    # 1. Re-authenticate: prove the caller knows the CURRENT password.
+    signin_result = await sign_in(DEFAULT_ST_TENANT_ID, email, current_password)
+    if not isinstance(signin_result, SignInOkResult):
+        raise PasswordAdminError(
+            "wrong_password", "The current password is incorrect"
+        )
+
+    # 2. Apply the new password (reuses the policy-aware setter path).
+    recipe_user_id = await _recipe_user_id_for_email(email)
+
+    from supertokens_python.recipe.emailpassword.asyncio import (
+        update_email_or_password,
+    )
+    from supertokens_python.recipe.emailpassword.interfaces import (
+        PasswordPolicyViolationError,
+        UnknownUserIdError,
+        UpdateEmailOrPasswordOkResult,
+    )
+
+    result = await update_email_or_password(
+        recipe_user_id,
+        password=new_password,
+        apply_password_policy=True,
+        tenant_id_for_password_policy=DEFAULT_ST_TENANT_ID,
+    )
+
+    if isinstance(result, UpdateEmailOrPasswordOkResult):
+        logger.info("User %s changed their own password", email)
+        return recipe_user_id.get_as_string()
+    if isinstance(result, PasswordPolicyViolationError):
+        raise PasswordAdminError(
+            "password_policy",
+            getattr(result, "failure_reason", None)
+            or "The new password does not meet the configured policy.",
+        )
+    if isinstance(result, UnknownUserIdError):
+        raise PasswordAdminError(
+            "no_supertokens_user",
+            f"SuperTokens does not recognize a user for {email!r}.",
+        )
+    raise PasswordAdminError(
+        "update_failed",
+        f"Failed to change password for {email!r}: {type(result).__name__}",
+    )
+
+
 __all__ = [
     "DEFAULT_ST_TENANT_ID",
     "PasswordAdminError",
     "PasswordSetLink",
     "create_password_set_link",
     "set_password_for_email",
+    "change_password",
 ]

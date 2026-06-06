@@ -31,6 +31,7 @@ const ReconciliationHub = lazy(
 const AnalyticsHub = lazy(() => import("../../components/AnalyticsHub"));
 const AdminHub = lazy(() => import("../../components/AdminHub"));
 const SettingsPage = lazy(() => import("../../components/SettingsPage"));
+const ProfilePage = lazy(() => import("../../components/ProfilePage"));
 const CustomersPage = lazy(
   () => import("../../components/commerce/CustomersListPage"),
 );
@@ -237,6 +238,17 @@ export default function Home() {
             <ErrorBoundary componentName="Settings">
               <Suspense fallback={<ComponentLoadingPlaceholder />}>
                 <SettingsPage />
+              </Suspense>
+            </ErrorBoundary>
+          </div>
+        );
+
+      case "profile":
+        return (
+          <div className="flex-1 bg-gray-50">
+            <ErrorBoundary componentName="Profile">
+              <Suspense fallback={<ComponentLoadingPlaceholder />}>
+                <ProfilePage />
               </Suspense>
             </ErrorBoundary>
           </div>

@@ -15,7 +15,9 @@ import {
   Users,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
+import { useEffect, useState } from "react";
 import Session from "supertokens-auth-react/recipe/session";
+import { apiService } from "../services/api";
 
 interface SidebarProps {
   activeItem?: string;
@@ -31,6 +33,24 @@ export default function Sidebar({
   onNavigate,
 }: SidebarProps) {
   const router = useRouter();
+  const [email, setEmail] = useState<string>("");
+
+  // Surface the signed-in user's email next to the avatar. Derived from the
+  // verified session via the backend, falling back to a generic label.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const profile = await apiService.getAccountProfile();
+        if (!cancelled && profile?.email) setEmail(profile.email);
+      } catch {
+        // Non-fatal — the avatar just shows the generic label.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const handleLogout = async () => {
     // Revoke the SuperTokens session (clears the session cookies) before
@@ -177,17 +197,24 @@ export default function Sidebar({
               "color-mix(in srgb, var(--color-surface) 60%, transparent)",
           }}
         >
-          <div className="w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0 bg-primary">
-            <User className="w-5 h-5 text-white" />
-          </div>
-          <div className="flex-1 min-w-0">
-            <p
-              className="text-sm font-medium"
-              style={{ color: "var(--color-primary)" }}
-            >
-              User
-            </p>
-          </div>
+          <button
+            type="button"
+            onClick={() => onNavigate("profile")}
+            title="View profile"
+            className="flex items-center space-x-3 flex-1 min-w-0 text-left focus:outline-none focus:ring-2 focus:ring-primary rounded-md"
+          >
+            <div className="w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0 bg-primary">
+              <User className="w-5 h-5 text-white" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <p
+                className="text-sm font-medium truncate"
+                style={{ color: "var(--color-primary)" }}
+              >
+                {email || "My Account"}
+              </p>
+            </div>
+          </button>
           <button
             onClick={handleLogout}
             className="flex-shrink-0 transition-all duration-200 p-1.5 rounded-md"
@@ -210,10 +237,10 @@ export default function Sidebar({
 
       {/* User Profile - Collapsed */}
       <div
-        className={`absolute bottom-4 left-1/2 transform -translate-x-1/2 transition-all duration-300 ${isCollapsed ? "opacity-100" : "opacity-0 pointer-events-none"}`}
+        className={`absolute bottom-4 left-1/2 transform -translate-x-1/2 transition-all duration-300 flex flex-col items-center gap-2 ${isCollapsed ? "opacity-100" : "opacity-0 pointer-events-none"}`}
       >
         <button
-          onClick={handleLogout}
+          onClick={() => onNavigate("profile")}
           className="w-10 h-10 rounded-full flex items-center justify-center transition-all duration-200 bg-primary hover:bg-primary-hover"
           onMouseEnter={(e) => {
             e.currentTarget.style.backgroundColor =
@@ -224,9 +251,23 @@ export default function Sidebar({
             e.currentTarget.style.backgroundColor = "var(--color-primary)";
             e.currentTarget.style.transform = "scale(1)";
           }}
-          title="Logout"
+          title="View profile"
         >
           <User className="w-5 h-5 text-white" />
+        </button>
+        <button
+          onClick={handleLogout}
+          className="p-1.5 rounded-md transition-colors"
+          style={{ color: "var(--color-gray-500)" }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.color = "var(--color-error)";
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.color = "var(--color-gray-500)";
+          }}
+          title="Logout"
+        >
+          <LogOut className="w-4 h-4" />
         </button>
       </div>
     </aside>

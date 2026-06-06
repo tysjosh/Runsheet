@@ -1,6 +1,6 @@
 "use client";
 
-import { FileInput, HelpCircle, Settings } from "lucide-react";
+import { FileInput, HelpCircle, Lock, Settings } from "lucide-react";
 import { lazy, Suspense, useState } from "react";
 import LoadingSpinner from "./LoadingSpinner";
 import { PageHeader, type Tab, TabNavigation } from "./ui";
@@ -8,6 +8,7 @@ import { PageHeader, type Tab, TabNavigation } from "./ui";
 const AgentSettingsPage = lazy(() => import("./ops/AgentSettingsPage"));
 const DataImport = lazy(() => import("./DataImport"));
 const Support = lazy(() => import("./Support"));
+const ChangePassword = lazy(() => import("./ChangePassword"));
 
 const TABS: Tab[] = [
   {
@@ -19,6 +20,11 @@ const TABS: Tab[] = [
     id: "import",
     label: "Data Import",
     icon: <FileInput className="w-4 h-4" />,
+  },
+  {
+    id: "security",
+    label: "Security",
+    icon: <Lock className="w-4 h-4" />,
   },
   {
     id: "support",
@@ -44,6 +50,7 @@ export default function SettingsPage() {
         <Suspense fallback={<LoadingSpinner message="Loading..." />}>
           {activeTab === "agents" && <AgentSettingsPage />}
           {activeTab === "import" && <DataImport />}
+          {activeTab === "security" && <ChangePassword />}
           {activeTab === "support" && <Support />}
         </Suspense>
       </div>

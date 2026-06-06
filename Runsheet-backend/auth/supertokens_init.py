@@ -91,6 +91,62 @@ def configured_session_lifetime_seconds() -> int:
     return _session_lifetime_seconds
 
 
+def _build_email_delivery(settings: Settings):
+    """Build the EmailPassword email-delivery config for password-reset email.
+
+    When a custom SMTP relay is configured (``smtp_host`` + ``smtp_from_email``),
+    password-reset email is sent through it using credentials loaded from the
+    environment (never hardcoded — mirrors the Req 10.x posture for the core
+    connection secrets). When SMTP is not configured, returns ``None`` so the
+    EmailPassword recipe falls back to SuperTokens' built-in email service — the
+    forgot-password flow therefore works in development without an operator-run
+    relay, and an operator enables their own relay purely via env config.
+
+    Returns:
+        An ``EmailDeliveryConfig`` wrapping an SMTP service, or ``None`` to use
+        the SDK default.
+    """
+    if not settings.smtp_configured:
+        logger.info(
+            "SuperTokens email delivery: SMTP not configured — using the "
+            "SuperTokens built-in email service for password-reset email. "
+            "Set SMTP_HOST + SMTP_FROM_EMAIL to route through your own relay."
+        )
+        return None
+
+    from supertokens_python.ingredients.emaildelivery.types import (
+        EmailDeliveryConfig,
+        SMTPSettings,
+        SMTPSettingsFrom,
+    )
+    from supertokens_python.recipe.emailpassword.emaildelivery.services.smtp import (
+        SMTPService,
+    )
+
+    smtp_service = SMTPService(
+        smtp_settings=SMTPSettings(
+            host=settings.smtp_host.strip(),
+            port=settings.smtp_port,
+            from_=SMTPSettingsFrom(
+                name=settings.smtp_from_name,
+                email=settings.smtp_from_email.strip(),
+            ),
+            password=(settings.smtp_password or None),
+            username=(settings.smtp_username.strip() or None),
+            secure=settings.smtp_secure,
+        )
+    )
+    logger.info(
+        "SuperTokens email delivery: routing password-reset email via SMTP "
+        "host=%s port=%d from=%s secure=%s",
+        settings.smtp_host,
+        settings.smtp_port,
+        settings.smtp_from_email,
+        settings.smtp_secure,
+    )
+    return EmailDeliveryConfig(service=smtp_service)
+
+
 def _make_password_validator(
     min_length: int,
 ) -> Callable[[str, str], Any]:
@@ -297,6 +353,7 @@ def init_supertokens(settings: Settings) -> None:
                         )
                     ]
                 ),
+                email_delivery=_build_email_delivery(settings),
             ),
             # Session: SuperTokens-issued tokens in HttpOnly/Secure cookies with
             # anti-CSRF (Req 2.1, 2.2, 2.5). The create_new_session override
