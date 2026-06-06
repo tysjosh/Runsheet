@@ -73,6 +73,7 @@ import {
 } from "../../services/agentApi";
 import { ApiError } from "../../services/api";
 import { getCurrentTenantId } from "../../services/tenant";
+import { getCurrentUserRoles } from "../../utils/auth";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -1069,9 +1070,24 @@ function FeedbackSection() {
 // ─── Main Page Component ─────────────────────────────────────────────────────
 
 export default function AgentSettingsPage() {
-  // In a real app, this would come from an auth context or user session.
-  // For now, default to admin=true; the component supports read-only mode.
-  const [isAdmin] = useState(true);
+  // Admin gate derived from the verified session's roles (presentation-only;
+  // the backend re-checks the role on every privileged write and returns 403
+  // otherwise — see Requirement 3.4/3.5). Defaults to read-only until roles
+  // resolve so a non-admin never briefly sees editable controls.
+  const [isAdmin, setIsAdmin] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const roles = await getCurrentUserRoles();
+      if (!cancelled) {
+        setIsAdmin(roles.includes("admin"));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   return (
     <div className="flex-1 flex flex-col h-full bg-gray-50">

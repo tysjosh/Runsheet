@@ -350,6 +350,29 @@ class ApiService {
     }
   }
 
+  // Driver utilization (Drivers → Utilization tab)
+  //
+  // Session-aware fetch of the per-driver utilization summary
+  // (GET /api/ops/drivers/utilization). Returns the items array; an optional
+  // status filter narrows the result server-side.
+  async getDriverUtilization(status?: string): Promise<unknown[]> {
+    const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+    const response = await fetchWithSession(
+      fetchWithTimeout,
+      `${API_BASE_URL}/ops/drivers/utilization${qs}`,
+      { method: "GET", headers: { "Content-Type": "application/json" } },
+    );
+    if (!response.ok) {
+      throw new ApiError(
+        `Failed to load driver utilization (status ${response.status})`,
+        response.status,
+      );
+    }
+    const json = await response.json();
+    const data = json?.items ?? json?.data ?? json;
+    return Array.isArray(data) ? data : [];
+  }
+
   // Account / self-service auth
   //
   // Fetch the signed-in user's identity (email / roles / tenant), derived by

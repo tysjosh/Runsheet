@@ -107,11 +107,11 @@ import {
   updateCostConfig,
 } from "../../services/fuelApi";
 import { getCurrentTenantId } from "../../services/tenant";
+import { getCurrentUserId } from "../../utils/auth";
 import StormModeBanner from "./StormModeBanner";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const DISPATCHER_ID = "dispatcher-001";
 const PAGE_SIZE = 10;
 const GENERATED_PLAN_REFRESH_ATTEMPTS = 4;
 const GENERATED_PLAN_REFRESH_DELAY_MS = 750;
@@ -2175,7 +2175,12 @@ function PlansTab() {
     async (planId: string) => {
       setApproveLoading(planId);
       try {
-        await approvePlan(planId, activeTenantId(), DISPATCHER_ID);
+        const dispatcherId = await getCurrentUserId();
+        if (!dispatcherId) {
+          addToast("Your session has expired. Please sign in again.", "error");
+          return;
+        }
+        await approvePlan(planId, activeTenantId(), dispatcherId);
         addToast(`Plan ${planId} approved and dispatched`, "success");
         refreshPlanList();
         if (selectedPlanId === planId) {
@@ -2199,10 +2204,15 @@ function PlansTab() {
       if (!showRejectDialog) return;
       setRejectLoading(true);
       try {
+        const dispatcherId = await getCurrentUserId();
+        if (!dispatcherId) {
+          addToast("Your session has expired. Please sign in again.", "error");
+          return;
+        }
         await rejectPlan(
           showRejectDialog,
           activeTenantId(),
-          DISPATCHER_ID,
+          dispatcherId,
           reason || undefined,
         );
         addToast(`Plan ${showRejectDialog} rejected`, "success");

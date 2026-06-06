@@ -1,13 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { apiService } from "../../services/api";
 import LoadingSpinner from "../LoadingSpinner";
 import type {
   DriverStatus,
   DriverUtilization,
 } from "../ops/DriverUtilizationList";
 import DriverUtilizationList from "../ops/DriverUtilizationList";
-import { getAuthToken } from "../../utils/auth";
 
 /**
  * Driver Utilization View — displays real-time driver availability and workload
@@ -21,29 +21,13 @@ export default function DriverUtilizationView() {
   const loadData = useCallback(async () => {
     try {
       setLoading(true);
-      const baseUrl =
-        process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
-      const params = new URLSearchParams();
-      if (statusFilter) params.set("status", statusFilter);
-      const url = `${baseUrl}/ops/drivers/utilization${params.toString() ? `?${params}` : ""}`;
-
-      // Get auth token and include in request
-      const token = await getAuthToken();
-      const headers: HeadersInit = {
-        "Content-Type": "application/json",
-      };
-      if (token) {
-        headers.Authorization = `Bearer ${token}`;
-      }
-
-      const res = await fetch(url, { headers });
-      if (res.ok) {
-        const json = await res.json();
-        const data = json.items ?? json.data ?? json;
-        setDrivers(Array.isArray(data) ? data : []);
-      } else {
-        console.error(`Failed to load drivers: ${res.status} ${res.statusText}`);
-      }
+      // Session-aware fetch (SuperTokens cookie + anti-CSRF). Replaces the
+      // legacy raw-fetch + Bearer-token path so Drivers matches every other
+      // module's auth posture.
+      const data = await apiService.getDriverUtilization(
+        statusFilter || undefined,
+      );
+      setDrivers(data as DriverUtilization[]);
     } catch (error) {
       console.error("Failed to load driver utilization data:", error);
     } finally {
