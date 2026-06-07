@@ -1,6 +1,14 @@
 import { Boxes, FileText, RefreshCw, X } from "lucide-react";
-import { lazy, Suspense, useCallback, useEffect, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { type LocationUpdateData, useFleetWebSocket } from "../hooks";
+import { useDialogA11y } from "../hooks/useDialogA11y";
 import type { AssetComplianceSummary } from "../services/api";
 import { apiService } from "../services/api";
 import type {
@@ -74,6 +82,13 @@ export default function FleetTracking({ onTruckSelect }: FleetTrackingProps) {
   // the row), replacing the former top-level "Compartments" tab.
   const [compartmentsTruck, setCompartmentsTruck] = useState<Truck | null>(
     null,
+  );
+  const compartmentsPanelRef = useRef<HTMLDivElement>(null);
+  const closeCompartments = useCallback(() => setCompartmentsTruck(null), []);
+  useDialogA11y(
+    compartmentsTruck !== null,
+    compartmentsPanelRef,
+    closeCompartments,
   );
   const [assetTypeFilter, setAssetTypeFilter] = useState<AssetType | "all">(
     "all",
@@ -574,6 +589,8 @@ export default function FleetTracking({ onTruckSelect }: FleetTrackingProps) {
           onClick={() => setCompartmentsTruck(null)}
         >
           <div
+            ref={compartmentsPanelRef}
+            tabIndex={-1}
             className="h-full w-full max-w-3xl overflow-y-auto bg-white shadow-xl"
             onClick={(e) => e.stopPropagation()}
           >

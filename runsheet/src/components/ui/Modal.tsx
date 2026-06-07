@@ -7,7 +7,8 @@
 
 import { X } from "lucide-react";
 import type React from "react";
-import { useEffect } from "react";
+import { useEffect, useId, useRef } from "react";
+import { useDialogA11y } from "../../hooks/useDialogA11y";
 import { Button } from "./Button";
 
 export interface ModalProps {
@@ -36,16 +37,11 @@ export const Modal: React.FC<ModalProps> = ({
   size = "md",
   className = "",
 }) => {
-  // Close on escape key
-  useEffect(() => {
-    const handleEscape = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && isOpen) {
-        onClose();
-      }
-    };
-    document.addEventListener("keydown", handleEscape);
-    return () => document.removeEventListener("keydown", handleEscape);
-  }, [isOpen, onClose]);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+
+  // Focus trap, initial focus, Escape-to-close, and focus restoration.
+  useDialogA11y(isOpen, panelRef, onClose);
 
   // Prevent body scroll when modal is open
   useEffect(() => {
@@ -67,12 +63,19 @@ export const Modal: React.FC<ModalProps> = ({
       onClick={onClose}
     >
       <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
         className={`bg-white rounded-xl shadow-xl w-full ${sizeStyles[size]} mx-4 ${className}`}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-          <h2 className="text-lg font-semibold text-primary">{title}</h2>
+          <h2 id={titleId} className="text-lg font-semibold text-primary">
+            {title}
+          </h2>
           <button
             onClick={onClose}
             className="p-1 text-gray-400 hover:text-gray-600 rounded transition-colors"

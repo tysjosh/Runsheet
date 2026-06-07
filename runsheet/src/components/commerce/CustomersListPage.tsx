@@ -1,7 +1,14 @@
 "use client";
 
 import { Gauge, X } from "lucide-react";
-import { lazy, Suspense, useCallback, useEffect, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import {
   Badge,
   Button,
@@ -11,6 +18,7 @@ import {
   Pagination,
   Table,
 } from "@/components/ui";
+import { useDialogA11y } from "../../hooks/useDialogA11y";
 import {
   type Customer,
   type CustomerFilters,
@@ -44,6 +52,9 @@ export default function CustomersListPage({
   // Customer whose tanks are shown in the slide-over (click-through), replacing
   // the former Fuel Ops > Customer Tanks tab.
   const [tanksCustomer, setTanksCustomer] = useState<Customer | null>(null);
+  const tanksPanelRef = useRef<HTMLDivElement>(null);
+  const closeTanks = useCallback(() => setTanksCustomer(null), []);
+  useDialogA11y(tanksCustomer !== null, tanksPanelRef, closeTanks);
   // Selected customer for in-shell detail (when no onSelectCustomer override).
   const [selectedCustomerId, setSelectedCustomerId] = useState<string | null>(
     null,
@@ -231,6 +242,8 @@ export default function CustomersListPage({
           onClick={() => setTanksCustomer(null)}
         >
           <div
+            ref={tanksPanelRef}
+            tabIndex={-1}
             className="h-full w-full max-w-4xl overflow-y-auto bg-white shadow-xl"
             onClick={(e) => e.stopPropagation()}
           >
