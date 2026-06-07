@@ -120,7 +120,7 @@ export interface FuelOrder {
   special_instructions?: string | null;
   intake_channel: IntakeChannelType;
   intake_channel_id: string;
-  intake_metadata: IntakeMetadata;
+  intake_metadata?: IntakeMetadata;
   status: OrderStatus;
   assigned_driver_id?: string | null;
   assigned_asset_id?: string | null;

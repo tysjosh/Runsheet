@@ -142,8 +142,10 @@ function LinkedRefField({ link, fallbackId, href }: LinkedRefFieldProps) {
 // ─── Intake Metadata Renderer ────────────────────────────────────────────────
 
 function IntakeMetadataSection({ order }: { order: FuelOrder }) {
-  const meta = order.intake_metadata;
-  const channel = order.intake_channel;
+  // The backend OrderResponse does not always include intake_metadata, so
+  // default to an empty object and guard the channel string.
+  const meta = order.intake_metadata ?? {};
+  const channel = order.intake_channel ?? "";
 
   return (
     <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-4">

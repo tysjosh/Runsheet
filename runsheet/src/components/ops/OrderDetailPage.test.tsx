@@ -194,6 +194,19 @@ describe("OrderDetailPage — render", () => {
 
     expect(await screen.findByText(/not found/i)).toBeInTheDocument();
   });
+
+  it("renders without crashing when intake_metadata is absent", async () => {
+    // The backend OrderResponse does not return intake_metadata — the detail
+    // view must default it rather than dereference undefined (regression).
+    const { intake_metadata, ...withoutMeta } = orderFixture();
+    void intake_metadata;
+    mockGetOrder.mockResolvedValue(withoutMeta as never);
+    mockGetOrderEvents.mockResolvedValue(eventsResponse());
+
+    render(<OrderDetailPage />);
+
+    expect(await screen.findByText(/acme fuel co/i)).toBeInTheDocument();
+  });
 });
 
 describe("OrderDetailPage — intake metadata", () => {
