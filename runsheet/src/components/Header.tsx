@@ -1,8 +1,12 @@
+import { Menu } from "lucide-react";
+
 interface HeaderProps {
   onAIClick?: () => void;
+  /** Open the off-canvas sidebar drawer. Only wired below `md`. */
+  onMenuClick?: () => void;
 }
 
-export default function Header({ onAIClick }: HeaderProps) {
+export default function Header({ onAIClick, onMenuClick }: HeaderProps) {
   return (
     <header
       className="relative overflow-hidden"
@@ -22,6 +26,16 @@ export default function Header({ onAIClick }: HeaderProps) {
         <div className="max-w-7xl mx-auto flex items-center justify-between">
           {/* Logo/Brand */}
           <div className="flex items-center space-x-2.5">
+            {/* Mobile drawer toggle — hidden on the desktop rail (md+) */}
+            <button
+              type="button"
+              onClick={onMenuClick}
+              aria-label="Open navigation menu"
+              className="md:hidden flex items-center justify-center w-9 h-9 rounded-lg transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-500"
+              style={{ color: "var(--color-primary)" }}
+            >
+              <Menu className="w-5 h-5" />
+            </button>
             <div className="w-9 h-9 rounded-xl flex items-center justify-center bg-primary">
               <img
                 src="/runsheet_logo.svg"

@@ -61,6 +61,7 @@ export default function Home() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [activeMenuItem, setActiveMenuItem] = useState(() => {
     if (typeof window !== "undefined") {
       return sessionStorage.getItem("activeMenuItem") || "today";
@@ -315,12 +316,17 @@ export default function Home() {
           isCollapsed={sidebarCollapsed}
           onToggle={() => setSidebarCollapsed(!sidebarCollapsed)}
           onNavigate={handleNavigate}
+          isMobileOpen={mobileSidebarOpen}
+          onMobileClose={() => setMobileSidebarOpen(false)}
         />
         <div
           className="flex-1 flex flex-col min-h-0 overflow-hidden"
           style={{ minWidth: 0 }}
         >
-          <Header onAIClick={() => setAiChatOpen(true)} />
+          <Header
+            onAIClick={() => setAiChatOpen(true)}
+            onMenuClick={() => setMobileSidebarOpen(true)}
+          />
           <main className="flex-1 flex bg-white relative z-0 overflow-hidden">
             <div className="flex-1 flex bg-white overflow-auto">
               {renderMainContent()}
