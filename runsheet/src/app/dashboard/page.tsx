@@ -37,6 +37,7 @@ const CustomersPage = lazy(
 );
 const DriversHub = lazy(() => import("../../components/DriversHub"));
 const DispatchCockpit = lazy(() => import("../../components/DispatchCockpit"));
+const SetupHub = lazy(() => import("../../components/SetupHub"));
 const OperationsControl = lazy(() => import("../ops/control/page"));
 
 function MapLoadingPlaceholder() {
@@ -239,6 +240,17 @@ export default function Home() {
             <ErrorBoundary componentName="Admin">
               <Suspense fallback={<ComponentLoadingPlaceholder />}>
                 <AdminHub />
+              </Suspense>
+            </ErrorBoundary>
+          </div>
+        );
+
+      case "setup":
+        return (
+          <div className="flex-1 bg-gray-50">
+            <ErrorBoundary componentName="Setup">
+              <Suspense fallback={<ComponentLoadingPlaceholder />}>
+                <SetupHub />
               </Suspense>
             </ErrorBoundary>
           </div>

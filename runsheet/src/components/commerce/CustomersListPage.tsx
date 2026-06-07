@@ -1,7 +1,8 @@
 "use client";
 
+import { Gauge, X } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import {
   Badge,
   Button,
@@ -17,6 +18,12 @@ import {
   type CustomerStatus,
   getCustomers,
 } from "../../services/commerceApi";
+import LoadingSpinner from "../LoadingSpinner";
+
+// Customer tanks are a property of a customer, reached by clicking the
+// customer rather than living as a separate Fuel Ops tab. Lazy-loaded into a
+// slide-over.
+const CustomerTankPage = lazy(() => import("../ops/CustomerTankPage"));
 
 interface CustomersListPageProps {
   onSelectCustomer?: (customerId: string) => void;
@@ -33,6 +40,9 @@ export default function CustomersListPage({
   const [totalPages, setTotalPages] = useState(1);
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<CustomerStatus | "">("");
+  // Customer whose tanks are shown in the slide-over (click-through), replacing
+  // the former Fuel Ops > Customer Tanks tab.
+  const [tanksCustomer, setTanksCustomer] = useState<Customer | null>(null);
 
   const fetchCustomers = useCallback(async () => {
     setLoading(true);
@@ -152,21 +162,32 @@ export default function CustomersListPage({
                   key: "actions",
                   label: "Actions",
                   render: (customer) => (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => {
-                        if (onSelectCustomer) {
-                          onSelectCustomer(customer.customer_id);
-                        } else {
-                          router.push(
-                            `/commerce/customers/${customer.customer_id}`,
-                          );
-                        }
-                      }}
-                    >
-                      View Details
-                    </Button>
+                    <div className="flex items-center gap-1">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        icon={<Gauge className="w-3.5 h-3.5" />}
+                        onClick={() => setTanksCustomer(customer)}
+                        aria-label={`View tanks for ${customer.display_name}`}
+                      >
+                        Tanks
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => {
+                          if (onSelectCustomer) {
+                            onSelectCustomer(customer.customer_id);
+                          } else {
+                            router.push(
+                              `/commerce/customers/${customer.customer_id}`,
+                            );
+                          }
+                        }}
+                      >
+                        View Details
+                      </Button>
+                    </div>
                   ),
                 },
               ]}
@@ -181,6 +202,48 @@ export default function CustomersListPage({
             />
           </>
         ))}
+
+      {/* Customer tanks slide-over — reached by clicking a customer's Tanks
+          button (replaces the former Fuel Ops > Customer Tanks tab). */}
+      {tanksCustomer && (
+        <div
+          className="fixed inset-0 z-50 flex justify-end bg-black/30"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Customer tanks"
+          onClick={() => setTanksCustomer(null)}
+        >
+          <div
+            className="h-full w-full max-w-4xl overflow-y-auto bg-white shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-gray-200 px-6 py-4">
+              <div>
+                <h2 className="text-lg font-semibold text-primary">Tanks</h2>
+                <p className="text-xs text-gray-500">
+                  {tanksCustomer.display_name} · {tanksCustomer.customer_id}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setTanksCustomer(null)}
+                className="rounded p-1 text-gray-400 hover:text-gray-600"
+                aria-label="Close tanks"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="p-6">
+              <Suspense fallback={<LoadingSpinner message="Loading…" />}>
+                <CustomerTankPage
+                  customerId={tanksCustomer.customer_id}
+                  embedded
+                />
+              </Suspense>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

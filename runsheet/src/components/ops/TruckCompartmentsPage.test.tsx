@@ -300,6 +300,27 @@ describe("TruckCompartmentsPage", () => {
     expect(await screen.findByText("TNK-002")).toBeInTheDocument();
   });
 
+  it("locks to a single truck (drill-down) and hides the picker", async () => {
+    mockList.mockResolvedValue(
+      listResponseFixture(
+        [compartmentFixture({ compartment_id: "TRUCK-1_c1", state: "clean" })],
+        "TRUCK-1",
+      ),
+    );
+
+    render(<TruckCompartmentsPage truckId="TRUCK-1" embedded />);
+
+    // Loads the locked truck directly — no picker interaction needed.
+    await waitFor(() => expect(mockList).toHaveBeenCalledWith("TRUCK-1"));
+    expect(
+      await screen.findByTestId("compartment-row-TRUCK-1_c1"),
+    ).toBeInTheDocument();
+    // The truck-lookup picker is not part of the drill-down surface.
+    expect(screen.queryByTestId("truck-lookup-form")).not.toBeInTheDocument();
+    // It does not enumerate the full tanker roster.
+    expect(mockListTrucks).not.toHaveBeenCalled();
+  });
+
   it("renders a row per compartment with its state badge and record action", async () => {
     mockList.mockResolvedValue(
       listResponseFixture([

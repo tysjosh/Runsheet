@@ -1262,10 +1262,16 @@ function CustomerTankFormModal({
 export interface CustomerTankPageProps {
   /** Initial filter state; useful when linking in from another page. */
   initialFilters?: CustomerTankFilters;
+  /** When set, scope the list to one customer's tanks (drill-down). */
+  customerId?: string;
+  /** Drop the standalone page chrome for slide-over hosting. */
+  embedded?: boolean;
 }
 
 export default function CustomerTankPage({
   initialFilters,
+  customerId,
+  embedded = false,
 }: CustomerTankPageProps = {}) {
   const { toasts, addToast, dismissToast } = useToasts();
 
@@ -1293,6 +1299,7 @@ export default function CustomerTankPage({
       try {
         const response = await listCustomerTanks({
           ...filters,
+          ...(customerId ? { customer_id: customerId } : {}),
           page,
           size: PAGE_SIZE,
         });
@@ -1346,7 +1353,7 @@ export default function CustomerTankPage({
         if (!signal?.aborted) setLoading(false);
       }
     },
-    [filters, page],
+    [filters, page, customerId],
   );
 
   useEffect(() => {
@@ -1548,21 +1555,27 @@ export default function CustomerTankPage({
   ];
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className={embedded ? "" : "min-h-screen bg-gray-50"}>
       <ToastContainer toasts={toasts} onDismiss={dismissToast} />
 
-      <div className="max-w-7xl mx-auto px-6 py-6 space-y-6">
+      <div
+        className={
+          embedded ? "space-y-4" : "max-w-7xl mx-auto px-6 py-6 space-y-6"
+        }
+      >
         {/* Header */}
         <div className="flex items-start justify-between">
-          <div>
-            <h1 className="text-xl font-semibold text-primary">
-              Customer Tanks
-            </h1>
-            <p className="text-sm text-gray-500 mt-1">
-              Per-customer fuel tanks used by the forecaster to drive runout
-              predictions, K-factor learning, and storm-mode prioritization.
-            </p>
-          </div>
+          {!embedded && (
+            <div>
+              <h1 className="text-xl font-semibold text-primary">
+                Customer Tanks
+              </h1>
+              <p className="text-sm text-gray-500 mt-1">
+                Per-customer fuel tanks used by the forecaster to drive runout
+                predictions, K-factor learning, and storm-mode prioritization.
+              </p>
+            </div>
+          )}
           <button
             type="button"
             onClick={() => setFormOpen({ mode: "create" })}

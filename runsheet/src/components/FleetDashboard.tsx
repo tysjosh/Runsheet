@@ -1,6 +1,6 @@
 "use client";
 
-import { Package, Package as PackageIcon, Shield, Truck } from "lucide-react";
+import { Package, Package as PackageIcon, Truck } from "lucide-react";
 import { lazy, Suspense, useState } from "react";
 import type { Truck as TruckType } from "../types/api";
 import ExpiryAlertWidget from "./compliance/ExpiryAlertWidget";
@@ -11,9 +11,6 @@ import { type Tab, TabNavigation } from "./ui";
 const FleetTracking = lazy(() => import("./FleetTracking"));
 const ShipmentBoardView = lazy(() => import("../app/ops/page"));
 const Inventory = lazy(() => import("./Inventory"));
-const AssetCertificationsPage = lazy(
-  () => import("./compliance/AssetCertificationsPage"),
-);
 
 interface FleetDashboardProps {
   selectedTruck: TruckType | null;
@@ -38,11 +35,6 @@ const TABS: Tab[] = [
     id: "inventory",
     label: "Inventory",
     icon: <PackageIcon className="w-4 h-4" />,
-  },
-  {
-    id: "certifications",
-    label: "Certifications",
-    icon: <Shield className="w-4 h-4" />,
   },
 ];
 
@@ -71,7 +63,9 @@ export default function FleetDashboard({
             {/* Expiry Alert Summary Widget */}
             <ErrorBoundary componentName="Expiry Alerts">
               <ExpiryAlertWidget
-                onViewCertifications={() => setActiveTab("certifications")}
+                onViewCertifications={
+                  onNavigate ? () => onNavigate("compliance") : undefined
+                }
                 onViewDrivers={
                   onNavigate ? () => onNavigate("drivers") : undefined
                 }
@@ -113,20 +107,6 @@ export default function FleetDashboard({
                 fallback={<LoadingSpinner message="Loading inventory..." />}
               >
                 <Inventory />
-              </Suspense>
-            </ErrorBoundary>
-          </div>
-        )}
-
-        {activeTab === "certifications" && (
-          <div className="h-full bg-white border-t border-gray-200 overflow-auto">
-            <ErrorBoundary componentName="Asset Certifications">
-              <Suspense
-                fallback={
-                  <LoadingSpinner message="Loading certifications..." />
-                }
-              >
-                <AssetCertificationsPage />
               </Suspense>
             </ErrorBoundary>
           </div>

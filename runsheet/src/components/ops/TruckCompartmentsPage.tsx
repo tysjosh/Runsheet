@@ -863,7 +863,15 @@ function LoadEligibilityModal({
 
 // ─── Page ────────────────────────────────────────────────────────────────────
 
-export default function TruckCompartmentsPage() {
+export default function TruckCompartmentsPage({
+  truckId,
+  embedded = false,
+}: {
+  /** When provided, lock the page to one truck and hide the picker. */
+  truckId?: string;
+  /** Drop the standalone page chrome (padding/card) for slide-over hosting. */
+  embedded?: boolean;
+} = {}) {
   const [truckIdInput, setTruckIdInput] = useState("");
   const [activeTruckId, setActiveTruckId] = useState<string | null>(null);
   const [items, setItems] = useState<TruckCompartmentState[]>([]);
@@ -879,11 +887,11 @@ export default function TruckCompartmentsPage() {
     useState<TruckCompartmentState | null>(null);
   const { toasts, addToast, dismissToast } = useToasts();
 
-  const fetchCompartments = useCallback(async (truckId: string) => {
+  const fetchCompartments = useCallback(async (id: string) => {
     setLoading(true);
     setError("");
     try {
-      const resp = await listTruckCompartments(truckId);
+      const resp = await listTruckCompartments(id);
       setItems(resp.items);
       setActiveTruckId(resp.truck_id);
     } catch (err) {
@@ -896,11 +904,18 @@ export default function TruckCompartmentsPage() {
     }
   }, []);
 
-  // Load the list of trucks that have compartments configured so the
-  // dispatcher can pick one from a dropdown instead of memorising ids.
-  // Auto-select the first truck so the tab shows data on open.
+  // When locked to a single truck (drill-down from the fleet table), load it
+  // directly and skip the picker entirely. Otherwise load the list of trucks
+  // with compartments so the dispatcher can pick one, auto-selecting the first.
   useEffect(() => {
     let cancelled = false;
+    if (truckId) {
+      setTruckOptionsLoaded(true);
+      void fetchCompartments(truckId);
+      return () => {
+        cancelled = true;
+      };
+    }
     listCompartmentTrucks()
       .then((resp) => {
         if (cancelled) return;
@@ -918,7 +933,7 @@ export default function TruckCompartmentsPage() {
     return () => {
       cancelled = true;
     };
-  }, [fetchCompartments]);
+  }, [truckId, fetchCompartments]);
 
   const handleLookup = (e: React.FormEvent) => {
     e.preventDefault();
@@ -1041,9 +1056,21 @@ export default function TruckCompartmentsPage() {
   ];
 
   return (
-    <div className="flex-1 flex flex-col p-6 bg-gray-50 overflow-auto">
+    <div
+      className={
+        embedded
+          ? "flex flex-col"
+          : "flex-1 flex flex-col p-6 bg-gray-50 overflow-auto"
+      }
+    >
       <ToastContainer toasts={toasts} onDismiss={dismissToast} />
-      <div className="bg-white rounded-xl border border-gray-200 p-6 max-w-6xl w-full mx-auto">
+      <div
+        className={
+          embedded
+            ? "w-full"
+            : "bg-white rounded-xl border border-gray-200 p-6 max-w-6xl w-full mx-auto"
+        }
+      >
         <div className="flex items-start justify-between gap-4 mb-6">
           <div>
             <h1 className="text-2xl font-semibold text-primary mb-1 flex items-center gap-2">
@@ -1090,64 +1117,66 @@ export default function TruckCompartmentsPage() {
           )}
         </div>
 
-        <form
-          className="flex items-end gap-3 mb-6"
-          onSubmit={handleLookup}
-          data-testid="truck-lookup-form"
-        >
-          <div className="flex-1">
-            <label
-              htmlFor="truck-id-input"
-              className="block text-xs font-medium text-gray-600 mb-1"
-            >
-              Truck ID
-            </label>
-            <div className="relative">
-              <Search
-                className="w-3.5 h-3.5 text-gray-400 absolute left-2.5 top-1/2 -translate-y-1/2"
-                aria-hidden="true"
-              />
-              <input
-                id="truck-id-input"
-                type="text"
-                list="compartment-truck-options"
-                className="w-full pl-8 pr-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white"
-                value={truckIdInput}
-                onChange={(e) => setTruckIdInput(e.target.value)}
-                placeholder={
-                  truckOptions.length > 0
-                    ? `e.g. ${truckOptions[0].truck_id}`
-                    : "e.g. TNK-001"
-                }
-                required
-              />
-              <datalist id="compartment-truck-options">
-                {truckOptions.map((t) => (
-                  <option key={t.truck_id} value={t.truck_id}>
-                    {t.truck_id} ({t.compartment_count} compartments)
-                  </option>
-                ))}
-              </datalist>
-            </div>
-          </div>
-          <button
-            type="submit"
-            disabled={loading}
-            className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white rounded-lg bg-primary hover:bg-primary-hover disabled:opacity-50"
+        {!truckId && (
+          <form
+            className="flex items-end gap-3 mb-6"
+            onSubmit={handleLookup}
+            data-testid="truck-lookup-form"
           >
-            {loading ? (
-              <Loader2
-                className="w-3.5 h-3.5 animate-spin"
-                aria-hidden="true"
-              />
-            ) : (
-              <Search className="w-3.5 h-3.5" aria-hidden="true" />
-            )}
-            Load compartments
-          </button>
-        </form>
+            <div className="flex-1">
+              <label
+                htmlFor="truck-id-input"
+                className="block text-xs font-medium text-gray-600 mb-1"
+              >
+                Truck ID
+              </label>
+              <div className="relative">
+                <Search
+                  className="w-3.5 h-3.5 text-gray-400 absolute left-2.5 top-1/2 -translate-y-1/2"
+                  aria-hidden="true"
+                />
+                <input
+                  id="truck-id-input"
+                  type="text"
+                  list="compartment-truck-options"
+                  className="w-full pl-8 pr-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white"
+                  value={truckIdInput}
+                  onChange={(e) => setTruckIdInput(e.target.value)}
+                  placeholder={
+                    truckOptions.length > 0
+                      ? `e.g. ${truckOptions[0].truck_id}`
+                      : "e.g. TNK-001"
+                  }
+                  required
+                />
+                <datalist id="compartment-truck-options">
+                  {truckOptions.map((t) => (
+                    <option key={t.truck_id} value={t.truck_id}>
+                      {t.truck_id} ({t.compartment_count} compartments)
+                    </option>
+                  ))}
+                </datalist>
+              </div>
+            </div>
+            <button
+              type="submit"
+              disabled={loading}
+              className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white rounded-lg bg-primary hover:bg-primary-hover disabled:opacity-50"
+            >
+              {loading ? (
+                <Loader2
+                  className="w-3.5 h-3.5 animate-spin"
+                  aria-hidden="true"
+                />
+              ) : (
+                <Search className="w-3.5 h-3.5" aria-hidden="true" />
+              )}
+              Load compartments
+            </button>
+          </form>
+        )}
 
-        {truckOptions.length > 0 && (
+        {truckOptions.length > 0 && !truckId && (
           <div className="flex flex-wrap items-center gap-2 mb-6 -mt-2">
             <span className="text-xs text-gray-500">Tankers:</span>
             {truckOptions.map((t) => (
@@ -1184,7 +1213,7 @@ export default function TruckCompartmentsPage() {
           </p>
         )}
 
-        {!activeTruckId && !error && !loading && (
+        {!activeTruckId && !error && !loading && !truckId && (
           <div className="text-center py-16 text-gray-500 text-sm">
             {!truckOptionsLoaded ? (
               <span className="inline-flex items-center gap-2">

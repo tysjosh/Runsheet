@@ -1,5 +1,5 @@
-import { FileText, RefreshCw } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { Boxes, FileText, RefreshCw, X } from "lucide-react";
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { type LocationUpdateData, useFleetWebSocket } from "../hooks";
 import type { AssetComplianceSummary } from "../services/api";
 import { apiService } from "../services/api";
@@ -23,6 +23,10 @@ import {
   Table,
 } from "./ui";
 import { WebSocketStatusBadge } from "./WebSocketStatus";
+
+// Compartments are a property of a truck, reached by clicking the asset rather
+// than living as a separate top-level tab. Lazy-loaded into a slide-over.
+const TruckCompartmentsPage = lazy(() => import("./ops/TruckCompartmentsPage"));
 
 /** Filter options for the asset type dropdown */
 const ASSET_TYPE_OPTIONS: { label: string; value: AssetType | "all" }[] = [
@@ -66,6 +70,11 @@ export default function FleetTracking({ onTruckSelect }: FleetTrackingProps) {
   const [loading, setLoading] = useState(true);
   const [showInTransit, setShowInTransit] = useState(true);
   const [selectedTruck, setSelectedTruck] = useState<string | null>(null);
+  // Truck whose compartments are shown in the slide-over (click-through from
+  // the row), replacing the former top-level "Compartments" tab.
+  const [compartmentsTruck, setCompartmentsTruck] = useState<Truck | null>(
+    null,
+  );
   const [assetTypeFilter, setAssetTypeFilter] = useState<AssetType | "all">(
     "all",
   );
@@ -400,6 +409,27 @@ export default function FleetTracking({ onTruckSelect }: FleetTrackingProps) {
         </div>
       ),
     },
+    {
+      key: "compartments",
+      label: "",
+      align: "right",
+      render: (truck) =>
+        (truck.assetType ?? "vehicle") === "vehicle" ? (
+          <button
+            type="button"
+            onClick={(e) => {
+              // Don't trigger the row's map-selection click.
+              e.stopPropagation();
+              setCompartmentsTruck(truck);
+            }}
+            className="inline-flex items-center gap-1 rounded-md border border-gray-200 px-2 py-1 text-xs font-medium text-gray-600 hover:bg-gray-50"
+            aria-label={`View compartments for ${truck.plateNumber || truck.name}`}
+          >
+            <Boxes className="h-3 w-3" />
+            Compartments
+          </button>
+        ) : null,
+    },
   ];
 
   if (loading) {
@@ -532,6 +562,51 @@ export default function FleetTracking({ onTruckSelect }: FleetTrackingProps) {
           className="px-4"
         />
       </div>
+
+      {/* Compartments slide-over — reached by clicking a truck's Compartments
+          button (replaces the former Fuel Ops > Compartments tab). */}
+      {compartmentsTruck && (
+        <div
+          className="fixed inset-0 z-50 flex justify-end bg-black/30"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Truck compartments"
+          onClick={() => setCompartmentsTruck(null)}
+        >
+          <div
+            className="h-full w-full max-w-3xl overflow-y-auto bg-white shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-gray-200 px-6 py-4">
+              <div>
+                <h2 className="text-lg font-semibold text-primary">
+                  Compartments
+                </h2>
+                <p className="text-xs text-gray-500">
+                  {compartmentsTruck.plateNumber || compartmentsTruck.name} ·{" "}
+                  {compartmentsTruck.id}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setCompartmentsTruck(null)}
+                className="rounded p-1 text-gray-400 hover:text-gray-600"
+                aria-label="Close compartments"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="p-6">
+              <Suspense fallback={<LoadingSpinner message="Loading…" />}>
+                <TruckCompartmentsPage
+                  truckId={compartmentsTruck.id}
+                  embedded
+                />
+              </Suspense>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
