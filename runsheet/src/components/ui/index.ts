@@ -21,6 +21,8 @@ export type {
 export { EntityLink, entityHref, summaryLabel } from "./EntityLink";
 export type { FilterBarProps, FilterSelectProps } from "./FilterBar";
 export { FilterBar, FilterSelect } from "./FilterBar";
+export type { InShellNav } from "./InShellNav";
+export { InShellNavProvider, useInShellNav } from "./InShellNav";
 export type { ModalFooterProps, ModalProps } from "./Modal";
 export { Modal, ModalFooter } from "./Modal";
 export type { PageHeaderProps } from "./PageHeader";

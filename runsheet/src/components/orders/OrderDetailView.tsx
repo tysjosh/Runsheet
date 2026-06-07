@@ -18,7 +18,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
-import { ToastContainer, useToasts } from "@/components/ui";
+import { EntityLink, ToastContainer, useToasts } from "@/components/ui";
 import { ApiError } from "../../services/api";
 import {
   type AssignDriverPayload,
@@ -822,27 +822,12 @@ export default function OrderDetailView({
               <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
                 <dt className="text-gray-500">Customer</dt>
                 <dd className="text-gray-900">
-                  {order.links?.customer?.status === "unresolved" ? (
-                    <span className="inline-flex items-center gap-1.5">
-                      <span className="text-gray-500">
-                        {order.customer_name || order.customer_id}
-                      </span>
-                      <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium text-warning-dark bg-warning-light">
-                        Unlinked
-                      </span>
-                    </span>
-                  ) : (
-                    <Link
-                      href={`/commerce/customers/${encodeURIComponent(order.customer_id)}`}
-                      className="text-info hover:text-info-dark underline underline-offset-2"
-                    >
-                      {(order.links?.customer?.status === "resolved"
-                        ? (summaryLabel(order.links.customer.summary) ??
-                          order.customer_name)
-                        : order.customer_name) || order.customer_id}{" "}
-                      ({order.customer_id})
-                    </Link>
-                  )}
+                  <EntityLink
+                    type="customer"
+                    id={order.customer_id}
+                    label={order.customer_name || undefined}
+                    link={order.links?.customer}
+                  />
                 </dd>
 
                 <dt className="text-gray-500">Address</dt>

@@ -27,6 +27,7 @@
 import Link from "next/link";
 import type React from "react";
 import { Badge } from "./Badge";
+import { useInShellNav } from "./InShellNav";
 
 // ─── Entity types + canonical route map ──────────────────────────────────────
 
@@ -193,10 +194,49 @@ export function EntityLink({
   stopPropagation = false,
   "data-testid": testId,
 }: EntityLinkProps) {
+  const nav = useInShellNav();
+  const inShell = nav?.handles(type) ?? false;
   const linkClass = `${DEFAULT_LINK_CLASS} ${className}`.trim();
   const onClick = stopPropagation
     ? (e: React.MouseEvent) => e.stopPropagation()
     : undefined;
+
+  // Render the navigable element: an in-shell button when the shell can host
+  // this entity type, otherwise a canonical-route link (also the fallback on
+  // standalone routes where there is no provider).
+  const NavTarget = ({
+    targetId,
+    children,
+  }: {
+    targetId: string;
+    children: React.ReactNode;
+  }) => {
+    if (inShell && nav) {
+      return (
+        <button
+          type="button"
+          className={`${linkClass} cursor-pointer border-0 bg-transparent p-0 text-left`}
+          onClick={(e) => {
+            if (stopPropagation) e.stopPropagation();
+            nav.open(type, targetId);
+          }}
+          data-testid={testId}
+        >
+          {children}
+        </button>
+      );
+    }
+    return (
+      <Link
+        href={entityHref(type, targetId)}
+        className={linkClass}
+        onClick={onClick}
+        data-testid={testId}
+      >
+        {children}
+      </Link>
+    );
+  };
 
   // Resolved — link to the owning module, preferring the resolved name.
   if (link?.status === "resolved") {
@@ -207,15 +247,10 @@ export function EntityLink({
     const showSuffix =
       showId && typeof display === "string" && display !== link.id;
     return (
-      <Link
-        href={entityHref(type, link.id)}
-        className={linkClass}
-        onClick={onClick}
-        data-testid={testId}
-      >
+      <NavTarget targetId={link.id}>
         {display}
         {showSuffix && <span className="text-gray-500"> ({link.id})</span>}
-      </Link>
+      </NavTarget>
     );
   }
 
@@ -232,16 +267,18 @@ export function EntityLink({
     const showSuffix =
       showId && typeof display === "string" && display !== fallbackId;
     return (
-      <Link
-        href={entityHref(type, fallbackId)}
-        className={linkClass}
-        onClick={onClick}
-        data-testid={testId}
-      >
+      <NavTarget targetId={fallbackId}>
         {display}
         {showSuffix && <span className="text-gray-500"> ({fallbackId})</span>}
-      </Link>
+      </NavTarget>
     );
+  }
+
+  // No navigable id at all but we still hold a denormalized name snapshot — show
+  // the snapshot with an explicit "Unlinked" badge rather than presenting an
+  // un-navigable name as if it were a live link (Req 13.3).
+  if (label != null && label !== "") {
+    return <UnlinkedAffordance display={label} testId={testId} />;
   }
 
   return (

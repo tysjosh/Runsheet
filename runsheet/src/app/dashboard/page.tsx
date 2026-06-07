@@ -8,6 +8,7 @@ import ErrorBoundary from "../../components/ErrorBoundary";
 import Header from "../../components/Header";
 import LoadingSpinner from "../../components/LoadingSpinner";
 import Sidebar from "../../components/Sidebar";
+import { InShellNavProvider } from "../../components/ui/InShellNav";
 import type { Truck } from "../../types/api";
 
 // MapView — heavy Google Maps library, no SSR
@@ -31,6 +32,9 @@ const SettingsPage = lazy(() => import("../../components/SettingsPage"));
 const ProfilePage = lazy(() => import("../../components/ProfilePage"));
 const CustomersPage = lazy(
   () => import("../../components/commerce/CustomersListPage"),
+);
+const CustomerDetailPage = lazy(
+  () => import("../../components/commerce/CustomerDetailPage"),
 );
 const DriversHub = lazy(() => import("../../components/DriversHub"));
 const DispatchCockpit = lazy(() => import("../../components/DispatchCockpit"));
@@ -80,6 +84,7 @@ export default function Home() {
   const [selectedTruck, setSelectedTruck] = useState<Truck | null>(null);
   const [aiChatOpen, setAiChatOpen] = useState(false);
   const [orderDetailId, setOrderDetailId] = useState<string | null>(null);
+  const [customerDetailId, setCustomerDetailId] = useState<string | null>(null);
   const [ordersQuery, setOrdersQuery] = useState("");
   const [createOrderOpen, setCreateOrderOpen] = useState(false);
 
@@ -100,6 +105,21 @@ export default function Home() {
   const openOrders = (query = "") => {
     setOrdersQuery(query);
     handleNavigate("orders");
+  };
+  const openCustomer = (customerId: string) => {
+    setCustomerDetailId(customerId);
+    handleNavigate("customer-detail");
+  };
+
+  // Cross-module reference links (EntityLink + inline links) open in-shell for
+  // the entity types the shell can host; everything else falls back to a
+  // canonical-route <Link> (handled inside EntityLink when handles() is false).
+  const inShellNav = {
+    handles: (type: string) => type === "order" || type === "customer",
+    open: (type: string, id: string) => {
+      if (type === "order") openOrder(id);
+      else if (type === "customer") openCustomer(id);
+    },
   };
 
   useEffect(() => {
@@ -222,6 +242,33 @@ export default function Home() {
             <ErrorBoundary componentName="Customers">
               <Suspense fallback={<ComponentLoadingPlaceholder />}>
                 <CustomersPage />
+              </Suspense>
+            </ErrorBoundary>
+          </div>
+        );
+
+      case "customer-detail":
+        // Refreshing into this state loses the selected id — fall back to the
+        // customers list rather than render a blank detail page.
+        if (!customerDetailId) {
+          return (
+            <div className="flex-1 bg-gray-50">
+              <ErrorBoundary componentName="Customers">
+                <Suspense fallback={<ComponentLoadingPlaceholder />}>
+                  <CustomersPage />
+                </Suspense>
+              </ErrorBoundary>
+            </div>
+          );
+        }
+        return (
+          <div className="flex-1 overflow-auto bg-gray-50">
+            <ErrorBoundary componentName="Customer">
+              <Suspense fallback={<ComponentLoadingPlaceholder />}>
+                <CustomerDetailPage
+                  customerId={customerDetailId}
+                  onBack={() => handleNavigate("customers")}
+                />
               </Suspense>
             </ErrorBoundary>
           </div>
@@ -405,9 +452,11 @@ export default function Home() {
             }}
           />
           <main className="flex-1 flex bg-white relative z-0 overflow-hidden">
-            <div className="flex-1 flex bg-white overflow-auto">
-              {renderMainContent()}
-            </div>
+            <InShellNavProvider value={inShellNav}>
+              <div className="flex-1 flex bg-white overflow-auto">
+                {renderMainContent()}
+              </div>
+            </InShellNavProvider>
           </main>
         </div>
       </div>
