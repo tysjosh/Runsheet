@@ -19,7 +19,7 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { type Column, Table } from "@/components/ui";
+import { type Column, Modal, ModalFooter, Table } from "@/components/ui";
 import { ApiError } from "../../services/api";
 import {
   type CreateIntakeChannelPayload,
@@ -69,6 +69,11 @@ export default function IntakeChannelsAdminPanel() {
     action: "create",
   });
   const [copied, setCopied] = useState(false);
+
+  // Delete confirmation
+  const [channelToDelete, setChannelToDelete] = useState<IntakeChannel | null>(
+    null,
+  );
 
   // ── Data loading ──────────────────────────────────────────────────────────
 
@@ -170,23 +175,22 @@ export default function IntakeChannelsAdminPanel() {
 
   // ── Delete channel ────────────────────────────────────────────────────────
 
-  const handleDelete = useCallback(
-    async (channelId: string) => {
-      if (!confirm("Are you sure you want to delete this channel?")) return;
-      setWorking(channelId);
-      try {
-        await deleteIntakeChannel(channelId);
-        await fetchChannels();
-      } catch (err) {
-        setError(
-          err instanceof ApiError ? err.message : "Failed to delete channel",
-        );
-      } finally {
-        setWorking(null);
-      }
-    },
-    [fetchChannels],
-  );
+  const handleConfirmDelete = useCallback(async () => {
+    if (!channelToDelete) return;
+    const channelId = channelToDelete.channel_id;
+    setWorking(channelId);
+    try {
+      await deleteIntakeChannel(channelId);
+      setChannelToDelete(null);
+      await fetchChannels();
+    } catch (err) {
+      setError(
+        err instanceof ApiError ? err.message : "Failed to delete channel",
+      );
+    } finally {
+      setWorking(null);
+    }
+  }, [channelToDelete, fetchChannels]);
 
   // ── Copy to clipboard ─────────────────────────────────────────────────────
 
@@ -273,7 +277,7 @@ export default function IntakeChannelsAdminPanel() {
           </button>
           <button
             type="button"
-            onClick={() => handleDelete(channel.channel_id)}
+            onClick={() => setChannelToDelete(channel)}
             disabled={working === channel.channel_id}
             className="p-1.5 rounded hover:bg-error-light text-error"
             title="Delete channel"
@@ -518,6 +522,44 @@ export default function IntakeChannelsAdminPanel() {
           </div>
         </div>
       )}
+
+      {/* Delete Confirmation Modal */}
+      <Modal
+        isOpen={channelToDelete !== null}
+        onClose={() => setChannelToDelete(null)}
+        title="Delete Intake Channel"
+        size="sm"
+        footer={
+          <ModalFooter
+            onCancel={() => setChannelToDelete(null)}
+            onConfirm={handleConfirmDelete}
+            cancelText="Cancel"
+            confirmText="Delete Channel"
+            confirmVariant="danger"
+            loading={
+              channelToDelete !== null && working === channelToDelete.channel_id
+            }
+          />
+        }
+      >
+        <div className="flex items-start gap-3">
+          <AlertTriangle className="w-5 h-5 text-error flex-shrink-0 mt-0.5" />
+          <div className="text-sm text-gray-700">
+            <p className="mb-2">
+              Are you sure you want to delete{" "}
+              <span className="font-semibold text-primary">
+                {channelToDelete?.display_name}
+              </span>{" "}
+              (<span className="font-mono">{channelToDelete?.channel_id}</span>
+              )?
+            </p>
+            <p className="text-gray-500">
+              This permanently removes the channel and invalidates its HMAC
+              secret. This action cannot be undone.
+            </p>
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }

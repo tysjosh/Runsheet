@@ -292,24 +292,59 @@ describe("IntakeChannelsAdminPanel — toggle enabled", () => {
 });
 
 describe("IntakeChannelsAdminPanel — delete", () => {
-  it("deletes a channel after confirmation", async () => {
+  it("deletes a channel after confirming in the modal", async () => {
     mockList.mockResolvedValue({
       items: [channelFixture({ channel_id: "ch-del" })],
       total: 1,
     });
     mockDelete.mockResolvedValue(undefined);
-    window.confirm = jest.fn(() => true);
 
     render(<IntakeChannelsAdminPanel />);
 
     // Wait for channels to load
     expect(await screen.findByText("ch-del")).toBeInTheDocument();
 
+    // Open the delete confirmation modal
+    fireEvent.click(screen.getByRole("button", { name: /delete ch-del/i }));
+
+    // Modal appears naming the channel; delete not yet called
+    expect(
+      await screen.findByRole("heading", { name: /delete intake channel/i }),
+    ).toBeInTheDocument();
+    expect(mockDelete).not.toHaveBeenCalled();
+
+    // Confirm deletion
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /delete ch-del/i }));
+      fireEvent.click(screen.getByRole("button", { name: /delete channel/i }));
     });
 
-    expect(window.confirm).toHaveBeenCalled();
     await waitFor(() => expect(mockDelete).toHaveBeenCalledWith("ch-del"));
+  });
+
+  it("does not delete when the modal is cancelled", async () => {
+    mockList.mockResolvedValue({
+      items: [channelFixture({ channel_id: "ch-keep" })],
+      total: 1,
+    });
+    mockDelete.mockResolvedValue(undefined);
+
+    render(<IntakeChannelsAdminPanel />);
+
+    expect(await screen.findByText("ch-keep")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /delete ch-keep/i }));
+
+    expect(
+      await screen.findByRole("heading", { name: /delete intake channel/i }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /cancel/i }));
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("heading", { name: /delete intake channel/i }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(mockDelete).not.toHaveBeenCalled();
   });
 });
