@@ -48,10 +48,11 @@ function AccountFilterSelect({
       try {
         const res = await getAccounts({ status: "active", limit: 200 });
         if (cancelled) return;
+        const rows = Array.isArray(res.data) ? res.data : [];
         setOptions(
-          res.data.map((a) => ({
+          rows.map((a) => ({
             value: a.account_id,
-            label: a.display_name,
+            label: a.display_name || a.account_id,
             sublabel: a.account_id,
           })),
         );

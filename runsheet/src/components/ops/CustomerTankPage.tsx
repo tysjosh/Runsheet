@@ -1304,7 +1304,9 @@ export default function CustomerTankPage({
           size: PAGE_SIZE,
         });
         if (signal?.aborted) return;
-        setTanks(response.items);
+        // Guard against a null/non-array items payload before storing/iterating.
+        const tankItems = Array.isArray(response.items) ? response.items : [];
+        setTanks(tankItems);
         setTotalWindow(response.total);
         setHasNext(response.has_next);
 
@@ -1318,7 +1320,7 @@ export default function CustomerTankPage({
         try {
           const tenantId = getCurrentTenantId();
           const types = Array.from(
-            new Set(response.items.map((t) => t.customer_type)),
+            new Set(tankItems.map((t) => t.customer_type)),
           );
           const results = await Promise.all(
             types.map((customer_type) =>
@@ -1332,7 +1334,7 @@ export default function CustomerTankPage({
           if (signal?.aborted) return;
           const map: Record<string, CustomerTankForecast> = {};
           for (const res of results) {
-            if (!res) continue;
+            if (!res || !Array.isArray(res.data)) continue;
             for (const f of res.data) {
               const id = f.customer_tank_id;
               // Backend sorts by timestamp desc, so the first row seen per

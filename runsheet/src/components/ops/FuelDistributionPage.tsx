@@ -3445,7 +3445,7 @@ function CombinableGroupsPanel({ addError }: CombinableGroupsPanelProps) {
           <Loader2 className="w-5 h-5 text-gray-400 animate-spin" />
           <span className="ml-2 text-xs text-gray-500">Loading…</span>
         </div>
-      ) : !data || data.items.length === 0 ? (
+      ) : !data || !Array.isArray(data.items) || data.items.length === 0 ? (
         <div className="text-center py-8 text-xs text-gray-400">No results</div>
       ) : (
         <div className="space-y-3">
