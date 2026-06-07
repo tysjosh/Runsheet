@@ -15,14 +15,16 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 jest.mock("../../../services/commerceApi", () => ({
   getCustomers: jest.fn(),
+  getCustomer: jest.fn(),
 }));
 
-import { getCustomers } from "../../../services/commerceApi";
+import { getCustomer, getCustomers } from "../../../services/commerceApi";
 import CustomersListPage from "../CustomersListPage";
 
 const mockGetCustomers = getCustomers as jest.MockedFunction<
   typeof getCustomers
 >;
+const mockGetCustomer = getCustomer as jest.MockedFunction<typeof getCustomer>;
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -122,6 +124,44 @@ describe("CustomersListPage", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /View Details/i }));
     expect(onSelect).toHaveBeenCalledWith("cust_001");
+  });
+
+  it("renders customer detail in-shell when no onSelectCustomer override is provided", async () => {
+    mockGetCustomers.mockResolvedValue(
+      paginatedResponse([customerFixture()]) as any,
+    );
+    mockGetCustomer.mockResolvedValue({
+      data: {
+        ...customerFixture(),
+        open_invoice_count: 1,
+        open_balance_cents: 12345,
+        lifetime_revenue_cents: 678900,
+      },
+      request_id: "req-1",
+    } as any);
+
+    render(<CustomersListPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Acme Fuel Corp")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /View Details/i }));
+
+    // Detail loads in place (no route navigation) — the in-shell Back affordance
+    // appears and the customer summary renders.
+    expect(
+      await screen.findByRole("button", { name: /Back to Customers/i }),
+    ).toBeInTheDocument();
+    expect(mockGetCustomer).toHaveBeenCalledWith("cust_001");
+
+    // Returning to the list restores it.
+    fireEvent.click(screen.getByRole("button", { name: /Back to Customers/i }));
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /View Details/i }),
+      ).toBeInTheDocument();
+    });
   });
 
   it("filters by status when dropdown changes", async () => {

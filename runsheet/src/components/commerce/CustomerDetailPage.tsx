@@ -10,10 +10,17 @@ import {
 
 interface CustomerDetailPageProps {
   customerId: string;
+  /**
+   * Optional in-shell back handler. When provided (e.g. the dashboard shell
+   * renders detail in place), the Back button clears the selection instead of
+   * route-navigating to /commerce/customers.
+   */
+  onBack?: () => void;
 }
 
 export default function CustomerDetailPage({
   customerId,
+  onBack,
 }: CustomerDetailPageProps) {
   const router = useRouter();
   const [customer, setCustomer] = useState<CustomerWithProjections | null>(
@@ -88,7 +95,9 @@ export default function CustomerDetailPage({
         <div className="flex items-center gap-4 mb-2">
           <Button
             variant="ghost"
-            onClick={() => router.push("/commerce/customers")}
+            onClick={() =>
+              onBack ? onBack() : router.push("/commerce/customers")
+            }
           >
             ← Back to Customers
           </Button>

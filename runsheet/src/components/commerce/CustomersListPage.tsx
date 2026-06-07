@@ -1,7 +1,6 @@
 "use client";
 
 import { Gauge, X } from "lucide-react";
-import { useRouter } from "next/navigation";
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import {
   Badge,
@@ -24,6 +23,9 @@ import LoadingSpinner from "../LoadingSpinner";
 // customer rather than living as a separate Fuel Ops tab. Lazy-loaded into a
 // slide-over.
 const CustomerTankPage = lazy(() => import("../ops/CustomerTankPage"));
+// Customer detail is rendered in-shell (consistent with the rest of the
+// dashboard) rather than route-navigating away to /commerce/customers/[id].
+const CustomerDetailPage = lazy(() => import("./CustomerDetailPage"));
 
 interface CustomersListPageProps {
   onSelectCustomer?: (customerId: string) => void;
@@ -32,7 +34,6 @@ interface CustomersListPageProps {
 export default function CustomersListPage({
   onSelectCustomer,
 }: CustomersListPageProps) {
-  const router = useRouter();
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -43,6 +44,10 @@ export default function CustomersListPage({
   // Customer whose tanks are shown in the slide-over (click-through), replacing
   // the former Fuel Ops > Customer Tanks tab.
   const [tanksCustomer, setTanksCustomer] = useState<Customer | null>(null);
+  // Selected customer for in-shell detail (when no onSelectCustomer override).
+  const [selectedCustomerId, setSelectedCustomerId] = useState<string | null>(
+    null,
+  );
 
   const fetchCustomers = useCallback(async () => {
     setLoading(true);
@@ -78,6 +83,20 @@ export default function CustomersListPage({
     if (status === "suspended") return "warning";
     return "default";
   };
+
+  // In-shell customer detail: when a customer is selected (and no external
+  // override is wired), render the detail in place instead of leaving the
+  // dashboard shell for the /commerce/customers/[id] route.
+  if (selectedCustomerId) {
+    return (
+      <Suspense fallback={<LoadingSpinner message="Loading…" />}>
+        <CustomerDetailPage
+          customerId={selectedCustomerId}
+          onBack={() => setSelectedCustomerId(null)}
+        />
+      </Suspense>
+    );
+  }
 
   return (
     <div className="p-6">
@@ -179,9 +198,7 @@ export default function CustomersListPage({
                           if (onSelectCustomer) {
                             onSelectCustomer(customer.customer_id);
                           } else {
-                            router.push(
-                              `/commerce/customers/${customer.customer_id}`,
-                            );
+                            setSelectedCustomerId(customer.customer_id);
                           }
                         }}
                       >
