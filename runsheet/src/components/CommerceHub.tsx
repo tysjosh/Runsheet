@@ -6,6 +6,7 @@ import {
   CreditCard,
   DollarSign,
   FileText,
+  ListChecks,
   Shield,
   Sliders,
   TrendingUp,
@@ -29,6 +30,11 @@ const PriceProtectionContractsPage = lazy(
   () => import("./compliance/PriceProtectionContractsPage"),
 );
 const PricingRulesPage = lazy(() => import("./compliance/PricingRulesPage"));
+// Reconciliation is the four-way gallon-variance dashboard (ordered → loaded →
+// delivered → invoiced). It's finance/back-office and ties into invoicing, so
+// it lives in the Commerce hub beside AR Aging rather than as its own
+// top-level sidebar destination.
+const ReconciliationPage = lazy(() => import("./ops/ReconciliationPage"));
 
 const TABS: Tab[] = [
   {
@@ -61,6 +67,11 @@ const TABS: Tab[] = [
     id: "ar-aging",
     label: "AR Aging",
     icon: <TrendingUp className="w-4 h-4" />,
+  },
+  {
+    id: "reconciliation",
+    label: "Reconciliation",
+    icon: <ListChecks className="w-4 h-4" />,
   },
 ];
 
@@ -155,6 +166,13 @@ export default function CommerceHub() {
         {activeTab === "ar-aging" && (
           <Suspense fallback={<LoadingSpinner message="Loading AR Aging..." />}>
             <ARAgingDashboard />
+          </Suspense>
+        )}
+        {activeTab === "reconciliation" && (
+          <Suspense
+            fallback={<LoadingSpinner message="Loading reconciliation..." />}
+          >
+            <ReconciliationPage />
           </Suspense>
         )}
       </div>

@@ -25,9 +25,6 @@ const DispatchPage = lazy(() => import("../../components/DispatchPage"));
 const FuelOpsPage = lazy(() => import("../../components/FuelOpsPage"));
 const ComplianceHub = lazy(() => import("../../components/ComplianceHub"));
 const CommerceHub = lazy(() => import("../../components/CommerceHub"));
-const ReconciliationHub = lazy(
-  () => import("../../components/ReconciliationHub"),
-);
 const AnalyticsHub = lazy(() => import("../../components/AnalyticsHub"));
 const AdminHub = lazy(() => import("../../components/AdminHub"));
 const SettingsPage = lazy(() => import("../../components/SettingsPage"));
@@ -202,11 +199,14 @@ export default function Home() {
         );
 
       case "reconciliation":
+        // Reconciliation now lives as a tab inside the Billing & Commerce hub
+        // (finance/back-office). Redirect any persisted "reconciliation" nav
+        // state there so old sessions don't land on a blank screen.
         return (
           <div className="flex-1 bg-gray-50">
-            <ErrorBoundary componentName="Reconciliation">
+            <ErrorBoundary componentName="Billing">
               <Suspense fallback={<ComponentLoadingPlaceholder />}>
-                <ReconciliationHub />
+                <CommerceHub />
               </Suspense>
             </ErrorBoundary>
           </div>
