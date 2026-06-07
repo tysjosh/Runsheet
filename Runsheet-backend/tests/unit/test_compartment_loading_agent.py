@@ -721,7 +721,7 @@ class TestQueryTrucksWithEquipmentCheck:
                                     "allowed_grades": ["AGO"],
                                     "position_index": 0,
                                     "tenant_id": "tenant-1",
-                                    "depot_location": "Depot A",
+                                    "depot_city": "Depot A",
                                 }
                             },
                         ]
@@ -769,7 +769,7 @@ class TestQueryTrucksWithEquipmentCheck:
                                     "allowed_grades": ["AGO"],
                                     "position_index": 0,
                                     "tenant_id": "tenant-1",
-                                    "depot_location": "Depot A",
+                                    "depot_city": "Depot A",
                                 }
                             },
                         ]
