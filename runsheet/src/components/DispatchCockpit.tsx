@@ -52,6 +52,20 @@ import {
 const REFRESH_INTERVAL_MS = 60_000;
 const MAX_ROWS = 6;
 
+/**
+ * Safely extract a `.data` array from a settled list-endpoint promise.
+ * Returns [] when the request rejected or the payload's `data` is missing /
+ * not an array (real backends occasionally return `null` data), so callers can
+ * spread the result without risking a "not iterable" runtime error.
+ */
+function settledArray<T>(
+  result: PromiseSettledResult<{ data?: T[] | null } | undefined>,
+): T[] {
+  if (result.status !== "fulfilled") return [];
+  const data = result.value?.data;
+  return Array.isArray(data) ? data : [];
+}
+
 interface DispatchCockpitProps {
   /** Navigate to a top-level dashboard module (e.g. "dispatch"). */
   onNavigate?: (item: string) => void;
@@ -107,8 +121,8 @@ export default function DispatchCockpit({ onNavigate }: DispatchCockpitProps) {
         getApprovals(getCurrentTenantId()),
       ]);
 
-    const placed = placedRes.status === "fulfilled" ? placedRes.value.data : [];
-    const held = holdRes.status === "fulfilled" ? holdRes.value.data : [];
+    const placed = settledArray<FuelOrder>(placedRes);
+    const held = settledArray<FuelOrder>(holdRes);
     // De-dupe by order_id (a status can't be both, but guard anyway) and sort
     // newest-first so the freshest work surfaces at the top.
     const byId = new Map<string, FuelOrder>();
@@ -120,10 +134,8 @@ export default function DispatchCockpit({ onNavigate }: DispatchCockpitProps) {
       ),
     );
 
-    setDelayedJobs(
-      delayedRes.status === "fulfilled" ? delayedRes.value.data : [],
-    );
-    setFuelAlerts(fuelRes.status === "fulfilled" ? fuelRes.value.data : []);
+    setDelayedJobs(settledArray<Job>(delayedRes));
+    setFuelAlerts(settledArray<FuelAlert>(fuelRes));
 
     if (approvalsRes.status === "fulfilled") {
       const data = approvalsRes.value as {

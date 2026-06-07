@@ -194,6 +194,18 @@ it("renders empty states and stays usable when a source fails", async () => {
   expect(screen.getByText("All stations healthy")).toBeInTheDocument();
 });
 
+it("tolerates a null data payload without crashing", async () => {
+  // Real backends occasionally return `data: null`; the cockpit must not
+  // try to spread it (regression: "placed is not iterable").
+  mockListOrders.mockResolvedValue({
+    data: null,
+  } as unknown as Awaited<ReturnType<typeof listOrders>>);
+
+  render(<DispatchCockpit />);
+
+  expect(await screen.findByText("No orders waiting")).toBeInTheDocument();
+});
+
 it("assigns a driver inline and removes the order from the list", async () => {
   mockListOrders.mockImplementation((filters) =>
     Promise.resolve(
