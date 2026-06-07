@@ -735,3 +735,117 @@ class TestExecuteMutationSendCustomerNotification:
         assert result.executed is True
         assert result.confirmation_method == "immediate"
         assert "notif-e2e" in result.result
+
+
+# ---------------------------------------------------------------------------
+# Tests: approval-queue deduplication (_find_pending_duplicate)
+# ---------------------------------------------------------------------------
+
+
+def _pending_hit(action_id: str, tool_name: str, parameters: dict):
+    """Build an ES hit shaped like an agent_approval_queue pending entry."""
+    return {
+        "_source": {
+            "action_id": action_id,
+            "tool_name": tool_name,
+            "status": "pending",
+            "parameters": parameters,
+        }
+    }
+
+
+def _queueing_protocol(pending_hits: list):
+    """A protocol in suggest-only mode (so mutations queue) whose approval
+    queue's ES returns ``pending_hits`` for the dedup lookup."""
+    protocol = _make_protocol(
+        risk_level=RiskLevel.MEDIUM, autonomy_level="suggest-only"
+    )
+    protocol._approval_queue._es = MagicMock()
+    protocol._approval_queue._es.search_documents = AsyncMock(
+        return_value={"hits": {"hits": pending_hits}}
+    )
+    return protocol
+
+
+class TestApprovalQueueDeduplication:
+    """Dedup keys on the *target identity*, not the full parameter set."""
+
+    async def test_same_station_is_deduped_despite_different_quantity(self):
+        """A pending refill for FS-011 suppresses a new FS-011 refill even when
+        the recomputed quantity differs — no duplicate pending request."""
+        protocol = _queueing_protocol(
+            [
+                _pending_hit(
+                    "existing-1",
+                    "request_fuel_refill",
+                    {"station_id": "FS-011", "quantity_liters": 16800.0,
+                     "priority": "medium"},
+                )
+            ]
+        )
+        request = _make_request(
+            tool_name="request_fuel_refill",
+            parameters={"station_id": "FS-011", "quantity_liters": 17250.0,
+                        "priority": "high"},
+            agent_id="fuel_management_agent",
+        )
+
+        result = await protocol.process_mutation(request)
+
+        assert result.confirmation_method == "already_queued"
+        assert result.approval_id == "existing-1"
+        protocol._approval_queue.create.assert_not_called()
+
+    async def test_different_station_still_queues(self):
+        """A pending refill for FS-011 must NOT suppress a refill for FS-014."""
+        protocol = _queueing_protocol(
+            [
+                _pending_hit(
+                    "existing-1",
+                    "request_fuel_refill",
+                    {"station_id": "FS-011", "quantity_liters": 16800.0},
+                )
+            ]
+        )
+        request = _make_request(
+            tool_name="request_fuel_refill",
+            parameters={"station_id": "FS-014", "quantity_liters": 14200.0},
+            agent_id="fuel_management_agent",
+        )
+
+        result = await protocol.process_mutation(request)
+
+        assert result.confirmation_method == "approval_queue"
+        protocol._approval_queue.create.assert_awaited_once()
+
+    async def test_no_pending_entries_queues_normally(self):
+        """With nothing pending, the proposal is queued (create called)."""
+        protocol = _queueing_protocol([])
+        request = _make_request(
+            tool_name="request_fuel_refill",
+            parameters={"station_id": "FS-003", "quantity_liters": 30600.0},
+            agent_id="fuel_management_agent",
+        )
+
+        result = await protocol.process_mutation(request)
+
+        assert result.confirmation_method == "approval_queue"
+        protocol._approval_queue.create.assert_awaited_once()
+
+    async def test_unregistered_tool_falls_back_to_full_param_match(self):
+        """Tools without a registered identity dedup on exact parameters."""
+        protocol = _queueing_protocol(
+            [_pending_hit("existing-1", "mystery_tool", {"a": 1, "b": 2})]
+        )
+        # Identical params → duplicate.
+        dup = await protocol.process_mutation(
+            _make_request(tool_name="mystery_tool", parameters={"a": 1, "b": 2})
+        )
+        assert dup.confirmation_method == "already_queued"
+
+        # Different params → not a duplicate.
+        protocol._approval_queue.create.reset_mock()
+        fresh = await protocol.process_mutation(
+            _make_request(tool_name="mystery_tool", parameters={"a": 1, "b": 99})
+        )
+        assert fresh.confirmation_method == "approval_queue"

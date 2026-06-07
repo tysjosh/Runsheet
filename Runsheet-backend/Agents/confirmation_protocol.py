@@ -21,6 +21,27 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+# Per-tool "target identity" parameter keys for approval-queue deduplication.
+# Two pending proposals from the same agent that resolve to the same identity
+# are duplicates even when other (recomputed) parameters differ — e.g. a refill
+# quantity that drifts between monitor cycles must not spawn a second pending
+# request for the same station, and a pending proposal for one station must not
+# suppress a proposal for a different one. Tools absent from this map fall back
+# to an exact full-parameter comparison.
+_DEDUP_IDENTITY_KEYS: Dict[str, tuple] = {
+    "request_fuel_refill": ("station_id",),
+    "update_fuel_threshold": ("station_id",),
+    "reassign_rider": ("shipment_id",),
+    "escalate_shipment": ("shipment_id",),
+    "cancel_job": ("job_id",),
+    "update_job_status": ("job_id",),
+    "assign_asset_to_job": ("job_id",),
+    "reroute_job": ("job_id",),
+    "create_job": ("job_type", "origin", "destination"),
+    "send_customer_notification": ("customer_id", "delivery_id"),
+}
+
+
 @dataclass
 class MutationRequest:
     """Represents a request to execute a mutation tool.
@@ -182,7 +203,16 @@ class ConfirmationProtocol:
         return risk_level.value in matrix.get(autonomy_level, set())
 
     async def _find_pending_duplicate(self, request: MutationRequest):
-        """Check if an identical pending action already exists in the approval queue.
+        """Return the action_id of a pending proposal targeting the same entity.
+
+        Deduplication keys on the *target identity* of the proposal — the subset
+        of parameters that names what the action affects (e.g. ``station_id``
+        for ``request_fuel_refill``), per :data:`_DEDUP_IDENTITY_KEYS` — not the
+        full parameter set. This means a recomputed ``quantity_liters`` cannot
+        defeat dedup (no duplicate pending request for the same station across
+        restarts/cycles), while a pending proposal for one station does not
+        suppress a legitimate proposal for a different station. Tools without a
+        registered identity fall back to an exact full-parameter match.
 
         Returns the action_id if a duplicate is found, None otherwise.
         """
@@ -198,12 +228,26 @@ class ConfirmationProtocol:
                     ]
                 }
             },
-            "size": 1,
+            "size": 100,
         }
-        resp = await es.search_documents("agent_approval_queue", query, size=1)
+        resp = await es.search_documents("agent_approval_queue", query, size=100)
         hits = resp.get("hits", {}).get("hits", [])
-        if hits:
-            return hits[0]["_source"].get("action_id")
+        if not hits:
+            return None
+
+        identity_keys = _DEDUP_IDENTITY_KEYS.get(request.tool_name)
+
+        def _identity(params):
+            params = params or {}
+            if identity_keys is None:
+                return params  # exact full-parameter match
+            return tuple(params.get(k) for k in identity_keys)
+
+        target = _identity(request.parameters)
+        for hit in hits:
+            source = hit.get("_source", {})
+            if _identity(source.get("parameters")) == target:
+                return source.get("action_id")
         return None
 
     async def _execute_mutation(self, request: MutationRequest) -> str:
