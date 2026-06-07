@@ -19,6 +19,9 @@ const IntegrationMarketplacePage = lazy(
 const IntakeChannelsAdminPanel = lazy(
   () => import("./admin/IntakeChannelsAdminPanel"),
 );
+const WeatherAlertsPage = lazy(
+  () => import("../app/admin/weather-alerts/page"),
+);
 
 function LoadingPlaceholder() {
   return (
@@ -59,6 +62,10 @@ export default function AdminHub() {
     {
       id: "intake-channels",
       label: "Intake Channels",
+    },
+    {
+      id: "weather-alerts",
+      label: "Weather Alerts",
     },
   ];
 
@@ -104,6 +111,12 @@ export default function AdminHub() {
         return (
           <Suspense fallback={<LoadingPlaceholder />}>
             <IntakeChannelsAdminPanel />
+          </Suspense>
+        );
+      case "weather-alerts":
+        return (
+          <Suspense fallback={<LoadingPlaceholder />}>
+            <WeatherAlertsPage />
           </Suspense>
         );
       default:
