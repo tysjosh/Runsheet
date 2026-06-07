@@ -34,8 +34,48 @@ interface SidebarProps {
   onMobileClose?: () => void;
 }
 
+interface NavItem {
+  id: string;
+  label: string;
+  icon: typeof LayoutDashboard;
+}
+
+// Grouped navigation — sections keep the 13 destinations scannable and put the
+// three config-flavored destinations (Setup / Admin / Settings) together under
+// one "Workspace" heading so they're no longer guessed-at siblings of ops.
+const NAV_SECTIONS: { label: string; items: NavItem[] }[] = [
+  {
+    label: "Operations",
+    items: [
+      { id: "today", label: "Today", icon: LayoutDashboard },
+      { id: "fleet", label: "Fleet", icon: Truck },
+      { id: "dispatch", label: "Dispatch", icon: CalendarClock },
+      { id: "drivers", label: "Drivers", icon: User },
+      { id: "fuel-ops", label: "Fuel Ops", icon: Fuel },
+      { id: "compliance", label: "Compliance", icon: ClipboardCheck },
+      { id: "control", label: "Control Center", icon: Radio },
+    ],
+  },
+  {
+    label: "Commerce",
+    items: [
+      { id: "customers", label: "Customers", icon: Users },
+      { id: "billing", label: "Billing", icon: DollarSign },
+      { id: "analytics", label: "Analytics", icon: BarChart3 },
+    ],
+  },
+  {
+    label: "Workspace",
+    items: [
+      { id: "setup", label: "Setup", icon: SlidersHorizontal },
+      { id: "admin", label: "Admin", icon: Shield },
+      { id: "settings", label: "Settings", icon: Settings },
+    ],
+  },
+];
+
 export default function Sidebar({
-  activeItem = "fleet",
+  activeItem = "today",
   isCollapsed,
   onToggle,
   onNavigate,
@@ -47,9 +87,6 @@ export default function Sidebar({
   const [isMobile, setIsMobile] = useState(false);
   const asideRef = useRef<HTMLElement>(null);
 
-  // Track viewport so the drawer always renders its expanded content below
-  // `md` even if the user previously collapsed the desktop rail. The
-  // expand/collapse affordance is desktop-only.
   useEffect(() => {
     if (typeof window === "undefined") return;
     const mq = window.matchMedia("(max-width: 767px)");
@@ -59,8 +96,6 @@ export default function Sidebar({
     return () => mq.removeEventListener("change", update);
   }, []);
 
-  // When the drawer opens on small screens, move focus into it and let Escape
-  // close it for keyboard users.
   useEffect(() => {
     if (!isMobileOpen) return;
     asideRef.current?.focus();
@@ -75,8 +110,6 @@ export default function Sidebar({
   // to the desktop rail.
   const collapsed = isMobile ? false : isCollapsed;
 
-  // Surface the signed-in user's email next to the avatar. Derived from the
-  // verified session via the backend, falling back to a generic label.
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -93,8 +126,6 @@ export default function Sidebar({
   }, []);
 
   const handleLogout = async () => {
-    // Revoke the SuperTokens session (clears the session cookies) before
-    // returning to sign-in. Navigate regardless of revoke outcome.
     try {
       await Session.signOut();
     } finally {
@@ -102,26 +133,38 @@ export default function Sidebar({
     }
   };
 
-  const menuItems = [
-    { id: "today", label: "Today", icon: LayoutDashboard },
-    { id: "fleet", label: "Fleet", icon: Truck },
-    { id: "customers", label: "Customers", icon: Users },
-    { id: "drivers", label: "Drivers", icon: User },
-    { id: "dispatch", label: "Dispatch", icon: CalendarClock },
-    { id: "fuel-ops", label: "Fuel Ops", icon: Fuel },
-    { id: "compliance", label: "Compliance", icon: ClipboardCheck },
-    { id: "billing", label: "Billing", icon: DollarSign },
-    { id: "analytics", label: "Analytics", icon: BarChart3 },
-    { id: "control", label: "Control Center", icon: Radio },
-    { id: "setup", label: "Setup", icon: SlidersHorizontal },
-    { id: "admin", label: "Admin", icon: Shield },
-    { id: "settings", label: "Settings", icon: Settings },
-  ];
-
   // Navigating also dismisses the mobile drawer so the content is visible.
   const navigateTo = (id: string) => {
     onNavigate(id);
     onMobileClose?.();
+  };
+
+  const renderItem = (item: NavItem) => {
+    const isActive = activeItem.toLowerCase() === item.id;
+    const Icon = item.icon;
+    return (
+      <li key={item.id}>
+        <button
+          type="button"
+          onClick={() => navigateTo(item.id)}
+          aria-current={isActive ? "page" : undefined}
+          title={collapsed ? item.label : undefined}
+          className={`flex w-full items-center ${collapsed ? "justify-center rounded-2xl" : "justify-start gap-3 rounded-lg"} px-3 py-2.5 transition-colors duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-[color:var(--color-primary)] ${isActive ? "" : "hover:bg-[color-mix(in_srgb,var(--color-primary)_7%,transparent)]"}`}
+          style={{
+            color: isActive ? "white" : "var(--color-primary)",
+            backgroundColor: isActive ? "var(--color-primary)" : "transparent",
+          }}
+        >
+          <Icon
+            className="h-5 w-5 flex-shrink-0"
+            style={{ color: isActive ? "white" : "var(--color-primary)" }}
+          />
+          {!collapsed && (
+            <span className="text-sm font-medium">{item.label}</span>
+          )}
+        </button>
+      </li>
+    );
   };
 
   return (
@@ -150,27 +193,15 @@ export default function Sidebar({
         {/* Toggle Button — desktop rail only */}
         <button
           onClick={onToggle}
+          type="button"
           aria-label={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
           aria-expanded={!isCollapsed}
-          className="hidden md:block absolute -right-3 border rounded-full p-1.5 z-20 transition-all duration-200 shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-500"
+          className="hidden md:block absolute -right-3 border rounded-full p-1.5 z-20 transition-all duration-200 shadow-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-[color:var(--color-primary)]"
           style={{
             backgroundColor: "var(--color-surface)",
             borderColor:
               "color-mix(in srgb, var(--color-primary) 12%, transparent)",
             top: "20px",
-          }}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.backgroundColor = "var(--color-primary)";
-            e.currentTarget.style.borderColor = "var(--color-primary)";
-            const icon = e.currentTarget.querySelector("svg");
-            if (icon) icon.style.color = "white";
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.backgroundColor = "var(--color-surface)";
-            e.currentTarget.style.borderColor =
-              "color-mix(in srgb, var(--color-primary) 12%, transparent)";
-            const icon = e.currentTarget.querySelector("svg");
-            if (icon) icon.style.color = "var(--color-primary)";
           }}
         >
           <ChevronLeft
@@ -179,67 +210,33 @@ export default function Sidebar({
           />
         </button>
 
-        <nav className="p-4 pt-6">
-          <ul className="space-y-1.5">
-            {menuItems.map((item) => (
-              <li key={item.id}>
-                <div
-                  className={`flex items-center ${collapsed ? "justify-center" : "justify-start"} px-3 py-2.5 ${collapsed ? "rounded-2xl" : "rounded-lg"} cursor-pointer transition-all duration-200`}
-                  style={{
-                    color:
-                      activeItem.toLowerCase() === item.id
-                        ? "white"
-                        : "var(--color-primary)",
-                    backgroundColor:
-                      activeItem.toLowerCase() === item.id
-                        ? "var(--color-primary)"
-                        : "transparent",
-                  }}
-                  onMouseEnter={(e) => {
-                    if (activeItem.toLowerCase() !== item.id) {
-                      e.currentTarget.style.backgroundColor =
-                        "color-mix(in srgb, var(--color-primary) 6%, transparent)";
-                    } else {
-                      e.currentTarget.style.backgroundColor =
-                        "var(--color-primary-hover)";
-                    }
-                  }}
-                  onMouseLeave={(e) => {
-                    if (activeItem.toLowerCase() !== item.id) {
-                      e.currentTarget.style.backgroundColor = "transparent";
-                    } else {
-                      e.currentTarget.style.backgroundColor =
-                        "var(--color-primary)";
-                    }
-                  }}
-                  onClick={() => navigateTo(item.id)}
-                  title={collapsed ? item.label : ""}
-                >
+        <nav
+          aria-label="Primary"
+          className="h-full overflow-y-auto p-4 pt-6 pb-28"
+        >
+          {NAV_SECTIONS.map((section, i) => (
+            <div key={section.label} className={i > 0 ? "mt-6" : ""}>
+              {collapsed ? (
+                i > 0 && (
                   <div
-                    className={`flex items-center ${collapsed ? "" : "space-x-3"}`}
-                  >
-                    <item.icon
-                      className={`w-5 h-5 transition-colors`}
-                      style={{
-                        color:
-                          activeItem.toLowerCase() === item.id
-                            ? "white"
-                            : "var(--color-primary)",
-                      }}
-                    />
-                    {!collapsed && (
-                      <span
-                        className="font-medium text-sm transition-opacity duration-200"
-                        style={{ opacity: collapsed ? 0 : 1 }}
-                      >
-                        {item.label}
-                      </span>
-                    )}
-                  </div>
-                </div>
-              </li>
-            ))}
-          </ul>
+                    className="mx-2 mb-3 h-px"
+                    style={{
+                      backgroundColor:
+                        "color-mix(in srgb, var(--color-primary) 10%, transparent)",
+                    }}
+                  />
+                )
+              ) : (
+                <p
+                  className="mb-2 px-3 text-[10px] font-semibold uppercase tracking-[0.18em]"
+                  style={{ color: "var(--color-gray-500)" }}
+                >
+                  {section.label}
+                </p>
+              )}
+              <ul className="space-y-1">{section.items.map(renderItem)}</ul>
+            </div>
+          ))}
         </nav>
 
         {/* User Profile - Expanded */}
@@ -247,7 +244,7 @@ export default function Sidebar({
           className={`absolute bottom-4 left-4 right-4 transition-all duration-300 ${collapsed ? "opacity-0 pointer-events-none" : "opacity-100"}`}
         >
           <div
-            className="flex items-center space-x-3 p-3 rounded-lg transition-colors"
+            className="flex items-center space-x-3 p-3 rounded-lg"
             style={{
               backgroundColor:
                 "color-mix(in srgb, var(--color-surface) 60%, transparent)",
@@ -257,7 +254,7 @@ export default function Sidebar({
               type="button"
               onClick={() => navigateTo("profile")}
               title="View profile"
-              className="flex items-center space-x-3 flex-1 min-w-0 text-left focus:outline-none focus:ring-2 focus:ring-primary rounded-md"
+              className="flex items-center space-x-3 flex-1 min-w-0 text-left rounded-md focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-primary)]"
             >
               <div className="w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0 bg-primary">
                 <User className="w-5 h-5 text-white" />
@@ -272,18 +269,10 @@ export default function Sidebar({
               </div>
             </button>
             <button
+              type="button"
               onClick={handleLogout}
-              className="flex-shrink-0 transition-all duration-200 p-1.5 rounded-md"
+              className="flex-shrink-0 p-1.5 rounded-md transition-colors hover:bg-[color-mix(in_srgb,var(--color-error)_10%,transparent)] hover:text-[color:var(--color-error)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-error)]"
               style={{ color: "var(--color-gray-500)" }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.backgroundColor =
-                  "color-mix(in srgb, var(--color-error) 10%, transparent)";
-                e.currentTarget.style.color = "var(--color-error)";
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.backgroundColor = "transparent";
-                e.currentTarget.style.color = "var(--color-gray-500)";
-              }}
               title="Logout"
             >
               <LogOut className="w-4 h-4" />
@@ -296,31 +285,18 @@ export default function Sidebar({
           className={`absolute bottom-4 left-1/2 transform -translate-x-1/2 transition-all duration-300 flex flex-col items-center gap-2 ${collapsed ? "opacity-100" : "opacity-0 pointer-events-none"}`}
         >
           <button
+            type="button"
             onClick={() => navigateTo("profile")}
-            className="w-10 h-10 rounded-full flex items-center justify-center transition-all duration-200 bg-primary hover:bg-primary-hover"
-            onMouseEnter={(e) => {
-              e.currentTarget.style.backgroundColor =
-                "var(--color-primary-hover)";
-              e.currentTarget.style.transform = "scale(1.05)";
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.backgroundColor = "var(--color-primary)";
-              e.currentTarget.style.transform = "scale(1)";
-            }}
+            className="w-10 h-10 rounded-full flex items-center justify-center transition-all duration-200 bg-primary hover:bg-primary-hover focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-[color:var(--color-primary)]"
             title="View profile"
           >
             <User className="w-5 h-5 text-white" />
           </button>
           <button
+            type="button"
             onClick={handleLogout}
-            className="p-1.5 rounded-md transition-colors"
+            className="p-1.5 rounded-md transition-colors hover:text-[color:var(--color-error)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-error)]"
             style={{ color: "var(--color-gray-500)" }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.color = "var(--color-error)";
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.color = "var(--color-gray-500)";
-            }}
             title="Logout"
           >
             <LogOut className="w-4 h-4" />

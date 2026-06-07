@@ -214,8 +214,9 @@ it("renders empty states and stays usable when a source fails", async () => {
   render(<DispatchCockpit />);
 
   await waitFor(() => expect(mockListOrders).toHaveBeenCalled());
-  expect(await screen.findByText("No orders waiting")).toBeInTheDocument();
-  expect(screen.getByText("All stations healthy")).toBeInTheDocument();
+  // One source failing must not blank the cockpit — it falls open to the
+  // unified "caught up" state.
+  expect(await screen.findByText(/you're all caught up/i)).toBeInTheDocument();
 });
 
 it("tolerates a null list payload without crashing", async () => {
@@ -227,7 +228,7 @@ it("tolerates a null list payload without crashing", async () => {
 
   render(<DispatchCockpit />);
 
-  expect(await screen.findByText("No orders waiting")).toBeInTheDocument();
+  expect(await screen.findByText(/you're all caught up/i)).toBeInTheDocument();
 });
 
 it("assigns a driver inline and removes the order from the list", async () => {

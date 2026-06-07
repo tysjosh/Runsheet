@@ -1,4 +1,8 @@
-import { Menu } from "lucide-react";
+"use client";
+
+import { Menu, Plus, Search, Sparkles } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { useState } from "react";
 
 interface HeaderProps {
   onAIClick?: () => void;
@@ -7,85 +11,111 @@ interface HeaderProps {
 }
 
 export default function Header({ onAIClick, onMenuClick }: HeaderProps) {
+  const router = useRouter();
+  const [query, setQuery] = useState("");
+
+  // Global search currently scopes to the Orders board (the primary searchable
+  // entity). The typed query is handed off via the URL so the board can pick it
+  // up; until a unified search index exists this is the most useful landing.
+  const handleSearch = (e: React.FormEvent) => {
+    e.preventDefault();
+    const q = query.trim();
+    router.push(q ? `/ops?q=${encodeURIComponent(q)}` : "/ops");
+  };
+
   return (
     <header
-      className="relative overflow-hidden"
-      style={{ backgroundColor: "var(--color-surface-muted)" }}
+      className="flex-shrink-0 border-b bg-[color:var(--color-surface)]"
+      style={{
+        borderColor:
+          "color-mix(in srgb, var(--color-primary) 10%, transparent)",
+      }}
     >
-      {/* Subtle gradient overlay */}
-      <div
-        className="absolute inset-0 opacity-50"
-        style={{
-          background:
-            "linear-gradient(135deg, color-mix(in srgb, var(--color-surface) 80%, transparent) 0%, color-mix(in srgb, var(--color-gray-100) 40%, transparent) 100%)",
-        }}
-      />
+      <div className="flex h-16 items-center gap-3 px-4 sm:px-6 lg:px-8">
+        {/* Mobile drawer toggle — hidden on the desktop rail (md+) */}
+        <button
+          type="button"
+          onClick={onMenuClick}
+          aria-label="Open navigation menu"
+          className="md:hidden flex items-center justify-center w-9 h-9 rounded-lg transition-colors hover:bg-[color-mix(in_srgb,var(--color-primary)_8%,transparent)] focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-[color:var(--color-primary)]"
+          style={{ color: "var(--color-primary)" }}
+        >
+          <Menu className="w-5 h-5" />
+        </button>
 
-      {/* Content */}
-      <div className="relative px-8 py-3">
-        <div className="max-w-7xl mx-auto flex items-center justify-between">
-          {/* Logo/Brand */}
-          <div className="flex items-center space-x-2.5">
-            {/* Mobile drawer toggle — hidden on the desktop rail (md+) */}
-            <button
-              type="button"
-              onClick={onMenuClick}
-              aria-label="Open navigation menu"
-              className="md:hidden flex items-center justify-center w-9 h-9 rounded-lg transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-500"
-              style={{ color: "var(--color-primary)" }}
-            >
-              <Menu className="w-5 h-5" />
-            </button>
-            <div className="w-9 h-9 rounded-xl flex items-center justify-center bg-primary">
-              <img
-                src="/runsheet_logo.svg"
-                alt="Runsheet Logo"
-                className="w-5 h-5"
-                style={{ filter: "brightness(0) invert(1)" }}
-              />
-            </div>
-            <h1
-              className="text-xl font-semibold tracking-tight"
-              style={{ color: "var(--color-primary)" }}
-            >
-              Runsheet
-            </h1>
+        {/* Brand */}
+        <div className="flex items-center gap-2.5">
+          <div className="w-9 h-9 rounded-xl flex items-center justify-center bg-primary">
+            <img
+              src="/runsheet_logo.svg"
+              alt="Runsheet"
+              className="w-5 h-5"
+              style={{ filter: "brightness(0) invert(1)" }}
+            />
           </div>
+          <h1
+            className="hidden text-lg font-semibold tracking-tight sm:block"
+            style={{ color: "var(--color-primary)" }}
+          >
+            Runsheet
+          </h1>
+        </div>
 
-          {/* Header Actions */}
-          <div className="flex items-center space-x-2">
-            <button
-              onClick={onAIClick}
-              aria-label="Open AI support assistant"
-              className="flex items-center space-x-2 px-4 py-2 rounded-lg transition-all duration-200 font-medium text-sm focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-500"
+        {/* Global search — flexes to fill the bar */}
+        <form
+          onSubmit={handleSearch}
+          role="search"
+          className="ml-2 flex max-w-xl flex-1 items-center"
+        >
+          <div className="relative w-full">
+            <Search
+              className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2"
+              style={{ color: "var(--color-gray-400)" }}
+            />
+            <input
+              type="search"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search orders…"
+              aria-label="Search orders"
+              className="w-full rounded-lg border py-2 pl-9 pr-3 text-sm transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-primary)]"
               style={{
+                borderColor:
+                  "color-mix(in srgb, var(--color-primary) 12%, transparent)",
+                backgroundColor: "var(--color-surface-muted)",
                 color: "var(--color-primary)",
-                backgroundColor:
-                  "color-mix(in srgb, var(--color-surface) 80%, transparent)",
-                border:
-                  "1px solid color-mix(in srgb, var(--color-primary) 10%, transparent)",
               }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.backgroundColor = "var(--color-surface)";
-                e.currentTarget.style.transform = "translateY(-1px)";
-                e.currentTarget.style.boxShadow =
-                  "0 4px 12px color-mix(in srgb, var(--color-ink) 8%, transparent)";
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.backgroundColor =
-                  "color-mix(in srgb, var(--color-surface) 80%, transparent)";
-                e.currentTarget.style.transform = "translateY(0)";
-                e.currentTarget.style.boxShadow = "none";
-              }}
-            >
-              <img
-                src="/assistant.svg"
-                alt="Support Assistant"
-                className="w-5 h-5"
-              />
-              <span>Support</span>
-            </button>
+            />
           </div>
+        </form>
+
+        {/* Actions */}
+        <div className="ml-auto flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => router.push("/ops")}
+            className="hidden items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium text-white transition-colors bg-primary hover:bg-primary-hover focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-[color:var(--color-primary)] sm:flex"
+          >
+            <Plus className="h-4 w-4" />
+            New Order
+          </button>
+          <button
+            type="button"
+            onClick={onAIClick}
+            aria-label="Ask the AI copilot"
+            className="flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-medium transition-colors hover:bg-[color-mix(in_srgb,var(--color-primary)_6%,transparent)] focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-[color:var(--color-primary)]"
+            style={{
+              color: "var(--color-primary)",
+              borderColor:
+                "color-mix(in srgb, var(--color-primary) 12%, transparent)",
+            }}
+          >
+            <Sparkles
+              className="h-4 w-4"
+              style={{ color: "var(--color-brand-accent)" }}
+            />
+            <span className="hidden sm:inline">Ask Copilot</span>
+          </button>
         </div>
       </div>
     </header>

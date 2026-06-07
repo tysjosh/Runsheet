@@ -3,18 +3,18 @@
 /**
  * DispatchCockpit — the dispatcher's "Today" landing.
  *
- * A single "what needs my attention now" surface that aggregates the work
- * scattered across Orders, Dispatch, Fuel Ops, and the Control Center, and
- * deep-links each item to the place it's acted on. Read paths reuse existing
- * endpoints (orders list, delayed jobs, fuel alerts, agent approvals); each
- * source loads independently and fails open so one outage can't blank the
- * whole cockpit.
+ * A single "what needs my attention now" surface. Rather than siloing work
+ * into per-type boxes, it merges every source (orders, delayed jobs, fuel
+ * alerts, agent proposals) into ONE severity-ranked priority feed, with filter
+ * chips to narrow by category. A station near dry outranks a freshly placed
+ * order, so the dispatcher always sees the most urgent work first. Read paths
+ * reuse existing endpoints; each source loads independently and fails open so
+ * one outage can't blank the whole cockpit.
  */
 
 import {
-  AlertTriangle,
-  ArrowRight,
   Bot,
+  CheckCircle2,
   ChevronRight,
   ClipboardList,
   Clock,
@@ -55,21 +55,10 @@ import {
 // WebSockets; the cockpit only polls this slowly so it still recovers if the
 // socket drops or a server-side push is missed.
 const REFRESH_INTERVAL_MS = 120_000;
-// Coalesce bursts of WebSocket events into a single reload so a flurry of
-// updates doesn't trigger a reload per message.
 const WS_REFRESH_DEBOUNCE_MS = 500;
-const MAX_ROWS = 6;
+const MAX_PER_SOURCE = 6;
 
-/**
- * Safely extract a list array from a settled list-endpoint promise.
- *
- * Different list surfaces use different envelopes: the order endpoints return
- * ``{ items }`` (no ``data``/``request_id`` wrapper) while the scheduling and
- * fuel-alert endpoints return ``{ data }``. We read whichever is present.
- * Returns [] when the request rejected or the payload's list is missing / not
- * an array (real backends occasionally return ``null``), so callers can spread
- * the result without risking a "not iterable" runtime error.
- */
+/** Safely extract a list array from a settled list-endpoint promise. */
 function settledArray<T>(
   result: PromiseSettledResult<
     { data?: T[] | null; items?: T[] | null } | undefined
@@ -80,10 +69,25 @@ function settledArray<T>(
   return Array.isArray(list) ? list : [];
 }
 
+/** Extract the authoritative total from a settled paginated response. */
+function settledTotal(
+  result: PromiseSettledResult<
+    | { total?: number; data?: unknown[] | null; items?: unknown[] | null }
+    | undefined
+  >,
+): number {
+  if (result.status !== "fulfilled") return 0;
+  const v = result.value;
+  if (typeof v?.total === "number") return v.total;
+  const list = v?.data ?? v?.items;
+  return Array.isArray(list) ? list.length : 0;
+}
+
 interface DispatchCockpitProps {
-  /** Navigate to a top-level dashboard module (e.g. "dispatch"). */
   onNavigate?: (item: string) => void;
 }
+
+type Category = "order" | "delayed" | "fuel" | "agent";
 
 function formatRelative(dateStr?: string | null): string {
   if (!dateStr) return "";
@@ -111,6 +115,18 @@ const FUEL_ALERT_VARIANT: Record<FuelAlert["status"], BadgeVariant> = {
   empty: "error",
 };
 
+// Cross-category severity so the single feed can rank a near-dry station above
+// a freshly placed order. Bases are spaced so categories don't leapfrog except
+// where it's intended (a critical fuel alert outranks any delay).
+function fuelSeverity(a: FuelAlert): number {
+  const base =
+    a.status === "empty" ? 4000 : a.status === "critical" ? 3000 : 2000;
+  return base - (a.stock_percentage ?? 0);
+}
+function delaySeverity(j: Job): number {
+  return 1000 + Math.min(j.delay_duration_minutes ?? 0, 900);
+}
+
 export default function DispatchCockpit({ onNavigate }: DispatchCockpitProps) {
   const router = useRouter();
   const { toasts, addToast, dismissToast } = useToasts();
@@ -118,18 +134,21 @@ export default function DispatchCockpit({ onNavigate }: DispatchCockpitProps) {
   const [delayedJobs, setDelayedJobs] = useState<Job[]>([]);
   const [fuelAlerts, setFuelAlerts] = useState<FuelAlert[]>([]);
   const [approvalCount, setApprovalCount] = useState(0);
+  const [ordersTotal, setOrdersTotal] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const [filter, setFilter] = useState<"all" | Category>("all");
 
-  const loadData = useCallback(async () => {
-    setLoading(true);
-    // "Needs attention" orders: newly placed (await scheduling/assignment)
-    // plus anything parked on hold (awaits release).
+  // `background` refreshes (poll / WebSocket) update in place — they must not
+  // flip the feed back to a skeleton over data the dispatcher is reading.
+  const loadData = useCallback(async (opts?: { background?: boolean }) => {
+    if (!opts?.background) setRefreshing(true);
     const orderStatuses: OrderStatus[] = ["placed", "on_hold"];
     const [placedRes, holdRes, delayedRes, fuelRes, approvalsRes] =
       await Promise.allSettled([
-        listOrders({ status: orderStatuses[0], size: MAX_ROWS }),
-        listOrders({ status: orderStatuses[1], size: MAX_ROWS }),
+        listOrders({ status: orderStatuses[0], size: MAX_PER_SOURCE }),
+        listOrders({ status: orderStatuses[1], size: MAX_PER_SOURCE }),
         getDelayedJobs(),
         getFuelAlerts(),
         getApprovals(getCurrentTenantId()),
@@ -137,8 +156,6 @@ export default function DispatchCockpit({ onNavigate }: DispatchCockpitProps) {
 
     const placed = settledArray<FuelOrder>(placedRes);
     const held = settledArray<FuelOrder>(holdRes);
-    // De-dupe by order_id (a status can't be both, but guard anyway) and sort
-    // newest-first so the freshest work surfaces at the top.
     const byId = new Map<string, FuelOrder>();
     for (const o of [...placed, ...held]) byId.set(o.order_id, o);
     setOrders(
@@ -147,6 +164,9 @@ export default function DispatchCockpit({ onNavigate }: DispatchCockpitProps) {
           new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
       ),
     );
+    // Authoritative backlog size from the API totals — not the capped page,
+    // so the chip never under-reports a busy morning.
+    setOrdersTotal(settledTotal(placedRes) + settledTotal(holdRes));
 
     setDelayedJobs(settledArray<Job>(delayedRes));
     setFuelAlerts(settledArray<FuelAlert>(fuelRes));
@@ -164,22 +184,24 @@ export default function DispatchCockpit({ onNavigate }: DispatchCockpitProps) {
 
     setLastUpdated(new Date());
     setLoading(false);
+    setRefreshing(false);
   }, []);
 
   useEffect(() => {
     loadData();
-    const interval = setInterval(loadData, REFRESH_INTERVAL_MS);
+    const interval = setInterval(
+      () => loadData({ background: true }),
+      REFRESH_INTERVAL_MS,
+    );
     return () => clearInterval(interval);
   }, [loadData]);
 
-  // Coalesce WebSocket-driven reloads: a burst of order/scheduling events
-  // schedules a single debounced refresh rather than one reload per message.
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const scheduleRefresh = useCallback(() => {
     if (refreshTimer.current) clearTimeout(refreshTimer.current);
     refreshTimer.current = setTimeout(() => {
       refreshTimer.current = null;
-      loadData();
+      loadData({ background: true });
     }, WS_REFRESH_DEBOUNCE_MS);
   }, [loadData]);
 
@@ -190,17 +212,12 @@ export default function DispatchCockpit({ onNavigate }: DispatchCockpitProps) {
     [],
   );
 
-  // Live updates — orders WS refreshes the attention list when an order is
-  // placed, reassigned, or changes status.
   useOrdersWebSocket(getCurrentTenantId(), {
     subscriptions: ["order_placed", "order_status_changed", "order_assigned"],
     onOrderPlaced: scheduleRefresh,
     onOrderStatusChanged: scheduleRefresh,
     onOrderAssigned: scheduleRefresh,
   });
-
-  // Scheduling WS refreshes the delayed-operations section on delay alerts
-  // and job status changes.
   useSchedulingWebSocket({
     subscriptions: ["status_changed", "delay_alert"],
     onStatusChanged: scheduleRefresh,
@@ -209,11 +226,110 @@ export default function DispatchCockpit({ onNavigate }: DispatchCockpitProps) {
 
   const openOrder = (orderId: string) =>
     router.push(`/orders/${encodeURIComponent(orderId)}`);
-
-  // Drop an order from the attention list once it's been actioned inline. The
-  // next refresh reconciles authoritative state from the server.
   const removeOrder = (orderId: string) =>
     setOrders((prev) => prev.filter((o) => o.order_id !== orderId));
+
+  const counts = {
+    order: ordersTotal,
+    delayed: delayedJobs.length,
+    fuel: fuelAlerts.length,
+    agent: approvalCount,
+  };
+  const totalCount = counts.order + counts.delayed + counts.fuel + counts.agent;
+
+  const show = (c: Category) => filter === "all" || filter === c;
+
+  // Build the unified, severity-ranked feed. Orders keep their own row
+  // component (inline assign/release); other categories render generic rows.
+  type Entry = { key: string; severity: number; node: React.ReactNode };
+  const entries: Entry[] = [];
+
+  if (show("fuel")) {
+    for (const alert of fuelAlerts.slice(0, MAX_PER_SOURCE)) {
+      entries.push({
+        key: `fuel-${alert.station_id}`,
+        severity: fuelSeverity(alert),
+        node: (
+          <FeedRow
+            key={`fuel-${alert.station_id}`}
+            icon={<Fuel className="h-4 w-4 text-warning" />}
+            onClick={() => onNavigate?.("fuel-ops")}
+            title={alert.name}
+            subtitle={alert.location_name ?? alert.station_id}
+            meta={`${Math.round(alert.stock_percentage)}%`}
+            badge={
+              <Badge variant={FUEL_ALERT_VARIANT[alert.status]} size="sm">
+                {alert.status}
+              </Badge>
+            }
+          />
+        ),
+      });
+    }
+  }
+
+  if (show("delayed")) {
+    for (const job of [...delayedJobs]
+      .sort((a, b) => delaySeverity(b) - delaySeverity(a))
+      .slice(0, MAX_PER_SOURCE)) {
+      entries.push({
+        key: `delayed-${job.job_id}`,
+        severity: delaySeverity(job),
+        node: (
+          <FeedRow
+            key={`delayed-${job.job_id}`}
+            icon={<Clock className="h-4 w-4 text-error" />}
+            onClick={() => onNavigate?.("dispatch")}
+            title={job.job_id}
+            subtitle={`${job.origin} → ${job.destination}`}
+            badge={
+              <Badge variant="error" size="sm">
+                +{formatDelay(job.delay_duration_minutes)}
+              </Badge>
+            }
+          />
+        ),
+      });
+    }
+  }
+
+  if (show("order")) {
+    for (const order of orders.slice(0, MAX_PER_SOURCE)) {
+      const sev = order.status === "on_hold" ? 600 : 400;
+      entries.push({
+        key: `order-${order.order_id}`,
+        severity: sev,
+        node: (
+          <OrderAttentionRow
+            key={`order-${order.order_id}`}
+            order={order}
+            onOpen={() => openOrder(order.order_id)}
+            onActioned={removeOrder}
+            onReload={() => loadData({ background: true })}
+            addToast={addToast}
+          />
+        ),
+      });
+    }
+  }
+
+  if (show("agent") && approvalCount > 0) {
+    entries.push({
+      key: "agent-proposals",
+      severity: 200,
+      node: (
+        <FeedRow
+          key="agent-proposals"
+          icon={<Bot className="h-4 w-4 text-gray-500" />}
+          onClick={() => onNavigate?.("control")}
+          title={`${approvalCount} proposal${approvalCount === 1 ? "" : "s"} awaiting review`}
+          subtitle="Review in Control Center"
+        />
+      ),
+    });
+  }
+
+  entries.sort((a, b) => b.severity - a.severity);
 
   return (
     <div className="flex flex-col h-full">
@@ -224,17 +340,17 @@ export default function DispatchCockpit({ onNavigate }: DispatchCockpitProps) {
         actions={
           <div className="flex items-center gap-3">
             {lastUpdated && (
-              <span className="text-xs text-gray-400">
+              <span className="text-xs text-gray-500">
                 Updated {formatRelative(lastUpdated.toISOString())}
               </span>
             )}
             <Button
               variant="secondary"
               size="sm"
-              onClick={loadData}
+              onClick={() => loadData()}
               icon={
                 <RefreshCw
-                  className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`}
+                  className={`w-3.5 h-3.5 ${refreshing ? "animate-spin" : ""}`}
                 />
               }
             >
@@ -244,169 +360,80 @@ export default function DispatchCockpit({ onNavigate }: DispatchCockpitProps) {
         }
       />
 
-      <div className="flex-1 overflow-auto bg-gray-50 p-6 space-y-6">
-        {/* KPI strip */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          <KpiCard
-            label="Orders to action"
-            value={orders.length}
-            icon={<ClipboardList className="w-5 h-5" />}
+      <div className="flex-1 overflow-auto bg-gray-50 p-4 sm:p-6">
+        {/* Filter chips — counts shown once, here, and double as filters. */}
+        <div
+          className="mb-4 flex flex-wrap gap-2"
+          role="tablist"
+          aria-label="Filter attention items"
+        >
+          <FilterChip
+            label="All"
+            count={totalCount}
+            active={filter === "all"}
+            onClick={() => setFilter("all")}
+          />
+          <FilterChip
+            label="Orders"
+            count={counts.order}
+            active={filter === "order"}
+            onClick={() => setFilter("order")}
             tone="info"
-            onClick={() => router.push("/ops")}
           />
-          <KpiCard
-            label="Delayed jobs"
-            value={delayedJobs.length}
-            icon={<Clock className="w-5 h-5" />}
+          <FilterChip
+            label="Delayed"
+            count={counts.delayed}
+            active={filter === "delayed"}
+            onClick={() => setFilter("delayed")}
             tone="error"
-            onClick={() => onNavigate?.("dispatch")}
           />
-          <KpiCard
-            label="Fuel alerts"
-            value={fuelAlerts.length}
-            icon={<Fuel className="w-5 h-5" />}
+          <FilterChip
+            label="Fuel"
+            count={counts.fuel}
+            active={filter === "fuel"}
+            onClick={() => setFilter("fuel")}
             tone="warning"
-            onClick={() => onNavigate?.("fuel-ops")}
           />
-          <KpiCard
-            label="Agent proposals"
-            value={approvalCount}
-            icon={<Bot className="w-5 h-5" />}
-            tone="default"
-            onClick={() => onNavigate?.("control")}
+          <FilterChip
+            label="Agents"
+            count={counts.agent}
+            active={filter === "agent"}
+            onClick={() => setFilter("agent")}
           />
         </div>
 
-        {/* Attention queues */}
-        <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-          <AttentionCard
-            title="Orders needing attention"
-            icon={<ClipboardList className="w-4 h-4 text-info" />}
-            count={orders.length}
-            loading={loading}
-            emptyMessage="No orders waiting"
-            footer={
-              <button
-                type="button"
-                onClick={() => router.push("/ops")}
-                className="flex items-center gap-1 text-xs font-medium text-primary hover:underline"
-              >
-                View all orders <ArrowRight className="w-3 h-3" />
-              </button>
-            }
-          >
-            {orders.slice(0, MAX_ROWS).map((order) => (
-              <OrderAttentionRow
-                key={order.order_id}
-                order={order}
-                onOpen={() => openOrder(order.order_id)}
-                onActioned={removeOrder}
-                onReload={loadData}
-                addToast={addToast}
-              />
-            ))}
-          </AttentionCard>
+        {/* Unified priority feed */}
+        <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
+          <div className="flex items-center gap-2 border-b border-gray-100 px-4 py-3">
+            <h3 className="text-sm font-semibold text-primary">
+              Priority queue
+            </h3>
+            <span className="ml-auto text-xs font-medium text-gray-500">
+              {entries.length} item{entries.length === 1 ? "" : "s"}
+            </span>
+          </div>
 
-          <AttentionCard
-            title="Delayed operations"
-            icon={<Clock className="w-4 h-4 text-error" />}
-            count={delayedJobs.length}
-            loading={loading}
-            emptyMessage="No delayed operations"
-            footer={
-              <button
-                type="button"
-                onClick={() => onNavigate?.("dispatch")}
-                className="flex items-center gap-1 text-xs font-medium text-primary hover:underline"
-              >
-                Go to Dispatch <ArrowRight className="w-3 h-3" />
-              </button>
-            }
-          >
-            {[...delayedJobs]
-              .sort(
-                (a, b) =>
-                  (b.delay_duration_minutes ?? 0) -
-                  (a.delay_duration_minutes ?? 0),
-              )
-              .slice(0, MAX_ROWS)
-              .map((job) => (
-                <AttentionRow
-                  key={job.job_id}
-                  onClick={() => onNavigate?.("dispatch")}
-                  title={job.job_id}
-                  subtitle={`${job.origin} → ${job.destination}`}
-                  badge={
-                    <Badge variant="error" size="sm">
-                      +{formatDelay(job.delay_duration_minutes)}
-                    </Badge>
-                  }
-                />
-              ))}
-          </AttentionCard>
-
-          <AttentionCard
-            title="Fuel alerts"
-            icon={<AlertTriangle className="w-4 h-4 text-warning" />}
-            count={fuelAlerts.length}
-            loading={loading}
-            emptyMessage="All stations healthy"
-            footer={
-              <button
-                type="button"
-                onClick={() => onNavigate?.("fuel-ops")}
-                className="flex items-center gap-1 text-xs font-medium text-primary hover:underline"
-              >
-                Go to Fuel Ops <ArrowRight className="w-3 h-3" />
-              </button>
-            }
-          >
-            {fuelAlerts.slice(0, MAX_ROWS).map((alert) => (
-              <AttentionRow
-                key={alert.station_id}
-                onClick={() => onNavigate?.("fuel-ops")}
-                title={alert.name}
-                subtitle={alert.location_name ?? alert.station_id}
-                meta={`${Math.round(alert.stock_percentage)}%`}
-                badge={
-                  <Badge variant={FUEL_ALERT_VARIANT[alert.status]} size="sm">
-                    {alert.status}
-                  </Badge>
-                }
-              />
-            ))}
-          </AttentionCard>
-
-          <AttentionCard
-            title="Agent proposals"
-            icon={<Bot className="w-4 h-4 text-gray-500" />}
-            count={approvalCount}
-            loading={loading}
-            emptyMessage="No pending proposals"
-            footer={
-              <button
-                type="button"
-                onClick={() => onNavigate?.("control")}
-                className="flex items-center gap-1 text-xs font-medium text-primary hover:underline"
-              >
-                Review in Control Center <ArrowRight className="w-3 h-3" />
-              </button>
-            }
-          >
-            {approvalCount > 0 && (
-              <button
-                type="button"
-                onClick={() => onNavigate?.("control")}
-                className="flex w-full items-center justify-between px-4 py-3 text-left hover:bg-gray-50"
-              >
-                <span className="text-sm text-gray-700">
-                  {approvalCount} proposal{approvalCount === 1 ? "" : "s"}{" "}
-                  awaiting review
-                </span>
-                <ChevronRight className="w-4 h-4 text-gray-400" />
-              </button>
-            )}
-          </AttentionCard>
+          {loading ? (
+            <div className="px-4 py-16 text-center text-sm text-gray-500">
+              Loading…
+            </div>
+          ) : entries.length === 0 ? (
+            <div className="flex flex-col items-center gap-2 px-4 py-16 text-center">
+              <CheckCircle2 className="h-8 w-8 text-success" />
+              <p className="text-sm font-medium text-gray-700">
+                You&apos;re all caught up
+              </p>
+              <p className="text-xs text-gray-500">
+                {filter === "all"
+                  ? "No orders waiting, no delays, all stations healthy."
+                  : "Nothing needs attention in this category."}
+              </p>
+            </div>
+          ) : (
+            <div className="divide-y divide-gray-50">
+              {entries.map((e) => e.node)}
+            </div>
+          )}
         </div>
       </div>
 
@@ -415,102 +442,63 @@ export default function DispatchCockpit({ onNavigate }: DispatchCockpitProps) {
   );
 }
 
-// ─── KPI Card ────────────────────────────────────────────────────────────────
+// ─── Filter chip ─────────────────────────────────────────────────────────────
 
-const KPI_TONE: Record<string, string> = {
+const CHIP_TONE: Record<string, string> = {
   info: "text-info",
   error: "text-error",
   warning: "text-warning",
   default: "text-primary",
 };
 
-function KpiCard({
+function FilterChip({
   label,
-  value,
-  icon,
-  tone,
+  count,
+  active,
   onClick,
+  tone = "default",
 }: {
   label: string;
-  value: number;
-  icon: React.ReactNode;
-  tone: "info" | "error" | "warning" | "default";
+  count: number;
+  active: boolean;
   onClick: () => void;
+  tone?: "info" | "error" | "warning" | "default";
 }) {
   return (
     <button
       type="button"
+      role="tab"
+      aria-selected={active}
       onClick={onClick}
-      className="flex items-center justify-between rounded-xl border border-gray-200 bg-white p-5 text-left shadow-sm transition-shadow hover:shadow-md focus:outline-none focus:ring-2 focus:ring-primary/40"
+      className={`inline-flex items-center gap-2 rounded-full border px-3.5 py-1.5 text-sm font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 ${
+        active
+          ? "border-primary bg-primary text-white"
+          : "border-gray-200 bg-white text-gray-600 hover:bg-gray-50"
+      }`}
     >
-      <div>
-        <p className="text-sm text-gray-500">{label}</p>
-        <p className={`mt-1 text-3xl font-semibold ${KPI_TONE[tone]}`}>
-          {value}
-        </p>
-      </div>
-      <span className={`${KPI_TONE[tone]} opacity-80`}>{icon}</span>
+      <span>{label}</span>
+      <span
+        className={`rounded-full px-1.5 text-xs font-semibold ${
+          active ? "bg-white/20 text-white" : `bg-gray-100 ${CHIP_TONE[tone]}`
+        }`}
+      >
+        {count}
+      </span>
     </button>
   );
 }
 
-// ─── Attention Card + Row ──────────────────────────────────────────────────
+// ─── Generic feed row ──────────────────────────────────────────────────────
 
-function AttentionCard({
-  title,
+function FeedRow({
   icon,
-  count,
-  loading,
-  emptyMessage,
-  footer,
-  children,
-}: {
-  title: string;
-  icon: React.ReactNode;
-  count: number;
-  loading: boolean;
-  emptyMessage: string;
-  footer?: React.ReactNode;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="flex flex-col rounded-xl border border-gray-200 bg-white shadow-sm">
-      <div className="flex items-center gap-2 border-b border-gray-100 px-4 py-3">
-        {icon}
-        <h3 className="text-sm font-semibold text-primary">{title}</h3>
-        <span className="ml-auto text-xs font-medium text-gray-400">
-          {count}
-        </span>
-      </div>
-      <div className="divide-y divide-gray-50">
-        {loading ? (
-          <div className="px-4 py-8 text-center text-sm text-gray-400">
-            Loading…
-          </div>
-        ) : count === 0 ? (
-          <div className="px-4 py-8 text-center text-sm text-gray-400">
-            {emptyMessage}
-          </div>
-        ) : (
-          children
-        )}
-      </div>
-      {footer && count > 0 && (
-        <div className="mt-auto border-t border-gray-100 px-4 py-2.5">
-          {footer}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function AttentionRow({
   onClick,
   title,
   subtitle,
   meta,
   badge,
 }: {
+  icon: React.ReactNode;
   onClick: () => void;
   title: string;
   subtitle?: string;
@@ -521,17 +509,20 @@ function AttentionRow({
     <button
       type="button"
       onClick={onClick}
-      className="flex w-full items-center gap-3 px-4 py-2.5 text-left hover:bg-gray-50"
+      className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-gray-50 focus:outline-none focus-visible:bg-gray-50"
     >
+      <span className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg bg-gray-50">
+        {icon}
+      </span>
       <div className="min-w-0 flex-1">
         <p className="truncate text-sm font-medium text-gray-900">{title}</p>
         {subtitle && (
           <p className="truncate text-xs text-gray-500">{subtitle}</p>
         )}
       </div>
-      {meta && <span className="text-xs text-gray-400">{meta}</span>}
+      {meta && <span className="text-xs text-gray-500">{meta}</span>}
       {badge}
-      <ChevronRight className="w-4 h-4 flex-shrink-0 text-gray-300" />
+      <ChevronRight className="h-4 w-4 flex-shrink-0 text-gray-300" />
     </button>
   );
 }
@@ -586,7 +577,6 @@ function OrderAttentionRow({
     setWorking(true);
     try {
       const res = await releaseHoldOrder(order.order_id);
-      // The backend may keep the order on hold if a re-run intake hook fails.
       if (res.status === "on_hold") {
         addToast(
           `Still on hold: ${res.hold_reason ?? "intake check failed"}`,
@@ -608,12 +598,15 @@ function OrderAttentionRow({
   };
 
   return (
-    <div className="px-4 py-2.5 hover:bg-gray-50">
+    <div className="px-4 py-3 hover:bg-gray-50">
       <div className="flex items-center gap-3">
+        <span className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg bg-gray-50">
+          <ClipboardList className="h-4 w-4 text-info" />
+        </span>
         <button
           type="button"
           onClick={onOpen}
-          className="min-w-0 flex-1 text-left"
+          className="min-w-0 flex-1 text-left focus:outline-none focus-visible:underline"
         >
           <p className="truncate text-sm font-medium text-gray-900">
             {order.customer_name || order.customer_id}
@@ -622,7 +615,7 @@ function OrderAttentionRow({
             {order.ship_to_address}
           </p>
         </button>
-        <span className="text-xs text-gray-400">
+        <span className="text-xs text-gray-500">
           {formatRelative(order.created_at)}
         </span>
         <Badge variant={isOnHold ? "warning" : "info"} size="sm">
@@ -649,7 +642,7 @@ function OrderAttentionRow({
       </div>
 
       {assigning && canAssign && (
-        <div className="mt-2 flex items-center gap-2 pl-1">
+        <div className="mt-2 flex items-center gap-2 pl-11">
           <div className="flex-1">
             <DriverPicker
               value={driverId}
