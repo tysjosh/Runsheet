@@ -241,7 +241,7 @@ export default function Home() {
           <div className="flex-1 bg-gray-50">
             <ErrorBoundary componentName="Customers">
               <Suspense fallback={<ComponentLoadingPlaceholder />}>
-                <CustomersPage />
+                <CustomersPage onSelectCustomer={openCustomer} />
               </Suspense>
             </ErrorBoundary>
           </div>
@@ -255,7 +255,7 @@ export default function Home() {
             <div className="flex-1 bg-gray-50">
               <ErrorBoundary componentName="Customers">
                 <Suspense fallback={<ComponentLoadingPlaceholder />}>
-                  <CustomersPage />
+                  <CustomersPage onSelectCustomer={openCustomer} />
                 </Suspense>
               </ErrorBoundary>
             </div>
