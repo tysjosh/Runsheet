@@ -48,6 +48,26 @@ jest.mock("../../services/api", () => ({
   ApiTimeoutError: class extends Error {},
 }));
 
+// DriverPicker (mounted in the Assign Driver modal) loads the active driver
+// roster from complianceApi. Provide a deterministic roster so the picker can
+// be exercised in tests.
+jest.mock("../../services/complianceApi", () => ({
+  getDrivers: jest.fn().mockResolvedValue({
+    data: [
+      {
+        driver_id: "drv-off",
+        full_name: "Off Duty Dave",
+        cdl_class: "A",
+        status: "active",
+      },
+    ],
+    page: 1,
+    size: 200,
+    total: 1,
+    request_id: "drivers-1",
+  }),
+}));
+
 import OrderDetailPage from "../../app/orders/[orderId]/page";
 import type { FuelOrder, FuelOrderEvent } from "../../services/ordersApi";
 import {
@@ -559,9 +579,10 @@ describe("OrderDetailPage — mutation controls", () => {
     expect(await screen.findByText(/acme fuel co/i)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /assign driver/i }));
-    fireEvent.change(screen.getByLabelText(/driver id/i), {
-      target: { value: "drv-off" },
-    });
+
+    // Open the driver picker and choose the (off-duty) driver from the roster.
+    fireEvent.click(await screen.findByLabelText(/^driver$/i));
+    fireEvent.click(await screen.findByText("Off Duty Dave"));
 
     await act(async () => {
       fireEvent.click(screen.getByText("Assign"));

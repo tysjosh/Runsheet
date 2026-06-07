@@ -20,6 +20,7 @@ import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { ToastContainer, useToasts } from "@/components/ui";
+import DriverPicker from "../../../components/ops/DriverPicker";
 import { ApiError } from "../../../services/api";
 import {
   type AssignDriverPayload,
@@ -482,14 +483,13 @@ function MutationControls({
         >
           <div className="bg-white rounded-xl shadow-xl w-full max-w-sm mx-4 p-6">
             <h3 className="text-lg font-semibold mb-4">Assign Driver</h3>
-            <input
-              type="text"
-              value={assignDriverId}
-              onChange={(e) => setAssignDriverId(e.target.value)}
-              placeholder="Driver ID"
-              className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg mb-4 focus:ring-2 focus:ring-primary focus:outline-none"
-              aria-label="Driver ID"
-            />
+            <div className="mb-4">
+              <DriverPicker
+                value={assignDriverId || null}
+                onChange={setAssignDriverId}
+                aria-label="Driver"
+              />
+            </div>
             <div className="flex justify-end gap-2">
               <button
                 type="button"

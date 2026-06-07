@@ -31,6 +31,9 @@ import {
   type PaginatedResponse,
 } from "../../services/ordersApi";
 import { getCurrentTenantId } from "../../services/tenant";
+import CustomerPicker from "./CustomerPicker";
+import DriverPicker from "./DriverPicker";
+import ProductPicker from "./ProductPicker";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -506,40 +509,37 @@ export default function OrdersPage({
             </select>
           </div>
 
-          <input
-            type="text"
-            value={customerIdFilter}
-            onChange={(e) => {
-              setCustomerIdFilter(e.target.value);
+          <CustomerPicker
+            value={customerIdFilter || null}
+            onChange={(id) => {
+              setCustomerIdFilter(id);
               resetPage();
             }}
-            placeholder="Customer ID"
-            className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-primary focus:outline-none"
-            aria-label="Filter by customer ID"
+            placeholder="All customers"
+            allowClear
+            aria-label="Filter by customer"
           />
 
-          <input
-            type="text"
-            value={driverIdFilter}
-            onChange={(e) => {
-              setDriverIdFilter(e.target.value);
+          <DriverPicker
+            value={driverIdFilter || null}
+            onChange={(id) => {
+              setDriverIdFilter(id);
               resetPage();
             }}
-            placeholder="Driver ID"
-            className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-primary focus:outline-none"
-            aria-label="Filter by driver ID"
+            placeholder="All drivers"
+            allowClear
+            aria-label="Filter by driver"
           />
 
-          <input
-            type="text"
-            value={productCodeFilter}
-            onChange={(e) => {
-              setProductCodeFilter(e.target.value);
+          <ProductPicker
+            value={productCodeFilter || null}
+            onChange={(code) => {
+              setProductCodeFilter(code);
               resetPage();
             }}
-            placeholder="Product Code"
-            className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-primary focus:outline-none"
-            aria-label="Filter by product code"
+            placeholder="All products"
+            allowClear
+            aria-label="Filter by product"
           />
 
           <input

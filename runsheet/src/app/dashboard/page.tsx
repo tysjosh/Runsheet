@@ -36,6 +36,7 @@ const CustomersPage = lazy(
   () => import("../../components/commerce/CustomersListPage"),
 );
 const DriversHub = lazy(() => import("../../components/DriversHub"));
+const DispatchCockpit = lazy(() => import("../../components/DispatchCockpit"));
 const OperationsControl = lazy(() => import("../ops/control/page"));
 
 function MapLoadingPlaceholder() {
@@ -61,12 +62,12 @@ export default function Home() {
   const router = useRouter();
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [activeMenuItem, setActiveMenuItem] = useState(() => {
     if (typeof window !== "undefined") {
-      return sessionStorage.getItem("activeMenuItem") || "fleet";
+      return sessionStorage.getItem("activeMenuItem") || "today";
     }
-    return "fleet";
+    return "today";
   });
   const [selectedTruck, setSelectedTruck] = useState<Truck | null>(null);
   const [aiChatOpen, setAiChatOpen] = useState(false);
@@ -110,6 +111,17 @@ export default function Home() {
 
   const renderMainContent = () => {
     switch (activeMenuItem) {
+      case "today":
+        return (
+          <div className="flex-1 bg-gray-50">
+            <ErrorBoundary componentName="Today">
+              <Suspense fallback={<ComponentLoadingPlaceholder />}>
+                <DispatchCockpit onNavigate={handleNavigate} />
+              </Suspense>
+            </ErrorBoundary>
+          </div>
+        );
+
       case "fleet":
         return (
           <Suspense fallback={<ComponentLoadingPlaceholder />}>

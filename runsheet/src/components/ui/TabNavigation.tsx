@@ -28,7 +28,7 @@ export const TabNavigation: React.FC<TabNavigationProps> = ({
   className = "",
 }) => {
   return (
-    <div className={`border-b border-gray-200 px-6 ${className}`}>
+    <div className={`bg-white border-b border-gray-200 px-6 ${className}`}>
       <nav className="flex gap-6 overflow-x-auto" aria-label="Tabs">
         {tabs.map((tab) => {
           const isActive = activeTab === tab.id;

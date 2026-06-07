@@ -17,7 +17,7 @@ export const Card: React.FC<CardProps> = ({
 }) => {
   return (
     <div
-      className={`bg-white rounded-xl border border-gray-100 p-6 ${className}`}
+      className={`bg-white rounded-xl border border-gray-200 shadow-sm p-6 ${className}`}
     >
       {title && (
         <h3 className="text-lg font-semibold text-gray-900 mb-4">{title}</h3>

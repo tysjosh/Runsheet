@@ -1,8 +1,9 @@
 "use client";
 
 import { AlertTriangle, CheckCircle, Play, XCircle } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { JobStatus } from "../../types/api";
+import { Modal, ModalFooter } from "../ui";
 
 /**
  * Valid status transitions per the design spec state machine.
@@ -84,29 +85,55 @@ export default function JobActionButtons({
   onTransition,
 }: JobActionButtonsProps) {
   const [loading, setLoading] = useState<JobStatus | null>(null);
+  // "Fail" requires a reason. Rather than a browser window.prompt (which is
+  // unvalidated, can be suppressed by the browser, and breaks the visual
+  // flow), capture it in a proper modal with a required field.
+  const [showFailModal, setShowFailModal] = useState(false);
+  const [failReason, setFailReason] = useState("");
+  const failReasonRef = useRef<HTMLTextAreaElement>(null);
+
+  // Focus the reason field when the fail modal opens (accessible alternative
+  // to the autoFocus attribute).
+  useEffect(() => {
+    if (showFailModal) {
+      const t = setTimeout(() => failReasonRef.current?.focus(), 0);
+      return () => clearTimeout(t);
+    }
+  }, [showFailModal]);
 
   const validTargets = VALID_TRANSITIONS[currentStatus] ?? [];
 
   if (validTargets.length === 0) return null;
 
-  const handleClick = async (targetStatus: JobStatus) => {
+  const runTransition = async (
+    targetStatus: JobStatus,
+    failureReason?: string,
+  ) => {
     setLoading(targetStatus);
     try {
-      let failureReason: string | undefined;
-      if (targetStatus === "failed") {
-        const reason = window.prompt("Enter failure reason:");
-        if (!reason) {
-          setLoading(null);
-          return;
-        }
-        failureReason = reason;
-      }
       await onTransition(jobId, targetStatus, failureReason);
     } catch {
       // Error is handled by the parent component (displayed inline)
     } finally {
       setLoading(null);
     }
+  };
+
+  const handleClick = async (targetStatus: JobStatus) => {
+    if (targetStatus === "failed") {
+      // Defer the transition until the reason is confirmed in the modal.
+      setFailReason("");
+      setShowFailModal(true);
+      return;
+    }
+    await runTransition(targetStatus);
+  };
+
+  const handleConfirmFail = async () => {
+    const reason = failReason.trim();
+    if (!reason) return;
+    setShowFailModal(false);
+    await runTransition("failed", reason);
   };
 
   return (
@@ -132,6 +159,41 @@ export default function JobActionButtons({
           </button>
         );
       })}
+
+      <Modal
+        isOpen={showFailModal}
+        onClose={() => setShowFailModal(false)}
+        title="Mark job as failed"
+        size="sm"
+        footer={
+          <ModalFooter
+            onCancel={() => setShowFailModal(false)}
+            onConfirm={handleConfirmFail}
+            confirmText="Mark failed"
+            confirmVariant="danger"
+            loading={loading === "failed"}
+          />
+        }
+      >
+        <label
+          htmlFor={`fail-reason-${jobId}`}
+          className="block text-sm font-medium text-gray-700 mb-2"
+        >
+          Failure reason
+        </label>
+        <textarea
+          id={`fail-reason-${jobId}`}
+          ref={failReasonRef}
+          value={failReason}
+          onChange={(e) => setFailReason(e.target.value)}
+          rows={3}
+          placeholder="Describe why this job failed (e.g. customer site inaccessible, equipment breakdown)…"
+          className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 focus:outline-none resize-none"
+        />
+        <p className="mt-2 text-xs text-gray-500">
+          A reason is required and will be recorded on the job's event timeline.
+        </p>
+      </Modal>
     </div>
   );
 }

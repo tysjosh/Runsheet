@@ -104,6 +104,7 @@ export default function CommerceHub() {
     <div className="flex flex-col h-full">
       <PageHeader
         title="Billing & Commerce"
+        subtitle="Accounts, invoices, pricing, and receivables"
         icon={<DollarSign className="w-5 h-5" />}
       />
       <TabNavigation

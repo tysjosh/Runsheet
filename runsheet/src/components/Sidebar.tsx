@@ -5,6 +5,7 @@ import {
   ClipboardCheck,
   DollarSign,
   Fuel,
+  LayoutDashboard,
   ListChecks,
   LogOut,
   Radio,
@@ -63,6 +64,7 @@ export default function Sidebar({
   };
 
   const menuItems = [
+    { id: "today", label: "Today", icon: LayoutDashboard },
     { id: "fleet", label: "Fleet", icon: Truck },
     { id: "customers", label: "Customers", icon: Users },
     { id: "drivers", label: "Drivers", icon: User },

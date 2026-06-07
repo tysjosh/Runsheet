@@ -1,14 +1,15 @@
 "use client";
 
 import { AlertTriangle, X } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import {
   type AssetReadinessIndicator,
   getAssetReadiness,
   type ReadinessStatus,
 } from "../../services/inventoryApi";
 import { createJob } from "../../services/schedulingApi";
-import type { Job, JobType, Priority } from "../../types/api";
+import type { AssetType, Job, JobType, Priority } from "../../types/api";
+import AssetPicker from "./AssetPicker";
 
 const JOB_TYPES: { value: JobType; label: string }[] = [
   { value: "cargo_transport", label: "Cargo Transport" },
@@ -25,30 +26,16 @@ const PRIORITIES: { value: Priority; label: string }[] = [
   { value: "urgent", label: "Urgent" },
 ];
 
-// Asset options per job type (must match JOB_ASSET_COMPATIBILITY on backend)
-const ASSETS_BY_JOB_TYPE: Record<string, { value: string; label: string }[]> = {
-  cargo_transport: [
-    { value: "TRK-001", label: "TRK-001 — Volvo FH16 Tanker" },
-    { value: "TRK-002", label: "TRK-002 — Kenworth T680 Tanker" },
-    { value: "TRK-003", label: "TRK-003 — Peterbilt 579 Tanker" },
-    { value: "TRK-004", label: "TRK-004 — Freightliner Cascadia" },
-    { value: "TRK-005", label: "TRK-005 — Mack Anthem Tanker" },
-    { value: "TRK-006", label: "TRK-006 — International LT Tanker" },
-    { value: "TRK-007", label: "TRK-007 — Ford F-750 Service" },
-    { value: "TRK-008", label: "TRK-008 — RAM 5500 Service" },
-    { value: "TNK-001", label: "TNK-001 — Heil 9200 Tanker Trailer" },
-    { value: "TNK-002", label: "TNK-002 — Polar 8400 Tanker Trailer" },
-  ],
-  passenger_transport: [
-    { value: "TRK-007", label: "TRK-007 — Ford F-750 Service" },
-    { value: "TRK-008", label: "TRK-008 — RAM 5500 Service" },
-  ],
-  airport_transfer: [
-    { value: "TRK-007", label: "TRK-007 — Ford F-750 Service" },
-    { value: "TRK-008", label: "TRK-008 — RAM 5500 Service" },
-  ],
-  vessel_movement: [],
-  crane_booking: [],
+// Job type → required asset type. Mirrors the backend compatibility rule
+// (see Agents/overlay/dispatch_optimizer.py and delay_response_agent.py) so
+// the asset picker only offers assets the backend will accept. The backend
+// still re-validates on submit.
+const JOB_TYPE_TO_ASSET_TYPE: Record<JobType, AssetType> = {
+  cargo_transport: "vehicle",
+  passenger_transport: "vehicle",
+  vessel_movement: "vessel",
+  airport_transfer: "vehicle",
+  crane_booking: "equipment",
 };
 
 // ─── Readiness Indicator Component ──────────────────────────────────────────
@@ -184,19 +171,22 @@ export default function CreateJobModal({
     notes: "",
   });
 
-  // Fetch readiness for all assets of the current job type
-  const fetchReadiness = useCallback(async (jobType: string) => {
-    const assets = ASSETS_BY_JOB_TYPE[jobType] || [];
-    if (assets.length === 0) return;
+  // Fetch readiness for a set of asset ids (loaded live from the fleet roster
+  // by the AssetPicker for the current job type).
+  const fetchReadiness = useCallback(async (assetIds: string[]) => {
+    if (assetIds.length === 0) {
+      setReadinessMap({});
+      return;
+    }
 
     const results: Record<string, AssetReadinessIndicator> = {};
     const settled = await Promise.allSettled(
-      assets.map((asset) => getAssetReadiness(asset.value)),
+      assetIds.map((assetId) => getAssetReadiness(assetId)),
     );
 
     settled.forEach((result, index) => {
       if (result.status === "fulfilled") {
-        results[assets[index].value] = result.value.data;
+        results[assetIds[index]] = result.value.data;
       }
       // Fail-open: if request fails, don't show indicator for that asset
     });
@@ -204,10 +194,13 @@ export default function CreateJobModal({
     setReadinessMap(results);
   }, []);
 
-  // Fetch readiness when job type changes
-  useEffect(() => {
-    fetchReadiness(form.job_type);
-  }, [form.job_type, fetchReadiness]);
+  // Map AssetPicker's loaded ids → readiness fetch.
+  const handleAssetsLoaded = useCallback(
+    (assetIds: string[]) => {
+      fetchReadiness(assetIds);
+    },
+    [fetchReadiness],
+  );
 
   const addToast = useCallback((message: string, type: "warning" | "error") => {
     const id = `toast-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -277,8 +270,6 @@ export default function CreateJobModal({
 
   const inputClass =
     "w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white";
-
-  const currentAssets = ASSETS_BY_JOB_TYPE[form.job_type] || [];
 
   return (
     <>
@@ -393,33 +384,22 @@ export default function CreateJobModal({
                 <label className="block text-xs font-medium text-gray-600 mb-1">
                   Asset (optional)
                 </label>
-                <div className="relative">
-                  <select
-                    value={form.asset_assigned}
-                    onChange={(e) =>
-                      setForm({ ...form, asset_assigned: e.target.value })
-                    }
-                    className={inputClass}
-                  >
-                    <option value="">— None —</option>
-                    {currentAssets.map((a) => {
-                      const readiness = readinessMap[a.value];
-                      const statusIcon = readiness
-                        ? readiness.status === "ready"
-                          ? "🟢"
-                          : readiness.status === "warning"
-                            ? "🟡"
-                            : "🔴"
-                        : "";
-                      return (
-                        <option key={a.value} value={a.value}>
-                          {statusIcon} {a.label}
-                        </option>
-                      );
-                    })}
-                  </select>
-                </div>
-                {/* Readiness indicator below the select */}
+                <AssetPicker
+                  assetType={JOB_TYPE_TO_ASSET_TYPE[form.job_type]}
+                  value={form.asset_assigned || null}
+                  onChange={(assetId) =>
+                    setForm((prev) => ({ ...prev, asset_assigned: assetId }))
+                  }
+                  readinessByAsset={Object.fromEntries(
+                    Object.entries(readinessMap).map(([id, r]) => [
+                      id,
+                      r.status,
+                    ]),
+                  )}
+                  onAssetsLoaded={handleAssetsLoaded}
+                  aria-label="Asset"
+                />
+                {/* Readiness indicator below the picker */}
                 {form.asset_assigned && readinessMap[form.asset_assigned] && (
                   <div className="mt-1.5 flex items-center gap-1.5">
                     <ReadinessIndicator

@@ -36,6 +36,14 @@ async def initialize(app, container: ServiceContainer) -> None:
         logger.info("Persistence layer dormant (no DATABASE_URL) — outbox relay not started")
         return
 
+    # Fail fast if the database is behind the latest migrations. An authored-
+    # but-unapplied migration otherwise surfaces as a 500 on the first
+    # read-cutover query (missing column) rather than an obvious boot error.
+    # Skippable via SKIP_MIGRATION_CHECK=1 for emergencies.
+    from persistence.migration_check import check_migrations_current
+
+    check_migrations_current(raise_on_drift=True)
+
     settings = container.get("settings") if container.has("settings") else None
     if settings is not None and not getattr(settings, "outbox_relay_enabled", True):
         logger.info("Outbox relay disabled by settings — not started")

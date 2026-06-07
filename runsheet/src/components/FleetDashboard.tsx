@@ -62,7 +62,6 @@ export default function FleetDashboard({
         tabs={TABS}
         activeTab={activeTab}
         onChange={setActiveTab}
-        className="pt-4 bg-gray-50"
       />
 
       {/* Tab content */}

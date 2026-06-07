@@ -110,6 +110,8 @@ import {
 } from "../../services/fuelApi";
 import { getCurrentTenantId } from "../../services/tenant";
 import { getCurrentUserId } from "../../utils/auth";
+import AssetPicker from "./AssetPicker";
+import StationPicker from "./StationPicker";
 import StormModeBanner from "./StormModeBanner";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -896,7 +898,13 @@ function ReplanForm({ planId, onClose, onSuccess }: ReplanFormProps) {
             <select
               value={form.disruption_type}
               onChange={(e) =>
-                setForm({ ...form, disruption_type: e.target.value })
+                // Changing the disruption type changes what the entity refers
+                // to (truck vs station vs free-form), so clear the prior pick.
+                setForm({
+                  ...form,
+                  disruption_type: e.target.value,
+                  entity_id: "",
+                })
               }
               className={inputClass}
               required
@@ -927,17 +935,50 @@ function ReplanForm({ planId, onClose, onSuccess }: ReplanFormProps) {
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">
-              Entity ID
+            <label
+              htmlFor="replan-entity"
+              className="block text-xs font-medium text-gray-600 mb-1"
+            >
+              {form.disruption_type === "truck_breakdown"
+                ? "Truck"
+                : form.disruption_type === "station_closure" ||
+                    form.disruption_type === "demand_spike"
+                  ? "Station"
+                  : "Entity ID"}
             </label>
-            <input
-              type="text"
-              value={form.entity_id}
-              onChange={(e) => setForm({ ...form, entity_id: e.target.value })}
-              placeholder="e.g. TRK-001 or STN-005"
-              className={inputClass}
-              required
-            />
+            {form.disruption_type === "truck_breakdown" ? (
+              <AssetPicker
+                id="replan-entity"
+                assetType="vehicle"
+                value={form.entity_id || null}
+                onChange={(entityId) =>
+                  setForm({ ...form, entity_id: entityId })
+                }
+                aria-label="Truck"
+              />
+            ) : form.disruption_type === "station_closure" ||
+              form.disruption_type === "demand_spike" ? (
+              <StationPicker
+                id="replan-entity"
+                value={form.entity_id || null}
+                onChange={(entityId) =>
+                  setForm({ ...form, entity_id: entityId })
+                }
+                aria-label="Station"
+              />
+            ) : (
+              <input
+                id="replan-entity"
+                type="text"
+                value={form.entity_id}
+                onChange={(e) =>
+                  setForm({ ...form, entity_id: e.target.value })
+                }
+                placeholder="Affected entity (e.g. road segment or route ID)"
+                className={inputClass}
+                required
+              />
+            )}
           </div>
 
           <div className="flex justify-end gap-3 pt-2">
@@ -3563,13 +3604,11 @@ export default function FuelDistributionPage() {
         title="Fuel Distribution"
         subtitle="Plan generation, forecasts, and delivery priorities"
         icon={<Droplets className="w-5 h-5" />}
-        className="bg-gray-50"
       />
       <TabNavigation
         tabs={TABS}
         activeTab={activeTab}
         onChange={setActiveTab}
-        className="bg-gray-50"
       />
 
       {/* Tab content */}

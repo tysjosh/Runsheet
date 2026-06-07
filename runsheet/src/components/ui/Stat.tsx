@@ -19,7 +19,7 @@ export const Stat: React.FC<StatProps> = ({
 }) => {
   return (
     <div
-      className={`bg-white rounded-xl border border-gray-100 p-6 ${className}`}
+      className={`bg-white rounded-xl border border-gray-200 shadow-sm p-6 ${className}`}
     >
       <div className="text-sm font-medium text-gray-600 mb-1">{label}</div>
       <div className="text-2xl font-bold text-gray-900">{value}</div>

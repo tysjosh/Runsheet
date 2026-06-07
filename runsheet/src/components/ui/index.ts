@@ -27,6 +27,11 @@ export type { PageHeaderProps } from "./PageHeader";
 export { PageHeader } from "./PageHeader";
 export type { PaginationProps } from "./Pagination";
 export { Pagination } from "./Pagination";
+export type {
+  SearchableSelectOption,
+  SearchableSelectProps,
+} from "./SearchableSelect";
+export { SearchableSelect } from "./SearchableSelect";
 export type { StatProps } from "./Stat";
 export { Stat } from "./Stat";
 export type { Stat as StatsBarStat, StatsBarProps } from "./StatsBar";

@@ -208,7 +208,69 @@ jobs:
           echo "✅ Endpoint registry is up to date."
 
   # -----------------------------------------------------------------
-  # Job 6: Git hygiene — no ignored files tracked, ADR index exists
+  # Job 6: Migration freshness — migrations apply cleanly + models in sync
+  # -----------------------------------------------------------------
+  migration-check:
+    runs-on: ubuntu-latest
+    needs: backend-tests
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: runsheet
+          POSTGRES_PASSWORD: runsheet
+          POSTGRES_DB: runsheet
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U runsheet"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    defaults:
+      run:
+        working-directory: Runsheet-backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: Runsheet-backend/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Apply migrations to a fresh database
+        env:
+          ENVIRONMENT: "development"
+          DATABASE_URL: "postgresql+psycopg://runsheet:runsheet@localhost:5432/runsheet"
+        run: alembic upgrade head
+
+      - name: Verify DB is at the latest head (drift check)
+        env:
+          ENVIRONMENT: "development"
+          DATABASE_URL: "postgresql+psycopg://runsheet:runsheet@localhost:5432/runsheet"
+        run: python -m scripts.check_migrations
+
+      - name: Verify a single linear migration head (no divergent branches)
+        env:
+          ENVIRONMENT: "development"
+          DATABASE_URL: "postgresql+psycopg://runsheet:runsheet@localhost:5432/runsheet"
+        run: |
+          head_count=$(alembic heads 2>/dev/null | grep -c '(head)')
+          echo "Migration heads detected: $head_count"
+          if [ "$head_count" -ne 1 ]; then
+            echo "❌ Expected exactly one migration head; found $head_count."
+            echo "Divergent branches must be merged: alembic merge -m '<msg>' <rev1> <rev2>"
+            alembic heads
+            exit 1
+          fi
+          echo "✅ Single linear migration head."
+
+  # -----------------------------------------------------------------
+  # Job 7: Git hygiene — no ignored files tracked, ADR index exists
   # -----------------------------------------------------------------
   git-hygiene:
     runs-on: ubuntu-latest

@@ -68,7 +68,11 @@ export default function FuelOpsPage() {
 
   return (
     <div className="flex flex-col h-full">
-      <PageHeader title="Fuel Operations" />
+      <PageHeader
+        title="Fuel Operations"
+        subtitle="Manage stations, tanks, compartments, and sourcing"
+        icon={<Fuel className="w-5 h-5" />}
+      />
       <TabNavigation
         tabs={TABS}
         activeTab={activeTab}

@@ -27,7 +27,11 @@ export default function DispatchPage() {
 
   return (
     <div className="flex flex-col h-full">
-      <PageHeader title="Dispatch" />
+      <PageHeader
+        title="Dispatch"
+        subtitle="Schedule jobs and plan fuel distribution runs"
+        icon={<CalendarClock className="w-5 h-5" />}
+      />
       <TabNavigation
         tabs={TABS}
         activeTab={activeTab}
