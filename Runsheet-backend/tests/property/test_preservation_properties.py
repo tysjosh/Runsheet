@@ -598,11 +598,24 @@ class TestBootstrapLifecycle:
     def test_boot_order_is_correct(self):
         """
         Bootstrap modules are initialized in dependency order:
-        core → middleware → ops → fuel → inventory → scheduling → notifications → agents → integrations.
+        core → persistence → middleware → ops → fuel → inventory → scheduling →
+        notifications → compliance → agents → integrations.
         """
         from bootstrap import _BOOT_ORDER
 
-        expected_order = ["core", "middleware", "ops", "fuel", "inventory", "scheduling", "notifications", "agents", "integrations"]
+        expected_order = [
+            "core",
+            "persistence",
+            "middleware",
+            "ops",
+            "fuel",
+            "inventory",
+            "scheduling",
+            "notifications",
+            "compliance",
+            "agents",
+            "integrations",
+        ]
         assert _BOOT_ORDER == expected_order, (
             f"Boot order mismatch. Expected {expected_order}, got {_BOOT_ORDER}"
         )
@@ -615,7 +628,19 @@ class TestBootstrapLifecycle:
 
         # shutdown_all uses reversed(_BOOT_ORDER)
         expected_shutdown = list(reversed(_BOOT_ORDER))
-        assert expected_shutdown == ["integrations", "agents", "notifications", "scheduling", "inventory", "fuel", "ops", "middleware", "core"]
+        assert expected_shutdown == [
+            "integrations",
+            "agents",
+            "compliance",
+            "notifications",
+            "scheduling",
+            "inventory",
+            "fuel",
+            "ops",
+            "middleware",
+            "persistence",
+            "core",
+        ]
 
     @pytest.mark.asyncio
     async def test_initialize_all_calls_modules_in_order(self):
@@ -630,7 +655,7 @@ class TestBootstrapLifecycle:
         assert callable(shutdown_all), "shutdown_all is not callable"
 
         # Verify boot order has the expected modules
-        assert len(_BOOT_ORDER) == 9
+        assert len(_BOOT_ORDER) == 11
         assert _BOOT_ORDER[0] == "core", "First module should be 'core'"
         assert _BOOT_ORDER[-1] == "integrations", "Last module should be 'integrations'"
 

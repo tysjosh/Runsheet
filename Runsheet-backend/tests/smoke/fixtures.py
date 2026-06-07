@@ -429,6 +429,94 @@ ROUTE_FIXTURES: Dict[str, RouteFixture] = {
         method="POST",
         path_params={"agent_id": "delay_response"},
     ),
+
+    # ---- Read-only (GET) coverage for commerce / compliance / fuel /
+    # inventory / notifications / integrations / import surfaces. These need
+    # no request body; path-templated routes carry a placeholder id so
+    # resolve_path produces a concrete URL. ----
+    "GET /api/commerce/accounts": RouteFixture(),
+    "GET /api/commerce/accounts/{account_id}": RouteFixture(
+        path_params={"account_id": "acc_001"},
+    ),
+    "GET /api/commerce/accounts/{account_id}/aging": RouteFixture(
+        path_params={"account_id": "acc_001"},
+    ),
+    "GET /api/commerce/ar-aging": RouteFixture(),
+    "GET /api/commerce/ar-aging/history": RouteFixture(),
+    "GET /api/commerce/customers": RouteFixture(),
+    "GET /api/commerce/customers/{customer_id}": RouteFixture(
+        path_params={"customer_id": "CUST-001"},
+    ),
+    "GET /api/commerce/invoices": RouteFixture(),
+    "GET /api/commerce/invoices/{invoice_id}": RouteFixture(
+        path_params={"invoice_id": "inv_001"},
+    ),
+    "GET /api/commerce/invoices/{invoice_id}/events": RouteFixture(
+        path_params={"invoice_id": "inv_001"},
+    ),
+    "GET /api/commerce/payments": RouteFixture(),
+    "GET /api/commerce/payments/{payment_id}": RouteFixture(
+        path_params={"payment_id": "pay_001"},
+    ),
+    "GET /api/commerce/price-books": RouteFixture(),
+    "GET /api/commerce/price-books/{price_book_id}": RouteFixture(
+        path_params={"price_book_id": "pb_001"},
+    ),
+    "GET /api/commerce/pricing-rules": RouteFixture(),
+    "GET /api/compliance/asset-certifications": RouteFixture(),
+    "GET /api/compliance/asset-certifications/dashboard": RouteFixture(),
+    "GET /api/compliance/asset-certifications/{cert_id}": RouteFixture(
+        path_params={"cert_id": "CERT-001"},
+    ),
+    "GET /api/compliance/drivers": RouteFixture(),
+    "GET /api/compliance/drivers/dashboard": RouteFixture(),
+    "GET /api/compliance/drivers/{driver_id}": RouteFixture(
+        path_params={"driver_id": "DRV-001"},
+    ),
+    "GET /api/compliance/ifta/report": RouteFixture(),
+    "GET /api/compliance/ifta/completeness": RouteFixture(),
+    "GET /api/compliance/kfactor/dashboard": RouteFixture(),
+    "GET /api/compliance/meters": RouteFixture(),
+    "GET /api/compliance/meters/{meter_id}": RouteFixture(
+        path_params={"meter_id": "MTR-001"},
+    ),
+    "GET /api/compliance/tax-jurisdictions": RouteFixture(),
+    "GET /api/compliance/terminal-bols": RouteFixture(),
+    "GET /api/fuel/destinations": RouteFixture(),
+    "GET /api/fuel/products": RouteFixture(),
+    "GET /api/fuel/rack-prices": RouteFixture(),
+    "GET /api/fuel/supplier-contracts": RouteFixture(),
+    "GET /api/fuel/terminals": RouteFixture(),
+    "GET /api/fuel/terminals/{terminal_id}": RouteFixture(
+        path_params={"terminal_id": "TERM-001"},
+    ),
+    "GET /api/fuel/terminals/{terminal_id}/wait-summary": RouteFixture(
+        path_params={"terminal_id": "TERM-001"},
+    ),
+    "GET /api/fuel/mvp/customer-tanks": RouteFixture(),
+    "GET /api/fuel/mvp/customer-tanks/{customer_tank_id}": RouteFixture(
+        path_params={"customer_tank_id": "TANK-001"},
+    ),
+    "GET /api/fuel/mvp/depots": RouteFixture(),
+    "GET /api/fuel/mvp/depots/{depot_id}": RouteFixture(
+        path_params={"depot_id": "DEP-001"},
+    ),
+    "GET /api/fuel/mvp/forecasts": RouteFixture(),
+    "GET /api/fuel/mvp/plans": RouteFixture(),
+    "GET /api/fuel/mvp/priorities": RouteFixture(),
+    "GET /api/inventory/alerts": RouteFixture(),
+    "GET /api/inventory/items": RouteFixture(),
+    "GET /api/inventory/items/{item_id}": RouteFixture(
+        path_params={"item_id": "ITEM-001"},
+    ),
+    "GET /api/inventory/summary": RouteFixture(),
+    "GET /api/notifications": RouteFixture(),
+    "GET /api/notifications/rules": RouteFixture(),
+    "GET /api/notifications/summary": RouteFixture(),
+    "GET /api/notifications/templates": RouteFixture(),
+    "GET /api/integrations": RouteFixture(),
+    "GET /api/integrations/providers": RouteFixture(),
+    "GET /api/import/history": RouteFixture(),
 }
 
 
@@ -477,6 +565,12 @@ WS_FIXTURES: Dict[str, WSFixture] = {
     # connect, matching the envelope shape used by the other overlay
     # channels.
     "/ws/fuel-planning": WSFixture(
+        params={"token": ""},
+        expects_confirmation=True,
+    ),
+    # Tenant-scoped invoice state channel (Commerce design §6). Sends a
+    # connection-confirmation envelope on connect, like the other channels.
+    "/ws/commerce/invoices": WSFixture(
         params={"token": ""},
         expects_confirmation=True,
     ),
