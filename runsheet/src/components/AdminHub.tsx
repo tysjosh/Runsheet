@@ -1,6 +1,6 @@
 "use client";
 
-import { lazy, Suspense, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { type Tab, TabNavigation } from "./ui";
 
 // Lazy load admin components
@@ -31,8 +31,19 @@ function LoadingPlaceholder() {
   );
 }
 
-export default function AdminHub() {
-  const [activeTab, setActiveTab] = useState("metrics");
+export default function AdminHub({
+  initialTab = "metrics",
+}: {
+  /** Tab to open on mount (e.g. deep-linked from the Storm_Mode banner). */
+  initialTab?: string;
+} = {}) {
+  const [activeTab, setActiveTab] = useState(initialTab);
+
+  // Honor a changed deep-link target (e.g. banner → Weather Alerts) even when
+  // AdminHub is already mounted in the shell.
+  useEffect(() => {
+    setActiveTab(initialTab);
+  }, [initialTab]);
 
   const tabs: Tab[] = [
     {

@@ -20,6 +20,14 @@ export interface InShellNav {
   handles: (type: EntityType) => boolean;
   /** Open the entity in-shell. Only called for types `handles` returned true. */
   open: (type: EntityType, id: string) => void;
+  /**
+   * Open a top-level shell module in-shell (no route change), optionally
+   * selecting a sub-tab within it. Used by surfaces that would otherwise
+   * deep-link to a standalone route — e.g. the Storm_Mode banner's
+   * "Full details" opening Admin → Weather Alerts. Optional: consumers fall
+   * back to a route link when the shell doesn't provide it.
+   */
+  openModule?: (item: string, tab?: string) => void;
 }
 
 const InShellNavContext = createContext<InShellNav | null>(null);

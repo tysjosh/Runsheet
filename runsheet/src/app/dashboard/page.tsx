@@ -87,6 +87,7 @@ export default function Home() {
   const [customerDetailId, setCustomerDetailId] = useState<string | null>(null);
   const [ordersQuery, setOrdersQuery] = useState("");
   const [createOrderOpen, setCreateOrderOpen] = useState(false);
+  const [adminTab, setAdminTab] = useState("metrics");
 
   // Persist active menu item across refreshes
   const handleNavigate = (item: string) => {
@@ -110,6 +111,13 @@ export default function Home() {
     setCustomerDetailId(customerId);
     handleNavigate("customer-detail");
   };
+  // Open a top-level module in-shell, optionally selecting a sub-tab (e.g. the
+  // Storm_Mode banner opening Admin → Weather Alerts) so deep-links stay in the
+  // shell instead of routing out to a standalone page.
+  const openModule = (item: string, tab?: string) => {
+    if (item === "admin") setAdminTab(tab ?? "metrics");
+    handleNavigate(item);
+  };
 
   // Cross-module reference links (EntityLink + inline links) open in-shell for
   // the entity types the shell can host; everything else falls back to a
@@ -120,6 +128,7 @@ export default function Home() {
       if (type === "order") openOrder(id);
       else if (type === "customer") openCustomer(id);
     },
+    openModule,
   };
 
   useEffect(() => {
@@ -359,7 +368,7 @@ export default function Home() {
           <div className="flex-1 bg-gray-50">
             <ErrorBoundary componentName="Admin">
               <Suspense fallback={<ComponentLoadingPlaceholder />}>
-                <AdminHub />
+                <AdminHub initialTab={adminTab} />
               </Suspense>
             </ErrorBoundary>
           </div>

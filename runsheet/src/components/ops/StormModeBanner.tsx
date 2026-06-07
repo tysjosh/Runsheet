@@ -55,6 +55,7 @@ import {
   submitStormModeOverride,
 } from "../../services/fuelApi";
 import { getCurrentUserId, getCurrentUserRoles } from "../../utils/auth";
+import { useInShellNav } from "../ui/InShellNav";
 
 // ─── Role gate (Req 9.4.4) ───────────────────────────────────────────────────
 
@@ -357,6 +358,9 @@ export default function StormModeBanner({
   const [sessionRoles, setSessionRoles] = useState<string[]>([]);
   const [sessionActorId, setSessionActorId] = useState<string>("");
   const cancelledRef = useRef(false);
+  // When rendered inside the dashboard shell, open "Full details" in-shell
+  // (Admin → Weather Alerts) instead of navigating to the standalone route.
+  const nav = useInShellNav();
 
   const reload = useCallback(async () => {
     try {
@@ -533,13 +537,24 @@ export default function StormModeBanner({
           </div>
 
           <div className="flex items-center gap-2 flex-shrink-0">
-            <a
-              href={detailsHref}
-              className="inline-flex items-center gap-1 text-xs font-medium text-error-dark hover:text-error-dark underline"
-            >
-              Full details
-              <ExternalLink className="w-3 h-3" />
-            </a>
+            {nav?.openModule ? (
+              <button
+                type="button"
+                onClick={() => nav.openModule?.("admin", "weather-alerts")}
+                className="inline-flex items-center gap-1 text-xs font-medium text-error-dark hover:text-error-dark underline"
+              >
+                Full details
+                <ExternalLink className="w-3 h-3" />
+              </button>
+            ) : (
+              <a
+                href={detailsHref}
+                className="inline-flex items-center gap-1 text-xs font-medium text-error-dark hover:text-error-dark underline"
+              >
+                Full details
+                <ExternalLink className="w-3 h-3" />
+              </a>
+            )}
             {canOverride && !showOverrideForm && (
               <button
                 type="button"
