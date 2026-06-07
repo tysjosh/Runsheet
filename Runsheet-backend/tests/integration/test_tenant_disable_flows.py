@@ -311,10 +311,10 @@ class TestSchedulingWSManagerTenantMatrix:
     @pytest.mark.asyncio
     async def test_scheduling_ws_broadcast_job_created(self):
         ws = FakeWebSocket()
-        await self.manager.connect(ws)
+        await self.manager.connect(ws, tenant_id="tenant-sched")
 
         count = await self.manager.broadcast_job_created(
-            {"job_id": "JOB-001", "status": "created"}
+            {"job_id": "JOB-001", "status": "created", "tenant_id": "tenant-sched"}
         )
         assert count >= 1
         job_msgs = [m for m in ws.messages if m.get("type") == "job_created"]
@@ -323,10 +323,10 @@ class TestSchedulingWSManagerTenantMatrix:
     @pytest.mark.asyncio
     async def test_scheduling_ws_broadcast_status_changed(self):
         ws = FakeWebSocket()
-        await self.manager.connect(ws)
+        await self.manager.connect(ws, tenant_id="tenant-sched")
 
         count = await self.manager.broadcast_status_changed(
-            job_data={"job_id": "JOB-001"},
+            job_data={"job_id": "JOB-001", "tenant_id": "tenant-sched"},
             old_status="created",
             new_status="assigned",
         )
@@ -335,10 +335,14 @@ class TestSchedulingWSManagerTenantMatrix:
     @pytest.mark.asyncio
     async def test_scheduling_ws_broadcast_delay_alert(self):
         ws = FakeWebSocket()
-        await self.manager.connect(ws)
+        await self.manager.connect(ws, tenant_id="tenant-sched")
 
         count = await self.manager.broadcast_delay_alert(
-            job_data={"job_id": "JOB-001", "job_type": "delivery"},
+            job_data={
+                "job_id": "JOB-001",
+                "job_type": "delivery",
+                "tenant_id": "tenant-sched",
+            },
             delay_minutes=30,
         )
         assert count >= 1
@@ -472,11 +476,13 @@ class TestFullDisableEnableCycleAllManagers:
         manager = SchedulingWebSocketManager()
 
         ws = FakeWebSocket()
-        await manager.connect(ws)
+        await manager.connect(ws, tenant_id="tenant-sched")
         assert not ws.closed
         assert manager.get_connection_count() == 1
 
-        count = await manager.broadcast_job_created({"job_id": "JOB-001"})
+        count = await manager.broadcast_job_created(
+            {"job_id": "JOB-001", "tenant_id": "tenant-sched"}
+        )
         assert count >= 1
 
         await manager.disconnect(ws)
