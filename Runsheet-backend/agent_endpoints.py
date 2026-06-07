@@ -43,9 +43,12 @@ _feedback_service = None
 router = APIRouter(prefix="/api/agent", tags=["agent"])
 
 # Auth policy declaration for this router (Req 5.2)
-# Default: JWT_REQUIRED for all agent endpoints
-# Exception: GET /api/agent/health → PUBLIC (see
-# middleware.auth_enforcement.PUBLIC_ROUTE_ALLOWLIST)
+# JWT_REQUIRED for every agent endpoint, including GET /api/agent/health.
+# This router is NOT on middleware.auth_enforcement.PUBLIC_ROUTE_ALLOWLIST
+# (which the allowlist-sanity property test pins to exactly health + docs),
+# so the global Auth_Middleware fails closed and a verified SuperTokens
+# session is required. Agent health is operational detail, not a load-balancer
+# probe, so it stays behind auth rather than widening the public surface.
 ROUTER_AUTH_POLICY = "jwt_required"
 
 
@@ -602,28 +605,30 @@ async def get_feedback_stats(
 @router.get("/health")
 async def get_agent_health(request: Request):
     """
-    Status of all autonomous and overlay agents.
+    Status of all autonomous, overlay, and MVP fuel-distribution agents.
 
     Returns the status (running, paused/stopped, error) and agent_id
-    for each registered agent.
+    for each registered agent across all three agent registries
+    (``autonomous_agents``, ``overlay_agents``, ``mvp_agents``).
 
     Validates: Requirement 9.6
     """
-    agents = getattr(request.app.state, "autonomous_agents", {})
-    overlay_agents = getattr(request.app.state, "overlay_agents", {})
     health = {}
-    for agent_id, agent in agents.items():
-        health[agent_id] = {
-            "agent_id": agent_id,
-            "status": agent.status,
-            "type": "autonomous",
-        }
-    for agent_id, agent in overlay_agents.items():
-        health[agent_id] = {
-            "agent_id": agent_id,
-            "status": agent.status,
-            "type": "overlay",
-        }
+    # Each registry is an ``{agent_id: agent}`` dict stored on app.state by
+    # bootstrap.agents. MVP agents subclass BaseOverlayAgent → BaseAgent, so
+    # they expose the same ``.status`` property as the other two tiers.
+    registries = (
+        ("autonomous", getattr(request.app.state, "autonomous_agents", {})),
+        ("overlay", getattr(request.app.state, "overlay_agents", {})),
+        ("mvp", getattr(request.app.state, "mvp_agents", {})),
+    )
+    for agent_type, agents in registries:
+        for agent_id, agent in agents.items():
+            health[agent_id] = {
+                "agent_id": agent_id,
+                "status": agent.status,
+                "type": agent_type,
+            }
     return {"agents": health}
 
 
