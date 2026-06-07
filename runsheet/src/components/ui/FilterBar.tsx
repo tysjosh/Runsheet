@@ -29,7 +29,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
     <div className={`flex gap-4 ${className}`}>
       {onSearchChange && (
         <div className="flex-1 relative">
-          <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
+          <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-500" />
           <input
             type="text"
             aria-label="Search"
@@ -62,7 +62,7 @@ export const FilterSelect: React.FC<FilterSelectProps> = ({
   return (
     <div className="relative">
       {icon && (
-        <div className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400">
+        <div className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-500">
           {icon}
         </div>
       )}

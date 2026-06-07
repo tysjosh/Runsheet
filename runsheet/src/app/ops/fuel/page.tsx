@@ -350,7 +350,7 @@ export default function FuelDashboardPage() {
 
                     <div className="relative">
                       <Search
-                        className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400"
+                        className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500"
                         aria-hidden="true"
                       />
                       <input
@@ -389,7 +389,7 @@ export default function FuelDashboardPage() {
                       }}
                     />
                   ) : (
-                    <p className="text-sm text-gray-400 text-center py-8">
+                    <p className="text-sm text-gray-500 text-center py-8">
                       Failed to load station detail
                     </p>
                   )}

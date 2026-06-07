@@ -181,7 +181,7 @@ function DetailItem({
 }) {
   return (
     <div>
-      <p className="text-xs text-gray-400 mb-0.5">{label}</p>
+      <p className="text-xs text-gray-500 mb-0.5">{label}</p>
       <p
         className={`text-sm text-primary ${mono ? "font-mono text-xs" : ""} truncate`}
         title={value}
@@ -240,7 +240,7 @@ export default function ImportHistory({ onClose }: ImportHistoryProps) {
 
   if (loading) {
     return (
-      <div className="flex flex-col items-center justify-center py-20 text-gray-400">
+      <div className="flex flex-col items-center justify-center py-20 text-gray-500">
         <Loader2 className="w-8 h-8 animate-spin mb-4" />
         <p className="text-sm font-medium">Loading import history…</p>
       </div>
@@ -288,9 +288,9 @@ export default function ImportHistory({ onClose }: ImportHistoryProps) {
       headerClassName: "w-8",
       render: (session) =>
         expandedId === session.session_id ? (
-          <ChevronDown className="w-4 h-4 text-gray-400" />
+          <ChevronDown className="w-4 h-4 text-gray-500" />
         ) : (
-          <ChevronRight className="w-4 h-4 text-gray-400" />
+          <ChevronRight className="w-4 h-4 text-gray-500" />
         ),
     },
     {
@@ -364,7 +364,7 @@ export default function ImportHistory({ onClose }: ImportHistoryProps) {
 
       {/* Filters */}
       <div className="flex items-center gap-3 mb-6">
-        <Filter className="w-4 h-4 text-gray-400 flex-shrink-0" />
+        <Filter className="w-4 h-4 text-gray-500 flex-shrink-0" />
 
         <select
           value={dataTypeFilter}
@@ -399,7 +399,7 @@ export default function ImportHistory({ onClose }: ImportHistoryProps) {
               setDataTypeFilter("");
               setStatusFilter("");
             }}
-            className="text-xs text-gray-400 hover:text-gray-600 transition-colors"
+            className="text-xs text-gray-500 hover:text-gray-600 transition-colors"
           >
             Clear filters
           </button>
@@ -408,7 +408,7 @@ export default function ImportHistory({ onClose }: ImportHistoryProps) {
 
       {/* Empty state */}
       {sessions.length === 0 && (
-        <div className="flex flex-col items-center justify-center py-16 text-gray-400">
+        <div className="flex flex-col items-center justify-center py-16 text-gray-500">
           <Database className="w-12 h-12 mb-4" />
           <p className="text-sm font-medium mb-1">No import sessions found</p>
           <p className="text-xs">

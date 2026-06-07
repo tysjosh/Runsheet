@@ -139,8 +139,8 @@ describe("formatVariancePct", () => {
 
 describe("varianceCellClass", () => {
   it("returns neutral color for null / NaN", () => {
-    expect(varianceCellClass(null)).toContain("text-gray-400");
-    expect(varianceCellClass(undefined)).toContain("text-gray-400");
+    expect(varianceCellClass(null)).toContain("text-gray-500");
+    expect(varianceCellClass(undefined)).toContain("text-gray-500");
   });
 
   it("returns red styling at or above threshold", () => {

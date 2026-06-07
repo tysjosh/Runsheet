@@ -348,7 +348,7 @@ function CsvDropZone({
         aria-label="Drop CSV file here or click to browse"
       >
         <Upload
-          className={`w-10 h-10 mb-4 ${dragOver ? "text-primary" : "text-gray-400"}`}
+          className={`w-10 h-10 mb-4 ${dragOver ? "text-primary" : "text-gray-500"}`}
         />
         <p className="text-sm font-medium text-primary mb-1">
           {dragOver ? "Drop your file here" : "Drag and drop your CSV file"}
@@ -356,7 +356,7 @@ function CsvDropZone({
         <p className="text-xs text-gray-500 mb-4">
           or click to browse your files
         </p>
-        <div className="flex items-center gap-3 text-xs text-gray-400">
+        <div className="flex items-center gap-3 text-xs text-gray-500">
           <span>.csv files only</span>
           <span>•</span>
           <span>Max {MAX_FILE_SIZE_LABEL}</span>
@@ -375,9 +375,9 @@ function CsvDropZone({
       {/* Selected file indicator */}
       {selectedFile && (
         <div className="mt-3 flex items-center gap-2 text-sm text-gray-600">
-          <FileSpreadsheet className="w-4 h-4 text-gray-400" />
+          <FileSpreadsheet className="w-4 h-4 text-gray-500" />
           <span>{selectedFile.name}</span>
-          <span className="text-xs text-gray-400">
+          <span className="text-xs text-gray-500">
             ({(selectedFile.size / 1024).toFixed(1)} KB)
           </span>
         </div>
@@ -427,7 +427,7 @@ function SheetsInput({
           onChange={(e) => onUrlChange(e.target.value)}
           onKeyDown={handleKeyDown}
           placeholder="https://docs.google.com/spreadsheets/d/..."
-          className="flex-1 px-4 py-2.5 text-sm border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent placeholder:text-gray-400"
+          className="flex-1 px-4 py-2.5 text-sm border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent placeholder:text-gray-500"
         />
         <button
           type="button"
@@ -436,7 +436,7 @@ function SheetsInput({
           className={`px-5 py-2.5 text-sm font-medium rounded-xl transition-colors ${
             url.trim()
               ? "bg-primary text-white hover:bg-primary-hover"
-              : "bg-gray-100 text-gray-400 cursor-not-allowed"
+              : "bg-gray-100 text-gray-500 cursor-not-allowed"
           }`}
         >
           Import
@@ -450,7 +450,7 @@ function SheetsInput({
 
 function LoadingState({ activeTab }: { activeTab: SourceTab }) {
   return (
-    <div className="flex flex-col items-center justify-center py-16 text-gray-400">
+    <div className="flex flex-col items-center justify-center py-16 text-gray-500">
       <Loader2 className="w-8 h-8 animate-spin mb-4" />
       <p className="text-sm font-medium text-primary">
         {activeTab === "csv"
@@ -532,7 +532,7 @@ function ParsePreview({ result }: { result: ParseResponse }) {
       <div>
         <h3 className="text-sm font-semibold text-primary mb-3">
           Sample Preview{" "}
-          <span className="font-normal text-gray-400">
+          <span className="font-normal text-gray-500">
             (first {result.sample_rows.length} rows)
           </span>
         </h3>
@@ -561,7 +561,7 @@ function ParsePreview({ result }: { result: ParseResponse }) {
                     idx % 2 === 0 ? "bg-white" : "bg-gray-50/50"
                   }`}
                 >
-                  <td className="px-3 py-2 text-gray-400 font-mono">
+                  <td className="px-3 py-2 text-gray-500 font-mono">
                     {idx + 1}
                   </td>
                   {result.columns.map((col) => (

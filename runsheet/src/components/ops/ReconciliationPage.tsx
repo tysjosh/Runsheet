@@ -114,7 +114,7 @@ export function varianceCellClass(
   pct: number | null | undefined,
   threshold: number = DEFAULT_ALERT_PCT,
 ): string {
-  if (pct == null || Number.isNaN(pct)) return "text-gray-400";
+  if (pct == null || Number.isNaN(pct)) return "text-gray-500";
   const abs = Math.abs(pct);
   if (abs >= threshold) return "text-error-dark font-semibold";
   if (abs >= threshold * 0.5) return "text-warning-dark font-medium";
@@ -200,7 +200,7 @@ function FiltersRow({
         </label>
         <div className="relative">
           <Search
-            className="w-3.5 h-3.5 text-gray-400 absolute left-2.5 top-1/2 -translate-y-1/2"
+            className="w-3.5 h-3.5 text-gray-500 absolute left-2.5 top-1/2 -translate-y-1/2"
             aria-hidden="true"
           />
           <input
@@ -228,7 +228,7 @@ function FiltersRow({
         </label>
         <div className="relative">
           <Search
-            className="w-3.5 h-3.5 text-gray-400 absolute left-2.5 top-1/2 -translate-y-1/2"
+            className="w-3.5 h-3.5 text-gray-500 absolute left-2.5 top-1/2 -translate-y-1/2"
             aria-hidden="true"
           />
           <input
@@ -256,7 +256,7 @@ function FiltersRow({
         </label>
         <div className="relative">
           <Search
-            className="w-3.5 h-3.5 text-gray-400 absolute left-2.5 top-1/2 -translate-y-1/2"
+            className="w-3.5 h-3.5 text-gray-500 absolute left-2.5 top-1/2 -translate-y-1/2"
             aria-hidden="true"
           />
           <input
@@ -408,7 +408,7 @@ function PodDetailDrawer({ record, onClose, onError }: PodDetailDrawerProps) {
           <button
             type="button"
             onClick={onClose}
-            className="p-1 text-gray-400 hover:text-gray-600 rounded"
+            className="p-1 text-gray-500 hover:text-gray-600 rounded"
             aria-label="Close POD detail"
           >
             <X className="w-5 h-5" />
@@ -749,12 +749,12 @@ function TamperEvidenceSection({ podId, onError }: TamperEvidenceSectionProps) {
         </span>
         {open ? (
           <ChevronUp
-            className="w-4 h-4 text-gray-400 group-hover:text-gray-600"
+            className="w-4 h-4 text-gray-500 group-hover:text-gray-600"
             aria-hidden="true"
           />
         ) : (
           <ChevronDown
-            className="w-4 h-4 text-gray-400 group-hover:text-gray-600"
+            className="w-4 h-4 text-gray-500 group-hover:text-gray-600"
             aria-hidden="true"
           />
         )}
@@ -1067,7 +1067,7 @@ function ReconciliationChain({
           data-testid={`chain-invoice-${record.reconciliation_id}`}
         />
       ) : (
-        <span className="text-gray-400" title="Invoice (pending)">
+        <span className="text-gray-500" title="Invoice (pending)">
           —
         </span>
       )}

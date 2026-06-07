@@ -172,7 +172,7 @@ export default function JobBoard({
             onClick={(e) => e.stopPropagation()}
           >
             {job.job_id}
-            <ExternalLink className="w-3 h-3 text-gray-400" />
+            <ExternalLink className="w-3 h-3 text-gray-500" />
           </Link>
         ) : (
           job.job_id
@@ -259,8 +259,8 @@ export default function JobBoard({
       rowClassName={(job) => getRowColor(job)}
       emptyState={
         <div className="text-gray-500">
-          <p className="text-lg font-medium text-gray-400">No jobs found</p>
-          <p className="text-sm text-gray-400 mt-1">
+          <p className="text-lg font-medium text-gray-500">No jobs found</p>
+          <p className="text-sm text-gray-500 mt-1">
             Try adjusting your filters
           </p>
         </div>

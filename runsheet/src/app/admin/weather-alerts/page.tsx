@@ -557,7 +557,7 @@ export default function WeatherAlertsPage() {
         {loading && !status && (
           <div className="flex items-center justify-center py-12">
             <Loader2
-              className="w-6 h-6 text-gray-400 animate-spin"
+              className="w-6 h-6 text-gray-500 animate-spin"
               aria-hidden="true"
             />
           </div>

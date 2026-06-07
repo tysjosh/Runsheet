@@ -255,7 +255,7 @@ function RestrictionCard({ restriction }: RestrictionCardProps) {
             {restriction.restriction_id}
           </p>
         </div>
-        <span className="text-[10px] uppercase tracking-wide text-gray-400">
+        <span className="text-[10px] uppercase tracking-wide text-gray-500">
           {restriction.source}
         </span>
       </header>
@@ -492,7 +492,7 @@ function UploadForm({ onSuccess, onError }: UploadFormProps) {
             {polygonError}
           </p>
         )}
-        <p className="text-[10px] text-gray-400 mt-1">
+        <p className="text-[10px] text-gray-500 mt-1">
           Paste a GeoJSON Polygon or MultiPolygon with WGS84 [lon, lat]
           coordinates. The backend validates the geometry before persisting.
         </p>
@@ -627,7 +627,7 @@ export default function RoadRestrictionsPanel({
             data-testid="road-restriction-role-gate-notice"
           >
             <ShieldAlert
-              className="w-4 h-4 text-gray-400 mt-0.5 flex-shrink-0"
+              className="w-4 h-4 text-gray-500 mt-0.5 flex-shrink-0"
               aria-hidden="true"
             />
             <span>

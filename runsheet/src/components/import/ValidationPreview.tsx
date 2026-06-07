@@ -136,10 +136,10 @@ export default function ValidationPreview({
 
   if (loading || (!validationResult && !error)) {
     return (
-      <div className="flex flex-col items-center justify-center py-20 text-gray-400">
+      <div className="flex flex-col items-center justify-center py-20 text-gray-500">
         <Loader2 className="w-8 h-8 animate-spin mb-4" />
         <p className="text-sm font-medium">Validating your data…</p>
-        <p className="text-xs mt-1 text-gray-400">
+        <p className="text-xs mt-1 text-gray-500">
           Checking rows against the schema template
         </p>
       </div>
@@ -310,7 +310,7 @@ export default function ValidationPreview({
             className={`flex items-center gap-2 px-6 py-2.5 text-sm font-medium rounded-xl transition-colors ${
               canImport
                 ? "bg-primary text-white hover:bg-primary-hover"
-                : "bg-gray-100 text-gray-400 cursor-not-allowed"
+                : "bg-gray-100 text-gray-500 cursor-not-allowed"
             }`}
           >
             <Upload className="w-4 h-4" />

@@ -382,7 +382,7 @@ export default function InvoiceDetailPage({
                 <p className="text-sm text-gray-600">
                   by {event.actor}
                   {event.payload && Object.keys(event.payload).length > 0 && (
-                    <span className="ml-2 text-xs text-gray-400">
+                    <span className="ml-2 text-xs text-gray-500">
                       {JSON.stringify(event.payload)}
                     </span>
                   )}

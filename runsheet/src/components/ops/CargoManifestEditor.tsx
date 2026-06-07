@@ -369,8 +369,8 @@ function EditableCargoTable({
       getRowId={(item) => item.item_id}
       emptyState={
         <div className="text-gray-500">
-          <p className="text-lg font-medium text-gray-400">No cargo items</p>
-          <p className="text-sm text-gray-400 mt-1">
+          <p className="text-lg font-medium text-gray-500">No cargo items</p>
+          <p className="text-sm text-gray-500 mt-1">
             This job has no cargo manifest items to edit
           </p>
         </div>

@@ -513,7 +513,7 @@ function DepotFormModal({
           <button
             type="button"
             onClick={onClose}
-            className="p-1 text-gray-400 hover:text-gray-600 rounded"
+            className="p-1 text-gray-500 hover:text-gray-600 rounded"
             aria-label="Close depot form"
           >
             <X className="w-5 h-5" />
@@ -720,7 +720,7 @@ function DepotFormModal({
                   {fieldErrors.fuel_types_supported}
                 </p>
               )}
-              <p className="text-xs text-gray-400 mt-1">
+              <p className="text-xs text-gray-500 mt-1">
                 Pick every canonical product this depot can load.
               </p>
             </fieldset>
@@ -808,7 +808,7 @@ function DeleteConfirmModal({
           <button
             type="button"
             onClick={onCancel}
-            className="p-1 text-gray-400 hover:text-gray-600 rounded"
+            className="p-1 text-gray-500 hover:text-gray-600 rounded"
             aria-label="Close delete confirmation"
           >
             <X className="w-5 h-5" />
@@ -1020,12 +1020,12 @@ export default function DepotsPage({ initialFilters }: DepotsPageProps = {}) {
       render: (depot) => (
         <div className="flex items-start gap-1">
           <MapPin
-            className="w-3 h-3 text-gray-400 mt-0.5 shrink-0"
+            className="w-3 h-3 text-gray-500 mt-0.5 shrink-0"
             aria-hidden="true"
           />
           <div>
             <div className="line-clamp-2">{depot.address}</div>
-            <div className="text-xs text-gray-400 font-mono">
+            <div className="text-xs text-gray-500 font-mono">
               {formatCoordinates(depot)}
             </div>
           </div>
@@ -1038,7 +1038,7 @@ export default function DepotsPage({ initialFilters }: DepotsPageProps = {}) {
       className: "text-sm text-gray-700",
       render: (depot) => (
         <span className="inline-flex items-center gap-1">
-          <Clock className="w-3 h-3 text-gray-400" aria-hidden="true" />
+          <Clock className="w-3 h-3 text-gray-500" aria-hidden="true" />
           {depot.timezone}
         </span>
       ),
@@ -1049,7 +1049,7 @@ export default function DepotsPage({ initialFilters }: DepotsPageProps = {}) {
       render: (depot) => (
         <div className="flex flex-wrap gap-1 max-w-[240px]">
           {(depot.fuel_types_supported ?? []).length === 0 ? (
-            <span className="text-xs text-gray-400">—</span>
+            <span className="text-xs text-gray-500">—</span>
           ) : (
             (depot.fuel_types_supported ?? []).map((code) => (
               <span
@@ -1187,15 +1187,15 @@ export default function DepotsPage({ initialFilters }: DepotsPageProps = {}) {
             loading={loading && depots.length === 0}
             loadingState={
               <div className="flex items-center justify-center py-4">
-                <Loader2 className="w-5 h-5 text-gray-400 animate-spin" />
+                <Loader2 className="w-5 h-5 text-gray-500 animate-spin" />
               </div>
             }
             emptyState={
               <div className="text-gray-500">
-                <p className="text-lg font-medium text-gray-400">
+                <p className="text-lg font-medium text-gray-500">
                   No depots found
                 </p>
-                <p className="text-sm text-gray-400 mt-1">
+                <p className="text-sm text-gray-500 mt-1">
                   Try adjusting your filters or add a new depot.
                 </p>
               </div>

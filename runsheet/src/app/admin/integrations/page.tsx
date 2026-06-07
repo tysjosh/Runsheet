@@ -496,7 +496,7 @@ export default function IntegrationMarketplacePage() {
           <div className="flex flex-wrap items-center gap-3">
             <div className="relative flex-1 min-w-[200px]">
               <Search
-                className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400"
+                className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500"
                 aria-hidden="true"
               />
               <input
@@ -567,7 +567,7 @@ export default function IntegrationMarketplacePage() {
         {loading && (
           <div className="flex items-center justify-center py-12">
             <Loader2
-              className="w-6 h-6 text-gray-400 animate-spin"
+              className="w-6 h-6 text-gray-500 animate-spin"
               aria-hidden="true"
             />
           </div>
@@ -589,7 +589,7 @@ export default function IntegrationMarketplacePage() {
                     <h2 className="text-sm font-semibold text-primary uppercase tracking-wide">
                       {formatCategoryLabel(category)}
                     </h2>
-                    <span className="text-[11px] text-gray-400">
+                    <span className="text-[11px] text-gray-500">
                       {categoryProviders.length} provider
                       {categoryProviders.length === 1 ? "" : "s"}
                     </span>
@@ -665,7 +665,7 @@ function SummaryTile({
         : "text-primary";
   return (
     <div className="bg-white rounded-xl shadow-sm border border-gray-100 px-4 py-3">
-      <p className="text-[10px] text-gray-400 uppercase tracking-wide">
+      <p className="text-[10px] text-gray-500 uppercase tracking-wide">
         {label}
       </p>
       <p className={`text-2xl font-semibold mt-1 ${toneClasses}`}>{value}</p>

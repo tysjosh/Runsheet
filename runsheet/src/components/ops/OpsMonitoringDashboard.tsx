@@ -171,7 +171,7 @@ function MetricCard({ title, icon, children, loading }: MetricCardProps) {
       <div className="px-5 py-4">
         {loading ? (
           <div className="flex items-center justify-center py-8">
-            <Loader2 className="w-5 h-5 text-gray-400 animate-spin" />
+            <Loader2 className="w-5 h-5 text-gray-500 animate-spin" />
           </div>
         ) : (
           <div className="divide-y divide-gray-50">{children}</div>
@@ -313,7 +313,7 @@ function ShipmentMetricsSection({
       <div className="px-5 py-4">
         {loading ? (
           <div className="flex items-center justify-center py-8">
-            <Loader2 className="w-5 h-5 text-gray-400 animate-spin" />
+            <Loader2 className="w-5 h-5 text-gray-500 animate-spin" />
           </div>
         ) : error ? (
           <div className="text-sm text-error bg-error-light px-4 py-3 rounded-lg">
@@ -327,7 +327,7 @@ function ShipmentMetricsSection({
             data={data?.data ?? []}
             getRowId={(entry) => entry.timestamp}
             emptyState={
-              <div className="flex flex-col items-center justify-center py-8 text-gray-400">
+              <div className="flex flex-col items-center justify-center py-8 text-gray-500">
                 <TrendingUp className="w-8 h-8 mb-2" />
                 <p className="text-sm">No shipment metrics available</p>
               </div>
@@ -505,7 +505,7 @@ function SlaMetricsSection({
       <div className="px-5 py-4">
         {loading ? (
           <div className="flex items-center justify-center py-8">
-            <Loader2 className="w-5 h-5 text-gray-400 animate-spin" />
+            <Loader2 className="w-5 h-5 text-gray-500 animate-spin" />
           </div>
         ) : error ? (
           <div className="text-sm text-error bg-error-light px-4 py-3 rounded-lg">
@@ -565,7 +565,7 @@ function SlaMetricsSection({
             />
           </div>
         ) : (
-          <div className="flex flex-col items-center justify-center py-8 text-gray-400">
+          <div className="flex flex-col items-center justify-center py-8 text-gray-500">
             <Shield className="w-8 h-8 mb-2" />
             <p className="text-sm">No SLA metrics available</p>
           </div>
@@ -741,7 +741,7 @@ export default function OpsMonitoringDashboard() {
             <button
               onClick={fetchMetrics}
               disabled={loading}
-              className="p-2 rounded-lg text-gray-400 hover:text-primary hover:bg-gray-100 transition-colors disabled:opacity-50"
+              className="p-2 rounded-lg text-gray-500 hover:text-primary hover:bg-gray-100 transition-colors disabled:opacity-50"
               title="Refresh metrics"
             >
               <RefreshCw

@@ -954,7 +954,7 @@ function CandidateRow({ candidate, rank, isBest }: CandidateRowProps) {
             </div>
           </div>
         </div>
-        <div className="flex-shrink-0 text-gray-400 ml-2">
+        <div className="flex-shrink-0 text-gray-500 ml-2">
           {expanded ? (
             <ChevronUp className="w-4 h-4" aria-hidden="true" />
           ) : (
@@ -1144,7 +1144,7 @@ function RackPricesPanel({
             Filtered by <span className="font-mono">{productFilter}</span>
           </div>
         </div>
-        <DollarSign className="w-4 h-4 text-gray-400" aria-hidden="true" />
+        <DollarSign className="w-4 h-4 text-gray-500" aria-hidden="true" />
       </div>
       <div className="max-h-[360px] overflow-auto">
         {loading ? (
@@ -1201,7 +1201,7 @@ function SupplierContractsPanel({
             Filtered by <span className="font-mono">{productFilter}</span>
           </div>
         </div>
-        <Building2 className="w-4 h-4 text-gray-400" aria-hidden="true" />
+        <Building2 className="w-4 h-4 text-gray-500" aria-hidden="true" />
       </div>
       <div className="max-h-[360px] overflow-auto">
         {loading ? (

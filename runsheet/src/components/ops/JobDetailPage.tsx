@@ -187,7 +187,7 @@ function EventTimeline({ events }: EventTimelineProps) {
 
   if (sorted.length === 0) {
     return (
-      <div className="text-center py-8 text-gray-400">
+      <div className="text-center py-8 text-gray-500">
         <Activity className="w-8 h-8 mx-auto mb-2 opacity-50" />
         <p className="text-sm">No events recorded</p>
       </div>
@@ -235,7 +235,7 @@ function EventTimeline({ events }: EventTimelineProps) {
                       {formatDateTime(event.event_timestamp)}
                     </span>
                     {event.actor_id && (
-                      <span className="text-[10px] text-gray-400">
+                      <span className="text-[10px] text-gray-500">
                         by {event.actor_id}
                       </span>
                     )}
@@ -269,7 +269,7 @@ function EventTimeline({ events }: EventTimelineProps) {
                         .filter(([key]) => key !== "items")
                         .map(([key, value]) => (
                           <span key={key} className="mr-3">
-                            <span className="text-gray-400">
+                            <span className="text-gray-500">
                               {key.replace(/_/g, " ")}:
                             </span>{" "}
                             {String(value)}
@@ -307,14 +307,14 @@ function EventTimeline({ events }: EventTimelineProps) {
                 <span className="text-sm font-medium text-primary">
                   {formatEventType(event.event_type)}
                 </span>
-                <span className="text-xs text-gray-400">
+                <span className="text-xs text-gray-500">
                   {formatDateTime(event.event_timestamp)}
                 </span>
               </div>
 
               {event.actor_id && (
                 <div className="flex items-center gap-1 mt-1">
-                  <User className="w-3 h-3 text-gray-400" />
+                  <User className="w-3 h-3 text-gray-500" />
                   <span className="text-xs text-gray-500">
                     {event.actor_id}
                   </span>
@@ -357,7 +357,7 @@ interface DetailFieldProps {
 function DetailField({ icon, label, value }: DetailFieldProps) {
   return (
     <div className="flex items-start gap-3 py-2">
-      <div className="flex-shrink-0 mt-0.5 text-gray-400">{icon}</div>
+      <div className="flex-shrink-0 mt-0.5 text-gray-500">{icon}</div>
       <div className="min-w-0">
         <p className="text-xs font-medium text-gray-500 uppercase tracking-wider">
           {label}
@@ -419,7 +419,7 @@ function LinkedRefField({
       >
         {display}
         {display !== link.id && (
-          <span className="text-gray-400"> ({link.id})</span>
+          <span className="text-gray-500"> ({link.id})</span>
         )}
       </Link>
     );
@@ -443,12 +443,12 @@ function LinkedRefField({
       </Link>
     );
   } else {
-    content = <span className="text-gray-400">—</span>;
+    content = <span className="text-gray-500">—</span>;
   }
 
   return (
     <div className="flex items-start gap-3 py-2">
-      <div className="flex-shrink-0 mt-0.5 text-gray-400">{icon}</div>
+      <div className="flex-shrink-0 mt-0.5 text-gray-500">{icon}</div>
       <div className="min-w-0">
         <p className="text-xs font-medium text-gray-500 uppercase tracking-wider">
           {label}

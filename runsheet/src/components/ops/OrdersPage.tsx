@@ -216,6 +216,13 @@ export interface OrdersPageProps {
   onCreateOrder?: () => void;
   /** Callback when user clicks an order row */
   onOrderClick?: (orderId: string) => void;
+  /**
+   * Seed text for the in-page search box (e.g. from global header search).
+   * Filters the loaded page client-side by order id / customer / address —
+   * the list endpoint has no free-text search, so this scopes to the rows
+   * already on screen.
+   */
+  initialQuery?: string;
 }
 
 // ─── Component ───────────────────────────────────────────────────────────────
@@ -224,6 +231,7 @@ export default function OrdersPage({
   tenantId,
   onCreateOrder,
   onOrderClick,
+  initialQuery = "",
 }: OrdersPageProps) {
   const resolvedTenantId = tenantId ?? getCurrentTenantId();
   // ── State ───────────────────────────────────────────────────────────────
@@ -245,6 +253,11 @@ export default function OrdersPage({
   const [productCodeFilter, setProductCodeFilter] = useState("");
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
+  // Free-text search over the loaded page (id / customer / address).
+  const [query, setQuery] = useState(initialQuery);
+  useEffect(() => {
+    setQuery(initialQuery);
+  }, [initialQuery]);
 
   // ── Data fetching ───────────────────────────────────────────────────────
 
@@ -324,6 +337,19 @@ export default function OrdersPage({
   // ── Filter change resets page ───────────────────────────────────────────
 
   const resetPage = useCallback(() => setPage(1), []);
+
+  // Client-side text filter over the loaded page.
+  const visibleOrders = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return orders;
+    return orders.filter(
+      (o) =>
+        o.order_id.toLowerCase().includes(q) ||
+        (o.customer_name ?? "").toLowerCase().includes(q) ||
+        (o.customer_id ?? "").toLowerCase().includes(q) ||
+        (o.ship_to_address ?? "").toLowerCase().includes(q),
+    );
+  }, [orders, query]);
 
   const orderColumns: Column<FuelOrder>[] = [
     {
@@ -443,6 +469,20 @@ export default function OrdersPage({
       />
 
       <div className="border-b border-gray-100 px-8 py-4">
+        <div className="mb-3">
+          <label htmlFor="order-search" className="sr-only">
+            Search orders
+          </label>
+          <input
+            id="order-search"
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search loaded orders by ID, customer, or address…"
+            className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+            aria-label="Search orders"
+          />
+        </div>
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
           <div>
             <label htmlFor="order-status-filter" className="sr-only">
@@ -579,12 +619,12 @@ export default function OrdersPage({
       <div className="flex-1 min-h-0 overflow-y-auto">
         {loading && orders.length === 0 ? (
           <div className="flex items-center justify-center py-16">
-            <RefreshCw className="w-5 h-5 text-gray-400 animate-spin" />
+            <RefreshCw className="w-5 h-5 text-gray-500 animate-spin" />
           </div>
         ) : (
           <Table
             columns={orderColumns}
-            data={orders}
+            data={visibleOrders}
             getRowId={(order) => order.order_id}
             onRowClick={
               onOrderClick ? (order) => onOrderClick(order.order_id) : undefined

@@ -257,7 +257,7 @@ export default function CustomersListPage({
               <button
                 type="button"
                 onClick={() => setTanksCustomer(null)}
-                className="rounded p-1 text-gray-400 hover:text-gray-600"
+                className="rounded p-1 text-gray-500 hover:text-gray-600"
                 aria-label="Close tanks"
               >
                 <X className="h-5 w-5" />

@@ -437,14 +437,14 @@ export default function CommandInterfacePage() {
             <div className="flex items-center gap-2">
               <button
                 onClick={clearChat}
-                className="text-gray-400 hover:text-error p-2 rounded-lg hover:bg-error-light transition-all"
+                className="text-gray-500 hover:text-error p-2 rounded-lg hover:bg-error-light transition-all"
                 title="Clear chat"
               >
                 <Trash2 className="w-4 h-4" />
               </button>
               <button
                 onClick={() => setSidebarOpen(!sidebarOpen)}
-                className="text-gray-400 hover:text-primary p-2 rounded-lg hover:bg-gray-100 transition-all"
+                className="text-gray-500 hover:text-primary p-2 rounded-lg hover:bg-gray-100 transition-all"
                 title={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
               >
                 {sidebarOpen ? (

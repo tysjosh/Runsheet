@@ -39,9 +39,9 @@ export const EmptyState: React.FC<EmptyStateProps> = ({
           {renderedIcon}
         </div>
       )}
-      <p className="text-lg font-medium text-gray-400">{title}</p>
+      <p className="text-lg font-medium text-gray-500">{title}</p>
       {description && (
-        <p className="text-sm text-gray-400 mt-1">{description}</p>
+        <p className="text-sm text-gray-500 mt-1">{description}</p>
       )}
       {action && (
         <div className="mt-6">

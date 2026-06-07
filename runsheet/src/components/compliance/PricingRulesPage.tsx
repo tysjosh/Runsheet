@@ -956,7 +956,7 @@ function ResolvePricePanel() {
               <span className="font-bold text-lg">
                 {formatCents(result.resolved_price_cents)}
               </span>
-              <span className="text-gray-400 text-xs">/gal</span>
+              <span className="text-gray-500 text-xs">/gal</span>
             </div>
             <div>
               <span className="text-gray-500 block">Strategy Used</span>

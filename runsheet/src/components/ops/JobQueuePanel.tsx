@@ -50,14 +50,14 @@ export default function JobQueuePanel({ jobs }: JobQueuePanelProps) {
       <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-100">
         <CalendarClock className="w-4 h-4 text-primary" />
         <h3 className="text-sm font-semibold text-primary">Job Queue</h3>
-        <span className="ml-auto text-xs text-gray-400">
+        <span className="ml-auto text-xs text-gray-500">
           {queuedJobs.length} upcoming
         </span>
       </div>
 
       <div className="max-h-64 overflow-y-auto divide-y divide-gray-50">
         {queuedJobs.length === 0 ? (
-          <div className="px-4 py-6 text-center text-sm text-gray-400">
+          <div className="px-4 py-6 text-center text-sm text-gray-500">
             No upcoming jobs
           </div>
         ) : (
@@ -78,7 +78,7 @@ export default function JobQueuePanel({ jobs }: JobQueuePanelProps) {
                 <p className="text-xs text-gray-500 mt-0.5 truncate">
                   {job.origin} → {job.destination}
                 </p>
-                <p className="text-xs text-gray-400 mt-0.5">
+                <p className="text-xs text-gray-500 mt-0.5">
                   {formatTime(job.scheduled_time)}
                   {job.asset_assigned && ` · ${job.asset_assigned}`}
                 </p>

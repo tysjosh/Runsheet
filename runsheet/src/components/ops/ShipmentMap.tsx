@@ -59,7 +59,7 @@ export default function ShipmentMap({ events }: ShipmentMapProps) {
   if (points.length === 0) {
     return (
       <div className="rounded-xl border border-gray-100 bg-gray-50 px-4 py-8 text-center">
-        <MapPin className="mx-auto h-6 w-6 text-gray-400" aria-hidden="true" />
+        <MapPin className="mx-auto h-6 w-6 text-gray-500" aria-hidden="true" />
         <p className="mt-2 text-sm font-medium text-primary">
           No location data
         </p>

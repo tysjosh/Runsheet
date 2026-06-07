@@ -396,7 +396,7 @@ function CleaningEventModal({
           <button
             type="button"
             onClick={onClose}
-            className="p-1 text-gray-400 hover:text-gray-600 rounded"
+            className="p-1 text-gray-500 hover:text-gray-600 rounded"
             aria-label="Close cleaning event form"
           >
             <X className="w-5 h-5" aria-hidden="true" />
@@ -497,7 +497,7 @@ function CleaningEventModal({
               onChange={(e) => updateField("driver_id", e.target.value)}
               placeholder="e.g. DRV-001"
             />
-            <p className="text-[10px] text-gray-400 mt-1">
+            <p className="text-[10px] text-gray-500 mt-1">
               Canonical driver reference linked to the Drivers module. Preferred
               over the free-text actor id, which is retained for back-compat.
             </p>
@@ -513,7 +513,7 @@ function CleaningEventModal({
             >
               <Upload className="w-5 h-5" aria-hidden="true" />
               <span>Select photos or PDFs</span>
-              <span className="text-[10px] text-gray-400">
+              <span className="text-[10px] text-gray-500">
                 JPEG · PNG · HEIC · PDF
               </span>
               <input
@@ -538,7 +538,7 @@ function CleaningEventModal({
                     className="flex items-center gap-2 px-3 py-2 rounded-md border border-gray-100 text-xs"
                   >
                     <ImageIcon
-                      className="w-3.5 h-3.5 text-gray-400"
+                      className="w-3.5 h-3.5 text-gray-500"
                       aria-hidden="true"
                     />
                     <span className="flex-1 truncate text-gray-700">
@@ -568,7 +568,7 @@ function CleaningEventModal({
                     <button
                       type="button"
                       onClick={() => removeEvidence(item.id)}
-                      className="p-0.5 text-gray-400 hover:text-gray-600"
+                      className="p-0.5 text-gray-500 hover:text-gray-600"
                       aria-label={`Remove ${item.file.name}`}
                     >
                       <X className="w-3 h-3" aria-hidden="true" />
@@ -723,7 +723,7 @@ function LoadEligibilityModal({
           <button
             type="button"
             onClick={onClose}
-            className="p-1 text-gray-400 hover:text-gray-600 rounded"
+            className="p-1 text-gray-500 hover:text-gray-600 rounded"
             aria-label="Close load eligibility form"
           >
             <X className="w-5 h-5" aria-hidden="true" />
@@ -760,7 +760,7 @@ function LoadEligibilityModal({
               placeholder="e.g. DIESEL_2"
               required
             />
-            <p className="text-[10px] text-gray-400 mt-1">
+            <p className="text-[10px] text-gray-500 mt-1">
               Enter the canonical product code used by the compatibility matrix.
             </p>
           </div>
@@ -1005,7 +1005,7 @@ export default function TruckCompartmentsPage({
             <span className="font-medium text-primary">
               {c.last_loaded_product}
             </span>
-            <span className="block text-[10px] text-gray-400">
+            <span className="block text-[10px] text-gray-500">
               {formatTimestamp(c.last_loaded_at)}
             </span>
           </span>
@@ -1132,7 +1132,7 @@ export default function TruckCompartmentsPage({
               </label>
               <div className="relative">
                 <Search
-                  className="w-3.5 h-3.5 text-gray-400 absolute left-2.5 top-1/2 -translate-y-1/2"
+                  className="w-3.5 h-3.5 text-gray-500 absolute left-2.5 top-1/2 -translate-y-1/2"
                   aria-hidden="true"
                 />
                 <input
@@ -1195,7 +1195,7 @@ export default function TruckCompartmentsPage({
               >
                 {t.truck_id}
                 <span
-                  className={`ml-1 ${activeTruckId === t.truck_id ? "text-white/80" : "text-gray-400"}`}
+                  className={`ml-1 ${activeTruckId === t.truck_id ? "text-white/80" : "text-gray-500"}`}
                 >
                   · {t.compartment_count}
                 </span>

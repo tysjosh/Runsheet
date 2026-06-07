@@ -135,7 +135,7 @@ export default function FuelStationDetail({
           <button
             type="button"
             onClick={onClose}
-            className="p-1 rounded-md hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors"
+            className="p-1 rounded-md hover:bg-gray-100 text-gray-500 hover:text-gray-600 transition-colors"
             aria-label="Close station detail"
           >
             <X className="w-5 h-5" />
@@ -165,7 +165,7 @@ export default function FuelStationDetail({
             style={{ width: `${Math.min(stockPct, 100)}%` }}
           />
         </div>
-        <div className="text-right text-xs text-gray-400 mt-1">
+        <div className="text-right text-xs text-gray-500 mt-1">
           {stockPct.toFixed(1)}%
         </div>
 
@@ -174,7 +174,7 @@ export default function FuelStationDetail({
           <div className="text-center">
             <div className="flex items-center justify-center gap-1">
               <TrendingDown
-                className="w-3.5 h-3.5 text-gray-400"
+                className="w-3.5 h-3.5 text-gray-500"
                 aria-hidden="true"
               />
               <span className="text-lg font-semibold text-primary">
@@ -189,7 +189,7 @@ export default function FuelStationDetail({
           </div>
           <div className="text-center">
             <div className="flex items-center justify-center gap-1">
-              <Clock className="w-3.5 h-3.5 text-gray-400" aria-hidden="true" />
+              <Clock className="w-3.5 h-3.5 text-gray-500" aria-hidden="true" />
               <span className="text-lg font-semibold text-primary">
                 {station.days_until_empty > 0
                   ? `${station.days_until_empty.toFixed(1)}d`
@@ -201,7 +201,7 @@ export default function FuelStationDetail({
           <div className="text-center">
             <div className="flex items-center justify-center gap-1">
               <Droplets
-                className="w-3.5 h-3.5 text-gray-400"
+                className="w-3.5 h-3.5 text-gray-500"
                 aria-hidden="true"
               />
               <span className="text-lg font-semibold text-primary">
@@ -268,7 +268,7 @@ export default function FuelStationDetail({
 
         {recent_consumption_events.length === 0 &&
         recent_refill_events.length === 0 ? (
-          <p className="text-sm text-gray-400 text-center py-4">
+          <p className="text-sm text-gray-500 text-center py-4">
             No recent events
           </p>
         ) : (
@@ -290,7 +290,7 @@ export default function FuelStationDetail({
                     {formatGallons(getEventQuantityGallons(evt))} to{" "}
                     {evt.asset_id}
                   </div>
-                  <div className="text-xs text-gray-400">
+                  <div className="text-xs text-gray-500">
                     Operator: {evt.operator_id}
                     {evt.odometer_reading != null &&
                       ` · Odometer: ${evt.odometer_reading} km`}
@@ -314,7 +314,7 @@ export default function FuelStationDetail({
                     {formatGallons(getEventQuantityGallons(evt))} from{" "}
                     {evt.supplier}
                   </div>
-                  <div className="text-xs text-gray-400">
+                  <div className="text-xs text-gray-500">
                     Operator: {evt.operator_id}
                     {evt.delivery_reference &&
                       ` · Ref: ${evt.delivery_reference}`}

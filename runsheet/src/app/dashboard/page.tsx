@@ -36,6 +36,15 @@ const DriversHub = lazy(() => import("../../components/DriversHub"));
 const DispatchCockpit = lazy(() => import("../../components/DispatchCockpit"));
 const SetupHub = lazy(() => import("../../components/SetupHub"));
 const OperationsControl = lazy(() => import("../ops/control/page"));
+// In-shell orders board + detail (replaces routing out to /ops and /orders/:id
+// so the dashboard keeps a single, consistent in-shell navigation model).
+const OrdersBoard = lazy(() => import("../../components/ops/OrdersPage"));
+const OrderDetailView = lazy(
+  () => import("../../components/orders/OrderDetailView"),
+);
+const CreateOrderModal = lazy(
+  () => import("../../components/ops/CreateOrderModal"),
+);
 
 function MapLoadingPlaceholder() {
   return (
@@ -70,6 +79,9 @@ export default function Home() {
   });
   const [selectedTruck, setSelectedTruck] = useState<Truck | null>(null);
   const [aiChatOpen, setAiChatOpen] = useState(false);
+  const [orderDetailId, setOrderDetailId] = useState<string | null>(null);
+  const [ordersQuery, setOrdersQuery] = useState("");
+  const [createOrderOpen, setCreateOrderOpen] = useState(false);
 
   // Persist active menu item across refreshes
   const handleNavigate = (item: string) => {
@@ -77,6 +89,17 @@ export default function Home() {
     if (typeof window !== "undefined") {
       sessionStorage.setItem("activeMenuItem", item);
     }
+  };
+
+  // In-shell navigation helpers — keep order workflows inside the dashboard
+  // shell instead of routing out to /ops and /orders/:id.
+  const openOrder = (orderId: string) => {
+    setOrderDetailId(orderId);
+    handleNavigate("order-detail");
+  };
+  const openOrders = (query = "") => {
+    setOrdersQuery(query);
+    handleNavigate("orders");
   };
 
   useEffect(() => {
@@ -115,7 +138,56 @@ export default function Home() {
           <div className="flex-1 bg-gray-50">
             <ErrorBoundary componentName="Today">
               <Suspense fallback={<ComponentLoadingPlaceholder />}>
-                <DispatchCockpit onNavigate={handleNavigate} />
+                <DispatchCockpit
+                  onNavigate={handleNavigate}
+                  onOpenOrder={openOrder}
+                />
+              </Suspense>
+            </ErrorBoundary>
+          </div>
+        );
+
+      case "orders":
+        return (
+          <div className="flex-1 bg-gray-50">
+            <ErrorBoundary componentName="Orders">
+              <Suspense fallback={<ComponentLoadingPlaceholder />}>
+                <OrdersBoard
+                  onOrderClick={openOrder}
+                  onCreateOrder={() => setCreateOrderOpen(true)}
+                  initialQuery={ordersQuery}
+                />
+              </Suspense>
+            </ErrorBoundary>
+          </div>
+        );
+
+      case "order-detail":
+        // Refreshing into this state loses the selected id — fall back to the
+        // board rather than render a blank detail page.
+        if (!orderDetailId) {
+          return (
+            <div className="flex-1 bg-gray-50">
+              <ErrorBoundary componentName="Orders">
+                <Suspense fallback={<ComponentLoadingPlaceholder />}>
+                  <OrdersBoard
+                    onOrderClick={openOrder}
+                    onCreateOrder={() => setCreateOrderOpen(true)}
+                    initialQuery={ordersQuery}
+                  />
+                </Suspense>
+              </ErrorBoundary>
+            </div>
+          );
+        }
+        return (
+          <div className="flex-1 overflow-auto bg-gray-50">
+            <ErrorBoundary componentName="Order">
+              <Suspense fallback={<ComponentLoadingPlaceholder />}>
+                <OrderDetailView
+                  orderId={orderDetailId}
+                  onBack={() => handleNavigate("orders")}
+                />
               </Suspense>
             </ErrorBoundary>
           </div>
@@ -326,6 +398,11 @@ export default function Home() {
           <Header
             onAIClick={() => setAiChatOpen(true)}
             onMenuClick={() => setMobileSidebarOpen(true)}
+            onSearch={openOrders}
+            onNewOrder={() => {
+              setCreateOrderOpen(true);
+              handleNavigate("orders");
+            }}
           />
           <main className="flex-1 flex bg-white relative z-0 overflow-hidden">
             <div className="flex-1 flex bg-white overflow-auto">
@@ -337,6 +414,18 @@ export default function Home() {
       <ErrorBoundary componentName="AI Chat">
         <Suspense fallback={null}>
           <AIChat isOpen={aiChatOpen} onClose={() => setAiChatOpen(false)} />
+        </Suspense>
+      </ErrorBoundary>
+      <ErrorBoundary componentName="Create Order">
+        <Suspense fallback={null}>
+          <CreateOrderModal
+            isOpen={createOrderOpen}
+            onClose={() => setCreateOrderOpen(false)}
+            onSuccess={(orderId) => {
+              setCreateOrderOpen(false);
+              openOrder(orderId);
+            }}
+          />
         </Suspense>
       </ErrorBoundary>
     </div>

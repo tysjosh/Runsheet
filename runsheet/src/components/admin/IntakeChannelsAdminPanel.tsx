@@ -437,7 +437,7 @@ export default function IntakeChannelsAdminPanel() {
       {/* Channels List */}
       {loading ? (
         <div className="flex items-center justify-center py-12">
-          <Loader2 className="w-5 h-5 text-gray-400 animate-spin" />
+          <Loader2 className="w-5 h-5 text-gray-500 animate-spin" />
         </div>
       ) : channels.length === 0 ? (
         <div className="text-center py-12 text-gray-500">

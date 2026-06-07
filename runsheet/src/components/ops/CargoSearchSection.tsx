@@ -288,10 +288,10 @@ export default function CargoSearchSection() {
           {results.length === 0 ? (
             <div className="text-center py-12">
               <Package className="w-10 h-10 text-gray-300 mx-auto mb-3" />
-              <p className="text-sm font-medium text-gray-400">
+              <p className="text-sm font-medium text-gray-500">
                 No cargo items found
               </p>
-              <p className="text-xs text-gray-400 mt-1">
+              <p className="text-xs text-gray-500 mt-1">
                 Try adjusting your search criteria
               </p>
             </div>

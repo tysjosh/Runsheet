@@ -81,7 +81,7 @@ export default function ImportComplete({
 
         {/* Summary card */}
         <div className="rounded-xl border border-gray-200 bg-white p-6 mb-8">
-          <h3 className="text-sm font-medium text-gray-400 uppercase tracking-wider mb-4">
+          <h3 className="text-sm font-medium text-gray-500 uppercase tracking-wider mb-4">
             Import Summary
           </h3>
 
@@ -92,7 +92,7 @@ export default function ImportComplete({
                 <CheckCircle2 className="w-4.5 h-4.5 text-success" />
               </div>
               <div>
-                <p className="text-xs text-gray-400">Imported</p>
+                <p className="text-xs text-gray-500">Imported</p>
                 <p className="text-lg font-semibold text-primary">
                   {result.imported_records}
                 </p>
@@ -102,10 +102,10 @@ export default function ImportComplete({
             {/* Records skipped */}
             <div className="flex items-start gap-3">
               <div className="w-9 h-9 rounded-lg bg-gray-50 flex items-center justify-center flex-shrink-0">
-                <SkipForward className="w-4.5 h-4.5 text-gray-400" />
+                <SkipForward className="w-4.5 h-4.5 text-gray-500" />
               </div>
               <div>
-                <p className="text-xs text-gray-400">Skipped</p>
+                <p className="text-xs text-gray-500">Skipped</p>
                 <p className="text-lg font-semibold text-primary">
                   {result.skipped_records}
                 </p>
@@ -118,7 +118,7 @@ export default function ImportComplete({
                 <FileSpreadsheet className="w-4.5 h-4.5 text-info" />
               </div>
               <div>
-                <p className="text-xs text-gray-400">Data Type</p>
+                <p className="text-xs text-gray-500">Data Type</p>
                 <p className="text-sm font-medium text-primary">
                   {dataTypeLabel}
                 </p>
@@ -131,7 +131,7 @@ export default function ImportComplete({
                 <Database className="w-4.5 h-4.5 text-brand-secondary" />
               </div>
               <div>
-                <p className="text-xs text-gray-400">ES Index</p>
+                <p className="text-xs text-gray-500">ES Index</p>
                 <p className="text-sm font-medium text-primary font-mono">
                   {result.es_index}
                 </p>
@@ -144,7 +144,7 @@ export default function ImportComplete({
                 <Clock className="w-4.5 h-4.5 text-gray-500" />
               </div>
               <div>
-                <p className="text-xs text-gray-400">Duration</p>
+                <p className="text-xs text-gray-500">Duration</p>
                 <p className="text-sm font-medium text-primary">
                   {result.duration_seconds.toFixed(1)}s
                 </p>

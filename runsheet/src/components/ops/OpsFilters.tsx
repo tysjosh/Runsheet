@@ -37,7 +37,7 @@ export default function OpsFilters({ filters, onChange }: OpsFiltersProps) {
 
   return (
     <div className="flex flex-wrap items-center gap-3">
-      <Filter className="w-4 h-4 text-gray-400" aria-hidden="true" />
+      <Filter className="w-4 h-4 text-gray-500" aria-hidden="true" />
 
       <select
         value={filters.status}
@@ -71,7 +71,7 @@ export default function OpsFilters({ filters, onChange }: OpsFiltersProps) {
         aria-label="Start date"
       />
 
-      <span className="text-gray-400 text-sm">to</span>
+      <span className="text-gray-500 text-sm">to</span>
 
       <input
         type="date"

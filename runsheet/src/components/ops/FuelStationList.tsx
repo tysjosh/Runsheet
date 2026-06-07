@@ -213,7 +213,7 @@ export default function FuelStationList({
                 {stockPct.toFixed(1)}%
               </span>
             </div>
-            <div className="text-xs text-gray-400 mt-0.5">
+            <div className="text-xs text-gray-500 mt-0.5">
               {formatGallons(getCurrentStockGallons(station))} /{" "}
               {formatGallons(getCapacityGallons(station))} gal
             </div>
@@ -254,7 +254,7 @@ export default function FuelStationList({
       render: (station) =>
         station.location_name ? (
           <span className="flex items-center gap-1">
-            <MapPin className="w-3 h-3 text-gray-400" aria-hidden="true" />
+            <MapPin className="w-3 h-3 text-gray-500" aria-hidden="true" />
             {station.location_name}
           </span>
         ) : (
@@ -300,8 +300,8 @@ export default function FuelStationList({
       }
       emptyState={
         <div className="text-gray-500">
-          <p className="text-lg font-medium text-gray-400">No stations found</p>
-          <p className="text-sm text-gray-400 mt-1">
+          <p className="text-lg font-medium text-gray-500">No stations found</p>
+          <p className="text-sm text-gray-500 mt-1">
             Try adjusting your filters
           </p>
         </div>

@@ -372,7 +372,7 @@ function TimeRangeSelector({
             className="px-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300"
             aria-label="Custom start date"
           />
-          <span className="text-gray-400 text-sm">to</span>
+          <span className="text-gray-500 text-sm">to</span>
           <input
             type="date"
             value={timeRange.end_date}
@@ -419,7 +419,7 @@ function FailureTypeDropdown({
           </option>
         ))}
       </select>
-      <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
+      <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500 pointer-events-none" />
     </div>
   );
 }
@@ -489,7 +489,7 @@ function FailedShipmentsTable({
       </div>
 
       {shipments.length === 0 ? (
-        <p className="text-sm text-gray-400 py-4">No failed shipments found</p>
+        <p className="text-sm text-gray-500 py-4">No failed shipments found</p>
       ) : (
         <Table<OpsShipment>
           ariaLabel="Failed shipments"
@@ -586,7 +586,7 @@ function ShipmentDrillDownPanel({
           </div>
           <button
             onClick={onClose}
-            className="p-1 text-gray-400 hover:text-gray-600 rounded"
+            className="p-1 text-gray-500 hover:text-gray-600 rounded"
             aria-label="Close detail panel"
           >
             <X className="w-5 h-5" />
@@ -720,7 +720,7 @@ function ShipmentDrillDownPanel({
                               {new Date(event.event_timestamp).toLocaleString()}
                             </p>
                             {event.location && (
-                              <p className="text-xs text-gray-400 mt-0.5">
+                              <p className="text-xs text-gray-500 mt-0.5">
                                 📍 {event.location.lat.toFixed(4)},{" "}
                                 {event.location.lon.toFixed(4)}
                               </p>
@@ -737,7 +737,7 @@ function ShipmentDrillDownPanel({
                     </div>
                   </div>
                 ) : (
-                  <p className="text-sm text-gray-400">No events recorded</p>
+                  <p className="text-sm text-gray-500">No events recorded</p>
                 )}
               </section>
             </div>

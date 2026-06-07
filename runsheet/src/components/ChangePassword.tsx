@@ -188,7 +188,7 @@ function PasswordField({
           type="button"
           onClick={() => setLocalShow((v) => !v)}
           aria-label={visible ? "Hide password" : "Show password"}
-          className="absolute inset-y-0 right-0 pr-4 flex items-center text-gray-400 hover:text-gray-600 transition-colors focus:outline-none focus:ring-2 focus:ring-gray-500 rounded"
+          className="absolute inset-y-0 right-0 pr-4 flex items-center text-gray-500 hover:text-gray-600 transition-colors focus:outline-none focus:ring-2 focus:ring-gray-500 rounded"
         >
           {visible ? (
             <EyeOff className="w-5 h-5" />

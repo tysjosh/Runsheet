@@ -109,7 +109,7 @@ function ToastNotification({
       </div>
       <button
         onClick={() => onDismiss(toast.id)}
-        className="flex-shrink-0 p-0.5 rounded text-gray-400 hover:text-gray-600 transition-colors"
+        className="flex-shrink-0 p-0.5 rounded text-gray-500 hover:text-gray-600 transition-colors"
         aria-label="Dismiss notification"
       >
         <X className="w-3.5 h-3.5" />

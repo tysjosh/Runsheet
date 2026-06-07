@@ -238,7 +238,7 @@ export default function SchedulingJobBoardPage() {
         >
           <Suspense
             fallback={
-              <div className="flex items-center justify-center py-8 text-gray-400 text-sm">
+              <div className="flex items-center justify-center py-8 text-gray-500 text-sm">
                 Loading cargo search...
               </div>
             }

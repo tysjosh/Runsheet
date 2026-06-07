@@ -75,7 +75,7 @@ function StepIndicator({ currentStep }: { currentStep: WorkflowStep }) {
                     ? "bg-success-light text-success-dark"
                     : isCurrent
                       ? "bg-primary text-white"
-                      : "bg-gray-100 text-gray-400"
+                      : "bg-gray-100 text-gray-500"
                 }`}
               >
                 {isCompleted ? (
@@ -90,7 +90,7 @@ function StepIndicator({ currentStep }: { currentStep: WorkflowStep }) {
                     ? "font-medium text-primary"
                     : isCompleted
                       ? "text-success-dark"
-                      : "text-gray-400"
+                      : "text-gray-500"
                 }`}
               >
                 {step.label}
@@ -110,7 +110,7 @@ function StepIndicator({ currentStep }: { currentStep: WorkflowStep }) {
 
 function StepPlaceholder({ name }: { name: string }) {
   return (
-    <div className="flex flex-col items-center justify-center py-20 text-gray-400">
+    <div className="flex flex-col items-center justify-center py-20 text-gray-500">
       <Database className="w-12 h-12 mb-4" />
       <p className="text-sm font-medium">{name}</p>
       <p className="text-xs mt-1">This step will be available soon.</p>

@@ -450,14 +450,14 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
             <div className="flex items-center space-x-2">
               <button
                 onClick={clearChat}
-                className="text-gray-400 hover:text-error p-2 rounded-lg hover:bg-error-light transition-all duration-200"
+                className="text-gray-500 hover:text-error p-2 rounded-lg hover:bg-error-light transition-all duration-200"
                 title="Clear chat"
               >
                 <Trash2 className="w-4 h-4" />
               </button>
               <button
                 onClick={onClose}
-                className="text-gray-400 hover:text-gray-700 p-2 rounded-lg hover:bg-gray-100 transition-all duration-200"
+                className="text-gray-500 hover:text-gray-700 p-2 rounded-lg hover:bg-gray-100 transition-all duration-200"
                 title="Close chat"
               >
                 <X className="w-4 h-4" />
@@ -690,7 +690,7 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
               </div>
               <div className="flex items-center gap-2">
                 <div className="flex-1">
-                  <label className="block text-[10px] text-gray-400 mb-0.5">
+                  <label className="block text-[10px] text-gray-500 mb-0.5">
                     From
                   </label>
                   <input
@@ -702,7 +702,7 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
                 </div>
                 <span className="text-gray-300 mt-3">→</span>
                 <div className="flex-1">
-                  <label className="block text-[10px] text-gray-400 mb-0.5">
+                  <label className="block text-[10px] text-gray-500 mb-0.5">
                     To
                   </label>
                   <input
@@ -727,7 +727,7 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
                 className={`p-2.5 rounded-xl border-2 transition-all duration-200 flex-shrink-0 ${
                   showDatePicker || (startDate && endDate)
                     ? "border-info bg-info-light text-info"
-                    : "border-gray-200 bg-white text-gray-400 hover:text-gray-600 hover:border-gray-300"
+                    : "border-gray-200 bg-white text-gray-500 hover:text-gray-600 hover:border-gray-300"
                 }`}
                 title={
                   startDate && endDate

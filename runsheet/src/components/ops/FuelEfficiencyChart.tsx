@@ -189,7 +189,7 @@ export default function FuelEfficiencyChart() {
       <div className="flex flex-wrap items-end gap-3">
         <div className="relative">
           <Search
-            className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400"
+            className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500"
             aria-hidden="true"
           />
           <input
@@ -248,7 +248,7 @@ export default function FuelEfficiencyChart() {
 
       {/* Loading state */}
       {loading && !error && (
-        <div className="flex items-center justify-center py-8 text-gray-400 text-sm">
+        <div className="flex items-center justify-center py-8 text-gray-500 text-sm">
           <div className="w-5 h-5 border-2 border-gray-300 border-t-primary rounded-full animate-spin mr-2" />
           Loading efficiency data...
         </div>
@@ -256,7 +256,7 @@ export default function FuelEfficiencyChart() {
 
       {/* Empty state */}
       {!loading && !error && data.length === 0 && (
-        <div className="text-center py-8 text-gray-400 text-sm">
+        <div className="text-center py-8 text-gray-500 text-sm">
           <BarChart3
             className="w-8 h-8 mx-auto mb-2 opacity-40"
             aria-hidden="true"

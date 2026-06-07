@@ -145,7 +145,7 @@ function renderVarianceCell(
 ) {
   const variance = computeSettlementVariance(contract, marketPriceCents);
   if (variance.gallonsDelivered === 0) {
-    return <span className="text-gray-400">No deliveries</span>;
+    return <span className="text-gray-500">No deliveries</span>;
   }
 
   const varianceDollars = variance.varianceCents / 100;
@@ -158,7 +158,7 @@ function renderVarianceCell(
       >
         {isPositive ? "+" : ""}${varianceDollars.toFixed(2)}
       </span>
-      <span className="text-gray-400 ml-1 text-xs">
+      <span className="text-gray-500 ml-1 text-xs">
         ({formatGallons(variance.gallonsDelivered)} gal)
       </span>
     </div>

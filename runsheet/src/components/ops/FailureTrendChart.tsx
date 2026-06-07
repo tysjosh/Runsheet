@@ -16,7 +16,7 @@ interface FailureTrendChartProps {
 export default function FailureTrendChart({ data }: FailureTrendChartProps) {
   if (data.length === 0) {
     return (
-      <div className="text-center py-8 text-gray-400 text-sm">
+      <div className="text-center py-8 text-gray-500 text-sm">
         No trend data for the selected time range
       </div>
     );
@@ -44,7 +44,7 @@ export default function FailureTrendChart({ data }: FailureTrendChartProps) {
       <h3 className="text-sm font-medium text-gray-700">Failure Trend</h3>
 
       {/* Y-axis max label */}
-      <div className="flex items-end gap-2 text-xs text-gray-400">
+      <div className="flex items-end gap-2 text-xs text-gray-500">
         <span className="w-8 text-right">{maxCount}</span>
         <div className="flex-1 border-b border-dashed border-gray-200" />
       </div>
@@ -87,7 +87,7 @@ export default function FailureTrendChart({ data }: FailureTrendChartProps) {
             key={`${bucket.timestamp + i}-label`}
             className="flex-1 min-w-[24px] max-w-[48px] text-center"
           >
-            <span className="text-[10px] text-gray-400 truncate block">
+            <span className="text-[10px] text-gray-500 truncate block">
               {formatLabel(bucket.timestamp)}
             </span>
           </div>
@@ -95,7 +95,7 @@ export default function FailureTrendChart({ data }: FailureTrendChartProps) {
       </div>
 
       {/* Zero line */}
-      <div className="flex items-center gap-2 text-xs text-gray-400">
+      <div className="flex items-center gap-2 text-xs text-gray-500">
         <span className="w-8 text-right">0</span>
         <div className="flex-1 border-b border-gray-200" />
       </div>

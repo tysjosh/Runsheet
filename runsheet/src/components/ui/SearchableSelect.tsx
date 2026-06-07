@@ -133,12 +133,12 @@ export function SearchableSelect({
         className="flex w-full items-center justify-between gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-left text-sm focus:border-gray-300 focus:outline-none focus:ring-2 focus:ring-gray-200 disabled:cursor-not-allowed disabled:opacity-50"
       >
         <span
-          className={`truncate ${selected ? "text-gray-900" : "text-gray-400"}`}
+          className={`truncate ${selected ? "text-gray-900" : "text-gray-500"}`}
         >
           {selected ? selected.label : placeholder}
         </span>
         <ChevronDown
-          className={`h-4 w-4 flex-shrink-0 text-gray-400 transition-transform ${
+          className={`h-4 w-4 flex-shrink-0 text-gray-500 transition-transform ${
             open ? "rotate-180" : ""
           }`}
         />
@@ -149,7 +149,7 @@ export function SearchableSelect({
           type="button"
           onClick={() => onChange("")}
           aria-label="Clear selection"
-          className="absolute right-8 top-1/2 -translate-y-1/2 rounded p-0.5 text-gray-400 hover:text-gray-600"
+          className="absolute right-8 top-1/2 -translate-y-1/2 rounded p-0.5 text-gray-500 hover:text-gray-600"
         >
           <X className="h-3.5 w-3.5" />
         </button>
@@ -158,7 +158,7 @@ export function SearchableSelect({
       {open && (
         <div className="absolute z-50 mt-1 w-full overflow-hidden rounded-lg border border-gray-200 bg-white shadow-lg">
           <div className="relative border-b border-gray-100 p-2">
-            <Search className="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
+            <Search className="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" />
             <input
               ref={searchRef}
               type="text"
@@ -180,11 +180,11 @@ export function SearchableSelect({
             className="max-h-60 overflow-y-auto py-1"
           >
             {loading ? (
-              <div className="px-3 py-3 text-center text-sm text-gray-400">
+              <div className="px-3 py-3 text-center text-sm text-gray-500">
                 Loading…
               </div>
             ) : filtered.length === 0 ? (
-              <div className="px-3 py-3 text-center text-sm text-gray-400">
+              <div className="px-3 py-3 text-center text-sm text-gray-500">
                 {emptyMessage}
               </div>
             ) : (

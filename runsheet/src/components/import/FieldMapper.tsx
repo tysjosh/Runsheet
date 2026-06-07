@@ -159,7 +159,7 @@ export default function FieldMapper({
 
   if (loading) {
     return (
-      <div className="flex flex-col items-center justify-center py-20 text-gray-400">
+      <div className="flex flex-col items-center justify-center py-20 text-gray-500">
         <Loader2 className="w-8 h-8 animate-spin mb-4" />
         <p className="text-sm">Loading field schema…</p>
       </div>
@@ -273,7 +273,7 @@ export default function FieldMapper({
               <div>
                 <p className="text-sm font-medium text-primary">{col}</p>
                 {sampleValue !== undefined && (
-                  <p className="text-xs text-gray-400 mt-0.5 truncate max-w-[240px]">
+                  <p className="text-xs text-gray-500 mt-0.5 truncate max-w-[240px]">
                     e.g. {sampleValue || "—"}
                   </p>
                 )}
@@ -400,7 +400,7 @@ function TargetFieldDropdown({
       {/* Dropdown chevron */}
       <ChevronDown
         className={`absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 pointer-events-none ${
-          isMapped ? "text-success" : "text-gray-400"
+          isMapped ? "text-success" : "text-gray-500"
         }`}
       />
 
@@ -412,11 +412,11 @@ function TargetFieldDropdown({
               Required
             </span>
           ) : (
-            <span className="text-[10px] font-medium text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded">
+            <span className="text-[10px] font-medium text-gray-500 bg-gray-100 px-1.5 py-0.5 rounded">
               Optional
             </span>
           )}
-          <span className="text-[10px] text-gray-400 truncate max-w-[180px]">
+          <span className="text-[10px] text-gray-500 truncate max-w-[180px]">
             {currentField.description}
           </span>
         </div>

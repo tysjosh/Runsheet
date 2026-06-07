@@ -133,7 +133,7 @@ function ToastContainer({
           <span className="flex-1">{toast.message}</span>
           <button
             onClick={() => onDismiss(toast.id)}
-            className="text-gray-400 hover:text-gray-600"
+            className="text-gray-500 hover:text-gray-600"
             aria-label="Dismiss notification"
           >
             <X className="w-3.5 h-3.5" />
@@ -279,7 +279,7 @@ export default function CreateJobModal({
             <h2 className="text-lg font-semibold text-primary">Create Job</h2>
             <button
               onClick={onClose}
-              className="p-1 text-gray-400 hover:text-gray-600 rounded"
+              className="p-1 text-gray-500 hover:text-gray-600 rounded"
             >
               <X className="w-5 h-5" />
             </button>

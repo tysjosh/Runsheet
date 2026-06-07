@@ -248,7 +248,7 @@ export default function Support() {
       render: (ticket: SupportTicket) => (
         <span className="text-sm text-gray-700">
           {ticket.assignedTo || (
-            <span className="text-gray-400">Unassigned</span>
+            <span className="text-gray-500">Unassigned</span>
           )}
         </span>
       ),
@@ -291,7 +291,7 @@ export default function Support() {
               ))}
             </div>
           ) : (
-            <span className="text-xs text-gray-400">-</span>
+            <span className="text-xs text-gray-500">-</span>
           )}
           {actionError[ticket.id] && (
             <p className="text-xs text-error">{actionError[ticket.id]}</p>
@@ -363,7 +363,7 @@ export default function Support() {
               filters={
                 <>
                   <div className="relative">
-                    <Filter className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
+                    <Filter className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-500" />
                     <select
                       value={filterPriority}
                       onChange={(e) => {
@@ -455,7 +455,7 @@ export default function Support() {
                   <h3 className="font-semibold text-primary">Ticket Details</h3>
                   <button
                     onClick={() => setSelectedTicket(null)}
-                    className="text-gray-400 hover:text-primary p-2 rounded-lg hover:bg-white transition-colors"
+                    className="text-gray-500 hover:text-primary p-2 rounded-lg hover:bg-white transition-colors"
                   >
                     <X className="w-5 h-5" />
                   </button>
@@ -682,7 +682,7 @@ function CreateTicketModal({ onClose, onCreated }: CreateTicketModalProps) {
           </h2>
           <button
             onClick={onClose}
-            className="p-1 text-gray-400 hover:text-gray-600 rounded"
+            className="p-1 text-gray-500 hover:text-gray-600 rounded"
           >
             <X className="w-5 h-5" />
           </button>

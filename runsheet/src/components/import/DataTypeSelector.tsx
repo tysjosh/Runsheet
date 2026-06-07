@@ -109,7 +109,7 @@ export default function DataTypeSelector({ onSelect }: DataTypeSelectorProps) {
 
   if (loading) {
     return (
-      <div className="flex flex-col items-center justify-center py-20 text-gray-400">
+      <div className="flex flex-col items-center justify-center py-20 text-gray-500">
         <Loader2 className="w-8 h-8 animate-spin mb-4" />
         <p className="text-sm">Loading data type schemas…</p>
       </div>
@@ -200,8 +200,8 @@ export default function DataTypeSelector({ onSelect }: DataTypeSelectorProps) {
               {/* ES Index */}
               {schema && (
                 <div className="flex items-center gap-1.5 mb-3">
-                  <Database className="w-3.5 h-3.5 text-gray-400" />
-                  <span className="text-xs text-gray-400 font-mono">
+                  <Database className="w-3.5 h-3.5 text-gray-500" />
+                  <span className="text-xs text-gray-500 font-mono">
                     {schema.es_index}
                   </span>
                 </div>
@@ -216,7 +216,7 @@ export default function DataTypeSelector({ onSelect }: DataTypeSelectorProps) {
                     </span>{" "}
                     required
                   </span>
-                  <span className="text-xs text-gray-400">•</span>
+                  <span className="text-xs text-gray-500">•</span>
                   <span className="text-xs text-gray-600">
                     <span className="font-medium text-gray-500">
                       {optionalCount}
@@ -259,7 +259,7 @@ export default function DataTypeSelector({ onSelect }: DataTypeSelectorProps) {
           className={`px-6 py-2.5 text-sm font-medium rounded-xl transition-colors ${
             selected
               ? "bg-primary text-white hover:bg-primary-hover"
-              : "bg-gray-100 text-gray-400 cursor-not-allowed"
+              : "bg-gray-100 text-gray-500 cursor-not-allowed"
           }`}
         >
           Continue with {selected ? DATA_TYPE_CONFIG[selected].label : "…"}

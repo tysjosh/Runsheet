@@ -242,7 +242,7 @@ export default function ExpiryAlertWidget({
                   <AlertBadge count={driverAlerts.urgent} level="urgent" />
                   <AlertBadge count={driverAlerts.warning} level="warning" />
                   {onViewDrivers && (
-                    <ChevronRight className="w-3.5 h-3.5 text-gray-400 ml-1" />
+                    <ChevronRight className="w-3.5 h-3.5 text-gray-500 ml-1" />
                   )}
                 </div>
               </div>
@@ -286,7 +286,7 @@ export default function ExpiryAlertWidget({
                   <AlertBadge count={assetAlerts.critical} level="critical" />
                   <AlertBadge count={assetAlerts.urgent} level="urgent" />
                   {onViewCertifications && (
-                    <ChevronRight className="w-3.5 h-3.5 text-gray-400 ml-1" />
+                    <ChevronRight className="w-3.5 h-3.5 text-gray-500 ml-1" />
                   )}
                 </div>
               </div>

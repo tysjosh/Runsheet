@@ -471,7 +471,7 @@ export default function AgentMonitoringDashboard() {
               {activeTab === "approvals" &&
                 (approvals.length === 0 ? (
                   <div className="text-center py-12 text-gray-500">
-                    <CheckCircle className="w-12 h-12 text-gray-400 mx-auto mb-4" />
+                    <CheckCircle className="w-12 h-12 text-gray-500 mx-auto mb-4" />
                     <p>No pending approvals</p>
                   </div>
                 ) : (

@@ -397,7 +397,7 @@ export default function MapView({
                       setShowInfo(false);
                       setClickedTruck(null);
                     }}
-                    className="text-gray-400 hover:text-gray-600 transition-colors"
+                    className="text-gray-500 hover:text-gray-600 transition-colors"
                   >
                     <svg
                       className="w-5 h-5"

@@ -217,7 +217,7 @@ function ConnectModal({ provider, onCancel, onSubmit }: ConnectModalProps) {
           <button
             type="button"
             onClick={onCancel}
-            className="p-1 text-gray-400 hover:text-gray-600 rounded"
+            className="p-1 text-gray-500 hover:text-gray-600 rounded"
             aria-label="Close connect form"
           >
             <X className="w-5 h-5" />
@@ -359,7 +359,7 @@ function DisconnectModal({
           <button
             type="button"
             onClick={onCancel}
-            className="p-1 text-gray-400 hover:text-gray-600 rounded"
+            className="p-1 text-gray-500 hover:text-gray-600 rounded"
             aria-label="Close disconnect confirmation"
           >
             <X className="w-5 h-5" />
@@ -454,7 +454,7 @@ function SyncRunSummary({
           {formatRelativeTime(run.started_at)}
         </span>
         {totalRuns > 1 && (
-          <span className="text-gray-400">
+          <span className="text-gray-500">
             ({totalRuns} recent run{totalRuns === 1 ? "" : "s"})
           </span>
         )}
@@ -614,7 +614,7 @@ export default function IntegrationCard({
       {/* Connection meta */}
       <div className="grid grid-cols-2 gap-2 text-[11px] text-gray-500">
         <div>
-          <p className="text-gray-400 uppercase tracking-wide">Auth</p>
+          <p className="text-gray-500 uppercase tracking-wide">Auth</p>
           <p className="font-medium text-gray-700">
             {provider.auth_mode === "oauth2"
               ? "OAuth 2.0"
@@ -626,7 +626,7 @@ export default function IntegrationCard({
           </p>
         </div>
         <div>
-          <p className="text-gray-400 uppercase tracking-wide">Last sync</p>
+          <p className="text-gray-500 uppercase tracking-wide">Last sync</p>
           <p className="font-medium text-gray-700">
             {formatRelativeTime(lastSyncAt)}
           </p>
@@ -654,12 +654,12 @@ export default function IntegrationCard({
       {instance && (
         <div>
           <div className="flex items-center justify-between mb-1">
-            <p className="text-[10px] font-medium text-gray-400 uppercase tracking-wide">
+            <p className="text-[10px] font-medium text-gray-500 uppercase tracking-wide">
               Recent activity
             </p>
             {syncRunsLoading && (
               <Loader2
-                className="w-3 h-3 text-gray-400 animate-spin"
+                className="w-3 h-3 text-gray-500 animate-spin"
                 aria-hidden="true"
               />
             )}

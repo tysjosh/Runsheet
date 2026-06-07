@@ -85,6 +85,8 @@ function settledTotal(
 
 interface DispatchCockpitProps {
   onNavigate?: (item: string) => void;
+  /** In-shell order opener; falls back to routing to /orders/:id. */
+  onOpenOrder?: (orderId: string) => void;
 }
 
 type Category = "order" | "delayed" | "fuel" | "agent";
@@ -127,7 +129,10 @@ function delaySeverity(j: Job): number {
   return 1000 + Math.min(j.delay_duration_minutes ?? 0, 900);
 }
 
-export default function DispatchCockpit({ onNavigate }: DispatchCockpitProps) {
+export default function DispatchCockpit({
+  onNavigate,
+  onOpenOrder,
+}: DispatchCockpitProps) {
   const router = useRouter();
   const { toasts, addToast, dismissToast } = useToasts();
   const [orders, setOrders] = useState<FuelOrder[]>([]);
@@ -224,8 +229,10 @@ export default function DispatchCockpit({ onNavigate }: DispatchCockpitProps) {
     onDelayAlert: scheduleRefresh,
   });
 
-  const openOrder = (orderId: string) =>
-    router.push(`/orders/${encodeURIComponent(orderId)}`);
+  const openOrder = (orderId: string) => {
+    if (onOpenOrder) onOpenOrder(orderId);
+    else router.push(`/orders/${encodeURIComponent(orderId)}`);
+  };
   const removeOrder = (orderId: string) =>
     setOrders((prev) => prev.filter((o) => o.order_id !== orderId));
 

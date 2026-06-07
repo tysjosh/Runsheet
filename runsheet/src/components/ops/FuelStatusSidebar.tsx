@@ -56,7 +56,7 @@ export default function FuelStatusSidebar({ alerts }: FuelStatusSidebarProps) {
                   <span className="text-xs text-gray-500">
                     {alert.fuel_type}
                   </span>
-                  <span className="text-xs text-gray-400">
+                  <span className="text-xs text-gray-500">
                     {alert.stock_percentage.toFixed(1)}% remaining
                   </span>
                 </div>

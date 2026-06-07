@@ -150,7 +150,7 @@ export default function CargoTrackingPage() {
         <div className="flex items-center gap-3 mb-4">
           <Link
             href="/ops/scheduling"
-            className="text-gray-400 hover:text-primary transition-colors"
+            className="text-gray-500 hover:text-primary transition-colors"
             aria-label="Back to Job Board"
           >
             <ArrowLeft className="w-5 h-5" />

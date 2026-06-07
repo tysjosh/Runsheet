@@ -136,7 +136,7 @@ function DeleteConfirmDialog({
           <h2 className="text-lg font-semibold text-primary">Delete Memory</h2>
           <button
             onClick={onCancel}
-            className="p-1 text-gray-400 hover:text-gray-600 rounded"
+            className="p-1 text-gray-500 hover:text-gray-600 rounded"
             aria-label="Close delete confirmation"
           >
             <X className="w-5 h-5" />
@@ -241,7 +241,7 @@ function AutonomySection({ isAdmin }: AutonomySectionProps) {
   if (loading) {
     return (
       <div className="flex items-center justify-center py-16">
-        <Loader2 className="w-6 h-6 text-gray-400 animate-spin" />
+        <Loader2 className="w-6 h-6 text-gray-500 animate-spin" />
       </div>
     );
   }
@@ -482,10 +482,10 @@ function AgentHealthSection() {
 
       {loading ? (
         <div className="flex items-center justify-center py-16">
-          <Loader2 className="w-6 h-6 text-gray-400 animate-spin" />
+          <Loader2 className="w-6 h-6 text-gray-500 animate-spin" />
         </div>
       ) : agents.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-16 text-gray-400">
+        <div className="flex flex-col items-center justify-center py-16 text-gray-500">
           <Settings className="w-8 h-8 mb-2" />
           <p className="text-sm">No agents found</p>
           <p className="text-xs mt-1">
@@ -644,7 +644,7 @@ function MemorySection() {
       {/* Filters */}
       <div className="flex items-center gap-3 flex-wrap">
         <div className="flex items-center gap-1.5">
-          <Filter className="w-3.5 h-3.5 text-gray-400" />
+          <Filter className="w-3.5 h-3.5 text-gray-500" />
           <select
             value={typeFilter}
             onChange={(e) => {
@@ -659,7 +659,7 @@ function MemorySection() {
           </select>
         </div>
         <div className="flex items-center gap-1.5">
-          <Tag className="w-3.5 h-3.5 text-gray-400" />
+          <Tag className="w-3.5 h-3.5 text-gray-500" />
           <input
             type="text"
             value={tagsFilter}
@@ -687,10 +687,10 @@ function MemorySection() {
 
       {loading ? (
         <div className="flex items-center justify-center py-16">
-          <Loader2 className="w-6 h-6 text-gray-400 animate-spin" />
+          <Loader2 className="w-6 h-6 text-gray-500 animate-spin" />
         </div>
       ) : !memories || memories.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-16 text-gray-400">
+        <div className="flex flex-col items-center justify-center py-16 text-gray-500">
           <Brain className="w-8 h-8 mb-2" />
           <p className="text-sm">No memories found</p>
           <p className="text-xs mt-1">
@@ -715,7 +715,7 @@ function MemorySection() {
                   >
                     {memory.memory_type}
                   </span>
-                  <span className="text-[10px] text-gray-400">
+                  <span className="text-[10px] text-gray-500">
                     {memory.memory_id}
                   </span>
                 </div>
@@ -731,14 +731,14 @@ function MemorySection() {
                       {tag}
                     </span>
                   ))}
-                  <span className="text-[10px] text-gray-400">
+                  <span className="text-[10px] text-gray-500">
                     {new Date(memory.created_at).toLocaleString()}
                   </span>
                 </div>
               </div>
               <button
                 onClick={() => setDeleteTarget(memory.memory_id)}
-                className="ml-3 p-1.5 text-gray-400 hover:text-error rounded hover:bg-error-light transition-colors flex-shrink-0"
+                className="ml-3 p-1.5 text-gray-500 hover:text-error rounded hover:bg-error-light transition-colors flex-shrink-0"
                 aria-label={`Delete memory ${memory.memory_id}`}
               >
                 <Trash2 className="w-4 h-4" />
@@ -756,7 +756,7 @@ function MemorySection() {
                 <button
                   onClick={() => handlePageChange(page - 1)}
                   disabled={page <= 1}
-                  className="p-1.5 text-gray-400 hover:text-gray-600 disabled:opacity-30 disabled:cursor-not-allowed rounded"
+                  className="p-1.5 text-gray-500 hover:text-gray-600 disabled:opacity-30 disabled:cursor-not-allowed rounded"
                   aria-label="Previous page"
                 >
                   <ChevronLeft className="w-4 h-4" />
@@ -764,7 +764,7 @@ function MemorySection() {
                 <button
                   onClick={() => handlePageChange(page + 1)}
                   disabled={page >= totalPages}
-                  className="p-1.5 text-gray-400 hover:text-gray-600 disabled:opacity-30 disabled:cursor-not-allowed rounded"
+                  className="p-1.5 text-gray-500 hover:text-gray-600 disabled:opacity-30 disabled:cursor-not-allowed rounded"
                   aria-label="Next page"
                 >
                   <ChevronRight className="w-4 h-4" />
@@ -911,7 +911,7 @@ function FeedbackSection() {
       key: "created_at",
       label: "Created",
       headerClassName: "text-gray-500 normal-case tracking-normal",
-      className: "text-xs text-gray-400",
+      className: "text-xs text-gray-500",
       render: (entry) => new Date(entry.created_at).toLocaleString(),
     },
   ];
@@ -958,7 +958,7 @@ function FeedbackSection() {
       {/* Filters */}
       <div className="flex items-center gap-3 flex-wrap">
         <div className="flex items-center gap-1.5">
-          <Filter className="w-3.5 h-3.5 text-gray-400" />
+          <Filter className="w-3.5 h-3.5 text-gray-500" />
           <select
             value={typeFilter}
             onChange={(e) => {
@@ -974,7 +974,7 @@ function FeedbackSection() {
           </select>
         </div>
         <div className="flex items-center gap-1.5">
-          <Calendar className="w-3.5 h-3.5 text-gray-400" />
+          <Calendar className="w-3.5 h-3.5 text-gray-500" />
           <input
             type="date"
             value={startDate}
@@ -988,7 +988,7 @@ function FeedbackSection() {
           />
         </div>
         <div className="flex items-center gap-1.5">
-          <Calendar className="w-3.5 h-3.5 text-gray-400" />
+          <Calendar className="w-3.5 h-3.5 text-gray-500" />
           <input
             type="date"
             value={endDate}
@@ -1011,10 +1011,10 @@ function FeedbackSection() {
 
       {loading ? (
         <div className="flex items-center justify-center py-16">
-          <Loader2 className="w-6 h-6 text-gray-400 animate-spin" />
+          <Loader2 className="w-6 h-6 text-gray-500 animate-spin" />
         </div>
       ) : entries.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-16 text-gray-400">
+        <div className="flex flex-col items-center justify-center py-16 text-gray-500">
           <MessageSquare className="w-8 h-8 mb-2" />
           <p className="text-sm">No feedback entries found</p>
           <p className="text-xs mt-1">
@@ -1045,7 +1045,7 @@ function FeedbackSection() {
                 <button
                   onClick={() => handlePageChange(page - 1)}
                   disabled={page <= 1}
-                  className="p-1.5 text-gray-400 hover:text-gray-600 disabled:opacity-30 disabled:cursor-not-allowed rounded"
+                  className="p-1.5 text-gray-500 hover:text-gray-600 disabled:opacity-30 disabled:cursor-not-allowed rounded"
                   aria-label="Previous feedback page"
                 >
                   <ChevronLeft className="w-4 h-4" />
@@ -1053,7 +1053,7 @@ function FeedbackSection() {
                 <button
                   onClick={() => handlePageChange(page + 1)}
                   disabled={page >= totalPages}
-                  className="p-1.5 text-gray-400 hover:text-gray-600 disabled:opacity-30 disabled:cursor-not-allowed rounded"
+                  className="p-1.5 text-gray-500 hover:text-gray-600 disabled:opacity-30 disabled:cursor-not-allowed rounded"
                   aria-label="Next feedback page"
                 >
                   <ChevronRight className="w-4 h-4" />

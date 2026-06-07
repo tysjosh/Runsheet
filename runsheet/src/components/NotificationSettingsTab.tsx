@@ -263,7 +263,7 @@ function RulesSection() {
 
                   <div className="flex items-center gap-4 text-sm text-gray-500">
                     <div className="flex items-center gap-1.5">
-                      <span className="text-gray-400">Channels:</span>
+                      <span className="text-gray-500">Channels:</span>
                       <div className="flex gap-1.5">
                         {rule.default_channels.map((ch) => (
                           <span
@@ -277,7 +277,7 @@ function RulesSection() {
                       </div>
                     </div>
                     {rule.template_id && (
-                      <span className="text-gray-400">
+                      <span className="text-gray-500">
                         Template: {rule.template_id}
                       </span>
                     )}
@@ -293,7 +293,7 @@ function RulesSection() {
                   {rule.enabled ? (
                     <ToggleRight className="w-10 h-10 text-success" />
                   ) : (
-                    <ToggleLeft className="w-10 h-10 text-gray-400" />
+                    <ToggleLeft className="w-10 h-10 text-gray-500" />
                   )}
                 </button>
               </div>
@@ -312,10 +312,10 @@ function RulesSection() {
         {rules.length === 0 && (
           <div className="text-center py-16 text-gray-500">
             <Shield className="w-16 h-16 mx-auto mb-4 text-gray-300" />
-            <p className="text-lg font-medium text-gray-400">
+            <p className="text-lg font-medium text-gray-500">
               No notification rules found
             </p>
-            <p className="text-sm text-gray-400 mt-1">
+            <p className="text-sm text-gray-500 mt-1">
               Rules will be created automatically when the system initializes
             </p>
           </div>
@@ -456,7 +456,7 @@ function PreferencesSection() {
         {/* Search */}
         <div className="px-8 py-4 border-b border-gray-100">
           <div className="relative">
-            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
+            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-500" />
             <input
               type="text"
               placeholder="Search customers..."
@@ -492,10 +492,10 @@ function PreferencesSection() {
           ) : preferences.length === 0 ? (
             <div className="text-center py-16 text-gray-500">
               <Users className="w-16 h-16 mx-auto mb-4 text-gray-300" />
-              <p className="text-lg font-medium text-gray-400">
+              <p className="text-lg font-medium text-gray-500">
                 No customer preferences found
               </p>
-              <p className="text-sm text-gray-400 mt-1">
+              <p className="text-sm text-gray-500 mt-1">
                 {searchTerm
                   ? "Try adjusting your search"
                   : "Preferences will appear when customers are configured"}
@@ -525,7 +525,7 @@ function PreferencesSection() {
                           {pref.customer_id}
                         </p>
                       </div>
-                      <ChevronRight className="w-4 h-4 text-gray-400" />
+                      <ChevronRight className="w-4 h-4 text-gray-500" />
                     </div>
                     <div className="flex gap-3 mt-2">
                       <div className="flex gap-1">
@@ -539,7 +539,7 @@ function PreferencesSection() {
                           </span>
                         ))}
                         {channels.length === 0 && (
-                          <span className="text-xs text-gray-400">
+                          <span className="text-xs text-gray-500">
                             No channels
                           </span>
                         )}
@@ -584,7 +584,7 @@ function PreferencesSection() {
                   setSaveError("");
                   setSaveSuccess(false);
                 }}
-                className="text-gray-400 hover:text-primary p-2 rounded-lg hover:bg-white transition-colors"
+                className="text-gray-500 hover:text-primary p-2 rounded-lg hover:bg-white transition-colors"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -656,7 +656,7 @@ function PreferencesSection() {
                   </div>
                 ))}
                 {editEventPrefs.length === 0 && (
-                  <p className="text-sm text-gray-400">
+                  <p className="text-sm text-gray-500">
                     No event preferences configured
                   </p>
                 )}
@@ -693,7 +693,7 @@ function PreferencesSection() {
           </div>
         </div>
       ) : (
-        <div className="w-[420px] flex items-center justify-center bg-gray-50 text-gray-400">
+        <div className="w-[420px] flex items-center justify-center bg-gray-50 text-gray-500">
           <div className="text-center">
             <Edit3 className="w-12 h-12 mx-auto mb-3 text-gray-300" />
             <p className="text-sm font-medium">Select a customer</p>
@@ -828,10 +828,10 @@ function TemplatesSection() {
           ) : Object.keys(groupedTemplates).length === 0 ? (
             <div className="text-center py-16 text-gray-500">
               <FileText className="w-16 h-16 mx-auto mb-4 text-gray-300" />
-              <p className="text-lg font-medium text-gray-400">
+              <p className="text-lg font-medium text-gray-500">
                 No templates found
               </p>
-              <p className="text-sm text-gray-400 mt-1">
+              <p className="text-sm text-gray-500 mt-1">
                 Templates will be created automatically when the system
                 initializes
               </p>
@@ -860,7 +860,7 @@ function TemplatesSection() {
                               {getChannelIcon(tmpl.channel)}
                               {getChannelLabel(tmpl.channel)}
                             </span>
-                            <Edit3 className="w-3.5 h-3.5 text-gray-400" />
+                            <Edit3 className="w-3.5 h-3.5 text-gray-500" />
                           </div>
                           <p className="text-xs text-gray-500 line-clamp-2">
                             {tmpl.body_template}
@@ -894,7 +894,7 @@ function TemplatesSection() {
                   setSaveError("");
                   setSaveSuccess(false);
                 }}
-                className="text-gray-400 hover:text-primary p-2 rounded-lg hover:bg-white transition-colors"
+                className="text-gray-500 hover:text-primary p-2 rounded-lg hover:bg-white transition-colors"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -962,7 +962,7 @@ function TemplatesSection() {
                 )}
                 <p className="text-sm text-gray-700 whitespace-pre-wrap leading-relaxed">
                   {bodyPreview || (
-                    <span className="text-gray-400 italic">
+                    <span className="text-gray-500 italic">
                       Enter a body template to see the preview
                     </span>
                   )}
@@ -1000,7 +1000,7 @@ function TemplatesSection() {
           </div>
         </div>
       ) : (
-        <div className="w-[480px] flex items-center justify-center bg-gray-50 text-gray-400">
+        <div className="w-[480px] flex items-center justify-center bg-gray-50 text-gray-500">
           <div className="text-center">
             <Edit3 className="w-12 h-12 mx-auto mb-3 text-gray-300" />
             <p className="text-sm font-medium">Select a template</p>

@@ -64,7 +64,7 @@ function SectionCard({ title, icon, children, loading }: SectionCardProps) {
       <div className="px-5 py-4">
         {loading ? (
           <div className="flex items-center justify-center py-8">
-            <Loader2 className="w-5 h-5 text-gray-400 animate-spin" />
+            <Loader2 className="w-5 h-5 text-gray-500 animate-spin" />
           </div>
         ) : (
           children
@@ -324,7 +324,7 @@ export default function SchedulingMetricsPage() {
           <button
             onClick={fetchAllMetrics}
             disabled={loading}
-            className="p-2 rounded-lg text-gray-400 hover:text-primary hover:bg-gray-100 transition-colors disabled:opacity-50"
+            className="p-2 rounded-lg text-gray-500 hover:text-primary hover:bg-gray-100 transition-colors disabled:opacity-50"
             title="Refresh metrics"
           >
             <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
@@ -336,7 +336,7 @@ export default function SchedulingMetricsPage() {
       <div className="px-6 pb-4">
         <div className="flex flex-wrap items-center gap-4 bg-white border border-gray-200 rounded-lg px-4 py-3">
           <div className="flex items-center gap-2">
-            <Calendar className="w-4 h-4 text-gray-400" />
+            <Calendar className="w-4 h-4 text-gray-500" />
             <span className="text-xs font-medium text-gray-500">Filters</span>
           </div>
 
@@ -391,7 +391,7 @@ export default function SchedulingMetricsPage() {
                 setStartDate("");
                 setEndDate("");
               }}
-              className="text-xs text-gray-400 hover:text-gray-600 transition-colors"
+              className="text-xs text-gray-500 hover:text-gray-600 transition-colors"
             >
               Clear dates
             </button>
@@ -417,7 +417,7 @@ export default function SchedulingMetricsPage() {
           loading={loading}
         >
           {jobMetrics.length === 0 ? (
-            <p className="text-sm text-gray-400 py-4 text-center">
+            <p className="text-sm text-gray-500 py-4 text-center">
               No job metrics data for the selected time range.
             </p>
           ) : (
@@ -438,7 +438,7 @@ export default function SchedulingMetricsPage() {
           loading={loading}
         >
           {completionMetrics.length === 0 ? (
-            <p className="text-sm text-gray-400 py-4 text-center">
+            <p className="text-sm text-gray-500 py-4 text-center">
               No completion data for the selected time range.
             </p>
           ) : (
@@ -476,7 +476,7 @@ export default function SchedulingMetricsPage() {
                         {metric.avg_completion_minutes.toFixed(1)} min
                       </span>
                     </div>
-                    <div className="flex items-center justify-between text-xs text-gray-400">
+                    <div className="flex items-center justify-between text-xs text-gray-500">
                       <span>
                         {metric.completed} / {metric.total} jobs
                       </span>
@@ -495,7 +495,7 @@ export default function SchedulingMetricsPage() {
           loading={loading}
         >
           {assetUtilization.length === 0 ? (
-            <p className="text-sm text-gray-400 py-4 text-center">
+            <p className="text-sm text-gray-500 py-4 text-center">
               No asset utilization data for the selected time range.
             </p>
           ) : (
@@ -516,7 +516,7 @@ export default function SchedulingMetricsPage() {
           loading={loading}
         >
           {!delayMetrics ? (
-            <p className="text-sm text-gray-400 py-4 text-center">
+            <p className="text-sm text-gray-500 py-4 text-center">
               No delay data for the selected time range.
             </p>
           ) : (
@@ -554,7 +554,7 @@ export default function SchedulingMetricsPage() {
                             {row.job_type}
                           </span>
                           <span className="flex items-center gap-2">
-                            <span className="text-xs text-gray-400">
+                            <span className="text-xs text-gray-500">
                               {row.avg_delay_minutes.toFixed(1)} min avg
                             </span>
                             <span className="text-sm font-semibold text-primary bg-gray-100 px-2 py-0.5 rounded">

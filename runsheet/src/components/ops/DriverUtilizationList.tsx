@@ -349,7 +349,7 @@ export default function DriverUtilizationList({
             </span>
           );
         }
-        return <span className="text-xs text-gray-400">—</span>;
+        return <span className="text-xs text-gray-500">—</span>;
       },
     },
     {
@@ -357,7 +357,7 @@ export default function DriverUtilizationList({
       label: "Truck",
       render: (driver: DriverUtilization) => {
         if (!driver.assigned_truck_id) {
-          return <span className="text-xs text-gray-400">—</span>;
+          return <span className="text-xs text-gray-500">—</span>;
         }
         return (
           <a
@@ -379,7 +379,7 @@ export default function DriverUtilizationList({
         if (!qs) {
           return (
             <span
-              className="text-xs text-gray-400"
+              className="text-xs text-gray-500"
               title="No qualification record"
             >
               Unlinked
@@ -440,10 +440,10 @@ export default function DriverUtilizationList({
         rowClassName={(driver) => getRowHighlight(driver, capacity)}
         emptyState={
           <div className="text-gray-500">
-            <p className="text-lg font-medium text-gray-400">
+            <p className="text-lg font-medium text-gray-500">
               No drivers found
             </p>
-            <p className="text-sm text-gray-400 mt-1">
+            <p className="text-sm text-gray-500 mt-1">
               Try adjusting your filters
             </p>
           </div>

@@ -143,7 +143,7 @@ export default function AgentHealth() {
         </div>
         <button
           onClick={loadHealth}
-          className="p-1.5 rounded-md text-gray-400 hover:text-primary hover:bg-gray-100 transition-colors"
+          className="p-1.5 rounded-md text-gray-500 hover:text-primary hover:bg-gray-100 transition-colors"
           title="Refresh"
         >
           <RefreshCw className="w-3.5 h-3.5" />
@@ -157,7 +157,7 @@ export default function AgentHealth() {
             <div className="w-5 h-5 border-2 border-gray-300 border-t-primary rounded-full animate-spin" />
           </div>
         ) : agentEntries.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-8 text-gray-400">
+          <div className="flex flex-col items-center justify-center py-8 text-gray-500">
             <HeartPulse className="w-8 h-8 mb-2" />
             <p className="text-sm">No agents registered</p>
           </div>
@@ -198,7 +198,7 @@ export default function AgentHealth() {
                       {style.label}
                     </span>
                   </div>
-                  <p className="text-[11px] text-gray-400 truncate">
+                  <p className="text-[11px] text-gray-500 truncate">
                     {meta.description}
                   </p>
                 </div>

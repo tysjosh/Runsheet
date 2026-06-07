@@ -130,7 +130,7 @@ export function Table<T extends Record<string, any>>({
               <td colSpan={columns.length} className="text-center py-12">
                 {emptyState || (
                   <div className="text-gray-500">
-                    <p className="text-lg font-medium text-gray-400">
+                    <p className="text-lg font-medium text-gray-500">
                       No data found
                     </p>
                   </div>

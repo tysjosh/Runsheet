@@ -99,7 +99,7 @@ export default function ApprovalQueuePanel() {
 
       <div className="max-h-64 overflow-y-auto divide-y divide-gray-50">
         {approvals.length === 0 ? (
-          <div className="px-4 py-6 text-center text-sm text-gray-400">
+          <div className="px-4 py-6 text-center text-sm text-gray-500">
             No pending proposals
           </div>
         ) : (
@@ -132,7 +132,7 @@ export default function ApprovalQueuePanel() {
 
                 {/* Impact summary */}
                 {entry.impact_summary && (
-                  <p className="text-xs text-gray-400 mt-0.5 line-clamp-2">
+                  <p className="text-xs text-gray-500 mt-0.5 line-clamp-2">
                     {entry.impact_summary}
                   </p>
                 )}

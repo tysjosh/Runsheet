@@ -198,7 +198,7 @@ export function formatRunoutForecast(forecast: CustomerTankForecast | null): {
     return {
       label: "No forecast",
       detail: "—",
-      color: "text-gray-400",
+      color: "text-gray-500",
       bg: "bg-gray-100",
       title:
         "No runout forecast yet. The forecaster needs consumption history and an active tank.",
@@ -212,7 +212,7 @@ export function formatRunoutForecast(forecast: CustomerTankForecast | null): {
     return {
       label: "No forecast",
       detail: risk != null ? `${Math.round(risk * 100)}% risk / 24h` : "—",
-      color: "text-gray-400",
+      color: "text-gray-500",
       bg: "bg-gray-100",
       title: "Forecast exists but did not produce an hours-to-runout estimate.",
     };
@@ -396,7 +396,7 @@ function FiltersRow({
         </label>
         <div className="relative">
           <Search
-            className="w-3.5 h-3.5 text-gray-400 absolute left-2.5 top-1/2 -translate-y-1/2"
+            className="w-3.5 h-3.5 text-gray-500 absolute left-2.5 top-1/2 -translate-y-1/2"
             aria-hidden="true"
           />
           <input
@@ -760,7 +760,7 @@ function CustomerTankFormModal({
           <button
             type="button"
             onClick={onClose}
-            className="p-1 text-gray-400 hover:text-gray-600 rounded"
+            className="p-1 text-gray-500 hover:text-gray-600 rounded"
             aria-label="Close customer tank form"
           >
             <X className="w-5 h-5" />
@@ -879,7 +879,7 @@ function CustomerTankFormModal({
                 }
                 placeholder="e.g. ORD-0042"
               />
-              <p className="text-xs text-gray-400 mt-1">
+              <p className="text-xs text-gray-500 mt-1">
                 The delivery order that most recently refilled this tank.
               </p>
             </div>
@@ -1205,7 +1205,7 @@ function CustomerTankFormModal({
                   {fieldErrors.k_factor}
                 </p>
               )}
-              <p className="text-xs text-gray-400 mt-1">
+              <p className="text-xs text-gray-500 mt-1">
                 Gallons consumed per Heating Degree Day. Leave blank to let the
                 forecaster learn from delivery history.
               </p>
@@ -1449,7 +1449,7 @@ export default function CustomerTankPage({
       render: (tank) => (
         <>
           <div className="capitalize">{tank.fuel_type.replace(/_/g, " ")}</div>
-          <div className="text-xs text-gray-400">{tank.fuel_product_code}</div>
+          <div className="text-xs text-gray-500">{tank.fuel_product_code}</div>
         </>
       ),
     },
@@ -1478,7 +1478,7 @@ export default function CustomerTankPage({
                 {pct.toFixed(0)}%
               </span>
             </div>
-            <div className="text-xs text-gray-400 mt-0.5">
+            <div className="text-xs text-gray-500 mt-0.5">
               {formatGallons(tank.current_level_gallons)} /{" "}
               {formatGallons(tank.capacity_gallons)} gal
             </div>
@@ -1492,7 +1492,7 @@ export default function CustomerTankPage({
       className: "text-sm text-gray-700",
       render: (tank) => (
         <span className="inline-flex items-center gap-1">
-          <MapPin className="w-3 h-3 text-gray-400" aria-hidden="true" />
+          <MapPin className="w-3 h-3 text-gray-500" aria-hidden="true" />
           {tank.zip_code}
         </span>
       ),
@@ -1528,7 +1528,7 @@ export default function CustomerTankPage({
             >
               {fc.label}
             </span>
-            <div className="text-xs text-gray-400 mt-0.5">{fc.detail}</div>
+            <div className="text-xs text-gray-500 mt-0.5">{fc.detail}</div>
           </>
         );
       },
@@ -1617,10 +1617,10 @@ export default function CustomerTankPage({
             loading={loading && tanks.length === 0}
             emptyState={
               <div className="text-gray-500">
-                <p className="text-lg font-medium text-gray-400">
+                <p className="text-lg font-medium text-gray-500">
                   No customer tanks found
                 </p>
-                <p className="text-sm text-gray-400 mt-1">
+                <p className="text-sm text-gray-500 mt-1">
                   Try adjusting your filters or add a new tank.
                 </p>
               </div>

@@ -97,7 +97,7 @@ function GoogleChart({
     return (
       <div
         style={{ width, height }}
-        className="flex items-center justify-center text-gray-400 text-sm"
+        className="flex items-center justify-center text-gray-500 text-sm"
       >
         Loading chart...
       </div>

@@ -42,7 +42,7 @@ export default function FailureBarChart({
 
   if (entries.length === 0) {
     return (
-      <div className="text-center py-8 text-gray-400 text-sm">
+      <div className="text-center py-8 text-gray-500 text-sm">
         No failure data for the selected time range
       </div>
     );

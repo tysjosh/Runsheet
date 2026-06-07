@@ -211,7 +211,7 @@ function InfoItem({
 }) {
   return (
     <div className="flex items-start gap-2">
-      <div className="text-gray-400 mt-0.5">{icon}</div>
+      <div className="text-gray-500 mt-0.5">{icon}</div>
       <div>
         <p className="text-xs text-gray-500">{label}</p>
         <p className="text-sm font-medium text-primary">{value}</p>

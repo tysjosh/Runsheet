@@ -355,7 +355,7 @@ export default function Inventory() {
         filters={
           <>
             <div className="relative">
-              <Filter className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
+              <Filter className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-500" />
               <select
                 value={filterCategory}
                 onChange={(e) => {
@@ -604,7 +604,7 @@ function StockAdjustmentModal({
           </h2>
           <button
             onClick={onClose}
-            className="p-1 text-gray-400 hover:text-gray-600 rounded"
+            className="p-1 text-gray-500 hover:text-gray-600 rounded"
           >
             <X className="w-5 h-5" />
           </button>
@@ -782,7 +782,7 @@ function EditInventoryModal({
           </h2>
           <button
             onClick={onClose}
-            className="p-1 text-gray-400 hover:text-gray-600 rounded"
+            className="p-1 text-gray-500 hover:text-gray-600 rounded"
           >
             <X className="w-5 h-5" />
           </button>
@@ -952,7 +952,7 @@ function CreateInventoryModal({
           </h2>
           <button
             onClick={onClose}
-            className="p-1 text-gray-400 hover:text-gray-600 rounded"
+            className="p-1 text-gray-500 hover:text-gray-600 rounded"
           >
             <X className="w-5 h-5" />
           </button>
@@ -1297,7 +1297,7 @@ function StockHistoryModal({ item, onClose }: StockHistoryModalProps) {
           </div>
           <button
             onClick={onClose}
-            className="p-1 text-gray-400 hover:text-gray-600 rounded"
+            className="p-1 text-gray-500 hover:text-gray-600 rounded"
             aria-label="Close history modal"
           >
             <X className="w-5 h-5" />
@@ -1319,7 +1319,7 @@ function StockHistoryModal({ item, onClose }: StockHistoryModalProps) {
           )}
 
           {!loading && !error && events.length === 0 && (
-            <div className="flex flex-col items-center justify-center py-16 text-gray-400">
+            <div className="flex flex-col items-center justify-center py-16 text-gray-500">
               <Clock className="w-8 h-8 mb-2" />
               <p className="text-sm">No stock movements recorded</p>
             </div>

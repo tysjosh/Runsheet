@@ -208,7 +208,7 @@ const notificationColumns: Column<Notification>[] = [
           )}
         </div>
       ) : (
-        <span className="text-sm text-gray-400">—</span>
+        <span className="text-sm text-gray-500">—</span>
       ),
   },
   {
@@ -419,7 +419,7 @@ export default function NotificationHistoryTab() {
         label: "Total",
         value: summary.total,
         color: "text-primary",
-        icon: <Bell className="w-5 h-5 text-gray-400" />,
+        icon: <Bell className="w-5 h-5 text-gray-500" />,
       },
       {
         label: "Sent",
@@ -467,7 +467,7 @@ export default function NotificationHistoryTab() {
           {/* Search and Filters */}
           <div className="flex gap-4">
             <div className="flex-1 relative">
-              <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
+              <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-500" />
               <input
                 type="text"
                 placeholder="Search by recipient, entity ID, or message..."
@@ -477,7 +477,7 @@ export default function NotificationHistoryTab() {
               />
             </div>
             <div className="relative">
-              <Filter className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
+              <Filter className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-500" />
               <select
                 value={filterType}
                 onChange={(e) =>
@@ -576,10 +576,10 @@ export default function NotificationHistoryTab() {
               emptyState={
                 <>
                   <Bell className="w-16 h-16 mx-auto mb-4 text-gray-300" />
-                  <p className="text-lg font-medium text-gray-400">
+                  <p className="text-lg font-medium text-gray-500">
                     No notifications found
                   </p>
-                  <p className="text-sm text-gray-400 mt-1">
+                  <p className="text-sm text-gray-500 mt-1">
                     Try adjusting your search or filter criteria
                   </p>
                 </>
@@ -634,7 +634,7 @@ export default function NotificationHistoryTab() {
                   setSelectedNotification(null);
                   setRetryError("");
                 }}
-                className="text-gray-400 hover:text-primary p-2 rounded-lg hover:bg-white transition-colors"
+                className="text-gray-500 hover:text-primary p-2 rounded-lg hover:bg-white transition-colors"
               >
                 <X className="w-5 h-5" />
               </button>

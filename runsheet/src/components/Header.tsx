@@ -8,19 +8,36 @@ interface HeaderProps {
   onAIClick?: () => void;
   /** Open the off-canvas sidebar drawer. Only wired below `md`. */
   onMenuClick?: () => void;
+  /** In-shell search handler. Falls back to routing to the Orders board. */
+  onSearch?: (query: string) => void;
+  /** In-shell "New Order" handler. Falls back to routing to the Orders board. */
+  onNewOrder?: () => void;
 }
 
-export default function Header({ onAIClick, onMenuClick }: HeaderProps) {
+export default function Header({
+  onAIClick,
+  onMenuClick,
+  onSearch,
+  onNewOrder,
+}: HeaderProps) {
   const router = useRouter();
   const [query, setQuery] = useState("");
 
-  // Global search currently scopes to the Orders board (the primary searchable
-  // entity). The typed query is handed off via the URL so the board can pick it
-  // up; until a unified search index exists this is the most useful landing.
+  // In-shell, search filters the Orders board view directly; on the standalone
+  // route fallback the query is handed off via the URL.
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
     const q = query.trim();
+    if (onSearch) {
+      onSearch(q);
+      return;
+    }
     router.push(q ? `/ops?q=${encodeURIComponent(q)}` : "/ops");
+  };
+
+  const handleNewOrder = () => {
+    if (onNewOrder) onNewOrder();
+    else router.push("/ops");
   };
 
   return (
@@ -93,7 +110,7 @@ export default function Header({ onAIClick, onMenuClick }: HeaderProps) {
         <div className="ml-auto flex items-center gap-2">
           <button
             type="button"
-            onClick={() => router.push("/ops")}
+            onClick={handleNewOrder}
             className="hidden items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium text-white transition-colors bg-primary hover:bg-primary-hover focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-[color:var(--color-primary)] sm:flex"
           >
             <Plus className="h-4 w-4" />

@@ -202,7 +202,7 @@ function RejectDialog({
           <h2 className="text-lg font-semibold text-primary">Reject Plan</h2>
           <button
             onClick={onCancel}
-            className="p-1 text-gray-400 hover:text-gray-600 rounded"
+            className="p-1 text-gray-500 hover:text-gray-600 rounded"
             aria-label="Close rejection dialog"
             disabled={loading}
           >
@@ -297,7 +297,7 @@ function CostConfigPanel({ onClose, onSave, addToast }: CostConfigPanelProps) {
           </h2>
           <button
             onClick={onClose}
-            className="p-1 text-gray-400 hover:text-gray-600 rounded"
+            className="p-1 text-gray-500 hover:text-gray-600 rounded"
             aria-label="Close cost configuration"
           >
             <X className="w-5 h-5" />
@@ -498,7 +498,7 @@ function OutcomeComparison({ planId }: OutcomeComparisonProps) {
   if (loading) {
     return (
       <div className="flex items-center justify-center py-8">
-        <Loader2 className="w-5 h-5 text-gray-400 animate-spin" />
+        <Loader2 className="w-5 h-5 text-gray-500 animate-spin" />
       </div>
     );
   }
@@ -676,7 +676,7 @@ function CostBreakdownSection({
   if (loading) {
     return (
       <div className="flex items-center justify-center py-8">
-        <Loader2 className="w-5 h-5 text-gray-400 animate-spin" />
+        <Loader2 className="w-5 h-5 text-gray-500 animate-spin" />
       </div>
     );
   }
@@ -877,7 +877,7 @@ function ReplanForm({ planId, onClose, onSuccess }: ReplanFormProps) {
           <h2 className="text-lg font-semibold text-primary">Replan</h2>
           <button
             onClick={onClose}
-            className="p-1 text-gray-400 hover:text-gray-600 rounded"
+            className="p-1 text-gray-500 hover:text-gray-600 rounded"
             aria-label="Close replan form"
           >
             <X className="w-5 h-5" />
@@ -1140,7 +1140,7 @@ function EmergencyStopModal({
           </div>
           <button
             onClick={onClose}
-            className="p-1 text-gray-400 hover:text-gray-600 rounded"
+            className="p-1 text-gray-500 hover:text-gray-600 rounded"
             aria-label="Close emergency stop form"
           >
             <X className="w-5 h-5" />
@@ -1413,7 +1413,7 @@ function ReplanDiffSection<T>({
         disabled={isEmpty}
         className={`w-full flex items-center justify-between px-4 py-2.5 text-sm font-medium transition-colors ${
           isEmpty
-            ? "text-gray-400 cursor-default"
+            ? "text-gray-500 cursor-default"
             : "text-primary hover:bg-gray-50"
         }`}
         aria-expanded={open}
@@ -1423,7 +1423,7 @@ function ReplanDiffSection<T>({
           <span
             className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
               isEmpty
-                ? "bg-gray-50 text-gray-400"
+                ? "bg-gray-50 text-gray-500"
                 : "bg-info-light text-info-dark"
             }`}
           >
@@ -1432,9 +1432,9 @@ function ReplanDiffSection<T>({
         </span>
         {!isEmpty &&
           (open ? (
-            <ChevronUp className="w-4 h-4 text-gray-400" />
+            <ChevronUp className="w-4 h-4 text-gray-500" />
           ) : (
-            <ChevronDown className="w-4 h-4 text-gray-400" />
+            <ChevronDown className="w-4 h-4 text-gray-500" />
           ))}
       </button>
       {open && !isEmpty && (
@@ -1447,7 +1447,7 @@ function ReplanDiffSection<T>({
         </div>
       )}
       {isEmpty && emptyLabel && (
-        <div className="px-4 py-2 text-[11px] text-gray-400">{emptyLabel}</div>
+        <div className="px-4 py-2 text-[11px] text-gray-500">{emptyLabel}</div>
       )}
     </div>
   );
@@ -1639,7 +1639,7 @@ function ReplanDiffPanel({ seedEventId }: ReplanDiffPanelProps) {
       )}
 
       {!diff && !loading && !error && (
-        <p className="text-xs text-gray-400">
+        <p className="text-xs text-gray-500">
           Enter a replan event_id to view the structured diff (added / removed /
           reordered / reassigned stops plus quantity and ETA changes).
         </p>
@@ -1757,7 +1757,7 @@ function PlanDetailView({
   if (loading) {
     return (
       <div className="flex items-center justify-center py-16">
-        <Loader2 className="w-6 h-6 text-gray-400 animate-spin" />
+        <Loader2 className="w-6 h-6 text-gray-500 animate-spin" />
       </div>
     );
   }
@@ -1857,15 +1857,15 @@ function PlanDetailView({
           </div>
           <div className="grid grid-cols-3 gap-4 text-xs text-gray-600 mb-3">
             <div>
-              <span className="text-gray-400">Truck:</span>{" "}
+              <span className="text-gray-500">Truck:</span>{" "}
               {plan.loading_plan.truck_id}
             </div>
             <div>
-              <span className="text-gray-400">Utilization:</span>{" "}
+              <span className="text-gray-500">Utilization:</span>{" "}
               {plan.loading_plan.total_utilization_pct.toFixed(1)}%
             </div>
             <div>
-              <span className="text-gray-400">Weight:</span>{" "}
+              <span className="text-gray-500">Weight:</span>{" "}
               {plan.loading_plan.total_weight_kg.toFixed(0)} kg
             </div>
           </div>
@@ -1879,7 +1879,7 @@ function PlanDetailView({
           )}
         </div>
       ) : (
-        <div className="border border-gray-100 rounded-lg p-4 text-sm text-gray-400 text-center">
+        <div className="border border-gray-100 rounded-lg p-4 text-sm text-gray-500 text-center">
           No loading plan available
         </div>
       )}
@@ -1936,11 +1936,11 @@ function PlanDetailView({
               )}
             </div>
           ) : (
-            <p className="text-xs text-gray-400">No routes assigned</p>
+            <p className="text-xs text-gray-500">No routes assigned</p>
           )}
         </div>
       ) : (
-        <div className="border border-gray-100 rounded-lg p-4 text-sm text-gray-400 text-center">
+        <div className="border border-gray-100 rounded-lg p-4 text-sm text-gray-500 text-center">
           No route plan available
         </div>
       )}
@@ -2017,7 +2017,7 @@ function PaginationControls({
         <button
           onClick={() => onPageChange(pagination.page - 1)}
           disabled={pagination.page <= 1}
-          className="p-1.5 text-gray-400 hover:text-gray-600 disabled:opacity-30 disabled:cursor-not-allowed rounded"
+          className="p-1.5 text-gray-500 hover:text-gray-600 disabled:opacity-30 disabled:cursor-not-allowed rounded"
           aria-label="Previous page"
         >
           <ChevronLeft className="w-4 h-4" />
@@ -2025,7 +2025,7 @@ function PaginationControls({
         <button
           onClick={() => onPageChange(pagination.page + 1)}
           disabled={pagination.page >= pagination.total_pages}
-          className="p-1.5 text-gray-400 hover:text-gray-600 disabled:opacity-30 disabled:cursor-not-allowed rounded"
+          className="p-1.5 text-gray-500 hover:text-gray-600 disabled:opacity-30 disabled:cursor-not-allowed rounded"
           aria-label="Next page"
         >
           <ChevronRight className="w-4 h-4" />
@@ -2333,7 +2333,7 @@ function PlansTab() {
         </select>
         <button
           onClick={refreshPlanList}
-          className="p-1.5 text-gray-400 hover:text-gray-600 rounded"
+          className="p-1.5 text-gray-500 hover:text-gray-600 rounded"
           aria-label="Refresh plan list"
         >
           <RefreshCw className="w-4 h-4" />
@@ -2349,10 +2349,10 @@ function PlansTab() {
       {/* Plan list */}
       {listLoading ? (
         <div className="flex items-center justify-center py-16">
-          <Loader2 className="w-6 h-6 text-gray-400 animate-spin" />
+          <Loader2 className="w-6 h-6 text-gray-500 animate-spin" />
         </div>
       ) : planList.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-16 text-gray-400">
+        <div className="flex flex-col items-center justify-center py-16 text-gray-500">
           <Truck className="w-8 h-8 mb-2" />
           <p className="text-sm">No plans found</p>
           <p className="text-xs mt-1">
@@ -2599,10 +2599,10 @@ function ForecastsTab() {
 
       {loading ? (
         <div className="flex items-center justify-center py-16">
-          <Loader2 className="w-6 h-6 text-gray-400 animate-spin" />
+          <Loader2 className="w-6 h-6 text-gray-500 animate-spin" />
         </div>
       ) : forecasts.length === 0 ? (
-        <div className="text-center py-16 text-gray-400">
+        <div className="text-center py-16 text-gray-500">
           <p className="text-sm">No forecasts found</p>
           <p className="text-xs mt-1">Try adjusting your filters</p>
         </div>
@@ -2837,7 +2837,7 @@ function PrioritiesTab() {
             </span>
           ))}
           {c.members.length > 8 && (
-            <span className="text-gray-400 text-[11px]">
+            <span className="text-gray-500 text-[11px]">
               +{c.members.length - 8} more
             </span>
           )}
@@ -2917,7 +2917,7 @@ function PrioritiesTab() {
             {p.cluster_size != null ? ` (n=${p.cluster_size})` : ""}
           </span>
         ) : (
-          <span className="text-gray-400">—</span>
+          <span className="text-gray-500">—</span>
         ),
     },
     {
@@ -2937,7 +2937,7 @@ function PrioritiesTab() {
         </h3>
         <button
           onClick={loadPriorities}
-          className="p-1.5 text-gray-400 hover:text-gray-600 rounded"
+          className="p-1.5 text-gray-500 hover:text-gray-600 rounded"
           aria-label="Refresh priorities"
         >
           <RefreshCw className="w-4 h-4" />
@@ -2998,10 +2998,10 @@ function PrioritiesTab() {
 
       {loading ? (
         <div className="flex items-center justify-center py-16">
-          <Loader2 className="w-6 h-6 text-gray-400 animate-spin" />
+          <Loader2 className="w-6 h-6 text-gray-500 animate-spin" />
         </div>
       ) : entries.length === 0 ? (
-        <div className="text-center py-16 text-gray-400">
+        <div className="text-center py-16 text-gray-500">
           <p className="text-sm">No delivery priorities found</p>
           {bucketFilter && (
             <p className="text-xs mt-1">
@@ -3087,7 +3087,7 @@ const priorityClusterColumns: Column<PriorityClusterItem>[] = [
           {bucket}
         </span>
       ) : (
-        <span className="text-gray-400">—</span>
+        <span className="text-gray-500">—</span>
       );
     },
   },
@@ -3243,11 +3243,11 @@ function PriorityClustersPanel({ addError }: PriorityClustersPanelProps) {
 
       {loading ? (
         <div className="flex items-center justify-center py-10">
-          <Loader2 className="w-5 h-5 text-gray-400 animate-spin" />
+          <Loader2 className="w-5 h-5 text-gray-500 animate-spin" />
           <span className="ml-2 text-xs text-gray-500">Loading…</span>
         </div>
       ) : !data || data.items.length === 0 ? (
-        <div className="text-center py-8 text-xs text-gray-400">No results</div>
+        <div className="text-center py-8 text-xs text-gray-500">No results</div>
       ) : (
         <Table<PriorityClusterItem>
           ariaLabel="Priority clusters (DBSCAN)"
@@ -3442,11 +3442,11 @@ function CombinableGroupsPanel({ addError }: CombinableGroupsPanelProps) {
 
       {loading ? (
         <div className="flex items-center justify-center py-10">
-          <Loader2 className="w-5 h-5 text-gray-400 animate-spin" />
+          <Loader2 className="w-5 h-5 text-gray-500 animate-spin" />
           <span className="ml-2 text-xs text-gray-500">Loading…</span>
         </div>
       ) : !data || !Array.isArray(data.items) || data.items.length === 0 ? (
-        <div className="text-center py-8 text-xs text-gray-400">No results</div>
+        <div className="text-center py-8 text-xs text-gray-500">No results</div>
       ) : (
         <div className="space-y-3">
           {data.items.map((group: CombinableGroup) => (
@@ -3470,8 +3470,8 @@ function CombinableGroupsPanel({ addError }: CombinableGroupsPanelProps) {
                   ))}
                 </div>
                 <span className="inline-flex items-center gap-1 text-sm font-medium text-primary whitespace-nowrap">
-                  <DollarSign className="w-3.5 h-3.5 text-gray-400" />
-                  <Droplets className="w-3.5 h-3.5 text-gray-400" />
+                  <DollarSign className="w-3.5 h-3.5 text-gray-500" />
+                  <Droplets className="w-3.5 h-3.5 text-gray-500" />
                   {group.estimated_combined_gallons.toLocaleString(undefined, {
                     maximumFractionDigits: 0,
                   })}{" "}
@@ -3520,7 +3520,7 @@ function CombinableGroupsPanel({ addError }: CombinableGroupsPanelProps) {
                             {bucket}
                           </span>
                         ) : (
-                          <span className="text-gray-400">—</span>
+                          <span className="text-gray-500">—</span>
                         )}
                       </span>
                     </li>
@@ -3541,7 +3541,7 @@ function CombinableGroupsPanel({ addError }: CombinableGroupsPanelProps) {
                   type="button"
                   onClick={() => handlePageChange(page - 1)}
                   disabled={page <= 1 || loading}
-                  className="p-1.5 text-gray-400 hover:text-gray-600 disabled:opacity-30 disabled:cursor-not-allowed rounded"
+                  className="p-1.5 text-gray-500 hover:text-gray-600 disabled:opacity-30 disabled:cursor-not-allowed rounded"
                   aria-label="Previous page"
                 >
                   <ChevronLeft className="w-4 h-4" />
@@ -3550,7 +3550,7 @@ function CombinableGroupsPanel({ addError }: CombinableGroupsPanelProps) {
                   type="button"
                   onClick={() => handlePageChange(page + 1)}
                   disabled={!data.has_next || loading}
-                  className="p-1.5 text-gray-400 hover:text-gray-600 disabled:opacity-30 disabled:cursor-not-allowed rounded"
+                  className="p-1.5 text-gray-500 hover:text-gray-600 disabled:opacity-30 disabled:cursor-not-allowed rounded"
                   aria-label="Next page"
                 >
                   <ChevronRight className="w-4 h-4" />

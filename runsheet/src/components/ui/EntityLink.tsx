@@ -214,7 +214,7 @@ export function EntityLink({
         data-testid={testId}
       >
         {display}
-        {showSuffix && <span className="text-gray-400"> ({link.id})</span>}
+        {showSuffix && <span className="text-gray-500"> ({link.id})</span>}
       </Link>
     );
   }
@@ -239,13 +239,13 @@ export function EntityLink({
         data-testid={testId}
       >
         {display}
-        {showSuffix && <span className="text-gray-400"> ({fallbackId})</span>}
+        {showSuffix && <span className="text-gray-500"> ({fallbackId})</span>}
       </Link>
     );
   }
 
   return (
-    <span className="text-gray-400" data-testid={testId}>
+    <span className="text-gray-500" data-testid={testId}>
       —
     </span>
   );

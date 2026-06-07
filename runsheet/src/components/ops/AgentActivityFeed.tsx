@@ -138,7 +138,7 @@ export default function AgentActivityFeed() {
           <span
             className={`w-2 h-2 rounded-full ${isConnected ? "bg-success" : "bg-gray-300"}`}
           />
-          <span className="text-xs text-gray-400">
+          <span className="text-xs text-gray-500">
             {isConnected ? "Live" : "Offline"}
           </span>
         </div>
@@ -151,7 +151,7 @@ export default function AgentActivityFeed() {
             <div className="w-5 h-5 border-2 border-gray-300 border-t-primary rounded-full animate-spin" />
           </div>
         ) : entries.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-8 text-gray-400">
+          <div className="flex flex-col items-center justify-center py-8 text-gray-500">
             <Activity className="w-8 h-8 mb-2" />
             <p className="text-sm">No agent activity yet</p>
           </div>
@@ -191,7 +191,7 @@ export default function AgentActivityFeed() {
                     {buildActionSummary(entry)}
                   </p>
                 </div>
-                <span className="text-[10px] text-gray-400 flex-shrink-0 mt-0.5">
+                <span className="text-[10px] text-gray-500 flex-shrink-0 mt-0.5">
                   {formatTimestamp(entry.timestamp)}
                 </span>
               </div>

@@ -39,7 +39,7 @@ const STATUS_COLORS: Record<
   completed: { bg: "bg-gray-100", text: "text-gray-600", label: "Completed" },
   cancelled: { bg: "bg-gray-100", text: "text-gray-500", label: "Cancelled" },
   failed: { bg: "bg-error-light", text: "text-error-dark", label: "Failed" },
-  unassigned: { bg: "bg-gray-50", text: "text-gray-400", label: "Unassigned" },
+  unassigned: { bg: "bg-gray-50", text: "text-gray-500", label: "Unassigned" },
 };
 
 /**
@@ -59,7 +59,7 @@ export default function OperationsMap({ assets }: OperationsMapProps) {
             Asset Locations
           </h3>
         </div>
-        <span className="text-xs text-gray-400">{assets.length} assets</span>
+        <span className="text-xs text-gray-500">{assets.length} assets</span>
       </div>
 
       {/* Legend */}
@@ -83,7 +83,7 @@ export default function OperationsMap({ assets }: OperationsMapProps) {
       {/* Map placeholder with asset markers */}
       <div className="flex-1 relative bg-gray-50 overflow-auto p-4">
         {assets.length === 0 ? (
-          <div className="h-full flex items-center justify-center text-gray-400 text-sm">
+          <div className="h-full flex items-center justify-center text-gray-500 text-sm">
             No assets with location data
           </div>
         ) : (
@@ -109,7 +109,7 @@ export default function OperationsMap({ assets }: OperationsMapProps) {
                       {asset.job_id}
                     </p>
                   )}
-                  <p className="text-xs text-gray-400 mt-0.5">
+                  <p className="text-xs text-gray-500 mt-0.5">
                     {asset.lat.toFixed(4)}, {asset.lng.toFixed(4)}
                   </p>
                 </div>

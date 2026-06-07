@@ -66,7 +66,7 @@ export default function DelayedOperationsPanel({
                 {job.origin} → {job.destination}
               </p>
               {job.asset_assigned && (
-                <p className="text-xs text-gray-400 mt-0.5">
+                <p className="text-xs text-gray-500 mt-0.5">
                   Asset: {job.asset_assigned}
                 </p>
               )}

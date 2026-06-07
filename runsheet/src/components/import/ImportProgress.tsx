@@ -192,7 +192,7 @@ export default function ImportProgress({
               / {totalRecords} records processed
             </p>
           ) : (
-            <p className="text-sm text-gray-400">Waiting for results…</p>
+            <p className="text-sm text-gray-500">Waiting for results…</p>
           )}
         </div>
       </div>

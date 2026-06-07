@@ -352,7 +352,7 @@ export default function FleetTracking({ onTruckSelect }: FleetTrackingProps) {
           <span className="text-gray-900">
             {formatAssetLabel(truck.assetType ?? "vehicle")}
           </span>
-          <span className="text-gray-400 ml-1">
+          <span className="text-gray-500 ml-1">
             / {formatAssetLabel(truck.assetSubtype ?? "truck")}
           </span>
         </div>
@@ -384,7 +384,7 @@ export default function FleetTracking({ onTruckSelect }: FleetTrackingProps) {
         if (!status || status === "unknown") {
           return (
             <span
-              className="text-xs text-gray-400"
+              className="text-xs text-gray-500"
               title="No compliance records"
             >
               Unlinked
@@ -607,7 +607,7 @@ export default function FleetTracking({ onTruckSelect }: FleetTrackingProps) {
               <button
                 type="button"
                 onClick={() => setCompartmentsTruck(null)}
-                className="rounded p-1 text-gray-400 hover:text-gray-600"
+                className="rounded p-1 text-gray-500 hover:text-gray-600"
                 aria-label="Close compartments"
               >
                 <X className="h-5 w-5" />

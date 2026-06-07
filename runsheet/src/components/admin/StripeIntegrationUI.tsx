@@ -306,7 +306,7 @@ export default function StripeIntegrationUI() {
       {/* Configuration Status */}
       {!isConfigured ? (
         <div className="bg-white rounded-xl border border-gray-200 p-12 text-center mb-6">
-          <AlertCircle className="w-12 h-12 text-gray-400 mx-auto mb-4" />
+          <AlertCircle className="w-12 h-12 text-gray-500 mx-auto mb-4" />
           <h3 className="text-lg font-semibold text-gray-900 mb-2">
             Stripe Not Configured
           </h3>
@@ -421,7 +421,7 @@ export default function StripeIntegrationUI() {
                 </div>
               ) : payments.length === 0 ? (
                 <div className="text-center py-12 text-gray-500">
-                  <CreditCard className="w-12 h-12 text-gray-400 mx-auto mb-4" />
+                  <CreditCard className="w-12 h-12 text-gray-500 mx-auto mb-4" />
                   <p>No payments found</p>
                 </div>
               ) : (
