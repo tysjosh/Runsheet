@@ -25,7 +25,8 @@ export default function OperationsControlPage() {
               Operations Control
             </h1>
             <p className="text-gray-500">
-              Command center for jobs, assets, and fuel monitoring
+              Live monitoring — assets, jobs, and fuel across the operation.
+              Head to Today to triage and act.
             </p>
           </div>
         </div>

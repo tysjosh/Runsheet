@@ -1,5 +1,6 @@
 "use client";
 
+import { AlertTriangle, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import type {
   DelayAlertEvent,
@@ -14,6 +15,7 @@ import { getAlerts as getInventoryAlerts } from "../../services/inventoryApi";
 import { getActiveJobs, getDelayedJobs } from "../../services/schedulingApi";
 import type { Job, JobStatus, OperationsControlSummary } from "../../types/api";
 import LoadingSpinner from "../LoadingSpinner";
+import { Button } from "../ui";
 import ApprovalQueuePanel from "./ApprovalQueuePanel";
 import DelayedOperationsPanel from "./DelayedOperationsPanel";
 import FuelStatusSidebar from "./FuelStatusSidebar";
@@ -22,6 +24,20 @@ import JobQueuePanel from "./JobQueuePanel";
 import OperationsMap from "./OperationsMap";
 import OperationsSummaryBar from "./OperationsSummaryBar";
 import StormModeBanner from "./StormModeBanner";
+
+// Fallback poll so the command center recovers if the WebSocket drops or a
+// server-side push is missed — a monitoring surface can't silently go stale.
+const REFRESH_INTERVAL_MS = 60_000;
+
+function formatRelative(date: Date | null): string {
+  if (!date) return "";
+  const secs = Math.round((Date.now() - date.getTime()) / 1000);
+  if (secs < 5) return "just now";
+  if (secs < 60) return `${secs}s ago`;
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m ago`;
+  return `${Math.floor(mins / 60)}h ago`;
+}
 
 interface AssetLocation {
   asset_id: string;
@@ -34,12 +50,12 @@ interface AssetLocation {
 
 /**
  * Command center layout composing all operations control panels.
- * Subscribes to scheduling + fuel WebSocket events for real-time updates.
+ * Subscribes to scheduling + fuel WebSocket events for real-time updates,
+ * with a slow fallback poll and a manual refresh so the view can always
+ * re-sync.
  *
- * Layout:
- * - Top: OperationsSummaryBar (full width)
- * - Left: OperationsMap (~60% width)
- * - Right: JobQueuePanel + DelayedOperationsPanel + FuelStatusSidebar (~40% width)
+ * Layout (responsive): map + right rail stack on small screens and sit
+ * side-by-side (≈60/40) from `lg` up.
  *
  * Validates: Requirements 10.1-10.7
  */
@@ -50,6 +66,9 @@ export default function OperationsControlView() {
   const [assetLocations, setAssetLocations] = useState<AssetLocation[]>([]);
   const [inventoryAlertCount, setInventoryAlertCount] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const [loadError, setLoadError] = useState(false);
 
   /** Build summary from current state */
   const summary: OperationsControlSummary = {
@@ -59,18 +78,22 @@ export default function OperationsControlView() {
     fuel_alerts: fuelAlerts.length,
   };
 
-  /** Load all data sources independently — each request handles its own errors */
-  const loadData = useCallback(async () => {
+  /**
+   * Load all data sources independently — each request handles its own errors.
+   * `background` refreshes (poll) update in place without the full-screen
+   * spinner so they don't blank the command center.
+   */
+  const loadData = useCallback(async (opts?: { background?: boolean }) => {
+    if (!opts?.background) setRefreshing(true);
     try {
-      setLoading(true);
-      const [activeRes, delayedRes, fuelRes, assetsRes, inventoryRes] =
-        await Promise.allSettled([
-          getActiveJobs(),
-          getDelayedJobs(),
-          getFuelAlerts(),
-          apiService.getAssets(),
-          getInventoryAlerts(),
-        ]);
+      const results = await Promise.allSettled([
+        getActiveJobs(),
+        getDelayedJobs(),
+        getFuelAlerts(),
+        apiService.getAssets(),
+        getInventoryAlerts(),
+      ]);
+      const [activeRes, delayedRes, fuelRes, assetsRes, inventoryRes] = results;
 
       setActiveJobs(
         activeRes.status === "fulfilled" ? activeRes.value.data : [],
@@ -80,7 +103,6 @@ export default function OperationsControlView() {
       );
       setFuelAlerts(fuelRes.status === "fulfilled" ? fuelRes.value.data : []);
 
-      // Inventory alerts count (fail-open: default to 0)
       if (inventoryRes.status === "fulfilled") {
         setInventoryAlertCount(
           inventoryRes.value.count ?? inventoryRes.value.data?.length ?? 0,
@@ -92,7 +114,6 @@ export default function OperationsControlView() {
       const assets =
         assetsRes.status === "fulfilled" ? assetsRes.value.data : [];
 
-      // Build asset locations with job assignment info
       const jobsByAsset = new Map<string, Job>();
       for (const job of activeRes.status === "fulfilled"
         ? activeRes.value.data
@@ -130,15 +151,27 @@ export default function OperationsControlView() {
           };
         });
       setAssetLocations(locations);
+
+      // Surface a non-blocking warning if any source failed (each still
+      // fails open to empty, but the user should know data may be partial).
+      setLoadError(results.some((r) => r.status === "rejected"));
     } catch (error) {
       console.error("Failed to load operations data:", error);
+      setLoadError(true);
     } finally {
+      setLastUpdated(new Date());
       setLoading(false);
+      setRefreshing(false);
     }
   }, []);
 
   useEffect(() => {
     loadData();
+    const id = setInterval(
+      () => loadData({ background: true }),
+      REFRESH_INTERVAL_MS,
+    );
+    return () => clearInterval(id);
   }, [loadData]);
 
   /**
@@ -232,22 +265,57 @@ export default function OperationsControlView() {
           verified session's role claims (Req 8.6). */}
       <StormModeBanner />
 
-      <div className="h-full flex flex-col gap-4 p-6 overflow-hidden">
+      <div className="h-full flex flex-col gap-4 p-4 sm:p-6 overflow-y-auto lg:overflow-hidden">
+        {/* Sync toolbar — last updated, manual refresh, and a non-blocking
+            warning when a source failed (data still fails open to empty). */}
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="min-h-[1.25rem]">
+            {loadError && (
+              <span
+                role="alert"
+                className="inline-flex items-center gap-1.5 text-xs text-warning-dark"
+              >
+                <AlertTriangle className="h-3.5 w-3.5" />
+                Some data failed to load — showing last known values.
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-3">
+            {lastUpdated && (
+              <span className="text-xs text-gray-500">
+                Updated {formatRelative(lastUpdated)}
+              </span>
+            )}
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => loadData()}
+              icon={
+                <RefreshCw
+                  className={`w-3.5 h-3.5 ${refreshing ? "animate-spin" : ""}`}
+                />
+              }
+            >
+              Refresh
+            </Button>
+          </div>
+        </div>
+
         {/* Top: Summary Bar */}
         <OperationsSummaryBar summary={summary} />
 
         {/* Inventory Health Indicator */}
         <InventoryHealthBadge alertCount={inventoryAlertCount} />
 
-        {/* Main content: Map + Right sidebar */}
-        <div className="flex-1 flex gap-4 min-h-0">
-          {/* Left: Map (~60%) */}
-          <div className="w-3/5 min-h-0">
+        {/* Main content: Map + Right sidebar — stacks below lg. */}
+        <div className="flex-1 flex flex-col gap-4 min-h-0 lg:flex-row">
+          {/* Map (~60% on lg; fixed height when stacked) */}
+          <div className="h-[55vh] w-full min-h-0 lg:h-auto lg:w-3/5">
             <OperationsMap assets={assetLocations} />
           </div>
 
-          {/* Right sidebar (~40%) */}
-          <div className="w-2/5 flex flex-col gap-4 overflow-y-auto min-h-0">
+          {/* Right rail (~40% on lg) */}
+          <div className="flex w-full flex-col gap-4 lg:w-2/5 lg:min-h-0 lg:overflow-y-auto">
             <JobQueuePanel jobs={activeJobs} />
             <DelayedOperationsPanel jobs={activeJobs} />
             <ApprovalQueuePanel />
