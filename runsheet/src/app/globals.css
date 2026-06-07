@@ -4,17 +4,22 @@
   --background: #ffffff;
   --foreground: #000000;
 
-  --rs-color-primary: #232323;
-  --rs-color-primary-hover: #1a1a1a;
-  --rs-color-primary-light: #404040;
+  /* Primary = the landing-page emerald family. The vivid landing green
+     (#16b88c) fails WCAG AA both as white-on-green (buttons/active nav) and
+     green-on-white (labels/headings that use --color-primary as text), so the
+     action/text token is the AA-safe deep-emerald sibling and the vivid green
+     is exposed as primary-light for accents/highlights. */
+  --rs-color-primary: #0b7d5e;
+  --rs-color-primary-hover: #096b50;
+  --rs-color-primary-light: #16b88c;
   --rs-color-primary-soft: color-mix(
     in srgb,
-    var(--rs-color-primary) 6%,
+    var(--rs-color-primary) 8%,
     transparent
   );
 
   --rs-color-ink: #0f0f0f;
-  --rs-color-brand-accent: #0d9373;
+  --rs-color-brand-accent: #16b88c;
   --rs-color-brand-accent-soft: color-mix(
     in srgb,
     var(--rs-color-brand-accent) 12%,
