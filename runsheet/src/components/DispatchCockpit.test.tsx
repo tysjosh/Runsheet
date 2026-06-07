@@ -7,7 +7,13 @@
  * source loads independently and fails open.
  */
 import "@testing-library/jest-dom";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 
 const mockPush = jest.fn();
 jest.mock("next/navigation", () => ({
@@ -31,6 +37,14 @@ jest.mock("../services/agentApi", () => ({
 jest.mock("../services/tenant", () => ({
   getCurrentTenantId: () => "tenant-a",
 }));
+// WebSocket hooks drive live updates; mock them so tests stay deterministic.
+// Each returns nothing meaningful here — the cockpit only registers callbacks.
+jest.mock("../hooks/useOrdersWebSocket", () => ({
+  useOrdersWebSocket: jest.fn(),
+}));
+jest.mock("../hooks/useSchedulingWebSocket", () => ({
+  useSchedulingWebSocket: jest.fn(),
+}));
 // DriverPicker (used by the inline assign action) loads the roster.
 jest.mock("../services/complianceApi", () => ({
   getDrivers: jest.fn().mockResolvedValue({
@@ -49,6 +63,8 @@ jest.mock("../services/complianceApi", () => ({
   }),
 }));
 
+import { useOrdersWebSocket } from "../hooks/useOrdersWebSocket";
+import { useSchedulingWebSocket } from "../hooks/useSchedulingWebSocket";
 import { getApprovals } from "../services/agentApi";
 import { getAlerts as getFuelAlerts } from "../services/fuelApi";
 import {
@@ -75,6 +91,11 @@ const mockGetFuelAlerts = getFuelAlerts as jest.MockedFunction<
 const mockGetApprovals = getApprovals as jest.MockedFunction<
   typeof getApprovals
 >;
+const mockUseOrdersWebSocket = useOrdersWebSocket as jest.MockedFunction<
+  typeof useOrdersWebSocket
+>;
+const mockUseSchedulingWebSocket =
+  useSchedulingWebSocket as jest.MockedFunction<typeof useSchedulingWebSocket>;
 
 function paginated<T>(data: T[]) {
   return {
@@ -92,6 +113,8 @@ beforeEach(() => {
   mockGetFuelAlerts.mockReset();
   mockGetApprovals.mockReset();
   mockPush.mockReset();
+  mockUseOrdersWebSocket.mockReset();
+  mockUseSchedulingWebSocket.mockReset();
 
   // Default: empty everything; individual tests override.
   mockListOrders.mockResolvedValue(paginated([]));
@@ -276,4 +299,87 @@ it("releases a hold inline", async () => {
 
   await waitFor(() => expect(mockReleaseHold).toHaveBeenCalledWith("ord_h"));
   expect(await screen.findByText("Hold released")).toBeInTheDocument();
+});
+
+describe("DispatchCockpit — live WebSocket updates", () => {
+  it("subscribes to the orders and scheduling WebSockets", () => {
+    render(<DispatchCockpit />);
+
+    expect(mockUseOrdersWebSocket).toHaveBeenCalledWith(
+      "tenant-a",
+      expect.objectContaining({
+        onOrderPlaced: expect.any(Function),
+        onOrderStatusChanged: expect.any(Function),
+        onOrderAssigned: expect.any(Function),
+      }),
+    );
+    expect(mockUseSchedulingWebSocket).toHaveBeenCalledWith(
+      expect.objectContaining({
+        onStatusChanged: expect.any(Function),
+        onDelayAlert: expect.any(Function),
+      }),
+    );
+  });
+
+  it("re-fetches orders when a WebSocket order event arrives", async () => {
+    let ordersOptions: Parameters<typeof useOrdersWebSocket>[1] | undefined;
+    mockUseOrdersWebSocket.mockImplementation((_tenantId, options) => {
+      ordersOptions = options;
+      return undefined as unknown as ReturnType<typeof useOrdersWebSocket>;
+    });
+
+    render(<DispatchCockpit />);
+
+    // Wait for the initial load to settle.
+    await waitFor(() => expect(mockListOrders).toHaveBeenCalled());
+    const callsBefore = mockListOrders.mock.calls.length;
+
+    // Simulate a pushed order event; the cockpit coalesces and reloads.
+    act(() => {
+      ordersOptions?.onOrderPlaced?.({
+        order_id: "ord_live",
+        status: "placed",
+      } as never);
+    });
+
+    await waitFor(
+      () =>
+        expect(mockListOrders.mock.calls.length).toBeGreaterThan(callsBefore),
+      { timeout: 2000 },
+    );
+  });
+
+  it("re-fetches when a scheduling delay alert arrives", async () => {
+    let schedulingOptions:
+      | Parameters<typeof useSchedulingWebSocket>[0]
+      | undefined;
+    mockUseSchedulingWebSocket.mockImplementation((options) => {
+      schedulingOptions = options;
+      return undefined as unknown as ReturnType<typeof useSchedulingWebSocket>;
+    });
+
+    render(<DispatchCockpit />);
+
+    await waitFor(() => expect(mockGetDelayedJobs).toHaveBeenCalled());
+    const callsBefore = mockGetDelayedJobs.mock.calls.length;
+
+    act(() => {
+      schedulingOptions?.onDelayAlert?.({
+        job_id: "JOB-1",
+        job_type: "delivery",
+        origin: "Houston",
+        destination: "Dallas",
+        delay_duration_minutes: 45,
+        estimated_arrival: new Date().toISOString(),
+      });
+    });
+
+    await waitFor(
+      () =>
+        expect(mockGetDelayedJobs.mock.calls.length).toBeGreaterThan(
+          callsBefore,
+        ),
+      { timeout: 2000 },
+    );
+  });
 });

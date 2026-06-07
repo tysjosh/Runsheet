@@ -22,7 +22,9 @@ import {
   RefreshCw,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useOrdersWebSocket } from "../hooks/useOrdersWebSocket";
+import { useSchedulingWebSocket } from "../hooks/useSchedulingWebSocket";
 import { getApprovals } from "../services/agentApi";
 import { ApiError } from "../services/api";
 import {
@@ -49,7 +51,13 @@ import {
   useToasts,
 } from "./ui";
 
-const REFRESH_INTERVAL_MS = 60_000;
+// Safety-net fallback poll. Live updates arrive over the orders/scheduling
+// WebSockets; the cockpit only polls this slowly so it still recovers if the
+// socket drops or a server-side push is missed.
+const REFRESH_INTERVAL_MS = 120_000;
+// Coalesce bursts of WebSocket events into a single reload so a flurry of
+// updates doesn't trigger a reload per message.
+const WS_REFRESH_DEBOUNCE_MS = 500;
 const MAX_ROWS = 6;
 
 /**
@@ -157,6 +165,41 @@ export default function DispatchCockpit({ onNavigate }: DispatchCockpitProps) {
     const interval = setInterval(loadData, REFRESH_INTERVAL_MS);
     return () => clearInterval(interval);
   }, [loadData]);
+
+  // Coalesce WebSocket-driven reloads: a burst of order/scheduling events
+  // schedules a single debounced refresh rather than one reload per message.
+  const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scheduleRefresh = useCallback(() => {
+    if (refreshTimer.current) clearTimeout(refreshTimer.current);
+    refreshTimer.current = setTimeout(() => {
+      refreshTimer.current = null;
+      loadData();
+    }, WS_REFRESH_DEBOUNCE_MS);
+  }, [loadData]);
+
+  useEffect(
+    () => () => {
+      if (refreshTimer.current) clearTimeout(refreshTimer.current);
+    },
+    [],
+  );
+
+  // Live updates — orders WS refreshes the attention list when an order is
+  // placed, reassigned, or changes status.
+  useOrdersWebSocket(getCurrentTenantId(), {
+    subscriptions: ["order_placed", "order_status_changed", "order_assigned"],
+    onOrderPlaced: scheduleRefresh,
+    onOrderStatusChanged: scheduleRefresh,
+    onOrderAssigned: scheduleRefresh,
+  });
+
+  // Scheduling WS refreshes the delayed-operations section on delay alerts
+  // and job status changes.
+  useSchedulingWebSocket({
+    subscriptions: ["status_changed", "delay_alert"],
+    onStatusChanged: scheduleRefresh,
+    onDelayAlert: scheduleRefresh,
+  });
 
   const openOrder = (orderId: string) =>
     router.push(`/orders/${encodeURIComponent(orderId)}`);
