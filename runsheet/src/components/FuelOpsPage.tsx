@@ -1,17 +1,25 @@
 "use client";
-import { Building2, Fuel } from "lucide-react";
+import { BarChart3, Building2, Fuel } from "lucide-react";
 import { lazy, Suspense, useState } from "react";
 import LoadingSpinner from "./LoadingSpinner";
 import { PageHeader, type Tab, TabNavigation } from "./ui";
 
-const FuelDashboard = lazy(() => import("../app/ops/fuel/page"));
+const FuelDashboard = lazy(() => import("./ops/FuelDashboardView"));
 const SourcingPage = lazy(() => import("./ops/SourcingPage"));
 
+// Flattened to one tab set so the hub doesn't stack a second header + tab bar
+// on top of the embedded dashboard. Stations/Consumption drive the embedded
+// fuel dashboard's view; Sourcing is its own page.
 const TABS: Tab[] = [
   {
     id: "stations",
     label: "Fuel Stations",
     icon: <Fuel className="w-4 h-4" />,
+  },
+  {
+    id: "efficiency",
+    label: "Consumption",
+    icon: <BarChart3 className="w-4 h-4" />,
   },
   {
     id: "sourcing",
@@ -29,7 +37,7 @@ export default function FuelOpsPage() {
     <div className="flex flex-col h-full">
       <PageHeader
         title="Fuel Operations"
-        subtitle="Monitor stations and source supply"
+        subtitle="Monitor stations, consumption, and source supply"
         icon={<Fuel className="w-5 h-5" />}
       />
       <TabNavigation
@@ -39,7 +47,12 @@ export default function FuelOpsPage() {
       />
       <div className="flex-1 overflow-auto">
         <Suspense fallback={<LoadingSpinner message="Loading..." />}>
-          {activeTab === "stations" && <FuelDashboard />}
+          {(activeTab === "stations" || activeTab === "efficiency") && (
+            <FuelDashboard
+              embedded
+              view={activeTab as "stations" | "efficiency"}
+            />
+          )}
           {activeTab === "sourcing" && <SourcingPage />}
         </Suspense>
       </div>
