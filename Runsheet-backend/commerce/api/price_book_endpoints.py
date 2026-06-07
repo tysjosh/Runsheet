@@ -1,7 +1,7 @@
 """Price Book REST endpoints for the Commerce Backbone.
 
 Provides CRUD endpoints for PriceBook records under /api/commerce/price-books,
-including the ``/pricing/resolve`` dry-run resolver for UI preview.
+including the ``/price-books/resolve`` dry-run resolver for UI preview.
 
 All endpoints require ``commerce.backbone_enabled`` and
 ``commerce.pricing_engine_enabled`` feature flags to be active for the
@@ -34,7 +34,13 @@ _price_book_service: Optional[PriceBookService] = None
 _pricing_engine: Optional[PricingEngine] = None
 
 router = APIRouter(prefix="/api/commerce/price-books", tags=["commerce-price-books"])
-pricing_router = APIRouter(prefix="/api/commerce/pricing", tags=["commerce-pricing"])
+# The dry-run pricing resolver lives under the price-books prefix
+# (``/api/commerce/price-books/resolve``) to avoid colliding with the
+# operational sell-price resolver at ``POST /api/commerce/pricing/resolve``
+# (commerce.api.pricing_endpoints), which is a different engine/contract.
+pricing_router = APIRouter(
+    prefix="/api/commerce/price-books", tags=["commerce-price-books"]
+)
 
 
 def configure_price_book_api(
@@ -169,7 +175,7 @@ class UpdatePriceBookRequest(BaseModel):
 
 
 class PricingResolveRequest(BaseModel):
-    """Request body for POST /api/commerce/pricing/resolve (dry-run resolver)."""
+    """Request body for POST /api/commerce/price-books/resolve (dry-run resolver)."""
 
     account_id: str = Field(..., description="Account ID to resolve pricing for")
     product_code: str = Field(..., description="Product code to price")
@@ -374,7 +380,7 @@ async def activate_price_book(
 
 
 # ---------------------------------------------------------------------------
-# POST /api/commerce/pricing/resolve (dry-run resolver)
+# POST /api/commerce/price-books/resolve (dry-run resolver)
 # ---------------------------------------------------------------------------
 
 

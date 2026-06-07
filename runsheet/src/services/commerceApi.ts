@@ -601,12 +601,12 @@ export async function activatePriceBook(
   );
 }
 
-/** POST /commerce/pricing/resolve — dry-run pricing resolution */
+/** POST /commerce/price-books/resolve — dry-run pricing resolution */
 export async function resolvePricing(
   payload: PricingResolveRequest,
 ): Promise<SingleResponse<PricingResolveResult>> {
   return commerceRequest<SingleResponse<PricingResolveResult>>(
-    "/commerce/pricing/resolve",
+    "/commerce/price-books/resolve",
     {
       method: "POST",
       body: JSON.stringify(payload),
