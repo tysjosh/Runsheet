@@ -1,7 +1,9 @@
 fastapi==0.115.0
 uvicorn==0.24.0
-pydantic==2.10.0
-pydantic-settings==2.7.0
+# pydantic floor is set by supertokens-python 0.31.3 (requires >=2.10.6);
+# pinned to the versions the test suite is validated against.
+pydantic==2.12.5
+pydantic-settings==2.12.0
 python-multipart==0.0.18
 elasticsearch==8.11.0
 python-dotenv==1.0.0
