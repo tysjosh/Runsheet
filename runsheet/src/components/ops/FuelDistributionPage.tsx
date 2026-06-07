@@ -1458,7 +1458,7 @@ function ReplanDiffBody({ diff }: { diff: ReplanDiff }) {
     <div className="space-y-2">
       <ReplanDiffSection
         title="Added stops"
-        items={diff.added_stops}
+        items={diff.added_stops ?? []}
         render={(s) => (
           <div className="flex items-center justify-between">
             <span className="font-medium text-primary">{s.stop_id}</span>
@@ -1474,7 +1474,7 @@ function ReplanDiffBody({ diff }: { diff: ReplanDiff }) {
       />
       <ReplanDiffSection
         title="Removed stops"
-        items={diff.removed_stops}
+        items={diff.removed_stops ?? []}
         render={(s) => (
           <div className="flex items-center justify-between">
             <span className="font-medium text-primary">{s.stop_id}</span>
@@ -1488,7 +1488,7 @@ function ReplanDiffBody({ diff }: { diff: ReplanDiff }) {
       />
       <ReplanDiffSection
         title="Reordered stops"
-        items={diff.reordered_stops}
+        items={diff.reordered_stops ?? []}
         render={(s) => (
           <div className="flex items-center justify-between">
             <span className="font-medium text-primary">{s.stop_id}</span>
@@ -1501,7 +1501,7 @@ function ReplanDiffBody({ diff }: { diff: ReplanDiff }) {
       />
       <ReplanDiffSection
         title="Reassigned stops"
-        items={diff.reassigned_stops}
+        items={diff.reassigned_stops ?? []}
         render={(s) => (
           <div className="flex items-center justify-between">
             <span className="font-medium text-primary">{s.stop_id}</span>
@@ -1513,7 +1513,7 @@ function ReplanDiffBody({ diff }: { diff: ReplanDiff }) {
       />
       <ReplanDiffSection
         title="Quantity changes"
-        items={diff.quantity_changes}
+        items={diff.quantity_changes ?? []}
         render={(s) => (
           <div className="flex items-center justify-between">
             <span className="font-medium text-primary">{s.stop_id}</span>
@@ -1526,7 +1526,7 @@ function ReplanDiffBody({ diff }: { diff: ReplanDiff }) {
       />
       <ReplanDiffSection
         title="ETA shifts"
-        items={diff.eta_shifts}
+        items={diff.eta_shifts ?? []}
         render={(s) => (
           <div className="flex items-center justify-between">
             <span className="font-medium text-primary">{s.stop_id}</span>

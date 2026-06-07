@@ -431,7 +431,7 @@ export default function StormModeBanner({
   }
 
   const triggeringAlert: StormModeTriggeringAlert | undefined =
-    status.triggering_alerts[0];
+    (status.triggering_alerts ?? [])[0];
   const severity = triggeringAlert?.severity;
   const severityBadge = severity
     ? SEVERITY_BADGE[severity]
@@ -510,9 +510,12 @@ export default function StormModeBanner({
                   <dt className="inline font-medium">Source:</dt>{" "}
                   <dd className="inline">
                     {triggeringAlert.source.toUpperCase()}
-                    {triggeringAlert.affected_zip_codes.length > 0
-                      ? ` · ${triggeringAlert.affected_zip_codes.length} ZIP${
-                          triggeringAlert.affected_zip_codes.length === 1
+                    {(triggeringAlert.affected_zip_codes ?? []).length > 0
+                      ? ` · ${
+                          (triggeringAlert.affected_zip_codes ?? []).length
+                        } ZIP${
+                          (triggeringAlert.affected_zip_codes ?? []).length ===
+                          1
                             ? ""
                             : "s"
                         }`

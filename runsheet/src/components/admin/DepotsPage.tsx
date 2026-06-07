@@ -481,7 +481,7 @@ function DepotFormModal({
         if (
           !arraysShallowEqual(
             form.fuel_types_supported,
-            depot.fuel_types_supported,
+            depot.fuel_types_supported ?? [],
           )
         ) {
           patch.fuel_types_supported = form.fuel_types_supported;
@@ -1048,10 +1048,10 @@ export default function DepotsPage({ initialFilters }: DepotsPageProps = {}) {
       label: "Products",
       render: (depot) => (
         <div className="flex flex-wrap gap-1 max-w-[240px]">
-          {depot.fuel_types_supported.length === 0 ? (
+          {(depot.fuel_types_supported ?? []).length === 0 ? (
             <span className="text-xs text-gray-400">—</span>
           ) : (
-            depot.fuel_types_supported.map((code) => (
+            (depot.fuel_types_supported ?? []).map((code) => (
               <span
                 key={code}
                 className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-info-light text-info-dark"

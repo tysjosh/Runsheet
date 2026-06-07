@@ -539,7 +539,8 @@ function RecommendationBanner({
 }: {
   recommendation: SourcingRecommendation;
 }) {
-  const waitWarningCount = recommendation.wait_warning_terminal_ids.length;
+  const waitWarningCount = (recommendation.wait_warning_terminal_ids ?? [])
+    .length;
   return (
     <div className="space-y-2">
       {recommendation.rack_price_fallback && (
@@ -576,7 +577,7 @@ function RecommendationBanner({
             <div className="text-xs mt-0.5">
               Terminals:{" "}
               <span className="font-mono">
-                {recommendation.wait_warning_terminal_ids.join(", ")}
+                {(recommendation.wait_warning_terminal_ids ?? []).join(", ")}
               </span>
             </div>
           </div>
@@ -1293,12 +1294,12 @@ function SupplierContractsPanel({
                     </dd>
                   </div>
                 </dl>
-                {contract.preferred_terminal_ids.length > 0 && (
+                {(contract.preferred_terminal_ids ?? []).length > 0 && (
                   <div className="mt-1 text-[11px] text-gray-600 flex flex-wrap items-center gap-x-2 gap-y-1">
                     <span className="uppercase text-[9px] text-gray-500 mr-1">
                       Terminals:
                     </span>
-                    {contract.preferred_terminal_ids.map((tid) => (
+                    {(contract.preferred_terminal_ids ?? []).map((tid) => (
                       <EntityLink
                         key={tid}
                         type="terminal"
@@ -1527,14 +1528,14 @@ export default function SourcingPage({ initialQuery }: SourcingPageProps = {}) {
       .finally(() => setContractsLoading(false));
   }, []);
 
-  const candidateCount = recommendation?.candidates.length ?? 0;
+  const candidateCount = (recommendation?.candidates ?? []).length;
 
   const summary = useMemo(() => {
     if (!recommendation) return null;
-    const best = recommendation.candidates[0];
+    const best = (recommendation.candidates ?? [])[0];
     return {
       candidates: candidateCount,
-      waitWarnings: recommendation.wait_warning_terminal_ids.length,
+      waitWarnings: (recommendation.wait_warning_terminal_ids ?? []).length,
       bestPrice: best?.price_per_gallon_usd,
       bestTerminal: best?.terminal_id,
     };
@@ -1668,14 +1669,14 @@ export default function SourcingPage({ initialQuery }: SourcingPageProps = {}) {
                 Ranking terminals…
               </div>
             ) : recommendation ? (
-              recommendation.candidates.length === 0 ? (
+              (recommendation.candidates ?? []).length === 0 ? (
                 <div className="border border-dashed border-gray-200 rounded-lg px-6 py-12 text-center text-sm text-gray-500">
                   Every eligible terminal was disqualified for this query. Widen
                   the product, time-of-day, or branded filters and try again.
                 </div>
               ) : (
                 <div className="space-y-2">
-                  {recommendation.candidates.map((candidate, idx) => (
+                  {(recommendation.candidates ?? []).map((candidate, idx) => (
                     <CandidateRow
                       key={candidate.terminal_id}
                       candidate={candidate}

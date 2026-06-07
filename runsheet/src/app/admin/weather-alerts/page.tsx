@@ -136,7 +136,7 @@ const alertColumns: Column<StormModeTriggeringAlert>[] = [
     label: "ZIPs",
     align: "right",
     className: "text-sm text-gray-700",
-    render: (alert) => alert.affected_zip_codes.length,
+    render: (alert) => (alert.affected_zip_codes ?? []).length,
   },
 ];
 

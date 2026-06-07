@@ -1192,12 +1192,12 @@ export interface ReplanDiff {
   diff_id: string;
   original_route_id: string;
   patched_route_id: string;
-  added_stops: ReplanStopRef[];
-  removed_stops: ReplanStopRef[];
-  reordered_stops: ReplanReorderedStop[];
-  reassigned_stops: ReplanReassignedStop[];
-  quantity_changes: ReplanQuantityChange[];
-  eta_shifts: ReplanEtaShift[];
+  added_stops?: ReplanStopRef[];
+  removed_stops?: ReplanStopRef[];
+  reordered_stops?: ReplanReorderedStop[];
+  reassigned_stops?: ReplanReassignedStop[];
+  quantity_changes?: ReplanQuantityChange[];
+  eta_shifts?: ReplanEtaShift[];
   generated_at: string;
 }
 
@@ -1351,7 +1351,7 @@ export interface Depot {
   location_lon: number;
   address: string;
   timezone: string;
-  fuel_types_supported: string[];
+  fuel_types_supported?: string[];
   status: DepotStatus;
   /**
    * Whether this depot is the tenant's default. The backend
@@ -1552,7 +1552,7 @@ export interface ReconciliationRecord {
   variance_load_vs_order_pct: number;
   variance_delivered_vs_loaded_pct: number;
   variance_invoiced_vs_delivered_pct?: number | null;
-  alert_flags: string[];
+  alert_flags?: string[];
   generated_at: string;
 }
 
@@ -1706,7 +1706,7 @@ export interface StormModeTriggeringAlert {
   description?: string | null;
   expected_start_at: string;
   expected_end_at?: string | null;
-  affected_zip_codes: string[];
+  affected_zip_codes?: string[];
   source: WeatherAlertSource;
   activation_status: WeatherAlertStatus;
 }
@@ -1751,7 +1751,7 @@ export interface StormModeStatusResponse {
   computed_state: StormModeState;
   override_active: boolean;
   override?: StormModeActiveOverride | null;
-  triggering_alerts: StormModeTriggeringAlert[];
+  triggering_alerts?: StormModeTriggeringAlert[];
   activation_window: StormModeActivationWindow;
   updated_at?: string | null;
 }
@@ -1893,9 +1893,9 @@ export interface SourcingRecommendation {
   volume_gallons: number;
   origin_lat: number;
   origin_lon: number;
-  candidates: SourcingTerminalCandidate[];
+  candidates?: SourcingTerminalCandidate[];
   rack_price_fallback: boolean;
-  wait_warning_terminal_ids: string[];
+  wait_warning_terminal_ids?: string[];
   generated_at: string;
   updated_at?: string | null;
   created_at?: string | null;
@@ -2010,7 +2010,7 @@ export interface Terminal {
   location_lon: number;
   address: string;
   timezone: string;
-  supported_products: string[];
+  supported_products?: string[];
   branded: boolean;
   supplier_brand?: string | null;
   status: TerminalStatus;
@@ -2044,7 +2044,7 @@ export interface SupplierContract {
   supplier_name: string;
   /** Canonical product_code (server canonicalizes legacy aliases). */
   product_code: string;
-  preferred_terminal_ids: string[];
+  preferred_terminal_ids?: string[];
   contract_price_per_gallon_usd?: number | null;
   branded_required: boolean;
   minimum_lift_gallons_per_month?: number | null;
@@ -2400,7 +2400,7 @@ export interface CleaningEvent {
    */
   driver_id?: string | null;
   notes?: string | null;
-  evidence_refs: string[];
+  evidence_refs?: string[];
   cleaned_at: string;
   created_at: string;
   updated_at: string;
@@ -2483,8 +2483,8 @@ export interface FuelProductItem {
   category: string;
   density_lbs_per_gallon: number;
   tax_class: string;
-  aliases: string[];
-  region_availability: string[];
+  aliases?: string[];
+  region_availability?: string[];
 }
 
 /** Envelope returned by ``GET /api/fuel/products``. */
@@ -2522,7 +2522,7 @@ export interface DeliveryDestination {
   location?: DeliveryDestinationLocation | null;
   address?: string | null;
   zip_code?: string | null;
-  fuel_products: string[];
+  fuel_products?: string[];
   capacity_gallons?: number | null;
   current_level_gallons?: number | null;
   status?: string | null;
@@ -2650,7 +2650,7 @@ export interface PriorityClusterItem {
   centroid: PriorityClusterCentroid;
   member_count: number;
   highest_priority_bucket?: "critical" | "high" | "medium" | "low" | null;
-  fuel_grades: string[];
+  fuel_grades?: string[];
 }
 
 /** Envelope returned by ``GET /api/fuel/mvp/priority-clusters``. */
