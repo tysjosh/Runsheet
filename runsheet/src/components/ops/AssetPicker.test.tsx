@@ -116,3 +116,33 @@ it("shows an error message when the roster fails to load", async () => {
   fireEvent.click(await screen.findByLabelText("Asset"));
   expect(await screen.findByText(/couldn't load assets/i)).toBeInTheDocument();
 });
+
+it("renders assets missing an assetSubtype without crashing", async () => {
+  // Regression: a backend asset without `assetSubtype` previously threw
+  // "Cannot read properties of undefined (reading 'replace')".
+  mockGetAssets.mockResolvedValue({
+    data: [{ id: "AST-300", name: "No Subtype Rig", assetType: "vehicle" }],
+  } as unknown as Awaited<ReturnType<typeof apiService.getAssets>>);
+
+  render(<AssetPicker assetType="vehicle" value={null} onChange={jest.fn()} />);
+
+  fireEvent.click(await screen.findByLabelText("Asset"));
+  expect(await screen.findByText("No Subtype Rig")).toBeInTheDocument();
+});
+
+it("tolerates a null data payload without crashing", async () => {
+  mockGetAssets.mockResolvedValue({
+    data: null,
+  } as unknown as Awaited<ReturnType<typeof apiService.getAssets>>);
+
+  await act(async () => {
+    render(
+      <AssetPicker assetType="vehicle" value={null} onChange={jest.fn()} />,
+    );
+  });
+
+  fireEvent.click(await screen.findByLabelText("Asset"));
+  expect(
+    await screen.findByText(/no compatible assets found/i),
+  ).toBeInTheDocument();
+});

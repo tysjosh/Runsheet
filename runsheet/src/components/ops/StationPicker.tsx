@@ -38,11 +38,14 @@ export default function StationPicker({
       try {
         const res = await getStations({ page: 1, size: 200 });
         if (cancelled) return;
+        const rows = Array.isArray(res.data) ? res.data : [];
         setOptions(
-          res.data.map((s) => ({
+          rows.map((s) => ({
             value: s.station_id,
-            label: s.name,
-            sublabel: `${s.location_name ?? s.fuel_type} · ${s.station_id}`,
+            label: s.name || s.station_id,
+            sublabel: [s.location_name ?? s.fuel_type ?? "", s.station_id]
+              .filter(Boolean)
+              .join(" · "),
           })),
         );
       } catch {

@@ -43,10 +43,11 @@ export default function CustomerPicker({
       try {
         const res = await getCustomers({ status: "active", limit: 200 });
         if (cancelled) return;
+        const rows = Array.isArray(res.data) ? res.data : [];
         setOptions(
-          res.data.map((c) => ({
+          rows.map((c) => ({
             value: c.customer_id,
-            label: c.display_name,
+            label: c.display_name || c.customer_id,
             sublabel: c.customer_id,
           })),
         );

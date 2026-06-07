@@ -72,10 +72,13 @@ export default function AssetPicker({
       try {
         const res = await apiService.getAssets({ asset_type: assetType });
         if (cancelled) return;
-        const loaded: LoadedAsset[] = res.data.map((a) => ({
+        // Guard against a null/non-array data payload (real backends sometimes
+        // return data: null) and against assets missing optional fields.
+        const rows = Array.isArray(res.data) ? res.data : [];
+        const loaded: LoadedAsset[] = rows.map((a) => ({
           id: a.id,
           name: a.name || a.plateNumber || a.id,
-          subtype: a.assetSubtype,
+          subtype: a.assetSubtype ?? "",
         }));
         setAssets(loaded);
         onAssetsLoaded?.(loaded.map((a) => a.id));
@@ -95,10 +98,16 @@ export default function AssetPicker({
 
   const options: SearchableSelectOption[] = assets.map((a) => {
     const readiness = readinessByAsset?.[a.id];
-    const subtypeLabel = a.subtype.replace(/_/g, " ");
-    const sublabel = readiness
-      ? `${subtypeLabel} · ${a.id} · ${READINESS_HINT[readiness]}`
-      : `${subtypeLabel} · ${a.id}`;
+    const subtypeLabel = (a.subtype ?? "").replace(/_/g, " ").trim();
+    // Compose "subtype · id · readiness", dropping any empty segments so a
+    // missing subtype doesn't leave a dangling separator.
+    const sublabel = [
+      subtypeLabel,
+      a.id,
+      readiness ? READINESS_HINT[readiness] : "",
+    ]
+      .filter(Boolean)
+      .join(" · ");
     return { value: a.id, label: a.name, sublabel };
   });
 

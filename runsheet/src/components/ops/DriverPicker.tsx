@@ -49,11 +49,14 @@ export default function DriverPicker({
         // client-side.
         const res = await getDrivers({ status: "active", page: 1, size: 200 });
         if (cancelled) return;
+        const rows = Array.isArray(res.data) ? res.data : [];
         setOptions(
-          res.data.map((d) => ({
+          rows.map((d) => ({
             value: d.driver_id,
-            label: d.full_name,
-            sublabel: `CDL ${d.cdl_class} · ${d.driver_id}`,
+            label: d.full_name || d.driver_id,
+            sublabel: [d.cdl_class ? `CDL ${d.cdl_class}` : "", d.driver_id]
+              .filter(Boolean)
+              .join(" · "),
           })),
         );
       } catch {

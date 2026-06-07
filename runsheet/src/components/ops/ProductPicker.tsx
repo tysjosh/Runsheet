@@ -43,11 +43,14 @@ export default function ProductPicker({
       try {
         const res = await listFuelProducts();
         if (cancelled) return;
+        const rows = Array.isArray(res.items) ? res.items : [];
         setOptions(
-          res.items.map((p) => ({
+          rows.map((p) => ({
             value: p.product_code,
-            label: p.display_name,
-            sublabel: `${p.category} · ${p.product_code}`,
+            label: p.display_name || p.product_code,
+            sublabel: [p.category ?? "", p.product_code]
+              .filter(Boolean)
+              .join(" · "),
           })),
         );
       } catch {
