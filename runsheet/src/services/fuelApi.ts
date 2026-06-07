@@ -2191,6 +2191,19 @@ export async function listTerminals(
 }
 
 /**
+ * GET ``/api/fuel/terminals/{terminal_id}`` — fetch a single canonical
+ * Terminal (Req 8.1.2). This is the owning-module read that backs the
+ * ``/compliance/terminals/:id`` detail route an {@link EntityLink} of type
+ * ``terminal`` links to. Returns HTTP 404 (``terminal_not_found``) when the id
+ * does not exist for the tenant.
+ */
+export async function getTerminal(terminalId: string): Promise<Terminal> {
+  return fuelRequest<Terminal>(
+    `/fuel/terminals/${encodeURIComponent(terminalId)}`,
+  );
+}
+
+/**
  * GET ``/api/fuel/supplier-contracts`` — paginated Supplier_Contracts
  * for the tenant with embedded monthly lift summary (Task 7.6,
  * Req 8.3.2, 8.3.4).
