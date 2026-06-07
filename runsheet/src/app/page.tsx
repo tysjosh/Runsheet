@@ -1,95 +1,85 @@
 "use client";
 
+/**
+ * Runsheet — editorial landing page.
+ *
+ * A bold, high-contrast "ops terminal" landing page for the AI dispatch
+ * copilot. Each product pillar (01–05) ships a bespoke animated SVG that
+ * *illustrates the feature itself*: a runout forecast with P50/P90 bands, a
+ * route-replan network with a stalled truck, a grade-segregated tanker, a
+ * three-layer agent stack, and the compliance document stack. Pure client
+ * component — all motion is CSS keyframes, no deps beyond lucide-react +
+ * next/link.
+ */
+
 import {
   ArrowRight,
-  BarChart3,
-  Bot,
-  CheckCircle,
-  Clock,
-  Droplets,
+  ArrowUpRight,
+  BadgeCheck,
+  Droplet,
   Eye,
-  Globe,
-  Link2,
-  Lock,
-  Menu,
-  Route,
-  Shield,
-  Sparkles,
-  Target,
-  Truck,
-  Users,
-  X,
+  FileText,
+  Gauge,
+  Landmark,
+  Plug,
+  ScrollText,
+  ShieldCheck,
+  SlidersHorizontal,
 } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
-/* ─── Landing Color Tokens ─────────────────────────────────────────────────── */
+// ─── Theme ─────────────────────────────────────────────────────────────────────
 
-const landingColors = {
-  ink: "var(--color-ink)",
-  accent: "var(--color-brand-accent)",
-  secondary: "var(--color-brand-secondary)",
-  info: "var(--color-info)",
-  success: "var(--color-success)",
-  white: "var(--color-surface)",
-  gray100: "var(--color-gray-100)",
-  gray300: "var(--color-gray-300)",
-  gray400: "var(--color-gray-400)",
+const ACCENT = "#16b88c";
+const GRADE = {
+  AGO: "#16b88c",
+  PMS: "#f59e0b",
+  ATK: "#3b82f6",
+  LPG: "#a78bfa",
 } as const;
 
-const softColor = (color: string, amount = 12) =>
-  `color-mix(in srgb, ${color} ${amount}%, transparent)`;
-
-const landingGridBackground = `linear-gradient(${landingColors.ink} 1px, transparent 1px), linear-gradient(90deg, ${landingColors.ink} 1px, transparent 1px)`;
-
-// ─── Animated Counter ────────────────────────────────────────────────────────
-
-function AnimatedCounter({
-  end,
-  suffix = "",
-  duration = 2000,
-}: {
-  end: number;
-  suffix?: string;
-  duration?: number;
-}) {
-  const [count, setCount] = useState(0);
-  const ref = useRef<HTMLSpanElement>(null);
-  const hasAnimated = useRef(false);
-
-  useEffect(() => {
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        if (entry.isIntersecting && !hasAnimated.current) {
-          hasAnimated.current = true;
-          const startTime = performance.now();
-          const animate = (now: number) => {
-            const elapsed = now - startTime;
-            const progress = Math.min(elapsed / duration, 1);
-            const eased = 1 - (1 - progress) ** 3;
-            setCount(Math.floor(eased * end));
-            if (progress < 1) requestAnimationFrame(animate);
-          };
-          requestAnimationFrame(animate);
-        }
-      },
-      { threshold: 0.3 },
-    );
-    if (ref.current) observer.observe(ref.current);
-    return () => observer.disconnect();
-  }, [end, duration]);
-
-  return (
-    <span ref={ref}>
-      {count}
-      {suffix}
-    </span>
-  );
+interface GfxTheme {
+  fg: string;
+  grid: string;
+  panel: string;
+  panelEdge: string;
+  muted: string;
 }
 
-// ─── Fade-in on Scroll ───────────────────────────────────────────────────────
+const DARK_GFX: GfxTheme = {
+  fg: "#f5f4ef",
+  grid: "rgba(245,244,239,0.12)",
+  panel: "#101012",
+  panelEdge: "rgba(245,244,239,0.14)",
+  muted: "rgba(245,244,239,0.45)",
+};
 
-function FadeIn({
+const CREAM_GFX: GfxTheme = {
+  fg: "#0a0a0b",
+  grid: "rgba(10,10,11,0.1)",
+  panel: "#ffffff",
+  panelEdge: "rgba(10,10,11,0.12)",
+  muted: "rgba(10,10,11,0.45)",
+};
+
+// ─── Reduced-motion preference ─────────────────────────────────────────────────
+
+function usePrefersReducedMotion() {
+  const [reduce, setReduce] = useState(false);
+  useEffect(() => {
+    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const update = () => setReduce(mq.matches);
+    update();
+    mq.addEventListener("change", update);
+    return () => mq.removeEventListener("change", update);
+  }, []);
+  return reduce;
+}
+
+// ─── Reveal-on-scroll ─────────────────────────────────────────────────────────
+
+function Reveal({
   children,
   className = "",
   delay = 0,
@@ -99,17 +89,23 @@ function FadeIn({
   delay?: number;
 }) {
   const ref = useRef<HTMLDivElement>(null);
-  const [visible, setVisible] = useState(false);
+  const [shown, setShown] = useState(false);
+  const reduce = usePrefersReducedMotion();
 
   useEffect(() => {
-    const observer = new IntersectionObserver(
+    const el = ref.current;
+    if (!el) return;
+    const obs = new IntersectionObserver(
       ([entry]) => {
-        if (entry.isIntersecting) setVisible(true);
+        if (entry.isIntersecting) {
+          setShown(true);
+          obs.disconnect();
+        }
       },
-      { threshold: 0.15 },
+      { threshold: 0.18 },
     );
-    if (ref.current) observer.observe(ref.current);
-    return () => observer.disconnect();
+    obs.observe(el);
+    return () => obs.disconnect();
   }, []);
 
   return (
@@ -117,9 +113,11 @@ function FadeIn({
       ref={ref}
       className={className}
       style={{
-        opacity: visible ? 1 : 0,
-        transform: visible ? "translateY(0)" : "translateY(32px)",
-        transition: `opacity 0.7s ease ${delay}ms, transform 0.7s ease ${delay}ms`,
+        opacity: shown || reduce ? 1 : 0,
+        transform: shown || reduce ? "translateY(0)" : "translateY(40px)",
+        transition: reduce
+          ? "none"
+          : `opacity .9s cubic-bezier(.16,1,.3,1) ${delay}ms, transform .9s cubic-bezier(.16,1,.3,1) ${delay}ms`,
       }}
     >
       {children}
@@ -127,1871 +125,1559 @@ function FadeIn({
   );
 }
 
-// ─── Product UI Mockup: Dashboard ────────────────────────────────────────────
+// ─── Console frame around each feature graphic ──────────────────────────────────
 
-function DashboardMockup() {
+function Console({
+  file,
+  theme,
+  children,
+}: {
+  file: string;
+  theme: GfxTheme;
+  children: React.ReactNode;
+}) {
   return (
-    <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-      <div className="flex items-center gap-2 px-4 py-2.5 border-b border-gray-100 bg-gray-50/80">
-        <div className="flex gap-1.5">
-          <div className="w-2 h-2 rounded-full bg-error" />
-          <div className="w-2 h-2 rounded-full bg-warning" />
-          <div className="w-2 h-2 rounded-full bg-success" />
-        </div>
-        <span className="text-[9px] text-gray-400 ml-2 font-mono">
-          runsheet.app/dashboard
-        </span>
-      </div>
-      <div className="p-4">
-        <div className="grid grid-cols-3 gap-2 mb-3">
-          {[
-            {
-              label: "Active Trucks",
-              value: "47",
-              color: landingColors.accent,
-            },
-            {
-              label: "Fuel Efficiency",
-              value: "94%",
-              color: landingColors.secondary,
-            },
-            {
-              label: "On-Time Rate",
-              value: "98.2%",
-              color: landingColors.info,
-            },
-          ].map((s) => (
-            <div
-              key={s.label}
-              className="rounded-lg p-2.5 border border-gray-100"
-            >
-              <div
-                className="w-5 h-5 rounded mb-1.5"
-                style={{ backgroundColor: softColor(s.color) }}
-              />
-              <p
-                className="text-sm font-bold"
-                style={{ color: landingColors.ink }}
-              >
-                {s.value}
-              </p>
-              <p className="text-[9px] text-gray-400">{s.label}</p>
-            </div>
-          ))}
-        </div>
-        <div className="rounded-lg border border-gray-100 p-3 mb-3">
-          <div className="flex justify-between mb-2">
-            <span
-              className="text-[10px] font-semibold"
-              style={{ color: landingColors.ink }}
-            >
-              Fleet Activity
-            </span>
-            <span className="text-[9px] text-gray-400">Last 7 days</span>
-          </div>
-          <div className="flex items-end gap-1 h-16">
-            {[40, 65, 45, 80, 55, 90, 70].map((h, i) => (
-              <div
-                key={i}
-                className="flex-1 rounded-t"
-                style={{
-                  height: `${h}%`,
-                  backgroundColor:
-                    i === 5
-                      ? landingColors.accent
-                      : softColor(landingColors.accent, 20),
-                }}
-              />
-            ))}
-          </div>
-        </div>
-        <div className="space-y-1.5">
-          {[
-            {
-              id: "TRK-042",
-              route: "Houston → Dallas",
-              status: "In Transit",
-              color: landingColors.info,
-            },
-            {
-              id: "TRK-018",
-              route: "Chicago → Detroit",
-              status: "Loading",
-              color: landingColors.secondary,
-            },
-            {
-              id: "TRK-091",
-              route: "Atlanta → Charlotte",
-              status: "Delivered",
-              color: landingColors.success,
-            },
-          ].map((t) => (
-            <div
-              key={t.id}
-              className="flex items-center justify-between py-1.5 px-2.5 rounded-md bg-gray-50/80"
-            >
-              <div className="flex items-center gap-2">
-                <div
-                  className="w-1.5 h-1.5 rounded-full"
-                  style={{ backgroundColor: t.color }}
-                />
-                <span
-                  className="text-[10px] font-medium"
-                  style={{ color: landingColors.ink }}
-                >
-                  {t.id}
-                </span>
-                <span className="text-[9px] text-gray-400">{t.route}</span>
-              </div>
-              <span
-                className="text-[9px] font-medium px-1.5 py-0.5 rounded-full"
-                style={{ color: t.color, backgroundColor: softColor(t.color) }}
-              >
-                {t.status}
-              </span>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ─── Product UI Mockup: Scheduling Board ─────────────────────────────────────
-
-function SchedulingMockup() {
-  return (
-    <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-      <div className="flex items-center gap-2 px-4 py-2.5 border-b border-gray-100 bg-gray-50/80">
-        <div className="flex gap-1.5">
-          <div className="w-2 h-2 rounded-full bg-error" />
-          <div className="w-2 h-2 rounded-full bg-warning" />
-          <div className="w-2 h-2 rounded-full bg-success" />
-        </div>
-        <span className="text-[9px] text-gray-400 ml-2 font-mono">
-          runsheet.app/scheduling
-        </span>
-      </div>
-      <div className="p-4">
-        <div className="grid grid-cols-3 gap-2">
-          {["Pending", "In Progress", "Completed"].map((col, ci) => (
-            <div key={col}>
-              <div className="flex items-center gap-1.5 mb-2">
-                <div
-                  className="w-2 h-2 rounded-full"
-                  style={{
-                    backgroundColor: [
-                      landingColors.secondary,
-                      landingColors.info,
-                      landingColors.success,
-                    ][ci],
-                  }}
-                />
-                <span
-                  className="text-[10px] font-semibold"
-                  style={{ color: landingColors.ink }}
-                >
-                  {col}
-                </span>
-              </div>
-              <div className="space-y-1.5">
-                {[0, 1].map((j) => (
-                  <div
-                    key={j}
-                    className="rounded-lg border border-gray-100 p-2.5"
-                  >
-                    <div className="flex items-center gap-1.5 mb-1">
-                      <div className="w-4 h-4 rounded bg-gray-100" />
-                      <span
-                        className="text-[9px] font-medium"
-                        style={{ color: landingColors.ink }}
-                      >
-                        JOB-{ci * 2 + j + 1}
-                        {String(ci * 2 + j + 1).padStart(2, "0")}
-                      </span>
-                    </div>
-                    <div className="h-1 rounded-full bg-gray-100 mb-1">
-                      <div
-                        className="h-full rounded-full"
-                        style={{
-                          width: `${[30, 60, 45, 80, 100, 100][ci * 2 + j]}%`,
-                          backgroundColor: [
-                            landingColors.secondary,
-                            landingColors.info,
-                            landingColors.success,
-                          ][ci],
-                        }}
-                      />
-                    </div>
-                    <p className="text-[8px] text-gray-400">
-                      {
-                        [
-                          "Fuel delivery",
-                          "Route pickup",
-                          "Depot transfer",
-                          "Express haul",
-                          "Bulk cargo",
-                          "Last mile",
-                        ][ci * 2 + j]
-                      }
-                    </p>
-                  </div>
-                ))}
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ─── Product UI Mockup: Fuel Distribution Map ────────────────────────────────
-
-function FuelMapMockup() {
-  return (
-    <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-      <div className="flex items-center gap-2 px-4 py-2.5 border-b border-gray-100 bg-gray-50/80">
-        <div className="flex gap-1.5">
-          <div className="w-2 h-2 rounded-full bg-error" />
-          <div className="w-2 h-2 rounded-full bg-warning" />
-          <div className="w-2 h-2 rounded-full bg-success" />
-        </div>
-        <span className="text-[9px] text-gray-400 ml-2 font-mono">
-          runsheet.app/fuel-map
-        </span>
-      </div>
-      <div className="p-4">
-        <div className="relative rounded-lg bg-gradient-to-br from-info-light to-success-light h-40 mb-3 overflow-hidden">
-          {/* Map grid lines */}
-          <div
-            className="absolute inset-0 opacity-10"
-            style={{
-              backgroundImage: landingGridBackground,
-              backgroundSize: "20px 20px",
-            }}
+    <div
+      className="overflow-hidden rounded-2xl border"
+      style={{ background: theme.panel, borderColor: theme.panelEdge }}
+    >
+      <div
+        className="flex items-center gap-2 border-b px-4 py-2.5"
+        style={{ borderColor: theme.panelEdge }}
+      >
+        <span className="flex gap-1.5">
+          <span
+            className="h-2 w-2 rounded-full"
+            style={{ background: "#ef4444" }}
           />
-          {/* Station markers */}
-          {[
-            {
-              top: "20%",
-              left: "25%",
-              label: "Depot A",
-              color: landingColors.accent,
-            },
-            {
-              top: "50%",
-              left: "60%",
-              label: "Station B",
-              color: landingColors.secondary,
-            },
-            {
-              top: "30%",
-              left: "75%",
-              label: "Station C",
-              color: landingColors.info,
-            },
-            {
-              top: "70%",
-              left: "35%",
-              label: "Depot D",
-              color: landingColors.success,
-            },
-          ].map((m) => (
-            <div
-              key={m.label}
-              className="absolute flex flex-col items-center"
-              style={{ top: m.top, left: m.left }}
-            >
-              <div
-                className="w-3 h-3 rounded-full border-2 border-white shadow-sm"
-                style={{ backgroundColor: m.color }}
-              />
-              <span
-                className="text-[7px] font-medium mt-0.5 bg-white/80 px-1 rounded"
-                style={{ color: m.color }}
-              >
-                {m.label}
-              </span>
-            </div>
-          ))}
-          {/* Route lines */}
-          <svg className="absolute inset-0 w-full h-full" viewBox="0 0 200 160">
-            <path
-              d="M50 32 L120 80"
-              stroke={landingColors.secondary}
-              strokeWidth="1"
-              strokeDasharray="4 2"
-              fill="none"
-              opacity="0.5"
-            />
-            <path
-              d="M120 80 L150 48"
-              stroke={landingColors.info}
-              strokeWidth="1"
-              strokeDasharray="4 2"
-              fill="none"
-              opacity="0.5"
-            />
-            <path
-              d="M50 32 L70 112"
-              stroke={landingColors.success}
-              strokeWidth="1"
-              strokeDasharray="4 2"
-              fill="none"
-              opacity="0.5"
-            />
-          </svg>
-        </div>
-        <div className="grid grid-cols-2 gap-2">
-          {[
-            {
-              label: "Total Volume",
-              value: "45,000L",
-              color: landingColors.accent,
-            },
-            {
-              label: "Stations Active",
-              value: "12/14",
-              color: landingColors.info,
-            },
-          ].map((s) => (
-            <div
-              key={s.label}
-              className="rounded-lg border border-gray-100 p-2 text-center"
-            >
-              <p className="text-xs font-bold" style={{ color: s.color }}>
-                {s.value}
-              </p>
-              <p className="text-[8px] text-gray-400">{s.label}</p>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ─── Product UI Mockup: Analytics Dashboard ──────────────────────────────────
-
-function AnalyticsMockup() {
-  return (
-    <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-      <div className="flex items-center gap-2 px-4 py-2.5 border-b border-gray-100 bg-gray-50/80">
-        <div className="flex gap-1.5">
-          <div className="w-2 h-2 rounded-full bg-error" />
-          <div className="w-2 h-2 rounded-full bg-warning" />
-          <div className="w-2 h-2 rounded-full bg-success" />
-        </div>
-        <span className="text-[9px] text-gray-400 ml-2 font-mono">
-          runsheet.app/analytics
+          <span
+            className="h-2 w-2 rounded-full"
+            style={{ background: "#f59e0b" }}
+          />
+          <span
+            className="h-2 w-2 rounded-full"
+            style={{ background: ACCENT }}
+          />
+        </span>
+        <span
+          className="ml-2 font-mono text-[10px] uppercase tracking-[0.2em]"
+          style={{ color: theme.muted }}
+        >
+          {file}
         </span>
       </div>
-      <div className="p-4">
-        <div className="grid grid-cols-2 gap-2 mb-3">
-          {[
-            {
-              label: "Revenue",
-              value: "$12.4M",
-              change: "+18%",
-              color: landingColors.success,
-            },
-            {
-              label: "Cost/mi",
-              value: "$42.30",
-              change: "-12%",
-              color: landingColors.info,
-            },
-            {
-              label: "Utilization",
-              value: "87%",
-              change: "+5%",
-              color: landingColors.accent,
-            },
-            {
-              label: "SLA Score",
-              value: "96.8%",
-              change: "+2.1%",
-              color: landingColors.secondary,
-            },
-          ].map((m) => (
-            <div
-              key={m.label}
-              className="rounded-lg border border-gray-100 p-2.5"
+      <div className="p-4">{children}</div>
+    </div>
+  );
+}
+
+// ─── 01 · Forecast graphic ──────────────────────────────────────────────────────
+
+function ForecastGfx({ theme }: { theme: GfxTheme }) {
+  return (
+    <svg
+      viewBox="0 0 400 220"
+      className="w-full"
+      role="img"
+      aria-label="Runout forecast with P50 and P90 confidence bands crossing a runout threshold"
+    >
+      <defs>
+        <linearGradient id="rs-band" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={ACCENT} stopOpacity="0.32" />
+          <stop offset="100%" stopColor={ACCENT} stopOpacity="0.04" />
+        </linearGradient>
+      </defs>
+
+      {/* gridlines */}
+      {[44, 88, 132, 176].map((y) => (
+        <line
+          key={y}
+          x1="40"
+          y1={y}
+          x2="384"
+          y2={y}
+          stroke={theme.grid}
+          strokeWidth="1"
+        />
+      ))}
+      {[40, 126, 212, 298, 384].map((x) => (
+        <line
+          key={x}
+          x1={x}
+          y1="24"
+          x2={x}
+          y2="180"
+          stroke={theme.grid}
+          strokeWidth="1"
+        />
+      ))}
+
+      {/* confidence band (P90 envelope) */}
+      <path
+        d="M40 70 L126 86 L212 112 L298 150 L384 188 L384 150 L298 116 L212 90 L126 72 L40 62 Z"
+        fill="url(#rs-band)"
+      />
+
+      {/* runout threshold */}
+      <line
+        x1="40"
+        y1="170"
+        x2="384"
+        y2="170"
+        stroke="#ef4444"
+        strokeWidth="1.5"
+        strokeDasharray="5 4"
+      />
+      <text
+        x="44"
+        y="164"
+        fontSize="9"
+        fontFamily="monospace"
+        fill="#ef4444"
+        letterSpacing="1"
+      >
+        RUNOUT
+      </text>
+
+      {/* P50 declining line (draws in) */}
+      <path
+        d="M40 66 L126 79 L212 101 L298 133 L384 169"
+        fill="none"
+        stroke={ACCENT}
+        strokeWidth="2.5"
+        strokeLinecap="round"
+        strokeDasharray="460"
+        strokeDashoffset="460"
+        style={{ animation: "rs-draw 2.4s cubic-bezier(.16,1,.3,1) forwards" }}
+      />
+
+      {/* crossing marker — where P50 meets the runout line */}
+      <g style={{ transformOrigin: "372px 164px" }}>
+        <circle
+          cx="372"
+          cy="164"
+          r="9"
+          fill="none"
+          stroke={ACCENT}
+          strokeWidth="1.5"
+          style={{ animation: "rs-blip 2s ease-in-out infinite" }}
+        />
+      </g>
+      <circle cx="372" cy="164" r="3.5" fill={ACCENT} />
+
+      {/* labels */}
+      <text
+        x="40"
+        y="200"
+        fontSize="9"
+        fontFamily="monospace"
+        fill={theme.muted}
+      >
+        0h
+      </text>
+      <text
+        x="196"
+        y="200"
+        fontSize="9"
+        fontFamily="monospace"
+        fill={theme.muted}
+      >
+        36h
+      </text>
+      <text
+        x="364"
+        y="200"
+        fontSize="9"
+        fontFamily="monospace"
+        fill={theme.muted}
+      >
+        72h
+      </text>
+      {/* legend (kept clear of the plot, above the gridlines) */}
+      <line x1="44" y1="14" x2="62" y2="14" stroke={ACCENT} strokeWidth="2.5" />
+      <text x="68" y="17" fontSize="9" fontFamily="monospace" fill={ACCENT}>
+        P50
+      </text>
+      <rect x="104" y="9" width="16" height="10" rx="2" fill="url(#rs-band)" />
+      <text
+        x="126"
+        y="17"
+        fontSize="9"
+        fontFamily="monospace"
+        fill={theme.muted}
+      >
+        P90
+      </text>
+      <text
+        x="12"
+        y="100"
+        fontSize="9"
+        fontFamily="monospace"
+        fill={theme.muted}
+        transform="rotate(-90 12 100)"
+      >
+        TANK %
+      </text>
+    </svg>
+  );
+}
+
+// ─── 02 · Replan graphic ────────────────────────────────────────────────────────
+
+function ReplanGfx({ theme }: { theme: GfxTheme }) {
+  const node = (x: number, y: number, label: string, broken = false) => (
+    <g key={label}>
+      <circle cx={x} cy={y} r="6" fill={broken ? "#ef4444" : ACCENT} />
+      <circle
+        cx={x}
+        cy={y}
+        r="11"
+        fill="none"
+        stroke={broken ? "#ef4444" : ACCENT}
+        strokeOpacity="0.4"
+        strokeWidth="1"
+      />
+      <text
+        x={x}
+        y={y + 24}
+        fontSize="9"
+        fontFamily="monospace"
+        fill={theme.muted}
+        textAnchor="middle"
+      >
+        {label}
+      </text>
+    </g>
+  );
+  return (
+    <svg
+      viewBox="0 0 400 220"
+      className="w-full"
+      role="img"
+      aria-label="Delivery route rerouting around a stalled truck to an alternate vehicle"
+    >
+      {/* depot */}
+      <rect x="34" y="96" width="20" height="20" rx="3" fill={theme.fg} />
+      <text
+        x="44"
+        y="136"
+        fontSize="9"
+        fontFamily="monospace"
+        fill={theme.muted}
+        textAnchor="middle"
+      >
+        DEPOT
+      </text>
+
+      {/* original route (faded, with break) */}
+      <path
+        d="M54 106 L150 60 L246 60"
+        fill="none"
+        stroke={theme.muted}
+        strokeWidth="1.5"
+        strokeDasharray="4 4"
+      />
+      {/* break marker */}
+      <g style={{ transformOrigin: "200px 60px" }}>
+        <line
+          x1="193"
+          y1="53"
+          x2="207"
+          y2="67"
+          stroke="#ef4444"
+          strokeWidth="2.5"
+        />
+        <line
+          x1="207"
+          y1="53"
+          x2="193"
+          y2="67"
+          stroke="#ef4444"
+          strokeWidth="2.5"
+        />
+      </g>
+      {/* stalled truck glyph */}
+      <g transform="translate(150 44)">
+        <rect
+          x="-12"
+          y="0"
+          width="24"
+          height="12"
+          rx="2"
+          fill="#ef4444"
+          fillOpacity="0.85"
+        />
+        <circle cx="-6" cy="14" r="2.5" fill="#ef4444" />
+        <circle cx="6" cy="14" r="2.5" fill="#ef4444" />
+      </g>
+
+      {/* reroute path (marching dashes) */}
+      <path
+        d="M54 106 L150 150 L246 150 L320 96"
+        fill="none"
+        stroke={ACCENT}
+        strokeWidth="2.5"
+        strokeLinecap="round"
+        strokeDasharray="8 6"
+        style={{ animation: "rs-march 1.1s linear infinite" }}
+      />
+      {/* alternate truck */}
+      <g transform="translate(96 132)">
+        <rect x="-13" y="0" width="26" height="13" rx="2" fill={ACCENT} />
+        <rect x="9" y="2" width="7" height="6" rx="1" fill={ACCENT} />
+        <circle cx="-6" cy="15" r="2.5" fill={theme.fg} />
+        <circle cx="7" cy="15" r="2.5" fill={theme.fg} />
+      </g>
+
+      {/* delivery nodes */}
+      {node(246, 60, "S-02 ✕", true)}
+      {node(246, 150, "S-03")}
+      {node(320, 96, "S-04")}
+
+      {/* status chip */}
+      <rect
+        x="276"
+        y="20"
+        width="108"
+        height="22"
+        rx="11"
+        fill={ACCENT}
+        fillOpacity="0.14"
+      />
+      <circle
+        cx="290"
+        cy="31"
+        r="3.5"
+        fill={ACCENT}
+        style={{ animation: "rs-blip 1.6s ease-in-out infinite" }}
+      />
+      <text
+        x="300"
+        y="35"
+        fontSize="10"
+        fontFamily="monospace"
+        fill={ACCENT}
+        letterSpacing="1"
+      >
+        REPLAN · 1.4s
+      </text>
+    </svg>
+  );
+}
+
+// ─── 03 · Load / tanker graphic ─────────────────────────────────────────────────
+
+function LoadGfx({ theme }: { theme: GfxTheme }) {
+  const comps = [
+    { grade: "AGO", color: GRADE.AGO, fill: 0.9 },
+    { grade: "PMS", color: GRADE.PMS, fill: 0.82 },
+    { grade: "ATK", color: GRADE.ATK, fill: 0.95 },
+    { grade: "LPG", color: GRADE.LPG, fill: 0.7 },
+  ];
+  const x0 = 70;
+  const w = 70;
+  const top = 40;
+  const h = 96;
+  return (
+    <svg
+      viewBox="0 0 400 220"
+      className="w-full"
+      role="img"
+      aria-label="Multi-compartment tanker with grade-segregated fills and utilization gauge"
+    >
+      {/* cab */}
+      <path
+        d="M40 96 L40 60 L62 60 L70 88 L70 136 L40 136 Z"
+        fill={theme.fg}
+        fillOpacity="0.85"
+      />
+      <rect x="44" y="66" width="14" height="12" rx="2" fill={theme.panel} />
+      {/* tank shell */}
+      <rect
+        x={x0}
+        y={top - 6}
+        width={w * 4 + 6}
+        height={h + 12}
+        rx="12"
+        fill="none"
+        stroke={theme.fg}
+        strokeOpacity="0.5"
+        strokeWidth="2"
+      />
+
+      {comps.map((c, i) => {
+        const x = x0 + 3 + i * w;
+        const fillH = h * c.fill;
+        return (
+          <g key={c.grade}>
+            {/* compartment outline */}
+            <rect
+              x={x}
+              y={top}
+              width={w - 4}
+              height={h}
+              rx="4"
+              fill={theme.fg}
+              fillOpacity="0.05"
+            />
+            {/* liquid fill (rises) */}
+            <g
+              style={{
+                transformOrigin: `${x}px ${top + h}px`,
+                animation: `rs-fill 1.6s cubic-bezier(.16,1,.3,1) ${i * 140}ms both`,
+              }}
             >
-              <p className="text-[9px] text-gray-400 mb-0.5">{m.label}</p>
-              <div className="flex items-baseline gap-1.5">
-                <span
-                  className="text-sm font-bold"
-                  style={{ color: landingColors.ink }}
-                >
-                  {m.value}
-                </span>
-                <span
-                  className="text-[8px] font-medium"
-                  style={{ color: m.color }}
-                >
-                  {m.change}
-                </span>
-              </div>
-            </div>
-          ))}
-        </div>
-        {/* Trend lines */}
-        <div className="rounded-lg border border-gray-100 p-3">
-          <p
-            className="text-[10px] font-semibold mb-2"
-            style={{ color: landingColors.ink }}
+              <rect
+                x={x}
+                y={top + (h - fillH)}
+                width={w - 4}
+                height={fillH}
+                rx="4"
+                fill={c.color}
+                fillOpacity="0.85"
+              />
+              <rect
+                x={x}
+                y={top + (h - fillH)}
+                width={w - 4}
+                height="3"
+                fill={c.color}
+              />
+            </g>
+            {/* bulkhead */}
+            {i < 3 && (
+              <line
+                x1={x + w - 4}
+                y1={top - 4}
+                x2={x + w - 4}
+                y2={top + h + 4}
+                stroke={theme.fg}
+                strokeOpacity="0.5"
+                strokeWidth="2"
+              />
+            )}
+            {/* grade label — sits below the wheels so the two never overlap */}
+            <text
+              x={x + (w - 4) / 2}
+              y={top + h + 38}
+              fontSize="10"
+              fontWeight="700"
+              fontFamily="monospace"
+              fill={theme.fg}
+              textAnchor="middle"
+            >
+              {c.grade}
+            </text>
+            <text
+              x={x + (w - 4) / 2}
+              y={top - 14}
+              fontSize="9"
+              fontFamily="monospace"
+              fill={c.color}
+              textAnchor="middle"
+            >
+              {Math.round(c.fill * 100)}%
+            </text>
+          </g>
+        );
+      })}
+
+      {/* wheels */}
+      {[110, 250, 290].map((cx) => (
+        <circle
+          key={cx}
+          cx={cx}
+          cy="150"
+          r="9"
+          fill={theme.fg}
+          fillOpacity="0.85"
+        />
+      ))}
+
+      {/* utilization gauge */}
+      <text
+        x="356"
+        y="44"
+        fontSize="9"
+        fontFamily="monospace"
+        fill={theme.muted}
+        textAnchor="end"
+      >
+        UTIL
+      </text>
+      <text
+        x="356"
+        y="64"
+        fontSize="20"
+        fontWeight="800"
+        fill={ACCENT}
+        textAnchor="end"
+      >
+        92%
+      </text>
+    </svg>
+  );
+}
+
+// ─── 04 · Multi-agent graphic ────────────────────────────────────────────────────
+
+function AgentGfx({
+  theme,
+  reduce = false,
+}: {
+  theme: GfxTheme;
+  reduce?: boolean;
+}) {
+  const layers = [
+    { y: 36, label: "META-LEARNING", dashed: true, nodes: 1 },
+    { y: 100, label: "OVERLAY AGENTS", dashed: true, nodes: 3 },
+    { y: 164, label: "DOMAIN WATCHDOGS", dashed: false, nodes: 5 },
+  ];
+  return (
+    <svg
+      viewBox="0 0 400 220"
+      className="w-full"
+      role="img"
+      aria-label="Three-layer agent stack from domain watchdogs to overlay to meta-learning, with a pulse rising through the layers"
+    >
+      {/* vertical connectors with rising pulse */}
+      {[120, 200, 280].map((x) => (
+        <g key={x}>
+          <line
+            x1={x}
+            y1="164"
+            x2={x}
+            y2="36"
+            stroke={theme.grid}
+            strokeWidth="1.5"
+          />
+          {reduce ? (
+            <circle cx={x} cy="100" r="3" fill={ACCENT} opacity="0.5" />
+          ) : (
+            <circle cx={x} cy="164" r="3" fill={ACCENT}>
+              <animate
+                attributeName="cy"
+                values="164;36"
+                dur="2.6s"
+                repeatCount="indefinite"
+                begin={`${(x - 120) / 120}s`}
+              />
+              <animate
+                attributeName="opacity"
+                values="0;1;1;0"
+                dur="2.6s"
+                repeatCount="indefinite"
+                begin={`${(x - 120) / 120}s`}
+              />
+            </circle>
+          )}
+        </g>
+      ))}
+
+      {layers.map((layer) => (
+        <g key={layer.label}>
+          {Array.from({ length: layer.nodes }).map((_, i) => {
+            const cx =
+              layer.nodes === 1 ? 200 : 70 + (i * 260) / (layer.nodes - 1);
+            return (
+              <g key={`${layer.label}-${cx}`}>
+                <circle
+                  cx={cx}
+                  cy={layer.y}
+                  r="9"
+                  fill={layer.dashed ? "none" : ACCENT}
+                  stroke={ACCENT}
+                  strokeWidth="1.5"
+                  strokeDasharray={layer.dashed ? "3 3" : "0"}
+                />
+                {!layer.dashed && (
+                  <circle cx={cx} cy={layer.y} r="3.5" fill={theme.panel} />
+                )}
+              </g>
+            );
+          })}
+          <text
+            x="20"
+            y={layer.y - 16}
+            fontSize="8.5"
+            fontFamily="monospace"
+            fill={theme.muted}
+            textAnchor="start"
           >
-            Monthly Trend
-          </p>
-          <svg viewBox="0 0 200 60" className="w-full h-12">
-            <path
-              d="M0 50 L30 40 L60 45 L90 30 L120 25 L150 15 L180 20 L200 10"
-              stroke={landingColors.accent}
-              strokeWidth="2"
-              fill="none"
-            />
-            <path
-              d="M0 55 L30 50 L60 48 L90 42 L120 38 L150 35 L180 30 L200 28"
-              stroke={landingColors.info}
-              strokeWidth="1.5"
-              fill="none"
-              opacity="0.5"
-            />
-          </svg>
-          <div className="flex gap-4 mt-1">
-            <div className="flex items-center gap-1">
-              <div
-                className="w-2 h-0.5 rounded"
-                style={{ backgroundColor: landingColors.accent }}
-              />
-              <span className="text-[8px] text-gray-400">Revenue</span>
-            </div>
-            <div className="flex items-center gap-1">
-              <div
-                className="w-2 h-0.5 rounded"
-                style={{ backgroundColor: landingColors.info }}
-              />
-              <span className="text-[8px] text-gray-400">Efficiency</span>
-            </div>
-          </div>
-        </div>
+            {layer.label}
+          </text>
+        </g>
+      ))}
+
+      {/* shadow-mode / autonomy track */}
+      <text
+        x="16"
+        y="202"
+        fontSize="8.5"
+        fontFamily="monospace"
+        fill={theme.muted}
+      >
+        SHADOW
+      </text>
+      <line
+        x1="70"
+        y1="199"
+        x2="330"
+        y2="199"
+        stroke={theme.grid}
+        strokeWidth="2"
+      />
+      {[70, 200, 330].map((x) => (
+        <circle key={x} cx={x} cy="199" r="3" fill={theme.muted} />
+      ))}
+      <circle
+        cx="130"
+        cy="199"
+        r="5"
+        fill={ACCENT}
+        style={{ animation: "rs-slide 4s ease-in-out infinite" }}
+      />
+      <text x="344" y="202" fontSize="8.5" fontFamily="monospace" fill={ACCENT}>
+        FULL-AUTO
+      </text>
+    </svg>
+  );
+}
+
+// ─── Marquee ─────────────────────────────────────────────────────────────────────
+
+function Marquee({
+  items,
+  direction = "left",
+  className = "",
+}: {
+  items: string[];
+  direction?: "left" | "right";
+  className?: string;
+}) {
+  const run = [...items, ...items];
+  return (
+    <div className={`relative flex overflow-hidden ${className}`}>
+      <div
+        className="flex shrink-0 items-center whitespace-nowrap"
+        style={{ animation: `rs-marquee-${direction} 38s linear infinite` }}
+      >
+        {run.map((item, i) => (
+          <span
+            key={`${item}-${i}`}
+            className="mx-6 inline-flex items-center text-sm font-semibold uppercase tracking-[0.2em]"
+          >
+            {item}
+            <span className="ml-12 text-[#16b88c]">/</span>
+          </span>
+        ))}
       </div>
     </div>
   );
 }
 
-// ─── Marquee CSS (injected via style tag) ────────────────────────────────────
+// ─── Pillar (text + feature graphic) ───────────────────────────────────────────
 
-function MarqueeStyles() {
+interface PillarProps {
+  id: string;
+  index: string;
+  kicker: string;
+  title: React.ReactNode;
+  body: string;
+  tags: string[];
+  graphic: React.ReactNode;
+  accent?: string;
+  invert?: boolean;
+  flip?: boolean;
+  children?: React.ReactNode;
+}
+
+function Pillar({
+  id,
+  index,
+  kicker,
+  title,
+  body,
+  tags,
+  graphic,
+  accent = ACCENT,
+  invert = false,
+  flip = false,
+  children,
+}: PillarProps) {
+  const text = invert ? "#0a0a0b" : "#f5f4ef";
+  return (
+    <section
+      id={id}
+      className={`relative border-t ${invert ? "bg-[#f5f4ef]" : ""}`}
+      style={{
+        color: text,
+        borderColor: invert ? "rgba(10,10,11,0.12)" : "rgba(245,244,239,0.12)",
+      }}
+    >
+      <div className="mx-auto grid max-w-7xl items-center gap-12 px-6 py-20 lg:grid-cols-2 lg:gap-16 lg:px-10 lg:py-28">
+        {/* TEXT */}
+        <div className={flip ? "lg:order-2" : ""}>
+          <Reveal>
+            <div
+              className="mb-8 flex items-center gap-4 font-mono text-xs uppercase tracking-[0.3em]"
+              style={{
+                color: invert
+                  ? "rgba(10,10,11,0.62)"
+                  : "rgba(245,244,239,0.62)",
+              }}
+            >
+              <span style={{ color: accent }}>{index}</span>
+              <span
+                className="h-px w-[90px]"
+                style={{ background: accent, opacity: 0.5 }}
+              />
+              <span>{kicker}</span>
+            </div>
+          </Reveal>
+          <Reveal delay={60}>
+            <h2 className="text-[clamp(2.5rem,7vw,5.5rem)] font-black uppercase leading-[0.9] tracking-[-0.03em]">
+              {title}
+            </h2>
+          </Reveal>
+          <Reveal delay={140}>
+            <p
+              className="mt-7 max-w-lg text-base leading-relaxed lg:text-lg"
+              style={{
+                color: invert ? "rgba(10,10,11,0.8)" : "rgba(245,244,239,0.82)",
+              }}
+            >
+              {body}
+            </p>
+          </Reveal>
+          {children && (
+            <Reveal delay={200}>
+              <div className="mt-6">{children}</div>
+            </Reveal>
+          )}
+          <Reveal delay={240}>
+            <div className="mt-8 flex flex-wrap gap-x-3 gap-y-2">
+              {tags.map((t) => (
+                <span
+                  key={t}
+                  className="rounded-full border px-3 py-1 font-mono text-[10px] uppercase tracking-[0.2em]"
+                  style={{
+                    borderColor: `color-mix(in srgb, ${accent} 45%, transparent)`,
+                    color: invert
+                      ? "rgba(10,10,11,0.78)"
+                      : "rgba(245,244,239,0.78)",
+                  }}
+                >
+                  {t}
+                </span>
+              ))}
+            </div>
+          </Reveal>
+        </div>
+
+        {/* GRAPHIC */}
+        <Reveal delay={120} className={flip ? "lg:order-1" : ""}>
+          {graphic}
+        </Reveal>
+      </div>
+    </section>
+  );
+}
+
+// ─── Hero console (product preview) ────────────────────────────────────────────
+
+const HERO_QUEUE = [
+  { id: "STN-014", dry: "9h to dry", status: "URGENT", color: "#f59e0b" },
+  { id: "STN-007", dry: "18h to dry", status: "ASSIGNED", color: ACCENT },
+  { id: "STN-022", dry: "31h to dry", status: "SCHEDULED", color: "#3b82f6" },
+];
+
+function HeroConsole() {
+  return (
+    <Console file="dispatch.console" theme={DARK_GFX}>
+      <div className="mb-3 flex items-center justify-between">
+        <span className="font-mono text-[10px] uppercase tracking-[0.2em] text-[#f5f4ef]/65">
+          Runout Forecast · 72h
+        </span>
+        <span className="inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.2em] text-[#16b88c]">
+          <span className="h-1.5 w-1.5 rounded-full bg-[#16b88c]" />
+          Live
+        </span>
+      </div>
+      <ForecastGfx theme={DARK_GFX} />
+      <div className="mt-4 space-y-1.5">
+        {HERO_QUEUE.map((row) => (
+          <div
+            key={row.id}
+            className="flex items-center justify-between rounded-lg border border-[#f5f4ef]/10 bg-[#0a0a0b] px-3 py-2"
+          >
+            <span className="font-mono text-[11px] tracking-wide text-[#f5f4ef]/85">
+              {row.id}
+            </span>
+            <span className="font-mono text-[11px] text-[#f5f4ef]/55">
+              {row.dry}
+            </span>
+            <span
+              className="rounded-full px-2 py-0.5 font-mono text-[9px] uppercase tracking-[0.15em]"
+              style={{
+                color: row.color,
+                background: `color-mix(in srgb, ${row.color} 16%, transparent)`,
+              }}
+            >
+              {row.status}
+            </span>
+          </div>
+        ))}
+      </div>
+    </Console>
+  );
+}
+
+// ─── Keyframes ───────────────────────────────────────────────────────────────────
+
+function LandingStyles() {
   return (
     <style>{`
-      @keyframes marquee-left {
-        0% { transform: translateX(0); }
-        100% { transform: translateX(-50%); }
+      @keyframes rs-marquee-left { 0% { transform: translateX(0); } 100% { transform: translateX(-50%); } }
+      @keyframes rs-marquee-right { 0% { transform: translateX(-50%); } 100% { transform: translateX(0); } }
+      @keyframes rs-grid-drift { 0% { background-position: 0 0; } 100% { background-position: 60px 60px; } }
+      @keyframes rs-pulse-glow { 0%,100% { opacity: .35; } 50% { opacity: .75; } }
+      @keyframes rs-rise { 0% { transform: translateY(14px); opacity: 0; } 100% { transform: translateY(0); opacity: 1; } }
+      @keyframes rs-draw { to { stroke-dashoffset: 0; } }
+      @keyframes rs-march { to { stroke-dashoffset: -28; } }
+      @keyframes rs-blip { 0%,100% { transform: scale(0.6); opacity: .4; } 50% { transform: scale(1.15); opacity: 1; } }
+      @keyframes rs-fill { from { transform: scaleY(0); } to { transform: scaleY(1); } }
+      @keyframes rs-slide { 0%,100% { transform: translateX(0); } 50% { transform: translateX(200px); } }
+      .rs-hero-word { animation: rs-rise .9s cubic-bezier(.16,1,.3,1) both; }
+      .rs-root a:focus-visible, .rs-root button:focus-visible {
+        outline: 2px solid #16b88c;
+        outline-offset: 3px;
+        border-radius: 8px;
       }
-      @keyframes marquee-right {
-        0% { transform: translateX(-50%); }
-        100% { transform: translateX(0); }
-      }
-      .animate-marquee-left {
-        animation: marquee-left 30s linear infinite;
-      }
-      .animate-marquee-right {
-        animation: marquee-right 30s linear infinite;
+      @media (prefers-reduced-motion: reduce) {
+        .rs-root *, .rs-root *::before, .rs-root *::after {
+          animation: none !important;
+          transition: none !important;
+        }
       }
     `}</style>
   );
 }
 
-// ─── Main Landing Page ───────────────────────────────────────────────────────
+const HERO_STATS = [
+  { value: "24–72h", label: "Runout forecast horizon" },
+  { value: "< 2 min", label: "Disruption replan time" },
+  { value: "85–95%", label: "Truck utilization" },
+  { value: "< 500ms", label: "Load constraint solve" },
+];
+
+const NAV_LINKS = [
+  ["Forecasting", "#forecasting"],
+  ["Replanning", "#replanning"],
+  ["Loading", "#loading"],
+  ["AI Agents", "#agents"],
+  ["Compliance", "#compliance"],
+  ["How", "#how"],
+] as const;
+
+const COMPLIANCE = [
+  {
+    icon: Landmark,
+    title: "Tax Engine",
+    body: "Federal · State · County · City (FIPS)",
+  },
+  {
+    icon: Gauge,
+    title: "Volume Correction",
+    body: "API 2540 VCF · Gross → Net at 60°F",
+  },
+  {
+    icon: BadgeCheck,
+    title: "Driver Compliance",
+    body: "CDL · HAZMAT · Medical card expiry",
+  },
+  {
+    icon: Droplet,
+    title: "Enforcement",
+    body: "Dyed diesel · IRS 637M · Exemption certs",
+  },
+  {
+    icon: FileText,
+    title: "Reporting",
+    body: "IFTA quarterly · Form 720 · Audit-ready",
+  },
+];
+
+// Per-pillar accent hues — a controlled palette break so the page doesn't read
+// as one flat green. The emerald action color (CTAs) stays constant; only the
+// decorative kicker/index/tags shift.
+const PILLAR_ACCENT = {
+  forecasting: ACCENT,
+  replanning: "#3b82f6",
+  loading: ACCENT,
+  agents: "#a78bfa",
+} as const;
+
+// Real regulatory standards Runsheet implements — used in place of fabricated
+// customer logos (there are none to show yet).
+const STANDARDS = [
+  "API 2540 VCF",
+  "DOT / FMCSA",
+  "IFTA",
+  "IRS 637M",
+  "Form 720",
+];
+
+// Architecture-true trust claims (not marketing fluff, not fake certifications).
+const TRUST_PILLARS = [
+  {
+    icon: Eye,
+    title: "Shadow-mode rollout",
+    body: "Agents observe and earn autonomy. Nothing goes live until it's validated against your data.",
+  },
+  {
+    icon: SlidersHorizontal,
+    title: "Human-in-the-loop",
+    body: "Configurable autonomy per operation — suggest-only, auto-low, or full-auto, with approval gates.",
+  },
+  {
+    icon: ShieldCheck,
+    title: "Tenant-isolated",
+    body: "Every distributor's data is scoped and isolated end to end. References never cross tenants.",
+  },
+  {
+    icon: ScrollText,
+    title: "Full audit trail",
+    body: "Every agent decision is logged and explainable — across all three agent layers.",
+  },
+];
+
+// How it works — the real rollout path, mapped to the shadow-mode model.
+const STEPS = [
+  {
+    icon: Plug,
+    title: "Connect",
+    body: "Stream tank telemetry, delivery history, and your fleet roster. Runsheet runs alongside your existing stack — no rip-and-replace.",
+  },
+  {
+    icon: Eye,
+    title: "Observe",
+    body: "Agents forecast runouts, optimize loads, and draft replans in shadow mode. You watch every call before it can act.",
+  },
+  {
+    icon: SlidersHorizontal,
+    title: "Approve",
+    body: "Promote agents from suggest-only to full-auto, one operation at a time, with a full audit trail on every decision.",
+  },
+];
+
+// ─── Main page ───────────────────────────────────────────────────────────────────
 
 export default function LandingPage() {
-  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [scrolled, setScrolled] = useState(false);
-  const [heroSlide, setHeroSlide] = useState(0);
-  const [activeTab, setActiveTab] = useState(0);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const reduce = usePrefersReducedMotion();
 
-  // Scroll listener for sticky nav
   useEffect(() => {
-    const onScroll = () => setScrolled(window.scrollY > 20);
+    const onScroll = () => setScrolled(window.scrollY > 16);
+    onScroll();
     window.addEventListener("scroll", onScroll, { passive: true });
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
 
-  // Hero carousel auto-advance
-  useEffect(() => {
-    const timer = setInterval(() => {
-      setHeroSlide((prev) => (prev + 1) % 3);
-    }, 4000);
-    return () => clearInterval(timer);
-  }, []);
-
-  const heroSlides = [
-    { component: <DashboardMockup />, label: "Fleet Dashboard" },
-    { component: <SchedulingMockup />, label: "Smart Scheduling" },
-    { component: <FuelMapMockup />, label: "Fuel Distribution" },
-  ];
-
-  const workflowTabs = [
-    {
-      title: "Explore insights",
-      icon: Eye,
-      desc: "Surface hidden patterns in fleet performance, fuel consumption, and delivery timelines with AI-powered analytics.",
-      mockup: <AnalyticsMockup />,
-    },
-    {
-      title: "Build schedules",
-      icon: Clock,
-      desc: "Create optimized delivery schedules with drag-and-drop job boards, automated driver assignment, and capacity planning.",
-      mockup: <SchedulingMockup />,
-    },
-    {
-      title: "Optimize routes",
-      icon: Route,
-      desc: "Let AI agents find the fastest, most fuel-efficient routes — and replan in real time when disruptions hit.",
-      mockup: <FuelMapMockup />,
-    },
-    {
-      title: "Generate reports",
-      icon: BarChart3,
-      desc: "Auto-generate compliance reports, cost breakdowns, and performance summaries for stakeholders.",
-      mockup: <AnalyticsMockup />,
-    },
-  ];
-
-  const navLinks = ["Platform", "Solutions", "Customers", "Pricing"];
-
   return (
-    <div className="min-h-screen bg-white">
-      <MarqueeStyles />
+    <div className="rs-root min-h-screen bg-[#0a0a0b] text-[#f5f4ef] antialiased">
+      <LandingStyles />
 
-      {/* ═══════════════════════════════════════════════════════════════════
-          1. STICKY NAV
-      ═══════════════════════════════════════════════════════════════════ */}
-      <nav
-        className={`fixed top-0 left-0 right-0 z-50 transition-all duration-300 ${
+      {/* NAV */}
+      <header
+        className={`fixed inset-x-0 top-0 z-50 transition-all duration-300 ${
           scrolled
-            ? "bg-white/95 backdrop-blur-md shadow-sm border-b border-gray-100"
-            : "bg-transparent"
+            ? "border-b border-[#f5f4ef]/10 bg-[#0a0a0b]/85 backdrop-blur-xl"
+            : "border-b border-transparent"
         }`}
       >
-        <div className="max-w-7xl mx-auto px-6 lg:px-8">
-          <div className="flex items-center justify-between h-16 lg:h-20">
-            {/* Logo */}
-            <Link href="/" className="flex items-center gap-2.5">
-              <div
-                className="w-9 h-9 rounded-lg flex items-center justify-center"
-                style={{ backgroundColor: landingColors.accent }}
+        <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-3 lg:px-10">
+          <Link href="/" className="flex items-baseline gap-px">
+            <span className="text-lg font-black uppercase tracking-tight">
+              RUN<span className="text-[#16b88c]">/</span>SHEET
+            </span>
+            <span className="ml-1.5 font-mono text-[9px] uppercase tracking-[0.3em] text-[#f5f4ef]/40">
+              beta
+            </span>
+          </Link>
+
+          <nav className="hidden items-center gap-8 lg:flex">
+            {NAV_LINKS.map(([label, href]) => (
+              <a
+                key={label}
+                href={href}
+                className="font-mono text-[11px] uppercase tracking-[0.2em] text-[#f5f4ef]/70 transition-colors hover:text-[#f5f4ef]"
               >
-                <Truck className="w-5 h-5 text-white" />
-              </div>
-              <span
-                className="text-xl font-bold tracking-tight"
-                style={{ color: landingColors.ink }}
-              >
-                Runsheet
-              </span>
+                {label}
+              </a>
+            ))}
+          </nav>
+
+          <div className="flex items-center gap-3">
+            <Link
+              href="/signin"
+              className="hidden font-mono text-[11px] uppercase tracking-[0.2em] text-[#f5f4ef]/60 transition-colors hover:text-[#f5f4ef] sm:inline"
+            >
+              Sign In
             </Link>
-
-            {/* Desktop Nav Links */}
-            <div className="hidden lg:flex items-center gap-8">
-              {navLinks.map((item) => (
-                <a
-                  key={item}
-                  href={`#${item.toLowerCase()}`}
-                  className="text-sm font-medium transition-colors hover:opacity-80"
-                  style={{ color: landingColors.ink }}
-                >
-                  {item}
-                </a>
-              ))}
-            </div>
-
-            {/* CTA Buttons */}
-            <div className="hidden lg:flex items-center gap-3">
-              <Link
-                href="/signin"
-                className="text-sm font-medium px-4 py-2 rounded-lg transition-all hover:bg-gray-50"
-                style={{ color: landingColors.ink }}
-              >
-                Sign In
-              </Link>
-              <Link
-                href="/signin"
-                className="text-sm font-semibold px-6 py-2.5 rounded-full text-white transition-all hover:opacity-90 shadow-sm"
-                style={{ backgroundColor: landingColors.accent }}
-              >
-                Get a Demo
-              </Link>
-            </div>
-
-            {/* Mobile Menu Toggle */}
+            <Link
+              href="/request-pilot"
+              className="group inline-flex items-center gap-1.5 rounded-full bg-[#16b88c] px-4 py-2 text-[11px] font-bold uppercase tracking-[0.15em] text-[#06231b] transition-all hover:bg-[#1ed3a0]"
+            >
+              Request Pilot
+              <ArrowRight className="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5" />
+            </Link>
             <button
-              onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-              className="lg:hidden p-2 rounded-lg hover:bg-gray-100"
+              type="button"
+              onClick={() => setMenuOpen((v) => !v)}
+              className="font-mono text-[11px] uppercase tracking-[0.2em] text-[#f5f4ef]/70 lg:hidden"
               aria-label="Toggle menu"
             >
-              {mobileMenuOpen ? (
-                <X className="w-5 h-5" style={{ color: landingColors.ink }} />
-              ) : (
-                <Menu
-                  className="w-5 h-5"
-                  style={{ color: landingColors.ink }}
-                />
-              )}
+              {menuOpen ? "Close" : "Menu"}
             </button>
           </div>
         </div>
 
-        {/* Mobile Menu */}
-        {mobileMenuOpen && (
-          <div className="lg:hidden bg-white border-t border-gray-100 shadow-lg">
-            <div className="px-6 py-4 space-y-3">
-              {navLinks.map((item) => (
-                <a
-                  key={item}
-                  href={`#${item.toLowerCase()}`}
-                  onClick={() => setMobileMenuOpen(false)}
-                  className="block text-sm font-medium py-2"
-                  style={{ color: landingColors.ink }}
-                >
-                  {item}
-                </a>
-              ))}
-              <div className="pt-3 border-t border-gray-100 flex flex-col gap-2">
-                <Link
-                  href="/signin"
-                  className="text-sm font-medium py-2.5 text-center rounded-lg border border-gray-200"
-                  style={{ color: landingColors.ink }}
-                >
-                  Sign In
-                </Link>
-                <Link
-                  href="/signin"
-                  className="text-sm font-semibold py-2.5 text-center rounded-full text-white"
-                  style={{ backgroundColor: landingColors.accent }}
-                >
-                  Get a Demo
-                </Link>
-              </div>
-            </div>
+        {menuOpen && (
+          <div className="border-t border-[#f5f4ef]/10 bg-[#0a0a0b] px-6 py-4 lg:hidden">
+            {NAV_LINKS.map(([label, href]) => (
+              <a
+                key={label}
+                href={href}
+                onClick={() => setMenuOpen(false)}
+                className="block py-2.5 font-mono text-xs uppercase tracking-[0.2em] text-[#f5f4ef]/70"
+              >
+                {label}
+              </a>
+            ))}
           </div>
         )}
-      </nav>
+      </header>
 
-      {/* ═══════════════════════════════════════════════════════════════════
-          2. HERO — Centered headline + full-width product carousel below
-      ═══════════════════════════════════════════════════════════════════ */}
-      <section className="pt-28 lg:pt-36 pb-16 lg:pb-24">
-        <div className="max-w-7xl mx-auto px-6 lg:px-8">
-          {/* Centered copy block */}
-          <div className="text-center max-w-3xl mx-auto mb-16">
-            <FadeIn>
-              <h1
-                className="text-5xl sm:text-6xl lg:text-7xl font-bold leading-[1.05] tracking-tight mb-6"
-                style={{ color: landingColors.ink }}
+      {/* HERO */}
+      <section className="relative overflow-hidden pt-28 pb-20 lg:pt-32 lg:pb-28">
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-0 opacity-[0.14]"
+          style={{
+            backgroundImage:
+              "linear-gradient(#f5f4ef 1px, transparent 1px), linear-gradient(90deg, #f5f4ef 1px, transparent 1px)",
+            backgroundSize: "60px 60px",
+            animation: "rs-grid-drift 8s linear infinite",
+            maskImage:
+              "radial-gradient(ellipse 80% 60% at 50% 25%, #000 30%, transparent 75%)",
+            WebkitMaskImage:
+              "radial-gradient(ellipse 80% 60% at 50% 25%, #000 30%, transparent 75%)",
+          }}
+        />
+        <div
+          aria-hidden
+          className="pointer-events-none absolute left-1/2 top-20 h-[420px] w-[820px] -translate-x-1/2 rounded-full blur-[140px]"
+          style={{
+            background:
+              "radial-gradient(circle, rgba(22,184,140,0.26), transparent 70%)",
+            animation: "rs-pulse-glow 6s ease-in-out infinite",
+          }}
+        />
+
+        <div className="relative mx-auto max-w-7xl px-6 lg:px-10">
+          <div className="mb-8 flex items-center gap-3 font-mono text-[11px] uppercase tracking-[0.3em] text-[#16b88c]">
+            <span className="h-px w-8 bg-[#16b88c]" />
+            AI Dispatch Copilot · For Regional Fuel Distributors
+          </div>
+
+          <h1 className="text-[clamp(3.25rem,13vw,10.5rem)] font-black uppercase leading-[0.84] tracking-[-0.04em]">
+            <span
+              className="rs-hero-word block"
+              style={{ animationDelay: "0ms" }}
+            >
+              Stop
+            </span>
+            <span
+              className="rs-hero-word block text-[#f5f4ef]/40"
+              style={{ animationDelay: "120ms" }}
+            >
+              The
+            </span>
+            <span
+              className="rs-hero-word block text-[#16b88c]"
+              style={{ animationDelay: "240ms" }}
+            >
+              Runout.
+            </span>
+          </h1>
+
+          <div className="mt-10 grid gap-10 lg:grid-cols-[1fr_1.15fr] lg:items-end">
+            <div>
+              <Reveal delay={360}>
+                <p className="max-w-xl text-lg leading-relaxed text-[#f5f4ef]/70">
+                  Autonomous AI operations for fuel distributors. Predict
+                  runouts, optimize truck loads, and replan disruptions in
+                  seconds — no rip-and-replace.
+                </p>
+              </Reveal>
+              <Reveal delay={440}>
+                <div className="mt-8 flex flex-wrap items-center gap-3">
+                  <Link
+                    href="/request-pilot"
+                    className="group inline-flex items-center gap-2 rounded-full bg-[#16b88c] px-7 py-3.5 text-sm font-bold uppercase tracking-[0.12em] text-[#06231b] transition-all hover:bg-[#1ed3a0]"
+                  >
+                    Request a Pilot
+                    <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-1" />
+                  </Link>
+                  <a
+                    href="#how"
+                    className="inline-flex items-center gap-2 rounded-full border border-[#f5f4ef]/25 px-7 py-3.5 text-sm font-bold uppercase tracking-[0.12em] text-[#f5f4ef] transition-all hover:border-[#f5f4ef]/60"
+                  >
+                    See How It Works ↓
+                  </a>
+                </div>
+              </Reveal>
+            </div>
+
+            <Reveal delay={480}>
+              <HeroConsole />
+            </Reveal>
+          </div>
+
+          <Reveal delay={560}>
+            <div className="mt-16 grid grid-cols-2 gap-px overflow-hidden rounded-2xl border border-[#f5f4ef]/10 bg-[#f5f4ef]/10 lg:grid-cols-4">
+              {HERO_STATS.map((s) => (
+                <div key={s.label} className="bg-[#0a0a0b] p-6">
+                  <div className="text-3xl font-black tracking-tight text-[#16b88c] lg:text-4xl">
+                    {s.value}
+                  </div>
+                  <div className="mt-2 font-mono text-[10px] uppercase tracking-[0.2em] text-[#f5f4ef]/65">
+                    {s.label}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <p className="mt-3 font-mono text-[10px] uppercase tracking-[0.15em] text-[#f5f4ef]/45">
+              * Design targets from in-development pilots — not guaranteed
+              results.
+            </p>
+          </Reveal>
+        </div>
+      </section>
+
+      {/* MARQUEE 1 */}
+      <div className="border-y border-[#f5f4ef]/10 bg-[#16b88c] py-3 text-[#06231b]">
+        <Marquee
+          items={[
+            "Runout Prevention",
+            "P50/P90 Forecasts",
+            "Exception Replanning",
+            "Multi-Compartment Loading",
+            "Shadow-Mode Agents",
+            "API 2540 VCF",
+            "IFTA Reporting",
+            "DOT / FMCSA Compliance",
+          ]}
+        />
+      </div>
+
+      {/* TRUST / STANDARDS */}
+      <section className="relative border-t border-[#f5f4ef]/10 bg-[#0d0d0f]">
+        <div className="mx-auto max-w-7xl px-6 py-16 lg:px-10 lg:py-20">
+          <Reveal>
+            <p className="text-center font-mono text-[11px] uppercase tracking-[0.3em] text-[#f5f4ef]/60">
+              Built on the standards your auditors already use
+            </p>
+            <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
+              {STANDARDS.map((s) => (
+                <span
+                  key={s}
+                  className="rounded-full border border-[#f5f4ef]/15 px-4 py-1.5 font-mono text-[11px] uppercase tracking-[0.18em] text-[#f5f4ef]/75"
+                >
+                  {s}
+                </span>
+              ))}
+            </div>
+          </Reveal>
+
+          <div className="mt-14 grid gap-px overflow-hidden rounded-2xl border border-[#f5f4ef]/10 bg-[#f5f4ef]/10 sm:grid-cols-2 lg:grid-cols-4">
+            {TRUST_PILLARS.map((t, i) => {
+              const Icon = t.icon;
+              return (
+                <Reveal key={t.title} delay={i * 70}>
+                  <div className="h-full bg-[#0d0d0f] p-6">
+                    <div className="mb-5 flex h-10 w-10 items-center justify-center rounded-lg bg-[#16b88c]/12">
+                      <Icon className="h-5 w-5 text-[#16b88c]" />
+                    </div>
+                    <h3 className="text-sm font-bold uppercase tracking-[0.06em]">
+                      {t.title}
+                    </h3>
+                    <p className="mt-3 text-sm leading-relaxed text-[#f5f4ef]/70">
+                      {t.body}
+                    </p>
+                  </div>
+                </Reveal>
+              );
+            })}
+          </div>
+        </div>
+      </section>
+
+      {/* HOW IT WORKS */}
+      <section id="how" className="relative border-t border-[#f5f4ef]/10">
+        <div className="mx-auto max-w-7xl px-6 py-20 lg:px-10 lg:py-28">
+          <Reveal>
+            <div className="mb-8 flex items-center gap-4 font-mono text-xs uppercase tracking-[0.3em] text-[#f5f4ef]/62">
+              <span className="text-[#16b88c]">→</span>
+              <span className="h-px w-[90px] bg-[#16b88c] opacity-50" />
+              How it works
+            </div>
+          </Reveal>
+          <Reveal delay={60}>
+            <h2 className="max-w-3xl text-[clamp(2.5rem,7vw,5.5rem)] font-black uppercase leading-[0.9] tracking-[-0.03em]">
+              Live in days.
+              <br />
+              <span className="text-[#f5f4ef]/40">
+                Autonomous on your terms.
+              </span>
+            </h2>
+          </Reveal>
+          <div className="mt-14 grid gap-px overflow-hidden rounded-2xl border border-[#f5f4ef]/10 bg-[#f5f4ef]/10 md:grid-cols-3">
+            {STEPS.map((step, i) => {
+              const Icon = step.icon;
+              return (
+                <Reveal key={step.title} delay={i * 90}>
+                  <div className="h-full bg-[#0a0a0b] p-7">
+                    <div className="flex items-center justify-between">
+                      <span className="font-mono text-[11px] uppercase tracking-[0.2em] text-[#16b88c]">
+                        0{i + 1}
+                      </span>
+                      <Icon className="h-5 w-5 text-[#f5f4ef]/55" />
+                    </div>
+                    <h3 className="mt-6 text-xl font-black uppercase tracking-tight">
+                      {step.title}
+                    </h3>
+                    <p className="mt-3 text-sm leading-relaxed text-[#f5f4ef]/70">
+                      {step.body}
+                    </p>
+                  </div>
+                </Reveal>
+              );
+            })}
+          </div>
+        </div>
+      </section>
+
+      {/* 01 FORECASTING */}
+      <Pillar
+        id="forecasting"
+        index="01"
+        kicker="Predictive Forecasting"
+        title={
+          <>
+            Predict
+            <br />
+            before dry.
+          </>
+        }
+        body="Runsheet generates 24–72 hour runout forecasts with P50/P90 confidence for every station — pulling from tank telemetry, delivery history, and demand patterns. Anomaly detection flags sensor drift before it corrupts your plan."
+        tags={["P50/P90 Forecasts", "Anomaly Detection", "SLA Prioritization"]}
+        graphic={
+          <Console file="forecast.engine" theme={DARK_GFX}>
+            <ForecastGfx theme={DARK_GFX} />
+          </Console>
+        }
+      />
+
+      {/* 02 REPLANNING */}
+      <Pillar
+        id="replanning"
+        index="02"
+        kicker="Exception Replanning"
+        flip
+        title={
+          <>
+            Fixed in
+            <br />
+            <span className="text-[#16b88c]">seconds.</span>
+          </>
+        }
+        body="Truck breakdown. Station outage. Demand spike. The replanning agent patches your plan in real time — finding replacement trucks with compatible compartments, reoptimizing stops, and adjusting quantities. Disruption response drops from 45+ minutes to under 2."
+        tags={[
+          "Disruption Response",
+          "Route Reoptimization",
+          "Smart Escalation",
+        ]}
+        accent={PILLAR_ACCENT.replanning}
+        graphic={
+          <Console file="replan.agent" theme={DARK_GFX}>
+            <ReplanGfx theme={DARK_GFX} />
+          </Console>
+        }
+      />
+
+      {/* 03 LOADING */}
+      <Pillar
+        id="loading"
+        index="03"
+        kicker="Load Optimization"
+        invert
+        title={
+          <>
+            Loaded
+            <br />
+            right.
+          </>
+        }
+        body="Auto-generate optimal loading plans for multi-compartment tankers — enforcing absolute AGO · PMS · ATK · LPG grade segregation, pushing utilization to 85–95%, and enabling multi-drop routes in a single trip. Constraint solving completes in under 500ms."
+        tags={["Grade Segregation", "Multi-Drop Routing", "85–95% Utilization"]}
+        graphic={
+          <Console file="load.solver" theme={CREAM_GFX}>
+            <LoadGfx theme={CREAM_GFX} />
+          </Console>
+        }
+      />
+
+      {/* 04 AGENTS */}
+      <Pillar
+        id="agents"
+        index="04"
+        kicker="Multi-Agent AI"
+        flip
+        title={
+          <>
+            <span className="block">Human</span>
+            <span className="block text-[#16b88c]">first.</span>
+          </>
+        }
+        body="Three agent layers run continuously: domain watchdogs monitor operations, overlay agents optimize across the fleet, and a meta-learning agent improves decisions over time. Every agent starts in shadow mode and earns autonomy through validated performance."
+        tags={[
+          "Shadow Mode",
+          "Configurable Autonomy",
+          "Continuous Learning",
+          "Audit Trail",
+        ]}
+        accent={PILLAR_ACCENT.agents}
+        graphic={
+          <Console file="agent.stack" theme={DARK_GFX}>
+            <AgentGfx theme={DARK_GFX} reduce={reduce} />
+          </Console>
+        }
+      >
+        <ul className="space-y-2.5">
+          {[
+            "Shadow mode first — agents go active only after validation.",
+            "Configurable autonomy: suggest-only → auto-low → full-auto.",
+            "Full audit trail on every agent decision, across every layer.",
+          ].map((line) => (
+            <li key={line} className="flex items-start gap-2.5">
+              <ArrowUpRight className="mt-0.5 h-4 w-4 shrink-0 text-[#16b88c]" />
+              <span className="text-sm text-[#f5f4ef]/70">{line}</span>
+            </li>
+          ))}
+        </ul>
+      </Pillar>
+
+      {/* MARQUEE 2 */}
+      <div className="border-y border-[#f5f4ef]/10 bg-[#0a0a0b] py-3 text-[#f5f4ef]">
+        <Marquee
+          direction="right"
+          items={[
+            "Autonomous Fuel Ops",
+            "85–95% Truck Utilization",
+            "2-Min Disruption Response",
+            "Human-in-Loop",
+            "Dyed-Diesel Enforcement",
+            "Form 720 Ready",
+            "Explainable AI",
+            "Regional Distributors",
+          ]}
+        />
+      </div>
+
+      {/* 05 COMPLIANCE */}
+      <section
+        id="compliance"
+        className="relative border-t border-[#f5f4ef]/10"
+      >
+        <div className="mx-auto max-w-7xl px-6 py-20 lg:px-10 lg:py-28">
+          <Reveal>
+            <div className="mb-8 flex items-center gap-4 font-mono text-xs uppercase tracking-[0.3em] text-[#f5f4ef]/62">
+              <span className="text-[#16b88c]">05</span>
+              <span className="h-px w-[90px] bg-[#16b88c] opacity-50" />
+              Compliance Backbone
+            </div>
+          </Reveal>
+          <Reveal delay={60}>
+            <h2 className="max-w-4xl text-[clamp(2.5rem,7vw,5.5rem)] font-black uppercase leading-[0.9] tracking-[-0.03em]">
+              Built in.
+              <br />
+              <span className="text-[#f5f4ef]/40">Not bolted on.</span>
+            </h2>
+          </Reveal>
+          <Reveal delay={140}>
+            <p className="mt-7 max-w-2xl text-base leading-relaxed text-[#f5f4ef]/70 lg:text-lg">
+              Runsheet handles the entire regulatory stack for U.S. fuel
+              distribution — multi-jurisdiction excise tax, API 2540 volume
+              correction, DOT/FMCSA driver qualification, dyed-diesel
+              enforcement, and IFTA reporting.
+            </p>
+          </Reveal>
+
+          <div className="mt-14 grid gap-px overflow-hidden rounded-2xl border border-[#f5f4ef]/10 bg-[#f5f4ef]/10 sm:grid-cols-2 lg:grid-cols-5">
+            {COMPLIANCE.map((c, i) => {
+              const Icon = c.icon;
+              return (
+                <Reveal key={c.title} delay={i * 70}>
+                  <div className="h-full bg-[#0a0a0b] p-6">
+                    <div className="mb-5 flex h-10 w-10 items-center justify-center rounded-lg bg-[#16b88c]/12">
+                      <Icon className="h-5 w-5 text-[#16b88c]" />
+                    </div>
+                    <div className="mb-2 font-mono text-[10px] uppercase tracking-[0.2em] text-[#16b88c]">
+                      0{i + 1}
+                    </div>
+                    <h3 className="text-sm font-bold uppercase tracking-[0.08em]">
+                      {c.title}
+                    </h3>
+                    <p className="mt-3 text-xs leading-relaxed text-[#f5f4ef]/70">
+                      {c.body}
+                    </p>
+                  </div>
+                </Reveal>
+              );
+            })}
+          </div>
+        </div>
+      </section>
+
+      {/* FINAL CTA */}
+      <section className="relative overflow-hidden border-t border-[#f5f4ef]/10">
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-0 opacity-[0.1]"
+          style={{
+            backgroundImage:
+              "linear-gradient(#f5f4ef 1px, transparent 1px), linear-gradient(90deg, #f5f4ef 1px, transparent 1px)",
+            backgroundSize: "48px 48px",
+          }}
+        />
+        <div className="relative mx-auto max-w-7xl px-6 py-28 text-center lg:px-10 lg:py-40">
+          <Reveal>
+            <h2 className="text-[clamp(3rem,11vw,9rem)] font-black uppercase leading-[0.86] tracking-[-0.04em]">
+              Run the
+              <br />
+              <span className="text-[#16b88c]">whole sheet.</span>
+            </h2>
+          </Reveal>
+          <Reveal delay={140}>
+            <p className="mx-auto mt-8 max-w-xl text-lg text-[#f5f4ef]/65">
+              From forecast to delivery to Form 720 — one autonomous operations
+              layer for regional fuel distributors.
+            </p>
+          </Reveal>
+          <Reveal delay={220}>
+            <div className="mt-10 flex flex-wrap items-center justify-center gap-3">
+              <Link
+                href="/request-pilot"
+                className="group inline-flex items-center gap-2 rounded-full bg-[#16b88c] px-8 py-4 text-sm font-bold uppercase tracking-[0.12em] text-[#06231b] transition-all hover:bg-[#1ed3a0]"
               >
-                Fleet operations look different here
-              </h1>
-            </FadeIn>
-
-            <FadeIn delay={100}>
-              <h2 className="text-lg lg:text-xl text-gray-500 leading-relaxed mb-10 max-w-2xl mx-auto font-normal">
-                Go from blind spots to full visibility in days — powered by all
-                your fleet data, operational knowledge, and AI.
-              </h2>
-            </FadeIn>
-
-            <FadeIn delay={200}>
+                Request a Pilot
+                <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-1" />
+              </Link>
               <Link
                 href="/signin"
-                className="inline-flex items-center justify-center gap-2 px-8 py-3.5 rounded-full text-white font-semibold text-sm transition-all hover:opacity-90 shadow-lg shadow-emerald-500/20"
-                style={{ backgroundColor: landingColors.accent }}
+                className="inline-flex items-center gap-2 rounded-full border border-[#f5f4ef]/20 px-8 py-4 text-sm font-bold uppercase tracking-[0.12em] text-[#f5f4ef] transition-all hover:border-[#f5f4ef]/50"
               >
-                Get a Demo
-                <ArrowRight className="w-4 h-4" />
+                Sign In
               </Link>
-            </FadeIn>
-          </div>
-
-          {/* Full-width product carousel below */}
-          <FadeIn delay={300}>
-            <div className="relative max-w-5xl mx-auto">
-              <div className="relative">
-                {heroSlides.map((slide, i) => (
-                  <div
-                    key={slide.label}
-                    className="transition-all duration-700 ease-in-out"
-                    style={{
-                      opacity: heroSlide === i ? 1 : 0,
-                      transform: heroSlide === i ? "scale(1)" : "scale(0.97)",
-                      position: heroSlide === i ? "relative" : "absolute",
-                      top: 0,
-                      left: 0,
-                      right: 0,
-                      pointerEvents: heroSlide === i ? "auto" : "none",
-                    }}
-                  >
-                    {slide.component}
-                  </div>
-                ))}
-              </div>
-
-              {/* Carousel navigation */}
-              <div className="flex items-center justify-center gap-3 mt-6">
-                {heroSlides.map((slide, i) => (
-                  <button
-                    key={slide.label}
-                    onClick={() => setHeroSlide(i)}
-                    className="group flex items-center gap-2 transition-all duration-300"
-                    aria-label={`Show ${slide.label}`}
-                  >
-                    <div
-                      className={`transition-all duration-300 rounded-full ${
-                        heroSlide === i ? "w-8 h-2" : "w-2 h-2"
-                      }`}
-                      style={{
-                        backgroundColor:
-                          heroSlide === i
-                            ? landingColors.accent
-                            : landingColors.gray300,
-                      }}
-                    />
-                  </button>
-                ))}
-              </div>
             </div>
-          </FadeIn>
+          </Reveal>
         </div>
       </section>
 
-      {/* ═══════════════════════════════════════════════════════════════════
-          3. LOGO PROOF STRIP
-      ═══════════════════════════════════════════════════════════════════ */}
-      <section className="py-12 border-y border-gray-100 bg-gray-50/50">
-        <div className="max-w-7xl mx-auto px-6 lg:px-8">
-          <p className="text-center text-xs font-medium text-gray-400 uppercase tracking-widest mb-8">
-            Trusted by fuel distributors across America
-          </p>
-          <div className="flex flex-wrap items-center justify-center gap-x-12 gap-y-6 mb-6">
-            {[
-              "PetroCorp",
-              "FuelNet",
-              "SwiftFuel",
-              "TankPro",
-              "FleetEnergy",
-              "RouteMax",
-              "LogiPrime",
-              "TransHaul",
-            ].map((name) => (
-              <span
-                key={name}
-                className="text-lg font-bold tracking-tight opacity-20"
-                style={{ color: landingColors.ink }}
-              >
-                {name}
-              </span>
-            ))}
-          </div>
-          <p className="text-center">
-            <a
-              href="#customers"
-              className="text-sm font-medium inline-flex items-center gap-1 transition-colors hover:opacity-80"
-              style={{ color: landingColors.info }}
-            >
-              Read case studies <ArrowRight className="w-3.5 h-3.5" />
-            </a>
-          </p>
-        </div>
-      </section>
-
-      {/* ═══════════════════════════════════════════════════════════════════
-          4. TWO-PRODUCT SHOWCASE
-      ═══════════════════════════════════════════════════════════════════ */}
-      <section id="platform" className="py-24 lg:py-32">
-        <div className="max-w-7xl mx-auto px-6 lg:px-8">
-          <FadeIn>
-            <div className="text-center max-w-2xl mx-auto mb-16">
-              <p
-                className="text-sm font-semibold uppercase tracking-widest mb-3"
-                style={{ color: landingColors.secondary }}
-              >
-                The Platform
-              </p>
-              <h2
-                className="text-3xl lg:text-4xl font-bold tracking-tight mb-4"
-                style={{ color: landingColors.ink }}
-              >
-                Two products. One outcome: operational excellence.
-              </h2>
-            </div>
-          </FadeIn>
-
-          <div className="grid md:grid-cols-2 gap-6">
-            {/* Fleet Intelligence Platform */}
-            <FadeIn>
-              <div className="group bg-white rounded-2xl border border-gray-100 hover:shadow-lg transition-all duration-300 overflow-hidden h-full">
-                <div className="p-8">
-                  <div
-                    className="w-12 h-12 rounded-xl flex items-center justify-center mb-5"
-                    style={{ backgroundColor: softColor(landingColors.accent) }}
-                  >
-                    <Truck
-                      className="w-6 h-6"
-                      style={{ color: landingColors.accent }}
-                    />
-                  </div>
-                  <h3
-                    className="text-xl font-bold mb-2"
-                    style={{ color: landingColors.ink }}
-                  >
-                    Fleet Intelligence Platform
-                  </h3>
-                  <p className="text-gray-500 text-sm mb-4">
-                    Real-time visibility, scheduling, and fuel management for
-                    every vehicle in your network.
-                  </p>
-                  <a
-                    href="#"
-                    className="text-sm font-medium inline-flex items-center gap-1 transition-colors hover:opacity-80"
-                    style={{ color: landingColors.accent }}
-                  >
-                    Learn more <ArrowRight className="w-3.5 h-3.5" />
-                  </a>
-                </div>
-                <div className="px-6 pb-6">
-                  <DashboardMockup />
-                </div>
-              </div>
-            </FadeIn>
-
-            {/* AI Operations Suite */}
-            <FadeIn delay={100}>
-              <div className="group bg-white rounded-2xl border border-gray-100 hover:shadow-lg transition-all duration-300 overflow-hidden h-full">
-                <div className="p-8">
-                  <div
-                    className="w-12 h-12 rounded-xl flex items-center justify-center mb-5"
-                    style={{
-                      backgroundColor: softColor(landingColors.secondary),
-                    }}
-                  >
-                    <Bot
-                      className="w-6 h-6"
-                      style={{ color: landingColors.secondary }}
-                    />
-                  </div>
-                  <h3
-                    className="text-xl font-bold mb-2"
-                    style={{ color: landingColors.ink }}
-                  >
-                    AI Operations Suite
-                  </h3>
-                  <p className="text-gray-500 text-sm mb-4">
-                    Autonomous agents that detect disruptions, replan routes,
-                    and optimize fuel distribution.
-                  </p>
-                  <a
-                    href="#"
-                    className="text-sm font-medium inline-flex items-center gap-1 transition-colors hover:opacity-80"
-                    style={{ color: landingColors.secondary }}
-                  >
-                    Learn more <ArrowRight className="w-3.5 h-3.5" />
-                  </a>
-                </div>
-                <div className="px-6 pb-6">
-                  <AnalyticsMockup />
-                </div>
-              </div>
-            </FadeIn>
-          </div>
-        </div>
-      </section>
-
-      {/* ═══════════════════════════════════════════════════════════════════
-          5. CAPABILITY CARDS — 2×2 grid
-      ═══════════════════════════════════════════════════════════════════ */}
-      <section id="solutions" className="py-24 lg:py-32 bg-gray-50/50">
-        <div className="max-w-7xl mx-auto px-6 lg:px-8">
-          <FadeIn>
-            <div className="text-center max-w-2xl mx-auto mb-16">
-              <p
-                className="text-sm font-semibold uppercase tracking-widest mb-3"
-                style={{ color: landingColors.info }}
-              >
-                Capabilities
-              </p>
-              <h2
-                className="text-3xl lg:text-4xl font-bold tracking-tight mb-4"
-                style={{ color: landingColors.ink }}
-              >
-                Built for every operational challenge
-              </h2>
-            </div>
-          </FadeIn>
-
-          <div className="grid md:grid-cols-2 gap-6">
-            {[
-              {
-                title: "Complete fleet visibility",
-                desc: "Track every vehicle, driver, and delivery in real time across your entire network.",
-                color: landingColors.accent,
-                icon: Globe,
-                mockup: (
-                  <div className="rounded-lg border border-gray-100 p-3 bg-white mt-4">
-                    <div className="flex items-center gap-2 mb-2">
-                      <div className="w-2 h-2 rounded-full bg-success animate-pulse" />
-                      <span
-                        className="text-[9px] font-medium"
-                        style={{ color: landingColors.ink }}
-                      >
-                        47 vehicles online
-                      </span>
-                    </div>
-                    <div className="grid grid-cols-4 gap-1">
-                      {Array.from({ length: 8 }).map((_, i) => (
-                        <div
-                          key={i}
-                          className="h-6 rounded bg-gray-50 flex items-center justify-center"
-                        >
-                          <Truck
-                            className="w-3 h-3"
-                            style={{
-                              color:
-                                i < 6
-                                  ? landingColors.success
-                                  : landingColors.secondary,
-                            }}
-                          />
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                ),
-              },
-              {
-                title: "Proactive AI insights",
-                desc: "AI agents detect delays, predict failures, and surface optimization opportunities before they become problems.",
-                color: landingColors.secondary,
-                icon: Sparkles,
-                mockup: (
-                  <div className="rounded-lg border border-gray-100 p-3 bg-white mt-4">
-                    <div className="space-y-1.5">
-                      {[
-                        {
-                          text: "Route TRK-042 delay predicted — rerouting",
-                          type: "warning",
-                        },
-                        {
-                          text: "Fuel savings opportunity: $240K/week",
-                          type: "success",
-                        },
-                        {
-                          text: "Driver fatigue alert: shift limit in 45min",
-                          type: "info",
-                        },
-                      ].map((alert) => (
-                        <div
-                          key={alert.text}
-                          className="flex items-center gap-2 py-1.5 px-2 rounded-md bg-gray-50/80"
-                        >
-                          <div
-                            className="w-1.5 h-1.5 rounded-full flex-shrink-0"
-                            style={{
-                              backgroundColor:
-                                alert.type === "warning"
-                                  ? landingColors.secondary
-                                  : alert.type === "success"
-                                    ? landingColors.success
-                                    : landingColors.info,
-                            }}
-                          />
-                          <span
-                            className="text-[9px]"
-                            style={{ color: landingColors.ink }}
-                          >
-                            {alert.text}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                ),
-              },
-              {
-                title: "Optimized fuel distribution",
-                desc: "AI-powered compartment loading and route optimization that cuts fuel costs by up to 35%.",
-                color: landingColors.info,
-                icon: Droplets,
-                mockup: (
-                  <div className="rounded-lg border border-gray-100 p-3 bg-white mt-4">
-                    <div className="flex items-center justify-between mb-2">
-                      <span
-                        className="text-[9px] font-medium"
-                        style={{ color: landingColors.ink }}
-                      >
-                        Compartment Loading
-                      </span>
-                      <span
-                        className="text-[9px] font-medium"
-                        style={{ color: landingColors.success }}
-                      >
-                        98% utilized
-                      </span>
-                    </div>
-                    <div className="flex gap-0.5 h-8">
-                      {[
-                        {
-                          w: "30%",
-                          color: landingColors.accent,
-                          label: "Diesel",
-                        },
-                        {
-                          w: "25%",
-                          color: landingColors.info,
-                          label: "Gasoline",
-                        },
-                        {
-                          w: "20%",
-                          color: landingColors.secondary,
-                          label: "Heating Oil",
-                        },
-                        {
-                          w: "23%",
-                          color: landingColors.success,
-                          label: "Propane",
-                        },
-                      ].map((c) => (
-                        <div
-                          key={c.label}
-                          className="rounded flex items-center justify-center"
-                          style={{
-                            width: c.w,
-                            backgroundColor: softColor(c.color, 16),
-                          }}
-                        >
-                          <span
-                            className="text-[7px] font-bold"
-                            style={{ color: c.color }}
-                          >
-                            {c.label}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                ),
-              },
-              {
-                title: "Real-time scheduling",
-                desc: "Drag-and-drop job boards with automated assignment, capacity planning, and SLA tracking.",
-                color: landingColors.ink,
-                icon: Clock,
-                mockup: (
-                  <div className="rounded-lg border border-gray-100 p-3 bg-white mt-4">
-                    <div className="space-y-1">
-                      {[
-                        {
-                          job: "JOB-101",
-                          driver: "Mike J.",
-                          time: "08:00",
-                          status: "Assigned",
-                        },
-                        {
-                          job: "JOB-102",
-                          driver: "Sarah W.",
-                          time: "09:30",
-                          status: "En Route",
-                        },
-                        {
-                          job: "JOB-103",
-                          driver: "James R.",
-                          time: "11:00",
-                          status: "Pending",
-                        },
-                      ].map((j) => (
-                        <div
-                          key={j.job}
-                          className="flex items-center justify-between py-1.5 px-2 rounded-md bg-gray-50/80"
-                        >
-                          <div className="flex items-center gap-2">
-                            <span
-                              className="text-[9px] font-medium"
-                              style={{ color: landingColors.ink }}
-                            >
-                              {j.job}
-                            </span>
-                            <span className="text-[8px] text-gray-400">
-                              {j.driver}
-                            </span>
-                          </div>
-                          <span className="text-[8px] text-gray-400">
-                            {j.time}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                ),
-              },
-            ].map((cap, i) => (
-              <FadeIn key={cap.title} delay={i * 80}>
-                <div className="bg-white rounded-2xl border border-gray-100 p-7 hover:shadow-lg transition-all duration-300 h-full">
-                  <div className="flex items-start gap-4">
-                    <div
-                      className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0"
-                      style={{ backgroundColor: softColor(cap.color, 10) }}
-                    >
-                      <cap.icon
-                        className="w-5 h-5"
-                        style={{ color: cap.color }}
-                      />
-                    </div>
-                    <div>
-                      <h3
-                        className="text-base font-semibold mb-1"
-                        style={{ color: landingColors.ink }}
-                      >
-                        {cap.title}
-                      </h3>
-                      <p className="text-sm text-gray-500">{cap.desc}</p>
-                    </div>
-                  </div>
-                  {cap.mockup}
-                </div>
-              </FadeIn>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      {/* ═══════════════════════════════════════════════════════════════════
-          6. TABBED WORKFLOW SECTION
-      ═══════════════════════════════════════════════════════════════════ */}
-      <section className="py-24 lg:py-32">
-        <div className="max-w-7xl mx-auto px-6 lg:px-8">
-          <FadeIn>
-            <div className="text-center max-w-3xl mx-auto mb-16">
-              <h2
-                className="text-3xl lg:text-4xl font-bold tracking-tight mb-4"
-                style={{ color: landingColors.ink }}
-              >
-                Plan, track, optimize, and report — faster and more autonomously
-              </h2>
-              <p className="text-gray-500 text-lg">
-                A single workflow that covers your entire operational cycle.
-              </p>
-            </div>
-          </FadeIn>
-
-          <FadeIn delay={100}>
-            <div className="grid lg:grid-cols-5 gap-8 items-start">
-              {/* Left — Tabs */}
-              <div className="lg:col-span-2 space-y-2">
-                {workflowTabs.map((tab, i) => (
-                  <button
-                    key={tab.title}
-                    onClick={() => setActiveTab(i)}
-                    className={`w-full text-left p-5 rounded-xl transition-all duration-300 border ${
-                      activeTab === i
-                        ? "bg-white shadow-md border-gray-200"
-                        : "bg-transparent border-transparent hover:bg-gray-50"
-                    }`}
-                  >
-                    <div className="flex items-center gap-3 mb-2">
-                      <div
-                        className="w-8 h-8 rounded-lg flex items-center justify-center transition-colors"
-                        style={{
-                          backgroundColor:
-                            activeTab === i
-                              ? landingColors.accent
-                              : landingColors.gray100,
-                        }}
-                      >
-                        <tab.icon
-                          className="w-4 h-4"
-                          style={{
-                            color:
-                              activeTab === i
-                                ? landingColors.white
-                                : landingColors.gray400,
-                          }}
-                        />
-                      </div>
-                      <span
-                        className="text-sm font-semibold"
-                        style={{
-                          color:
-                            activeTab === i
-                              ? landingColors.ink
-                              : landingColors.gray400,
-                        }}
-                      >
-                        {tab.title}
-                      </span>
-                    </div>
-                    {activeTab === i && (
-                      <p className="text-sm text-gray-500 pl-11 leading-relaxed">
-                        {tab.desc}
-                      </p>
-                    )}
-                  </button>
-                ))}
-              </div>
-
-              {/* Right — Mockup */}
-              <div className="lg:col-span-3">
-                <div className="relative">
-                  {workflowTabs.map((tab, i) => (
-                    <div
-                      key={tab.title}
-                      className="transition-all duration-500"
-                      style={{
-                        opacity: activeTab === i ? 1 : 0,
-                        position: activeTab === i ? "relative" : "absolute",
-                        top: 0,
-                        left: 0,
-                        right: 0,
-                        pointerEvents: activeTab === i ? "auto" : "none",
-                      }}
-                    >
-                      {tab.mockup}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </FadeIn>
-        </div>
-      </section>
-
-      {/* ═══════════════════════════════════════════════════════════════════
-          7. ANALYST / AWARD CALLOUT
-      ═══════════════════════════════════════════════════════════════════ */}
-      <section
-        className="py-24 lg:py-32"
-        style={{ backgroundColor: landingColors.ink }}
-      >
-        <div className="max-w-7xl mx-auto px-6 lg:px-8">
-          <FadeIn>
-            <div className="flex flex-col lg:flex-row items-center gap-12 lg:gap-20">
-              {/* Award Graphic */}
-              <div className="flex-shrink-0">
-                <div className="w-40 h-40 lg:w-52 lg:h-52 rounded-2xl border border-white/10 bg-white/5 flex flex-col items-center justify-center">
-                  <div
-                    className="w-16 h-16 rounded-full flex items-center justify-center mb-3"
-                    style={{ backgroundColor: landingColors.accent }}
-                  >
-                    <Target className="w-8 h-8 text-white" />
-                  </div>
-                  <p className="text-[10px] font-bold text-white/60 uppercase tracking-widest">
-                    2024 Leader
-                  </p>
-                  <p className="text-[9px] text-white/40">
-                    Fuel Distribution Tech
-                  </p>
-                </div>
-              </div>
-
-              {/* Copy */}
-              <div>
-                <p
-                  className="text-sm font-semibold uppercase tracking-widest mb-3"
-                  style={{ color: landingColors.accent }}
-                >
-                  Recognition
-                </p>
-                <h2 className="text-3xl lg:text-4xl font-bold tracking-tight text-white mb-4">
-                  Recognized as a leader in fuel distribution technology
-                </h2>
-                <p className="text-white/50 text-lg leading-relaxed max-w-xl">
-                  Runsheet was named a top logistics platform in the 2024 Fuel
-                  Distribution Technology Awards for operational innovation,
-                  AI-driven fleet management, and measurable customer impact.
-                </p>
-              </div>
-            </div>
-          </FadeIn>
-        </div>
-      </section>
-
-      {/* ═══════════════════════════════════════════════════════════════════
-          8. CASE STUDIES CAROUSEL + METRIC CALLOUTS
-      ═══════════════════════════════════════════════════════════════════ */}
-      <section id="customers" className="py-24 lg:py-32 bg-gray-50/50">
-        <div className="max-w-7xl mx-auto px-6 lg:px-8">
-          <FadeIn>
-            <div className="text-center max-w-2xl mx-auto mb-12">
-              <p
-                className="text-sm font-semibold uppercase tracking-widest mb-3"
-                style={{ color: landingColors.accent }}
-              >
-                Customer Stories
-              </p>
-              <h2
-                className="text-3xl lg:text-4xl font-bold tracking-tight mb-4"
-                style={{ color: landingColors.ink }}
-              >
-                Proven results across industries
-              </h2>
-            </div>
-          </FadeIn>
-
-          {/* Horizontal scrollable cards */}
-          <FadeIn delay={100}>
-            <div className="flex gap-6 overflow-x-auto pb-4 snap-x snap-mandatory scrollbar-hide -mx-6 px-6">
-              {[
-                {
-                  company: "PetroCorp",
-                  industry: "Fuel Distribution",
-                  title: "How PetroCorp cut fuel costs by 45% in one quarter",
-                  color: landingColors.accent,
-                },
-                {
-                  company: "SwiftFuel",
-                  industry: "Last-Mile Delivery",
-                  title:
-                    "SwiftFuel hit 98% on-time delivery with AI scheduling",
-                  color: landingColors.secondary,
-                },
-                {
-                  company: "RouteMax",
-                  industry: "Cross-Country Logistics",
-                  title: "RouteMax replans 3x faster with autonomous agents",
-                  color: landingColors.info,
-                },
-                {
-                  company: "TankPro",
-                  industry: "Fleet Management",
-                  title: "TankPro gained full visibility across 200+ vehicles",
-                  color: landingColors.success,
-                },
-                {
-                  company: "FuelNet",
-                  industry: "Fuel Distribution",
-                  title:
-                    "FuelNet optimized compartment loading for 52% less waste",
-                  color: landingColors.accent,
-                },
-              ].map((study) => (
-                <div
-                  key={study.company}
-                  className="flex-shrink-0 w-80 snap-start bg-white rounded-2xl border border-gray-100 p-7 hover:shadow-md transition-shadow"
-                >
-                  <div className="flex items-center gap-3 mb-5">
-                    <div
-                      className="w-10 h-10 rounded-full flex items-center justify-center text-white text-xs font-bold"
-                      style={{ backgroundColor: study.color }}
-                    >
-                      {study.company.slice(0, 2)}
-                    </div>
-                    <div>
-                      <p
-                        className="text-sm font-semibold"
-                        style={{ color: landingColors.ink }}
-                      >
-                        {study.company}
-                      </p>
-                      <p className="text-xs text-gray-400">{study.industry}</p>
-                    </div>
-                  </div>
-                  <h3
-                    className="text-sm font-semibold leading-snug mb-5"
-                    style={{ color: landingColors.ink }}
-                  >
-                    {study.title}
-                  </h3>
-                  <a
-                    href="#"
-                    className="text-sm font-medium inline-flex items-center gap-1 transition-colors hover:opacity-80"
-                    style={{ color: study.color }}
-                  >
-                    Read story <ArrowRight className="w-3.5 h-3.5" />
-                  </a>
-                </div>
-              ))}
-            </div>
-          </FadeIn>
-
-          {/* Metric callouts */}
-          <FadeIn delay={200}>
-            <div className="grid sm:grid-cols-3 gap-6 mt-16">
-              {[
-                {
-                  value: 500,
-                  suffix: "+",
-                  label: "Fleets managed",
-                  color: landingColors.accent,
-                },
-                {
-                  value: 200,
-                  suffix: "%",
-                  label: "Boost in efficiency",
-                  color: landingColors.secondary,
-                },
-                {
-                  value: 52,
-                  suffix: "%",
-                  label: "Reduction in fuel waste",
-                  color: landingColors.info,
-                },
-              ].map((m) => (
-                <div key={m.label} className="text-center">
-                  <p
-                    className="text-4xl lg:text-5xl font-bold mb-1"
-                    style={{ color: m.color }}
-                  >
-                    <AnimatedCounter end={m.value} suffix={m.suffix} />
-                  </p>
-                  <p className="text-sm text-gray-500">{m.label}</p>
-                </div>
-              ))}
-            </div>
-          </FadeIn>
-        </div>
-      </section>
-
-      {/* ═══════════════════════════════════════════════════════════════════
-          9. SECURITY SECTION
-      ═══════════════════════════════════════════════════════════════════ */}
-      <section className="py-24 lg:py-32">
-        <div className="max-w-7xl mx-auto px-6 lg:px-8">
-          <FadeIn>
-            <div className="text-center max-w-2xl mx-auto mb-12">
-              <p
-                className="text-sm font-semibold uppercase tracking-widest mb-3"
-                style={{ color: landingColors.info }}
-              >
-                Security
-              </p>
-              <h2
-                className="text-3xl lg:text-4xl font-bold tracking-tight mb-4"
-                style={{ color: landingColors.ink }}
-              >
-                Enterprise-grade security, by default
-              </h2>
-              <p className="text-gray-500 text-lg">
-                Your fleet data is protected by the same standards trusted by
-                Fortune 500 logistics companies.
-              </p>
-            </div>
-          </FadeIn>
-
-          <FadeIn delay={100}>
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
-              {[
-                {
-                  badge: "SOC 2 Type II",
-                  desc: "Audited controls",
-                  icon: Shield,
-                },
-                { badge: "GDPR", desc: "Data privacy by design", icon: Lock },
-                {
-                  badge: "ISO 27001",
-                  desc: "Information security",
-                  icon: Shield,
-                },
-                {
-                  badge: "HIPAA",
-                  desc: "Health data compliance",
-                  icon: CheckCircle,
-                },
-                { badge: "SSO / RBAC", desc: "Access management", icon: Users },
-              ].map((item) => (
-                <div
-                  key={item.badge}
-                  className="bg-white rounded-2xl border border-gray-100 p-6 text-center hover:shadow-lg transition-all"
-                >
-                  <div
-                    className="w-12 h-12 rounded-xl flex items-center justify-center mx-auto mb-3"
-                    style={{ backgroundColor: softColor(landingColors.info) }}
-                  >
-                    <item.icon
-                      className="w-5 h-5"
-                      style={{ color: landingColors.info }}
-                    />
-                  </div>
-                  <p
-                    className="text-sm font-semibold mb-1"
-                    style={{ color: landingColors.ink }}
-                  >
-                    {item.badge}
-                  </p>
-                  <p className="text-xs text-gray-400">{item.desc}</p>
-                </div>
-              ))}
-            </div>
-          </FadeIn>
-        </div>
-      </section>
-
-      {/* ═══════════════════════════════════════════════════════════════════
-          10. AWARDS / RECOGNITION GRID — Marquee
-      ═══════════════════════════════════════════════════════════════════ */}
-      <section className="py-16 bg-gray-50/50 overflow-hidden">
-        <div className="max-w-7xl mx-auto px-6 lg:px-8 mb-8">
-          <p className="text-center text-xs font-medium text-gray-400 uppercase tracking-widest">
-            Awards &amp; Recognition
-          </p>
-        </div>
-        <div className="relative">
-          <div className="flex animate-marquee-left whitespace-nowrap">
-            {[...Array(2)].map((_, setIdx) => (
-              <div key={setIdx} className="flex gap-6 px-3">
-                {[
-                  "Fuel Tech Awards 2024",
-                  "Best Fleet Platform",
-                  "AI Innovation Award",
-                  "Logistics Leader",
-                  "Top 50 Startups",
-                  "Enterprise Ready",
-                  "ISO Certified",
-                  "SOC 2 Verified",
-                  "GDPR Compliant",
-                  "Best UX Design",
-                ].map((award) => (
-                  <div
-                    key={`${setIdx}-${award}`}
-                    className="inline-flex items-center gap-2 px-5 py-2.5 rounded-full border border-gray-200 bg-white"
-                  >
-                    <Target
-                      className="w-3.5 h-3.5"
-                      style={{ color: landingColors.accent }}
-                    />
-                    <span
-                      className="text-xs font-medium whitespace-nowrap"
-                      style={{ color: landingColors.ink }}
-                    >
-                      {award}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      {/* ═══════════════════════════════════════════════════════════════════
-          11. INTEGRATIONS SECTION — Two-row marquee
-      ═══════════════════════════════════════════════════════════════════ */}
-      <section className="py-24 lg:py-32 overflow-hidden">
-        <div className="max-w-7xl mx-auto px-6 lg:px-8">
-          <FadeIn>
-            <div className="text-center max-w-2xl mx-auto mb-12">
-              <p
-                className="text-sm font-semibold uppercase tracking-widest mb-3"
-                style={{ color: landingColors.secondary }}
-              >
-                Integrations
-              </p>
-              <h2
-                className="text-3xl lg:text-4xl font-bold tracking-tight mb-4"
-                style={{ color: landingColors.ink }}
-              >
-                Connect to 50+ tools
-              </h2>
-              <p className="text-gray-500 text-lg">
-                Runsheet fits into your existing stack — not the other way
-                around.
-              </p>
-            </div>
-          </FadeIn>
-        </div>
-
-        {/* Row 1 — scrolls left */}
-        <div className="relative mb-4">
-          <div className="flex animate-marquee-left whitespace-nowrap">
-            {[...Array(2)].map((_, setIdx) => (
-              <div key={setIdx} className="flex gap-3 px-1.5">
-                {[
-                  "SAP ERP",
-                  "Oracle TMS",
-                  "Google Maps",
-                  "Fleetio",
-                  "QuickBooks",
-                  "Xero",
-                  "Slack",
-                  "Microsoft Teams",
-                  "Twilio",
-                  "SendGrid",
-                  "Stripe",
-                  "Square",
-                ].map((tool) => (
-                  <div
-                    key={`${setIdx}-${tool}`}
-                    className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-gray-200 bg-white hover:shadow-sm transition-shadow"
-                  >
-                    <Link2 className="w-3 h-3 text-gray-400" />
-                    <span
-                      className="text-xs font-medium whitespace-nowrap"
-                      style={{ color: landingColors.ink }}
-                    >
-                      {tool}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* Row 2 — scrolls right */}
-        <div className="relative">
-          <div className="flex animate-marquee-right whitespace-nowrap">
-            {[...Array(2)].map((_, setIdx) => (
-              <div key={setIdx} className="flex gap-3 px-1.5">
-                {[
-                  "Salesforce",
-                  "HubSpot",
-                  "Zendesk",
-                  "Jira",
-                  "Power BI",
-                  "Tableau",
-                  "AWS S3",
-                  "Google Cloud",
-                  "MongoDB",
-                  "PostgreSQL",
-                  "Redis",
-                  "Elasticsearch",
-                ].map((tool) => (
-                  <div
-                    key={`${setIdx}-${tool}`}
-                    className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-gray-200 bg-white hover:shadow-sm transition-shadow"
-                  >
-                    <Link2 className="w-3 h-3 text-gray-400" />
-                    <span
-                      className="text-xs font-medium whitespace-nowrap"
-                      style={{ color: landingColors.ink }}
-                    >
-                      {tool}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      {/* ═══════════════════════════════════════════════════════════════════
-          12. FINAL CTA
-      ═══════════════════════════════════════════════════════════════════ */}
-      <section
-        className="py-24 lg:py-32"
-        style={{ backgroundColor: landingColors.ink }}
-      >
-        <div className="max-w-7xl mx-auto px-6 lg:px-8">
-          <FadeIn>
-            <div className="relative text-center">
-              {/* Background accents */}
-              <div
-                className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[300px] rounded-full opacity-10 blur-3xl pointer-events-none"
-                style={{ backgroundColor: landingColors.accent }}
-              />
-
-              <div className="relative">
-                <h2 className="text-3xl lg:text-5xl font-bold text-white tracking-tight mb-4">
-                  Get a personalized demo
-                </h2>
-                <p className="text-white/60 text-lg max-w-xl mx-auto mb-8">
-                  See how Runsheet can transform your fleet operations. Our team
-                  will walk you through the platform with your data.
-                </p>
-                <Link
-                  href="/signin"
-                  className="inline-flex items-center gap-2 px-8 py-4 rounded-full text-white font-semibold transition-all hover:opacity-90 shadow-lg"
-                  style={{ backgroundColor: landingColors.accent }}
-                >
-                  Get a Demo
-                  <ArrowRight className="w-4 h-4" />
-                </Link>
-              </div>
-            </div>
-          </FadeIn>
-        </div>
-      </section>
-
-      {/* ═══════════════════════════════════════════════════════════════════
-          13. ENTERPRISE FOOTER — 5 columns
-      ═══════════════════════════════════════════════════════════════════ */}
-      <footer className="border-t border-gray-100 py-16">
-        <div className="max-w-7xl mx-auto px-6 lg:px-8">
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-10 mb-12">
-            {/* Brand */}
-            <div className="col-span-2 md:col-span-3 lg:col-span-1">
-              <div className="flex items-center gap-2.5 mb-4">
-                <div
-                  className="w-8 h-8 rounded-lg flex items-center justify-center"
-                  style={{ backgroundColor: landingColors.accent }}
-                >
-                  <Truck className="w-4 h-4 text-white" />
-                </div>
-                <span
-                  className="text-lg font-bold"
-                  style={{ color: landingColors.ink }}
-                >
-                  Runsheet
+      {/* FOOTER */}
+      <footer className="border-t border-[#f5f4ef]/10 bg-[#0a0a0b]">
+        <div className="mx-auto max-w-7xl px-6 py-14 lg:px-10">
+          <div className="grid gap-10 md:grid-cols-[1.4fr_1fr_1fr_1fr]">
+            <div>
+              <Link href="/" className="flex items-baseline gap-px">
+                <span className="text-2xl font-black uppercase tracking-tight">
+                  RUN<span className="text-[#16b88c]">/</span>SHEET
                 </span>
-              </div>
-              <p className="text-sm text-gray-400 leading-relaxed">
-                AI-powered fleet management for modern logistics operations.
+              </Link>
+              <p className="mt-4 max-w-xs text-sm leading-relaxed text-[#f5f4ef]/55">
+                Autonomous AI operations for regional fuel distributors —
+                forecast, load, replan, and stay compliant.
               </p>
             </div>
 
-            {/* Platform */}
             <div>
-              <p
-                className="text-xs font-semibold uppercase tracking-widest mb-4"
-                style={{ color: landingColors.ink }}
-              >
+              <h4 className="mb-4 font-mono text-[10px] uppercase tracking-[0.25em] text-[#f5f4ef]/45">
                 Platform
-              </p>
+              </h4>
               <ul className="space-y-2.5">
-                {[
-                  "Fleet Tracking",
-                  "Fuel Management",
-                  "Scheduling",
-                  "Analytics",
-                  "AI Agents",
-                ].map((link) => (
-                  <li key={link}>
+                {NAV_LINKS.map(([label, href]) => (
+                  <li key={label}>
                     <a
-                      href="#"
-                      className="text-sm text-gray-400 hover:text-gray-600 transition-colors"
+                      href={href}
+                      className="text-sm text-[#f5f4ef]/70 transition-colors hover:text-[#f5f4ef]"
                     >
-                      {link}
+                      {label}
                     </a>
                   </li>
                 ))}
               </ul>
             </div>
 
-            {/* Solutions */}
             <div>
-              <p
-                className="text-xs font-semibold uppercase tracking-widest mb-4"
-                style={{ color: landingColors.ink }}
-              >
-                Solutions
-              </p>
+              <h4 className="mb-4 font-mono text-[10px] uppercase tracking-[0.25em] text-[#f5f4ef]/45">
+                Get started
+              </h4>
               <ul className="space-y-2.5">
-                {[
-                  "Fuel Distribution",
-                  "Last-Mile Delivery",
-                  "Cross-Border",
-                  "Fleet Operators",
-                  "Enterprise",
-                ].map((link) => (
-                  <li key={link}>
-                    <a
-                      href="#"
-                      className="text-sm text-gray-400 hover:text-gray-600 transition-colors"
-                    >
-                      {link}
-                    </a>
-                  </li>
-                ))}
+                <li>
+                  <Link
+                    href="/request-pilot"
+                    className="text-sm text-[#f5f4ef]/70 transition-colors hover:text-[#f5f4ef]"
+                  >
+                    Request a Pilot
+                  </Link>
+                </li>
+                <li>
+                  <Link
+                    href="/signin"
+                    className="text-sm text-[#f5f4ef]/70 transition-colors hover:text-[#f5f4ef]"
+                  >
+                    Sign In
+                  </Link>
+                </li>
               </ul>
             </div>
 
-            {/* Resources */}
             <div>
-              <p
-                className="text-xs font-semibold uppercase tracking-widest mb-4"
-                style={{ color: landingColors.ink }}
-              >
-                Resources
-              </p>
+              <h4 className="mb-4 font-mono text-[10px] uppercase tracking-[0.25em] text-[#f5f4ef]/45">
+                Contact
+              </h4>
               <ul className="space-y-2.5">
-                {[
-                  "Documentation",
-                  "API Reference",
-                  "Blog",
-                  "Case Studies",
-                  "Status",
-                ].map((link) => (
-                  <li key={link}>
-                    <a
-                      href="#"
-                      className="text-sm text-gray-400 hover:text-gray-600 transition-colors"
-                    >
-                      {link}
-                    </a>
-                  </li>
-                ))}
-              </ul>
-            </div>
-
-            {/* Company */}
-            <div>
-              <p
-                className="text-xs font-semibold uppercase tracking-widest mb-4"
-                style={{ color: landingColors.ink }}
-              >
-                Company
-              </p>
-              <ul className="space-y-2.5">
-                {["About", "Careers", "Press", "Contact", "Partners"].map(
-                  (link) => (
-                    <li key={link}>
-                      <a
-                        href="#"
-                        className="text-sm text-gray-400 hover:text-gray-600 transition-colors"
-                      >
-                        {link}
-                      </a>
-                    </li>
-                  ),
-                )}
-              </ul>
-            </div>
-
-            {/* Legal */}
-            <div>
-              <p
-                className="text-xs font-semibold uppercase tracking-widest mb-4"
-                style={{ color: landingColors.ink }}
-              >
-                Legal
-              </p>
-              <ul className="space-y-2.5">
-                {[
-                  "Terms of Service",
-                  "Privacy Policy",
-                  "Cookie Policy",
-                  "Security",
-                  "GDPR",
-                ].map((link) => (
-                  <li key={link}>
-                    <a
-                      href="#"
-                      className="text-sm text-gray-400 hover:text-gray-600 transition-colors"
-                    >
-                      {link}
-                    </a>
-                  </li>
-                ))}
+                <li>
+                  <a
+                    href="mailto:hello@runsheet.app"
+                    className="text-sm text-[#f5f4ef]/70 transition-colors hover:text-[#f5f4ef]"
+                  >
+                    hello@runsheet.app
+                  </a>
+                </li>
+                <li className="text-sm text-[#f5f4ef]/55">United States</li>
               </ul>
             </div>
           </div>
 
-          <div className="flex flex-col sm:flex-row items-center justify-between pt-8 border-t border-gray-100 gap-4">
-            <p className="text-xs text-gray-400">
-              © 2025 Runsheet. All rights reserved.
-            </p>
-            <div className="flex items-center gap-6">
-              {["Terms", "Privacy", "Cookies"].map((link) => (
-                <a
-                  key={link}
-                  href="#"
-                  className="text-xs text-gray-400 hover:text-gray-600 transition-colors"
-                >
-                  {link}
-                </a>
-              ))}
-            </div>
+          <div className="mt-12 flex flex-col gap-2 border-t border-[#f5f4ef]/10 pt-6 font-mono text-[10px] uppercase tracking-[0.22em] text-[#f5f4ef]/50 sm:flex-row sm:items-center sm:justify-between">
+            <span>© {new Date().getFullYear()} Runsheet · Beta</span>
+            <span>
+              Fuel Distribution · Runout Prevention · Dispatch Support
+            </span>
           </div>
         </div>
       </footer>
