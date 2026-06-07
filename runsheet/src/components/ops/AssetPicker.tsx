@@ -38,6 +38,8 @@ interface AssetPickerProps {
   readinessByAsset?: Record<string, ReadinessStatus>;
   /** Called with the loaded asset ids whenever the roster (re)loads. */
   onAssetsLoaded?: (assetIds: string[]) => void;
+  /** Show a clear control (used when the picker acts as an optional filter). */
+  allowClear?: boolean;
 }
 
 const READINESS_HINT: Record<ReadinessStatus, string> = {
@@ -56,6 +58,7 @@ export default function AssetPicker({
   "aria-label": ariaLabel = "Asset",
   readinessByAsset,
   onAssetsLoaded,
+  allowClear = false,
 }: AssetPickerProps) {
   const [assets, setAssets] = useState<LoadedAsset[]>([]);
   const [loading, setLoading] = useState(true);
@@ -114,6 +117,7 @@ export default function AssetPicker({
       onChange={onChange}
       loading={loading}
       disabled={disabled}
+      allowClear={allowClear}
       placeholder="— None —"
       searchPlaceholder="Search assets…"
       emptyMessage={

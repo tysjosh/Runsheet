@@ -2,7 +2,14 @@
 
 import type React from "react";
 import { useCallback, useEffect, useState } from "react";
-import { type Column, EntityLink, Table } from "@/components/ui";
+import type { SearchableSelectOption } from "@/components/ui";
+import {
+  type Column,
+  EntityLink,
+  SearchableSelect,
+  Table,
+} from "@/components/ui";
+import { getAccounts } from "../../services/commerceApi";
 import {
   type ContractStatus,
   type ContractType,
@@ -13,6 +20,8 @@ import {
   type UpdatePriceProtectionContractPayload,
   updatePriceProtectionContract,
 } from "../../services/complianceApi";
+import CustomerPicker from "../ops/CustomerPicker";
+import ProductPicker from "../ops/ProductPicker";
 
 // ─── Sub-view types ──────────────────────────────────────────────────────────
 
@@ -518,6 +527,84 @@ export default function PriceProtectionContractsPage() {
 
 // ─── Contract Form Sub-Component ─────────────────────────────────────────────
 
+/**
+ * AccountSelect — searchable account selector scoped to a customer, backed by
+ * /commerce/accounts. Accounts belong to a customer, so the roster is filtered
+ * by the selected customer. Uses the generic SearchableSelect since there is
+ * no dedicated account picker.
+ */
+function AccountSelect({
+  id,
+  customerId,
+  value,
+  onChange,
+}: {
+  id?: string;
+  customerId: string;
+  value: string | null;
+  onChange: (accountId: string) => void;
+}) {
+  const [options, setOptions] = useState<SearchableSelectOption[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState(false);
+
+  useEffect(() => {
+    if (!customerId) {
+      setOptions([]);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      setLoadError(false);
+      try {
+        const res = await getAccounts({
+          customer_id: customerId,
+          status: "active",
+          limit: 200,
+        });
+        if (cancelled) return;
+        setOptions(
+          res.data.map((a) => ({
+            value: a.account_id,
+            label: a.display_name,
+            sublabel: a.account_id,
+          })),
+        );
+      } catch {
+        if (!cancelled) setLoadError(true);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [customerId]);
+
+  const mergedOptions =
+    value && !options.some((o) => o.value === value)
+      ? [{ value, label: value }, ...options]
+      : options;
+
+  return (
+    <SearchableSelect
+      id={id}
+      aria-label="Account ID"
+      options={mergedOptions}
+      value={value}
+      onChange={onChange}
+      loading={loading}
+      disabled={!customerId}
+      placeholder={
+        customerId ? "Select an account…" : "Select a customer first"
+      }
+      searchPlaceholder="Search accounts…"
+      emptyMessage={loadError ? "Couldn't load accounts" : "No accounts found"}
+    />
+  );
+}
+
 interface ContractFormProps {
   initialData: PriceProtectionContract | null;
   onSubmit: (
@@ -562,6 +649,7 @@ function ContractForm({
   const [status, setStatus] = useState<ContractStatus>(
     initialData?.status ?? "active",
   );
+  const [validationError, setValidationError] = useState<string | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -576,6 +664,13 @@ function ContractForm({
       };
       await onSubmit(data);
     } else {
+      // Customer, account, and product are required on create (previously
+      // enforced by native inputs now replaced with pickers).
+      if (!customerId || !accountId || !productCode) {
+        setValidationError("Customer, account, and product code are required");
+        return;
+      }
+      setValidationError(null);
       const data: CreatePriceProtectionContractPayload = {
         customer_id: customerId,
         account_id: accountId,
@@ -601,6 +696,15 @@ function ContractForm({
         {isEdit ? "Edit Contract" : "Add New Contract"}
       </h2>
 
+      {validationError && (
+        <div
+          role="alert"
+          className="bg-error-light border border-error-light text-error-dark p-3 rounded mb-4 text-sm"
+        >
+          {validationError}
+        </div>
+      )}
+
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {/* Customer ID — only on create */}
         {!isEdit && (
@@ -611,13 +715,16 @@ function ContractForm({
             >
               Customer ID
             </label>
-            <input
+            <CustomerPicker
               id="customer-id"
-              type="text"
-              required
-              value={customerId}
-              onChange={(e) => setCustomerId(e.target.value)}
-              className="w-full border rounded px-3 py-2"
+              aria-label="Customer ID"
+              value={customerId || null}
+              onChange={(value) => {
+                setCustomerId(value);
+                // Account is scoped to the customer; clear it on change.
+                setAccountId("");
+              }}
+              allowClear
             />
           </div>
         )}
@@ -631,13 +738,11 @@ function ContractForm({
             >
               Account ID
             </label>
-            <input
+            <AccountSelect
               id="account-id"
-              type="text"
-              required
-              value={accountId}
-              onChange={(e) => setAccountId(e.target.value)}
-              className="w-full border rounded px-3 py-2"
+              customerId={customerId}
+              value={accountId || null}
+              onChange={setAccountId}
             />
           </div>
         )}
@@ -651,14 +756,12 @@ function ContractForm({
             >
               Product Code
             </label>
-            <input
+            <ProductPicker
               id="product-code"
-              type="text"
-              required
-              value={productCode}
-              onChange={(e) => setProductCode(e.target.value)}
-              className="w-full border rounded px-3 py-2"
-              placeholder="e.g. HEATING_OIL"
+              aria-label="Product Code"
+              value={productCode || null}
+              onChange={setProductCode}
+              allowClear
             />
           </div>
         )}

@@ -9,6 +9,7 @@ import {
   getTaxExemptions,
   type TaxExemption,
 } from "../../services/complianceApi";
+import CustomerPicker from "../ops/CustomerPicker";
 
 // ─── Sub-view types ──────────────────────────────────────────────────────────
 
@@ -339,9 +340,15 @@ function ExemptionForm({ onSubmit, onCancel, loading }: ExemptionFormProps) {
   const [exemptionType, setExemptionType] = useState("");
   const [certificateNumber, setCertificateNumber] = useState("");
   const [expiryDate, setExpiryDate] = useState("");
+  // The customer picker isn't a native input, so enforce "required" here.
+  const [customerError, setCustomerError] = useState<string | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!customerId) {
+      setCustomerError("Customer ID is required.");
+      return;
+    }
     const data: CreateTaxExemptionPayload = {
       customer_id: customerId,
       exemption_type: exemptionType,
@@ -366,15 +373,18 @@ function ExemptionForm({ onSubmit, onCancel, loading }: ExemptionFormProps) {
           >
             Customer ID
           </label>
-          <input
+          <CustomerPicker
             id="customer-id"
-            type="text"
-            required
-            value={customerId}
-            onChange={(e) => setCustomerId(e.target.value)}
-            className="w-full border rounded px-3 py-2"
-            placeholder="e.g. CUST-001"
+            aria-label="Customer ID"
+            value={customerId || null}
+            onChange={(value) => {
+              setCustomerId(value);
+              setCustomerError(null);
+            }}
           />
+          {customerError && (
+            <p className="text-xs text-error mt-1">{customerError}</p>
+          )}
         </div>
         <div>
           <label

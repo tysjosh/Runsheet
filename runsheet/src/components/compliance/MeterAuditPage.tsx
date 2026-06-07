@@ -11,6 +11,7 @@ import {
   type MeterAuditEntry,
   type MeterRegistration,
 } from "../../services/complianceApi";
+import AssetPicker from "../ops/AssetPicker";
 
 // ─── Sub-view types ──────────────────────────────────────────────────────────
 
@@ -268,17 +269,20 @@ export default function MeterAuditPage() {
             >
               Truck ID
             </label>
-            <input
-              id="truck-id-filter"
-              type="text"
-              value={truckIdFilter}
-              onChange={(e) => {
-                setTruckIdFilter(e.target.value);
-                setPage(1);
-              }}
-              className="border rounded px-3 py-2 w-48"
-              placeholder="Filter by truck..."
-            />
+            {/* Filter by a real fleet vehicle; blank (cleared) = all trucks. */}
+            <div className="w-48">
+              <AssetPicker
+                id="truck-id-filter"
+                assetType="vehicle"
+                aria-label="Truck ID"
+                value={truckIdFilter || null}
+                onChange={(value) => {
+                  setTruckIdFilter(value);
+                  setPage(1);
+                }}
+                allowClear
+              />
+            </div>
           </div>
         </div>
 
@@ -550,9 +554,17 @@ function RegisterMeterForm({
   const [calibrationDate, setCalibrationDate] = useState("");
   const [calibrationExpiryDate, setCalibrationExpiryDate] = useState("");
   const [weightsMeasuresAuthority, setWeightsMeasuresAuthority] = useState("");
+  // The truck picker isn't a native input, so its "required" rule is enforced
+  // here rather than via the browser's constraint validation.
+  const [truckError, setTruckError] = useState<string | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+
+    if (!truckId) {
+      setTruckError("Truck ID is required.");
+      return;
+    }
 
     const data: CreateMeterPayload = {
       meter_number: meterNumber,
@@ -601,15 +613,19 @@ function RegisterMeterForm({
           >
             Truck ID
           </label>
-          <input
+          <AssetPicker
             id="meter-truck-id"
-            type="text"
-            required
-            value={truckId}
-            onChange={(e) => setTruckId(e.target.value)}
-            className="w-full border rounded px-3 py-2"
-            placeholder="e.g. TRK-101"
+            assetType="vehicle"
+            aria-label="Truck ID"
+            value={truckId || null}
+            onChange={(value) => {
+              setTruckId(value);
+              setTruckError(null);
+            }}
           />
+          {truckError && (
+            <p className="text-xs text-error mt-1">{truckError}</p>
+          )}
         </div>
 
         {/* Calibration Certificate Number */}

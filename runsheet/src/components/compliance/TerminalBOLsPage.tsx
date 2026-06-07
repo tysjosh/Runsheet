@@ -9,6 +9,8 @@ import {
   type TerminalBOLStatus,
   uploadTerminalBOL,
 } from "../../services/complianceApi";
+import DriverPicker from "../ops/DriverPicker";
+import ProductPicker from "../ops/ProductPicker";
 
 // ─── View modes ──────────────────────────────────────────────────────────────
 
@@ -242,17 +244,20 @@ export default function TerminalBOLsPage() {
             >
               Product Code
             </label>
-            <input
-              id="product-code-filter"
-              type="text"
-              value={productCodeFilter}
-              onChange={(e) => {
-                setProductCodeFilter(e.target.value);
-                setPage(1);
-              }}
-              className="border rounded px-3 py-2 w-48"
-              placeholder="Filter by product..."
-            />
+            {/* Filter by a real fuel product; cleared = all products. */}
+            <div className="w-48">
+              <ProductPicker
+                id="product-code-filter"
+                aria-label="Product Code"
+                value={productCodeFilter || null}
+                onChange={(value) => {
+                  setProductCodeFilter(value);
+                  setPage(1);
+                }}
+                placeholder="All products"
+                allowClear
+              />
+            </div>
           </div>
           <div>
             <label
@@ -261,17 +266,20 @@ export default function TerminalBOLsPage() {
             >
               Driver ID
             </label>
-            <input
-              id="driver-id-filter"
-              type="text"
-              value={driverIdFilter}
-              onChange={(e) => {
-                setDriverIdFilter(e.target.value);
-                setPage(1);
-              }}
-              className="border rounded px-3 py-2 w-48"
-              placeholder="Filter by driver..."
-            />
+            {/* Filter by a real driver; cleared = all drivers. */}
+            <div className="w-48">
+              <DriverPicker
+                id="driver-id-filter"
+                aria-label="Driver ID"
+                value={driverIdFilter || null}
+                onChange={(value) => {
+                  setDriverIdFilter(value);
+                  setPage(1);
+                }}
+                placeholder="All drivers"
+                allowClear
+              />
+            </div>
           </div>
         </div>
 

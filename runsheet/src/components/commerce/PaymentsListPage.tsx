@@ -7,13 +7,86 @@ import {
   EmptyState,
   FilterBar,
   PageHeader,
+  SearchableSelect,
+  type SearchableSelectOption,
   Table,
 } from "@/components/ui";
 import type {
   CursorPaginatedResponse,
   Payment,
 } from "../../services/commerceApi";
-import { getPayments, type PaymentFilters } from "../../services/commerceApi";
+import {
+  getAccounts,
+  getPayments,
+  type PaymentFilters,
+} from "../../services/commerceApi";
+
+/**
+ * AccountFilterSelect — searchable account selector backed by /commerce/accounts.
+ *
+ * Accounts are a distinct entity from customers, so this uses the generic
+ * SearchableSelect with the live account roster rather than CustomerPicker.
+ */
+function AccountFilterSelect({
+  id,
+  value,
+  onChange,
+}: {
+  id?: string;
+  value: string | null;
+  onChange: (accountId: string) => void;
+}) {
+  const [options, setOptions] = useState<SearchableSelectOption[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      setLoadError(false);
+      try {
+        const res = await getAccounts({ status: "active", limit: 200 });
+        if (cancelled) return;
+        setOptions(
+          res.data.map((a) => ({
+            value: a.account_id,
+            label: a.display_name,
+            sublabel: a.account_id,
+          })),
+        );
+      } catch {
+        if (!cancelled) setLoadError(true);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Keep an already-selected account visible even if not in the loaded set.
+  const mergedOptions =
+    value && !options.some((o) => o.value === value)
+      ? [{ value, label: value }, ...options]
+      : options;
+
+  return (
+    <SearchableSelect
+      id={id}
+      aria-label="Account"
+      options={mergedOptions}
+      value={value}
+      onChange={onChange}
+      loading={loading}
+      allowClear
+      placeholder="All accounts"
+      searchPlaceholder="Search accounts…"
+      emptyMessage={loadError ? "Couldn't load accounts" : "No accounts found"}
+    />
+  );
+}
 
 export default function PaymentsListPage() {
   const [payments, setPayments] = useState<Payment[]>([]);
@@ -108,25 +181,40 @@ export default function PaymentsListPage() {
       />
 
       <FilterBar
-        searchPlaceholder="Search by invoice or account ID..."
-        onSearchChange={(value) => {
-          // Simple heuristic: if it looks like an invoice ID, filter by invoice
-          // Otherwise filter by account
-          if (value.toLowerCase().includes("inv")) {
-            setInvoiceFilter(value);
-            setAccountFilter("");
-          } else if (value.toLowerCase().includes("acc")) {
-            setAccountFilter(value);
-            setInvoiceFilter("");
-          } else if (value) {
-            setInvoiceFilter(value);
-            setAccountFilter("");
-          } else {
-            setInvoiceFilter("");
-            setAccountFilter("");
-          }
-        }}
-        filters={null}
+        filters={
+          <>
+            <div className="min-w-[220px]">
+              <label
+                htmlFor="payments-account-filter"
+                className="block text-xs text-gray-600 mb-1"
+              >
+                Account
+              </label>
+              <AccountFilterSelect
+                id="payments-account-filter"
+                value={accountFilter || null}
+                onChange={(value) => setAccountFilter(value)}
+              />
+            </div>
+            <div>
+              <label
+                htmlFor="payments-invoice-filter"
+                className="block text-xs text-gray-600 mb-1"
+              >
+                Invoice ID
+              </label>
+              <input
+                id="payments-invoice-filter"
+                type="text"
+                aria-label="Invoice ID"
+                value={invoiceFilter}
+                onChange={(e) => setInvoiceFilter(e.target.value)}
+                placeholder="inv_..."
+                className="px-4 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 focus:outline-none min-w-[200px]"
+              />
+            </div>
+          </>
+        }
       />
 
       {/* Error state */}

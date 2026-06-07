@@ -14,6 +14,7 @@ import type {
   Invoice,
 } from "../../services/commerceApi";
 import { getInvoices, type InvoiceFilters } from "../../services/commerceApi";
+import CustomerPicker from "../ops/CustomerPicker";
 
 interface InvoicesListPageProps {
   onSelectInvoice?: (invoiceId: string) => void;
@@ -28,7 +29,7 @@ export default function InvoicesListPage({
   const [cursor, setCursor] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const [statusFilter, setStatusFilter] = useState<string>("");
-  const [customerFilter, _setCustomerFilter] = useState<string>("");
+  const [customerFilter, setCustomerFilter] = useState<string>("");
 
   const fetchInvoices = useCallback(
     async (nextCursor?: string | null) => {
@@ -102,23 +103,37 @@ export default function InvoicesListPage({
 
       <FilterBar
         filters={
-          <select
-            value={statusFilter}
-            onChange={(e) => {
-              setStatusFilter(e.target.value);
-              fetchInvoices();
-            }}
-            className="px-4 py-3 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-gray-200 focus:border-gray-300 focus:outline-none bg-white min-w-[140px]"
-            aria-label="Status"
-          >
-            <option value="">All</option>
-            <option value="draft">Draft</option>
-            <option value="open">Open</option>
-            <option value="partial">Partial</option>
-            <option value="paid">Paid</option>
-            <option value="overdue">Overdue</option>
-            <option value="void">Void</option>
-          </select>
+          <>
+            <select
+              value={statusFilter}
+              onChange={(e) => {
+                setStatusFilter(e.target.value);
+                fetchInvoices();
+              }}
+              className="px-4 py-3 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-gray-200 focus:border-gray-300 focus:outline-none bg-white min-w-[140px]"
+              aria-label="Status"
+            >
+              <option value="">All</option>
+              <option value="draft">Draft</option>
+              <option value="open">Open</option>
+              <option value="partial">Partial</option>
+              <option value="paid">Paid</option>
+              <option value="overdue">Overdue</option>
+              <option value="void">Void</option>
+            </select>
+            <div className="min-w-[220px]">
+              <CustomerPicker
+                aria-label="Customer"
+                value={customerFilter || null}
+                onChange={(value) => {
+                  setCustomerFilter(value);
+                  fetchInvoices();
+                }}
+                allowClear
+                placeholder="All customers"
+              />
+            </div>
+          </>
         }
       />
 

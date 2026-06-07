@@ -22,6 +22,14 @@ jest.mock("../../services/ordersApi", () => ({
   createOrder: jest.fn(),
 }));
 
+jest.mock("../../services/commerceApi", () => ({
+  getCustomers: jest.fn(),
+}));
+
+jest.mock("../../services/fuelApi", () => ({
+  listFuelProducts: jest.fn(),
+}));
+
 jest.mock("../../services/api", () => ({
   ApiError: class ApiError extends Error {
     status: number;
@@ -35,6 +43,8 @@ jest.mock("../../services/api", () => ({
   ApiTimeoutError: class extends Error {},
 }));
 
+import { getCustomers } from "../../services/commerceApi";
+import { listFuelProducts } from "../../services/fuelApi";
 import { createOrder } from "../../services/ordersApi";
 import CreateOrderModal, {
   type CreateOrderFormValues,
@@ -42,6 +52,29 @@ import CreateOrderModal, {
 } from "./CreateOrderModal";
 
 const mockCreateOrder = createOrder as jest.MockedFunction<typeof createOrder>;
+const mockGetCustomers = getCustomers as jest.MockedFunction<
+  typeof getCustomers
+>;
+const mockListFuelProducts = listFuelProducts as jest.MockedFunction<
+  typeof listFuelProducts
+>;
+
+// ─── Picker helper ───────────────────────────────────────────────────────────
+
+/**
+ * Drive a SearchableSelect-backed picker: open it by its trigger button's
+ * accessible name, then click the option whose label matches `optionName`.
+ * Options load asynchronously on mount, so `findByRole` polls until ready.
+ */
+async function pickOption(triggerName: string, optionName: RegExp) {
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: triggerName }));
+  });
+  const option = await screen.findByRole("option", { name: optionName });
+  await act(async () => {
+    fireEvent.click(option);
+  });
+}
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -71,6 +104,35 @@ function validForm(
 
 beforeEach(() => {
   mockCreateOrder.mockReset();
+  mockGetCustomers.mockReset();
+  mockListFuelProducts.mockReset();
+
+  // Roster backing CustomerPicker — includes the id the tests select.
+  mockGetCustomers.mockResolvedValue({
+    data: [
+      {
+        customer_id: "CUST-001",
+        display_name: "Acme Fuel",
+        status: "active",
+      } as never,
+    ],
+    cursor: null,
+    has_more: false,
+    request_id: "req-customers",
+  });
+
+  // Catalog backing ProductPicker — includes the code the tests select.
+  mockListFuelProducts.mockResolvedValue({
+    region: "US",
+    items: [
+      {
+        product_code: "DIESEL_2",
+        display_name: "Diesel #2",
+        category: "diesel",
+      } as never,
+    ],
+    total: 1,
+  });
 });
 
 // ─── Pure validation tests ───────────────────────────────────────────────────
@@ -221,10 +283,12 @@ describe("CreateOrderModal — submission", () => {
     const getInput = (id: string) =>
       document.getElementById(id) as HTMLInputElement;
 
+    // Customer ID and Product Code are now searchable pickers — select rather
+    // than type. The picker returns the underlying id/code as the value.
+    await pickOption("Customer ID", /Acme Fuel/);
+    await pickOption("Product Code", /Diesel #2/);
+
     await act(async () => {
-      fireEvent.change(getInput("co-customer-id"), {
-        target: { value: "CUST-001" },
-      });
       fireEvent.change(getInput("co-customer-name"), {
         target: { value: "Acme" },
       });
@@ -233,9 +297,6 @@ describe("CreateOrderModal — submission", () => {
       });
       fireEvent.change(getInput("co-lat"), { target: { value: "40.7" } });
       fireEvent.change(getInput("co-lon"), { target: { value: "-74.0" } });
-      fireEvent.change(getInput("co-product"), {
-        target: { value: "DIESEL_2" },
-      });
       fireEvent.change(getInput("co-gallons"), { target: { value: "500" } });
       fireEvent.change(getInput("co-window-start"), {
         target: { value: "2024-06-01T08:00" },
@@ -269,10 +330,10 @@ describe("CreateOrderModal — submission", () => {
     const getInput = (id: string) =>
       document.getElementById(id) as HTMLInputElement;
 
+    await pickOption("Customer ID", /Acme Fuel/);
+    await pickOption("Product Code", /Diesel #2/);
+
     await act(async () => {
-      fireEvent.change(getInput("co-customer-id"), {
-        target: { value: "CUST-001" },
-      });
       fireEvent.change(getInput("co-customer-name"), {
         target: { value: "Acme" },
       });
@@ -281,9 +342,6 @@ describe("CreateOrderModal — submission", () => {
       });
       fireEvent.change(getInput("co-lat"), { target: { value: "40.7" } });
       fireEvent.change(getInput("co-lon"), { target: { value: "-74.0" } });
-      fireEvent.change(getInput("co-product"), {
-        target: { value: "DIESEL_2" },
-      });
       fireEvent.change(getInput("co-gallons"), { target: { value: "500" } });
       fireEvent.change(getInput("co-window-start"), {
         target: { value: "2024-06-01T08:00" },

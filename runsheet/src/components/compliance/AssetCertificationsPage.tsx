@@ -22,6 +22,7 @@ import {
   getAssetCertifications,
   getAssetCertificationsDashboard,
 } from "../../services/complianceApi";
+import AssetPicker from "../ops/AssetPicker";
 
 // ─── Sub-view types ──────────────────────────────────────────────────────────
 
@@ -600,9 +601,15 @@ function CertificationForm({
   const [expiryDate, setExpiryDate] = useState("");
   const [inspectorName, setInspectorName] = useState("");
   const [certificateNumber, setCertificateNumber] = useState("");
+  // The asset picker isn't a native input, so enforce its "required" rule here.
+  const [assetError, setAssetError] = useState<string | null>(null);
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
+    if (!assetId) {
+      setAssetError("Asset ID is required.");
+      return;
+    }
     const data: CreateAssetCertificationPayload = {
       asset_id: assetId,
       certification_type: certificationType,
@@ -626,15 +633,22 @@ function CertificationForm({
           <label htmlFor="asset-id" className="block text-sm font-medium mb-1">
             Asset ID
           </label>
-          <input
+          {/* Cargo-tank trucks are fleet vehicles, so the roster is filtered to
+              vehicle assets (the live equivalent of the former TRUCK-001 text
+              entry). */}
+          <AssetPicker
             id="asset-id"
-            type="text"
-            required
-            value={assetId}
-            onChange={(e) => setAssetId(e.target.value)}
-            className="w-full border rounded px-3 py-2"
-            placeholder="e.g., TRUCK-001"
+            assetType="vehicle"
+            aria-label="Asset ID"
+            value={assetId || null}
+            onChange={(value) => {
+              setAssetId(value);
+              setAssetError(null);
+            }}
           />
+          {assetError && (
+            <p className="text-xs text-error mt-1">{assetError}</p>
+          )}
         </div>
         <div>
           <label htmlFor="cert-type" className="block text-sm font-medium mb-1">

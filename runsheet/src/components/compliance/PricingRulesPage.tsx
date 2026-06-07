@@ -14,6 +14,8 @@ import {
   resolvePrice,
   type TierBreak,
 } from "../../services/complianceApi";
+import CustomerPicker from "../ops/CustomerPicker";
+import ProductPicker from "../ops/ProductPicker";
 
 // ─── Sub-view types ──────────────────────────────────────────────────────────
 
@@ -383,6 +385,7 @@ function PricingRuleForm({
   const [priority, setPriority] = useState<string>("10");
   const [effectiveDate, setEffectiveDate] = useState("");
   const [expiryDate, setExpiryDate] = useState("");
+  const [validationError, setValidationError] = useState<string | null>(null);
 
   // Strategy-specific fields
   const [postedPriceCents, setPostedPriceCents] = useState<string>("");
@@ -429,6 +432,13 @@ function PricingRuleForm({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
+    // Product code is required (previously enforced by the native input).
+    if (!productCode) {
+      setValidationError("Product code is required");
+      return;
+    }
+    setValidationError(null);
+
     const data: CreatePricingRulePayload = {
       customer_id: customerId || null,
       product_code: productCode,
@@ -469,6 +479,15 @@ function PricingRuleForm({
     >
       <h2 className="text-lg font-bold mb-4">Add New Pricing Rule</h2>
 
+      {validationError && (
+        <div
+          role="alert"
+          className="bg-error-light border border-error-light text-error-dark p-3 rounded mb-4 text-sm"
+        >
+          {validationError}
+        </div>
+      )}
+
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {/* Customer ID (optional) */}
         <div>
@@ -478,12 +497,12 @@ function PricingRuleForm({
           >
             Customer ID (optional)
           </label>
-          <input
+          <CustomerPicker
             id="rule-customer-id"
-            type="text"
-            value={customerId}
-            onChange={(e) => setCustomerId(e.target.value)}
-            className="w-full border rounded px-3 py-2"
+            aria-label="Customer ID (optional)"
+            value={customerId || null}
+            onChange={setCustomerId}
+            allowClear
             placeholder="Leave blank for product default"
           />
         </div>
@@ -496,14 +515,12 @@ function PricingRuleForm({
           >
             Product Code
           </label>
-          <input
+          <ProductPicker
             id="rule-product-code"
-            type="text"
-            required
-            value={productCode}
-            onChange={(e) => setProductCode(e.target.value)}
-            className="w-full border rounded px-3 py-2"
-            placeholder="e.g. ULSD, UNL87"
+            aria-label="Product Code"
+            value={productCode || null}
+            onChange={setProductCode}
+            allowClear
           />
         </div>
 
@@ -793,6 +810,12 @@ function ResolvePricePanel() {
     setResult(null);
     setResolveError(null);
 
+    if (!customerId || !productCode) {
+      setResolving(false);
+      setResolveError("Customer and product code are required");
+      return;
+    }
+
     try {
       const payload: ResolvePricePayload = {
         customer_id: customerId,
@@ -833,14 +856,12 @@ function ResolvePricePanel() {
             >
               Customer ID
             </label>
-            <input
+            <CustomerPicker
               id="resolve-customer-id"
-              type="text"
-              required
-              value={customerId}
-              onChange={(e) => setCustomerId(e.target.value)}
-              className="w-full border rounded px-3 py-2"
-              placeholder="CUST-001"
+              aria-label="Customer ID"
+              value={customerId || null}
+              onChange={setCustomerId}
+              allowClear
             />
           </div>
           <div>
@@ -850,14 +871,12 @@ function ResolvePricePanel() {
             >
               Product Code
             </label>
-            <input
+            <ProductPicker
               id="resolve-product-code"
-              type="text"
-              required
-              value={productCode}
-              onChange={(e) => setProductCode(e.target.value)}
-              className="w-full border rounded px-3 py-2"
-              placeholder="ULSD"
+              aria-label="Product Code"
+              value={productCode || null}
+              onChange={setProductCode}
+              allowClear
             />
           </div>
           <div>

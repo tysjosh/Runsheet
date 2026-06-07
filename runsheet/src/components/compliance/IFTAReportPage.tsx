@@ -12,6 +12,7 @@ import {
   type IFTAReportFilters,
   type IFTATruckSummary,
 } from "../../services/complianceApi";
+import AssetPicker from "../ops/AssetPicker";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -473,15 +474,14 @@ export default function IFTAReportPage() {
               >
                 Truck ID
               </label>
-              <input
+              <AssetPicker
                 id="adj-truck-id"
-                type="text"
-                value={adjustmentForm.truck_id}
-                onChange={(e) =>
-                  handleAdjustmentFieldChange("truck_id", e.target.value)
+                assetType="vehicle"
+                aria-label="Truck ID"
+                value={adjustmentForm.truck_id || null}
+                onChange={(value) =>
+                  handleAdjustmentFieldChange("truck_id", value)
                 }
-                placeholder="e.g. truck_001"
-                className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
               />
             </div>
             <div>

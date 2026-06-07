@@ -19,6 +19,15 @@ jest.mock("../../services/complianceApi", () => {
   };
 });
 
+// The manual-adjustment form's Truck ID is an AssetPicker backed by
+// apiService.getAssets, which it calls on mount — stub it so the page renders
+// without hitting the network.
+jest.mock("../../services/api", () => ({
+  apiService: {
+    getAssets: jest.fn().mockResolvedValue({ data: [], request_id: "assets" }),
+  },
+}));
+
 import type { IFTAReport } from "../../services/complianceApi";
 import { getIFTAReport } from "../../services/complianceApi";
 import IFTAReportPage from "./IFTAReportPage";

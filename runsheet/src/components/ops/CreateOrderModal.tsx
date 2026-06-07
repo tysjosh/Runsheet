@@ -19,6 +19,8 @@ import {
   type CreateOrderPayload,
   createOrder,
 } from "../../services/ordersApi";
+import CustomerPicker from "./CustomerPicker";
+import ProductPicker from "./ProductPicker";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -296,12 +298,12 @@ export default function CreateOrderModal({
                 >
                   Customer ID *
                 </label>
-                <input
+                <CustomerPicker
                   id="co-customer-id"
-                  type="text"
-                  value={form.customer_id}
-                  onChange={(e) => handleChange("customer_id", e.target.value)}
-                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-primary focus:outline-none"
+                  aria-label="Customer ID"
+                  value={form.customer_id || null}
+                  onChange={(value) => handleChange("customer_id", value)}
+                  allowClear
                 />
                 {errors.customer_id && (
                   <p className="text-xs text-error mt-1">
@@ -471,12 +473,12 @@ export default function CreateOrderModal({
                 >
                   Product Code *
                 </label>
-                <input
+                <ProductPicker
                   id="co-product"
-                  type="text"
-                  value={form.product_code}
-                  onChange={(e) => handleChange("product_code", e.target.value)}
-                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-primary focus:outline-none"
+                  aria-label="Product Code"
+                  value={form.product_code || null}
+                  onChange={(value) => handleChange("product_code", value)}
+                  allowClear
                 />
                 {errors.product_code && (
                   <p className="text-xs text-error mt-1">
