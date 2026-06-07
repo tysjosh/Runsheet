@@ -1,6 +1,17 @@
 """
 Shared pytest fixtures and configuration for all tests.
 """
+# Register the real Elasticsearch service module before any test module is
+# collected. Many test files call
+# ``sys.modules.setdefault("services.elasticsearch_service", MagicMock())`` at
+# import time; whichever was collected first poisoned the shared module slot
+# for the whole session, so later production modules importing the real class
+# bound a MagicMock and their tests failed in-suite (but passed in isolation).
+# Importing the real module here makes those ``setdefault`` calls no-ops.
+# ``ElasticsearchService.connect()`` short-circuits under ENVIRONMENT=test, so
+# this performs no network I/O.
+import services.elasticsearch_service  # noqa: F401,E402
+
 import pytest
 import asyncio
 from typing import Generator, AsyncGenerator
