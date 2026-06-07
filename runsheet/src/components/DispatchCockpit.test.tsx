@@ -97,11 +97,12 @@ const mockUseOrdersWebSocket = useOrdersWebSocket as jest.MockedFunction<
 const mockUseSchedulingWebSocket =
   useSchedulingWebSocket as jest.MockedFunction<typeof useSchedulingWebSocket>;
 
-function paginated<T>(data: T[]) {
+function paginated<T>(items: T[]) {
   return {
-    data,
-    pagination: { page: 1, size: 6, total: data.length, total_pages: 1 },
-    request_id: "r1",
+    items,
+    total: items.length,
+    page: 1,
+    size: 6,
   } as unknown as Awaited<ReturnType<typeof listOrders>>;
 }
 
@@ -217,11 +218,11 @@ it("renders empty states and stays usable when a source fails", async () => {
   expect(screen.getByText("All stations healthy")).toBeInTheDocument();
 });
 
-it("tolerates a null data payload without crashing", async () => {
-  // Real backends occasionally return `data: null`; the cockpit must not
+it("tolerates a null list payload without crashing", async () => {
+  // Real backends occasionally return `items: null`; the cockpit must not
   // try to spread it (regression: "placed is not iterable").
   mockListOrders.mockResolvedValue({
-    data: null,
+    items: null,
   } as unknown as Awaited<ReturnType<typeof listOrders>>);
 
   render(<DispatchCockpit />);
@@ -248,8 +249,8 @@ it("assigns a driver inline and removes the order from the list", async () => {
     ),
   );
   mockAssignDriver.mockResolvedValue({
-    data: { order_id: "ord_1", status: "scheduled" },
-    request_id: "r1",
+    order_id: "ord_1",
+    status: "scheduled",
   } as unknown as Awaited<ReturnType<typeof assignDriver>>);
 
   render(<DispatchCockpit />);
@@ -289,8 +290,8 @@ it("releases a hold inline", async () => {
     ),
   );
   mockReleaseHold.mockResolvedValue({
-    data: { order_id: "ord_h", status: "placed" },
-    request_id: "r1",
+    order_id: "ord_h",
+    status: "placed",
   } as unknown as Awaited<ReturnType<typeof releaseHoldOrder>>);
 
   render(<DispatchCockpit />);

@@ -228,7 +228,7 @@ export default function CreateOrderModal({
 
         const response = await createOrder(payload);
         setForm(INITIAL_FORM);
-        onSuccess?.(response.data.order_id);
+        if (response.order_id) onSuccess?.(response.order_id);
         onClose();
       } catch (err) {
         if (err instanceof ApiError) {

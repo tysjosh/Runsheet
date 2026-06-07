@@ -11,16 +11,7 @@
  */
 
 import { ApiError, ApiTimeoutError, fetchWithSession } from "./api";
-import {
-  buildQueryString,
-  fetchWithTimeout,
-  type PaginatedResponse,
-} from "./utils";
-
-// Re-export the shared pagination/response envelope types so existing
-// downstream imports (e.g. OrdersPage) keep resolving them from this module
-// (Req 2.4/4.3).
-export type { PaginatedResponse, PaginationMeta } from "./utils";
+import { buildQueryString, fetchWithTimeout } from "./utils";
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -206,7 +197,6 @@ export interface UpdateOrderStatusPayload {
 
 export interface AssignDriverPayload {
   driver_id: string;
-  run_id?: string;
 }
 
 export interface CancelOrderPayload {
@@ -223,14 +213,41 @@ export interface ReleaseHoldPayload {
 
 // ─── Response Types ──────────────────────────────────────────────────────────
 
-export interface OrderResponse {
-  data: FuelOrder;
-  request_id: string;
+/**
+ * Response for ``GET /api/orders`` — the order endpoints return a bare
+ * ``{ items, total, page, size }`` envelope (see ``OrderListResponse`` in
+ * :mod:`Runsheet-backend/fuel/api/order_endpoints.py`), NOT the
+ * ``{ data, pagination, request_id }`` shape used by the other list surfaces.
+ * The backend model declares ``extra="forbid"``, so no additional keys are
+ * emitted.
+ */
+export interface OrderListResponse {
+  items: FuelOrder[];
+  total: number;
+  page: number;
+  size: number;
 }
 
-export interface OrderEventsResponse {
-  data: FuelOrderEvent[];
-  request_id: string;
+/**
+ * Response for ``GET /api/orders/{order_id}/events`` — a bare
+ * ``{ items, total }`` envelope (``OrderEventsListResponse`` server-side),
+ * with no ``data``/``request_id`` wrapper.
+ */
+export interface OrderEventsListResponse {
+  items: FuelOrderEvent[];
+  total: number;
+}
+
+/**
+ * Response for ``POST /api/orders`` — the create endpoint runs the intake
+ * pipeline and returns an intake result (``IntakeResultResponse`` server-side),
+ * NOT a full order. ``order_id`` is present once the order is materialized;
+ * ``status`` is the pipeline outcome (e.g. ``"accepted"``, ``"duplicate"``).
+ */
+export interface IntakeResultResponse {
+  event_id: string;
+  status: string;
+  order_id?: string | null;
 }
 
 // ─── HTTP Helpers ────────────────────────────────────────────────────────────
@@ -279,9 +296,9 @@ async function ordersRequest<T>(
 /** GET /api/orders — list orders with filters and pagination */
 export async function listOrders(
   filters: OrderListFilters = {},
-): Promise<PaginatedResponse<FuelOrder>> {
+): Promise<OrderListResponse> {
   const qs = buildQueryString(filters);
-  return ordersRequest<PaginatedResponse<FuelOrder>>(`/orders${qs}`);
+  return ordersRequest<OrderListResponse>(`/orders${qs}`);
 }
 
 /**
@@ -296,11 +313,11 @@ export async function listOrders(
 export async function getOrder(
   orderId: string,
   options?: { expand?: OrderExpand[] },
-): Promise<OrderResponse> {
+): Promise<FuelOrder> {
   const qs = options?.expand?.length
     ? `?expand=${options.expand.join(",")}`
     : "";
-  return ordersRequest<OrderResponse>(
+  return ordersRequest<FuelOrder>(
     `/orders/${encodeURIComponent(orderId)}${qs}`,
   );
 }
@@ -308,17 +325,23 @@ export async function getOrder(
 /** GET /api/orders/:order_id/events — fetch the event timeline for an order */
 export async function getOrderEvents(
   orderId: string,
-): Promise<OrderEventsResponse> {
-  return ordersRequest<OrderEventsResponse>(
+): Promise<OrderEventsListResponse> {
+  return ordersRequest<OrderEventsListResponse>(
     `/orders/${encodeURIComponent(orderId)}/events`,
   );
 }
 
-/** POST /api/orders — create a new fuel order (dispatcher keyboard) */
+/**
+ * POST /api/orders — create a new fuel order (dispatcher keyboard).
+ *
+ * Returns the intake-pipeline result ({@link IntakeResultResponse}), not a
+ * full order. The new order's id is available on ``order_id`` once the order
+ * is materialized.
+ */
 export async function createOrder(
   payload: CreateOrderPayload,
-): Promise<OrderResponse> {
-  return ordersRequest<OrderResponse>("/orders", {
+): Promise<IntakeResultResponse> {
+  return ordersRequest<IntakeResultResponse>("/orders", {
     method: "POST",
     body: JSON.stringify(payload),
   });
@@ -328,8 +351,8 @@ export async function createOrder(
 export async function updateOrderStatus(
   orderId: string,
   payload: UpdateOrderStatusPayload,
-): Promise<OrderResponse> {
-  return ordersRequest<OrderResponse>(
+): Promise<FuelOrder> {
+  return ordersRequest<FuelOrder>(
     `/orders/${encodeURIComponent(orderId)}/status`,
     {
       method: "PATCH",
@@ -342,8 +365,8 @@ export async function updateOrderStatus(
 export async function assignDriver(
   orderId: string,
   payload: AssignDriverPayload,
-): Promise<OrderResponse> {
-  return ordersRequest<OrderResponse>(
+): Promise<FuelOrder> {
+  return ordersRequest<FuelOrder>(
     `/orders/${encodeURIComponent(orderId)}/assign`,
     {
       method: "PATCH",
@@ -356,8 +379,8 @@ export async function assignDriver(
 export async function cancelOrder(
   orderId: string,
   payload: CancelOrderPayload,
-): Promise<OrderResponse> {
-  return ordersRequest<OrderResponse>(
+): Promise<FuelOrder> {
+  return ordersRequest<FuelOrder>(
     `/orders/${encodeURIComponent(orderId)}/cancel`,
     {
       method: "POST",
@@ -370,8 +393,8 @@ export async function cancelOrder(
 export async function holdOrder(
   orderId: string,
   payload: HoldOrderPayload,
-): Promise<OrderResponse> {
-  return ordersRequest<OrderResponse>(
+): Promise<FuelOrder> {
+  return ordersRequest<FuelOrder>(
     `/orders/${encodeURIComponent(orderId)}/hold`,
     {
       method: "POST",
@@ -385,13 +408,14 @@ export async function holdOrder(
  *
  * Re-runs the registered intake hooks (pricing, credit-check, etc.). If
  * all pass, the order transitions back to ``placed``; if any hook fails,
- * the order stays ``on_hold`` with an updated ``hold_reason``.
+ * the order stays ``on_hold`` with an updated ``hold_reason``. The returned
+ * order reflects the resulting status.
  */
 export async function releaseHoldOrder(
   orderId: string,
   payload: ReleaseHoldPayload = {},
-): Promise<OrderResponse> {
-  return ordersRequest<OrderResponse>(
+): Promise<FuelOrder> {
+  return ordersRequest<FuelOrder>(
     `/orders/${encodeURIComponent(orderId)}/release-hold`,
     {
       method: "POST",

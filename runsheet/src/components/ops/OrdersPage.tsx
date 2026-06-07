@@ -27,8 +27,8 @@ import {
   type IntakeChannelType,
   listOrders,
   type OrderListFilters,
+  type OrderListResponse,
   type OrderStatus,
-  type PaginatedResponse,
 } from "../../services/ordersApi";
 import { getCurrentTenantId } from "../../services/tenant";
 import CustomerPicker from "./CustomerPicker";
@@ -278,10 +278,11 @@ export default function OrdersPage({
     setLoading(true);
     setError(null);
     try {
-      const response: PaginatedResponse<FuelOrder> = await listOrders(filters);
-      setOrders(response.data ?? []);
-      setTotalPages(response.pagination?.total_pages ?? 1);
-      setTotal(response.pagination?.total ?? 0);
+      const response: OrderListResponse = await listOrders(filters);
+      setOrders(response.items ?? []);
+      const size = response.size || PAGE_SIZE;
+      setTotalPages(Math.max(1, Math.ceil((response.total ?? 0) / size)));
+      setTotal(response.total ?? 0);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load orders");
     } finally {

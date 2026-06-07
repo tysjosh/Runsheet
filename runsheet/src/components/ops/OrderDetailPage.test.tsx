@@ -69,7 +69,11 @@ jest.mock("../../services/complianceApi", () => ({
 }));
 
 import OrderDetailPage from "../../app/orders/[orderId]/page";
-import type { FuelOrder, FuelOrderEvent } from "../../services/ordersApi";
+import type {
+  FuelOrder,
+  FuelOrderEvent,
+  OrderEventsListResponse,
+} from "../../services/ordersApi";
 import {
   assignDriver,
   cancelOrder,
@@ -151,6 +155,13 @@ function eventFixture(overrides: Partial<FuelOrderEvent> = {}): FuelOrderEvent {
   };
 }
 
+/** Build the bare ``{ items, total }`` events envelope the backend returns. */
+function eventsResponse(
+  events: FuelOrderEvent[] = [],
+): OrderEventsListResponse {
+  return { items: events, total: events.length };
+}
+
 beforeEach(() => {
   mockGetOrder.mockReset();
   mockGetOrderEvents.mockReset();
@@ -165,11 +176,8 @@ beforeEach(() => {
 
 describe("OrderDetailPage — render", () => {
   it("renders order details and event timeline", async () => {
-    mockGetOrder.mockResolvedValue({ data: orderFixture(), request_id: "r1" });
-    mockGetOrderEvents.mockResolvedValue({
-      data: [eventFixture()],
-      request_id: "r2",
-    });
+    mockGetOrder.mockResolvedValue(orderFixture());
+    mockGetOrderEvents.mockResolvedValue(eventsResponse([eventFixture()]));
 
     render(<OrderDetailPage />);
 
@@ -180,7 +188,7 @@ describe("OrderDetailPage — render", () => {
 
   it("renders error state when fetch fails", async () => {
     mockGetOrder.mockRejectedValue(new Error("Not found"));
-    mockGetOrderEvents.mockResolvedValue({ data: [], request_id: "r2" });
+    mockGetOrderEvents.mockResolvedValue(eventsResponse());
 
     render(<OrderDetailPage />);
 
@@ -190,17 +198,16 @@ describe("OrderDetailPage — render", () => {
 
 describe("OrderDetailPage — intake metadata", () => {
   it("renders dispatcher metadata for dispatcher channel", async () => {
-    mockGetOrder.mockResolvedValue({
-      data: orderFixture({
+    mockGetOrder.mockResolvedValue(
+      orderFixture({
         intake_channel: "dispatcher",
         intake_metadata: {
           dispatcher_user_id: "disp-42",
           session_id: "sess-99",
         },
       }),
-      request_id: "r1",
-    });
-    mockGetOrderEvents.mockResolvedValue({ data: [], request_id: "r2" });
+    );
+    mockGetOrderEvents.mockResolvedValue(eventsResponse());
 
     render(<OrderDetailPage />);
 
@@ -209,8 +216,8 @@ describe("OrderDetailPage — intake metadata", () => {
   });
 
   it("renders voice metadata with transcript and recording", async () => {
-    mockGetOrder.mockResolvedValue({
-      data: orderFixture({
+    mockGetOrder.mockResolvedValue(
+      orderFixture({
         intake_channel: "voice",
         intake_metadata: {
           call_id: "call-123",
@@ -219,9 +226,8 @@ describe("OrderDetailPage — intake metadata", () => {
           agent_confidence: 0.95,
         },
       }),
-      request_id: "r1",
-    });
-    mockGetOrderEvents.mockResolvedValue({ data: [], request_id: "r2" });
+    );
+    mockGetOrderEvents.mockResolvedValue(eventsResponse());
 
     render(<OrderDetailPage />);
 
@@ -233,14 +239,13 @@ describe("OrderDetailPage — intake metadata", () => {
   });
 
   it("renders csv metadata with import batch link", async () => {
-    mockGetOrder.mockResolvedValue({
-      data: orderFixture({
+    mockGetOrder.mockResolvedValue(
+      orderFixture({
         intake_channel: "csv",
         intake_metadata: { import_batch_id: "batch-777", csv_row_number: 42 },
       }),
-      request_id: "r1",
-    });
-    mockGetOrderEvents.mockResolvedValue({ data: [], request_id: "r2" });
+    );
+    mockGetOrderEvents.mockResolvedValue(eventsResponse());
 
     render(<OrderDetailPage />);
 
@@ -251,11 +256,12 @@ describe("OrderDetailPage — intake metadata", () => {
 
 describe("OrderDetailPage — storm mode banner", () => {
   it("shows storm mode banner when event has storm_event_id", async () => {
-    mockGetOrder.mockResolvedValue({ data: orderFixture(), request_id: "r1" });
-    mockGetOrderEvents.mockResolvedValue({
-      data: [eventFixture({ event_payload: { storm_event_id: "storm-001" } })],
-      request_id: "r2",
-    });
+    mockGetOrder.mockResolvedValue(orderFixture());
+    mockGetOrderEvents.mockResolvedValue(
+      eventsResponse([
+        eventFixture({ event_payload: { storm_event_id: "storm-001" } }),
+      ]),
+    );
 
     render(<OrderDetailPage />);
 
@@ -265,11 +271,8 @@ describe("OrderDetailPage — storm mode banner", () => {
   });
 
   it("does not show storm banner when no storm event", async () => {
-    mockGetOrder.mockResolvedValue({ data: orderFixture(), request_id: "r1" });
-    mockGetOrderEvents.mockResolvedValue({
-      data: [eventFixture()],
-      request_id: "r2",
-    });
+    mockGetOrder.mockResolvedValue(orderFixture());
+    mockGetOrderEvents.mockResolvedValue(eventsResponse([eventFixture()]));
 
     render(<OrderDetailPage />);
 
@@ -280,14 +283,13 @@ describe("OrderDetailPage — storm mode banner", () => {
 
 describe("OrderDetailPage — assigned driver card", () => {
   it("shows driver card when assigned_driver_id is present", async () => {
-    mockGetOrder.mockResolvedValue({
-      data: orderFixture({
+    mockGetOrder.mockResolvedValue(
+      orderFixture({
         assigned_driver_id: "drv-007",
         assigned_run_id: "run-1",
       }),
-      request_id: "r1",
-    });
-    mockGetOrderEvents.mockResolvedValue({ data: [], request_id: "r2" });
+    );
+    mockGetOrderEvents.mockResolvedValue(eventsResponse());
 
     render(<OrderDetailPage />);
 
@@ -301,11 +303,8 @@ describe("OrderDetailPage — assigned driver card", () => {
 
 describe("OrderDetailPage — POD section", () => {
   it("shows POD section when status is delivered", async () => {
-    mockGetOrder.mockResolvedValue({
-      data: orderFixture({ status: "delivered" }),
-      request_id: "r1",
-    });
-    mockGetOrderEvents.mockResolvedValue({ data: [], request_id: "r2" });
+    mockGetOrder.mockResolvedValue(orderFixture({ status: "delivered" }));
+    mockGetOrderEvents.mockResolvedValue(eventsResponse());
 
     render(<OrderDetailPage />);
 
@@ -313,11 +312,8 @@ describe("OrderDetailPage — POD section", () => {
   });
 
   it("does not show POD section for non-delivered orders", async () => {
-    mockGetOrder.mockResolvedValue({
-      data: orderFixture({ status: "placed" }),
-      request_id: "r1",
-    });
-    mockGetOrderEvents.mockResolvedValue({ data: [], request_id: "r2" });
+    mockGetOrder.mockResolvedValue(orderFixture({ status: "placed" }));
+    mockGetOrderEvents.mockResolvedValue(eventsResponse());
 
     render(<OrderDetailPage />);
 
@@ -328,8 +324,8 @@ describe("OrderDetailPage — POD section", () => {
 
 describe("OrderDetailPage — cross-module resolved links", () => {
   it("renders the resolved customer name and links to the customer module", async () => {
-    mockGetOrder.mockResolvedValue({
-      data: orderFixture({
+    mockGetOrder.mockResolvedValue(
+      orderFixture({
         customer_name: "Stale Snapshot Name",
         links: {
           customer: {
@@ -339,9 +335,8 @@ describe("OrderDetailPage — cross-module resolved links", () => {
           },
         },
       }),
-      request_id: "r1",
-    });
-    mockGetOrderEvents.mockResolvedValue({ data: [], request_id: "r2" });
+    );
+    mockGetOrderEvents.mockResolvedValue(eventsResponse());
 
     render(<OrderDetailPage />);
 
@@ -357,8 +352,8 @@ describe("OrderDetailPage — cross-module resolved links", () => {
   });
 
   it("renders a navigable asset card and driver card from resolved links", async () => {
-    mockGetOrder.mockResolvedValue({
-      data: orderFixture({
+    mockGetOrder.mockResolvedValue(
+      orderFixture({
         assigned_driver_id: "drv-007",
         assigned_asset_id: "asset-123",
         links: {
@@ -374,9 +369,8 @@ describe("OrderDetailPage — cross-module resolved links", () => {
           },
         },
       }),
-      request_id: "r1",
-    });
-    mockGetOrderEvents.mockResolvedValue({ data: [], request_id: "r2" });
+    );
+    mockGetOrderEvents.mockResolvedValue(eventsResponse());
 
     render(<OrderDetailPage />);
 
@@ -394,16 +388,15 @@ describe("OrderDetailPage — cross-module resolved links", () => {
   });
 
   it("shows an explicit Unlinked affordance for an unresolved asset reference", async () => {
-    mockGetOrder.mockResolvedValue({
-      data: orderFixture({
+    mockGetOrder.mockResolvedValue(
+      orderFixture({
         assigned_asset_id: "asset-gone",
         links: {
           asset: { status: "unresolved", id: "asset-gone" },
         },
       }),
-      request_id: "r1",
-    });
-    mockGetOrderEvents.mockResolvedValue({ data: [], request_id: "r2" });
+    );
+    mockGetOrderEvents.mockResolvedValue(eventsResponse());
 
     render(<OrderDetailPage />);
 
@@ -417,11 +410,10 @@ describe("OrderDetailPage — cross-module resolved links", () => {
   });
 
   it("links optimistically on the document id when links are absent", async () => {
-    mockGetOrder.mockResolvedValue({
-      data: orderFixture({ assigned_driver_id: "drv-007" }),
-      request_id: "r1",
-    });
-    mockGetOrderEvents.mockResolvedValue({ data: [], request_id: "r2" });
+    mockGetOrder.mockResolvedValue(
+      orderFixture({ assigned_driver_id: "drv-007" }),
+    );
+    mockGetOrderEvents.mockResolvedValue(eventsResponse());
 
     render(<OrderDetailPage />);
 
@@ -432,11 +424,8 @@ describe("OrderDetailPage — cross-module resolved links", () => {
 
 describe("OrderDetailPage — mutation controls", () => {
   it("hides mutation buttons for terminal statuses", async () => {
-    mockGetOrder.mockResolvedValue({
-      data: orderFixture({ status: "delivered" }),
-      request_id: "r1",
-    });
-    mockGetOrderEvents.mockResolvedValue({ data: [], request_id: "r2" });
+    mockGetOrder.mockResolvedValue(orderFixture({ status: "delivered" }));
+    mockGetOrderEvents.mockResolvedValue(eventsResponse());
 
     render(<OrderDetailPage />);
 
@@ -450,12 +439,9 @@ describe("OrderDetailPage — mutation controls", () => {
   });
 
   it("shows cancel modal (HIGH risk) and submits", async () => {
-    mockGetOrder.mockResolvedValue({ data: orderFixture(), request_id: "r1" });
-    mockGetOrderEvents.mockResolvedValue({ data: [], request_id: "r2" });
-    mockCancelOrder.mockResolvedValue({
-      data: orderFixture({ status: "cancelled" }),
-      request_id: "r3",
-    });
+    mockGetOrder.mockResolvedValue(orderFixture());
+    mockGetOrderEvents.mockResolvedValue(eventsResponse());
+    mockCancelOrder.mockResolvedValue(orderFixture({ status: "cancelled" }));
 
     render(<OrderDetailPage />);
 
@@ -484,15 +470,11 @@ describe("OrderDetailPage — mutation controls", () => {
   });
 
   it("shows hold modal and submits a hold reason", async () => {
-    mockGetOrder.mockResolvedValue({
-      data: orderFixture({ status: "placed" }),
-      request_id: "r1",
-    });
-    mockGetOrderEvents.mockResolvedValue({ data: [], request_id: "r2" });
-    mockHoldOrder.mockResolvedValue({
-      data: orderFixture({ status: "on_hold", hold_reason: "credit check" }),
-      request_id: "r3",
-    });
+    mockGetOrder.mockResolvedValue(orderFixture({ status: "placed" }));
+    mockGetOrderEvents.mockResolvedValue(eventsResponse());
+    mockHoldOrder.mockResolvedValue(
+      orderFixture({ status: "on_hold", hold_reason: "credit check" }),
+    );
 
     render(<OrderDetailPage />);
 
@@ -520,15 +502,11 @@ describe("OrderDetailPage — mutation controls", () => {
   });
 
   it("shows release-hold action for an on_hold order and submits", async () => {
-    mockGetOrder.mockResolvedValue({
-      data: orderFixture({ status: "on_hold", hold_reason: "credit check" }),
-      request_id: "r1",
-    });
-    mockGetOrderEvents.mockResolvedValue({ data: [], request_id: "r2" });
-    mockReleaseHoldOrder.mockResolvedValue({
-      data: orderFixture({ status: "placed" }),
-      request_id: "r3",
-    });
+    mockGetOrder.mockResolvedValue(
+      orderFixture({ status: "on_hold", hold_reason: "credit check" }),
+    );
+    mockGetOrderEvents.mockResolvedValue(eventsResponse());
+    mockReleaseHoldOrder.mockResolvedValue(orderFixture({ status: "placed" }));
 
     render(<OrderDetailPage />);
 
@@ -549,11 +527,8 @@ describe("OrderDetailPage — mutation controls", () => {
   });
 
   it("does not offer hold actions for an in_transit order", async () => {
-    mockGetOrder.mockResolvedValue({
-      data: orderFixture({ status: "in_transit" }),
-      request_id: "r1",
-    });
-    mockGetOrderEvents.mockResolvedValue({ data: [], request_id: "r2" });
+    mockGetOrder.mockResolvedValue(orderFixture({ status: "in_transit" }));
+    mockGetOrderEvents.mockResolvedValue(eventsResponse());
 
     render(<OrderDetailPage />);
 
@@ -569,8 +544,8 @@ describe("OrderDetailPage — mutation controls", () => {
 
   it("surfaces backend error_code on mutation failure", async () => {
     const { ApiError } = jest.requireMock("../../services/api");
-    mockGetOrder.mockResolvedValue({ data: orderFixture(), request_id: "r1" });
-    mockGetOrderEvents.mockResolvedValue({ data: [], request_id: "r2" });
+    mockGetOrder.mockResolvedValue(orderFixture());
+    mockGetOrderEvents.mockResolvedValue(eventsResponse());
     mockAssignDriver.mockRejectedValue(new ApiError("driver_unavailable", 409));
 
     render(<OrderDetailPage />);

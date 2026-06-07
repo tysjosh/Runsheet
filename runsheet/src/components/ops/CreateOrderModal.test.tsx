@@ -264,8 +264,9 @@ describe("CreateOrderModal — submission", () => {
 
   it("calls createOrder with valid payload on successful submission", async () => {
     mockCreateOrder.mockResolvedValue({
-      data: { order_id: "ord_new123" } as any,
-      request_id: "req-1",
+      event_id: "evt_1",
+      status: "accepted",
+      order_id: "ord_new123",
     });
     const onSuccess = jest.fn();
     const onClose = jest.fn();

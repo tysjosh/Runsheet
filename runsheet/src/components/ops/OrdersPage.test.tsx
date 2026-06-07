@@ -39,7 +39,7 @@ jest.mock("../../hooks/useOrdersWebSocket", () => ({
 }));
 
 import { useOrdersWebSocket } from "../../hooks/useOrdersWebSocket";
-import type { FuelOrder, PaginatedResponse } from "../../services/ordersApi";
+import type { FuelOrder, OrderListResponse } from "../../services/ordersApi";
 import { listOrders } from "../../services/ordersApi";
 import OrdersPage from "./OrdersPage";
 
@@ -89,12 +89,13 @@ function orderFixture(overrides: Partial<FuelOrder> = {}): FuelOrder {
 
 function paginatedResponse(
   orders: FuelOrder[],
-  overrides: Partial<PaginatedResponse<FuelOrder>> = {},
-): PaginatedResponse<FuelOrder> {
+  overrides: Partial<OrderListResponse> = {},
+): OrderListResponse {
   return {
-    data: orders,
-    pagination: { page: 1, size: 20, total: orders.length, total_pages: 1 },
-    request_id: "req-1",
+    items: orders,
+    total: orders.length,
+    page: 1,
+    size: 20,
     ...overrides,
   };
 }
@@ -288,7 +289,9 @@ describe("OrdersPage — pagination", () => {
   it("shows pagination and navigates to next page", async () => {
     mockListOrders.mockResolvedValue(
       paginatedResponse([orderFixture()], {
-        pagination: { page: 1, size: 20, total: 40, total_pages: 2 },
+        total: 40,
+        page: 1,
+        size: 20,
       }),
     );
 

@@ -61,17 +61,23 @@ const WS_REFRESH_DEBOUNCE_MS = 500;
 const MAX_ROWS = 6;
 
 /**
- * Safely extract a `.data` array from a settled list-endpoint promise.
- * Returns [] when the request rejected or the payload's `data` is missing /
- * not an array (real backends occasionally return `null` data), so callers can
- * spread the result without risking a "not iterable" runtime error.
+ * Safely extract a list array from a settled list-endpoint promise.
+ *
+ * Different list surfaces use different envelopes: the order endpoints return
+ * ``{ items }`` (no ``data``/``request_id`` wrapper) while the scheduling and
+ * fuel-alert endpoints return ``{ data }``. We read whichever is present.
+ * Returns [] when the request rejected or the payload's list is missing / not
+ * an array (real backends occasionally return ``null``), so callers can spread
+ * the result without risking a "not iterable" runtime error.
  */
 function settledArray<T>(
-  result: PromiseSettledResult<{ data?: T[] | null } | undefined>,
+  result: PromiseSettledResult<
+    { data?: T[] | null; items?: T[] | null } | undefined
+  >,
 ): T[] {
   if (result.status !== "fulfilled") return [];
-  const data = result.value?.data;
-  return Array.isArray(data) ? data : [];
+  const list = result.value?.data ?? result.value?.items;
+  return Array.isArray(list) ? list : [];
 }
 
 interface DispatchCockpitProps {
@@ -581,9 +587,9 @@ function OrderAttentionRow({
     try {
       const res = await releaseHoldOrder(order.order_id);
       // The backend may keep the order on hold if a re-run intake hook fails.
-      if (res.data?.status === "on_hold") {
+      if (res.status === "on_hold") {
         addToast(
-          `Still on hold: ${res.data.hold_reason ?? "intake check failed"}`,
+          `Still on hold: ${res.hold_reason ?? "intake check failed"}`,
           "error",
         );
         onReload();

@@ -698,8 +698,8 @@ export default function OrderDetailPage() {
         getOrder(orderId, { expand: ["customer", "asset", "driver"] }),
         getOrderEvents(orderId),
       ]);
-      setOrder(orderRes.data);
-      setEvents(eventsRes.data);
+      setOrder(orderRes);
+      setEvents(eventsRes.items);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load order");
     } finally {
