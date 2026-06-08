@@ -136,6 +136,7 @@ DEPOTS_MAPPING = {
             "timezone":              {"type": "keyword"},
             "fuel_types_supported":  {"type": "keyword"},
             "status":                {"type": "keyword"},
+            "is_default":            {"type": "boolean"},
             "updated_at":            {"type": "date"},
             "created_at":            {"type": "date"},
         },
@@ -715,6 +716,24 @@ def setup_fuel_ops_indices(es_service) -> None:
                 es_client.indices.create(index=index_name, body=body)
                 logger.info(f"Created fuel-ops index: {index_name}")
             else:
-                logger.info(f"Fuel-ops index already exists: {index_name}")
+                # Index exists — reconcile additively so new fields added to a
+                # mapping definition (e.g. depots.is_default) are pushed to the
+                # live index without a destructive reindex. ES ``put_mapping``
+                # adds new properties to a strict mapping; identical fields are
+                # no-ops and only an incompatible type change would raise
+                # (logged, non-fatal).
+                properties = (mapping.get("mappings") or {}).get("properties")
+                if properties:
+                    try:
+                        es_client.indices.put_mapping(
+                            index=index_name, body={"properties": properties}
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to reconcile fuel-ops index mapping %s",
+                            index_name,
+                        )
+                else:
+                    logger.info(f"Fuel-ops index already exists: {index_name}")
         except Exception:
             logger.exception("Failed to create fuel-ops index %s", index_name)

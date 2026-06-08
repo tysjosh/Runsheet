@@ -955,6 +955,31 @@ async def initialize(app, container: ServiceContainer) -> None:
     # the sourcing step on every evaluation.
     route_planning_agent.set_sourcing_recommender(sourcing_recommender)
 
+    # Wire the depot start-position resolver (Task 9.7 / Req 5.4.6). Without
+    # this the agent's depot fallback was never injected, so every route
+    # silently started from the DEFAULT_DEPOT (0,0) null-island sentinel.
+    # The resolver follows truck.assigned_depot_id → tenant.default_depot_id
+    # → is_default active depot, and returns None (→ plan skipped) when no
+    # depot is configured rather than routing from null-island.
+    try:
+        from fuel.depot_models import DepotRepository
+        from fuel.services.depot_start_resolver import make_depot_start_resolver
+
+        depot_repository_for_routing = (
+            container.depot_repository
+            if container.has("depot_repository")
+            else DepotRepository(es_service)
+        )
+        route_planning_agent.set_depot_resolver(
+            make_depot_start_resolver(
+                depot_repository=depot_repository_for_routing,
+                tenant_settings_service=tenant_settings_service,
+            )
+        )
+        logger.info("Route_Planning_Agent depot resolver wired")
+    except Exception as exc:  # noqa: BLE001 — degrade to legacy behaviour
+        logger.warning("Depot resolver wiring failed: %s", exc)
+
     # ---- Inventory Pipeline Integration ----
     from Agents.autonomous.inventory_monitor import InventoryMonitorAgent
 

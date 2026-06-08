@@ -564,7 +564,15 @@ class DepotRepository:
         # Merge, then re-validate through the Pydantic model so we never
         # persist a payload that would have failed validation on create.
         # The model validator canonicalizes fuel_types_supported for us.
-        merged = {**source, **clean_patch}
+        # Strip ES-only keys (e.g. the ``location`` geo_point convenience
+        # field) before constructing the strict model — the persisted source
+        # carries fields the ``extra="forbid"`` model does not define, and
+        # without this filter the merge raises ``extra_forbidden`` and breaks
+        # every depot update (including the "set as default" action).
+        model_fields = Depot.model_fields.keys()
+        merged = {
+            k: v for k, v in {**source, **clean_patch}.items() if k in model_fields
+        }
         merged["updated_at"] = _utcnow_iso()
         validated = Depot(**merged)
 
