@@ -128,9 +128,11 @@ class TestEvaluateRule:
         call_args = es.search_documents.call_args
         assert call_args[0][0] == NOTIFICATION_RULES_INDEX
         query = call_args[0][1]
-        must = query["query"]["bool"]["must"]
-        assert {"term": {"event_type": "eta_change"}} in must
-        assert {"term": {"tenant_id": "tenant-42"}} in must
+        bool_query = query["query"]["bool"]
+        # event_type is a scoring match clause; tenant_id is a non-scoring
+        # exact-match filter (idiomatic ES tenant scoping).
+        assert {"term": {"event_type": "eta_change"}} in bool_query["must"]
+        assert {"term": {"tenant_id": "tenant-42"}} in bool_query["filter"]
 
 
 # ---------------------------------------------------------------------------
