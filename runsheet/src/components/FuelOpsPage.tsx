@@ -1,15 +1,18 @@
 "use client";
-import { BarChart3, Building2, Fuel } from "lucide-react";
+import { Activity, BarChart3, Building2, Fuel } from "lucide-react";
 import { lazy, Suspense, useState } from "react";
 import LoadingSpinner from "./LoadingSpinner";
 import { PageHeader, type Tab, TabNavigation } from "./ui";
 
 const FuelDashboard = lazy(() => import("./ops/FuelDashboardView"));
 const SourcingPage = lazy(() => import("./ops/SourcingPage"));
+const KFactorCalibrationPage = lazy(
+  () => import("./compliance/KFactorCalibrationPage"),
+);
 
 // Flattened to one tab set so the hub doesn't stack a second header + tab bar
 // on top of the embedded dashboard. Stations/Consumption drive the embedded
-// fuel dashboard's view; Sourcing is its own page.
+// fuel dashboard's view; Sourcing and K-Factor are their own pages.
 const TABS: Tab[] = [
   {
     id: "stations",
@@ -20,6 +23,11 @@ const TABS: Tab[] = [
     id: "efficiency",
     label: "Consumption",
     icon: <BarChart3 className="w-4 h-4" />,
+  },
+  {
+    id: "kfactor",
+    label: "K-Factor",
+    icon: <Activity className="w-4 h-4" />,
   },
   {
     id: "sourcing",
@@ -54,6 +62,7 @@ export default function FuelOpsPage() {
             />
           )}
           {activeTab === "sourcing" && <SourcingPage />}
+          {activeTab === "kfactor" && <KFactorCalibrationPage />}
         </Suspense>
       </div>
     </div>

@@ -7,6 +7,7 @@ import {
   getKFactorDashboard,
   type KFactorEntry,
 } from "../../services/complianceApi";
+import TankConsumptionDrillIn from "./TankConsumptionDrillIn";
 
 // ─── Derived status ──────────────────────────────────────────────────────────
 
@@ -65,6 +66,7 @@ interface DecoratedKFactorEntry {
 }
 function getKFactorColumns(
   onApprove: (entry: KFactorEntry) => void,
+  onViewConsumption: (entry: KFactorEntry) => void,
 ): Column<DecoratedKFactorEntry>[] {
   return [
     {
@@ -131,16 +133,26 @@ function getKFactorColumns(
     {
       key: "actions",
       label: "Actions",
-      render: ({ entry, status }) =>
-        status === "review_needed" && entry.suggested_kfactor !== null ? (
+      render: ({ entry, status }) => (
+        <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={() => onApprove(entry)}
-            className="bg-primary text-white px-3 py-1 rounded text-sm hover:bg-primary-hover"
+            onClick={() => onViewConsumption(entry)}
+            className="text-primary text-sm underline hover:opacity-80"
           >
-            Approve
+            Consumption
           </button>
-        ) : null,
+          {status === "review_needed" && entry.suggested_kfactor !== null ? (
+            <button
+              type="button"
+              onClick={() => onApprove(entry)}
+              className="bg-primary text-white px-3 py-1 rounded text-sm hover:bg-primary-hover"
+            >
+              Approve
+            </button>
+          ) : null}
+        </div>
+      ),
     },
   ];
 }
@@ -158,6 +170,10 @@ export default function KFactorCalibrationPage() {
   );
   const [approving, setApproving] = useState(false);
   const [approvalError, setApprovalError] = useState<string | null>(null);
+
+  // Per-tank consumption drill-in state
+  const [consumptionTarget, setConsumptionTarget] =
+    useState<KFactorEntry | null>(null);
 
   // ─── Fetch dashboard ───────────────────────────────────────────────────────
 
@@ -300,7 +316,10 @@ export default function KFactorCalibrationPage() {
           {/* Dashboard table */}
           <Table<DecoratedKFactorEntry>
             ariaLabel="K-factor calibration dashboard"
-            columns={getKFactorColumns(handleApproveClick)}
+            columns={getKFactorColumns(
+              handleApproveClick,
+              setConsumptionTarget,
+            )}
             data={sortedEntries}
             getRowId={({ entry }) => entry.tank_id}
             emptyState={
@@ -393,6 +412,13 @@ export default function KFactorCalibrationPage() {
             </div>
           </div>
         </div>
+      )}
+      {/* Per-tank consumption / forecast drill-in */}
+      {consumptionTarget && (
+        <TankConsumptionDrillIn
+          entry={consumptionTarget}
+          onClose={() => setConsumptionTarget(null)}
+        />
       )}
     </div>
   );
