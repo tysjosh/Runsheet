@@ -316,7 +316,7 @@ export default function StripeIntegrationUI() {
           </p>
           <Button
             onClick={() => {
-              window.location.href = "/dashboard";
+              window.location.href = "/dashboard/admin?tab=integrations";
             }}
           >
             Go to Integrations

@@ -8,7 +8,6 @@ const NotificationMetricsDashboard = lazy(
   () => import("./admin/NotificationMetricsDashboard"),
 );
 const FeatureFlagsAdmin = lazy(() => import("./admin/FeatureFlagsAdmin"));
-const OrderWebhooksAdmin = lazy(() => import("./admin/OrderWebhooksAdmin"));
 const AgentMonitoringDashboard = lazy(
   () => import("./admin/AgentMonitoringDashboard"),
 );
@@ -55,10 +54,6 @@ export default function AdminHub({
       label: "Feature Flags",
     },
     {
-      id: "webhooks",
-      label: "Order Webhooks",
-    },
-    {
       id: "agents",
       label: "Agent Monitoring",
     },
@@ -97,7 +92,7 @@ export default function AdminHub({
       case "webhooks":
         return (
           <Suspense fallback={<LoadingPlaceholder />}>
-            <OrderWebhooksAdmin />
+            <IntakeChannelsAdminPanel />
           </Suspense>
         );
       case "agents":

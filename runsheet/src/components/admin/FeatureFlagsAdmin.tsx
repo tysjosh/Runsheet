@@ -1,9 +1,10 @@
 "use client";
 
 import { AlertCircle, Check, Flag, Info, X } from "lucide-react";
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   type FeatureFlagState,
+  getOrderIntakePipelineState,
   setOrderIntakePipelineState,
 } from "../../services/adminApi";
 import { Badge, Button, PageHeader } from "../ui";
@@ -49,8 +50,38 @@ export default function FeatureFlagsAdmin() {
   const [selectedState, setSelectedState] =
     useState<FeatureFlagState>("disabled");
   const [loading, setLoading] = useState(false);
+  const [stateLoading, setStateLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+
+  // Load the tenant's current pipeline state on mount and whenever the tenant
+  // changes, so the displayed "Current" badge reflects reality instead of a
+  // hardcoded default.
+  const fetchState = useCallback(async () => {
+    if (!tenantId.trim()) return;
+    setStateLoading(true);
+    setError(null);
+    try {
+      const response = await getOrderIntakePipelineState(tenantId.trim());
+      setCurrentState(response.data.state);
+      setSelectedState(response.data.state);
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Failed to load current feature flag state",
+      );
+    } finally {
+      setStateLoading(false);
+    }
+  }, [tenantId]);
+
+  useEffect(() => {
+    const t = setTimeout(() => {
+      fetchState();
+    }, 400);
+    return () => clearTimeout(t);
+  }, [fetchState]);
 
   const handleUpdateFlag = async () => {
     if (selectedState === currentState) {
@@ -64,7 +95,7 @@ export default function FeatureFlagsAdmin() {
 
     try {
       const response = await setOrderIntakePipelineState(
-        tenantId,
+        tenantId.trim(),
         selectedState,
       );
       setCurrentState(response.data.new_state);
@@ -119,7 +150,11 @@ export default function FeatureFlagsAdmin() {
               Control the new order intake pipeline rollout
             </p>
           </div>
-          {getStateBadge(currentState)}
+          {stateLoading ? (
+            <Badge variant="default">Loading…</Badge>
+          ) : (
+            getStateBadge(currentState)
+          )}
         </div>
 
         {/* Tenant Selection */}
@@ -195,7 +230,7 @@ export default function FeatureFlagsAdmin() {
         <div className="flex items-center gap-3">
           <Button
             onClick={handleUpdateFlag}
-            disabled={loading || selectedState === currentState}
+            disabled={loading || stateLoading || selectedState === currentState}
           >
             {loading ? "Updating..." : "Update Flag"}
           </Button>

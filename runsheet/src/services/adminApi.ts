@@ -43,54 +43,10 @@ export interface FeatureFlagResponse {
   ws_broadcast: boolean;
 }
 
-// ─── Order Webhook Types ─────────────────────────────────────────────────────
-
-export interface IntakeChannel {
-  channel_id: string;
+export interface FeatureFlagStateResponse {
   tenant_id: string;
-  channel_type: string;
-  display_name: string;
-  enabled: boolean;
-  hmac_secret_ref: string;
-  supported_schema_versions: string[];
-  rate_limit_per_minute?: number;
-  secret_version: number;
-  created_at: string;
-  updated_at: string;
-  last_webhook_at?: string | null;
-  webhook_count?: number;
-}
-
-export interface CreateChannelPayload {
-  channel_id: string;
-  channel_type: string;
-  display_name: string;
-  supported_schema_versions: string[];
-  rate_limit_per_minute?: number;
-  enabled?: boolean;
-}
-
-export interface CreateChannelResponse {
-  channel_id: string;
-  tenant_id: string;
-  channel_type: string;
-  display_name: string;
-  hmac_secret: string; // plaintext — returned ONCE, never again
-  hmac_secret_ref: string;
-  supported_schema_versions: string[];
-  rate_limit_per_minute?: number;
-  secret_version: number;
-  enabled: boolean;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface UpdateChannelPayload {
-  display_name?: string;
-  channel_type?: string;
-  supported_schema_versions?: string[];
-  rate_limit_per_minute?: number;
-  enabled?: boolean;
+  flag_key: string;
+  state: FeatureFlagState;
 }
 
 // ─── Agent Monitoring Types ──────────────────────────────────────────────────
@@ -238,6 +194,15 @@ export async function getCommunicationMetrics(
 
 // ─── Feature Flag Endpoints ──────────────────────────────────────────────────
 
+/** GET /api/ops/admin/feature-flags/{tenant_id}/order-intake-pipeline */
+export async function getOrderIntakePipelineState(
+  tenantId: string,
+): Promise<{ data: FeatureFlagStateResponse; request_id: string }> {
+  return adminRequest<{ data: FeatureFlagStateResponse; request_id: string }>(
+    `/ops/admin/feature-flags/${encodeURIComponent(tenantId)}/order-intake-pipeline`,
+  );
+}
+
 /** POST /api/ops/admin/feature-flags/{tenant_id}/order-intake-pipeline/{new_state} */
 export async function setOrderIntakePipelineState(
   tenantId: string,
@@ -246,63 +211,6 @@ export async function setOrderIntakePipelineState(
   return adminRequest<{ data: FeatureFlagResponse; request_id: string }>(
     `/ops/admin/feature-flags/${encodeURIComponent(tenantId)}/order-intake-pipeline/${newState}`,
     { method: "POST" },
-  );
-}
-
-// ─── Order Webhook Endpoints ─────────────────────────────────────────────────
-
-/** GET /api/integrations/intake-channels — list all intake channels */
-export async function getIntakeChannels(): Promise<{
-  items: IntakeChannel[];
-}> {
-  return adminRequest<{ items: IntakeChannel[] }>(
-    "/integrations/intake-channels",
-  );
-}
-
-/** POST /api/integrations/intake-channels — create a new intake channel */
-export async function createIntakeChannel(
-  payload: CreateChannelPayload,
-): Promise<CreateChannelResponse> {
-  return adminRequest<CreateChannelResponse>("/integrations/intake-channels", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
-}
-
-/** PATCH /api/integrations/intake-channels/{channel_id} — update an intake channel */
-export async function updateIntakeChannel(
-  channelId: string,
-  payload: UpdateChannelPayload,
-): Promise<IntakeChannel> {
-  return adminRequest<IntakeChannel>(
-    `/integrations/intake-channels/${encodeURIComponent(channelId)}`,
-    {
-      method: "PATCH",
-      body: JSON.stringify(payload),
-    },
-  );
-}
-
-/** DELETE /api/integrations/intake-channels/{channel_id} — delete an intake channel */
-export async function deleteIntakeChannel(channelId: string): Promise<void> {
-  await adminRequest<void>(
-    `/integrations/intake-channels/${encodeURIComponent(channelId)}`,
-    {
-      method: "DELETE",
-    },
-  );
-}
-
-/** POST /api/integrations/intake-channels/{channel_id}/rotate-secret — rotate HMAC secret */
-export async function rotateChannelSecret(
-  channelId: string,
-): Promise<{ new_secret: string }> {
-  return adminRequest<{ new_secret: string }>(
-    `/integrations/intake-channels/${encodeURIComponent(channelId)}/rotate-secret`,
-    {
-      method: "POST",
-    },
   );
 }
 
@@ -365,27 +273,23 @@ export async function getApprovals(params: {
   return adminRequest<ApprovalsResponse>(`/agent/approvals${qs}`);
 }
 
-/** POST /api/agent/approvals/{action_id}/approve — approve an action */
-export async function approveAction(
-  actionId: string,
-  reviewerId: string = "admin",
-): Promise<any> {
-  const qs = buildQueryString({ reviewer_id: reviewerId });
+/** POST /api/agent/approvals/{action_id}/approve — approve an action.
+ * The reviewer is derived server-side from the authenticated session. */
+export async function approveAction(actionId: string): Promise<any> {
   return adminRequest<any>(
-    `/agent/approvals/${encodeURIComponent(actionId)}/approve${qs}`,
+    `/agent/approvals/${encodeURIComponent(actionId)}/approve`,
     { method: "POST" },
   );
 }
 
-/** POST /api/agent/approvals/{action_id}/reject — reject an action */
+/** POST /api/agent/approvals/{action_id}/reject — reject an action.
+ * The reviewer is derived server-side from the authenticated session. */
 export async function rejectAction(
   actionId: string,
   reason: string = "",
-  reviewerId: string = "admin",
 ): Promise<any> {
-  const qs = buildQueryString({ reviewer_id: reviewerId });
   return adminRequest<any>(
-    `/agent/approvals/${encodeURIComponent(actionId)}/reject${qs}`,
+    `/agent/approvals/${encodeURIComponent(actionId)}/reject`,
     {
       method: "POST",
       body: JSON.stringify({ reason }),
