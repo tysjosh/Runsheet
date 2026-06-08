@@ -130,6 +130,42 @@ async function agentRequest<T>(
   }
 }
 
+// ─── Pagination normalization ────────────────────────────────────────────────
+
+/**
+ * Loosely-typed paginated envelope. The agent endpoints return the unified
+ * ``paginated_response_dict`` shape (``items`` + ``total``/``page``/``page_size``,
+ * plus legacy ``data``/``pagination``). This service's public functions promise
+ * ``{ entries, ... }``, so we normalize here — reading ``items``, then legacy
+ * ``data``, then ``entries`` — instead of forcing every caller to guess the key
+ * (which historically caused silently-empty feeds and queues).
+ */
+interface LoosePaginated {
+  entries?: unknown[];
+  items?: unknown[];
+  data?: unknown[];
+  total?: number;
+  page?: number;
+  size?: number;
+  page_size?: number;
+  pagination?: { total?: number; page?: number; size?: number };
+}
+
+function normalizePaginated<T>(raw: LoosePaginated): {
+  entries: T[];
+  total: number;
+  page: number;
+  size: number;
+} {
+  const entries = (raw.entries ?? raw.items ?? raw.data ?? []) as T[];
+  return {
+    entries,
+    total: raw.total ?? raw.pagination?.total ?? entries.length,
+    page: raw.page ?? raw.pagination?.page ?? 1,
+    size: raw.size ?? raw.page_size ?? raw.pagination?.size ?? entries.length,
+  };
+}
+
 // ─── Approval Queue Endpoints ────────────────────────────────────────────────
 
 /** GET /agent/approvals — list pending approvals for a tenant */
@@ -139,7 +175,8 @@ export async function getApprovals(
   size: number = 20,
 ): Promise<PaginatedApprovals> {
   const qs = buildQueryString({ tenant_id: tenantId, page, size });
-  return agentRequest<PaginatedApprovals>(`/approvals${qs}`);
+  const raw = await agentRequest<LoosePaginated>(`/approvals${qs}`);
+  return normalizePaginated<ApprovalEntry>(raw);
 }
 
 /** POST /agent/approvals/{action_id}/approve — approve a pending action */
@@ -197,7 +234,8 @@ export async function getActivityLog(
     page: filters.page ?? 1,
     size: filters.size ?? 50,
   });
-  return agentRequest<PaginatedActivity>(`/activity${qs}`);
+  const raw = await agentRequest<LoosePaginated>(`/activity${qs}`);
+  return normalizePaginated<ActivityLogEntry>(raw);
 }
 
 // ─── Agent Health Endpoints ──────────────────────────────────────────────────
@@ -300,7 +338,8 @@ export async function getMemories(
     page: filters.page ?? 1,
     size: filters.size ?? 20,
   });
-  return agentRequest<PaginatedMemories>(`/memory${qs}`);
+  const raw = await agentRequest<LoosePaginated>(`/memory${qs}`);
+  return normalizePaginated<MemoryEntry>(raw);
 }
 
 /** DELETE /agent/memory/{id} — delete a specific memory entry */
@@ -369,7 +408,8 @@ export async function getFeedback(
     page: filters.page ?? 1,
     size: filters.size ?? 20,
   });
-  return agentRequest<PaginatedFeedback>(`/feedback${qs}`);
+  const raw = await agentRequest<LoosePaginated>(`/feedback${qs}`);
+  return normalizePaginated<FeedbackEntry>(raw);
 }
 
 /** GET /agent/feedback/stats — feedback statistics */
