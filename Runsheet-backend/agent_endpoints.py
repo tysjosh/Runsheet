@@ -195,16 +195,24 @@ async def list_approvals(
 async def approve_action(
     action_id: str,
     request: Request,
-    reviewer_id: str = Query("admin", description="ID of the reviewing user"),
+    tenant: TenantContext = Depends(get_tenant_context),
+    reviewer_id: Optional[str] = Query(
+        None, description="Deprecated — the reviewer is taken from the session"
+    ),
 ):
     """
     Approve a pending action and trigger execution.
 
+    The reviewer recorded in the audit trail is the authenticated user, not a
+    client-supplied value (the ``reviewer_id`` query param is retained only for
+    backward compatibility and ignored when a session user is present).
+
     Validates: Requirement 2.4
     """
     svc = _get_approval_queue()
+    actor = tenant.user_id or reviewer_id or "unknown"
     try:
-        result = await svc.approve(action_id=action_id, reviewer_id=reviewer_id)
+        result = await svc.approve(action_id=action_id, reviewer_id=actor)
         return result
     except ValueError as e:
         raise validation_error(message=str(e))
@@ -221,18 +229,25 @@ async def reject_action(
     action_id: str,
     request: Request,
     body: ApprovalRejectRequest = None,
-    reviewer_id: str = Query("admin", description="ID of the reviewing user"),
+    tenant: TenantContext = Depends(get_tenant_context),
+    reviewer_id: Optional[str] = Query(
+        None, description="Deprecated — the reviewer is taken from the session"
+    ),
 ):
     """
     Reject a pending action with an optional reason.
+
+    The reviewer recorded in the audit trail is the authenticated user (see
+    :func:`approve_action`).
 
     Validates: Requirement 2.5
     """
     svc = _get_approval_queue()
     reason = body.reason if body else ""
+    actor = tenant.user_id or reviewer_id or "unknown"
     try:
         result = await svc.reject(
-            action_id=action_id, reviewer_id=reviewer_id, reason=reason
+            action_id=action_id, reviewer_id=actor, reason=reason
         )
         return result
     except ValueError as e:
