@@ -72,6 +72,7 @@ function getKFactorColumns(
     {
       key: "tank_id",
       label: "Tank ID",
+      className: "text-sm",
       // The k-factor subject is its tank, navigable to the Fuel Ops tank
       // surface (Req 11.3, 13.1).
       render: ({ entry }) => (
@@ -81,6 +82,7 @@ function getKFactorColumns(
     {
       key: "customer_id",
       label: "Customer",
+      className: "text-sm",
       // The owning customer is also navigable to the Commerce module.
       render: ({ entry }) => (
         <EntityLink type="customer" id={entry.customer_id} />
@@ -101,6 +103,7 @@ function getKFactorColumns(
     {
       key: "variance_percent",
       label: "Cumulative Variance",
+      className: "text-sm",
       render: ({ entry }) => {
         const variance = entry.variance_percent;
         return (
@@ -316,6 +319,7 @@ export default function KFactorCalibrationPage() {
           {/* Dashboard table */}
           <Table<DecoratedKFactorEntry>
             ariaLabel="K-factor calibration dashboard"
+            variant="compact"
             columns={getKFactorColumns(
               handleApproveClick,
               setConsumptionTarget,
