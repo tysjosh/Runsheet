@@ -30,6 +30,15 @@ class NotificationType(str, Enum):
     DELAY_ALERT = "delay_alert"
     ETA_CHANGE = "eta_change"
     ORDER_STATUS_UPDATE = "order_status_update"
+    # Fuel-specific notification types. Their string values match the
+    # seeded fuel notification rules and templates (see
+    # notifications/services/seed_data.py) so the pipeline resolves the
+    # correct rule/template instead of collapsing them to a generic
+    # order_status_update.
+    LOW_TANK_AUTOFILL_ALERT = "low_tank_autofill_alert"
+    PAST_DUE_INVOICE = "past_due_invoice"
+    DELIVERY_COMPLETED = "delivery_completed"
+    E_BOL_DELIVERY = "e_bol_delivery"
 
 
 class DeliveryStatus(str, Enum):

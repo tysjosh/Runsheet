@@ -54,7 +54,11 @@ def _map_event_to_notification_type(
     2. ``delay_alert`` → ``delay_alert``
     3. ``status_changed`` with updated ``estimated_arrival`` → ``eta_change``
     4. Any other ``status_changed`` → ``order_status_update``
-    5. Anything else → ``order_status_update``
+    5. A fuel-specific event whose name matches a NotificationType value
+       (``low_tank_autofill_alert``, ``past_due_invoice``,
+       ``delivery_completed``, ``e_bol_delivery``) → that type, so its
+       dedicated rule + template are used.
+    6. Anything else → ``order_status_update``
 
     Validates: Requirements 1.1, 1.2, 1.3, 1.4
     """
@@ -68,6 +72,14 @@ def _map_event_to_notification_type(
 
     if event_type == "delay_alert":
         return NotificationType.DELAY_ALERT
+
+    # Fuel-specific events map to their own NotificationType when one exists,
+    # so notify_event resolves the dedicated fuel rule/template rather than the
+    # generic order_status_update fallback.
+    try:
+        return NotificationType(event_type)
+    except ValueError:
+        pass
 
     # Fallback for any other event type
     return NotificationType.ORDER_STATUS_UPDATE

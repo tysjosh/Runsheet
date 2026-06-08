@@ -203,6 +203,21 @@ class TestMapEventToNotificationType:
         result = _map_event_to_notification_type("some_other_event", {})
         assert result == NotificationType.ORDER_STATUS_UPDATE
 
+    def test_fuel_events_map_to_their_own_type(self):
+        """Fuel events resolve their dedicated type (not the generic
+        order_status_update) so their dedicated rule + template are used."""
+        for event_type, expected in (
+            ("low_tank_autofill_alert", NotificationType.LOW_TANK_AUTOFILL_ALERT),
+            ("past_due_invoice", NotificationType.PAST_DUE_INVOICE),
+            ("delivery_completed", NotificationType.DELIVERY_COMPLETED),
+            ("e_bol_delivery", NotificationType.E_BOL_DELIVERY),
+        ):
+            assert _map_event_to_notification_type(event_type, {}) == expected
+            # And the enum value round-trips to the rule/template key.
+            assert (
+                _map_event_to_notification_type(event_type, {}).value == event_type
+            )
+
     def test_completed_takes_priority_over_eta(self):
         """status=completed should map to delivery_confirmation even if estimated_arrival is present."""
         result = _map_event_to_notification_type(
