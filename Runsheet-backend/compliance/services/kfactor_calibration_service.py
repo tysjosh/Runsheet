@@ -975,9 +975,24 @@ class KFactorCalibrationService:
         # 1. Query all auto-fill customer tanks for this tenant
         tanks = await self._get_autofill_tanks(tenant_id)
 
+        # Drop tanks whose stored document fails CustomerTank validation.
+        # The detail endpoint (GET /fuel/mvp/customer-tanks/{id}) validates
+        # against the same strict model and 404s on failure, so a tank that
+        # cannot be loaded here is one whose drill-in link would be dead.
+        # Skipping it keeps the dashboard and the detail view from disagreeing
+        # (a listed-but-un-navigable row). _safe_model_load strips the
+        # geo_point convenience field before validating, so only genuinely
+        # invalid records (e.g. an out-of-enum use_case) are dropped.
+        from fuel.customer_tank_models import _safe_model_load
+
         entries: List[KFactorEntry] = []
+        skipped_invalid = 0
 
         for tank_doc in tanks:
+            if _safe_model_load(tank_doc) is None:
+                skipped_invalid += 1
+                continue
+
             tank_id = tank_doc.get("customer_tank_id", "")
             customer_id = tank_doc.get("customer_id", "")
             current_kfactor = tank_doc.get("k_factor", 0.0)
@@ -1064,10 +1079,11 @@ class KFactorCalibrationService:
 
         logger.info(
             "get_calibration_dashboard: tenant=%s returned %d entries "
-            "(%d with variance data)",
+            "(%d with variance data, %d skipped as invalid)",
             tenant_id,
             len(entries),
             sum(1 for e in entries if e.variance_percent is not None),
+            skipped_invalid,
         )
 
         return entries

@@ -661,6 +661,13 @@ class TestInsufficientDataCases:
                     "zip_code": "06001",
                     "customer_type": "auto_fill",
                     "tenant_id": _TENANT_ID,
+                    "fuel_type": "propane",
+                    "fuel_product_code": "PROPANE",
+                    "capacity_gallons": 1000.0,
+                    "current_level_gallons": 400.0,
+                    "location_lat": 41.88,
+                    "location_lon": -87.62,
+                    "status": "active",
                 },
                 "sort": [tank_id],
             }

@@ -317,7 +317,13 @@ def _autofill_tank_hit(
     zip_code: str = "06001",
     customer_type: str = "auto_fill",
 ):
-    """Build a mock ES hit for an auto-fill customer tank."""
+    """Build a mock ES hit for an auto-fill customer tank.
+
+    Carries the full set of ``CustomerTank`` fields (not just the handful the
+    dashboard reads) so it round-trips through the model-validation guard in
+    ``get_calibration_dashboard`` exactly as a real ``customer_tanks`` _source
+    document would.
+    """
     return {
         "_source": {
             "customer_tank_id": tank_id,
@@ -326,6 +332,13 @@ def _autofill_tank_hit(
             "zip_code": zip_code,
             "customer_type": customer_type,
             "tenant_id": _TENANT_ID,
+            "fuel_type": "propane",
+            "fuel_product_code": "PROPANE",
+            "capacity_gallons": 1000.0,
+            "current_level_gallons": 400.0,
+            "location_lat": 41.88,
+            "location_lon": -87.62,
+            "status": "active",
         },
         "sort": [tank_id],
     }
@@ -353,7 +366,39 @@ class TestGetCalibrationDashboard:
         assert result == []
 
     @pytest.mark.asyncio
-    async def test_tank_with_sufficient_data_includes_variance(self):
+    async def test_skips_tank_failing_model_validation(self):
+        """A tank whose stored doc fails CustomerTank validation is dropped.
+
+        The detail endpoint (GET /fuel/mvp/customer-tanks/{id}) validates
+        against the same strict model and 404s on failure, so listing such a
+        tank would render an un-navigable drill-in row. The dashboard must
+        skip it so the two views stay consistent.
+        """
+        es = _make_es_service()
+
+        # One valid tank and one with an out-of-enum use_case (which the
+        # strict CustomerTank model rejects). Only the valid one should
+        # survive into the dashboard.
+        valid = _autofill_tank_hit(tank_id="tank_ok", k_factor=1.5)
+        invalid = _autofill_tank_hit(tank_id="tank_bad", k_factor=1.5)
+        invalid["_source"]["use_case"] = "auto_fill"  # not a valid UseCase
+
+        es.search_documents = AsyncMock(
+            side_effect=[
+                # 1. _get_autofill_tanks — returns both tanks
+                {"hits": {"hits": [valid, invalid]}},
+                # 2. _count_deliveries_for_tank for the valid tank
+                {"hits": {"hits": [], "total": {"value": 1}}},
+                # 3. _get_most_recent_delivery for the valid tank
+                {"hits": {"hits": []}},
+            ]
+        )
+
+        service = KFactorCalibrationService(es_service=es)
+
+        result = await service.get_calibration_dashboard(_TENANT_ID)
+
+        assert [e.tank_id for e in result] == ["tank_ok"]
         """Tank with ≥3 deliveries includes variance and suggested kfactor. Validates: 9.4"""
         es = _make_es_service()
 
