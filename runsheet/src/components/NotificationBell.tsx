@@ -4,11 +4,12 @@
  * Global operator alert bell for the dashboard header.
  *
  * Surfaces autonomous-agent activity and approvals that need attention — the
- * same stream that powers the Operations Command Center — with a live unread
- * badge and a dropdown of the most recent alerts. Subscribes to
- * /ws/agent-activity so new agent actions and approval requests appear (and
- * bump the badge) in real time across every dashboard page. "Unread" is tracked
- * client-side as alerts that arrived since the dropdown was last opened.
+ * same stream that powers the Operations Command Center — with a badge showing
+ * the number of approvals awaiting the operator and a dropdown of the most
+ * recent alerts. Subscribes to /ws/agent-activity so new agent actions and
+ * approval requests appear in real time across every dashboard page; the badge
+ * counts outstanding approvals (seeded from the server and adjusted as they are
+ * created/resolved), so it persists across reloads rather than resetting.
  *
  * Note: this is distinct from the customer-notification history at
  * /dashboard/notifications (outbound SMS/email/WhatsApp to customers). The bell
@@ -133,7 +134,7 @@ export default function NotificationBell() {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [items, setItems] = useState<BellAlert[]>([]);
-  const [unread, setUnread] = useState(0);
+  const [pendingCount, setPendingCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -147,6 +148,11 @@ export default function NotificationBell() {
           getApprovals(undefined, 1, RECENT_LIMIT).catch(() => null),
         ]);
         if (cancelled) return;
+        // The approvals endpoint returns only pending items, with `total`
+        // reflecting the full pending count — that's the actionable badge
+        // number (it persists across reloads, unlike a "since last seen"
+        // counter).
+        setPendingCount(approvals?.total ?? 0);
         const merged: BellAlert[] = [
           ...(approvals?.entries ?? [])
             .filter((a) => a.status === "pending")
@@ -167,21 +173,24 @@ export default function NotificationBell() {
     };
   }, []);
 
+  // New agent activity is informational — it shows in the list but does not
+  // change the badge, which tracks outstanding approvals only.
   const handleActivity = useCallback((entry: ActivityLogEntry) => {
     setItems((prev) => mergeAlert(prev, activityToAlert(entry)));
-    setUnread((n) => n + 1);
   }, []);
 
   const handleApprovalEvent = useCallback(
     (event: { type: string; approval: ApprovalEntry }) => {
       if (event.type === "approval_created") {
         setItems((prev) => mergeAlert(prev, approvalToAlert(event.approval)));
-        setUnread((n) => n + 1);
+        setPendingCount((n) => n + 1);
       } else {
-        // approved / rejected / expired — drop it from the attention list.
+        // approved / rejected / expired — clear it from the attention list
+        // and the badge.
         setItems((prev) =>
           prev.filter((a) => a.id !== event.approval.action_id),
         );
+        setPendingCount((n) => Math.max(0, n - 1));
       }
     },
     [],
@@ -216,14 +225,7 @@ export default function NotificationBell() {
     };
   }, [open]);
 
-  const toggle = () => {
-    setOpen((prev) => {
-      const next = !prev;
-      // Opening the panel clears the "new since last look" badge.
-      if (next) setUnread(0);
-      return next;
-    });
-  };
+  const toggle = () => setOpen((prev) => !prev);
 
   const goToCommand = () => {
     setOpen(false);
@@ -235,19 +237,23 @@ export default function NotificationBell() {
       <button
         type="button"
         onClick={toggle}
-        aria-label={unread > 0 ? `Alerts, ${unread} new` : "Alerts"}
+        aria-label={
+          pendingCount > 0
+            ? `Alerts, ${pendingCount} pending approval${pendingCount === 1 ? "" : "s"}`
+            : "Alerts"
+        }
         aria-haspopup="true"
         aria-expanded={open}
         className="relative flex items-center justify-center w-9 h-9 rounded-lg transition-colors hover:bg-[color-mix(in_srgb,var(--color-primary)_8%,transparent)] focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-[color:var(--color-primary)]"
         style={{ color: "var(--color-primary)" }}
       >
         <Bell className="w-5 h-5" />
-        {unread > 0 && (
+        {pendingCount > 0 && (
           <span
             className="absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] px-1 flex items-center justify-center rounded-full text-[10px] font-semibold text-white"
             style={{ backgroundColor: "var(--color-error)" }}
           >
-            {unread > 9 ? "9+" : unread}
+            {pendingCount > 9 ? "9+" : pendingCount}
           </span>
         )}
       </button>
