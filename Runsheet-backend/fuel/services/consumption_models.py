@@ -245,6 +245,7 @@ class ConsumptionModel(ABC):
         *,
         customer_type: Optional[str] = None,
         horizon_days: int = DEFAULT_WEATHER_HORIZON_DAYS,
+        calibrated_k_factor: Optional[float] = None,
     ) -> ConsumptionPrediction:
         """Return a :class:`ConsumptionPrediction` for the tank.
 
@@ -266,6 +267,12 @@ class ConsumptionModel(ABC):
             horizon_days: Forecast horizon in days. Defaults to 7; the
                 propane and heating-oil models average the forward HDD
                 window over this many days before applying their slope.
+            calibrated_k_factor: Optional operator-approved K-factor from
+                the K-Factor Calibration workflow (stored on
+                ``CustomerTank.k_factor``). When present and positive, the
+                propane model treats it as authoritative and uses it
+                instead of the learned/default K (Req 9.5). Other models
+                that do not model a single K ignore it.
 
         Returns:
             A non-negative :class:`ConsumptionPrediction`.
@@ -527,12 +534,17 @@ class PropaneKFactorModel(ConsumptionModel):
         *,
         customer_type: Optional[str] = None,
         horizon_days: int = DEFAULT_WEATHER_HORIZON_DAYS,
+        calibrated_k_factor: Optional[float] = None,
     ) -> ConsumptionPrediction:
         now = self._now()
         history = self._coerce_history(historical_events)
         weather_rows = self._coerce_weather(weather)
 
-        # Learn or fall back to the default K.
+        # K-factor precedence (Req 9.5):
+        #   1. Operator-approved calibrated K (weather-normalized, human
+        #      reviewed) — authoritative when present and positive.
+        #   2. Learned K from delivery history (>= MIN_PROPANE_INTERVALS).
+        #   3. Customer-type default constant.
         k_result = _learn_propane_k_factor(
             history=history,
             weather_rows=weather_rows,
@@ -540,17 +552,28 @@ class PropaneKFactorModel(ConsumptionModel):
             min_intervals=MIN_PROPANE_INTERVALS,
         )
         anomalies: List[str] = list(k_result["anomaly_flags"])
-        used_default_k = k_result["learned_k"] is None
+        learned_k = k_result["learned_k"]
+
         k_factor: float
-        if used_default_k:
+        k_factor_source: str
+        if calibrated_k_factor is not None and calibrated_k_factor > 0:
+            k_factor = float(calibrated_k_factor)
+            k_factor_source = "calibrated"
+        elif learned_k is not None:
+            k_factor = float(learned_k)
+            k_factor_source = "learned"
+        else:
             k_factor = _default_k_for_customer_type(
                 customer_type,
                 residential=self._residential_k,
                 commercial=self._commercial_k,
             )
+            k_factor_source = "default"
             anomalies.append("insufficient_history")
-        else:
-            k_factor = float(k_result["learned_k"])
+
+        # A calibrated K is human-approved, so a thin history no longer
+        # implies low confidence — only the weather-fallback path does.
+        used_default_k = k_factor_source == "default"
 
         # Average HDD across the forward horizon.
         forecast_hdd_samples = _select_forecast_hdd(weather_rows, now, horizon_days)
@@ -574,7 +597,7 @@ class PropaneKFactorModel(ConsumptionModel):
         features_used: Dict[str, Any] = {
             "tank_id": tank_id,
             "k_factor": round(k_factor, 4),
-            "k_factor_source": "learned" if not used_default_k else "default",
+            "k_factor_source": k_factor_source,
             "base_load_gpd": self._base_load,
             "forecast_hdd_avg": round(avg_hdd, 3),
             "forecast_hdd_days": len(forecast_hdd_samples),

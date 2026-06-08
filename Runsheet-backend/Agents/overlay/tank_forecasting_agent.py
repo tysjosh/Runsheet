@@ -70,6 +70,7 @@ from fuel.customer_tank_models import CustomerTank, CustomerTankRepository
 from fuel.services.consumption_models import (
     ConsumptionModel,
     ConsumptionPrediction,
+    PropaneKFactorModel,
     build_consumption_model,
     select_consumption_model_for_tank,
 )
@@ -1100,11 +1101,24 @@ class TankForecastingAgent(OverlayAgentBase):
         forecaster can still emit a valid TankForecast for the tank.
         """
         try:
+            # Thread the operator-approved calibrated K-factor into the
+            # propane model so an approved calibration actually changes the
+            # forecast (Req 9.5). Scoped to the propane K-factor model — the
+            # calibration formula (gallons / ΣHDD) is the propane K; other
+            # models do not consume a single K.
+            extra: Dict[str, Any] = {}
+            if (
+                isinstance(model, PropaneKFactorModel)
+                and tank.k_factor is not None
+                and tank.k_factor > 0
+            ):
+                extra["calibrated_k_factor"] = tank.k_factor
             return await model.predict(
                 tank.customer_tank_id,
                 history,
                 weather,
                 customer_type=tank.customer_type,
+                **extra,
             )
         except Exception as exc:
             logger.warning(
