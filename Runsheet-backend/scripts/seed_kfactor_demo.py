@@ -56,6 +56,7 @@ async def main() -> int:
     tenant_id = args.tenant
 
     from services.elasticsearch_service import elasticsearch_service as es
+    from commerce.services.commerce_es_mappings import CUSTOMERS_CURRENT_INDEX
     from fuel.services.fuel_ops_es_mappings import (
         CUSTOMER_TANKS_INDEX,
         WEATHER_OBSERVATIONS_INDEX,
@@ -63,6 +64,33 @@ async def main() -> int:
     from fuel.services.order_es_mappings import FUEL_ORDERS_CURRENT_INDEX
 
     now = _now()
+
+    # 0. Owning customer record so the tank's "Customer" link resolves in
+    #    Commerce (GET /api/commerce/customers/{id}). Without this the
+    #    K-Factor → customer drill-in 404s.
+    customer = {
+        "customer_id": CUSTOMER_ID,
+        "tenant_id": tenant_id,
+        "display_name": "Propane Demo Customer",
+        "legal_name": "Propane Demo Customer LLC",
+        "primary_email": "ops@propane-demo.example",
+        "status": "active",
+        "created_at": now,
+        "updated_at": now,
+    }
+    await es.index_document(CUSTOMERS_CURRENT_INDEX, CUSTOMER_ID, customer)
+    # Mirror to the Postgres source-of-truth so the customer resolves even when
+    # commerce reads are cut over to Postgres (best-effort / idempotent; a no-op
+    # when the persistence layer is disabled).
+    try:
+        from commerce.services.commerce_persistence_bridge import (
+            mirror_customer_create,
+        )
+
+        await mirror_customer_create(customer)
+    except Exception as exc:  # pragma: no cover - best-effort seed mirror
+        print(f"  (warn) customer Postgres mirror skipped: {exc}")
+    print(f"seeded customer {CUSTOMER_ID}")
 
     # 1. Propane customer tank.
     tank = {
@@ -78,7 +106,7 @@ async def main() -> int:
         "location_lon": -87.6219,
         "zip_code": ZIP,
         "k_factor": K_FACTOR,
-        "use_case": "auto_fill",
+        "use_case": "residential_heat",
         "status": "active",
         "created_at": now,
         "updated_at": now,
@@ -132,6 +160,7 @@ async def main() -> int:
 
     # Make everything searchable immediately.
     for index in (
+        CUSTOMERS_CURRENT_INDEX,
         CUSTOMER_TANKS_INDEX,
         WEATHER_OBSERVATIONS_INDEX,
         FUEL_ORDERS_CURRENT_INDEX,
