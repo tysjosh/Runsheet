@@ -335,13 +335,21 @@ def inject_tenant_filter(query: dict, tenant_id: str) -> dict:
     Applied to all read endpoints (shipments, riders, events, metrics)
     to enforce tenant-scoped data isolation.
 
+    Only the ``query`` clause is rewritten to add the tenant filter; every
+    other top-level search-body key the caller supplied (``sort``, ``size``,
+    ``search_after``, ``aggs``, ``_source``, ...) is preserved. Dropping
+    those siblings silently breaks ordering and ``search_after`` pagination,
+    so they are carried through unchanged.
+
     Validates: Requirements 9.2, 9.4
     """
-    return {
-        "query": {
-            "bool": {
-                "must": [query.get("query", {"match_all": {}})],
-                "filter": [{"term": {"tenant_id": tenant_id}}],
-            }
+    wrapped = {
+        key: value for key, value in query.items() if key != "query"
+    }
+    wrapped["query"] = {
+        "bool": {
+            "must": [query.get("query", {"match_all": {}})],
+            "filter": [{"term": {"tenant_id": tenant_id}}],
         }
     }
+    return wrapped
