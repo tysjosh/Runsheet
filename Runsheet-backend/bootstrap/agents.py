@@ -11,6 +11,8 @@ Requirements: 1.1, 1.2, 7.6
 import logging
 import os
 
+import asyncio
+
 from bootstrap.container import ServiceContainer
 
 logger = logging.getLogger(__name__)
@@ -23,6 +25,14 @@ _agent_redis_client = None
 # lifecycles that live outside the AgentScheduler.
 _storm_mode_evaluator = None
 _integration_scheduler = None
+# Periodic sweep that transitions pending approvals past their expiry_time to
+# "expired" (the ApprovalQueueService implements expire_stale() but nothing
+# scheduled it, so stale approvals accumulated in the pending queue forever).
+_approval_expiry_task = None
+
+# Interval for the approval-expiry sweep. Approvals carry a 1-hour expiry, so a
+# 5-minute cadence keeps the pending queue accurate without polling pressure.
+APPROVAL_EXPIRY_INTERVAL_SECONDS = 300
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +142,7 @@ async def _seed_fuel_ops_feature_flag_defaults(
 async def initialize(app, container: ServiceContainer) -> None:
     """Create and register all agentic AI services."""
     global _autonomous_agents, _agent_scheduler, _agent_redis_client
+    global _approval_expiry_task
     global _storm_mode_evaluator, _integration_scheduler
 
     import redis.asyncio as aioredis
@@ -439,6 +450,35 @@ async def initialize(app, container: ServiceContainer) -> None:
 
     # Wire back-reference
     approval_queue_service._confirmation_protocol = confirmation_protocol
+
+    # ── Approval expiry sweep ──────────────────────────────────────────
+    # Periodically transition pending approvals whose expiry_time has passed
+    # to "expired". ApprovalQueueService.expire_stale() existed but nothing
+    # scheduled it, so expired-but-still-pending approvals piled up in the
+    # queue (and inflated the operator alert badge). Mirrors the
+    # asyncio.create_task periodic-job pattern used in bootstrap/core.py.
+    async def _periodic_approval_expiry() -> None:
+        """Background task that expires stale pending approvals."""
+        try:
+            while True:
+                await asyncio.sleep(APPROVAL_EXPIRY_INTERVAL_SECONDS)
+                try:
+                    expired = await approval_queue_service.expire_stale()
+                    if expired:
+                        logger.info(
+                            "Approval expiry sweep: %d approval(s) expired",
+                            expired,
+                        )
+                except Exception as exc:
+                    logger.error("Approval expiry sweep failed: %s", exc)
+        except asyncio.CancelledError:
+            logger.info("Approval expiry task cancelled")
+
+    _approval_expiry_task = asyncio.create_task(_periodic_approval_expiry())
+    logger.info(
+        "Approval expiry sweep started (interval: %ds)",
+        APPROVAL_EXPIRY_INTERVAL_SECONDS,
+    )
 
     # Memory and Feedback
     memory_service = MemoryService(es_service=es_service)
@@ -1463,6 +1503,17 @@ async def shutdown(app, container: ServiceContainer) -> None:
     """Stop agents in order: L2 → L1 → L0, then close resources (Req 10.5)."""
     global _autonomous_agents, _agent_scheduler, _agent_redis_client
     global _storm_mode_evaluator, _integration_scheduler
+    global _approval_expiry_task
+
+    # Stop the approval-expiry sweep first — it's a standalone asyncio task
+    # with no dependency on the scheduler.
+    if _approval_expiry_task is not None:
+        _approval_expiry_task.cancel()
+        try:
+            await _approval_expiry_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        _approval_expiry_task = None
 
     # Stop the fuel-ops hardening services FIRST (before the
     # AgentScheduler) so any in-flight tick cannot observe a
