@@ -45,6 +45,7 @@ from notifications.api.metrics_endpoints import router as metrics_router
 from integrations.api.integrations_endpoints import router as integrations_router
 from integrations.api.intake_channel_endpoints import router as intake_channel_router
 from fuel.api.order_endpoints import router as order_router
+from fuel.api.feature_flag_admin_endpoints import router as feature_flag_admin_router
 from fuel.api.order_webhook_endpoints import router as order_webhook_router
 from fuel.api.driver_endpoints import router as driver_ops_router
 from auth.api.password_admin_endpoints import router as auth_admin_router
@@ -212,6 +213,7 @@ for _router in (
     exception_router, pod_router, agent_router, inline_router, import_router,
     notification_router, metrics_router, integrations_router,
     intake_channel_router, order_router, order_webhook_router,
+    feature_flag_admin_router,
     driver_ops_router,
     stripe_router, stripe_webhook_router,
     compliance_tax_router,

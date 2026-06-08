@@ -173,6 +173,20 @@ class OrdersWSManager(BaseWSManager):
     # Broadcasting — tenant-scoped + subscription-filtered
     # ------------------------------------------------------------------
 
+    async def broadcast(
+        self, event_type: str, data: dict, tenant_id: str = ""
+    ) -> int:
+        """Generic tenant-scoped broadcast of an arbitrary event type.
+
+        Used by non-order surfaces that share this socket (e.g. the admin
+        feature-flag endpoint pushing ``feature_flag_changed``). The
+        ``tenant_id`` is stamped into the payload so the same tenant-isolation
+        filtering as the typed order broadcasts applies. Returns the number of
+        clients that received the message.
+        """
+        payload = {**data, "tenant_id": data.get("tenant_id") or tenant_id}
+        return await self._broadcast_event(event_type, payload)
+
     async def broadcast_order_placed(self, order_data: dict) -> int:
         """Broadcast an order_placed event to subscribed clients.
 

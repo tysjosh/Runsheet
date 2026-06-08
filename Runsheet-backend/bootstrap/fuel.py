@@ -71,6 +71,34 @@ async def initialize(app, container: ServiceContainer) -> None:
         logger.warning("Failed to register Orders WebSocket manager: %s", e)
 
     # ---------------------------------------------------------------
+    # Order intake pipeline feature-flag admin endpoint — wire the
+    # FeatureFlagService (from ops bootstrap) and the orders WS manager so
+    # POST/GET /api/ops/admin/feature-flags/{tenant}/order-intake-pipeline
+    # work and broadcast flag changes. Without this the admin Feature Flags
+    # tab 404s. Requirement 9.3.5.
+    # ---------------------------------------------------------------
+    try:
+        from fuel.api.feature_flag_admin_endpoints import (
+            configure_feature_flag_admin,
+        )
+
+        configure_feature_flag_admin(
+            feature_flag_service=(
+                container.ops_feature_flags
+                if container.has("ops_feature_flags")
+                else None
+            ),
+            orders_ws_manager=(
+                container.orders_ws_manager
+                if container.has("orders_ws_manager")
+                else None
+            ),
+        )
+        logger.info("Feature-flag admin endpoint configured")
+    except Exception as e:
+        logger.warning("Failed to configure feature-flag admin endpoint: %s", e)
+
+    # ---------------------------------------------------------------
     # Order intake pipeline — repositories + endpoint wiring
     # ---------------------------------------------------------------
 

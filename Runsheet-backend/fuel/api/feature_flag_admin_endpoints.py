@@ -53,6 +53,48 @@ ORDER_INTAKE_PIPELINE_FLAG_KEY = "order_intake_pipeline"
 VALID_STATES = frozenset({"disabled", "shadow", "active_gated", "active_auto"})
 
 
+@router.get("/feature-flags/{tenant_id}/order-intake-pipeline")
+async def get_order_intake_pipeline_state(
+    tenant_id: str,
+    request: Request,
+    tenant: TenantContext = Depends(get_tenant_context),
+) -> dict:
+    """Return the current order-intake-pipeline overlay state for a tenant.
+
+    One of ``disabled``, ``shadow``, ``active_gated``, ``active_auto``
+    (defaults to ``disabled`` when never set). Role-gated to admin, matching
+    the setter.
+
+    Validates: Requirement 9.3.5.
+    """
+    roles = getattr(tenant, "roles", None) or []
+    if "admin" not in roles:
+        raise forbidden(
+            message="Order intake pipeline flag management requires the admin role",
+            details={"required_role": "admin"},
+        )
+
+    if _feature_flag_service is None:
+        from errors.exceptions import elasticsearch_unavailable
+
+        raise elasticsearch_unavailable(
+            message="Feature flag service not configured",
+            details={"service": "feature_flag_service"},
+        )
+
+    state = await _feature_flag_service.get_overlay_state(
+        ORDER_INTAKE_PIPELINE_FLAG_KEY, tenant_id
+    )
+    return {
+        "data": {
+            "tenant_id": tenant_id,
+            "flag_key": ORDER_INTAKE_PIPELINE_FLAG_KEY,
+            "state": state,
+        },
+        "request_id": getattr(request.state, "request_id", ""),
+    }
+
+
 @router.post("/feature-flags/{tenant_id}/order-intake-pipeline/{new_state}")
 async def set_order_intake_pipeline_state(
     tenant_id: str,
