@@ -1,70 +1,114 @@
 "use client";
 
 /**
- * Global notification bell for the dashboard header.
+ * Global operator alert bell for the dashboard header.
  *
- * Shows a live unread badge and a dropdown of the most recent notifications,
- * with a link through to the full /dashboard/notifications history. Subscribes
- * to the same /ws/notifications channel as the history view, so new
- * notifications appear (and bump the unread count) in real time across every
- * dashboard page. "Unread" is tracked client-side as notifications that arrived
- * since the dropdown was last opened — the pipeline has no per-user read state.
+ * Surfaces autonomous-agent activity and approvals that need attention — the
+ * same stream that powers the Operations Command Center — with a live unread
+ * badge and a dropdown of the most recent alerts. Subscribes to
+ * /ws/agent-activity so new agent actions and approval requests appear (and
+ * bump the badge) in real time across every dashboard page. "Unread" is tracked
+ * client-side as alerts that arrived since the dropdown was last opened.
+ *
+ * Note: this is distinct from the customer-notification history at
+ * /dashboard/notifications (outbound SMS/email/WhatsApp to customers). The bell
+ * is for the operator's own attention queue. "View all" routes to the command
+ * center where the full feed + approval queue live.
  */
 
-import {
-  Bell,
-  CheckCircle,
-  Clock,
-  Mail,
-  MessageSquare,
-  Phone,
-  Send,
-  XCircle,
-} from "lucide-react";
+import { Bell, CheckCircle2, Clock, ShieldAlert, XCircle } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useNotificationWebSocket } from "../hooks/useNotificationWebSocket";
+import { useAgentWebSocket } from "../hooks/useAgentWebSocket";
 import {
-  type DeliveryStatus,
-  getNotifications,
-  type Notification,
-} from "../services/notificationApi";
+  type ActivityLogEntry,
+  type ApprovalEntry,
+  getActivityLog,
+  getApprovals,
+} from "../services/agentApi";
 
 const RECENT_LIMIT = 8;
 
-function getStatusIcon(status: string) {
-  switch (status) {
-    case "pending":
-      return <Clock className="w-3.5 h-3.5 text-warning" />;
-    case "sent":
-      return <Send className="w-3.5 h-3.5 text-info" />;
-    case "delivered":
-      return <CheckCircle className="w-3.5 h-3.5 text-success" />;
-    case "failed":
+/** Normalized alert shown in the bell — unifies activity log + approvals. */
+interface BellAlert {
+  id: string;
+  kind: "activity" | "approval";
+  agentLabel: string;
+  summary: string;
+  outcome: string | null;
+  riskLevel: string | null;
+  timestamp: string;
+}
+
+const AGENT_LABELS: Record<string, string> = {
+  delay_response_agent: "Delay Response",
+  fuel_management_agent: "Fuel Management",
+  sla_guardian_agent: "SLA Guardian",
+  ai_agent: "AI Assistant",
+  system: "System",
+};
+
+function agentLabel(agentId: string): string {
+  return AGENT_LABELS[agentId] ?? agentId;
+}
+
+function activitySummary(entry: ActivityLogEntry): string {
+  if (entry.action_type === "monitoring_cycle") {
+    const detections =
+      (entry.details as Record<string, unknown>)?.detection_count ?? 0;
+    const actions =
+      (entry.details as Record<string, unknown>)?.action_count ?? 0;
+    return `Monitoring cycle: ${detections} detections, ${actions} actions`;
+  }
+  if (entry.tool_name) return `${entry.action_type}: ${entry.tool_name}`;
+  return entry.action_type;
+}
+
+function activityToAlert(entry: ActivityLogEntry): BellAlert {
+  return {
+    id: entry.log_id,
+    kind: "activity",
+    agentLabel: agentLabel(entry.agent_id),
+    summary: activitySummary(entry),
+    outcome: entry.outcome,
+    riskLevel: entry.risk_level,
+    timestamp: entry.timestamp,
+  };
+}
+
+function approvalToAlert(approval: ApprovalEntry): BellAlert {
+  return {
+    id: approval.action_id,
+    kind: "approval",
+    agentLabel: agentLabel(approval.proposed_by),
+    summary:
+      approval.impact_summary ||
+      `${approval.action_type}: ${approval.tool_name}`,
+    outcome: "pending_approval",
+    riskLevel: approval.risk_level,
+    timestamp: approval.proposed_at,
+  };
+}
+
+function mergeAlert(prev: BellAlert[], next: BellAlert): BellAlert[] {
+  const deduped = prev.filter((a) => a.id !== next.id);
+  return [next, ...deduped].slice(0, RECENT_LIMIT);
+}
+
+function alertIcon(alert: BellAlert) {
+  if (alert.kind === "approval")
+    return <ShieldAlert className="w-3.5 h-3.5 text-warning" />;
+  switch (alert.outcome) {
+    case "success":
+      return <CheckCircle2 className="w-3.5 h-3.5 text-success" />;
+    case "failure":
+    case "rejected":
       return <XCircle className="w-3.5 h-3.5 text-error" />;
+    case "pending_approval":
+      return <Clock className="w-3.5 h-3.5 text-warning" />;
     default:
-      return null;
+      return <CheckCircle2 className="w-3.5 h-3.5 text-gray-400" />;
   }
-}
-
-function getChannelIcon(channel: string) {
-  switch (channel) {
-    case "sms":
-      return <Phone className="w-3 h-3" />;
-    case "email":
-      return <Mail className="w-3 h-3" />;
-    case "whatsapp":
-      return <MessageSquare className="w-3 h-3" />;
-    default:
-      return null;
-  }
-}
-
-function typeLabel(type: string) {
-  return type
-    .split("_")
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(" ");
 }
 
 function relativeTime(dateStr: string | null | undefined) {
@@ -88,18 +132,30 @@ function relativeTime(dateStr: string | null | undefined) {
 export default function NotificationBell() {
   const router = useRouter();
   const [open, setOpen] = useState(false);
-  const [items, setItems] = useState<Notification[]>([]);
+  const [items, setItems] = useState<BellAlert[]>([]);
   const [unread, setUnread] = useState(0);
   const [loading, setLoading] = useState(true);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Initial load of the most recent notifications.
+  // Initial load: recent agent activity + any pending approvals, merged newest-first.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const res = await getNotifications({ size: RECENT_LIMIT, page: 1 });
-        if (!cancelled) setItems(res.data);
+        const [activity, approvals] = await Promise.all([
+          getActivityLog({ size: RECENT_LIMIT }),
+          getApprovals(undefined, 1, RECENT_LIMIT).catch(() => null),
+        ]);
+        if (cancelled) return;
+        const merged: BellAlert[] = [
+          ...(approvals?.entries ?? [])
+            .filter((a) => a.status === "pending")
+            .map(approvalToAlert),
+          ...(activity.entries ?? []).map(activityToAlert),
+        ]
+          .sort((a, b) => b.timestamp.localeCompare(a.timestamp))
+          .slice(0, RECENT_LIMIT);
+        setItems(merged);
       } catch {
         // Non-fatal — the bell just starts empty until a live event arrives.
       } finally {
@@ -111,32 +167,31 @@ export default function NotificationBell() {
     };
   }, []);
 
-  // Live updates: prepend new notifications and bump the unread badge.
-  const handleCreated = useCallback((event: { notification: Notification }) => {
-    setItems((prev) => [event.notification, ...prev].slice(0, RECENT_LIMIT));
+  const handleActivity = useCallback((entry: ActivityLogEntry) => {
+    setItems((prev) => mergeAlert(prev, activityToAlert(entry)));
     setUnread((n) => n + 1);
   }, []);
 
-  const handleStatusChanged = useCallback(
-    (event: { notification_id: string; delivery_status: string }) => {
-      setItems((prev) =>
-        prev.map((n) =>
-          n.notification_id === event.notification_id
-            ? {
-                ...n,
-                delivery_status: event.delivery_status as DeliveryStatus,
-              }
-            : n,
-        ),
-      );
+  const handleApprovalEvent = useCallback(
+    (event: { type: string; approval: ApprovalEntry }) => {
+      if (event.type === "approval_created") {
+        setItems((prev) => mergeAlert(prev, approvalToAlert(event.approval)));
+        setUnread((n) => n + 1);
+      } else {
+        // approved / rejected / expired — drop it from the attention list.
+        setItems((prev) =>
+          prev.filter((a) => a.id !== event.approval.action_id),
+        );
+      }
     },
     [],
   );
 
-  useNotificationWebSocket({
+  useAgentWebSocket({
     autoConnect: true,
-    onNotificationCreated: handleCreated,
-    onStatusChanged: handleStatusChanged,
+    onActivity: handleActivity,
+    onAgentAction: handleActivity,
+    onApprovalEvent: handleApprovalEvent,
   });
 
   // Close on outside click / Escape.
@@ -170,9 +225,9 @@ export default function NotificationBell() {
     });
   };
 
-  const goToAll = () => {
+  const goToCommand = () => {
     setOpen(false);
-    router.push("/dashboard/notifications");
+    router.push("/ops/command");
   };
 
   return (
@@ -180,9 +235,7 @@ export default function NotificationBell() {
       <button
         type="button"
         onClick={toggle}
-        aria-label={
-          unread > 0 ? `Notifications, ${unread} new` : "Notifications"
-        }
+        aria-label={unread > 0 ? `Alerts, ${unread} new` : "Alerts"}
         aria-haspopup="true"
         aria-expanded={open}
         className="relative flex items-center justify-center w-9 h-9 rounded-lg transition-colors hover:bg-[color-mix(in_srgb,var(--color-primary)_8%,transparent)] focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-[color:var(--color-primary)]"
@@ -219,11 +272,11 @@ export default function NotificationBell() {
               className="text-sm font-semibold"
               style={{ color: "var(--color-primary)" }}
             >
-              Notifications
+              Agent Alerts
             </span>
             <button
               type="button"
-              onClick={goToAll}
+              onClick={goToCommand}
               className="text-xs font-medium underline hover:no-underline focus:outline-none"
               style={{ color: "var(--color-primary)" }}
             >
@@ -239,38 +292,50 @@ export default function NotificationBell() {
             ) : items.length === 0 ? (
               <div className="px-4 py-10 text-center">
                 <Bell className="w-8 h-8 mx-auto mb-2 text-gray-300" />
-                <p className="text-sm text-gray-500">No notifications yet</p>
+                <p className="text-sm text-gray-500">No agent activity yet</p>
               </div>
             ) : (
               <ul className="divide-y divide-gray-100">
-                {items.map((n) => (
-                  <li key={n.notification_id}>
+                {items.map((alert) => (
+                  <li key={`${alert.kind}-${alert.id}`}>
                     <button
                       type="button"
-                      onClick={goToAll}
+                      onClick={goToCommand}
                       className="w-full text-left px-4 py-3 transition-colors hover:bg-[color-mix(in_srgb,var(--color-primary)_5%,transparent)] focus:outline-none"
                     >
                       <div className="flex items-start gap-2">
-                        <span className="mt-0.5">
-                          {getStatusIcon(n.delivery_status)}
-                        </span>
+                        <span className="mt-0.5">{alertIcon(alert)}</span>
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center justify-between gap-2">
                             <span className="text-sm font-medium text-primary truncate">
-                              {typeLabel(n.notification_type)}
+                              {alert.agentLabel}
                             </span>
                             <span className="text-[11px] text-gray-400 flex-shrink-0">
-                              {relativeTime(n.created_at)}
+                              {relativeTime(alert.timestamp)}
                             </span>
                           </div>
                           <div className="text-xs text-gray-600 truncate">
-                            {n.subject || n.message_body}
+                            {alert.summary}
                           </div>
-                          <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-gray-500">
-                            {getChannelIcon(n.channel)}
-                            <span className="truncate">
-                              {n.recipient_name || n.recipient_reference}
-                            </span>
+                          <div className="mt-0.5 flex items-center gap-1.5">
+                            {alert.kind === "approval" && (
+                              <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-warning-light text-warning">
+                                Needs approval
+                              </span>
+                            )}
+                            {alert.riskLevel && (
+                              <span
+                                className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
+                                  alert.riskLevel === "high"
+                                    ? "bg-error-light text-error"
+                                    : alert.riskLevel === "medium"
+                                      ? "bg-warning-light text-warning"
+                                      : "bg-success-light text-success"
+                                }`}
+                              >
+                                {alert.riskLevel}
+                              </span>
+                            )}
                           </div>
                         </div>
                       </div>
