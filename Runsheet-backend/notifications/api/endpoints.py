@@ -191,6 +191,13 @@ async def list_notifications(
     delivery_status: Optional[str] = Query(None, description="Filter by delivery status"),
     related_entity_id: Optional[str] = Query(None, description="Filter by related entity ID"),
     recipient_reference: Optional[str] = Query(None, description="Filter by recipient reference"),
+    q: Optional[str] = Query(
+        None,
+        description=(
+            "Free-text search (case-insensitive contains) over recipient "
+            "reference/name, related entity id, subject, and message body."
+        ),
+    ),
     start_date: Optional[str] = Query(None, description="Start of date range (ISO 8601)"),
     end_date: Optional[str] = Query(None, description="End of date range (ISO 8601)"),
     page: int = Query(1, ge=1, description="Page number"),
@@ -214,6 +221,8 @@ async def list_notifications(
             filters["related_entity_id"] = related_entity_id
         if recipient_reference:
             filters["recipient_reference"] = recipient_reference
+        if q:
+            filters["search"] = q
         if start_date:
             filters["start_date"] = start_date
         if end_date:

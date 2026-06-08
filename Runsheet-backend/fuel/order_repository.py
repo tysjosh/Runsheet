@@ -156,6 +156,44 @@ def _safe_event_load(source: Dict[str, Any]) -> Optional[FuelOrderEvent]:
         return None
 
 
+#: Fields the order free-text search matches against, paired with the concrete
+#: index field a ``wildcard`` query should target. ``customer_name`` is an
+#: analyzed ``text`` field with a ``.keyword`` subfield, so we wildcard the raw
+#: keyword for whole-value substring matching; the others are already keyword
+#: (order_id, customer_id) or analyzed-only (ship_to_address).
+_ORDER_TEXT_WILDCARD_FIELDS = (
+    "order_id",
+    "customer_name.keyword",
+    "customer_id",
+    "ship_to_address",
+)
+
+
+def _build_text_should(q: Optional[str]) -> List[Dict[str, Any]]:
+    """Build the ES ``should`` clauses for an order free-text search.
+
+    Returns case-insensitive ``wildcard`` ``*q*`` queries over the searchable
+    fields, or an empty list when ``q`` is blank. The ``*`` / ``?`` / ``\\``
+    wildcard metacharacters in the user input are escaped so they match
+    literally rather than as wildcards.
+    """
+    if not q or not q.strip():
+        return []
+    needle = q.strip()
+    escaped = (
+        needle.replace("\\", "\\\\").replace("*", "\\*").replace("?", "\\?")
+    )
+    pattern = f"*{escaped}*"
+    return [
+        {
+            "wildcard": {
+                field: {"value": pattern, "case_insensitive": True}
+            }
+        }
+        for field in _ORDER_TEXT_WILDCARD_FIELDS
+    ]
+
+
 def _utcnow_iso() -> str:
     """Return the current UTC time as an ISO-8601 string."""
     return utcnow().isoformat()
@@ -497,6 +535,7 @@ class FuelOrderRepository:
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
         intake_channel: Optional[str] = None,
+        q: Optional[str] = None,
         page: int = 1,
         size: int = DEFAULT_PAGE_SIZE,
         sort: Optional[str] = None,
@@ -513,6 +552,9 @@ class FuelOrderRepository:
             start_date: Filter orders created on or after this ISO date.
             end_date: Filter orders created on or before this ISO date.
             intake_channel: Filter by intake_channel.
+            q: Free-text "contains" search (case-insensitive) over order_id,
+                customer_name, customer_id, and ship_to_address. ANDed with the
+                structured filters above.
             page: 1-based page number.
             size: Page size.
             sort: Sort field and direction (e.g. "created_at:desc").
@@ -554,6 +596,13 @@ class FuelOrderRepository:
             "fuel_order", tenant_id,
             term_filters=term_filters,
             range_field="created_at", range_gte=start_date, range_lte=end_date,
+            text_query=q,
+            text_fields=[
+                "order_id",
+                "customer_name",
+                "customer_id",
+                "ship_to_address",
+            ],
             sort_field=pg_sort_field, sort_order=pg_sort_order,
             page=page, size=size,
         )
@@ -594,7 +643,7 @@ class FuelOrderRepository:
                 date_range["lte"] = end_date
             filters.append({"range": {"created_at": date_range}})
 
-        # Build the inner query
+        # Build the inner query from the structured filters.
         if filters:
             inner_query: Dict[str, Any] = {
                 "query": {"bool": {"must": filters}}
@@ -604,6 +653,17 @@ class FuelOrderRepository:
 
         # Wrap with tenant filter
         query = inject_tenant_filter(inner_query, tenant_id)
+
+        # Layer the free-text "contains" search onto the (now tenant-scoped)
+        # top-level bool as a should-clause requiring at least one match. This
+        # ANDs with the tenant filter and the structured filters while keeping
+        # the same substring semantics as the former client-side filter.
+        # Wildcard with case_insensitive works on keyword fields (order_id,
+        # customer_id, customer_name.keyword) and the analyzed ship_to_address.
+        text_should = _build_text_should(q)
+        if text_should:
+            query["query"]["bool"]["should"] = text_should
+            query["query"]["bool"]["minimum_should_match"] = 1
 
         # Pagination
         from_offset = (page - 1) * size

@@ -111,6 +111,65 @@ async def test_truck_tenant_optional_get(engine, read_from_pg):
     assert doc["asset_id"] == "TRUCK-1"
 
 
+async def test_hybrid_search_text_query_contains(engine, read_from_pg):
+    # Free-text "contains" search ORs ILIKE %q% across the named doc fields,
+    # case-insensitively, and stays tenant-scoped.
+    await _seed("fuel_order", {
+        "order_id": "ORD-AAA", "tenant_id": TENANT, "status": "placed",
+        "customer_name": "Acme Fuels", "customer_id": "CUST-1",
+        "ship_to_address": "123 Main St", "created_at": "2026-01-01T00:00:00Z",
+    }, doc_id="ORD-AAA")
+    await _seed("fuel_order", {
+        "order_id": "ORD-BBB", "tenant_id": TENANT, "status": "placed",
+        "customer_name": "Beta Propane", "customer_id": "CUST-2",
+        "ship_to_address": "9 Oak Ave", "created_at": "2026-01-02T00:00:00Z",
+    }, doc_id="ORD-BBB")
+
+    text_fields = ["order_id", "customer_name", "customer_id", "ship_to_address"]
+    async with session_scope() as s:
+        repo = HybridReadRepository("fuel_order")
+        # Match on customer_name, case-insensitive.
+        by_name = await repo.search(
+            s, TENANT, text_query="acme", text_fields=text_fields
+        )
+        # Match on ship_to_address.
+        by_addr = await repo.search(
+            s, TENANT, text_query="oak", text_fields=text_fields
+        )
+        # No match.
+        none = await repo.search(
+            s, TENANT, text_query="zzz", text_fields=text_fields
+        )
+
+    assert {it["order_id"] for it in by_name["items"]} == {"ORD-AAA"}
+    assert {it["order_id"] for it in by_addr["items"]} == {"ORD-BBB"}
+    assert none["items"] == []
+
+
+async def test_hybrid_search_text_query_escapes_like_wildcards(engine, read_from_pg):
+    # A literal % in a doc value is only matched by a query containing % —
+    # the LIKE metacharacters in the user input are escaped.
+    await _seed("fuel_order", {
+        "order_id": "ORD-PCT", "tenant_id": TENANT, "status": "placed",
+        "customer_name": "50% Off Fuels", "customer_id": "CUST-9",
+        "ship_to_address": "1 A St", "created_at": "2026-01-03T00:00:00Z",
+    }, doc_id="ORD-PCT")
+    await _seed("fuel_order", {
+        "order_id": "ORD-PLAIN", "tenant_id": TENANT, "status": "placed",
+        "customer_name": "Plain Fuels", "customer_id": "CUST-8",
+        "ship_to_address": "2 B St", "created_at": "2026-01-04T00:00:00Z",
+    }, doc_id="ORD-PLAIN")
+
+    text_fields = ["customer_name"]
+    async with session_scope() as s:
+        repo = HybridReadRepository("fuel_order")
+        literal = await repo.search(
+            s, TENANT, text_query="50%", text_fields=text_fields
+        )
+    # "50%" matches only the doc literally containing "50%", not everything.
+    assert {it["order_id"] for it in literal["items"]} == {"ORD-PCT"}
+
+
 # ---------------------------------------------------------------------------
 # Service-level wiring
 # ---------------------------------------------------------------------------

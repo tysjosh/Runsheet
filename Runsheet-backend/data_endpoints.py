@@ -633,8 +633,31 @@ async def get_fleet_assets(
     asset_type: Optional[str] = None,
     asset_subtype: Optional[str] = None,
     status: Optional[str] = None,
+    search: Optional[str] = None,
 ):
-    """Return all assets with optional filtering by asset_type, asset_subtype, and status."""
+    """Return all assets with optional filtering by asset_type, asset_subtype, and status.
+
+    ``search`` applies a case-insensitive "contains" match over the asset's
+    name, plate number, and id. Both the Postgres read-cutover path and the ES
+    path materialize the full (≤1000) asset list and filter in Python, so the
+    behavior is identical regardless of the read store.
+    """
+
+    def _matches_search(doc: dict) -> bool:
+        if not search or not search.strip():
+            return True
+        needle = search.strip().lower()
+        haystacks = (
+            doc.get("truck_id"),
+            doc.get("asset_id"),
+            doc.get("asset_name"),
+            doc.get("plate_number"),
+            doc.get("vessel_name"),
+            doc.get("container_number"),
+            doc.get("equipment_model"),
+        )
+        return any(needle in (h or "").lower() for h in haystacks)
+
     try:
         # Read-cutover: serve the assets-alias list from Postgres when on. The
         # ES path filters by asset_type / asset_subtype / status (all term
@@ -658,6 +681,7 @@ async def get_fleet_assets(
                 docs = [d for d in docs if d.get("asset_subtype") == asset_subtype]
             if status:
                 docs = [d for d in docs if d.get("status") == status]
+            docs = [d for d in docs if _matches_search(d)]
             docs.sort(key=lambda d: d.get("created_at") or "", reverse=True)
 
             formatted_assets = [_format_asset(doc) for doc in docs]
@@ -692,6 +716,7 @@ async def get_fleet_assets(
         # Query the assets alias (points to trucks index)
         response = await elasticsearch_service.search_documents("assets", query, size=1000)
         docs = [hit["_source"] for hit in response["hits"]["hits"]]
+        docs = [d for d in docs if _matches_search(d)]
 
         formatted_assets = [_format_asset(doc) for doc in docs]
 

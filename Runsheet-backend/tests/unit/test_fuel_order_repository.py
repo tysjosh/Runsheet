@@ -251,6 +251,70 @@ class TestTenantFilterInjection:
 
 
 # ---------------------------------------------------------------------------
+# Tests: Free-text search (q)
+# ---------------------------------------------------------------------------
+
+
+class TestFreeTextSearch:
+    """``search(q=…)`` adds a case-insensitive wildcard should-clause over the
+    searchable fields, ANDed (still tenant-scoped) with any structured filters."""
+
+    @pytest.mark.asyncio
+    async def test_q_builds_wildcard_should_clause(self):
+        es = _FakeESService()
+        es.docs["ord_test001"] = _valid_order_dict()
+        repo = FuelOrderRepository(es)
+
+        await repo.search("tenant-1", q="Acme")
+
+        assert len(es.recorded_queries) == 1
+        query = es.recorded_queries[0]
+        _assert_tenant_filter_present(query, "tenant-1")
+
+        bool_clause = query["query"]["bool"]
+        should = bool_clause.get("should", [])
+        assert bool_clause.get("minimum_should_match") == 1
+        wildcard_fields = {
+            list(c["wildcard"].keys())[0] for c in should if "wildcard" in c
+        }
+        assert wildcard_fields == {
+            "order_id",
+            "customer_name.keyword",
+            "customer_id",
+            "ship_to_address",
+        }
+        # Case-insensitive substring pattern, value untouched apart from *…*.
+        for clause in should:
+            spec = next(iter(clause["wildcard"].values()))
+            assert spec["value"] == "*Acme*"
+            assert spec["case_insensitive"] is True
+
+    @pytest.mark.asyncio
+    async def test_q_escapes_wildcard_metacharacters(self):
+        es = _FakeESService()
+        repo = FuelOrderRepository(es)
+
+        await repo.search("tenant-1", q="a*b?c")
+
+        should = es.recorded_queries[0]["query"]["bool"]["should"]
+        spec = next(iter(should[0]["wildcard"].values()))
+        # User * and ? are escaped so they match literally; only our framing
+        # *…* are real wildcards.
+        assert spec["value"] == "*a\\*b\\?c*"
+
+    @pytest.mark.asyncio
+    async def test_blank_q_adds_no_should_clause(self):
+        es = _FakeESService()
+        es.docs["ord_test001"] = _valid_order_dict()
+        repo = FuelOrderRepository(es)
+
+        await repo.search("tenant-1", q="   ")
+
+        bool_clause = es.recorded_queries[0]["query"].get("bool", {})
+        assert "should" not in bool_clause
+
+
+# ---------------------------------------------------------------------------
 # Tests: Cross-tenant isolation
 # ---------------------------------------------------------------------------
 

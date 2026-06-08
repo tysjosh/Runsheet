@@ -209,6 +209,7 @@ class CustomerService:
         cursor: Optional[str] = None,
         limit: int = _DEFAULT_PAGE_LIMIT,
         status: Optional[str] = None,
+        search: Optional[str] = None,
         include_account_counts: bool = False,
     ) -> Dict[str, Any]:
         """List Customers for a tenant with cursor/limit pagination.
@@ -216,6 +217,11 @@ class CustomerService:
         Default limit is 50, max 200 (Req 1.3). Cursor is the
         ``customer_id`` of the last item on the previous page (keyset
         pagination via ``search_after``).
+
+        When ``search`` is provided, results are narrowed to customers whose
+        display name, legal name, primary email, or customer id contains the
+        term (case-insensitive). The same "contains" semantics are applied on
+        both the Postgres read-cutover path and the Elasticsearch path.
 
         When ``include_account_counts=True``, adds an ``account_count``
         field to each customer by performing a single aggregation query
@@ -238,7 +244,7 @@ class CustomerService:
             read_customer_list,
         )
         pg = await read_customer_list(
-            tenant_id, status=status, cursor=cursor, limit=limit
+            tenant_id, status=status, search=search, cursor=cursor, limit=limit
         )
         if pg is not _NOT_CUT_OVER:
             if include_account_counts and pg["items"]:
@@ -253,12 +259,33 @@ class CustomerService:
         if status:
             must_clauses.append({"term": {"status": status}})
 
+        bool_query: Dict[str, Any] = {
+            "must": must_clauses if must_clauses else [{"match_all": {}}],
+        }
+
+        # Free-text "contains" across display_name / legal_name / primary_email
+        # / customer_id. Wildcard with case_insensitive matches the Postgres
+        # ILIKE path; display_name is analyzed text so we target its keyword
+        # subfield for whole-value substring matching.
+        if search and search.strip():
+            needle = search.strip()
+            escaped = needle.replace("\\", "\\\\").replace("*", "\\*").replace(
+                "?", "\\?"
+            )
+            pattern = f"*{escaped}*"
+            bool_query["should"] = [
+                {"wildcard": {field: {"value": pattern, "case_insensitive": True}}}
+                for field in (
+                    "display_name.kw",
+                    "legal_name",
+                    "primary_email",
+                    "customer_id",
+                )
+            ]
+            bool_query["minimum_should_match"] = 1
+
         base_query: Dict[str, Any] = {
-            "query": {
-                "bool": {
-                    "must": must_clauses if must_clauses else [{"match_all": {}}],
-                }
-            },
+            "query": {"bool": bool_query},
             "size": limit,
             "sort": [
                 {"created_at": {"order": "desc"}},

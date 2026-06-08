@@ -655,6 +655,13 @@ async def list_orders(
     start_date: Optional[str] = Query(default=None),
     end_date: Optional[str] = Query(default=None),
     intake_channel: Optional[str] = Query(default=None),
+    q: Optional[str] = Query(
+        default=None,
+        description=(
+            "Free-text search (case-insensitive contains) over order id, "
+            "customer name, customer id, and ship-to address."
+        ),
+    ),
     page: int = Query(default=1, ge=1),
     size: int = Query(default=20, ge=1, le=100),
     sort: Optional[str] = Query(default=None),
@@ -674,6 +681,7 @@ async def list_orders(
         start_date=start_date,
         end_date=end_date,
         intake_channel=intake_channel,
+        q=q,
         page=page,
         size=size,
         sort=sort,

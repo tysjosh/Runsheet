@@ -50,6 +50,22 @@ def _clamp(limit: int) -> int:
     return min(limit, _MAX_PAGE_LIMIT)
 
 
+def _ilike_contains(column, query: str):
+    """Build a case-insensitive ``column ILIKE %query%`` with LIKE metacharacters
+    in ``query`` escaped so ``%`` / ``_`` match literally.
+
+    Returns ``None`` when ``query`` is blank. Portable across Postgres (native
+    ILIKE) and SQLite (``lower() LIKE lower()`` via SQLAlchemy's ``ilike``).
+    """
+    if not query or not query.strip():
+        return None
+    needle = query.strip()
+    escaped = (
+        needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    )
+    return column.ilike(f"%{escaped}%", escape="\\")
+
+
 def _page_result(items: List[Dict[str, Any]], limit: int, id_key: str) -> Dict[str, Any]:
     """Shape a list response identically to the ES-backed services."""
     next_cursor: Optional[str] = None
@@ -126,10 +142,22 @@ class CustomerReadRepository:
         return customer_to_doc(row) if row is not None else None
 
     async def list(self, session: AsyncSession, tenant_id: str, *,
-                   status: Optional[str] = None, cursor: Optional[str] = None,
+                   status: Optional[str] = None, search: Optional[str] = None,
+                   cursor: Optional[str] = None,
                    limit: int = _DEFAULT_PAGE_LIMIT) -> Dict[str, Any]:
         limit = _clamp(limit)
         filters = [CustomerORM.status == status] if status else []
+        if search and search.strip():
+            clauses = [
+                _ilike_contains(col, search)
+                for col in (
+                    CustomerORM.display_name,
+                    CustomerORM.legal_name,
+                    CustomerORM.primary_email,
+                    CustomerORM.customer_id,
+                )
+            ]
+            filters.append(or_(*[c for c in clauses if c is not None]))
         rows = await _keyset_page(
             session, CustomerORM, tenant_id=tenant_id, filters=filters,
             sort_col=CustomerORM.created_at, id_col=CustomerORM.customer_id,
@@ -600,6 +628,8 @@ class HybridReadRepository:
                      range_lte: Optional[str] = None,
                      range_lt: Optional[str] = None,
                      exists_fields: Optional[List[str]] = None,
+                     text_query: Optional[str] = None,
+                     text_fields: Optional[List[str]] = None,
                      sort_field: str = "created_at",
                      sort_order: str = "desc",
                      page: int = 1,
@@ -613,8 +643,12 @@ class HybridReadRepository:
         inclusive ``>= range_gte`` / ``<= range_lte`` (or exclusive ``<
         range_lt``) string comparison (ISO-8601 timestamps sort lexically ==
         chronologically); ``exists_fields`` require the document field to be
-        present and non-null (ES ``exists``). Cross-tenant rows are excluded via
-        the typed, indexed ``tenant_id``.
+        present and non-null (ES ``exists``). ``text_query`` + ``text_fields``
+        apply a case-insensitive substring (``ILIKE %q%``) match ORed across the
+        named document fields — the Postgres analogue of the ES ``wildcard``
+        free-text search, giving the same "contains" semantics on both read
+        paths. Cross-tenant rows are excluded via the typed, indexed
+        ``tenant_id``.
         """
         if page < 1:
             page = 1
@@ -645,6 +679,15 @@ class HybridReadRepository:
             where.append(self._doc_field(range_field) <= range_lte)
         if range_field and range_lt is not None:
             where.append(self._doc_field(range_field) < range_lt)
+
+        # Free-text "contains" across the named document fields. Escape the
+        # LIKE metacharacters so a user typing % or _ matches them literally.
+        if text_query and text_query.strip() and text_fields:
+            clauses = [
+                _ilike_contains(self._doc_field(field), text_query)
+                for field in text_fields
+            ]
+            where.append(or_(*[c for c in clauses if c is not None]))
 
         total = (
             await session.execute(

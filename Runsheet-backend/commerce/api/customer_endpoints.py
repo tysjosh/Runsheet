@@ -181,6 +181,13 @@ async def list_customers(
     cursor: Optional[str] = Query(default=None, description="Cursor for pagination (customer_id of last item)"),
     limit: int = Query(default=50, ge=1, le=200, description="Page size (default 50, max 200)"),
     status: Optional[str] = Query(default=None, description="Filter by status: active or archived"),
+    search: Optional[str] = Query(
+        default=None,
+        description=(
+            "Free-text search (case-insensitive contains) over display name, "
+            "legal name, primary email, and customer id."
+        ),
+    ),
     include_account_counts: bool = Query(default=True, description="Include account_count for each customer"),
 ) -> dict:
     """List Customers with cursor/limit pagination.
@@ -200,6 +207,7 @@ async def list_customers(
         cursor=cursor,
         limit=limit,
         status=status,
+        search=search,
         include_account_counts=include_account_counts,
     )
 

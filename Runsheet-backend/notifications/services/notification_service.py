@@ -351,13 +351,36 @@ class NotificationService:
 
         from_offset = (page - 1) * size
 
+        bool_query: dict = {
+            "must": must_clauses,
+            "filter": [{"term": {"tenant_id": tenant_id}}],
+        }
+
+        # Free-text "contains" search matching the UI's promise of searching by
+        # recipient, entity id, or message. Case-insensitive wildcard over the
+        # recipient (reference + name), the related entity id, and the message
+        # body / subject, requiring at least one match.
+        search = filters.get("search")
+        if search and str(search).strip():
+            needle = str(search).strip()
+            escaped = needle.replace("\\", "\\\\").replace("*", "\\*").replace(
+                "?", "\\?"
+            )
+            pattern = f"*{escaped}*"
+            bool_query["should"] = [
+                {"wildcard": {field: {"value": pattern, "case_insensitive": True}}}
+                for field in (
+                    "recipient_reference",
+                    "recipient_name.keyword",
+                    "related_entity_id",
+                    "subject.keyword",
+                    "message_body",
+                )
+            ]
+            bool_query["minimum_should_match"] = 1
+
         query = {
-            "query": {
-                "bool": {
-                    "must": must_clauses,
-                    "filter": [{"term": {"tenant_id": tenant_id}}],
-                }
-            },
+            "query": {"bool": bool_query},
             "sort": [{"created_at": {"order": "desc"}}],
             "from": from_offset,
             "size": size,
