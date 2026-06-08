@@ -1129,3 +1129,177 @@ async def cleanup_duplicate_data(request: Request, tenant: TenantContext = Depen
     except Exception as e:
         logger.exception("Error during data cleanup: %s", e)
         raise internal_error(message="Failed to clean up data", details={"error": str(e)})
+
+
+# ---------------------------------------------------------------------------
+# Universal search (orders + customers + assets)
+# ---------------------------------------------------------------------------
+
+
+def _truncate(value: Optional[str], length: int = 60) -> str:
+    """Trim a display string for a compact dropdown row."""
+    text = (value or "").strip()
+    return text if len(text) <= length else text[: length - 1] + "…"
+
+
+async def _universal_search_orders(tenant_id: str, q: str, limit: int) -> List[dict]:
+    """Top-N order matches for the universal search, reusing the order repo's
+    free-text ``q`` search (which spans id / customer / address on both the ES
+    and Postgres read paths)."""
+    from fuel.api.order_endpoints import _get_repository as _get_order_repository
+
+    repo = _get_order_repository()
+    result = await repo.search(tenant_id=tenant_id, q=q, page=1, size=limit)
+    items: List[dict] = []
+    for order in result.get("orders", []):
+        # ``order`` is a FuelOrder model; fall back gracefully on attrs.
+        order_id = getattr(order, "order_id", None)
+        if not order_id:
+            continue
+        customer_name = getattr(order, "customer_name", None) or getattr(
+            order, "customer_id", ""
+        )
+        address = getattr(order, "ship_to_address", "")
+        status = getattr(order, "status", "")
+        sub = " · ".join(p for p in (customer_name, status) if p)
+        items.append(
+            {
+                "type": "order",
+                "id": order_id,
+                "label": order_id,
+                "sublabel": _truncate(sub or address),
+            }
+        )
+    return items
+
+
+async def _universal_search_customers(tenant_id: str, q: str, limit: int) -> List[dict]:
+    """Top-N customer matches, reusing CustomerService.list(search=…)."""
+    from commerce.api.customer_endpoints import _get_customer_service
+
+    svc = _get_customer_service()
+    result = await svc.list(tenant_id, search=q, limit=limit)
+    items: List[dict] = []
+    for cust in result.get("items", []):
+        cid = cust.get("customer_id")
+        if not cid:
+            continue
+        items.append(
+            {
+                "type": "customer",
+                "id": cid,
+                "label": cust.get("display_name") or cid,
+                "sublabel": _truncate(cust.get("primary_email") or cid),
+            }
+        )
+    return items
+
+
+async def _universal_search_assets(tenant_id: str, q: str, limit: int) -> List[dict]:
+    """Top-N asset matches over name / plate / id, on either read path."""
+    needle = q.lower()
+
+    def _matches(doc: dict) -> bool:
+        return any(
+            needle in (h or "").lower()
+            for h in (
+                doc.get("truck_id"),
+                doc.get("asset_id"),
+                doc.get("asset_name"),
+                doc.get("plate_number"),
+                doc.get("vessel_name"),
+                doc.get("container_number"),
+                doc.get("equipment_model"),
+            )
+        )
+
+    from commerce.services.commerce_persistence_bridge import (
+        _NOT_CUT_OVER,
+        read_hybrid_fetch_for_aggregation,
+    )
+
+    docs: List[dict]
+    pg_assets = await read_hybrid_fetch_for_aggregation("truck", tenant_id)
+    if pg_assets is not _NOT_CUT_OVER:
+        docs = [d for d in pg_assets if d.get("tenant_id") == tenant_id]
+    else:
+        query = inject_tenant_filter({"query": {"match_all": {}}}, tenant_id)
+        resp = await elasticsearch_service.search_documents("assets", query, size=1000)
+        docs = [hit["_source"] for hit in resp["hits"]["hits"]]
+
+    matched = [d for d in docs if _matches(d)][:limit]
+    items: List[dict] = []
+    for doc in matched:
+        formatted = _format_asset(doc)
+        items.append(
+            {
+                "type": "asset",
+                "id": formatted.get("id"),
+                "label": formatted.get("name") or formatted.get("id"),
+                "sublabel": _truncate(
+                    " · ".join(
+                        p
+                        for p in (
+                            (formatted.get("asset_subtype") or "").replace("_", " "),
+                            formatted.get("id"),
+                        )
+                        if p
+                    )
+                ),
+            }
+        )
+    return items
+
+
+@router.get("/search/universal")
+@limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
+async def universal_search(
+    request: Request,
+    tenant: TenantContext = Depends(get_tenant_context),
+    q: str = "",
+    limit: int = 5,
+):
+    """Cross-entity search over orders, customers, and assets.
+
+    Returns up to ``limit`` matches per entity type, each as a uniform
+    ``{type, id, label, sublabel}`` row the UI can render in a grouped
+    dropdown and navigate via the shared entity routes. Each entity is queried
+    independently and failures are isolated — one unavailable module (e.g.
+    commerce disabled) yields an empty group rather than failing the whole
+    search. All queries are tenant-scoped.
+    """
+    query = (q or "").strip()
+    limit = max(1, min(limit, 20))
+
+    results: dict = {"orders": [], "customers": [], "assets": []}
+    if not query:
+        return {
+            "data": results,
+            "query": query,
+            "success": True,
+            "timestamp": utcnow().isoformat(),
+        }
+
+    searchers = (
+        ("orders", _universal_search_orders),
+        ("customers", _universal_search_customers),
+        ("assets", _universal_search_assets),
+    )
+    for key, fn in searchers:
+        try:
+            results[key] = await fn(tenant.tenant_id, query, limit)
+        except Exception as exc:  # noqa: BLE001 — isolate per-entity failures
+            logger.warning(
+                "universal_search: %s lookup failed for tenant=%s: %s",
+                key,
+                tenant.tenant_id,
+                exc,
+            )
+            results[key] = []
+
+    return {
+        "data": results,
+        "query": query,
+        "success": True,
+        "timestamp": utcnow().isoformat(),
+    }
