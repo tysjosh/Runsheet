@@ -20,6 +20,7 @@ import AgentActivityFeed from "./AgentActivityFeed";
 import AgentAutonomyBanner from "./AgentAutonomyBanner";
 import AgentHealth from "./AgentHealth";
 import ApprovalQueuePanel from "./ApprovalQueuePanel";
+import DefaultDepotWarning from "./DefaultDepotWarning";
 import DelayedOperationsPanel from "./DelayedOperationsPanel";
 import FuelStatusSidebar from "./FuelStatusSidebar";
 import InventoryHealthBadge from "./InventoryHealthBadge";
@@ -312,6 +313,10 @@ export default function OperationsControlView() {
             supervisor needs this state visible alongside the live activity
             feed and pause controls in the right rail. */}
         <AgentAutonomyBanner />
+
+        {/* Routing health: warn when no default depot is configured, since
+            route planning now silently skips plans in that state. */}
+        <DefaultDepotWarning />
 
         {/* Inventory Health Indicator */}
         <InventoryHealthBadge alertCount={inventoryAlertCount} />
