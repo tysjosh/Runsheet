@@ -15,6 +15,8 @@ export interface AssetFilters {
   asset_type?: AssetType;
   asset_subtype?: AssetSubtype;
   status?: string;
+  /** Free-text "contains" search over asset name, plate number, and id. */
+  search?: string;
 }
 
 // Payload for creating a new asset via POST /fleet/assets
@@ -577,6 +579,7 @@ class ApiService {
     if (filters?.asset_subtype)
       params.set("asset_subtype", filters.asset_subtype);
     if (filters?.status) params.set("status", filters.status);
+    if (filters?.search) params.set("search", filters.search);
     const query = params.toString();
     return this.request<Asset[]>(`/fleet/assets${query ? `?${query}` : ""}`);
   }

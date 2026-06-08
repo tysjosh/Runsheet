@@ -34,6 +34,16 @@ export default function CustomerPicker({
   const [options, setOptions] = useState<SearchableSelectOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
+  // Server-side typeahead: the typed query is debounced and sent to the
+  // customers endpoint so the picker can surface matches beyond the first
+  // page (the roster can exceed the page size).
+  const [query, setQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
+
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedQuery(query), 250);
+    return () => clearTimeout(t);
+  }, [query]);
 
   useEffect(() => {
     let cancelled = false;
@@ -41,7 +51,11 @@ export default function CustomerPicker({
       setLoading(true);
       setLoadError(false);
       try {
-        const res = await getCustomers({ status: "active", limit: 200 });
+        const res = await getCustomers({
+          status: "active",
+          limit: 50,
+          search: debouncedQuery.trim() || undefined,
+        });
         if (cancelled) return;
         const rows = Array.isArray(res.data) ? res.data : [];
         setOptions(
@@ -60,7 +74,7 @@ export default function CustomerPicker({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [debouncedQuery]);
 
   // Keep an already-selected customer visible even if not in the loaded set.
   const mergedOptions =
@@ -75,6 +89,8 @@ export default function CustomerPicker({
       options={mergedOptions}
       value={value}
       onChange={onChange}
+      onSearchChange={setQuery}
+      serverFiltered
       loading={loading}
       disabled={disabled}
       allowClear={allowClear}

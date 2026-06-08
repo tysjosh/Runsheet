@@ -205,6 +205,18 @@ export default function OrdersPage({
     setQuery(initialQuery);
   }, [initialQuery]);
 
+  // Debounce the free-text query before it hits the server, and reset to the
+  // first page whenever the search term changes so results aren't hidden on a
+  // stale page.
+  const [debouncedQuery, setDebouncedQuery] = useState(initialQuery);
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setDebouncedQuery(query);
+      setPage(1);
+    }, 300);
+    return () => clearTimeout(t);
+  }, [query]);
+
   // ── Data fetching ───────────────────────────────────────────────────────
 
   const filters: OrderListFilters = useMemo(
@@ -217,6 +229,7 @@ export default function OrdersPage({
       product_code: productCodeFilter || undefined,
       start_date: startDate || undefined,
       end_date: endDate || undefined,
+      q: debouncedQuery.trim() || undefined,
       page,
       size: PAGE_SIZE,
     }),
@@ -229,6 +242,7 @@ export default function OrdersPage({
       productCodeFilter,
       startDate,
       endDate,
+      debouncedQuery,
       page,
     ],
   );
@@ -284,18 +298,10 @@ export default function OrdersPage({
 
   const resetPage = useCallback(() => setPage(1), []);
 
-  // Client-side text filter over the loaded page.
-  const visibleOrders = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return orders;
-    return orders.filter(
-      (o) =>
-        o.order_id.toLowerCase().includes(q) ||
-        (o.customer_name ?? "").toLowerCase().includes(q) ||
-        (o.customer_id ?? "").toLowerCase().includes(q) ||
-        (o.ship_to_address ?? "").toLowerCase().includes(q),
-    );
-  }, [orders, query]);
+  // Server-side free-text search (q) now scopes the result set, so the page
+  // renders the fetched rows directly — no client-side re-filtering that would
+  // only see the current page.
+  const visibleOrders = orders;
 
   const orderColumns: Column<FuelOrder>[] = [
     {
@@ -424,7 +430,7 @@ export default function OrdersPage({
             type="search"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search loaded orders by ID, customer, or address…"
+            placeholder="Search orders by ID, customer, or address…"
             className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
             aria-label="Search orders"
           />

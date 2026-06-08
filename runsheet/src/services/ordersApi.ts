@@ -164,6 +164,8 @@ export interface OrderListFilters {
   start_date?: string;
   end_date?: string;
   intake_channel?: IntakeChannelType;
+  /** Free-text search over order id, customer name/id, and ship-to address. */
+  q?: string;
   page?: number;
   size?: number;
   sort?: string;

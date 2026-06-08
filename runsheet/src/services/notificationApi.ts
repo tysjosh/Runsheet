@@ -97,6 +97,8 @@ export interface NotificationFilters {
   delivery_status?: DeliveryStatus;
   related_entity_id?: string;
   recipient_reference?: string;
+  /** Free-text search over recipient, related entity id, subject, and message. */
+  q?: string;
   start_date?: string;
   end_date?: string;
   page?: number;

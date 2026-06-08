@@ -63,6 +63,15 @@ export default function AssetPicker({
   const [assets, setAssets] = useState<LoadedAsset[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
+  // Server-side typeahead: debounce the typed query and pass it to the fleet
+  // endpoint so matches beyond the loaded set are found (large fleets).
+  const [query, setQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
+
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedQuery(query), 250);
+    return () => clearTimeout(t);
+  }, [query]);
 
   useEffect(() => {
     let cancelled = false;
@@ -70,7 +79,10 @@ export default function AssetPicker({
       setLoading(true);
       setLoadError(false);
       try {
-        const res = await apiService.getAssets({ asset_type: assetType });
+        const res = await apiService.getAssets({
+          asset_type: assetType,
+          search: debouncedQuery.trim() || undefined,
+        });
         if (cancelled) return;
         // Guard against a null/non-array data payload (real backends sometimes
         // return data: null) and against assets missing optional fields.
@@ -94,7 +106,7 @@ export default function AssetPicker({
     return () => {
       cancelled = true;
     };
-  }, [assetType, onAssetsLoaded]);
+  }, [assetType, debouncedQuery, onAssetsLoaded]);
 
   const options: SearchableSelectOption[] = assets.map((a) => {
     const readiness = readinessByAsset?.[a.id];
@@ -124,6 +136,8 @@ export default function AssetPicker({
       options={mergedOptions}
       value={value}
       onChange={onChange}
+      onSearchChange={setQuery}
+      serverFiltered
       loading={loading}
       disabled={disabled}
       allowClear={allowClear}

@@ -353,7 +353,7 @@ export default function NotificationHistoryTab() {
       filters.channel = filterChannel as NotificationChannel;
     if (filterStatus !== "all")
       filters.delivery_status = filterStatus as DeliveryStatus;
-    if (searchTerm.trim()) filters.recipient_reference = searchTerm.trim();
+    if (searchTerm.trim()) filters.q = searchTerm.trim();
     return filters;
   }, [currentPage, filterType, filterChannel, filterStatus, searchTerm]);
 

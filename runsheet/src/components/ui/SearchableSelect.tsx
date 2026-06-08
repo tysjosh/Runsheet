@@ -38,6 +38,20 @@ export interface SearchableSelectProps {
   className?: string;
   "aria-label"?: string;
   id?: string;
+  /**
+   * Called (with the raw search text) whenever the in-dropdown query changes.
+   * Hosts that fetch options from a server use this to drive a debounced
+   * server-side search. When provided together with ``serverFiltered``, the
+   * component stops filtering ``options`` locally and renders them as given.
+   */
+  onSearchChange?: (query: string) => void;
+  /**
+   * Skip the built-in client-side filtering and render ``options`` verbatim.
+   * Use when the host already narrows the option set server-side via
+   * ``onSearchChange`` so results aren't double-filtered against a partial
+   * (server-narrowed) set.
+   */
+  serverFiltered?: boolean;
 }
 
 export function SearchableSelect({
@@ -53,6 +67,8 @@ export function SearchableSelect({
   className = "",
   "aria-label": ariaLabel,
   id,
+  onSearchChange,
+  serverFiltered = false,
 }: SearchableSelectProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -64,12 +80,15 @@ export function SearchableSelect({
   const selected = options.find((o) => o.value === value) ?? null;
 
   const filtered = useMemo(() => {
+    // When the host narrows options server-side, render them verbatim — a
+    // second client-side pass would hide rows the server already matched.
+    if (serverFiltered) return options;
     const q = query.trim().toLowerCase();
     if (!q) return options;
     return options.filter((o) =>
       `${o.label} ${o.sublabel ?? ""} ${o.value}`.toLowerCase().includes(q),
     );
-  }, [options, query]);
+  }, [options, query, serverFiltered]);
 
   // Close on outside click.
   useEffect(() => {
@@ -166,6 +185,7 @@ export function SearchableSelect({
               onChange={(e) => {
                 setQuery(e.target.value);
                 setHighlight(0);
+                onSearchChange?.(e.target.value);
               }}
               onKeyDown={handleSearchKeyDown}
               placeholder={searchPlaceholder}
