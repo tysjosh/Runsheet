@@ -938,6 +938,19 @@ async def initialize(app, container: ServiceContainer) -> None:
             if container.has("weather_provider")
             else None
         )
+        # Fallback: when no external weather adapter (NOAA/OpenWeather) is
+        # configured, read accumulated HDD from the persisted
+        # ``weather_observations`` index so K-factor variance still computes
+        # instead of silently disabling the feature.
+        if weather_provider is None:
+            from compliance.services.es_hdd_provider import EsHddProvider
+
+            weather_provider = EsHddProvider(es_service)
+            logger.info(
+                "KFactorCalibrationService: no external weather adapter "
+                "configured — using EsHddProvider (weather_observations) for "
+                "accumulated HDD"
+            )
         signal_bus = (
             container.get("signal_bus")
             if container.has("signal_bus")
