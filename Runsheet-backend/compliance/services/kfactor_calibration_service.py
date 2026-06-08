@@ -344,6 +344,95 @@ class KFactorCalibrationService:
             flagged=flagged,
         )
 
+    async def get_variance_history(
+        self, tank_id: str, tenant_id: str, *, limit: int = 10
+    ) -> List[Dict[str, Any]]:
+        """Return per-delivery predicted-vs-actual variance for a tank.
+
+        Enumerates the tank's delivered orders (newest first) and computes
+        the variance for each delivery that has a prior delivery to anchor
+        the HDD window, reusing :meth:`compute_variance`. Each item is the
+        ``KFactorVariance`` payload plus the ``delivery_date`` for display.
+
+        Deliveries that cannot be scored (no prior delivery, zero HDD, etc.)
+        are skipped rather than failing the whole history. If the weather
+        provider is unavailable the history short-circuits to whatever was
+        computed so far (an empty list when nothing could be scored).
+
+        Validates: Requirement 9.1, 9.2 (history view over per-delivery
+        variance).
+        """
+        from fuel.services.order_es_mappings import FUEL_ORDERS_CURRENT_INDEX
+
+        if limit <= 0:
+            return []
+
+        query: Dict[str, Any] = {
+            "query": {
+                "bool": {
+                    "must": [
+                        {"term": {"customer_tank_id": tank_id}},
+                        {"term": {"status": "delivered"}},
+                    ]
+                }
+            },
+            "sort": [{"updated_at": {"order": "desc"}}],
+        }
+        query = inject_tenant_filter(query, tenant_id)
+
+        # Fetch a few extra so the oldest delivery (which has no prior to
+        # anchor the HDD window) doesn't starve the requested limit.
+        fetch_size = limit + 5
+        try:
+            resp = await self._es.search_documents(
+                FUEL_ORDERS_CURRENT_INDEX, query, fetch_size
+            )
+        except Exception as exc:
+            logger.warning(
+                "KFactorCalibrationService.get_variance_history: delivery "
+                "query failed for tank=%s tenant=%s: %s",
+                tank_id,
+                tenant_id,
+                exc,
+            )
+            return []
+
+        hits = (resp or {}).get("hits", {}).get("hits", [])
+        history: List[Dict[str, Any]] = []
+        for hit in hits:
+            if len(history) >= limit:
+                break
+            source = hit.get("_source", {}) or {}
+            order_id = source.get("order_id")
+            if not order_id:
+                continue
+            delivery_date_raw = source.get("updated_at") or source.get(
+                "created_at"
+            )
+            try:
+                variance = await self.compute_variance(order_id, tenant_id)
+            except RuntimeError:
+                # Weather provider unavailable — no point continuing.
+                logger.info(
+                    "KFactorCalibrationService.get_variance_history: weather "
+                    "provider unavailable for tenant=%s tank=%s; returning "
+                    "%d scored deliveries",
+                    tenant_id,
+                    tank_id,
+                    len(history),
+                )
+                break
+            except ValueError:
+                # No prior delivery / zero HDD / missing inputs — skip.
+                continue
+            item = variance.model_dump(mode="json")
+            item["delivery_date"] = (
+                delivery_date_raw if isinstance(delivery_date_raw, str) else None
+            )
+            history.append(item)
+
+        return history
+
     # ------------------------------------------------------------------
     # Private helpers for compute_variance
     # ------------------------------------------------------------------

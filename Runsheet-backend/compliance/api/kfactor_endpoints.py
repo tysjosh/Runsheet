@@ -316,6 +316,66 @@ async def get_variance(
 
 
 # ---------------------------------------------------------------------------
+# GET /api/compliance/kfactor/{tank_id}/variance-history
+# ---------------------------------------------------------------------------
+
+
+@router.get("/{tank_id}/variance-history")
+async def get_variance_history(
+    request: Request,
+    tank_id: str,
+    tenant: TenantContext = Depends(get_tenant_context),
+    limit: int = Query(
+        10,
+        ge=1,
+        le=50,
+        description="Maximum number of recent deliveries to score.",
+    ),
+) -> Dict[str, Any]:
+    """Per-delivery predicted-vs-actual variance history for a tank.
+
+    Powers the per-tank consumption drill-in on the K-Factor screen: a
+    timeline of how each recent delivery's actual gallons compared to the
+    HDD-based prediction, so an operator can judge whether a suggested
+    K-factor is warranted.
+
+    Deliveries that cannot be scored (no prior delivery to anchor the HDD
+    window, zero HDD, etc.) are omitted. Returns an empty list when the
+    weather provider is unavailable rather than erroring.
+
+    Validates: Requirement 9.1, 9.2
+    """
+    svc = _get_kfactor_service()
+    try:
+        history = await svc.get_variance_history(
+            tank_id=tank_id, tenant_id=tenant.tenant_id, limit=limit
+        )
+    except AppException:
+        raise
+    except Exception as exc:
+        logger.error(
+            "kfactor.variance_history: unexpected error for tenant=%s "
+            "tank=%s: %s",
+            tenant.tenant_id,
+            tank_id,
+            exc,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error_code": "kfactor.variance_history_failed",
+                "message": "Failed to load K-factor variance history.",
+            },
+        )
+
+    return {
+        "data": history,
+        "count": len(history),
+        "request_id": _get_request_id(request),
+    }
+
+
+# ---------------------------------------------------------------------------
 # GET /api/compliance/kfactor/{tank_id}/suggest
 # ---------------------------------------------------------------------------
 
