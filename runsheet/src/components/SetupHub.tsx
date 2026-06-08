@@ -13,13 +13,7 @@
  * the daily-work surfaces rather than beside them.
  */
 
-import {
-  Activity,
-  Database,
-  Map as MapIcon,
-  Receipt,
-  ScrollText,
-} from "lucide-react";
+import { Database, Map as MapIcon, Receipt, ScrollText } from "lucide-react";
 import { lazy, Suspense, useEffect, useState } from "react";
 import { getCurrentUserRoles } from "../utils/auth";
 import LoadingSpinner from "./LoadingSpinner";
@@ -33,9 +27,6 @@ const TaxJurisdictionsPage = lazy(
   () => import("./compliance/TaxJurisdictionsPage"),
 );
 const ExemptionsPage = lazy(() => import("./compliance/ExemptionsPage"));
-const KFactorCalibrationPage = lazy(
-  () => import("./compliance/KFactorCalibrationPage"),
-);
 
 const TABS: Tab[] = [
   { id: "depots", label: "Depots", icon: <Database className="w-4 h-4" /> },
@@ -54,7 +45,6 @@ const TABS: Tab[] = [
     label: "Exemptions",
     icon: <ScrollText className="w-4 h-4" />,
   },
-  { id: "kfactor", label: "K-Factor", icon: <Activity className="w-4 h-4" /> },
 ];
 
 type TabId = string;
@@ -96,7 +86,6 @@ export default function SetupHub() {
           )}
           {activeTab === "tax" && <TaxJurisdictionsPage />}
           {activeTab === "exemptions" && <ExemptionsPage />}
-          {activeTab === "kfactor" && <KFactorCalibrationPage />}
         </Suspense>
       </div>
     </div>

@@ -1,5 +1,5 @@
 "use client";
-import { FileCheck, Gauge, Map, Shield } from "lucide-react";
+import { Activity, FileCheck, Gauge, Map, Shield } from "lucide-react";
 import { lazy, Suspense, useState } from "react";
 import LoadingSpinner from "./LoadingSpinner";
 import { PageHeader, type Tab, TabNavigation } from "./ui";
@@ -8,6 +8,9 @@ const AssetCertificationsPage = lazy(
   () => import("./compliance/AssetCertificationsPage"),
 );
 const MeterAuditPage = lazy(() => import("./compliance/MeterAuditPage"));
+const KFactorCalibrationPage = lazy(
+  () => import("./compliance/KFactorCalibrationPage"),
+);
 const TerminalBOLsPage = lazy(() => import("./compliance/TerminalBOLsPage"));
 const IFTAReportPage = lazy(() => import("./compliance/IFTAReportPage"));
 
@@ -18,6 +21,7 @@ const TABS: Tab[] = [
     icon: <Shield className="w-4 h-4" />,
   },
   { id: "meters", label: "Meters", icon: <Gauge className="w-4 h-4" /> },
+  { id: "kfactor", label: "K-Factor", icon: <Activity className="w-4 h-4" /> },
   { id: "bols", label: "BOLs", icon: <FileCheck className="w-4 h-4" /> },
   { id: "ifta", label: "IFTA", icon: <Map className="w-4 h-4" /> },
 ];
@@ -39,6 +43,7 @@ export default function ComplianceHub() {
         <Suspense fallback={<LoadingSpinner message="Loading..." />}>
           {activeTab === "certifications" && <AssetCertificationsPage />}
           {activeTab === "meters" && <MeterAuditPage />}
+          {activeTab === "kfactor" && <KFactorCalibrationPage />}
           {activeTab === "bols" && <TerminalBOLsPage />}
           {activeTab === "ifta" && <IFTAReportPage />}
         </Suspense>
