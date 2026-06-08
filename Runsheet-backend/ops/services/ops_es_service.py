@@ -93,12 +93,55 @@ class OpsElasticsearchService:
                     self.client.indices.create(index=index_name, body=mapping)
                     logger.info(f"✅ Created ops index: {index_name}")
                 else:
-                    logger.info(f"📋 Ops index already exists: {index_name}")
+                    # Index exists: reconcile any additively-introduced fields
+                    # (e.g. a new field a mutation started writing) onto the
+                    # live strict mapping. Adding fields is a safe, online
+                    # mapping update; existing fields are left untouched (ES
+                    # rejects type changes, which we never attempt here).
+                    self._reconcile_index_mapping(index_name, mapping)
             except Exception:
                 logger.exception("Failed to create ops index %s", index_name)
 
         # Set up shipment_events alias for time-based rollover
         self._setup_shipment_events_alias()
+
+    def _reconcile_index_mapping(
+        self, index_name: str, mapping: Dict[str, Any]
+    ) -> None:
+        """Additively put any mapping fields missing from the live index.
+
+        Only fields absent from the current mapping are sent via
+        ``put_mapping`` so an existing index gains newly-introduced fields
+        (like ``priority``) without a reindex. No-op when nothing is missing.
+        """
+        expected_props = mapping.get("mappings", {}).get("properties", {})
+        if not expected_props:
+            return
+        try:
+            actual = self.client.indices.get_mapping(index=index_name)
+            actual_props = (
+                actual.get(index_name, {}).get("mappings", {}).get("properties", {})
+            )
+            missing = {
+                name: spec
+                for name, spec in expected_props.items()
+                if name not in actual_props
+            }
+            if not missing:
+                logger.info(f"📋 Ops index already up to date: {index_name}")
+                return
+            self.client.indices.put_mapping(
+                index=index_name, body={"properties": missing}
+            )
+            logger.info(
+                "✅ Reconciled ops index %s — added fields: %s",
+                index_name,
+                ", ".join(sorted(missing)),
+            )
+        except Exception:
+            logger.exception(
+                "Failed to reconcile ops index mapping for %s", index_name
+            )
 
     def validate_ops_index_schemas(self) -> Dict[str, Any]:
         """
@@ -175,6 +218,7 @@ class OpsElasticsearchService:
                 "properties": {
                     "shipment_id": {"type": "keyword"},
                     "status": {"type": "keyword"},
+                    "priority": {"type": "keyword"},
                     "tenant_id": {"type": "keyword"},
                     "rider_id": {"type": "keyword"},
                     "failure_reason": {"type": "keyword"},
