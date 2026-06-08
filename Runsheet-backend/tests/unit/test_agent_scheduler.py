@@ -673,3 +673,51 @@ class TestAgentRecoveryIntegration:
         assert health["stable"]["restart_count"] == 0
 
         await scheduler.stop_all()
+
+
+# ---------------------------------------------------------------------------
+# Tests: idempotent start (regression — duplicate polling loops)
+# ---------------------------------------------------------------------------
+
+
+class TestIdempotentStart:
+    """start_all() is called once per agent-group registration in bootstrap.
+
+    Re-starting an already-running agent must NOT spawn a second polling
+    loop, otherwise concurrent loops race past the shared cooldown and the
+    agent takes the same action repeatedly (e.g. re-escalating a shipment).
+    """
+
+    @pytest.mark.asyncio
+    async def test_repeated_start_all_does_not_respawn_running_agent(self):
+        scheduler = _make_scheduler()
+        agent = MockAgent(agent_id="idem_agent")
+        scheduler.register(agent, RestartPolicy.ON_FAILURE)
+
+        await scheduler.start_all()
+        await asyncio.sleep(0.05)
+        first_agent_task = agent._task
+        first_monitor_task = scheduler._agents["idem_agent"].task
+
+        # Simulate the bootstrap pattern: start_all() invoked again after a
+        # later agent group is registered.
+        await scheduler.start_all()
+        await asyncio.sleep(0.05)
+
+        # Same underlying polling loop + monitor task — no duplicate spawned.
+        assert agent._task is first_agent_task
+        assert scheduler._agents["idem_agent"].task is first_monitor_task
+
+        await scheduler.stop_all()
+
+    @pytest.mark.asyncio
+    async def test_agent_start_is_idempotent_when_running(self):
+        agent = MockAgent(agent_id="idem_base")
+        await agent.start()
+        await asyncio.sleep(0.05)
+        first_task = agent._task
+
+        await agent.start()  # second call must be a no-op
+        assert agent._task is first_task
+
+        await agent.stop()

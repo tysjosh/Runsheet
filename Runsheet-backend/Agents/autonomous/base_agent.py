@@ -64,7 +64,17 @@ class AutonomousAgentBase(ABC):
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
-        """Start the polling loop as a background asyncio task."""
+        """Start the polling loop as a background asyncio task.
+
+        Idempotent: if a polling loop is already running, this is a no-op so
+        a second ``start()`` cannot orphan the existing ``_run_loop`` task
+        (which would keep polling forever alongside the new one).
+        """
+        if self._running and self._task is not None and not self._task.done():
+            self.logger.debug(
+                "Agent %s already running — start() ignored", self.agent_id
+            )
+            return
         self._running = True
         self._task = asyncio.create_task(self._run_loop())
         self.logger.info(f"Agent {self.agent_id} started")

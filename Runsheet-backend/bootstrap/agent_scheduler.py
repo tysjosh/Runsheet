@@ -111,7 +111,27 @@ class AgentScheduler:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _start_agent(self, state: AgentState) -> None:
-        """Start a single agent and create a monitoring task."""
+        """Start a single agent and create a monitoring task.
+
+        Idempotent: if the agent is already running with a live task, this
+        is a no-op. ``start_all()`` is called once per agent-group
+        registration during bootstrap and iterates *all* registered agents,
+        so without this guard every already-running agent would spawn a
+        duplicate, orphaned ``_run_loop`` on each call (``agent.start()``
+        overwrites its task reference without cancelling the previous one).
+        Those duplicate loops poll concurrently and race past the shared
+        in-memory cooldown, e.g. re-escalating the same shipment repeatedly.
+        """
+        if (
+            state.status == "running"
+            and state.agent._task is not None
+            and not state.agent._task.done()
+        ):
+            logger.debug(
+                "Agent %s already running — skipping duplicate start",
+                state.agent.agent_id,
+            )
+            return
         await state.agent.start()
         state.status = "running"
         state.started_at = datetime.now(timezone.utc)
