@@ -126,6 +126,11 @@ NOTIFICATION_RULES_MAPPING = {
             "enabled":          {"type": "boolean"},
             "default_channels": {"type": "keyword"},
             "template_id":      {"type": "keyword"},
+            # Fuel notification rules (seed_data.seed_fuel_notification_rules)
+            # carry these extra fields wiring a template_key to its trigger.
+            "template_key":      {"type": "keyword"},
+            "trigger_condition": {"type": "keyword"},
+            "description":       {"type": "text"},
             "created_at":       {"type": "date"},
             "updated_at":       {"type": "date"},
         }
@@ -152,6 +157,43 @@ DEAD_LETTER_QUEUE_MAPPING = {
         "number_of_replicas": 1,
     }
 }
+
+
+def _reconcile_notification_index_mapping(es_client, index_name, mapping) -> None:
+    """Additively put any mapping fields missing from a live notification index.
+
+    Only fields absent from the current mapping are sent via ``put_mapping``
+    so an existing index gains newly-introduced fields without a reindex.
+    No-op when nothing is missing.
+    """
+    expected_props = mapping.get("mappings", {}).get("properties", {})
+    if not expected_props:
+        return
+    try:
+        actual = es_client.indices.get_mapping(index=index_name)
+        actual_props = (
+            actual.get(index_name, {}).get("mappings", {}).get("properties", {})
+        )
+        missing = {
+            name: spec
+            for name, spec in expected_props.items()
+            if name not in actual_props
+        }
+        if not missing:
+            logger.info(f"📋 Notification index already up to date: {index_name}")
+            return
+        es_client.indices.put_mapping(
+            index=index_name, body={"properties": missing}
+        )
+        logger.info(
+            "✅ Reconciled notification index %s — added fields: %s",
+            index_name,
+            ", ".join(sorted(missing)),
+        )
+    except Exception:
+        logger.exception(
+            "Failed to reconcile notification index mapping for %s", index_name
+        )
 
 
 def setup_notification_indices(es_service):
@@ -189,6 +231,13 @@ def setup_notification_indices(es_service):
                 es_client.indices.create(index=index_name, body=mapping)
                 logger.info(f"✅ Created notification index: {index_name}")
             else:
-                logger.info(f"📋 Notification index already exists: {index_name}")
+                # Index exists: additively reconcile newly-introduced fields
+                # onto the live strict mapping (safe online update, no reindex)
+                # so a field the writers started using — e.g. the fuel rule's
+                # template_key/trigger_condition/description — doesn't 400 with
+                # a strict_dynamic_mapping_exception.
+                _reconcile_notification_index_mapping(
+                    es_client, index_name, mapping
+                )
         except Exception:
             logger.exception("Failed to create notification index %s", index_name)

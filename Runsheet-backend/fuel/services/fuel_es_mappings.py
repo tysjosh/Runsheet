@@ -59,9 +59,12 @@ FUEL_EVENTS_MAPPING = {
             "supplier": {"type": "keyword"},
             "delivery_reference": {"type": "keyword"},
             "odometer_reading": {"type": "float"},
+            "status": {"type": "keyword"},
             "tenant_id": {"type": "keyword"},
             "event_timestamp": {"type": "date"},
             "ingested_at": {"type": "date"},
+            "created_at": {"type": "date"},
+            "updated_at": {"type": "date"},
         },
     },
     "settings": {
@@ -107,6 +110,41 @@ FUEL_EVENTS_INDEX = "fuel_events"
 FUEL_EVENTS_ILM_POLICY_NAME = "fuel-events-policy"
 
 
+def _reconcile_fuel_index_mapping(es_client, index_name: str, mapping: dict) -> None:
+    """Additively put any mapping fields missing from the live fuel index.
+
+    Only fields absent from the current mapping are sent via ``put_mapping``
+    so an existing index gains newly-introduced fields without a reindex.
+    No-op when nothing is missing.
+    """
+    expected_props = mapping.get("mappings", {}).get("properties", {})
+    if not expected_props:
+        return
+    try:
+        actual = es_client.indices.get_mapping(index=index_name)
+        actual_props = (
+            actual.get(index_name, {}).get("mappings", {}).get("properties", {})
+        )
+        missing = {
+            name: spec
+            for name, spec in expected_props.items()
+            if name not in actual_props
+        }
+        if not missing:
+            logger.info(f"📋 Fuel index already up to date: {index_name}")
+            return
+        es_client.indices.put_mapping(
+            index=index_name, body={"properties": missing}
+        )
+        logger.info(
+            "✅ Reconciled fuel index %s — added fields: %s",
+            index_name,
+            ", ".join(sorted(missing)),
+        )
+    except Exception:
+        logger.exception("Failed to reconcile fuel index mapping for %s", index_name)
+
+
 def setup_fuel_indices(es_client, es_service=None):
     """
     Create fuel indices and apply ILM policy.
@@ -136,7 +174,12 @@ def setup_fuel_indices(es_client, es_service=None):
                 es_client.indices.create(index=index_name, body=mapping)
                 logger.info(f"✅ Created fuel index: {index_name}")
             else:
-                logger.info(f"📋 Fuel index already exists: {index_name}")
+                # Index exists: additively reconcile any newly-introduced
+                # fields onto the live strict mapping (a safe online update,
+                # no reindex, no type changes) so a field a mutation started
+                # writing — e.g. fuel_events.status — doesn't 400 with a
+                # strict_dynamic_mapping_exception.
+                _reconcile_fuel_index_mapping(es_client, index_name, mapping)
         except Exception:
             logger.exception("Failed to create fuel index %s", index_name)
 
