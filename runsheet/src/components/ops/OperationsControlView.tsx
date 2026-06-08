@@ -16,6 +16,9 @@ import { getActiveJobs, getDelayedJobs } from "../../services/schedulingApi";
 import type { Job, JobStatus, OperationsControlSummary } from "../../types/api";
 import LoadingSpinner from "../LoadingSpinner";
 import { Button } from "../ui";
+import AgentActivityFeed from "./AgentActivityFeed";
+import AgentAutonomyBanner from "./AgentAutonomyBanner";
+import AgentHealth from "./AgentHealth";
 import ApprovalQueuePanel from "./ApprovalQueuePanel";
 import DelayedOperationsPanel from "./DelayedOperationsPanel";
 import FuelStatusSidebar from "./FuelStatusSidebar";
@@ -304,6 +307,12 @@ export default function OperationsControlView() {
         {/* Top: Summary Bar */}
         <OperationsSummaryBar summary={summary} />
 
+        {/* Agent supervision: current autonomy level. Under auto-medium/
+            full-auto, agents act without per-action approval, so the
+            supervisor needs this state visible alongside the live activity
+            feed and pause controls in the right rail. */}
+        <AgentAutonomyBanner />
+
         {/* Inventory Health Indicator */}
         <InventoryHealthBadge alertCount={inventoryAlertCount} />
 
@@ -316,6 +325,15 @@ export default function OperationsControlView() {
 
           {/* Right rail (~40% on lg) */}
           <div className="flex w-full flex-col gap-4 lg:w-2/5 lg:min-h-0 lg:overflow-y-auto">
+            {/* Agent supervision — primary under autonomous operation: live
+                action feed + per-agent pause/resume. Height-bounded so the
+                panels' internal scroll works inside the flex-col rail. */}
+            <div className="h-80 flex-shrink-0">
+              <AgentActivityFeed />
+            </div>
+            <div className="h-64 flex-shrink-0">
+              <AgentHealth />
+            </div>
             <JobQueuePanel jobs={activeJobs} />
             <DelayedOperationsPanel jobs={activeJobs} />
             <ApprovalQueuePanel />
