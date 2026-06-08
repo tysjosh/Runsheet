@@ -19,6 +19,22 @@ export interface AssetFilters {
   search?: string;
 }
 
+// Universal (cross-entity) search — GET /api/search/universal
+export type UniversalSearchType = "order" | "customer" | "asset";
+
+export interface UniversalSearchHit {
+  type: UniversalSearchType;
+  id: string;
+  label: string;
+  sublabel: string;
+}
+
+export interface UniversalSearchResults {
+  orders: UniversalSearchHit[];
+  customers: UniversalSearchHit[];
+  assets: UniversalSearchHit[];
+}
+
 // Payload for creating a new asset via POST /fleet/assets
 export interface CreateAssetPayload {
   asset_id: string;
@@ -586,6 +602,22 @@ class ApiService {
 
   async getAsset(id: string): Promise<ApiResponse<Asset>> {
     return this.request<Asset>(`/fleet/assets/${id}`);
+  }
+
+  // Universal cross-entity search (orders + customers + assets). Returns up to
+  // `limit` matches per type for the global header search dropdown.
+  async universalSearch(q: string, limit = 5): Promise<UniversalSearchResults> {
+    const empty: UniversalSearchResults = {
+      orders: [],
+      customers: [],
+      assets: [],
+    };
+    const trimmed = q.trim();
+    if (!trimmed) return empty;
+    const res = await this.request<UniversalSearchResults>(
+      `/search/universal?q=${encodeURIComponent(trimmed)}&limit=${limit}`,
+    );
+    return res.data ?? empty;
   }
 
   async createAsset(data: CreateAssetPayload): Promise<ApiResponse<Asset>> {

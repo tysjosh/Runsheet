@@ -1,8 +1,8 @@
 "use client";
 
-import { Menu, Plus, Search, Sparkles } from "lucide-react";
+import { Menu, Plus, Sparkles } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import GlobalSearch from "./GlobalSearch";
 
 interface HeaderProps {
   onAIClick?: () => void;
@@ -21,13 +21,10 @@ export default function Header({
   onNewOrder,
 }: HeaderProps) {
   const router = useRouter();
-  const [query, setQuery] = useState("");
 
-  // In-shell, search filters the Orders board view directly; on the standalone
-  // route fallback the query is handed off via the URL.
-  const handleSearch = (e: React.FormEvent) => {
-    e.preventDefault();
-    const q = query.trim();
+  // Enter with no obvious single match hands the query to the orders board
+  // (the in-shell handler when provided, else the standalone route).
+  const handleSearchAll = (q: string) => {
     if (onSearch) {
       onSearch(q);
       return;
@@ -79,32 +76,7 @@ export default function Header({
         </div>
 
         {/* Global search — flexes to fill the bar */}
-        <form
-          onSubmit={handleSearch}
-          role="search"
-          className="ml-2 flex max-w-xl flex-1 items-center"
-        >
-          <div className="relative w-full">
-            <Search
-              className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2"
-              style={{ color: "var(--color-gray-400)" }}
-            />
-            <input
-              type="search"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search orders…"
-              aria-label="Search orders"
-              className="w-full rounded-lg border py-2 pl-9 pr-3 text-sm transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-primary)]"
-              style={{
-                borderColor:
-                  "color-mix(in srgb, var(--color-primary) 12%, transparent)",
-                backgroundColor: "var(--color-surface-muted)",
-                color: "var(--color-primary)",
-              }}
-            />
-          </div>
-        </form>
+        <GlobalSearch onSubmitFallback={handleSearchAll} />
 
         {/* Actions */}
         <div className="ml-auto flex items-center gap-2">
