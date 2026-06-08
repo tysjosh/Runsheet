@@ -247,7 +247,12 @@ async def initialize(app, container: ServiceContainer) -> None:
     try:
         from notifications.services.seed_data import seed_default_data
 
-        seed_tenant_id = os.environ.get("SEED_TENANT_ID", "").strip()
+        # Prefer the typed setting (loaded from .env files by pydantic);
+        # fall back to a raw env var for ad-hoc overrides. There is no safe
+        # implicit tenant in production, so an empty value skips the seed.
+        seed_tenant_id = (
+            getattr(container.settings, "seed_tenant_id", "") or ""
+        ).strip() or os.environ.get("SEED_TENANT_ID", "").strip()
         if seed_tenant_id:
             await seed_default_data(es_service, tenant_id=seed_tenant_id)
             logger.info(

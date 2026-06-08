@@ -455,6 +455,12 @@ class Settings(BaseSettings):
         le=720,
         description="Idempotency store TTL in hours"
     )
+    seed_tenant_id: str = Field(
+        default="",
+        description="Tenant to seed default notification rules/templates for "
+        "at startup (idempotent). Empty disables the seed — there is no safe "
+        "implicit tenant in production. Set to the demo tenant in dev.",
+    )
     dinee_api_base_url: Optional[str] = Field(
         default=None,
         description="Dinee REST API base URL for Replay Service backfill"
