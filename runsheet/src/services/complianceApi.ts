@@ -1025,6 +1025,28 @@ export async function getKFactorSuggestion(
   );
 }
 
+/** One delivery's predicted-vs-actual variance, plus its delivery date. */
+export interface KFactorVarianceHistoryItem extends KFactorVarianceResult {
+  /** ISO timestamp of the delivery (``updated_at``), or null. */
+  delivery_date: string | null;
+}
+
+/**
+ * GET /compliance/kfactor/:tankId/variance-history — per-delivery
+ * predicted-vs-actual variance timeline for a tank (newest first). Returns an
+ * empty list when no deliveries can be scored or the weather provider is
+ * unavailable.
+ */
+export async function getKFactorVarianceHistory(
+  tankId: string,
+  limit = 10,
+): Promise<CountResponse<KFactorVarianceHistoryItem>> {
+  const qs = buildQueryString({ limit });
+  return complianceRequest<CountResponse<KFactorVarianceHistoryItem>>(
+    `/compliance/kfactor/${encodeURIComponent(tankId)}/variance-history${qs}`,
+  );
+}
+
 // ─── IFTA Completeness & Fleet MPG ───────────────────────────────────────────
 
 export interface IFTAIncompleteDataFlag {

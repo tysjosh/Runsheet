@@ -3,18 +3,23 @@
 /**
  * Per-tank consumption / forecast drill-in, launched from a K-Factor
  * calibration row. Gives the approver the consumption context behind the
- * variance — the tank's recent run-out forecasts (the consumption-model
- * output the K-factor feeds) — without leaving the calibration screen.
+ * variance — the per-delivery predicted-vs-actual table plus the tank's
+ * recent run-out forecasts — so they can judge whether a suggested K is
+ * warranted, without leaving the calibration screen.
  *
- * This is intentionally a *per-tank* view (distinct from the network-level
- * Consumption tab): it answers "how has this specific tank's forecast
- * behaved?" so the operator can judge whether the suggested K is sensible.
+ * This is a per-tank view, distinct from the network-level Consumption tab.
  *
- * Data: GET /api/fuel/mvp/forecasts?customer_tank_id=… (newest first).
+ * Data:
+ *   GET /api/compliance/kfactor/{tank_id}/variance-history  (predicted vs actual)
+ *   GET /api/fuel/mvp/forecasts?customer_tank_id=…           (run-out forecasts)
  */
 
 import { useEffect, useState } from "react";
-import type { KFactorEntry } from "../../services/complianceApi";
+import type {
+  KFactorEntry,
+  KFactorVarianceHistoryItem,
+} from "../../services/complianceApi";
+import { getKFactorVarianceHistory } from "../../services/complianceApi";
 import type { CustomerTankForecast } from "../../services/fuelApi";
 import { listCustomerTankForecasts } from "../../services/fuelApi";
 import { getCurrentTenantId } from "../../services/tenant";
@@ -46,8 +51,31 @@ function fmtTime(iso: string | null | undefined): string {
   }
 }
 
+function fmtDay(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  try {
+    return new Date(iso).toLocaleDateString([], {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    });
+  } catch {
+    return iso;
+  }
+}
+
 function fmtK(v: number | null | undefined): string {
   return v === null || v === undefined ? "—" : v.toFixed(4);
+}
+
+function fmtGal(v: number | null | undefined): string {
+  if (v === null || v === undefined) return "—";
+  return v.toLocaleString(undefined, { maximumFractionDigits: 0 });
+}
+
+function fmtVariance(v: number | null | undefined): string {
+  if (v === null || v === undefined) return "—";
+  return `${v >= 0 ? "+" : ""}${v.toFixed(1)}%`;
 }
 
 export default function TankConsumptionDrillIn({
@@ -58,6 +86,7 @@ export default function TankConsumptionDrillIn({
   onClose: () => void;
 }) {
   const [forecasts, setForecasts] = useState<CustomerTankForecast[]>([]);
+  const [variance, setVariance] = useState<KFactorVarianceHistoryItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -67,16 +96,22 @@ export default function TankConsumptionDrillIn({
       setLoading(true);
       setError(null);
       try {
-        const resp = await listCustomerTankForecasts({
-          tenant_id: getCurrentTenantId(),
-          customer_tank_id: entry.tank_id,
-          size: MAX_ROWS,
-        });
-        if (!cancelled) setForecasts(resp.data ?? []);
+        const [forecastRes, varianceRes] = await Promise.all([
+          listCustomerTankForecasts({
+            tenant_id: getCurrentTenantId(),
+            customer_tank_id: entry.tank_id,
+            size: MAX_ROWS,
+          }),
+          getKFactorVarianceHistory(entry.tank_id, MAX_ROWS),
+        ]);
+        if (!cancelled) {
+          setForecasts(forecastRes.data ?? []);
+          setVariance(varianceRes.data ?? []);
+        }
       } catch (err) {
         if (!cancelled) {
           setError(
-            err instanceof Error ? err.message : "Failed to load forecasts",
+            err instanceof Error ? err.message : "Failed to load tank detail",
           );
         }
       } finally {
@@ -99,10 +134,11 @@ export default function TankConsumptionDrillIn({
         <div className="flex items-start justify-between mb-4">
           <div>
             <h2 id="tank-consumption-title" className="text-lg font-bold">
-              Consumption & Forecast — {entry.tank_id}
+              Consumption &amp; Forecast — {entry.tank_id}
             </h2>
             <p className="text-sm text-gray-500">
-              Recent run-out forecasts driven by this tank's K-factor.
+              Per-delivery accuracy and recent run-out forecasts for this tank's
+              K-factor.
             </p>
           </div>
           <button
@@ -136,7 +172,7 @@ export default function TankConsumptionDrillIn({
 
         {loading && (
           <div role="status" className="flex justify-center py-10">
-            <span className="sr-only">Loading forecasts…</span>
+            <span className="sr-only">Loading tank detail…</span>
             <div className="animate-spin h-7 w-7 border-4 border-primary border-t-transparent rounded-full" />
           </div>
         )}
@@ -150,64 +186,127 @@ export default function TankConsumptionDrillIn({
           </div>
         )}
 
-        {!loading && !error && forecasts.length === 0 && (
-          <p className="text-sm text-gray-500 py-8 text-center">
-            No forecasts recorded for this tank yet.
-          </p>
-        )}
-
-        {!loading && !error && forecasts.length > 0 && (
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="text-left text-xs text-gray-500 border-b border-gray-200">
-                <th className="py-2 pr-3 font-medium">When</th>
-                <th className="py-2 pr-3 font-medium">Model</th>
-                <th className="py-2 pr-3 font-medium">Run-out (p50)</th>
-                <th className="py-2 pr-3 font-medium">Run-out (p90)</th>
-                <th className="py-2 pr-3 font-medium">24h risk</th>
-                <th className="py-2 pr-3 font-medium">Confidence</th>
-                <th className="py-2 font-medium">Flags</th>
-              </tr>
-            </thead>
-            <tbody>
-              {forecasts.map((f, i) => (
-                <tr
-                  key={f.forecast_id ?? `${f.timestamp}-${i}`}
-                  className="border-b border-gray-100"
-                >
-                  <td className="py-2 pr-3 whitespace-nowrap">
-                    {fmtTime(f.timestamp)}
-                  </td>
-                  <td className="py-2 pr-3 text-gray-600">
-                    {f.model_name ?? "—"}
-                  </td>
-                  <td className="py-2 pr-3">
-                    {fmtHours(f.hours_to_runout_p50)}
-                  </td>
-                  <td className="py-2 pr-3">
-                    {fmtHours(f.hours_to_runout_p90)}
-                  </td>
-                  <td className="py-2 pr-3">
-                    <span
-                      className={
-                        (f.runout_risk_24h ?? 0) >= 0.5
-                          ? "text-error font-medium"
-                          : "text-gray-700"
-                      }
+        {!loading && !error && (
+          <>
+            {/* Predicted vs actual per delivery (Req 9.1, 9.2) */}
+            <h3 className="text-sm font-semibold text-gray-700 mb-2">
+              Predicted vs Actual (per delivery)
+            </h3>
+            {variance.length === 0 ? (
+              <p className="text-sm text-gray-500 py-4">
+                No scored deliveries yet — needs at least two deliveries and
+                weather data to compute variance.
+              </p>
+            ) : (
+              <table className="w-full text-sm mb-6">
+                <thead>
+                  <tr className="text-left text-xs text-gray-500 border-b border-gray-200">
+                    <th className="py-2 pr-3 font-medium">Delivery</th>
+                    <th className="py-2 pr-3 font-medium">Predicted (gal)</th>
+                    <th className="py-2 pr-3 font-medium">Actual (gal)</th>
+                    <th className="py-2 pr-3 font-medium">Variance</th>
+                    <th className="py-2 font-medium">Suggested K</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {variance.map((v) => (
+                    <tr
+                      key={v.delivery_id}
+                      className="border-b border-gray-100"
                     >
-                      {fmtPct(f.runout_risk_24h)}
-                    </span>
-                  </td>
-                  <td className="py-2 pr-3">{fmtPct(f.confidence)}</td>
-                  <td className="py-2 text-xs text-gray-500">
-                    {f.anomaly_flags && f.anomaly_flags.length > 0
-                      ? f.anomaly_flags.join(", ")
-                      : "—"}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+                      <td className="py-2 pr-3 whitespace-nowrap">
+                        {fmtDay(v.delivery_date)}
+                      </td>
+                      <td className="py-2 pr-3 font-mono">
+                        {fmtGal(v.predicted_gallons)}
+                      </td>
+                      <td className="py-2 pr-3 font-mono">
+                        {fmtGal(v.actual_gallons)}
+                      </td>
+                      <td className="py-2 pr-3">
+                        <span
+                          className={
+                            v.flagged
+                              ? "text-error font-medium"
+                              : "text-gray-700"
+                          }
+                        >
+                          {fmtVariance(v.variance_percent)}
+                        </span>
+                      </td>
+                      <td className="py-2 font-mono">
+                        {v.suggested_kfactor === null
+                          ? "—"
+                          : fmtK(v.suggested_kfactor)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+
+            {/* Recent run-out forecasts */}
+            <h3 className="text-sm font-semibold text-gray-700 mb-2">
+              Recent forecasts
+            </h3>
+            {forecasts.length === 0 ? (
+              <p className="text-sm text-gray-500 py-4">
+                No forecasts recorded for this tank yet.
+              </p>
+            ) : (
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-xs text-gray-500 border-b border-gray-200">
+                    <th className="py-2 pr-3 font-medium">When</th>
+                    <th className="py-2 pr-3 font-medium">Model</th>
+                    <th className="py-2 pr-3 font-medium">Run-out (p50)</th>
+                    <th className="py-2 pr-3 font-medium">Run-out (p90)</th>
+                    <th className="py-2 pr-3 font-medium">24h risk</th>
+                    <th className="py-2 pr-3 font-medium">Confidence</th>
+                    <th className="py-2 font-medium">Flags</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {forecasts.map((f, i) => (
+                    <tr
+                      key={f.forecast_id ?? `${f.timestamp}-${i}`}
+                      className="border-b border-gray-100"
+                    >
+                      <td className="py-2 pr-3 whitespace-nowrap">
+                        {fmtTime(f.timestamp)}
+                      </td>
+                      <td className="py-2 pr-3 text-gray-600">
+                        {f.model_name ?? "—"}
+                      </td>
+                      <td className="py-2 pr-3">
+                        {fmtHours(f.hours_to_runout_p50)}
+                      </td>
+                      <td className="py-2 pr-3">
+                        {fmtHours(f.hours_to_runout_p90)}
+                      </td>
+                      <td className="py-2 pr-3">
+                        <span
+                          className={
+                            (f.runout_risk_24h ?? 0) >= 0.5
+                              ? "text-error font-medium"
+                              : "text-gray-700"
+                          }
+                        >
+                          {fmtPct(f.runout_risk_24h)}
+                        </span>
+                      </td>
+                      <td className="py-2 pr-3">{fmtPct(f.confidence)}</td>
+                      <td className="py-2 text-xs text-gray-500">
+                        {f.anomaly_flags && f.anomaly_flags.length > 0
+                          ? f.anomaly_flags.join(", ")
+                          : "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </>
         )}
       </div>
     </div>
