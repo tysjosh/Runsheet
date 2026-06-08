@@ -55,6 +55,7 @@ export function useDashboardChrome(): DashboardChrome {
  */
 export const DASHBOARD_ITEM_PATH: Record<string, string> = {
   today: "/dashboard",
+  notifications: "/dashboard/notifications",
   orders: "/dashboard/orders",
   fleet: "/dashboard/fleet",
   dispatch: "/dashboard/dispatch",

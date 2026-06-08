@@ -3,6 +3,7 @@
 import { Menu, Plus, Sparkles } from "lucide-react";
 import { useRouter } from "next/navigation";
 import GlobalSearch from "./GlobalSearch";
+import NotificationBell from "./NotificationBell";
 
 interface HeaderProps {
   onAIClick?: () => void;
@@ -80,6 +81,7 @@ export default function Header({
 
         {/* Actions */}
         <div className="ml-auto flex items-center gap-2">
+          <NotificationBell />
           <button
             type="button"
             onClick={handleNewOrder}

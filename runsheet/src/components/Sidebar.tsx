@@ -1,5 +1,6 @@
 import {
   BarChart3,
+  Bell,
   CalendarClock,
   ChevronLeft,
   ClipboardCheck,
@@ -48,6 +49,7 @@ const NAV_SECTIONS: { label: string; items: NavItem[] }[] = [
     label: "Operations",
     items: [
       { id: "today", label: "Today", icon: LayoutDashboard },
+      { id: "notifications", label: "Notifications", icon: Bell },
       { id: "fleet", label: "Fleet", icon: Truck },
       { id: "dispatch", label: "Dispatch", icon: CalendarClock },
       { id: "drivers", label: "Drivers", icon: User },
