@@ -69,7 +69,7 @@ export default function InvoiceDetailPage({
   // WebSocket subscription for live invoice updates
   useEffect(() => {
     const wsUrl =
-      (process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000") +
+      (process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8080") +
       "/ws/commerce/invoices";
 
     let ws: WebSocket | null = null;

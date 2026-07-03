@@ -129,7 +129,7 @@ function calculateBackoffDelay(
  * @example
  * ```tsx
  * const { state, isConnected, lastMessage, connect, disconnect } = useWebSocket(
- *   'ws://localhost:8000/api/fleet/live',
+ *   'ws://localhost:8080/api/fleet/live',
  *   {
  *     onMessage: (data) => console.log('Received:', data),
  *     onReconnecting: (attempt, delay) => console.log(`Reconnecting in ${delay}ms (attempt ${attempt})`),

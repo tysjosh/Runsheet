@@ -27,7 +27,7 @@ export type {
 // ─── Configuration ───────────────────────────────────────────────────────────
 
 const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
+  process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080/api";
 
 // ─── Cross-Module Resolver Links (cross-module-entity-linkage Req 5.2/5.4) ────
 

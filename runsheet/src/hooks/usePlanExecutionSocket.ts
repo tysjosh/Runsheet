@@ -20,7 +20,7 @@ import {
 
 // API base URL for WebSocket
 const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
+  process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080/api";
 const WS_BASE_URL = API_BASE_URL.replace("http", "ws").replace("/api", "");
 const PLAN_EXECUTION_WS_BASE_URL = `${WS_BASE_URL}/ws/plan-execution`;
 

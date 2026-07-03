@@ -32,7 +32,7 @@ import {
   triggerReplay,
 } from "./opsApi";
 
-const API_BASE_URL = "http://localhost:8000/api";
+const API_BASE_URL = "http://localhost:8080/api";
 
 function mockFetchOnce(response: {
   ok: boolean;

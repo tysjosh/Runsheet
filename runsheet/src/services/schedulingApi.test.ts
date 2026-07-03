@@ -21,7 +21,7 @@
 import { ApiError } from "./api";
 import { acceptJob, ackJob, rejectJob, rerouteJob } from "./schedulingApi";
 
-const API_BASE_URL = "http://localhost:8000/api";
+const API_BASE_URL = "http://localhost:8080/api";
 
 function mockFetchOnce(response: {
   ok: boolean;
@@ -126,7 +126,7 @@ describe("rerouteJob", () => {
     expect(result.data).toEqual(job);
     const [url, options] = (global.fetch as jest.Mock).mock.calls[0];
     expect(url).toBe(
-      "http://localhost:8000/api/v1/scheduling/jobs/job-4/reroute",
+      "http://localhost:8080/api/v1/scheduling/jobs/job-4/reroute",
     );
     expect(options.method).toBe("POST");
     expect(JSON.parse(options.body)).toEqual({

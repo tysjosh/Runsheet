@@ -152,7 +152,7 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
 
     try {
       const API_BASE_URL =
-        process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
+        process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080/api";
       const response = await fetch(`${API_BASE_URL}/chat`, {
         method: "POST",
         headers: {
@@ -387,7 +387,7 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
   const clearChat = async () => {
     try {
       const API_BASE_URL =
-        process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
+        process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080/api";
       const response = await fetch(`${API_BASE_URL}/chat/clear`, {
         method: "POST",
         headers: {

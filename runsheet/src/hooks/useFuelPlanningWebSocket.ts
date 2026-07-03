@@ -44,7 +44,7 @@ import {
 // other specialized hooks). The ``/api`` suffix is stripped and the
 // protocol swapped to ``ws`` / ``wss``.
 const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
+  process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080/api";
 const WS_BASE = API_BASE_URL.replace(/\/api$/, "").replace("http", "ws");
 const FUEL_PLANNING_WS_URL = `${WS_BASE}/ws/fuel-planning`;
 

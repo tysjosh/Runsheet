@@ -128,7 +128,7 @@ export interface AssetComplianceSummary {
 
 // API base URL - replace with actual API endpoint
 const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
+  process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080/api";
 
 // Timeout configuration (in milliseconds)
 // Requirement 9.4: Configurable timeouts - 30s for standard calls, 120s for AI streaming

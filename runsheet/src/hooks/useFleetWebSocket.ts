@@ -19,7 +19,7 @@ import {
 
 // API base URL for WebSocket
 const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
+  process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080/api";
 
 /**
  * Build WebSocket URL with JWT token for authentication

@@ -184,7 +184,7 @@ export default function CommandInterfacePage() {
 
     try {
       const API_BASE_URL =
-        process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
+        process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080/api";
       const response = await fetch(`${API_BASE_URL}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -394,7 +394,7 @@ export default function CommandInterfacePage() {
   const clearChat = async () => {
     try {
       const API_BASE_URL =
-        process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
+        process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080/api";
       await fetch(`${API_BASE_URL}/chat/clear`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },

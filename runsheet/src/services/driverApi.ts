@@ -32,7 +32,7 @@ export type { PaginationMeta } from "./utils";
 // ─── Configuration ───────────────────────────────────────────────────────────
 
 const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
+  process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080/api";
 
 // S3 uploads are plain HTTPS PUTs — bound the wait separately from the
 // ops-API timeout because a large meter-ticket image can legitimately
