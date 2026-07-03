@@ -320,10 +320,13 @@ class TestJobPrioritiesMapping:
         props = JOB_PRIORITIES_MAPPING["mappings"]["properties"]
         assert props["timestamp"]["type"] == "date"
 
-    def test_scoring_weights_is_object(self):
+    def test_scoring_weights_is_flattened(self):
+        # ``scoring_weights`` is a small key→float map. Under the index's
+        # dynamic: strict root, an ``object`` field would inherit strict and
+        # reject the weight keys on write, so it's mapped as ``flattened``
+        # (whole map stored as one field, keys not individually mapped).
         props = JOB_PRIORITIES_MAPPING["mappings"]["properties"]
-        assert props["scoring_weights"]["type"] == "object"
-        assert props["scoring_weights"]["enabled"] is True
+        assert props["scoring_weights"]["type"] == "flattened"
 
     def test_priorities_is_nested(self):
         props = JOB_PRIORITIES_MAPPING["mappings"]["properties"]
