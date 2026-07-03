@@ -26,6 +26,17 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
+# Strict-mapped event-stream indices that carry their own domain timestamps
+# (e.g. event_timestamp / ingested_at) and therefore MUST NOT receive the
+# auto-stamped created_at/updated_at — doing so trips a
+# strict_dynamic_mapping_exception. Every OTHER strict index written via
+# index_document is auto-stamped, so its mapping must declare created_at and
+# updated_at (enforced by tests/unit/test_mapping_timestamp_contract.py).
+TIMESTAMP_SKIP_INDICES = frozenset(
+    {"job_events", "shipment_events", "fuel_order_events"}
+)
+
+
 class ElasticsearchService:
     """
     Elasticsearch service with circuit breaker protection.
@@ -1219,18 +1230,11 @@ class ElasticsearchService:
             return {"result": "skipped_retired_index"}
         try:
             async def _do_index():
-                # Only inject timestamps for indices that have these fields in their mapping.
-                # Strict-mapped event-stream indices reject unknown top-level
-                # fields. ``fuel_order_events`` is strict and carries its own
-                # domain timestamps (event_timestamp / ingested_at), so the
-                # auto-stamped created_at/updated_at triggered a
-                # strict_dynamic_mapping_exception and 503'd every order intake
-                # — it belongs in the skip set alongside job_events /
-                # shipment_events.
-                _TIMESTAMP_SKIP_INDICES = {
-                    "job_events", "shipment_events", "fuel_order_events",
-                }
-                if index not in _TIMESTAMP_SKIP_INDICES:
+                # Only inject timestamps for indices that have these fields in
+                # their mapping. Strict-mapped event-stream indices carry their
+                # own domain timestamps and reject the auto-stamped fields, so
+                # they are excluded via the module-level TIMESTAMP_SKIP_INDICES.
+                if index not in TIMESTAMP_SKIP_INDICES:
                     document["updated_at"] = utcnow().isoformat()
                     if "created_at" not in document:
                         document["created_at"] = utcnow().isoformat()

@@ -100,6 +100,9 @@ RESTOCK_REQUESTS_MAPPING = {
             },
             "tenant_id": {"type": "keyword"},
             "created_at": {"type": "date"},
+            # index_document auto-stamps updated_at on every write; a strict
+            # mapping without it rejects all restock-request creations.
+            "updated_at": {"type": "date"},
             "fulfilled_at": {"type": "date"},
         },
     },

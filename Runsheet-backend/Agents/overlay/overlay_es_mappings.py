@@ -191,6 +191,10 @@ JOB_PRIORITIES_MAPPING = {
             "scoring_weights": {"type": "flattened"},
             "tenant_id":       {"type": "keyword"},
             "timestamp":       {"type": "date"},
+            # index_document auto-stamps created_at/updated_at on every write;
+            # a strict mapping without them rejects all priority-list persists.
+            "created_at":      {"type": "date"},
+            "updated_at":      {"type": "date"},
         },
     },
     "settings": {
