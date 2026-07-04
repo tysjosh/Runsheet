@@ -735,16 +735,30 @@ class IntakeChannelRepository:
         self._require_tenant(tenant_id)
 
         # Read-cutover: serve from Postgres when enabled.
+        #
+        # NB: only ``channel_type`` is pushed down as a term filter. The
+        # Postgres hybrid-read builder extracts JSON fields as text
+        # (``document ->> 'enabled'``) and comparing that to a Python bool
+        # generates invalid SQL (``CAST(... AS VARCHAR) = true`` →
+        # "operator does not exist: character varying = boolean"). So the
+        # ``enabled`` gate is applied in Python below (mirroring the ES path),
+        # exactly like ``get_dispatcher_channel`` which also filters on
+        # ``channel_type`` alone.
         from commerce.services.commerce_persistence_bridge import (
             _NOT_CUT_OVER,
             read_hybrid_find_one,
         )
         pg = await read_hybrid_find_one(
             "intake_channel", tenant_id,
-            term_filters={"channel_type": "voice", "enabled": True},
+            term_filters={"channel_type": "voice"},
         )
         if pg is not _NOT_CUT_OVER:
-            return _safe_channel_load(pg) if pg is not None else None
+            if pg is None:
+                return None
+            channel = _safe_channel_load(pg)
+            if channel is not None and channel.enabled is False:
+                return None
+            return channel
 
         query = inject_tenant_filter(
             {
