@@ -48,6 +48,11 @@ VOICE_API_KEYS_MAPPING = {
             "channel_id": {"type": "keyword"},
             "disabled": {"type": "boolean"},
             "created_at": {"type": "date"},
+            # ``ElasticsearchService.index_document`` auto-stamps ``updated_at``
+            # on every write (see TIMESTAMP_SKIP_INDICES for the exclusions).
+            # This index is NOT skipped, so the strict mapping MUST allow the
+            # field or writes fail with strict_dynamic_mapping_exception.
+            "updated_at": {"type": "date"},
         },
     },
 }
