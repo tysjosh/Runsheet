@@ -195,6 +195,54 @@ def test_control_case_still_processes():
     assert result.orderId == "ord_ok_1"
 
 
+def test_unknown_product_code_named_422_without_pipeline():
+    import asyncio
+
+    ledger = FakeLedger()
+    pipeline = ProcessingPipeline()
+    bridge = _bridge(pipeline, ledger)
+
+    body = json.dumps(
+        {
+            "callId": "call-1",
+            "transcriptId": "tr-1",
+            "transcript": [{"speaker": "customer", "text": "fuel"}],
+            "callerPhone": "+15555550100",
+            "extractedSlots": {
+                "customer_id": "cust-1",
+                "customer_name": "Acme",
+                "ship_to_address": "1 Depot Rd",
+                "ship_to_lat": 40.0,
+                "ship_to_lon": -75.0,
+                "product_code": "ZZZ-not-a-product",
+            },
+            "reviewRequired": True,
+        }
+    ).encode("utf-8")
+
+    async def _run():
+        return await bridge.submit(
+            raw_body=body,
+            tenant_id=TENANT_ID,
+            idempotency_key="idem-bad-product",
+            timestamp=VALID_TIMESTAMP,
+            schema_version=SCHEMA_VERSION,
+            signature=VALID_SIGNATURE,
+            request_id="req-bad-product",
+        )
+
+    with pytest.raises(AppException) as ei:
+        asyncio.run(_run())
+
+    app_exc = ei.value
+    assert app_exc.error_code == ErrorCode.VOICE_PAYLOAD_INVALID
+    assert app_exc.details["missing_fields"] == ["extractedSlots.product_code"]
+    # Rejected at the bridge boundary — the pipeline is never invoked and no
+    # order outcome is recorded (nothing hits the poison queue).
+    assert pipeline.calls == 0
+    assert ledger.records == []
+
+
 def test_extract_invalid_fields_field_level():
     # gallons must be > 0 and lat in range — field-level errors carry loc.
     doc = {

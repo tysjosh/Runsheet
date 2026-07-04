@@ -71,6 +71,7 @@ from errors.exceptions import (
     voice_unauthorized,
 )
 from fuel.intake.voice_intake_adapter import VoiceIntakePayload
+from fuel.services.fuel_product_catalog import is_known_product
 from fuel.services.order_intake_pipeline import IntakeResponse
 from fuel.voice.voice_models import VoiceDisposition, VoiceSubmissionResponse
 from services.time_utils import utcnow
@@ -211,6 +212,22 @@ class DineeVoiceBridge:
 
         # --- (6) Required-field validation (bridge boundary → 422) --------
         parsed = self._validate_payload(payload_dict)
+
+        # --- (6.5) Product-code validation (bridge boundary → 422) --------
+        # The adapter canonicalizes ``product_code`` against the fuel product
+        # catalog and raises ``AdapterError`` for an unknown code, which the
+        # pipeline routes to the poison queue and reports as a generic
+        # "could not be processed" 422 (empty ``missing_fields``). Validate it
+        # here instead so an unknown/blank code returns a clean 422 that names
+        # ``extractedSlots.product_code`` — consistent with the other bridge
+        # boundary rejections — and never pollutes the poison queue with what
+        # is really a client input error.
+        product_code = parsed.extractedSlots.product_code
+        if not product_code or not is_known_product(product_code):
+            raise voice_payload_invalid(
+                message="The voice submission references an unknown product_code",
+                details={"missing_fields": ["extractedSlots.product_code"]},
+            )
 
         # --- (7) Pipeline invocation --------------------------------------
         # The pipeline performs the authoritative HMAC verification, tenant

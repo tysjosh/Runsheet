@@ -192,7 +192,9 @@ def _valid_slots(draw) -> Dict[str, Any]:
         "ship_to_lon": draw(
             st.floats(min_value=-180, max_value=180, allow_nan=False, allow_infinity=False)
         ),
-        "product_code": draw(_non_empty),
+        # A real catalog code: the bridge validates product_code against the
+        # fuel product catalog before invoking the pipeline.
+        "product_code": "DIESEL_2",
     }
 
 
