@@ -22,7 +22,13 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+)
 
 from fuel.intake.adapter_base import AdapterError, IntakeContext, IntakeResult
 from fuel.services.fuel_product_catalog import canonicalize
@@ -35,13 +41,26 @@ from fuel.services.fuel_product_catalog import canonicalize
 #: Marker written to ``hold_reason`` when a voice order requires human review.
 VOICE_REVIEW_HOLD_REASON = "voice_review_required"
 
+#: Prefix stamped on the synthetic ``customer_id`` when a voice caller cannot
+#: be resolved to an existing customer at intake time (design decision "A"):
+#: the order is still accepted, forced into review-hold, and a human resolves
+#: the real customer during review. The ``callId`` suffix keeps the provisional
+#: id stable and traceable back to the originating call.
+UNRESOLVED_CUSTOMER_PREFIX = "unresolved:"
+
 
 class TranscriptTurn(BaseModel):
-    """A single speaker turn in the voice call transcript."""
+    """A single speaker turn in the voice call transcript.
 
-    model_config = ConfigDict(extra="ignore")
+    Accepts either ``speaker`` (canonical) or ``role`` (the Dinee runtime's
+    native key) for the turn's author — the backend aligns to the fixed Dinee
+    client contract (assumption A5). Any extra keys the Dinee runtime emits
+    (e.g. ``at``) are ignored.
+    """
 
-    speaker: str
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    speaker: str = Field(validation_alias=AliasChoices("speaker", "role"))
     text: str
 
 
@@ -154,12 +173,27 @@ class VoiceIntakeAdapter:
                 message=f"Unknown product_code {slots.product_code!r}: {exc}",
             ) from exc
 
+        # Customer resolution (design decision "A"): a voice caller who does
+        # not resolve to an existing customer at intake time still yields an
+        # accepted order — the canonical FuelOrder requires a non-empty
+        # ``customer_id``, so we stamp a provisional, call-scoped reference and
+        # force the order into review-hold below. A human resolves the real
+        # customer during review. This keeps the platform-wide FuelOrder
+        # invariant intact instead of relaxing it.
+        raw_customer_id = slots.customer_id
+        customer_unresolved = not (raw_customer_id and raw_customer_id.strip())
+        customer_id = (
+            f"{UNRESOLVED_CUSTOMER_PREFIX}{parsed.callId}"
+            if customer_unresolved
+            else raw_customer_id
+        )
+
         transcript_text = self._join_transcript(parsed.transcript)
 
         # Build the order document — adapters own business shape only.
         order_doc: Dict[str, Any] = {
             # Customer reference
-            "customer_id": slots.customer_id,
+            "customer_id": customer_id,
             "customer_name": slots.customer_name,
             "customer_phone": parsed.callerPhone,
             "ship_to_address": slots.ship_to_address,
@@ -187,8 +221,11 @@ class VoiceIntakeAdapter:
         # Human-review disposition (Req 8.1): stamp the hold reason so the
         # registered VoiceReviewHoldHook promotes the order to on_hold after
         # the pipeline stamps status="placed". Status itself stays
-        # platform-owned and is never set by the adapter.
-        if parsed.reviewRequired:
+        # platform-owned and is never set by the adapter. An unresolved
+        # customer always forces review-hold — even when the agent did not set
+        # ``reviewRequired`` — because a provisional customer_id must be
+        # reconciled by a human before the order can proceed.
+        if parsed.reviewRequired or customer_unresolved:
             order_doc["hold_reason"] = VOICE_REVIEW_HOLD_REASON
 
         # Emit a single order_placed event.
@@ -209,6 +246,19 @@ class VoiceIntakeAdapter:
         return IntakeResult(order_doc=order_doc, event_docs=event_docs)
 
     @staticmethod
+    def is_unresolved_customer_id(customer_id: Optional[str]) -> bool:
+        """Return ``True`` when ``customer_id`` is a provisional voice reference.
+
+        A voice order whose caller could not be resolved to an existing
+        customer at intake carries a synthetic ``customer_id`` of the form
+        ``unresolved:{callId}`` (design decision "A"). Review tooling uses this
+        to flag the order for customer reconciliation.
+        """
+        return bool(customer_id) and customer_id.startswith(
+            UNRESOLVED_CUSTOMER_PREFIX
+        )
+
+    @staticmethod
     def _join_transcript(transcript: List[TranscriptTurn]) -> Optional[str]:
         """Render the transcript turns into a single newline-joined string.
 
@@ -226,4 +276,5 @@ __all__ = [
     "VoiceIntakePayload",
     "VoiceIntakeAdapter",
     "VOICE_REVIEW_HOLD_REASON",
+    "UNRESOLVED_CUSTOMER_PREFIX",
 ]

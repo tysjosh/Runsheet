@@ -215,14 +215,32 @@ class DineeVoiceBridge:
         # --- (7) Pipeline invocation --------------------------------------
         # The pipeline performs the authoritative HMAC verification, tenant
         # re-check, idempotency, adapter dispatch, persistence, and broadcast.
-        result: IntakeResponse = await self._pipeline.ingest_webhook(
-            channel_id=channel.channel_id,
-            body=raw_body,
-            signature=stripped_signature,
-            request_id=request_id,
-            idempotency_key_override=idempotency_key,
-            schema_version_override=schema_version,
-        )
+        #
+        # The bridge's stage (6) validates that the required *fields* are
+        # present, but the canonical ``FuelOrder`` also enforces value-level
+        # invariants inside the pipeline (e.g. a ``one_off`` order must carry a
+        # delivery window, gallons must be > 0, lat/lon must be in range).
+        # Those raise ``pydantic.ValidationError`` from
+        # ``FuelOrder.model_validate`` *after* the adapter runs. Left
+        # unhandled they surface as an HTTP 500, which is wrong: the input is
+        # bad, not the server. Catch them here and map to a uniform 422
+        # ``VOICE_PAYLOAD_INVALID`` naming the offending field(s)/rule(s), the
+        # same envelope shape as the required-field rejection. Non-validation
+        # failures (ES/network/etc.) are *not* caught and still surface as 500.
+        try:
+            result: IntakeResponse = await self._pipeline.ingest_webhook(
+                channel_id=channel.channel_id,
+                body=raw_body,
+                signature=stripped_signature,
+                request_id=request_id,
+                idempotency_key_override=idempotency_key,
+                schema_version_override=schema_version,
+            )
+        except ValidationError as exc:
+            raise voice_payload_invalid(
+                message="The voice submission failed value validation",
+                details={"missing_fields": _extract_invalid_fields(exc)},
+            ) from exc
 
         return await self._map_result(
             result=result,
@@ -438,6 +456,43 @@ def _extract_missing_fields(exc: ValidationError) -> List[str]:
     seen: set = set()
     deduped: List[str] = []
     for f in fields:
+        if f not in seen:
+            seen.add(f)
+            deduped.append(f)
+    return deduped
+
+
+def _extract_invalid_fields(exc: ValidationError) -> List[str]:
+    """Name the offending fields/rules for a value-level ``ValidationError``.
+
+    Unlike :func:`_extract_missing_fields` (absent required fields), this is
+    used for value violations surfaced by ``FuelOrder.model_validate`` inside
+    the pipeline. It handles two error shapes:
+
+        * **field-level** errors (e.g. ``ship_to_lat`` out of range) carry a
+          non-empty ``loc`` — the dotted field path is used.
+        * **model-level** validator errors (e.g. ``invalid_delivery_window``)
+          carry an empty ``loc``; the ``ValueError`` code from the message is
+          used instead so the caller learns *which rule* failed.
+
+    Only field names / rule codes are returned — never submitted values, so
+    no tenant data or credentials leak into the response.
+    """
+    out: List[str] = []
+    for err in exc.errors():
+        loc = ".".join(str(part) for part in err.get("loc", ()))
+        if loc:
+            out.append(loc)
+            continue
+        # Model-level validator: recover the ValueError code from the message
+        # (pydantic v2 renders it as "Value error, <code>").
+        msg = str(err.get("msg", "")).strip()
+        code = msg.split("Value error,", 1)[-1].strip() if "Value error," in msg else msg
+        out.append(code or "value_error")
+    # De-duplicate while preserving order.
+    seen: set = set()
+    deduped: List[str] = []
+    for f in out:
         if f not in seen:
             seen.add(f)
             deduped.append(f)
