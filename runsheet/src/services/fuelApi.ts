@@ -2451,6 +2451,42 @@ export async function listCompartmentTrucks(): Promise<CompartmentTrucksResponse
 }
 
 /**
+ * One compartment definition sent to
+ * ``PUT /api/fuel/mvp/compartments/{truck_id}``. ``allowed_grades`` accepts
+ * canonical product codes or NG aliases (AGO/PMS/ATK/LPG); the backend
+ * canonicalizes and rejects unknown codes with a 400.
+ */
+export interface CompartmentConfigInput {
+  compartment_id: string;
+  capacity_liters: number;
+  allowed_grades: string[];
+  position_index: number;
+}
+
+/** Response envelope for the compartment configuration PUT. */
+export interface ConfigureCompartmentsResponse {
+  truck_id: string;
+  compartments_configured: number;
+  status: string;
+}
+
+/**
+ * PUT ``/api/fuel/mvp/compartments/{truck_id}`` — define (or replace) a
+ * tanker's compartments. Also registers the truck in the fleet index
+ * server-side (FleetRegistrationService), so a brand-new tanker becomes
+ * both compartment-aware and fleet-visible in one call.
+ */
+export async function configureCompartments(
+  truckId: string,
+  compartments: CompartmentConfigInput[],
+): Promise<ConfigureCompartmentsResponse> {
+  return fuelRequest<ConfigureCompartmentsResponse>(
+    `/fuel/mvp/compartments/${encodeURIComponent(truckId)}`,
+    { method: "PUT", body: JSON.stringify({ compartments }) },
+  );
+}
+
+/**
  * POST ``/api/fuel/mvp/compartments/{id}/cleaning-events`` — record a
  * Cleaning_Event and reset the compartment's lifecycle state to
  * ``clean`` (Task 6.3 / Req 7.1.4).

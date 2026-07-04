@@ -34,9 +34,11 @@ import {
   Droplets,
   Image as ImageIcon,
   Loader2,
+  Plus,
   RefreshCw,
   Search,
   Sparkles,
+  Trash2,
   Truck as TruckIcon,
   Upload,
   X,
@@ -58,6 +60,7 @@ import {
 import type {
   CleaningEvent,
   CleaningMethod,
+  CompartmentConfigInput,
   CompartmentLifecycleState,
   CompartmentTruckSummary,
   LoadEligibilityDecision,
@@ -66,6 +69,8 @@ import type {
 } from "../../services/fuelApi";
 import {
   checkCompartmentLoadEligibility,
+  configureCompartments,
+  gallonsToLiters,
   getTruckCompartmentCapacityGallons,
   listCompartmentTrucks,
   listTruckCompartments,
@@ -861,6 +866,337 @@ function LoadEligibilityModal({
   );
 }
 
+// ─── Configure compartments modal ────────────────────────────────────────────
+
+/** Common fuel grades offered as quick-add chips. The backend also accepts
+ * canonical US codes (DIESEL_2, GASOLINE_REG, KEROSENE, PROPANE) and
+ * canonicalizes on write, rejecting unknown codes with a 400. */
+const COMMON_GRADES = ["AGO", "PMS", "ATK", "LPG"];
+
+interface CompartmentRow {
+  compartment_id: string;
+  capacity_gallons: string;
+  allowed_grades: string;
+  position_index: number;
+}
+
+function emptyRow(position: number): CompartmentRow {
+  return {
+    compartment_id: "",
+    capacity_gallons: "",
+    allowed_grades: "",
+    position_index: position,
+  };
+}
+
+/**
+ * Form to define (or replace) a tanker's compartments via
+ * ``PUT /api/fuel/mvp/compartments/{truck_id}``. Capacity is entered in
+ * gallons for UI consistency and converted to liters before submit. On
+ * success the truck is also registered in the fleet index server-side.
+ */
+function ConfigureCompartmentsModal({
+  initialTruckId,
+  lockTruckId,
+  initialCompartments,
+  onClose,
+  onSuccess,
+}: {
+  initialTruckId?: string;
+  lockTruckId?: boolean;
+  initialCompartments?: TruckCompartmentState[];
+  onClose: () => void;
+  onSuccess: (truckId: string, count: number) => void;
+}) {
+  const [truckId, setTruckId] = useState(initialTruckId ?? "");
+  const [rows, setRows] = useState<CompartmentRow[]>(() => {
+    if (initialCompartments && initialCompartments.length > 0) {
+      return initialCompartments.map((c, i) => ({
+        compartment_id: c.compartment_id,
+        capacity_gallons: String(
+          Math.round(getTruckCompartmentCapacityGallons(c)),
+        ),
+        allowed_grades: c.allowed_grades.join(", "),
+        position_index: c.position_index ?? i,
+      }));
+    }
+    return [emptyRow(0)];
+  });
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+
+  const updateRow = (idx: number, patch: Partial<CompartmentRow>) => {
+    setRows((prev) => prev.map((r, i) => (i === idx ? { ...r, ...patch } : r)));
+  };
+
+  const addRow = () => setRows((prev) => [...prev, emptyRow(prev.length)]);
+
+  const removeRow = (idx: number) =>
+    setRows((prev) => prev.filter((_, i) => i !== idx));
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmedTruck = truckId.trim();
+    if (!trimmedTruck) {
+      setError("Truck ID is required.");
+      return;
+    }
+    const compartments: CompartmentConfigInput[] = [];
+    for (const [i, r] of rows.entries()) {
+      const id = r.compartment_id.trim();
+      const gallons = Number(r.capacity_gallons);
+      const grades = r.allowed_grades
+        .split(",")
+        .map((g) => g.trim())
+        .filter(Boolean);
+      if (!id) {
+        setError(`Compartment ${i + 1}: ID is required.`);
+        return;
+      }
+      if (!Number.isFinite(gallons) || gallons <= 0) {
+        setError(`Compartment ${i + 1}: capacity must be greater than 0.`);
+        return;
+      }
+      if (grades.length === 0) {
+        setError(`Compartment ${i + 1}: at least one allowed grade required.`);
+        return;
+      }
+      compartments.push({
+        compartment_id: id,
+        capacity_liters: gallonsToLiters(gallons),
+        allowed_grades: grades,
+        position_index: r.position_index,
+      });
+    }
+
+    setSubmitting(true);
+    setError("");
+    try {
+      const resp = await configureCompartments(trimmedTruck, compartments);
+      onSuccess(resp.truck_id, resp.compartments_configured);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 400) {
+        // Backend rejects unknown fuel grades with a 400; its message names
+        // the offending value. Add a hint about accepted codes.
+        setError(
+          `${err.message}. Use codes like AGO, PMS, ATK, LPG (or DIESEL_2, GASOLINE_REG, KEROSENE, PROPANE).`,
+        );
+      } else {
+        setError(
+          err instanceof Error ? err.message : "Failed to save compartments.",
+        );
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/30 p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Configure compartments"
+      onClick={onClose}
+    >
+      <div
+        className="bg-white rounded-xl shadow-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between border-b border-gray-200 px-6 py-4">
+          <h2 className="text-lg font-semibold text-primary flex items-center gap-2">
+            <TruckIcon className="w-5 h-5" aria-hidden="true" />
+            Configure compartments
+          </h2>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded p-1 text-gray-500 hover:text-gray-700"
+            aria-label="Close"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="p-6 space-y-5">
+          <div>
+            <label
+              htmlFor="config-truck-id"
+              className="block text-xs font-medium text-gray-600 mb-1"
+            >
+              Truck ID
+            </label>
+            <input
+              id="config-truck-id"
+              type="text"
+              value={truckId}
+              onChange={(e) => setTruckId(e.target.value)}
+              disabled={lockTruckId}
+              placeholder="e.g. TNK-001"
+              className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white disabled:bg-gray-50 disabled:text-gray-500"
+              required
+            />
+            <p className="text-[11px] text-gray-500 mt-1">
+              A new truck ID is also registered in the fleet automatically.
+            </p>
+          </div>
+
+          <div className="space-y-3">
+            {rows.map((row, idx) => (
+              <div
+                key={idx}
+                className="border border-gray-200 rounded-lg p-3 space-y-2"
+              >
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-medium text-gray-500">
+                    Compartment {idx + 1}
+                  </span>
+                  {rows.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={() => removeRow(idx)}
+                      className="text-gray-400 hover:text-error p-1"
+                      aria-label={`Remove compartment ${idx + 1}`}
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  <div>
+                    <label className="block text-[11px] text-gray-500 mb-0.5">
+                      Compartment ID
+                    </label>
+                    <input
+                      type="text"
+                      value={row.compartment_id}
+                      onChange={(e) =>
+                        updateRow(idx, { compartment_id: e.target.value })
+                      }
+                      placeholder="C1"
+                      className="w-full px-2.5 py-1.5 text-sm border border-gray-200 rounded-md bg-white"
+                      required
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] text-gray-500 mb-0.5">
+                      Capacity (gal)
+                    </label>
+                    <input
+                      type="number"
+                      min="1"
+                      step="any"
+                      value={row.capacity_gallons}
+                      onChange={(e) =>
+                        updateRow(idx, { capacity_gallons: e.target.value })
+                      }
+                      placeholder="3000"
+                      className="w-full px-2.5 py-1.5 text-sm border border-gray-200 rounded-md bg-white"
+                      required
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] text-gray-500 mb-0.5">
+                      Position
+                    </label>
+                    <input
+                      type="number"
+                      min="0"
+                      value={row.position_index}
+                      onChange={(e) =>
+                        updateRow(idx, {
+                          position_index: Number(e.target.value),
+                        })
+                      }
+                      className="w-full px-2.5 py-1.5 text-sm border border-gray-200 rounded-md bg-white"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-[11px] text-gray-500 mb-0.5">
+                    Allowed grades (comma-separated)
+                  </label>
+                  <input
+                    type="text"
+                    value={row.allowed_grades}
+                    onChange={(e) =>
+                      updateRow(idx, { allowed_grades: e.target.value })
+                    }
+                    placeholder="AGO, PMS"
+                    className="w-full px-2.5 py-1.5 text-sm border border-gray-200 rounded-md bg-white"
+                    required
+                  />
+                  <div className="flex flex-wrap gap-1 mt-1">
+                    {COMMON_GRADES.map((g) => (
+                      <button
+                        key={g}
+                        type="button"
+                        onClick={() => {
+                          const existing = row.allowed_grades
+                            .split(",")
+                            .map((x) => x.trim())
+                            .filter(Boolean);
+                          if (existing.includes(g)) return;
+                          updateRow(idx, {
+                            allowed_grades: [...existing, g].join(", "),
+                          });
+                        }}
+                        className="px-1.5 py-0.5 text-[10px] font-mono rounded border border-gray-200 text-gray-600 hover:bg-gray-50"
+                      >
+                        + {g}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <button
+            type="button"
+            onClick={addRow}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-primary rounded-md border border-gray-200 hover:bg-gray-50"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            Add compartment
+          </button>
+
+          {error && (
+            <p
+              role="alert"
+              className="text-sm text-error bg-error-light px-3 py-2 rounded-lg"
+            >
+              {error}
+            </p>
+          )}
+
+          <div className="flex items-center justify-end gap-2 border-t border-gray-100 pt-4">
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-4 py-2 text-sm text-gray-600 rounded-lg hover:bg-gray-50 border border-gray-200"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={submitting}
+              className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white rounded-lg bg-primary hover:bg-primary-hover disabled:opacity-50"
+            >
+              {submitting ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Check className="w-3.5 h-3.5" />
+              )}
+              Save compartments
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 // ─── Page ────────────────────────────────────────────────────────────────────
 
 export default function TruckCompartmentsPage({
@@ -885,6 +1221,13 @@ export default function TruckCompartmentsPage({
     useState<TruckCompartmentState | null>(null);
   const [eligibilityCompartment, setEligibilityCompartment] =
     useState<TruckCompartmentState | null>(null);
+  // Configure-compartments modal: null = closed. `lock` pins the truck id
+  // (edit an existing tanker); unset = create/define a new one.
+  const [configureState, setConfigureState] = useState<{
+    truckId?: string;
+    lock: boolean;
+    items?: TruckCompartmentState[];
+  } | null>(null);
   const { toasts, addToast, dismissToast } = useToasts();
 
   const fetchCompartments = useCallback(async (id: string) => {
@@ -957,15 +1300,31 @@ export default function TruckCompartmentsPage({
     if (activeTruckId) void fetchCompartments(activeTruckId);
   };
 
+  const handleConfigureSuccess = (savedTruckId: string, count: number) => {
+    setConfigureState(null);
+    addToast(
+      `Saved ${count} compartment${count === 1 ? "" : "s"} for ${savedTruckId}.`,
+      "success",
+    );
+    setTruckIdInput(savedTruckId);
+    void fetchCompartments(savedTruckId);
+    // Refresh the tanker picker so a newly-defined truck appears in the list.
+    if (!truckId) {
+      listCompartmentTrucks()
+        .then((resp) => setTruckOptions(resp.items))
+        .catch(() => {});
+    }
+  };
+
   // Keep page scroll locked when modal is open.
   useEffect(() => {
-    if (!modalCompartment && !eligibilityCompartment) return;
+    if (!modalCompartment && !eligibilityCompartment && !configureState) return;
     const previous = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     return () => {
       document.body.style.overflow = previous;
     };
-  }, [modalCompartment, eligibilityCompartment]);
+  }, [modalCompartment, eligibilityCompartment, configureState]);
 
   const compartmentColumns: Column<TruckCompartmentState>[] = [
     {
@@ -1100,21 +1459,40 @@ export default function TruckCompartmentsPage({
               </p>
             )}
           </div>
-          {activeTruckId && (
+          <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={handleRefresh}
-              disabled={loading}
-              className="inline-flex items-center gap-1.5 px-3 py-2 text-sm text-gray-600 hover:text-gray-800 rounded-lg hover:bg-gray-50 border border-gray-200 disabled:opacity-50"
-              aria-label="Refresh compartments"
+              onClick={() =>
+                setConfigureState(
+                  activeTruckId
+                    ? { truckId: activeTruckId, lock: true, items }
+                    : { lock: false },
+                )
+              }
+              className="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-white rounded-lg bg-primary hover:bg-primary-hover"
+              data-testid="configure-compartments-btn"
             >
-              <RefreshCw
-                className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`}
-                aria-hidden="true"
-              />
-              Refresh
+              <Plus className="w-3.5 h-3.5" aria-hidden="true" />
+              {activeTruckId && items.length > 0
+                ? "Edit compartments"
+                : "Configure compartments"}
             </button>
-          )}
+            {activeTruckId && (
+              <button
+                type="button"
+                onClick={handleRefresh}
+                disabled={loading}
+                className="inline-flex items-center gap-1.5 px-3 py-2 text-sm text-gray-600 hover:text-gray-800 rounded-lg hover:bg-gray-50 border border-gray-200 disabled:opacity-50"
+                aria-label="Refresh compartments"
+              >
+                <RefreshCw
+                  className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`}
+                  aria-hidden="true"
+                />
+                Refresh
+              </button>
+            )}
+          </div>
         </div>
 
         {!truckId && (
@@ -1221,7 +1599,17 @@ export default function TruckCompartmentsPage({
                 Loading tankers…
               </span>
             ) : truckOptions.length === 0 ? (
-              "No trucks have compartments configured yet."
+              <div className="flex flex-col items-center gap-3">
+                <span>No trucks have compartments configured yet.</span>
+                <button
+                  type="button"
+                  onClick={() => setConfigureState({ lock: false })}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-white rounded-lg bg-primary hover:bg-primary-hover"
+                >
+                  <Plus className="w-3.5 h-3.5" aria-hidden="true" />
+                  Configure a tanker
+                </button>
+              </div>
             ) : (
               "Select a tanker above to see its compartments."
             )}
@@ -1238,13 +1626,19 @@ export default function TruckCompartmentsPage({
               No compartments configured for{" "}
               <span className="font-mono">{activeTruckId}</span>
             </p>
-            <p className="text-xs text-gray-500 mt-1">
-              Configure compartments via{" "}
-              <code className="font-mono text-xs">
-                PUT /api/fuel/mvp/compartments/&lbrace;truck_id&rbrace;
-              </code>
-              .
+            <p className="text-xs text-gray-500 mt-1 mb-3">
+              Define this tanker's compartments to enable load planning.
             </p>
+            <button
+              type="button"
+              onClick={() =>
+                setConfigureState({ truckId: activeTruckId, lock: true })
+              }
+              className="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-white rounded-lg bg-primary hover:bg-primary-hover"
+            >
+              <Plus className="w-3.5 h-3.5" aria-hidden="true" />
+              Configure compartments
+            </button>
           </div>
         )}
 
@@ -1271,6 +1665,15 @@ export default function TruckCompartmentsPage({
         <LoadEligibilityModal
           compartment={eligibilityCompartment}
           onClose={() => setEligibilityCompartment(null)}
+        />
+      )}
+      {configureState && (
+        <ConfigureCompartmentsModal
+          initialTruckId={configureState.truckId}
+          lockTruckId={configureState.lock}
+          initialCompartments={configureState.items}
+          onClose={() => setConfigureState(null)}
+          onSuccess={handleConfigureSuccess}
         />
       )}
     </div>

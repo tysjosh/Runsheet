@@ -64,7 +64,7 @@ const ENTITY_ROUTES: Record<EntityType, (id: string) => string> = {
   job: (id) => `/ops/scheduling/${encodeURIComponent(id)}`,
   // Fleet / ops
   asset: (id) => `/ops/tracking/${encodeURIComponent(id)}`,
-  driver: (id) => `/ops/drivers?driver=${encodeURIComponent(id)}`,
+  driver: (id) => `/dashboard/drivers?driver=${encodeURIComponent(id)}`,
   // Fuel ops
   tank: (id) => `/ops/fuel/tanks/${encodeURIComponent(id)}`,
   depot: (id) => `/ops/fuel/depots/${encodeURIComponent(id)}`,

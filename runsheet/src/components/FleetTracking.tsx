@@ -1,4 +1,4 @@
-import { Boxes, FileText, RefreshCw, X } from "lucide-react";
+import { Boxes, FileText, Plus, RefreshCw, X } from "lucide-react";
 import {
   lazy,
   Suspense,
@@ -9,8 +9,11 @@ import {
 } from "react";
 import { type LocationUpdateData, useFleetWebSocket } from "../hooks";
 import { useDialogA11y } from "../hooks/useDialogA11y";
-import type { AssetComplianceSummary } from "../services/api";
-import { apiService } from "../services/api";
+import type {
+  AssetComplianceSummary,
+  CreateAssetPayload,
+} from "../services/api";
+import { ApiError, apiService } from "../services/api";
 import type {
   AssetSubtype,
   AssetSummary,
@@ -68,6 +71,263 @@ const COMPLIANCE_CHIP: Record<
   valid: { variant: "success", label: "Valid" },
 };
 
+/** Asset subtype options grouped by the parent asset type. */
+const SUBTYPE_OPTIONS: Record<AssetType, AssetSubtype[]> = {
+  vehicle: ["truck", "fuel_truck", "personnel_vehicle"],
+  vessel: ["boat", "barge"],
+  equipment: ["crane", "forklift"],
+  container: ["cargo_container", "ISO_tank"],
+};
+
+function labelize(value: string): string {
+  return value.replace(/_/g, " ").replace(/\b\w/g, (l) => l.toUpperCase());
+}
+
+/**
+ * Create a fleet asset (truck/tanker/vessel/…) via POST /fleet/assets.
+ * The operator can add a tanker here; its compartments are then defined
+ * from the row's Compartments slide-over (or auto-registered when
+ * compartments are configured).
+ */
+function AddAssetModal({
+  onClose,
+  onCreated,
+}: {
+  onClose: () => void;
+  onCreated: () => void;
+}) {
+  const [assetId, setAssetId] = useState("");
+  const [name, setName] = useState("");
+  const [assetType, setAssetType] = useState<AssetType>("vehicle");
+  const [assetSubtype, setAssetSubtype] = useState<AssetSubtype>("fuel_truck");
+  const [plate, setPlate] = useState("");
+  const [lat, setLat] = useState("0");
+  const [lon, setLon] = useState("0");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const id = assetId.trim();
+    if (!id || !name.trim()) {
+      setError("Asset ID and name are required.");
+      return;
+    }
+    const latNum = Number(lat);
+    const lonNum = Number(lon);
+    if (!Number.isFinite(latNum) || !Number.isFinite(lonNum)) {
+      setError("Latitude and longitude must be numbers.");
+      return;
+    }
+    const payload: CreateAssetPayload = {
+      asset_id: id,
+      asset_type: assetType,
+      asset_subtype: assetSubtype,
+      name: name.trim(),
+      status: "active",
+      current_location: { lat: latNum, lon: lonNum },
+      ...(plate.trim() ? { plate_number: plate.trim() } : {}),
+    };
+    setSubmitting(true);
+    setError("");
+    try {
+      await apiService.createAsset(payload);
+      onCreated();
+    } catch (err) {
+      setError(
+        err instanceof ApiError
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : "Failed to create asset.",
+      );
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/30 p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Add asset"
+      onClick={onClose}
+    >
+      <div
+        className="bg-white rounded-xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between border-b border-gray-200 px-6 py-4">
+          <h2 className="text-lg font-semibold text-primary">Add asset</h2>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded p-1 text-gray-500 hover:text-gray-700"
+            aria-label="Close"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+        <form onSubmit={handleSubmit} className="p-6 space-y-4">
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label
+                htmlFor="asset-id"
+                className="block text-xs font-medium text-gray-600 mb-1"
+              >
+                Asset ID
+              </label>
+              <input
+                id="asset-id"
+                type="text"
+                value={assetId}
+                onChange={(e) => setAssetId(e.target.value)}
+                placeholder="TNK-001"
+                className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg bg-white"
+                required
+              />
+            </div>
+            <div>
+              <label
+                htmlFor="asset-name"
+                className="block text-xs font-medium text-gray-600 mb-1"
+              >
+                Name
+              </label>
+              <input
+                id="asset-name"
+                type="text"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="Tanker 1"
+                className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg bg-white"
+                required
+              />
+            </div>
+            <div>
+              <label
+                htmlFor="asset-type"
+                className="block text-xs font-medium text-gray-600 mb-1"
+              >
+                Type
+              </label>
+              <select
+                id="asset-type"
+                value={assetType}
+                onChange={(e) => {
+                  const t = e.target.value as AssetType;
+                  setAssetType(t);
+                  setAssetSubtype(SUBTYPE_OPTIONS[t][0]);
+                }}
+                className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg bg-white"
+              >
+                {(Object.keys(SUBTYPE_OPTIONS) as AssetType[]).map((t) => (
+                  <option key={t} value={t}>
+                    {labelize(t)}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label
+                htmlFor="asset-subtype"
+                className="block text-xs font-medium text-gray-600 mb-1"
+              >
+                Subtype
+              </label>
+              <select
+                id="asset-subtype"
+                value={assetSubtype}
+                onChange={(e) =>
+                  setAssetSubtype(e.target.value as AssetSubtype)
+                }
+                className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg bg-white"
+              >
+                {SUBTYPE_OPTIONS[assetType].map((s) => (
+                  <option key={s} value={s}>
+                    {labelize(s)}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+          <div>
+            <label
+              htmlFor="asset-plate"
+              className="block text-xs font-medium text-gray-600 mb-1"
+            >
+              Plate number (optional)
+            </label>
+            <input
+              id="asset-plate"
+              type="text"
+              value={plate}
+              onChange={(e) => setPlate(e.target.value)}
+              placeholder="ABC-1234"
+              className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg bg-white"
+            />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label
+                htmlFor="asset-lat"
+                className="block text-xs font-medium text-gray-600 mb-1"
+              >
+                Latitude
+              </label>
+              <input
+                id="asset-lat"
+                type="number"
+                step="any"
+                value={lat}
+                onChange={(e) => setLat(e.target.value)}
+                className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg bg-white"
+              />
+            </div>
+            <div>
+              <label
+                htmlFor="asset-lon"
+                className="block text-xs font-medium text-gray-600 mb-1"
+              >
+                Longitude
+              </label>
+              <input
+                id="asset-lon"
+                type="number"
+                step="any"
+                value={lon}
+                onChange={(e) => setLon(e.target.value)}
+                className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg bg-white"
+              />
+            </div>
+          </div>
+          {error && (
+            <p
+              role="alert"
+              className="text-sm text-error bg-error-light px-3 py-2 rounded-lg"
+            >
+              {error}
+            </p>
+          )}
+          <div className="flex items-center justify-end gap-2 border-t border-gray-100 pt-4">
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-4 py-2 text-sm text-gray-600 rounded-lg hover:bg-gray-50 border border-gray-200"
+            >
+              Cancel
+            </button>
+            <Button type="submit" disabled={submitting}>
+              {submitting ? "Creating…" : "Create asset"}
+            </Button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 interface FleetTrackingProps {
   onTruckSelect?: (truck: Truck) => void;
 }
@@ -94,6 +354,7 @@ export default function FleetTracking({ onTruckSelect }: FleetTrackingProps) {
     "all",
   );
   const [page, setPage] = useState(1);
+  const [showAddAsset, setShowAddAsset] = useState(false);
 
   /**
    * Per-asset compliance signal keyed by asset id, lazily fetched for the
@@ -475,15 +736,25 @@ export default function FleetTracking({ onTruckSelect }: FleetTrackingProps) {
           />
         }
         actions={
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            onClick={loadFleetData}
-            icon={<RefreshCw className="w-4 h-4" />}
-            title="Refresh"
-            aria-label="Refresh fleet data"
-          />
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              size="sm"
+              onClick={() => setShowAddAsset(true)}
+              icon={<Plus className="w-4 h-4" />}
+            >
+              Add asset
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={loadFleetData}
+              icon={<RefreshCw className="w-4 h-4" />}
+              title="Refresh"
+              aria-label="Refresh fleet data"
+            />
+          </div>
         }
       />
 
@@ -623,6 +894,16 @@ export default function FleetTracking({ onTruckSelect }: FleetTrackingProps) {
             </div>
           </div>
         </div>
+      )}
+
+      {showAddAsset && (
+        <AddAssetModal
+          onClose={() => setShowAddAsset(false)}
+          onCreated={() => {
+            setShowAddAsset(false);
+            void loadFleetData();
+          }}
+        />
       )}
     </div>
   );
