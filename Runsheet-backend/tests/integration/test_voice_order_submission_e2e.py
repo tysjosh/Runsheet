@@ -7,7 +7,7 @@ Exercises the full Surface A path over the **real**
 ``channel_type="voice"`` and the
 :class:`~fuel.voice.voice_review_hold_hook.VoiceReviewHoldHook` registered on
 the pipeline. A signed voice body is submitted through the HTTP endpoint
-``POST /voice/orders`` (served by the ``voice_submission_router`` with a wired
+``POST /voice-intake`` (served by the ``voice_submission_router`` with a wired
 :class:`~fuel.voice.dinee_voice_bridge.DineeVoiceBridge`) against recording
 in-memory Elasticsearch / ``/ws/orders`` fakes.
 
@@ -273,7 +273,7 @@ def ledger() -> RecordingLedger:
 
 @pytest.fixture
 def client(recording_es, recording_ws, ledger):
-    """A FastAPI TestClient serving POST /voice/orders through the real bridge."""
+    """A FastAPI TestClient serving POST /voice-intake through the real bridge."""
     pipeline = _build_pipeline(recording_es, recording_ws)
 
     channel_repo = AsyncMock()
@@ -316,7 +316,7 @@ def _headers(signature: str) -> Dict[str, str]:
 
 
 class TestVoiceOrderSubmissionE2E:
-    """End-to-end: POST /voice/orders → pipeline → persist + broadcast.
+    """End-to-end: POST /voice-intake → pipeline → persist + broadcast.
 
     Validates: Requirements 1.1, 1.2, 1.3, 8.1.
     """
@@ -329,7 +329,7 @@ class TestVoiceOrderSubmissionE2E:
         body = json.dumps(payload).encode()
         signature = _sign_body(body)
 
-        resp = client.post("/voice/orders", content=body, headers=_headers(signature))
+        resp = client.post("/voice-intake", content=body, headers=_headers(signature))
 
         assert resp.status_code == 200, resp.text
         data = resp.json()
@@ -382,7 +382,7 @@ class TestVoiceOrderSubmissionE2E:
         body = json.dumps(payload).encode()
         signature = _sign_body(body)
 
-        resp = client.post("/voice/orders", content=body, headers=_headers(signature))
+        resp = client.post("/voice-intake", content=body, headers=_headers(signature))
 
         assert resp.status_code == 200, resp.text
         data = resp.json()

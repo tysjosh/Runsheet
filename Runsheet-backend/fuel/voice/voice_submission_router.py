@@ -1,5 +1,5 @@
 """
-Surface A — Voice Order Submission router (``POST /voice/orders``).
+Surface A — Voice Order Submission router (``POST /voice-intake``).
 
 The Dinee ``ws-server`` posts signed, voice-captured orders to this endpoint on
 behalf of a tenant. The router is a thin FastAPI shell: it reads the fixed Dinee
@@ -16,9 +16,10 @@ stage-appropriate status code on any failure; the app-wide exception handlers
 (``errors.handlers.register_exception_handlers``) render those into the
 structured JSON envelope, so this router never translates errors by hand.
 
-The path (``/voice/orders``) follows open assumption A5: the bridge is mounted
-where the Dinee client actually posts. Per the design's A1 snippet the router
-carries no prefix and groups under the ``voice-intake`` tag.
+The path (``/voice-intake``) follows open assumption A5: the bridge is mounted
+where the Dinee client actually posts. The router carries no prefix so the path
+is exactly ``/voice-intake`` (distinct from the Surface B ``/voice`` prefix),
+and groups under the ``voice-intake`` tag.
 
 Wiring: the constructed :class:`DineeVoiceBridge` is injected at bootstrap
 (task 10.1) via :func:`configure_voice_submission_router` so the module-level
@@ -49,7 +50,7 @@ __all__ = [
 # Router
 # ---------------------------------------------------------------------------
 #
-# No prefix: the Dinee client posts to the bare ``/voice/orders`` path (A5). The
+# No prefix: the Dinee client posts to the bare ``/voice-intake`` path (A5). The
 # ``voice-intake`` tag groups the submission endpoint in the OpenAPI schema.
 router = APIRouter(tags=["voice-intake"])
 
@@ -84,7 +85,7 @@ def configure_voice_submission_router(*, bridge: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
-@router.post("/voice/orders", response_model=VoiceSubmissionResponse)
+@router.post("/voice-intake", response_model=VoiceSubmissionResponse)
 async def submit_voice_order(
     request: Request,
     x_runsheet_tenant: str = Header(..., alias="X-Runsheet-Tenant"),

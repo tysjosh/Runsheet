@@ -326,5 +326,5 @@ class TestProductValidation:
         # The required ``code`` query parameter is enforced by the framework, so
         # this rejection is only observable through the HTTP layer (Req 15.3).
         client = _build_client(bound_tenant)
-        resp = client.get("/products/validate")
+        resp = client.get("/voice/products/validate")
         assert resp.status_code == 422

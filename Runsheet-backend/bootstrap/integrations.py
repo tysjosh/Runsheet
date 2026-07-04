@@ -59,13 +59,6 @@ async def initialize(app, container: ServiceContainer) -> None:
         logger.warning("IntakeChannelRepository creation failed: %s", exc)
         return
 
-    # Wire the intake channel admin endpoints
-    try:
-        configure_intake_channel_endpoints(repository=intake_channel_repo)
-        logger.info("Intake channel endpoints configured")
-    except Exception as exc:
-        logger.warning("configure_intake_channel_endpoints() failed: %s", exc)
-
     # Late-inject the repo + vault into the OrderIntakePipeline. The pipeline
     # is constructed in bootstrap/fuel.py (boot order #5), BEFORE this module
     # (#11) builds the IntakeChannelRepository and before agents (#10) registers
@@ -116,6 +109,29 @@ async def initialize(app, container: ServiceContainer) -> None:
     # container. Requirements: 1.1, 1.3, 3.5, 3.6.
     # ------------------------------------------------------------------
     await _initialize_voice_integration(container, es_service, credentials_vault, intake_channel_repo)
+
+    # Wire the intake channel admin endpoints. Done AFTER voice integration so
+    # the already-constructed VoiceApiKeyRepository (registered on the container
+    # by _initialize_voice_integration) can be injected — enabling the create
+    # endpoint to mint a Surface B voice API key for ``channel_type="voice"``.
+    # When the voice repo is unavailable (e.g. empty salt), the endpoints still
+    # configure and voice-channel creates simply return no voice_api_key.
+    try:
+        voice_api_key_repo = (
+            container.voice_api_key_repository
+            if container.has("voice_api_key_repository")
+            else None
+        )
+        configure_intake_channel_endpoints(
+            repository=intake_channel_repo,
+            voice_api_key_repository=voice_api_key_repo,
+        )
+        logger.info(
+            "Intake channel endpoints configured (voice_api_key_repository=%s)",
+            "wired" if voice_api_key_repo is not None else "absent",
+        )
+    except Exception as exc:
+        logger.warning("configure_intake_channel_endpoints() failed: %s", exc)
 
     # Include the router on the app (if not already included via main.py)
     # The router is included in main.py at import time; this call ensures

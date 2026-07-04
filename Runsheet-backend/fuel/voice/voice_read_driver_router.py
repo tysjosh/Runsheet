@@ -14,11 +14,27 @@ underlying repositories. Those repositories apply the ``inject_tenant_filter`` +
 post-fetch re-validation pattern, so any cross-tenant identifier degrades to a
 uniform HTTP 404 (Req 11.3) rather than leaking another tenant's data.
 
-This module currently establishes the router scaffold and the credential-test
-endpoint ``GET /auth/ping`` (Requirement 12). The customer/order/driver read and
-write endpoints are added by later tasks (8.2 / 8.4 / 8.6) onto this same router;
-the ``configure_voice_read_driver_router`` wiring below lets the bootstrap layer
+This module establishes the router scaffold (mounted under the ``/voice``
+prefix) and the credential-test endpoint ``GET /voice/auth/ping``
+(Requirement 12). The customer/order/driver read and write endpoints are added
+by later tasks (8.2 / 8.4 / 8.6) onto this same router; the
+``configure_voice_read_driver_router`` wiring below lets the bootstrap layer
 inject the repositories those handlers will use.
+
+Mounted endpoints (all under the ``/voice`` prefix)::
+
+    GET  /voice/auth/ping
+    GET  /voice/customers/lookup
+    GET  /voice/customers/{id}/sites
+    GET  /voice/customers/{id}/tanks
+    GET  /voice/products/validate
+    GET  /voice/orders/lookup
+    GET  /voice/orders/{id}/status
+    GET  /voice/orders/{id}/eta
+    GET  /voice/customers/{id}/deliveries
+    GET  /voice/drivers/verify
+    GET  /voice/drivers/{id}/active-assignment
+    POST /voice/drivers/{driverId}/assignments/{assignmentId}/reports
 
 Requirements: 11.1, 11.2, 11.3, 12.1, 12.2, 12.3
 """
@@ -54,10 +70,11 @@ __all__ = [
 # Router
 # ---------------------------------------------------------------------------
 #
-# No prefix: the Dinee client posts to bare paths (``/auth/ping``,
-# ``/customers/lookup``, ``/orders/{id}/status``, ...). The ``voice`` tag groups
+# ``/voice`` prefix: the Dinee client posts to prefixed paths
+# (``/voice/auth/ping``, ``/voice/customers/lookup``,
+# ``/voice/orders/{id}/status``, ...). The ``voice-read-driver`` tag groups
 # these endpoints in the OpenAPI schema.
-router = APIRouter(tags=["voice-read-driver"])
+router = APIRouter(prefix="/voice", tags=["voice-read-driver"])
 
 
 # ---------------------------------------------------------------------------

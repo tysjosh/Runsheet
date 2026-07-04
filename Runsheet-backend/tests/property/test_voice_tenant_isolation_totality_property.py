@@ -40,9 +40,9 @@ The test is *parameterized over the mounted routes* so the guarantee is total:
       derived exclusively from the credential binding (Req 11.4).
 
 Endpoints that are not tenant-resource-scoped are exempt and documented:
-``GET /auth/ping`` (credential test, no tenant data) and
-``GET /products/validate`` (validates against the global fuel-product catalog,
-not tenant data).
+``GET /voice/auth/ping`` (credential test, no tenant data) and
+``GET /voice/products/validate`` (validates against the global fuel-product
+catalog, not tenant data).
 
 The handlers are driven through a FastAPI ``TestClient`` with
 ``get_voice_tenant`` overridden per tenant (as in
@@ -351,8 +351,8 @@ def _build_client(bound_tenant: str) -> TestClient:
 # ===========================================================================
 #: Endpoints that are intentionally NOT tenant-resource isolated.
 _EXEMPT_ROUTES: set[tuple[str, str]] = {
-    ("GET", "/auth/ping"),          # credential test — carries no tenant data
-    ("GET", "/products/validate"),  # validates the global product catalog
+    ("GET", "/voice/auth/ping"),          # credential test — no tenant data
+    ("GET", "/voice/products/validate"),  # validates the global product catalog
 }
 
 
@@ -365,58 +365,64 @@ def _endpoint_specs(ctx: _Ctx) -> list[dict]:
     return [
         {
             "method": "GET",
-            "path": "/customers/lookup",
-            "request": {"url": "/customers/lookup", "params": {"phone": ctx.phone}},
+            "path": "/voice/customers/lookup",
+            "request": {
+                "url": "/voice/customers/lookup",
+                "params": {"phone": ctx.phone},
+            },
             "category": "empty_list",
             "list_key": "customers",
         },
         {
             "method": "GET",
-            "path": "/customers/{customer_id}/sites",
-            "request": {"url": f"/customers/{ctx.customer_id}/sites"},
+            "path": "/voice/customers/{customer_id}/sites",
+            "request": {"url": f"/voice/customers/{ctx.customer_id}/sites"},
             "category": "not_found",
             "positive_status": 200,
         },
         {
             "method": "GET",
-            "path": "/customers/{customer_id}/tanks",
-            "request": {"url": f"/customers/{ctx.customer_id}/tanks"},
+            "path": "/voice/customers/{customer_id}/tanks",
+            "request": {"url": f"/voice/customers/{ctx.customer_id}/tanks"},
             "category": "not_found",
             "positive_status": 200,
         },
         {
             "method": "GET",
-            "path": "/orders/lookup",
-            "request": {"url": "/orders/lookup", "params": {"phone": ctx.phone}},
+            "path": "/voice/orders/lookup",
+            "request": {
+                "url": "/voice/orders/lookup",
+                "params": {"phone": ctx.phone},
+            },
             "category": "empty_list",
             "list_key": "orders",
         },
         {
             "method": "GET",
-            "path": "/orders/{order_id}/status",
-            "request": {"url": f"/orders/{ctx.order_delivered_id}/status"},
+            "path": "/voice/orders/{order_id}/status",
+            "request": {"url": f"/voice/orders/{ctx.order_delivered_id}/status"},
             "category": "not_found",
             "positive_status": 200,
         },
         {
             "method": "GET",
-            "path": "/orders/{order_id}/eta",
-            "request": {"url": f"/orders/{ctx.order_delivered_id}/eta"},
+            "path": "/voice/orders/{order_id}/eta",
+            "request": {"url": f"/voice/orders/{ctx.order_delivered_id}/eta"},
             "category": "not_found",
             "positive_status": 200,
         },
         {
             "method": "GET",
-            "path": "/customers/{customer_id}/deliveries",
-            "request": {"url": f"/customers/{ctx.customer_id}/deliveries"},
+            "path": "/voice/customers/{customer_id}/deliveries",
+            "request": {"url": f"/voice/customers/{ctx.customer_id}/deliveries"},
             "category": "not_found",
             "positive_status": 200,
         },
         {
             "method": "GET",
-            "path": "/drivers/verify",
+            "path": "/voice/drivers/verify",
             "request": {
-                "url": "/drivers/verify",
+                "url": "/voice/drivers/verify",
                 "params": {
                     "driverIdentifier": ctx.driver_id,
                     "phone": ctx.driver_phone,
@@ -427,17 +433,17 @@ def _endpoint_specs(ctx: _Ctx) -> list[dict]:
         },
         {
             "method": "GET",
-            "path": "/drivers/{driver_id}/active-assignment",
-            "request": {"url": f"/drivers/{ctx.driver_id}/active-assignment"},
+            "path": "/voice/drivers/{driver_id}/active-assignment",
+            "request": {"url": f"/voice/drivers/{ctx.driver_id}/active-assignment"},
             "category": "not_found",
             "positive_status": 200,
         },
         {
             "method": "POST",
-            "path": "/drivers/{driver_id}/assignments/{assignment_id}/reports",
+            "path": "/voice/drivers/{driver_id}/assignments/{assignment_id}/reports",
             "request": {
                 "url": (
-                    f"/drivers/{ctx.driver_id}/assignments/"
+                    f"/voice/drivers/{ctx.driver_id}/assignments/"
                     f"{ctx.order_active_id}/reports"
                 ),
                 "json": {"kind": "note", "detail": "on my way"},
