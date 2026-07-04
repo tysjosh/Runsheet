@@ -734,50 +734,42 @@ class IntakeChannelRepository:
         """
         self._require_tenant(tenant_id)
 
-        # Read-cutover: serve from Postgres when enabled.
-        #
-        # NB: only ``channel_type`` is pushed down as a term filter. The
-        # Postgres hybrid-read builder extracts JSON fields as text
-        # (``document ->> 'enabled'``) and comparing that to a Python bool
-        # generates invalid SQL (``CAST(... AS VARCHAR) = true`` →
-        # "operator does not exist: character varying = boolean"). So the
-        # ``enabled`` gate is applied in Python below (mirroring the ES path),
-        # exactly like ``get_dispatcher_channel`` which also filters on
+        # Fetch ALL of the tenant's voice channels and pick the enabled one
+        # deterministically, rather than trusting an arbitrary single hit.
+        # Two reasons:
+        #   * A ``find_one`` could return a *disabled* channel while an enabled
+        #     one exists, yielding a false 404.
+        #   * With more than one voice channel, selection must be stable.
+        # Only ``channel_type`` is pushed down as a term filter: the Postgres
+        # hybrid-read builder extracts JSON fields as text (``document ->>
+        # 'enabled'``) and comparing that to a Python bool emits invalid SQL
+        # (``CAST(... AS VARCHAR) = true`` → "operator does not exist:
+        # character varying = boolean"), so the ``enabled`` gate is applied in
+        # Python below — as ``get_dispatcher_channel`` also filters on
         # ``channel_type`` alone.
         from commerce.services.commerce_persistence_bridge import (
             _NOT_CUT_OVER,
-            read_hybrid_find_one,
+            read_hybrid_search,
         )
-        pg = await read_hybrid_find_one(
+        pg = await read_hybrid_search(
             "intake_channel", tenant_id,
             term_filters={"channel_type": "voice"},
+            sort_field="created_at", sort_order="asc",
+            page=1, size=100,
         )
         if pg is not _NOT_CUT_OVER:
-            if pg is None:
-                return None
-            channel = _safe_channel_load(pg)
-            if channel is not None and channel.enabled is False:
-                return None
-            return channel
+            return self._select_enabled_voice(pg.get("items", []), tenant_id)
 
         query = inject_tenant_filter(
-            {
-                "query": {
-                    "bool": {
-                        "must": [
-                            {"term": {"channel_type": "voice"}},
-                            {"term": {"enabled": True}},
-                        ]
-                    }
-                }
-            },
+            {"query": {"bool": {"must": [{"term": {"channel_type": "voice"}}]}}},
             tenant_id,
         )
-        query["size"] = 1
+        query["size"] = 100
+        query["sort"] = [{"created_at": {"order": "asc"}}]
 
         try:
             resp = await self._es.search_documents(
-                self._channels_index, query, 1
+                self._channels_index, query, 100
             )
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning(
@@ -788,20 +780,27 @@ class IntakeChannelRepository:
             )
             return None
 
-        sources = _extract_sources(resp)
-        if not sources:
-            return None
+        return self._select_enabled_voice(_extract_sources(resp), tenant_id)
 
-        source = sources[0]
-        # Defense-in-depth: re-validate tenant ownership.
-        if source.get("tenant_id") != tenant_id:
-            return None
-        # Defense-in-depth: only serve an enabled channel even if the ES
-        # filter is bypassed by a read-cutover path.
-        if source.get("enabled") is False:
-            return None
+    def _select_enabled_voice(
+        self, sources: List[Dict[str, Any]], tenant_id: str
+    ) -> Optional[IntakeChannel]:
+        """Pick the tenant's first enabled voice channel from ``sources``.
 
-        return _safe_channel_load(source)
+        Applies defense-in-depth tenant re-validation and the ``enabled`` gate
+        in Python (see :meth:`get_voice_channel`). ``sources`` is assumed to be
+        in a stable order (sorted by ``created_at`` ascending) so selection is
+        deterministic when a tenant has more than one voice channel.
+        """
+        for source in sources or []:
+            if source.get("tenant_id") != tenant_id:
+                continue
+            if source.get("enabled") is False:
+                continue
+            channel = _safe_channel_load(source)
+            if channel is not None and channel.enabled:
+                return channel
+        return None
 
     # ------------------------------------------------------------------
     # Internals
