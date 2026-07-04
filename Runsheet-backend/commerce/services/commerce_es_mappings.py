@@ -68,6 +68,11 @@ CUSTOMERS_CURRENT_MAPPING = {
             "primary_email":  {"type": "keyword"},
             "tax_id":         {"type": "keyword"},
             "status":         {"type": "keyword"},
+            # Optional projected lookup fields (Dinee voice integration, Req 13).
+            # Sourced from external_refs/metadata at write time so they are
+            # queryable; external_refs subfields are not indexed on their own.
+            "phone":          {"type": "keyword"},
+            "account_id":     {"type": "keyword"},
             "created_at":     {"type": "date"},
             "updated_at":     {"type": "date"},
             "external_refs":  {"type": "object"},

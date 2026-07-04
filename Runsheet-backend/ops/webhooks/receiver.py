@@ -18,8 +18,6 @@ is used exclusively for outbound REST API calls to Dinee (Replay Service).
 Requirements: 1.1-1.11, 1.3.1, 1.3.3, 1.3.4, 2.2.8
 """
 
-import hashlib
-import hmac
 import logging
 import re
 import time
@@ -32,6 +30,7 @@ from pydantic import BaseModel, Field
 
 from middleware.rate_limiter import limiter
 from config.settings import get_settings
+from ops.webhooks.hmac_util import verify_hmac_sha256_hex
 from ops.ingestion.adapter import AdapterTransformer, WebhookPayload
 from ops.services.ops_metrics import (
     ops_webhook_received_total,
@@ -150,6 +149,9 @@ def _verify_signature(body: bytes, signature: str, secret: str) -> bool:
     """
     Verify HMAC-SHA256 signature of the raw request body.
 
+    Delegates to the shared :func:`verify_hmac_sha256_hex` helper so there is
+    a single HMAC verification implementation across the codebase.
+
     Args:
         body: Raw request body bytes.
         signature: Value of the X-Dinee-Signature header.
@@ -158,12 +160,7 @@ def _verify_signature(body: bytes, signature: str, secret: str) -> bool:
     Returns:
         True if the computed HMAC matches the provided signature.
     """
-    expected = hmac.new(
-        secret.encode("utf-8"),
-        body,
-        hashlib.sha256,
-    ).hexdigest()
-    return hmac.compare_digest(expected, signature)
+    return verify_hmac_sha256_hex(secret, body, signature)
 
 
 # ---------------------------------------------------------------------------

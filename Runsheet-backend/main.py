@@ -48,6 +48,9 @@ from fuel.api.order_endpoints import router as order_router
 from fuel.api.feature_flag_admin_endpoints import router as feature_flag_admin_router
 from fuel.api.order_webhook_endpoints import router as order_webhook_router
 from fuel.api.driver_endpoints import router as driver_ops_router
+from fuel.voice.voice_submission_router import router as voice_submission_router
+from fuel.voice.voice_read_driver_router import router as voice_read_driver_router
+from fuel.voice.intake_vectors import run_intake_vector_self_check
 from auth.api.password_admin_endpoints import router as auth_admin_router
 from auth.api.account_endpoints import router as auth_account_router
 from integrations.api.stripe_endpoints import (
@@ -202,6 +205,12 @@ app.add_middleware(
     max_age=600,
 )
 
+# Dinee voice canonicalization self-check (Req 3.5/3.6): recompute the HMAC for
+# every vendored intake vector before mounting /voice/orders. A mismatch raises
+# here (fail-closed) so the submission endpoint is never served.
+run_intake_vector_self_check()
+logger.info("Voice intake vector self-check passed")
+
 # Routers (middleware is registered by bootstrap/middleware.py).
 # The Integration Marketplace and Stripe routers are configured by
 # bootstrap/agents.py where the credentials vault, instance repository,
@@ -231,6 +240,8 @@ for _router in (
     fuel_ops_mvp_router,
     auth_admin_router,
     auth_account_router,
+    voice_submission_router,  # Dinee voice Surface A (gated by self-check above)
+    voice_read_driver_router,  # Dinee voice Surface B read/driver endpoints
 ):
     app.include_router(_router)
 

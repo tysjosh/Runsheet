@@ -89,7 +89,15 @@ def _iso(value: Optional[datetime | date]) -> Optional[str]:
 
 def customer_to_doc(row: CustomerORM) -> Dict[str, Any]:
     """Build the ``customers_current`` document for a Customer row."""
-    return {
+    from commerce.services.customer_service import (
+        _ACCOUNT_SOURCE_KEYS,
+        _PHONE_SOURCE_KEYS,
+        _project_lookup_field,
+    )
+
+    external_refs = row.external_refs or {}
+    metadata = row.customer_metadata or {}
+    doc: Dict[str, Any] = {
         "customer_id": row.customer_id,
         "tenant_id": row.tenant_id,
         "display_name": row.display_name,
@@ -99,9 +107,20 @@ def customer_to_doc(row: CustomerORM) -> Dict[str, Any]:
         "status": row.status,
         "created_at": _iso(row.created_at),
         "updated_at": _iso(row.updated_at),
-        "external_refs": row.external_refs or {},
-        "metadata": row.customer_metadata or {},
+        "external_refs": external_refs,
+        "metadata": metadata,
     }
+
+    # Project the optional phone/account_id lookup fields (Req 13) so the
+    # Postgres read-cutover projection matches the ES write path.
+    phone = _project_lookup_field(external_refs, metadata, _PHONE_SOURCE_KEYS)
+    if phone is not None:
+        doc["phone"] = phone
+    account_id = _project_lookup_field(external_refs, metadata, _ACCOUNT_SOURCE_KEYS)
+    if account_id is not None:
+        doc["account_id"] = account_id
+
+    return doc
 
 
 def account_to_doc(row: AccountORM) -> Dict[str, Any]:

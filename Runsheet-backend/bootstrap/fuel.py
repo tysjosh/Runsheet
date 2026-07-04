@@ -169,6 +169,19 @@ async def initialize(app, container: ServiceContainer) -> None:
         except Exception as exc:
             logger.warning("Failed to register api_partner adapter: %s", exc)
 
+        # Dinee voice intake adapter (channel_type="voice"). Registered here
+        # alongside the other channel adapters so voice submissions dispatched
+        # through the bridge (Surface A) resolve to a real adapter. The bridge,
+        # ledger, and routers are wired in bootstrap/integrations.py once the
+        # IntakeChannelRepository + credentials_vault exist.
+        try:
+            from fuel.intake.voice_intake_adapter import VoiceIntakeAdapter
+            adapter_registry.register(
+                VoiceIntakeAdapter(), channel_type="voice", schema_version="1.0"
+            )
+        except Exception as exc:
+            logger.warning("Failed to register voice adapter: %s", exc)
+
         # Gather optional dependencies from the container
         idempotency_service = (
             container.ops_idempotency if container.has("ops_idempotency") else None
@@ -218,6 +231,16 @@ async def initialize(app, container: ServiceContainer) -> None:
         )
         container.order_intake_pipeline = order_intake_pipeline
         logger.info("OrderIntakePipeline registered")
+
+        # Register the VoiceReviewHoldHook so voice orders flagged for human
+        # review (hold_reason set by the VoiceIntakeAdapter) are promoted from
+        # status="placed" to status="on_hold" before persistence (Req 8.1).
+        try:
+            from fuel.voice.voice_review_hold_hook import VoiceReviewHoldHook
+            order_intake_pipeline.register_hook(VoiceReviewHoldHook())
+            logger.info("VoiceReviewHoldHook registered")
+        except Exception as exc:
+            logger.warning("Failed to register VoiceReviewHoldHook: %s", exc)
     except Exception as e:
         logger.warning("Failed to create OrderIntakePipeline: %s", e)
 

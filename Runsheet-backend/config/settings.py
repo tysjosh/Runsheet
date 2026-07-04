@@ -455,6 +455,23 @@ class Settings(BaseSettings):
         le=720,
         description="Idempotency store TTL in hours"
     )
+    voice_api_key_salt: str = Field(
+        default="",
+        description="Salt used to derive the stored salted-hash of Dinee voice "
+        "Surface B per-tenant API keys (voice_api_keys.api_key_sha256). The "
+        "plaintext key is never stored in the reverse-lookup index; only its "
+        "salted hash is compared in constant time during authentication.",
+    )
+    voice_replay_window_seconds: int = Field(
+        default=300,
+        ge=1,
+        le=86400,
+        description="Allowed clock skew (in seconds) for the Dinee voice "
+        "submission X-Timestamp replay window. Requests whose timestamp is "
+        "missing, unparseable, or more than this many seconds from server "
+        "time are rejected with HTTP 401 before the pipeline is invoked "
+        "(Req 4.1-4.4).",
+    )
     seed_tenant_id: str = Field(
         default="",
         description="Tenant to seed default notification rules/templates for "

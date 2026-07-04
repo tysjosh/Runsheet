@@ -719,6 +719,76 @@ class IntakeChannelRepository:
 
         return _safe_channel_load(source)
 
+    async def get_voice_channel(
+        self, tenant_id: str
+    ) -> Optional[IntakeChannel]:
+        """Look up the tenant's registered, enabled voice intake channel.
+
+        Used by the Dinee voice submission bridge (Surface A) to resolve the
+        ``channel_type="voice"`` channel for a tenant. The channel is always
+        derived from the authenticated tenant — never from a client-supplied
+        channel id (Req 2.4). Returns the first **enabled** voice channel for
+        the tenant, or ``None`` when the tenant has no enabled voice channel
+        (the bridge maps ``None`` to a uniform HTTP 404 that does not leak
+        whether the tenant exists).
+        """
+        self._require_tenant(tenant_id)
+
+        # Read-cutover: serve from Postgres when enabled.
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_hybrid_find_one,
+        )
+        pg = await read_hybrid_find_one(
+            "intake_channel", tenant_id,
+            term_filters={"channel_type": "voice", "enabled": True},
+        )
+        if pg is not _NOT_CUT_OVER:
+            return _safe_channel_load(pg) if pg is not None else None
+
+        query = inject_tenant_filter(
+            {
+                "query": {
+                    "bool": {
+                        "must": [
+                            {"term": {"channel_type": "voice"}},
+                            {"term": {"enabled": True}},
+                        ]
+                    }
+                }
+            },
+            tenant_id,
+        )
+        query["size"] = 1
+
+        try:
+            resp = await self._es.search_documents(
+                self._channels_index, query, 1
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "IntakeChannelRepository.get_voice_channel: search failed "
+                "for tenant=%s: %s",
+                tenant_id,
+                exc,
+            )
+            return None
+
+        sources = _extract_sources(resp)
+        if not sources:
+            return None
+
+        source = sources[0]
+        # Defense-in-depth: re-validate tenant ownership.
+        if source.get("tenant_id") != tenant_id:
+            return None
+        # Defense-in-depth: only serve an enabled channel even if the ES
+        # filter is bypassed by a read-cutover path.
+        if source.get("enabled") is False:
+            return None
+
+        return _safe_channel_load(source)
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------

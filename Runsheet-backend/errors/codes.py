@@ -145,6 +145,28 @@ class ErrorCode(str, Enum):
     COMMERCE_PAYMENT_AMOUNT_EXCEEDS_INVOICE = "COMMERCE_PAYMENT_AMOUNT_EXCEEDS_INVOICE"
     """Payment amount exceeds the invoice remaining balance (HTTP 422)"""
 
+    # Dinee Voice Integration errors (4xx)
+    VOICE_REPLAY_WINDOW_EXCEEDED = "VOICE_REPLAY_WINDOW_EXCEEDED"
+    """Voice submission X-Timestamp is stale/missing/invalid — outside the replay window (HTTP 401)"""
+
+    MISSING_IDEMPOTENCY_KEY = "MISSING_IDEMPOTENCY_KEY"
+    """Voice submission omitted the required X-Idempotency-Key header (HTTP 400)"""
+
+    IDEMPOTENCY_CONFLICT = "IDEMPOTENCY_CONFLICT"
+    """Same idempotency key reused with a different request body for the same tenant (HTTP 409)"""
+
+    UNSUPPORTED_SCHEMA_VERSION = "UNSUPPORTED_SCHEMA_VERSION"
+    """Voice submission X-Schema-Version is missing or unsupported by the voice channel (HTTP 422)"""
+
+    VOICE_PAYLOAD_INVALID = "VOICE_PAYLOAD_INVALID"
+    """VoiceIntakePayload is missing required fields — carries details.missing_fields (HTTP 422)"""
+
+    VOICE_UNAUTHORIZED = "VOICE_UNAUTHORIZED"
+    """Voice request failed Bearer/API-key authentication (HTTP 401)"""
+
+    VOICE_TENANT_MISMATCH = "VOICE_TENANT_MISMATCH"
+    """X-Runsheet-Tenant does not match the tenant bound to the presented credential (HTTP 403)"""
+
     # Internal errors (5xx)
     INTERNAL_ERROR = "INTERNAL_ERROR"
     """Unexpected server error (HTTP 500)"""
@@ -199,6 +221,14 @@ ERROR_CODE_STATUS_MAP: dict[ErrorCode, int] = {
     ErrorCode.DRIVER_UNAVAILABLE: 409,
     ErrorCode.LEGACY_ROUTE_SUNSET: 410,
     ErrorCode.SECURITY_TENANT_ID_MISMATCH: 403,
+    # Dinee Voice Integration error codes
+    ErrorCode.VOICE_REPLAY_WINDOW_EXCEEDED: 401,
+    ErrorCode.MISSING_IDEMPOTENCY_KEY: 400,
+    ErrorCode.IDEMPOTENCY_CONFLICT: 409,
+    ErrorCode.UNSUPPORTED_SCHEMA_VERSION: 422,
+    ErrorCode.VOICE_PAYLOAD_INVALID: 422,
+    ErrorCode.VOICE_UNAUTHORIZED: 401,
+    ErrorCode.VOICE_TENANT_MISMATCH: 403,
 }
 
 

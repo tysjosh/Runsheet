@@ -473,3 +473,105 @@ def security_tenant_id_mismatch(
         details=details
     )
 
+
+# --- Dinee Voice Integration factory functions ---
+#
+# These envelopes back Surface A (voice order submission) and Surface B
+# (read/driver endpoints). Per Requirements 9.3 and 10.6, rejection
+# envelopes MUST NOT carry tenant data or credential values: the factories
+# below take fixed, non-sensitive default messages and only ever attach
+# caller-provided `details` that the call sites keep free of tenant
+# identifiers, API keys, HMAC secrets, or signatures.
+
+
+def voice_replay_window_exceeded(
+    message: str = "Request timestamp is missing, invalid, or outside the allowed replay window",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a voice replay-window exceeded exception (HTTP 401)."""
+    return AppException(
+        error_code=ErrorCode.VOICE_REPLAY_WINDOW_EXCEEDED,
+        message=message,
+        details=details
+    )
+
+
+def missing_idempotency_key(
+    message: str = "The X-Idempotency-Key header is required",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a missing idempotency key exception (HTTP 400)."""
+    return AppException(
+        error_code=ErrorCode.MISSING_IDEMPOTENCY_KEY,
+        message=message,
+        details=details
+    )
+
+
+def idempotency_conflict(
+    message: str = "The idempotency key was reused with a different request body",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create an idempotency conflict exception (HTTP 409)."""
+    return AppException(
+        error_code=ErrorCode.IDEMPOTENCY_CONFLICT,
+        message=message,
+        details=details
+    )
+
+
+def unsupported_schema_version(
+    message: str = "The X-Schema-Version header is missing or unsupported",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create an unsupported schema version exception (HTTP 422)."""
+    return AppException(
+        error_code=ErrorCode.UNSUPPORTED_SCHEMA_VERSION,
+        message=message,
+        details=details
+    )
+
+
+def voice_payload_invalid(
+    missing_fields: Optional[list[str]] = None,
+    message: str = "The voice submission payload is missing required fields",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a voice payload validation exception (HTTP 422).
+
+    The response body identifies the absent required fields via
+    ``details.missing_fields`` (Requirement 7.3). When ``details`` is not
+    supplied, it is built from ``missing_fields``; the field names are the
+    only context carried and never include tenant data or credentials.
+    """
+    if details is None:
+        details = {"missing_fields": list(missing_fields or [])}
+    return AppException(
+        error_code=ErrorCode.VOICE_PAYLOAD_INVALID,
+        message=message,
+        details=details
+    )
+
+
+def voice_unauthorized(
+    message: str = "Authentication required",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a voice unauthorized exception (HTTP 401)."""
+    return AppException(
+        error_code=ErrorCode.VOICE_UNAUTHORIZED,
+        message=message,
+        details=details
+    )
+
+
+def voice_tenant_mismatch(
+    message: str = "The tenant header does not match the authenticated credential",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a voice tenant mismatch exception (HTTP 403)."""
+    return AppException(
+        error_code=ErrorCode.VOICE_TENANT_MISMATCH,
+        message=message,
+        details=details
+    )

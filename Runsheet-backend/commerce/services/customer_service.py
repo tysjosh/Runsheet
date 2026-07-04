@@ -35,6 +35,34 @@ _TAX_ID_PATTERN = re.compile(r"^[A-Z0-9-]{1,64}$")
 _DEFAULT_PAGE_LIMIT = 50
 _MAX_PAGE_LIMIT = 200
 
+# Source keys, in precedence order, from which the optional projected
+# ``phone`` / ``account_id`` lookup fields are derived (Req 13). The canonical
+# key is checked first, then documented aliases (alias fallback). Values are
+# read from ``external_refs`` first, then ``metadata``.
+_PHONE_SOURCE_KEYS = ("phone", "phone_number", "phoneNumber")
+_ACCOUNT_SOURCE_KEYS = ("account_id", "accountId", "account")
+
+
+def _project_lookup_field(
+    external_refs: Optional[Dict[str, Any]],
+    metadata: Optional[Dict[str, Any]],
+    source_keys: tuple,
+) -> Optional[str]:
+    """Resolve a single canonical lookup value with alias fallback.
+
+    Reads ``external_refs`` first, then ``metadata``, returning the first
+    non-empty value found under any of ``source_keys``. Returns ``None`` when
+    no source carries a value.
+    """
+    for source in (external_refs or {}, metadata or {}):
+        if not isinstance(source, dict):
+            continue
+        for key in source_keys:
+            value = source.get(key)
+            if value is not None and str(value).strip():
+                return str(value).strip()
+    return None
+
 
 # ---------------------------------------------------------------------------
 # Service
@@ -132,6 +160,18 @@ class CustomerService:
             "metadata": metadata or {},
         }
 
+        # Project optional phone/account_id lookup fields from external_refs/
+        # metadata so they are queryable by the voice customer-lookup path
+        # (Req 13). Only stamped when a source value exists.
+        phone = _project_lookup_field(external_refs, metadata, _PHONE_SOURCE_KEYS)
+        if phone is not None:
+            doc["phone"] = phone
+        account_id = _project_lookup_field(
+            external_refs, metadata, _ACCOUNT_SOURCE_KEYS
+        )
+        if account_id is not None:
+            doc["account_id"] = account_id
+
         await self._es.index_document(CUSTOMERS_CURRENT_INDEX, customer_id, doc)
 
         # Dual-write to the Postgres source-of-truth when opted in
@@ -197,6 +237,59 @@ class CustomerService:
             )
 
         return hits[0]["_source"]
+
+    # ------------------------------------------------------------------
+    # Lookup by phone / account
+    # ------------------------------------------------------------------
+
+    async def lookup_by_phone_or_account(
+        self,
+        tenant_id: str,
+        *,
+        phone: Optional[str] = None,
+        account_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Find the tenant's customers by projected phone or account_id.
+
+        Filters the tenant-scoped ``customers_current`` index on the canonical
+        projected ``phone`` / ``account_id`` fields (Req 13.1, 13.2). At least
+        one of ``phone`` or ``account_id`` must be supplied; if both are given,
+        a customer matching either value is returned. Returns the matching
+        customer source documents (which carry ``customer_id``, ``display_name``
+        and the projected ``phone`` / ``account_id`` when present, Req 13.3) or
+        an empty list when nothing matches.
+
+        Validates: Requirements 13.1, 13.2, 13.3, C3
+        """
+        should: List[Dict[str, Any]] = []
+        if phone is not None and str(phone).strip():
+            should.append({"term": {"phone": str(phone).strip()}})
+        if account_id is not None and str(account_id).strip():
+            should.append({"term": {"account_id": str(account_id).strip()}})
+
+        if not should:
+            raise validation_error(
+                "lookup_by_phone_or_account requires phone or account_id",
+                details={"phone": phone, "account_id": account_id},
+            )
+
+        base_query: Dict[str, Any] = {
+            "query": {
+                "bool": {
+                    "should": should,
+                    "minimum_should_match": 1,
+                }
+            },
+            "size": _MAX_PAGE_LIMIT,
+        }
+        query = inject_tenant_filter(base_query, tenant_id)
+
+        response = await self._es.search_documents(
+            CUSTOMERS_CURRENT_INDEX, query, size=_MAX_PAGE_LIMIT
+        )
+
+        hits = response["hits"]["hits"]
+        return [hit["_source"] for hit in hits]
 
     # ------------------------------------------------------------------
     # List
@@ -379,6 +472,24 @@ class CustomerService:
 
         if metadata is not None:
             partial["metadata"] = metadata
+
+        # Re-project the phone/account_id lookup fields whenever their source
+        # objects change, using the effective (post-update) values (Req 13).
+        if external_refs is not None or metadata is not None:
+            effective_refs = (
+                external_refs
+                if external_refs is not None
+                else existing.get("external_refs")
+            )
+            effective_meta = (
+                metadata if metadata is not None else existing.get("metadata")
+            )
+            partial["phone"] = _project_lookup_field(
+                effective_refs, effective_meta, _PHONE_SOURCE_KEYS
+            )
+            partial["account_id"] = _project_lookup_field(
+                effective_refs, effective_meta, _ACCOUNT_SOURCE_KEYS
+            )
 
         if not partial:
             return existing

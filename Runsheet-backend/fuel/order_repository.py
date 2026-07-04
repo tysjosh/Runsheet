@@ -529,6 +529,7 @@ class FuelOrderRepository:
         *,
         status: Optional[str] = None,
         customer_id: Optional[str] = None,
+        customer_phone: Optional[str] = None,
         driver_id: Optional[str] = None,
         call_type: Optional[str] = None,
         product_code: Optional[str] = None,
@@ -546,6 +547,7 @@ class FuelOrderRepository:
             tenant_id: The caller's tenant.
             status: Filter by order status.
             customer_id: Filter by customer_id.
+            customer_phone: Filter by customer_phone (exact match).
             driver_id: Filter by assigned_driver_id.
             call_type: Filter by call_type.
             product_code: Filter by product_code.
@@ -581,6 +583,7 @@ class FuelOrderRepository:
         term_filters = {
             "status": status,
             "customer_id": customer_id,
+            "customer_phone": customer_phone,
             "assigned_driver_id": driver_id,
             "call_type": call_type,
             "product_code": product_code,
@@ -625,6 +628,8 @@ class FuelOrderRepository:
             filters.append({"term": {"status": status}})
         if customer_id:
             filters.append({"term": {"customer_id": customer_id}})
+        if customer_phone:
+            filters.append({"term": {"customer_phone": customer_phone}})
         if driver_id:
             filters.append({"term": {"assigned_driver_id": driver_id}})
         if call_type:

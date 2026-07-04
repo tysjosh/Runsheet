@@ -30,6 +30,7 @@ FUEL_ORDER_EVENTS_INDEX = "fuel_order_events"
 DRIVERS_CURRENT_INDEX = "drivers_current"
 INTAKE_CHANNELS_INDEX = "intake_channels"
 PENDING_LEGACY_MIRRORS_INDEX = "pending_legacy_mirrors"
+DRIVER_REPORTS_INDEX = "driver_reports"
 
 # ---------------------------------------------------------------------------
 # Mappings
@@ -280,6 +281,26 @@ PENDING_LEGACY_MIRRORS_MAPPING = {
     },
 }
 
+DRIVER_REPORTS_MAPPING = {
+    "settings": {
+        "number_of_shards": 1,
+        "number_of_replicas": 1,
+    },
+    "mappings": {
+        "dynamic": "strict",
+        "properties": {
+            "report_id": {"type": "keyword"},
+            "tenant_id": {"type": "keyword"},
+            "driver_id": {"type": "keyword"},
+            "assignment_id": {"type": "keyword"},
+            "kind": {"type": "keyword"},
+            "detail": {"type": "text"},
+            "eta_minutes": {"type": "integer"},
+            "created_at": {"type": "date"},
+        },
+    },
+}
+
 # ---------------------------------------------------------------------------
 # Consolidated index registry
 # ---------------------------------------------------------------------------
@@ -290,6 +311,7 @@ ORDER_INTAKE_INDEX_MAPPINGS: dict[str, dict] = {
     DRIVERS_CURRENT_INDEX: DRIVERS_CURRENT_MAPPING,
     INTAKE_CHANNELS_INDEX: INTAKE_CHANNELS_MAPPING,
     PENDING_LEGACY_MIRRORS_INDEX: PENDING_LEGACY_MIRRORS_MAPPING,
+    DRIVER_REPORTS_INDEX: DRIVER_REPORTS_MAPPING,
 }
 
 

@@ -32,8 +32,6 @@ Validates: Requirements 1.1.6, 2.1, 2.2, 2.3, 9.1.3.
 """
 from __future__ import annotations
 
-import hashlib
-import hmac as hmac_mod
 import json
 import logging
 import time
@@ -54,6 +52,7 @@ from fuel.intake.adapter_base import (
 )
 from fuel.order_models import FuelOrder
 from fuel.services.order_id_generator import mint_event_id, mint_order_id
+from ops.webhooks.hmac_util import verify_hmac_sha256_hex
 from fuel.services.order_metrics import (
     orders_adapter_errors_total,
     orders_intake_latency_seconds,
@@ -194,6 +193,9 @@ class OrderIntakePipeline:
         body: bytes,
         signature: str,
         request_id: str,
+        *,
+        idempotency_key_override: Optional[str] = None,
+        schema_version_override: Optional[str] = None,
     ) -> IntakeResponse:
         """Ingest an order from an HMAC-signed webhook.
 
@@ -210,6 +212,17 @@ class OrderIntakePipeline:
             body: The raw request body bytes.
             signature: The ``X-Runsheet-Signature`` header value.
             request_id: A unique request/trace identifier.
+            idempotency_key_override: When provided, this value is used as the
+                tenant-scoped idempotency key (``client_event_id``) instead of
+                the payload-derived ``event_id``. Additive; used by the Dinee
+                voice bridge to map the ``X-Idempotency-Key`` header onto the
+                pipeline. When ``None`` (the default), behavior is unchanged.
+            schema_version_override: When provided, this value is used for the
+                schema-version whitelist check and adapter dispatch instead of
+                the payload-derived ``schema_version``. Additive; used by the
+                Dinee voice bridge to map the ``X-Schema-Version`` header onto
+                the pipeline. When ``None`` (the default), behavior is
+                unchanged.
 
         Returns:
             An :class:`IntakeResponse` with the outcome.
@@ -255,7 +268,12 @@ class OrderIntakePipeline:
             payload=payload,
             request_id=request_id,
             actor_user_id=None,
-            client_event_id=payload.get("event_id"),
+            client_event_id=(
+                idempotency_key_override
+                if idempotency_key_override is not None
+                else payload.get("event_id")
+            ),
+            schema_version_override=schema_version_override,
         )
 
     async def ingest_dispatcher(
@@ -316,6 +334,7 @@ class OrderIntakePipeline:
         request_id: str,
         actor_user_id: Optional[str],
         client_event_id: Optional[str],
+        schema_version_override: Optional[str] = None,
     ) -> IntakeResponse:
         """Shared pipeline logic for all intake paths.
 
@@ -357,8 +376,14 @@ class OrderIntakePipeline:
         # Generate or use the client-supplied event_id for idempotency
         event_id = client_event_id or mint_event_id()
 
-        # (e) Extract schema version early for metrics
-        schema_version = payload.get("schema_version", "1.0")
+        # (e) Extract schema version early for metrics. When a caller supplies
+        # a schema_version_override (e.g. the Dinee voice bridge mapping the
+        # X-Schema-Version header), it takes precedence over the payload value.
+        schema_version = (
+            schema_version_override
+            if schema_version_override is not None
+            else payload.get("schema_version", "1.0")
+        )
         intake_channel_type = getattr(channel, "channel_type", "unknown")
 
         # Record intake received metric
@@ -684,19 +709,16 @@ class OrderIntakePipeline:
     def _verify_hmac(body: bytes, signature: str, secret: str) -> None:
         """Verify the HMAC-SHA256 signature of the request body.
 
+        Delegates to the shared :func:`verify_hmac_sha256_hex` helper so there
+        is a single HMAC verification implementation across the codebase.
+
         The secret is used only for this comparison and MUST be discarded
         immediately after — never logged, never stored.
 
         Raises:
             webhook_signature_invalid: If the signature does not match.
         """
-        expected = hmac_mod.new(
-            secret.encode("utf-8"),
-            body,
-            hashlib.sha256,
-        ).hexdigest()
-
-        if not hmac_mod.compare_digest(expected, signature):
+        if not verify_hmac_sha256_hex(secret, body, signature):
             raise webhook_signature_invalid(
                 details={"reason": "HMAC-SHA256 mismatch"},
             )
