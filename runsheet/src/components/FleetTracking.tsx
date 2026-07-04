@@ -100,11 +100,23 @@ function AddAssetModal({
   const [name, setName] = useState("");
   const [assetType, setAssetType] = useState<AssetType>("vehicle");
   const [assetSubtype, setAssetSubtype] = useState<AssetSubtype>("fuel_truck");
-  const [plate, setPlate] = useState("");
+  // Type-specific identifier the backend requires (plate/vessel/container).
+  const [identifier, setIdentifier] = useState("");
+  const [address, setAddress] = useState("");
   const [lat, setLat] = useState("0");
   const [lon, setLon] = useState("0");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+
+  // Which type-specific identifier is required for the selected type.
+  const identifierField =
+    assetType === "vehicle"
+      ? { key: "plate_number" as const, label: "Plate number" }
+      : assetType === "vessel"
+        ? { key: "vessel_name" as const, label: "Vessel name" }
+        : assetType === "container"
+          ? { key: "container_number" as const, label: "Container number" }
+          : null; // equipment needs no extra identifier
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -113,20 +125,33 @@ function AddAssetModal({
       setError("Asset ID and name are required.");
       return;
     }
+    if (identifierField && !identifier.trim()) {
+      setError(
+        `${identifierField.label} is required for ${labelize(assetType)} assets.`,
+      );
+      return;
+    }
     const latNum = Number(lat);
     const lonNum = Number(lon);
     if (!Number.isFinite(latNum) || !Number.isFinite(lonNum)) {
       setError("Latitude and longitude must be numbers.");
       return;
     }
+    const trimmedAddress = address.trim() || "Unspecified";
     const payload: CreateAssetPayload = {
       asset_id: id,
       asset_type: assetType,
       asset_subtype: assetSubtype,
       name: name.trim(),
       status: "active",
-      current_location: { lat: latNum, lon: lonNum },
-      ...(plate.trim() ? { plate_number: plate.trim() } : {}),
+      current_location: {
+        id: `loc-${id}`,
+        name: trimmedAddress,
+        type: "site",
+        coordinates: { lat: latNum, lon: lonNum },
+        address: trimmedAddress,
+      },
+      ...(identifierField ? { [identifierField.key]: identifier.trim() } : {}),
     };
     setSubmitting(true);
     setError("");
@@ -219,6 +244,7 @@ function AddAssetModal({
                   const t = e.target.value as AssetType;
                   setAssetType(t);
                   setAssetSubtype(SUBTYPE_OPTIONS[t][0]);
+                  setIdentifier("");
                 }}
                 className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg bg-white"
               >
@@ -252,19 +278,40 @@ function AddAssetModal({
               </select>
             </div>
           </div>
+          {identifierField && (
+            <div>
+              <label
+                htmlFor="asset-identifier"
+                className="block text-xs font-medium text-gray-600 mb-1"
+              >
+                {identifierField.label}
+              </label>
+              <input
+                id="asset-identifier"
+                type="text"
+                value={identifier}
+                onChange={(e) => setIdentifier(e.target.value)}
+                placeholder={
+                  assetType === "vehicle" ? "ABC-1234" : identifierField.label
+                }
+                className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg bg-white"
+                required
+              />
+            </div>
+          )}
           <div>
             <label
-              htmlFor="asset-plate"
+              htmlFor="asset-address"
               className="block text-xs font-medium text-gray-600 mb-1"
             >
-              Plate number (optional)
+              Location / address
             </label>
             <input
-              id="asset-plate"
+              id="asset-address"
               type="text"
-              value={plate}
-              onChange={(e) => setPlate(e.target.value)}
-              placeholder="ABC-1234"
+              value={address}
+              onChange={(e) => setAddress(e.target.value)}
+              placeholder="Main depot"
               className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg bg-white"
             />
           </div>

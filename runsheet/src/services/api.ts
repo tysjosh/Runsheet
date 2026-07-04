@@ -36,16 +36,24 @@ export interface UniversalSearchResults {
 }
 
 // Payload for creating a new asset via POST /fleet/assets
+/** Location object accepted by POST /fleet/assets (backend `Location` model). */
+export interface AssetLocationPayload {
+  id: string;
+  name: string;
+  type: string;
+  coordinates: { lat: number; lon: number };
+  address: string;
+}
+
 export interface CreateAssetPayload {
   asset_id: string;
   asset_type: AssetType;
   asset_subtype: AssetSubtype;
   name: string;
   status?: string;
-  current_location: {
-    lat: number;
-    lon: number;
-  };
+  current_location: AssetLocationPayload;
+  // Type-specific identifiers the backend requires: plate_number (vehicle),
+  // vessel_name (vessel), container_number (container).
   plate_number?: string;
   driver_id?: string;
   driver_name?: string;
