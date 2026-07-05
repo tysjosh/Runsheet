@@ -28,6 +28,7 @@ from pydantic import (
     ConfigDict,
     Field,
     ValidationError,
+    model_validator,
 )
 
 from fuel.intake.adapter_base import AdapterError, IntakeContext, IntakeResult
@@ -68,24 +69,77 @@ class VoiceExtractedSlots(BaseModel):
     """The order fields the Dinee agent extracted from the call.
 
     Maps onto the canonical :class:`~fuel.order_models.FuelOrder` business
-    fields. ``customer_name``, ``ship_to_address``, and ``product_code`` are
-    required; the remainder are optional or carry defaults.
+    fields, aligned to the Dinee runsheet-pack slot contract (assumption A5):
+
+    * ``customer_name`` also accepts Dinee's ``customer`` key.
+    * ``ship_to_address`` also accepts Dinee's ``delivery_site`` key.
+    * ``quantity`` (``{gallons}`` / ``{fillToFull: true}``) is unpacked into
+      the flat ``gallons_requested`` / ``fill_to_full`` fields.
+    * ``delivery_window`` is a single free-text string on the Dinee side; it is
+      preserved verbatim in ``delivery_window_note`` (not forced into the
+      structured start/end fields).
+
+    ``customer_name``, ``ship_to_address``, and ``product_code`` are required;
+    coordinates are optional (voice captures no geocoding — reconciled during
+    review-hold) and ``call_type`` defaults to ``will_call`` so no delivery
+    window is required at intake.
     """
 
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
     customer_id: Optional[str] = None
-    customer_name: str
-    ship_to_address: str
-    ship_to_lat: float
-    ship_to_lon: float
+    customer_name: str = Field(
+        validation_alias=AliasChoices("customer_name", "customer")
+    )
+    ship_to_address: str = Field(
+        validation_alias=AliasChoices("ship_to_address", "delivery_site")
+    )
+    # Voice captures no coordinates; reconciled by a human during review-hold.
+    ship_to_lat: Optional[float] = None
+    ship_to_lon: Optional[float] = None
     product_code: str
     gallons_requested: Optional[float] = None
     fill_to_full: bool = False
-    call_type: Literal["will_call", "auto_fill", "keep_full", "one_off"] = "one_off"
+    # Voice does not collect a call_type; default to will_call so the canonical
+    # FuelOrder does not require a delivery window at intake (the dispatcher
+    # attaches the window before the placed -> scheduled transition).
+    call_type: Literal["will_call", "auto_fill", "keep_full", "one_off"] = "will_call"
     customer_tank_id: Optional[str] = None
     delivery_window_start: Optional[datetime] = None
     delivery_window_end: Optional[datetime] = None
+    # Dinee emits a single free-text delivery_window (e.g. "tomorrow morning"),
+    # not a structured start/end. Preserved verbatim for the review step.
+    delivery_window_note: Optional[str] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _unpack_dinee_shapes(cls, data: Any) -> Any:
+        """Normalize Dinee's nested/free-text slot shapes into flat fields.
+
+        Runs before field validation so the canonical fields are populated
+        from Dinee's ``quantity`` object and free-text ``delivery_window``.
+        Explicit flat values (if a caller sends them) take precedence.
+        """
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)  # never mutate the caller's dict
+
+        quantity = data.get("quantity")
+        if isinstance(quantity, dict):
+            if "gallons" in quantity and data.get("gallons_requested") is None:
+                data["gallons_requested"] = quantity.get("gallons")
+            if quantity.get("fillToFull") is True and "fill_to_full" not in data:
+                data["fill_to_full"] = True
+
+        window = data.get("delivery_window")
+        if (
+            isinstance(window, str)
+            and window.strip()
+            and not data.get("delivery_window_note")
+        ):
+            data["delivery_window_note"] = window.strip()
+
+        return data
 
 
 class VoiceIntakePayload(BaseModel):
@@ -217,6 +271,15 @@ class VoiceIntakeAdapter:
             },
             "source_schema_version": self.schema_version,
         }
+
+        # Preserve Dinee's free-text delivery window for the review step. It is
+        # not a structured start/end, so it lands in special_instructions rather
+        # than the datetime fields (call_type=will_call means no window is
+        # required at intake).
+        if slots.delivery_window_note:
+            order_doc["special_instructions"] = (
+                f"Requested delivery window (voice): {slots.delivery_window_note}"
+            )
 
         # Human-review disposition (Req 8.1): stamp the hold reason so the
         # registered VoiceReviewHoldHook promotes the order to on_hold after

@@ -47,9 +47,8 @@ def _payload(**slot_overrides: Any) -> Dict[str, Any]:
         "ship_to_lon": -75.0,
         "product_code": "propane",
         "gallons_requested": 500.0,
-        # call_type defaults to "one_off", which requires a delivery window on
-        # the canonical FuelOrder; supply a valid one so these tests exercise
-        # the customer_id behavior in isolation.
+        # call_type now defaults to "will_call", so no delivery window is
+        # required; keep one here for the customer_id tests either way.
         "delivery_window_start": "2026-07-04T09:00:00+00:00",
         "delivery_window_end": "2026-07-04T12:00:00+00:00",
     }
@@ -157,3 +156,67 @@ def test_resolved_customer_without_review_flag_is_not_held():
     payload["reviewRequired"] = False
     result = adapter.transform(payload, _context())
     assert "hold_reason" not in result.order_doc
+
+
+# ---------------------------------------------------------------------------
+# Dinee slot-contract alignment (A5)
+# ---------------------------------------------------------------------------
+
+
+def _dinee_payload(**slot_overrides: Any) -> Dict[str, Any]:
+    """A payload shaped like Dinee's real runsheet-pack output."""
+    slots: Dict[str, Any] = {
+        "customer": "Acme Co",             # -> customer_name
+        "delivery_site": "123 Depot Rd",   # -> ship_to_address
+        "product_code": "propane",
+        "quantity": {"gallons": 500},      # -> gallons_requested
+        "delivery_window": "tomorrow morning",  # -> delivery_window_note
+        # no coordinates, no call_type
+    }
+    slots.update(slot_overrides)
+    return {
+        "callId": "call-dinee",
+        "transcriptId": "tr-dinee",
+        "transcript": [{"role": "customer", "text": "need fuel", "at": 3}],
+        "callerPhone": "+15555550100",
+        "extractedSlots": slots,
+        "reviewRequired": True,
+    }
+
+
+def test_dinee_shaped_payload_validates_end_to_end():
+    adapter = VoiceIntakeAdapter()
+    result = adapter.transform(_dinee_payload(), _context())
+    doc = result.order_doc
+
+    assert doc["customer_name"] == "Acme Co"          # customer alias
+    assert doc["ship_to_address"] == "123 Depot Rd"   # delivery_site alias
+    assert doc["gallons_requested"] == 500            # quantity unpacked
+    assert doc["call_type"] == "will_call"            # default
+    assert doc["ship_to_lat"] is None                 # no coords
+    assert doc["ship_to_lon"] is None
+    assert "tomorrow morning" in doc["special_instructions"]
+
+    # Survives canonical FuelOrder validation (voice channel exempts coords,
+    # will_call exempts the delivery window).
+    FuelOrder.model_validate(_stamp_platform_fields(doc))
+
+
+def test_quantity_fill_to_full_shape():
+    adapter = VoiceIntakeAdapter()
+    result = adapter.transform(
+        _dinee_payload(quantity={"fillToFull": True}), _context()
+    )
+    doc = result.order_doc
+    assert doc["fill_to_full"] is True
+    assert doc["gallons_requested"] is None
+    FuelOrder.model_validate(_stamp_platform_fields(doc))
+
+
+def test_explicit_snake_case_still_accepted():
+    # Backward compatible: the canonical snake_case keys still work.
+    adapter = VoiceIntakeAdapter()
+    payload = _payload(customer_id="cust-1")  # uses customer_name/ship_to_address
+    result = adapter.transform(payload, _context())
+    assert result.order_doc["customer_name"] == "Acme Co"
+    assert result.order_doc["ship_to_address"] == "123 Depot Rd"

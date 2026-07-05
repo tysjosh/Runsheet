@@ -116,8 +116,12 @@ class FuelOrder(BaseModel):
     customer_phone: Optional[str] = None
     customer_email: Optional[str] = None
     ship_to_address: str = Field(..., min_length=1)
-    ship_to_lat: float = Field(..., ge=-90.0, le=90.0)
-    ship_to_lon: float = Field(..., ge=-180.0, le=180.0)
+    # Coordinates are optional at the model level so voice orders (which capture
+    # only a free-text address, no geocoding) can be accepted and reconciled
+    # during review-hold. Every non-voice / non-legacy channel MUST still carry
+    # them — enforced in _validate_coordinates.
+    ship_to_lat: Optional[float] = Field(default=None, ge=-90.0, le=90.0)
+    ship_to_lon: Optional[float] = Field(default=None, ge=-180.0, le=180.0)
     customer_tank_id: Optional[str] = None
 
     # product_code is nullable ONLY for legacy-channel orders during
@@ -178,6 +182,21 @@ class FuelOrder(BaseModel):
         """Non-legacy channels MUST carry a canonicalized product_code."""
         if self.product_code is None and self.intake_channel != "legacy":
             raise ValueError("missing_product_code")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_coordinates(self) -> "FuelOrder":
+        """Require ship-to coordinates for every channel except voice/legacy.
+
+        ``voice`` orders capture only a free-text delivery address (no
+        geocoding); the coordinates are reconciled by a human during
+        review-hold. ``legacy`` orders are exempt during the migration window.
+        Every other channel MUST carry both coordinates so downstream routing
+        has a geolocation at intake.
+        """
+        if self.intake_channel not in ("voice", "legacy"):
+            if self.ship_to_lat is None or self.ship_to_lon is None:
+                raise ValueError("missing_coordinates")
         return self
 
     @model_validator(mode="after")

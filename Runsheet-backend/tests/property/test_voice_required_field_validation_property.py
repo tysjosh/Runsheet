@@ -69,11 +69,11 @@ VALID_IDEM_KEY = "idem-required-key"
 
 # Required VoiceIntakePayload fields (dotted paths, matching pydantic loc).
 REQUIRED_TOP: List[str] = ["callId", "transcriptId", "transcript", "extractedSlots"]
+# ship_to_lat / ship_to_lon are intentionally NOT required: voice orders
+# capture no coordinates and are reconciled during review-hold (design A).
 REQUIRED_SLOTS: List[str] = [
     "customer_name",
     "ship_to_address",
-    "ship_to_lat",
-    "ship_to_lon",
     "product_code",
 ]
 
