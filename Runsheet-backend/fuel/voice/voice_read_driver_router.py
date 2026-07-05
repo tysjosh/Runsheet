@@ -297,6 +297,12 @@ async def get_active_assignment(
 
     return {
         "assignment": {
+            # ``id`` is the assignment identifier the driver-report endpoint
+            # expects at POST /voice/drivers/{id}/assignments/{assignmentId}/
+            # reports. An assignment is the tenant's order assigned to the
+            # driver, and the report repository resolves assignment_id via
+            # order_repository.get(...), so the assignment id IS the order id.
+            "id": active.order_id,
             "orderId": active.order_id,
             "runId": active.assigned_run_id,
             "status": active.status,
@@ -616,7 +622,12 @@ _DELIVERIES_FETCH_SIZE = 200
 
 
 class OrderSummary(BaseModel):
-    """A single order projection returned by ``GET /orders/lookup`` (Req 16.1)."""
+    """A single order projection returned by ``GET /orders/lookup`` (Req 16.1).
+
+    Carries both the canonical field names (``createdAt`` / ``gallons``) and
+    the Dinee client's expected aliases (``placedAt`` / ``quantityGallons`` /
+    ``customerId``) so the contract does not drift.
+    """
 
     model_config = ConfigDict(extra="ignore")
 
@@ -625,6 +636,10 @@ class OrderSummary(BaseModel):
     createdAt: str
     productCode: Optional[str] = None
     gallons: Optional[float] = None
+    # Dinee OrderSummary aliases (additive — canonical fields retained above).
+    customerId: Optional[str] = None
+    quantityGallons: Optional[float] = None
+    placedAt: Optional[str] = None
 
 
 class OrdersLookupResponse(BaseModel):
@@ -641,12 +656,18 @@ class DeliveriesResponse(BaseModel):
 
 def _project_order_summary(order: Any) -> OrderSummary:
     """Map a :class:`~fuel.order_models.FuelOrder` onto the lookup projection."""
+    created_at = _iso(order.created_at)
+    gallons = order.gallons_requested
     return OrderSummary(
         id=order.order_id,
         status=order.status,
-        createdAt=_iso(order.created_at),
+        createdAt=created_at,
         productCode=order.product_code,
-        gallons=order.gallons_requested,
+        gallons=gallons,
+        # Dinee-facing aliases (same values, client's expected key names).
+        customerId=order.customer_id,
+        quantityGallons=gallons,
+        placedAt=created_at,
     )
 
 

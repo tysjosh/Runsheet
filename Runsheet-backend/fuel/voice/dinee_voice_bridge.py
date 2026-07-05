@@ -176,10 +176,27 @@ class DineeVoiceBridge:
 
         payload_dict = self._parse_body(raw_body)
 
+        # --- (3a) Signed-body / header binding (replay resistance) --------
+        # Dinee signs only the request BODY; the tenant / idempotency-key /
+        # timestamp / schema-version values also travel as *unsigned* headers,
+        # and those header values drive the replay-window, idempotency and
+        # schema decisions. When the signed body also carries those fields they
+        # MUST agree with the headers — otherwise a captured signed body could
+        # be replayed with a fresh X-Timestamp (to pass the replay window) or a
+        # different X-Idempotency-Key (to mint a duplicate order). A mismatch is
+        # an authenticity failure (401), reported without echoing any values.
+        self._assert_signed_headers_match(
+            payload_dict,
+            idempotency_key=idempotency_key,
+            timestamp=timestamp,
+            schema_version=schema_version,
+        )
+
         # payload tenant_id (if present) must match the resolved channel's
-        # tenant (Req 2.4). The scope is always the resolved channel — the
-        # payload can only agree, never override.
+        # tenant (Req 2.4). Accept both snake_case and Dinee's camelCase key.
         payload_tenant = payload_dict.get("tenant_id")
+        if payload_tenant is None:
+            payload_tenant = payload_dict.get("tenantId")
         if payload_tenant is not None and payload_tenant != channel.tenant_id:
             raise voice_tenant_mismatch(
                 details={"reason": "payload tenant_id does not match the voice channel"},
@@ -291,6 +308,74 @@ class DineeVoiceBridge:
                 details={"reason": "malformed signature"},
             )
         return candidate[len(_SHA256_PREFIX):].lower()
+
+    def _assert_signed_headers_match(
+        self,
+        payload_dict: dict,
+        *,
+        idempotency_key: Optional[str],
+        timestamp: Optional[str],
+        schema_version: Optional[str],
+    ) -> None:
+        """Reject when a signed-body field disagrees with its unsigned header.
+
+        Only the request body is HMAC-signed. The tenant / idempotency-key /
+        timestamp / schema-version values also arrive as unsigned headers and
+        drive the replay, idempotency and schema decisions. When the signed
+        body carries any of those fields they MUST equal the corresponding
+        header; a disagreement means the (unsigned) headers were tampered with
+        relative to the signed content, so we fail closed with a uniform 401.
+        Fields absent from the body are not enforced (tolerant of clients that
+        only send them as headers). No submitted values are echoed (Req 10.6).
+        """
+
+        def _first(*keys: str) -> Any:
+            for key in keys:
+                if key in payload_dict and payload_dict[key] is not None:
+                    return payload_dict[key]
+            return None
+
+        def _reject(reason: str) -> None:
+            raise voice_unauthorized(
+                message="The signed body disagrees with the request headers",
+                details={"reason": reason},
+            )
+
+        # NB: the tenant field is deliberately NOT checked here. The body's
+        # tenant is already bound to the header: the channel is resolved from
+        # the header tenant, and the subsequent payload-tenant-vs-channel check
+        # raises VOICE_TENANT_MISMATCH (403) on any disagreement. Re-checking it
+        # here would only shadow that 403 with a 401.
+
+        body_idem = _first("idempotencyKey", "idempotency_key")
+        if body_idem is not None and str(body_idem) != str(idempotency_key or ""):
+            _reject("idempotency key mismatch between signed body and header")
+
+        body_schema = _first("schemaVersion", "schema_version")
+        if body_schema is not None and str(body_schema) != str(schema_version or ""):
+            _reject("schema version mismatch between signed body and header")
+
+        body_ts = _first("timestamp")
+        if body_ts is not None and not self._timestamps_equal(str(body_ts), timestamp):
+            _reject("timestamp mismatch between signed body and header")
+
+    def _timestamps_equal(self, body_ts: str, header_ts: Optional[str]) -> bool:
+        """True when the body and header timestamps denote the same instant.
+
+        Compares exact strings first, then falls back to parsed-instant
+        equality so a benign formatting difference (trailing ``Z`` vs
+        ``+00:00``) does not reject a legitimate submission, while a genuinely
+        different (replayed) timestamp still fails.
+        """
+        if header_ts is None:
+            return False
+        if body_ts.strip() == header_ts.strip():
+            return True
+        parsed_body = self._parse_timestamp(body_ts.strip())
+        parsed_header = self._parse_timestamp(header_ts.strip())
+        if parsed_body is not None and parsed_header is not None:
+            return parsed_body == parsed_header
+        return False
 
     def _assert_replay_window(self, timestamp: Optional[str]) -> None:
         """Reject a missing, unparseable, or stale ``X-Timestamp`` (Req 4).

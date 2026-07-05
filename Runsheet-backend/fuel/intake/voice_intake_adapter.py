@@ -150,7 +150,7 @@ class VoiceIntakePayload(BaseModel):
     advisory ``schemaVersion`` field — is authoritative for schema selection.
     """
 
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
     callId: str
     transcriptId: str
@@ -159,7 +159,14 @@ class VoiceIntakePayload(BaseModel):
     extractedSlots: VoiceExtractedSlots
     reviewRequired: bool = True
     schemaVersion: Optional[str] = None
-    agentConfidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    # Dinee emits ``confidenceScore``; accept it as an alias for the canonical
+    # ``agentConfidence`` so the value reaches intake_metadata.agent_confidence.
+    agentConfidence: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("agentConfidence", "confidenceScore"),
+    )
 
 
 # ---------------------------------------------------------------------------

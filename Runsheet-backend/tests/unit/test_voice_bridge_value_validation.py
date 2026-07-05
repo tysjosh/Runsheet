@@ -243,6 +243,92 @@ def test_unknown_product_code_named_422_without_pipeline():
     assert ledger.records == []
 
 
+def _signed_body(**overrides: Any) -> bytes:
+    """A body that also carries the signed tenant/idempotency/timestamp/schema."""
+    payload: Dict[str, Any] = {
+        "callId": "call-1",
+        "transcriptId": "tr-1",
+        "transcript": [{"speaker": "customer", "text": "fuel"}],
+        "callerPhone": "+15555550100",
+        "extractedSlots": {
+            "customer_id": "cust-1",
+            "customer_name": "Acme",
+            "ship_to_address": "1 Depot Rd",
+            "product_code": "propane",
+            "quantity": {"gallons": 500},
+        },
+        "reviewRequired": True,
+        # Signed copies of the header values.
+        "tenantId": TENANT_ID,
+        "idempotencyKey": VALID_IDEM_KEY,
+        "timestamp": VALID_TIMESTAMP,
+        "schemaVersion": SCHEMA_VERSION,
+    }
+    payload.update(overrides)
+    return json.dumps(payload).encode("utf-8")
+
+
+async def _submit_body(bridge: DineeVoiceBridge, body: bytes, **hdr: Any) -> Any:
+    return await bridge.submit(
+        raw_body=body,
+        tenant_id=hdr.get("tenant_id", TENANT_ID),
+        idempotency_key=hdr.get("idempotency_key", VALID_IDEM_KEY),
+        timestamp=hdr.get("timestamp", VALID_TIMESTAMP),
+        schema_version=hdr.get("schema_version", SCHEMA_VERSION),
+        signature=VALID_SIGNATURE,
+        request_id="req-signed",
+    )
+
+
+def test_signed_body_matching_headers_processes():
+    import asyncio
+
+    pipeline = ProcessingPipeline()
+    bridge = _bridge(pipeline, FakeLedger())
+    result = asyncio.run(_submit_body(bridge, _signed_body()))
+    assert pipeline.calls == 1
+    assert result.orderId == "ord_ok_1"
+
+
+def test_signed_body_idempotency_key_mismatch_rejected():
+    import asyncio
+
+    pipeline = ProcessingPipeline()
+    bridge = _bridge(pipeline, FakeLedger())
+    # Header idempotency key differs from the signed body's key -> replay attempt.
+    body = _signed_body(idempotencyKey="ORIGINAL-KEY")
+    with pytest.raises(AppException) as ei:
+        asyncio.run(_submit_body(bridge, body, idempotency_key="FRESH-KEY"))
+    assert ei.value.error_code == ErrorCode.VOICE_UNAUTHORIZED
+    assert pipeline.calls == 0
+
+
+def test_signed_body_timestamp_mismatch_rejected():
+    import asyncio
+
+    pipeline = ProcessingPipeline()
+    bridge = _bridge(pipeline, FakeLedger())
+    # Header timestamp differs from the signed body's timestamp -> replay attempt.
+    body = _signed_body(timestamp="2020-01-01T00:00:00+00:00")
+    with pytest.raises(AppException) as ei:
+        asyncio.run(_submit_body(bridge, body))  # header uses VALID_TIMESTAMP
+    assert ei.value.error_code == ErrorCode.VOICE_UNAUTHORIZED
+    assert pipeline.calls == 0
+
+
+def test_signed_body_timestamp_z_suffix_equivalent_ok():
+    import asyncio
+
+    # 'Z' vs '+00:00' for the same instant must NOT be rejected.
+    pipeline = ProcessingPipeline()
+    bridge = _bridge(pipeline, FakeLedger())
+    z_ts = VALID_TIMESTAMP.replace("+00:00", "Z")
+    body = _signed_body(timestamp=z_ts)
+    result = asyncio.run(_submit_body(bridge, body))  # header keeps +00:00 form
+    assert pipeline.calls == 1
+    assert result.orderId == "ord_ok_1"
+
+
 def test_extract_invalid_fields_field_level():
     # gallons must be > 0 and lat in range — field-level errors carry loc.
     doc = {

@@ -220,3 +220,20 @@ def test_explicit_snake_case_still_accepted():
     result = adapter.transform(payload, _context())
     assert result.order_doc["customer_name"] == "Acme Co"
     assert result.order_doc["ship_to_address"] == "123 Depot Rd"
+
+
+def test_confidence_score_alias_populates_agent_confidence():
+    # Dinee sends confidenceScore; it must land on intake_metadata.agent_confidence.
+    adapter = VoiceIntakeAdapter()
+    payload = _dinee_payload()
+    payload["confidenceScore"] = 0.87
+    result = adapter.transform(payload, _context())
+    assert result.order_doc["intake_metadata"]["agent_confidence"] == 0.87
+
+
+def test_agent_confidence_canonical_still_accepted():
+    adapter = VoiceIntakeAdapter()
+    payload = _dinee_payload()
+    payload["agentConfidence"] = 0.5
+    result = adapter.transform(payload, _context())
+    assert result.order_doc["intake_metadata"]["agent_confidence"] == 0.5
