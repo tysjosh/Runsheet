@@ -88,6 +88,30 @@ def _reset_settings_cache() -> Generator[None, None, None]:
         clear_settings_cache()
 
 
+@pytest.fixture(autouse=True)
+def _reset_ref_resolver() -> Generator[None, None, None]:
+    """Reset the process-wide ``RefResolver`` around every test.
+
+    ``services.ref_resolver.get_ref_resolver`` is a lazily-built process-wide
+    singleton, and endpoint modules fall back to it when no resolver is injected
+    (e.g. ``fuel_ops_endpoints._get_ref_resolver``). Bootstrap-style tests
+    register entity loaders (``customer``, ``order``, ...) on that singleton and
+    never unregister them, so unrelated tests later in the session suddenly had
+    write-time reference validation switched on and rejected fixture ids that
+    do not exist in their fake data.
+
+    ``configure_ref_resolver(None)`` is the module's documented test seam; using
+    it on both sides of every test keeps reference validation opt-in per test.
+    """
+    from services.ref_resolver import configure_ref_resolver
+
+    configure_ref_resolver(None)
+    try:
+        yield
+    finally:
+        configure_ref_resolver(None)
+
+
 @pytest.fixture(scope="session")
 def event_loop() -> Generator[asyncio.AbstractEventLoop, None, None]:
     """Create an event loop for the test session."""
