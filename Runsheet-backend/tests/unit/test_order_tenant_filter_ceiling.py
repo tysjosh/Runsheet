@@ -56,6 +56,14 @@ ALLOWLISTED_PATH_PATTERNS: List[str] = [
     "scripts/",
     "bootstrap/",
     "test_order_tenant_filter_ceiling.py",
+    # Not queries: ``TIMESTAMP_SKIP_INDICES`` is a module-level frozenset of
+    # index NAMES used to decide auto-stamping of created_at/updated_at. No ES
+    # query is built here, so there is nothing to scope.
+    "services/elasticsearch_service.py",
+    # Not queries: a ``(index_name, seeder_fn)`` dispatch table for the local
+    # demo seeder. Seeding is deliberately tenant-agnostic (docs are stamped
+    # tenant_id="demo") and is gated behind settings.seed_demo_data.
+    "seed_all_data.py",
 ]
 
 #: Directories to skip entirely during scanning.
@@ -67,6 +75,11 @@ SKIP_DIRS: Set[str] = {
     "__pycache__",
     "node_modules",
     ".git",
+    # Alembic revisions are schema DDL and cross-tenant backfills: they operate
+    # on whole tables/indices by definition, so a per-tenant filter is not
+    # applicable (and adding one would break the migration). They are never a
+    # request-path read, which is what this ceiling protects.
+    "alembic",
 }
 
 

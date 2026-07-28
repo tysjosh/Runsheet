@@ -12,6 +12,14 @@ Shared pytest fixtures and configuration for all tests.
 # this performs no network I/O.
 import services.elasticsearch_service  # noqa: F401,E402
 
+# Same rationale for ``prometheus_client``: ``tests/unit/test_compatibility_adapters.py``
+# installs a ``MagicMock`` under that name at import time (guarded by
+# ``if "prometheus_client" not in sys.modules``). When it is collected first,
+# every metric built afterwards is a MagicMock, so counter assertions compare
+# mock objects instead of numbers. Importing the real module here makes that
+# guard a no-op regardless of collection order.
+import prometheus_client  # noqa: F401,E402
+
 import pytest
 import asyncio
 from typing import Generator, AsyncGenerator
@@ -102,14 +110,43 @@ def _reset_ref_resolver() -> Generator[None, None, None]:
 
     ``configure_ref_resolver(None)`` is the module's documented test seam; using
     it on both sides of every test keeps reference validation opt-in per test.
+
+    Several endpoint modules additionally cache their OWN ``_ref_resolver``
+    override which takes precedence over the process-wide one
+    (``_get_ref_resolver()`` returns the module global when set). A test that
+    injects a fake there leaves it installed, so a later test calling the
+    documented ``configure_ref_resolver`` seam was silently ignored. Clear those
+    module-level overrides too, but only for modules already imported so this
+    fixture never forces an import.
     """
+    import sys
+
     from services.ref_resolver import configure_ref_resolver
 
-    configure_ref_resolver(None)
+    # Modules that shadow the process-wide resolver with a module-level override.
+    _resolver_override_modules = (
+        "fuel.api.order_endpoints",
+        "fuel.api.fuel_ops_endpoints",
+        "fuel.api.driver_endpoints",
+        "scheduling.api.endpoints",
+        "compliance.api.asset_certification_endpoints",
+        "commerce.api.account_endpoints",
+        "commerce.api.invoice_endpoints",
+        "commerce.api.payment_endpoints",
+    )
+
+    def _reset() -> None:
+        configure_ref_resolver(None)
+        for name in _resolver_override_modules:
+            mod = sys.modules.get(name)
+            if mod is not None and getattr(mod, "_ref_resolver", None) is not None:
+                mod._ref_resolver = None
+
+    _reset()
     try:
         yield
     finally:
-        configure_ref_resolver(None)
+        _reset()
 
 
 @pytest.fixture(scope="session")

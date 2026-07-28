@@ -1283,8 +1283,22 @@ class TankForecastingAgent(OverlayAgentBase):
         """Compute a TankForecast for a single (station, grade) pair.
 
         Uses fuel_calculations.py logic for baseline consumption rate
-        estimation (Req 1.6). When no historical data exists, assigns
-        default risk of 0.5 with confidence 0.1 (Req 1.7).
+        estimation (Req 1.6).
+
+        Zero-history behavior (see the branch below) DIVERGES from the original
+        Req 1.7 wording, which specified a flat ``runout_risk_24h=0.5`` /
+        ``confidence=0.1``. The current implementation instead projects a real
+        forecast from ``DEFAULT_CONSUMPTION_RATE`` (or the station's
+        ``daily_consumption_rate`` when cached), reports ``confidence=0.5``, and
+        tags the forecast ``insufficient_data`` + ``using_default_rate``.
+
+        ⚠️  Consequence: a tank with no consumption history whose projected p50
+        exceeds the 24h horizon reports ``runout_risk_24h=0.0`` — i.e. "no
+        risk" — which can de-prioritise it during dispatch even though the
+        estimate is not evidence-based. Consumers should treat the
+        ``insufficient_data`` / ``using_default_rate`` flags as the signal that
+        the risk figure is not trustworthy. Reconciling this with Req 1.7 is an
+        open product decision.
         """
         anomaly_flags = self._anomaly_cache.get(station_id, [])
 
