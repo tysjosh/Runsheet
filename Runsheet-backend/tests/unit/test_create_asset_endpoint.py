@@ -12,15 +12,28 @@ import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
 from fastapi.testclient import TestClient
 
+from tests.support.auth_seam import auth_headers, install_test_auth
+
 
 @pytest.fixture
 def client():
-    """Create a test client with mocked ES service."""
+    """Create a test client with mocked ES service and an authenticated scope.
+
+    ``POST /api/fleet/assets`` depends on ``get_tenant_context``, and the global
+    ``AuthEnforcementMiddleware`` rejects unauthenticated requests, so the
+    Test_Auth_Path seam is installed and every request carries an admin scope.
+    Without it each call returns 401 instead of exercising the endpoint.
+    """
     with patch("data_endpoints.elasticsearch_service") as mock_es:
         mock_es.index_document = AsyncMock(return_value={"result": "created"})
         from main import app
-        with TestClient(app) as c:
-            yield c, mock_es
+
+        install_test_auth(app)
+        try:
+            with TestClient(app, headers=auth_headers("t1")) as c:
+                yield c, mock_es
+        finally:
+            app.dependency_overrides.clear()
 
 
 class TestCreateFleetAsset:

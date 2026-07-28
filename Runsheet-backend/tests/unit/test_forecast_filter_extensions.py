@@ -23,6 +23,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from Agents.support.mvp_endpoints import configure_mvp_endpoints, router
+from tests.support.auth_seam import auth_headers, install_test_auth
 
 
 def _build_app() -> tuple[FastAPI, MagicMock]:
@@ -36,7 +37,16 @@ def _build_app() -> tuple[FastAPI, MagicMock]:
         }
     )
     configure_mvp_endpoints(pipeline=MagicMock(), es_service=es)
+    # These endpoints depend on ``get_tenant_context``; without the
+    # Test_Auth_Path override the dependency reaches the real SuperTokens
+    # verifier and raises "Initialisation not done".
+    install_test_auth(app)
     return app, es
+
+
+def _client(app: FastAPI) -> TestClient:
+    """A TestClient that carries an authenticated tenant scope on every call."""
+    return TestClient(app, headers=auth_headers("t1"))
 
 
 def _must_clauses_from_last_query(es: MagicMock) -> List[Dict[str, Any]]:
@@ -59,7 +69,7 @@ def _term_value(must: List[Dict[str, Any]], field: str) -> Any:
 class TestForecastFilterExtensions:
     def test_customer_tank_id_lands_in_query(self):
         app, es = _build_app()
-        client = TestClient(app)
+        client = _client(app)
 
         resp = client.get(
             "/api/fuel/mvp/forecasts",
@@ -70,7 +80,7 @@ class TestForecastFilterExtensions:
 
     def test_customer_id_lands_in_query(self):
         app, es = _build_app()
-        client = TestClient(app)
+        client = _client(app)
 
         client.get(
             "/api/fuel/mvp/forecasts",
@@ -80,7 +90,7 @@ class TestForecastFilterExtensions:
 
     def test_customer_type_lands_in_query(self):
         app, es = _build_app()
-        client = TestClient(app)
+        client = _client(app)
 
         client.get(
             "/api/fuel/mvp/forecasts",
@@ -90,7 +100,7 @@ class TestForecastFilterExtensions:
 
     def test_fuel_type_lands_in_query(self):
         app, es = _build_app()
-        client = TestClient(app)
+        client = _client(app)
 
         client.get(
             "/api/fuel/mvp/forecasts",
@@ -100,7 +110,7 @@ class TestForecastFilterExtensions:
 
     def test_fuel_grade_alias_is_canonicalized(self):
         app, es = _build_app()
-        client = TestClient(app)
+        client = _client(app)
 
         client.get(
             "/api/fuel/mvp/forecasts",
@@ -110,7 +120,7 @@ class TestForecastFilterExtensions:
 
     def test_unknown_fuel_grade_falls_back_to_raw(self):
         app, es = _build_app()
-        client = TestClient(app)
+        client = _client(app)
 
         client.get(
             "/api/fuel/mvp/forecasts",
@@ -121,7 +131,7 @@ class TestForecastFilterExtensions:
 
     def test_multiple_filters_are_combined(self):
         app, es = _build_app()
-        client = TestClient(app)
+        client = _client(app)
 
         client.get(
             "/api/fuel/mvp/forecasts",
@@ -139,11 +149,19 @@ class TestForecastFilterExtensions:
         assert _term_value(must, "fuel_type") == "diesel"
 
     def test_tenant_scoping_always_present(self):
+        """The query is always scoped to the SESSION tenant.
+
+        A client-supplied ``tenant_id`` query parameter must never influence
+        scoping (Req 5.1/5.2): the endpoint derives the tenant solely from the
+        verified context, so passing a foreign ``tenant_id`` is ignored rather
+        than honored.
+        """
         app, es = _build_app()
-        client = TestClient(app)
+        client = _client(app)  # authenticated as tenant "t1"
 
         client.get(
             "/api/fuel/mvp/forecasts",
             params={"tenant_id": "tenant-xyz"},
         )
-        assert _term_value(_must_clauses_from_last_query(es), "tenant_id") == "tenant-xyz"
+        # Scoped to the credential-bound tenant, NOT the query parameter.
+        assert _term_value(_must_clauses_from_last_query(es), "tenant_id") == "t1"
