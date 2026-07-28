@@ -200,9 +200,12 @@ class TestValidateMappingCombined:
 class TestAutoMapAllDataTypes:
     """Verify auto_map works for all supported data types."""
 
+    # NOTE: ``support_tickets`` (and ``riders``) were dropped from
+    # SchemaTemplates.TEMPLATES with the legacy last-mile cleanup; the
+    # supported set is now fleet / fuel_stations / inventory / jobs / orders.
     @pytest.mark.parametrize("data_type", [
         "fleet", "orders", "fuel_stations",
-        "inventory", "support_tickets", "jobs",
+        "inventory", "jobs",
     ])
     def test_identity_mapping(self, mapper: FieldMapper, data_type: str):
         """When source columns exactly match target field names, all should be mapped."""

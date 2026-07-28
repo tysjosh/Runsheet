@@ -108,8 +108,12 @@ class TestSetOverlayState:
             "dispatch_optimizer", "tenant-1", "shadow", "user-admin"
         )
         assert result == "disabled"
+        # Overlay flags are written with a 90-day TTL so a stale rollout state
+        # cannot outlive the migration window (ops/services/feature_flags.py).
         service.client.set.assert_awaited_once_with(
-            "overlay_ff:dispatch_optimizer:tenant-1", "shadow"
+            "overlay_ff:dispatch_optimizer:tenant-1",
+            "shadow",
+            ex=90 * 24 * 60 * 60,
         )
 
     @pytest.mark.asyncio
