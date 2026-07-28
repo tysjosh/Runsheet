@@ -117,6 +117,29 @@ def resource_not_found(
     )
 
 
+def legacy_ng_delivery_disabled(
+    surface: Optional[str] = None,
+) -> AppException:
+    """Create the 404 raised when the legacy NG last-mile surface is off.
+
+    The ``legacy_ng_delivery`` flag defaults OFF (product-owner audit
+    2026-05-08 recommendation #1), which hides the pre-pivot Nigerian
+    rider/shipment surface from US fuel tenants.
+
+    Args:
+        surface: Optional name of the blocked surface, echoed in ``details``
+            so operators can tell which gated route was hit.
+    """
+    return AppException(
+        error_code=ErrorCode.LEGACY_NG_DELIVERY_DISABLED,
+        message=(
+            "The legacy Nigerian last-mile delivery surface is disabled. "
+            "Set LEGACY_NG_DELIVERY_ENABLED=true to re-enable it."
+        ),
+        details={"surface": surface} if surface else None,
+    )
+
+
 def unauthorized(
     message: str = "Authentication required",
     details: Optional[dict[str, Any]] = None
@@ -572,6 +595,79 @@ def voice_tenant_mismatch(
     """Create a voice tenant mismatch exception (HTTP 403)."""
     return AppException(
         error_code=ErrorCode.VOICE_TENANT_MISMATCH,
+        message=message,
+        details=details
+    )
+
+
+# --- Fuel-ops / compliance entity-lookup factory functions ---
+#
+# These wrap error codes whose *wire value* is lower-case because the
+# endpoints below shipped with a raw ``HTTPException`` carrying
+# ``detail.error_code``. The generic ``resource_not_found`` /
+# ``internal_error`` factories would have renamed the code clients match
+# on, so each site keeps its published code through a dedicated factory.
+
+
+def depot_not_found(
+    message: str = "Depot not found",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a depot-not-found exception (HTTP 404)."""
+    return AppException(
+        error_code=ErrorCode.DEPOT_NOT_FOUND,
+        message=message,
+        details=details
+    )
+
+
+def driver_not_found(
+    message: str = "Referenced driver does not exist in this tenant.",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a driver-not-found exception (HTTP 400).
+
+    Note the 400: this is a *reference validation* failure on a submitted
+    payload field, not a missing addressed resource.
+    """
+    return AppException(
+        error_code=ErrorCode.DRIVER_NOT_FOUND,
+        message=message,
+        details=details
+    )
+
+
+def terminal_not_found(
+    message: str = "Terminal not found",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a terminal-not-found exception (HTTP 404)."""
+    return AppException(
+        error_code=ErrorCode.TERMINAL_NOT_FOUND,
+        message=message,
+        details=details
+    )
+
+
+def supplier_contract_not_found(
+    message: str = "Supplier contract not found",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a supplier-contract-not-found exception (HTTP 404)."""
+    return AppException(
+        error_code=ErrorCode.SUPPLIER_CONTRACT_NOT_FOUND,
+        message=message,
+        details=details
+    )
+
+
+def kfactor_variance_history_failed(
+    message: str = "Failed to load K-factor variance history.",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a K-factor variance-history failure exception (HTTP 500)."""
+    return AppException(
+        error_code=ErrorCode.KFACTOR_VARIANCE_HISTORY_FAILED,
         message=message,
         details=details
     )

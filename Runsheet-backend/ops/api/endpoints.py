@@ -19,8 +19,9 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
+from config.legacy_flags import is_legacy_ng_delivery_enabled
 from config.settings import get_settings
-from errors.exceptions import validation_error
+from errors.exceptions import legacy_ng_delivery_disabled, validation_error
 from middleware.rate_limiter import limiter
 from ops.middleware.pii_masker import PIIMasker, log_pii_access
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context, inject_tenant_filter
@@ -73,10 +74,22 @@ async def require_ops_enabled(
     tenant: TenantContext = Depends(get_tenant_context),
 ) -> TenantContext:
     """
-    FastAPI dependency that checks the feature flag for the tenant.
+    FastAPI dependency that checks the feature flags for this surface.
 
-    Raises HTTPException(404) with TENANT_DISABLED code when the Ops
-    Intelligence Layer is disabled for the requesting tenant.
+    Two independent gates, checked in order:
+
+    1. ``legacy_ng_delivery`` (deployment-wide, default OFF) — every route
+       behind this dependency reads the pre-pivot Nigerian last-mile model
+       (``shipments_current`` / ``riders_current`` / Dinee replay + drift).
+       When the flag is off the whole surface 404s with
+       ``LEGACY_NG_DELIVERY_DISABLED``. Ops platform monitoring
+       (``/monitoring/*``, ``/metrics/prometheus``) and the per-tenant
+       feature-flag admin routes deliberately do NOT depend on this, so
+       operators can still observe and manage a disabled surface.
+       Audit reference: product-owner-audit-2026-05-08 recommendation #1.
+    2. Per-tenant ops rollout flag — raises HTTPException(404) with
+       TENANT_DISABLED when the Ops Intelligence Layer is disabled for the
+       requesting tenant.
 
     In development mode the feature-flag gate can be bypassed, but only
     when ``ALLOW_OPS_DEV_BYPASS=true`` is *also* set (two-key posture,
@@ -86,6 +99,15 @@ async def require_ops_enabled(
 
     Validates: Requirement 27.3
     """
+    # --- Gate 1: legacy NG last-mile surface kill switch (default OFF) ---
+    if not is_legacy_ng_delivery_enabled():
+        logger.info(
+            "Ops API request blocked: legacy_ng_delivery is disabled "
+            "(tenant_id=%s)",
+            tenant.tenant_id,
+        )
+        raise legacy_ng_delivery_disabled(surface="ops_riders_shipments")
+
     # Development bypass is opt-in via an explicit second key so dev/prod
     # parity is preserved by default.
     if (

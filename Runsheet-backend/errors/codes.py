@@ -66,6 +66,9 @@ class ErrorCode(str, Enum):
     
     TENANT_DISABLED = "TENANT_DISABLED"
     """Tenant ops intelligence is disabled via feature flag (HTTP 404)"""
+
+    LEGACY_NG_DELIVERY_DISABLED = "LEGACY_NG_DELIVERY_DISABLED"
+    """Legacy Nigerian last-mile surface is off via ``legacy_ng_delivery`` (HTTP 404)"""
     
     # Ops Intelligence errors (5xx / operational)
     POISON_QUEUE_MAX_RETRIES = "POISON_QUEUE_MAX_RETRIES"
@@ -167,6 +170,29 @@ class ErrorCode(str, Enum):
     VOICE_TENANT_MISMATCH = "VOICE_TENANT_MISMATCH"
     """X-Runsheet-Tenant does not match the tenant bound to the presented credential (HTTP 403)"""
 
+    # Fuel-ops / compliance entity-lookup errors (4xx, 5xx)
+    #
+    # NOTE: unlike the rest of this catalog these values are lower-case.
+    # They are the already-shipped wire strings for endpoints that used to
+    # raise a raw ``HTTPException`` with a ``detail.error_code`` payload.
+    # Migrating those handlers to the structured ``ErrorResponse`` envelope
+    # must not change the code clients match on, so the value is frozen as
+    # the original string while the member name follows the enum convention.
+    DEPOT_NOT_FOUND = "depot_not_found"
+    """Depot does not exist for the tenant (HTTP 404)"""
+
+    DRIVER_NOT_FOUND = "driver_not_found"
+    """Referenced driver does not resolve in the tenant (HTTP 400)"""
+
+    TERMINAL_NOT_FOUND = "terminal_not_found"
+    """Terminal does not exist for the tenant (HTTP 404)"""
+
+    SUPPLIER_CONTRACT_NOT_FOUND = "supplier_contract_not_found"
+    """Supplier contract does not exist for the tenant (HTTP 404)"""
+
+    KFACTOR_VARIANCE_HISTORY_FAILED = "kfactor.variance_history_failed"
+    """Per-tank K-factor variance history could not be loaded (HTTP 500)"""
+
     # Internal errors (5xx)
     INTERNAL_ERROR = "INTERNAL_ERROR"
     """Unexpected server error (HTTP 500)"""
@@ -193,6 +219,7 @@ ERROR_CODE_STATUS_MAP: dict[ErrorCode, int] = {
     ErrorCode.WEBHOOK_SCHEMA_UNKNOWN: 200,
     ErrorCode.TENANT_NOT_FOUND: 404,
     ErrorCode.TENANT_DISABLED: 404,
+    ErrorCode.LEGACY_NG_DELIVERY_DISABLED: 404,
     ErrorCode.POISON_QUEUE_MAX_RETRIES: 422,
     ErrorCode.DRIFT_THRESHOLD_EXCEEDED: 409,
     ErrorCode.BACKFILL_IN_PROGRESS: 409,
@@ -229,6 +256,12 @@ ERROR_CODE_STATUS_MAP: dict[ErrorCode, int] = {
     ErrorCode.VOICE_PAYLOAD_INVALID: 422,
     ErrorCode.VOICE_UNAUTHORIZED: 401,
     ErrorCode.VOICE_TENANT_MISMATCH: 403,
+    # Fuel-ops / compliance entity-lookup error codes
+    ErrorCode.DEPOT_NOT_FOUND: 404,
+    ErrorCode.DRIVER_NOT_FOUND: 400,
+    ErrorCode.TERMINAL_NOT_FOUND: 404,
+    ErrorCode.SUPPLIER_CONTRACT_NOT_FOUND: 404,
+    ErrorCode.KFACTOR_VARIANCE_HISTORY_FAILED: 500,
 }
 
 

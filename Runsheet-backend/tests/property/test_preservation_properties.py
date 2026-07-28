@@ -229,6 +229,16 @@ class TestOpsTenantScoping:
     This behavior must be preserved after the fix.
     """
 
+    @pytest.fixture(autouse=True)
+    def _enable_legacy_ng_delivery(self, monkeypatch):
+        """``/api/ops/shipments`` is part of the legacy NG last-mile surface,
+        gated behind ``legacy_ng_delivery`` (default OFF). Enable it so the
+        tenant-scoping property still reaches the ES query.
+
+        Audit reference: product-owner-audit-2026-05-08 recommendation #1.
+        """
+        monkeypatch.setenv("LEGACY_NG_DELIVERY_ENABLED", "true")
+
     @given(tid=tenant_id_strategy)
     @settings(max_examples=20, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
     def test_ops_shipments_scoped_to_jwt_tenant(self, tid: str, preservation_app):
@@ -787,6 +797,13 @@ class TestFeatureFlagTenantDisabled:
     For disabled tenants, ops endpoints return 404 with TENANT_DISABLED.
     This behavior must be preserved.
     """
+
+    @pytest.fixture(autouse=True)
+    def _enable_legacy_ng_delivery(self, monkeypatch):
+        """Enable the deployment-wide ``legacy_ng_delivery`` gate (default OFF)
+        so this test still asserts the *per-tenant* TENANT_DISABLED path rather
+        than the surface-level 404."""
+        monkeypatch.setenv("LEGACY_NG_DELIVERY_ENABLED", "true")
 
     def test_disabled_tenant_gets_404(self, preservation_app):
         """

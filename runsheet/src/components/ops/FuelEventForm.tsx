@@ -4,7 +4,6 @@ import { ArrowDown, ArrowUp, Loader2, X } from "lucide-react";
 import { useCallback, useState } from "react";
 import type { FuelStation } from "../../services/fuelApi";
 import {
-  gallonsToLiters,
   getFuelStationCapacityGallons,
   getFuelStationCurrentStockGallons,
   recordConsumption,
@@ -72,7 +71,7 @@ export default function FuelEventForm({
           await recordConsumption({
             station_id: station.station_id,
             fuel_type: station.fuel_type,
-            quantity_liters: gallonsToLiters(Number(quantity)),
+            quantity_gallons: Number(quantity),
             asset_id: assetId.trim(),
             operator_id: operatorId.trim(),
             odometer_reading: odometer ? Number(odometer) : undefined,
@@ -81,7 +80,7 @@ export default function FuelEventForm({
           await recordRefill({
             station_id: station.station_id,
             fuel_type: station.fuel_type,
-            quantity_liters: gallonsToLiters(Number(quantity)),
+            quantity_gallons: Number(quantity),
             supplier: supplier.trim(),
             operator_id: operatorId.trim(),
             delivery_reference: deliveryRef.trim() || undefined,

@@ -558,6 +558,32 @@ class Settings(BaseSettings):
         description="Maximum concurrent active jobs per asset"
     )
 
+    # ── Legacy Nigerian Last-Mile Feature Flag ─────────────────────────
+    #
+    # Single kill switch for the pre-pivot Nigerian last-mile delivery
+    # surface (riders / shipments read API, Dinee event replay, Dinee drift
+    # comparison, the legacy support-ticket CRM). Default OFF so a fresh US
+    # fuel tenant never sees rider/shipment semantics.
+    #
+    # This flag gates *presentation and read surfaces only*. It deliberately
+    # does NOT touch the driver→rider dual-write, the ``riders_current``
+    # index, or the legacy webhook ingestion path — those are data-migration
+    # decisions with their own rollout mechanisms.
+    #
+    # Read it through ``config.legacy_flags.is_legacy_ng_delivery_enabled()``
+    # rather than off Settings directly, so the ``LEGACY_NG_DELIVERY_ENABLED``
+    # environment variable can flip the surface without a settings-cache
+    # reload.
+    legacy_ng_delivery_enabled: bool = Field(
+        default=False,
+        description=(
+            "Master feature flag for the legacy Nigerian last-mile delivery "
+            "surface (rider/shipment ops read API, Dinee replay + drift, "
+            "legacy support tickets). When off, those endpoints return 404. "
+            "Default: False."
+        ),
+    )
+
     # ── Commerce Backbone Feature Flags ────────────────────────────────
     #
     # These flags control the commerce backbone rollout per-tenant.

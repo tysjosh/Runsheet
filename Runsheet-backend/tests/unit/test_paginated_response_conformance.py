@@ -95,8 +95,11 @@ OPS_PAGINATED_PATHS = [
 
 
 @pytest.mark.parametrize("path", OPS_PAGINATED_PATHS)
-def test_ops_paginated_response_conformance(ops_client, path):
+def test_ops_paginated_response_conformance(ops_client, path, monkeypatch):
     """Ops paginated endpoints return PaginatedResponse-conforming JSON."""
+    # These are legacy NG last-mile routes, gated behind ``legacy_ng_delivery``
+    # (default OFF). Enable it so envelope conformance stays covered.
+    monkeypatch.setenv("LEGACY_NG_DELIVERY_ENABLED", "true")
     resp = ops_client.get(path)
     assert resp.status_code == 200
     body = resp.json()
