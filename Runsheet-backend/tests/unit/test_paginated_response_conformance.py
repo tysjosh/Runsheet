@@ -353,7 +353,14 @@ def agent_client():
 
     app.add_middleware(FakeRequestID)
     app.include_router(agent_router)
-    return TestClient(app)
+    # The agent routes depend on ``get_tenant_context``; without the
+    # Test_Auth_Path override the dependency reaches the real SuperTokens
+    # verifier and raises "Initialisation not done". The fuel/scheduling
+    # fixtures above already override it — do the same here.
+    from tests.support.auth_seam import auth_headers, install_test_auth
+
+    install_test_auth(app)
+    return TestClient(app, headers=auth_headers("t1"))
 
 
 AGENT_PAGINATED_PATHS = [
