@@ -63,6 +63,31 @@ import os
 settings.load_profile(os.getenv("HYPOTHESIS_PROFILE", "default"))
 
 
+@pytest.fixture(autouse=True)
+def _reset_settings_cache() -> Generator[None, None, None]:
+    """Clear the cached ``Settings`` singleton around every test.
+
+    ``config.settings.get_settings`` is an ``lru_cache``d singleton. Several
+    tests (notably ``tests/unit/test_settings.py``) build settings inside
+    ``patch.dict(os.environ, ..., clear=True)``, which wipes ``ENVIRONMENT=test``
+    and the real Elastic config. Those tests cleared the cache *before* running
+    but never *after*, so the cache kept a ``Settings`` object constructed from
+    the throwaway environment (``environment=development``, dummy endpoints) and
+    every later test in the session silently read that poisoned config. That is
+    what made ~117 unit tests fail in-suite while passing in isolation.
+
+    Clearing on both sides of every test makes settings per-test deterministic
+    regardless of collection order, without each test file having to remember.
+    """
+    from config.settings import clear_settings_cache
+
+    clear_settings_cache()
+    try:
+        yield
+    finally:
+        clear_settings_cache()
+
+
 @pytest.fixture(scope="session")
 def event_loop() -> Generator[asyncio.AbstractEventLoop, None, None]:
     """Create an event loop for the test session."""
