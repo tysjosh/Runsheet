@@ -239,7 +239,16 @@ def scheduling_client(scheduling_mock_es):
     )
 
     async def _override_tenant():
-        return TenantContext(tenant_id="t1", user_id="u1", has_pii_access=False)
+        # ``GET /api/scheduling/jobs`` is a dispatcher surface and now carries
+        # ``require_role(tenant, "dispatcher", "admin")`` (driver-mobile-app
+        # Req 3.13), so this envelope-conformance session has to hold one of
+        # those roles to reach the handler.
+        return TenantContext(
+            tenant_id="t1",
+            user_id="u1",
+            has_pii_access=False,
+            roles=["dispatcher"],
+        )
 
     app.dependency_overrides[get_tenant_context] = _override_tenant
 

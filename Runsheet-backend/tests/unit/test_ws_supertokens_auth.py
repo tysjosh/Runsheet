@@ -49,6 +49,48 @@ def _reset_verifier():
 
 
 class TestExtractSessionCredential:
+    def test_authorization_header_wins_over_cookie_and_query(self):
+        """Mobile transport: header → cookie → ?token=. Driver-mobile Req 14.1."""
+        websocket = _make_ws(
+            query_params={"token": "query-token"},
+            headers={
+                "authorization": "Bearer header-token",
+                "cookie": "sAccessToken=cookie-token",
+                "anti-csrf": "csrf-1",
+            },
+        )
+        token, anti_csrf = ws._extract_session_credential(websocket)
+        assert token == "header-token"
+        assert anti_csrf == "csrf-1"
+
+    def test_authorization_header_only(self):
+        websocket = _make_ws(headers={"authorization": "Bearer header-token"})
+        token, anti_csrf = ws._extract_session_credential(websocket)
+        assert token == "header-token"
+        assert anti_csrf is None
+
+    def test_authorization_scheme_is_case_insensitive(self):
+        websocket = _make_ws(headers={"authorization": "bearer header-token"})
+        token, _ = ws._extract_session_credential(websocket)
+        assert token == "header-token"
+
+    def test_non_bearer_authorization_falls_through_to_cookie(self):
+        """A non-Bearer scheme must not shadow the existing cookie transport."""
+        websocket = _make_ws(
+            headers={"authorization": "Basic dXNlcjpwYXNz",
+                     "cookie": "sAccessToken=cookie-token"},
+        )
+        token, _ = ws._extract_session_credential(websocket)
+        assert token == "cookie-token"
+
+    def test_empty_bearer_credential_falls_through_to_query(self):
+        websocket = _make_ws(
+            query_params={"token": "query-token"},
+            headers={"authorization": "Bearer "},
+        )
+        token, _ = ws._extract_session_credential(websocket)
+        assert token == "query-token"
+
     def test_cookie_first(self):
         websocket = _make_ws(
             query_params={"token": "query-token"},
@@ -158,6 +200,25 @@ class TestAuthenticateDriverSupertokens:
             result = await ws._authenticate_driver(websocket)
 
         assert result == ("t-1", "d-1")
+
+    @pytest.mark.asyncio
+    async def test_bearer_header_credential_authenticates_driver(self):
+        """A mobile handshake carrying the credential in the Authorization
+        header authenticates ``/ws/driver``. Driver-mobile Req 14.1, 14.3."""
+        seen = {}
+
+        async def fake_verify(access_token, anti_csrf):
+            seen["token"] = access_token
+            return {"tenant_id": "t-1", "driver_id": "d-1"}
+
+        ws.configure_ws_session_verifier(fake_verify)
+        websocket = _make_ws(headers={"authorization": "Bearer mobile-access-token"})
+
+        with patch("config.settings.get_settings", return_value=_make_settings()):
+            result = await ws._authenticate_driver(websocket)
+
+        assert result == ("t-1", "d-1")
+        assert seen["token"] == "mobile-access-token"
 
     @pytest.mark.asyncio
     async def test_session_missing_driver_returns_none(self):

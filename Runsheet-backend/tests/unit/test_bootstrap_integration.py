@@ -87,7 +87,8 @@ class TestFullBootstrapSequence:
         ``persistence`` boots right after ``core`` (the DB engine must exist
         before any module opens a session) and ``compliance`` after
         ``notifications``; both were added after this expectation was first
-        frozen.
+        frozen. ``driver`` sits after ``agents`` because ``redis_client`` is
+        not registered until ``bootstrap/agents.py``.
         """
         assert _BOOT_ORDER == [
             "core",
@@ -100,6 +101,7 @@ class TestFullBootstrapSequence:
             "notifications",
             "compliance",
             "agents",
+            "driver",
             "integrations",
         ]
 

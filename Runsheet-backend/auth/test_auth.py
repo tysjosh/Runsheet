@@ -122,6 +122,7 @@ def issue_test_context(
     has_pii_access: bool = True,
     *,
     user_id: Optional[str] = None,
+    driver_id: Optional[str] = None,
 ) -> TenantContext:
     """Build a valid ``TenantContext`` for tests (Req 11.1).
 
@@ -142,6 +143,12 @@ def issue_test_context(
             (Req 5.5). Defaults to a deterministic ``test-user::<tenant_id>``
             so two contexts for the same tenant share an identity while
             different tenants stay distinct.
+        driver_id: Optional canonical ``drivers_current.driver_id`` for driver
+            surface tests. Mirrors the tenant guard's coercion of the verified
+            claim: a non-empty string becomes the context value, and anything
+            else (omitted, ``None``, or blank) yields ``None`` so the driver
+            surface's fail-closed path (403 ``DRIVER_IDENTITY_MISSING``,
+            Req 1.6) stays exercised.
 
     Returns:
         A populated :class:`TenantContext`.
@@ -158,6 +165,14 @@ def issue_test_context(
 
     resolved_user_id = user_id if user_id else f"test-user::{tenant_id}"
 
+    # Same coercion the tenant guard applies to the verified ``driver_id``
+    # claim: only a non-empty string is an identity (Req 1.3, 1.4).
+    resolved_driver_id = (
+        driver_id.strip()
+        if isinstance(driver_id, str) and driver_id.strip()
+        else None
+    )
+
     settings = default_tenant_settings()
     return TenantContext(
         tenant_id=tenant_id,
@@ -166,6 +181,7 @@ def issue_test_context(
         roles=_normalize_roles(roles),
         region=settings.region,
         measurement_units=settings.measurement_units.to_dict(),
+        driver_id=resolved_driver_id,
     )
 
 

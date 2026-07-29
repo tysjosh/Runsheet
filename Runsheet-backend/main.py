@@ -200,7 +200,9 @@ app.add_middleware(
         "X-RateLimit-Reset", "X-Idempotent-Replayed",
         # SuperTokens issues the new session via these response headers; the
         # browser SDK must be able to read them across origins (Req 2.3, 8.4).
-        "front-token", "anti-csrf",
+        # st-access-token / st-refresh-token carry the session in header-based
+        # transfer mode, which the Expo-web driver client uses.
+        "front-token", "anti-csrf", "st-access-token", "st-refresh-token",
     ],
     max_age=600,
 )

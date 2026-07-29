@@ -112,6 +112,24 @@ class ExceptionRequest(BaseModel):
     media_refs: Optional[list[str]] = None
 
 
+class DriverStatusTransitionRequest(BaseModel):
+    """Request body for a driver-initiated fuel-order status transition.
+
+    ``status`` is the target status. ``event_timestamp`` is the **client's**
+    ISO-8601 stamp for when the driver performed the action, which may predate
+    the server's receipt by the length of an offline queue drain; it is recorded
+    on the appended order event as ``client_event_timestamp`` alongside the
+    server-stamped ``event_timestamp`` / ``ingested_at`` (R4.8).
+
+    Validates: Requirements 4.1, 4.8
+    """
+
+    status: str
+    event_timestamp: Optional[str] = None
+    reason: Optional[str] = None
+    notes: Optional[str] = None
+
+
 class PODRequest(BaseModel):
     """Request body for submitting proof of delivery.
 

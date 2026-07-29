@@ -14,6 +14,7 @@ import os
 import asyncio
 
 from bootstrap.container import ServiceContainer
+from bootstrap.routing import mount_router
 
 logger = logging.getLogger(__name__)
 
@@ -760,7 +761,9 @@ async def initialize(app, container: ServiceContainer) -> None:
         plan_execution_service=plan_execution_service,
         plan_execution_ws_manager=plan_execution_ws_manager,
     )
-    app.include_router(mvp_router)
+    # ``main.py`` already includes this router at import time, so mount through
+    # the idempotent helper: including it again would duplicate every MVP route.
+    mount_router(app, mvp_router)
     logger.info("MVP endpoints configured and router registered")
 
     # ---- Fuel Ops Hardening endpoints (Phase 3 Task 3.6 et al.) ----
@@ -775,8 +778,10 @@ async def initialize(app, container: ServiceContainer) -> None:
     )
 
     configure_fuel_ops_endpoints(es_service=es_service)
-    app.include_router(fuel_ops_router)
-    app.include_router(fuel_ops_mvp_router)
+    # Both routers are already included by ``main.py`` at import time; mounting
+    # them again here duplicated the whole fuel-ops surface.
+    mount_router(app, fuel_ops_router)
+    mount_router(app, fuel_ops_mvp_router)
     logger.info("Fuel-ops endpoints configured and routers registered")
 
     # Wire the fuel-planning WebSocket manager into the Tank Forecasting
@@ -1139,7 +1144,7 @@ async def initialize(app, container: ServiceContainer) -> None:
     )
 
     configure_job_reroute_routes(job_reroute_service=job_reroute_service)
-    app.include_router(job_reroute_router)
+    mount_router(app, job_reroute_router)
     logger.info("Cross-domain integration wiring complete")
 
     # ---- Fuel-Ops Hardening autonomous services (Task 12.1) -----------
@@ -1448,10 +1453,18 @@ async def initialize(app, container: ServiceContainer) -> None:
     try:
         from driver.api.pod_endpoints import configure_pod_endpoints
 
+        # ``order_repository`` / ``order_service`` must be passed here too:
+        # configure_pod_endpoints assigns every module global unconditionally,
+        # so omitting them would reset the order-keyed path to ``None`` after
+        # bootstrap/scheduling.py wired it.
         configure_pod_endpoints(
             es_service=es_service,
             job_service=container.job_service
                 if container.has("job_service") else None,
+            order_repository=container.get("order_repository")
+                if container.has("order_repository") else None,
+            order_service=container.get("order_service")
+                if container.has("order_service") else None,
             scheduling_ws_manager=container.scheduling_ws_manager
                 if container.has("scheduling_ws_manager") else None,
             driver_ws_manager=container.driver_ws_manager

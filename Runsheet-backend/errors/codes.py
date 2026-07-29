@@ -193,6 +193,88 @@ class ErrorCode(str, Enum):
     KFACTOR_VARIANCE_HISTORY_FAILED = "kfactor.variance_history_failed"
     """Per-tank K-factor variance history could not be loaded (HTTP 500)"""
 
+    # Driver Mobile App errors (4xx / 202)
+    #
+    # Values are UPPER_SNAKE, matching the rest of the catalog rather than the
+    # frozen lower-case fuel-ops lookup block above.
+    SESSION_EXPIRED = "SESSION_EXPIRED"
+    """Mobile session access token has expired, regardless of refresh-token validity (HTTP 401)"""
+
+    DRIVER_IDENTITY_MISSING = "DRIVER_IDENTITY_MISSING"
+    """Caller reached a driver surface with no driver_id on the TenantContext (HTTP 403)"""
+
+    DRIVER_RECORD_NOT_PROVISIONED = "DRIVER_RECORD_NOT_PROVISIONED"
+    """Driver-role user has no drivers_current record and cannot sign in (HTTP 403)"""
+
+    APP_ACCESS_ALREADY_LINKED = "APP_ACCESS_ALREADY_LINKED"
+    """Driver app access is already linked to another auth user (HTTP 409)"""
+
+    INVALID_PIN_FORMAT = "INVALID_PIN_FORMAT"
+    """Submitted PIN does not match the required format (HTTP 422)"""
+
+    WEAK_PIN = "WEAK_PIN"
+    """Submitted PIN fails the weak-PIN policy (HTTP 422)"""
+
+    PIN_VERIFICATION_FAILED = "PIN_VERIFICATION_FAILED"
+    """Submitted PIN did not verify (HTTP 403)"""
+
+    PIN_ATTEMPTS_EXCEEDED = "PIN_ATTEMPTS_EXCEEDED"
+    """Too many failed PIN attempts — lockout in force (HTTP 429)"""
+
+    OTP_REQUIRED = "OTP_REQUIRED"
+    """Tenant policy requires an OTP on POD submission and none was supplied (HTTP 422)"""
+
+    OTP_NOT_PROVISIONED = "OTP_NOT_PROVISIONED"
+    """OTP is required but none was provisioned for the delivery — fail closed (HTTP 409)"""
+
+    OTP_VERIFICATION_FAILED = "OTP_VERIFICATION_FAILED"
+    """Supplied POD OTP did not match the provisioned value (HTTP 403)"""
+
+    OTP_WINDOW_EXPIRED = "OTP_WINDOW_EXPIRED"
+    """Supplied POD OTP is outside its validity window (HTTP 409)"""
+
+    POD_GALLONS_CONFIRMATION_REQUIRED = "POD_GALLONS_CONFIRMATION_REQUIRED"
+    """Meter-ticket OCR failed or needs review — driver must confirm the gallon count (HTTP 409)"""
+
+    DELIVERED_GALLONS_REQUIRED = "DELIVERED_GALLONS_REQUIRED"
+    """POD records no refusal and carries no delivered_gallons value (HTTP 422)"""
+
+    POD_ORDER_REFERENCE_REQUIRED = "POD_ORDER_REFERENCE_REQUIRED"
+    """POD submission resolved to an absent or blank order reference (HTTP 422)"""
+
+    STOP_ALREADY_COMPLETED = "STOP_ALREADY_COMPLETED"
+    """Stop check-in targets a stop that is already completed (HTTP 409)"""
+
+    AMBIGUOUS_VOLUME_UNIT = "AMBIGUOUS_VOLUME_UNIT"
+    """Check-in supplied both actual_quantities (litres) and actual_quantities_gallons (HTTP 422)"""
+
+    VOLUME_QUANTITIES_REQUIRED = "VOLUME_QUANTITIES_REQUIRED"
+    """Check-in supplied neither actual_quantities nor actual_quantities_gallons (HTTP 422)"""
+
+    SENDER_IDENTITY_MISMATCH = "SENDER_IDENTITY_MISMATCH"
+    """Message body sender_id differs from the identity derived from TenantContext (HTTP 403)"""
+
+    ASSET_OUT_OF_SERVICE = "ASSET_OUT_OF_SERVICE"
+    """Assigned asset is out_of_service and cannot move to in_transit (HTTP 409)"""
+
+    PRETRIP_INSPECTION_REQUIRED = "PRETRIP_INSPECTION_REQUIRED"
+    """A pre-trip inspection is required and has not been recorded (HTTP 409)"""
+
+    ACTIVE_DELIVERY_IN_PROGRESS = "ACTIVE_DELIVERY_IN_PROGRESS"
+    """Duty-status transition blocked by an assigned order still in_transit (HTTP 409)"""
+
+    DUTY_STATUS_PROJECTION_PENDING = "DUTY_STATUS_PROJECTION_PENDING"
+    """Duty-status event is durable but the drivers_current projection write lags (HTTP 202)"""
+
+    HOS_LIMIT_REACHED = "HOS_LIMIT_REACHED"
+    """Hours-of-service limit reached — the transition is gated (HTTP 409)"""
+
+    HOS_FIGURES_UNAVAILABLE = "HOS_FIGURES_UNAVAILABLE"
+    """Hours-of-service figures could not be obtained to evaluate the gate (HTTP 409)"""
+
+    DRIVER_NOT_DISPATCH_ELIGIBLE = "DRIVER_NOT_DISPATCH_ELIGIBLE"
+    """Driver fails Dispatch_Eligibility for the requested operation (HTTP 409)"""
+
     # Internal errors (5xx)
     INTERNAL_ERROR = "INTERNAL_ERROR"
     """Unexpected server error (HTTP 500)"""
@@ -262,6 +344,33 @@ ERROR_CODE_STATUS_MAP: dict[ErrorCode, int] = {
     ErrorCode.TERMINAL_NOT_FOUND: 404,
     ErrorCode.SUPPLIER_CONTRACT_NOT_FOUND: 404,
     ErrorCode.KFACTOR_VARIANCE_HISTORY_FAILED: 500,
+    # Driver Mobile App error codes
+    ErrorCode.SESSION_EXPIRED: 401,
+    ErrorCode.DRIVER_IDENTITY_MISSING: 403,
+    ErrorCode.DRIVER_RECORD_NOT_PROVISIONED: 403,
+    ErrorCode.APP_ACCESS_ALREADY_LINKED: 409,
+    ErrorCode.INVALID_PIN_FORMAT: 422,
+    ErrorCode.WEAK_PIN: 422,
+    ErrorCode.PIN_VERIFICATION_FAILED: 403,
+    ErrorCode.PIN_ATTEMPTS_EXCEEDED: 429,
+    ErrorCode.OTP_REQUIRED: 422,
+    ErrorCode.OTP_NOT_PROVISIONED: 409,
+    ErrorCode.OTP_VERIFICATION_FAILED: 403,
+    ErrorCode.OTP_WINDOW_EXPIRED: 409,
+    ErrorCode.POD_GALLONS_CONFIRMATION_REQUIRED: 409,
+    ErrorCode.DELIVERED_GALLONS_REQUIRED: 422,
+    ErrorCode.POD_ORDER_REFERENCE_REQUIRED: 422,
+    ErrorCode.STOP_ALREADY_COMPLETED: 409,
+    ErrorCode.AMBIGUOUS_VOLUME_UNIT: 422,
+    ErrorCode.VOLUME_QUANTITIES_REQUIRED: 422,
+    ErrorCode.SENDER_IDENTITY_MISMATCH: 403,
+    ErrorCode.ASSET_OUT_OF_SERVICE: 409,
+    ErrorCode.PRETRIP_INSPECTION_REQUIRED: 409,
+    ErrorCode.ACTIVE_DELIVERY_IN_PROGRESS: 409,
+    ErrorCode.DUTY_STATUS_PROJECTION_PENDING: 202,
+    ErrorCode.HOS_LIMIT_REACHED: 409,
+    ErrorCode.HOS_FIGURES_UNAVAILABLE: 409,
+    ErrorCode.DRIVER_NOT_DISPATCH_ELIGIBLE: 409,
 }
 
 

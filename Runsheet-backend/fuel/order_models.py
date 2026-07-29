@@ -149,6 +149,17 @@ class FuelOrder(BaseModel):
     # existing same-tenant asset at write time (Req 2.3).
     assigned_asset_id: Optional[str] = None
     assigned_run_id: Optional[str] = None
+    # POD one-time code provisioned at dispatch by ``PODOTPService`` and the
+    # instant its validity window is measured from (driver-mobile-app R5.25,
+    # R5.28-R5.30). Both nullable: absent means the tenant does not require a
+    # code, which is the default. ``model_config`` is ``extra="forbid"`` and
+    # the ES mapping is ``dynamic: strict``, so either half alone would reject
+    # the write — and a stored document carrying an undeclared field would be
+    # dropped by ``_safe_order_load``. Never leaves the server on a
+    # ``/api/driver`` response: ``DriverWorkService`` strips ``pod_otp`` before
+    # serialization (R5.26).
+    pod_otp: Optional[str] = None
+    pod_otp_generated_at: Optional[datetime] = None
     legacy_origin_snapshot: Optional[str] = None
 
     source_schema_version: str = Field(..., min_length=1)
@@ -288,6 +299,12 @@ class Driver(BaseModel):
     driver_name: str = Field(..., min_length=1)
     phone: Optional[str] = None
     status: DriverStatus
+    # Duty-status projection bookkeeping. ``duty_status_event_id`` is the id of
+    # the Duty_Status_Event_Log document ``status`` projects and
+    # ``duty_status_updated_at`` is that event's ``server_received_at``. Both are
+    # optional: absent means the record predates the duty-status event log.
+    duty_status_event_id: Optional[str] = None
+    duty_status_updated_at: Optional[datetime] = None
     availability: Optional[str] = None
     assigned_truck_id: Optional[str] = None
     cdl_class: Optional[str] = None

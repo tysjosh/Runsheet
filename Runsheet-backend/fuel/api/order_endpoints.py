@@ -6,7 +6,8 @@ driver assignment, hold/release-hold, cancel, and bulk intake:
 
 * ``POST /api/orders`` — dispatcher keyboard create (JWT, dispatcher|admin).
 * ``POST /api/orders/bulk`` — batch upload ≤ 1000 rows (JWT, dispatcher|admin).
-* ``GET /api/orders`` — tenant-scoped list with filters (JWT, any role).
+* ``GET /api/orders`` — tenant-scoped list with filters
+  (JWT, dispatcher|admin — Req 3.13).
 * ``GET /api/orders/{order_id}`` — single order (JWT, any role).
 * ``GET /api/orders/{order_id}/events`` — event timeline (JWT, any role).
 * ``PATCH /api/orders/{order_id}/status`` — state-machine-guarded transition
@@ -35,6 +36,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, Query, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 
+from auth.authorization import require_role
 from errors.exceptions import (
     insufficient_role,
     missing_client_event_id,
@@ -667,9 +669,17 @@ async def list_orders(
     sort: Optional[str] = Query(default=None),
 ) -> OrderListResponse:
     """List fuel orders for the tenant with optional filters.
-    Any authenticated role can read orders.
-    Validates: Requirement 2.5.
+
+    This is a dispatcher surface: it accepts a ``driver_id`` filter but scopes
+    nothing to the caller, so a session holding only the ``driver`` role could
+    previously read every order in the tenant. The gate below closes that hole
+    — a ``driver``-only session now receives HTTP 403 ``INSUFFICIENT_ROLE`` and
+    must use ``GET /api/driver/work``, which is scoped to the caller's own
+    canonical ``driver_id`` (Req 3.13).
+
+    Validates: Requirements 2.5, 3.13.
     """
+    require_role(tenant, "dispatcher", "admin")
     repo = _get_repository()
     result = await repo.search(
         tenant_id=tenant.tenant_id,

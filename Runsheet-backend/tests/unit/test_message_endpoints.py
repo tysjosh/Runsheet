@@ -29,7 +29,6 @@ from fastapi.testclient import TestClient
 from driver.api.message_endpoints import (
     router as message_router,
     configure_message_endpoints,
-    _validate_sender_access,
 )
 from errors.exceptions import AppException
 
@@ -50,8 +49,26 @@ _SETTINGS_PATCH = nullcontext()
 # ---------------------------------------------------------------------------
 
 
-def _auth_headers(tenant_id: str = TENANT_ID) -> dict:
-    return auth_headers(tenant_id, sub="driver-1")
+def _auth_headers(
+    tenant_id: str = TENANT_ID,
+    *,
+    sub: str = "driver-1",
+    roles: list = None,
+    driver_id: str = "driver-1",
+) -> dict:
+    """A driver-scoped Test_Auth_Path header set.
+
+    ``/api/driver`` resolution runs ``require_driver_identity``, so the context
+    must hold the exact ``driver`` role and a canonical ``driver_id`` (Req 1.5,
+    1.6). The sender identity a message is stamped with is derived from this
+    context, never from the request body (Req 7.5–7.7).
+    """
+    return auth_headers(
+        tenant_id,
+        sub=sub,
+        roles=roles if roles is not None else ["driver"],
+        driver_id=driver_id,
+    )
 
 
 def _job_doc(
@@ -93,9 +110,33 @@ def _make_job_service(job_doc_return=None) -> MagicMock:
     return svc
 
 
+def _order_doc(
+    order_id="ORD_1",
+    tenant_id="t1",
+    assigned_driver_id="driver-1",
+) -> dict:
+    """Return a minimal fuel-order document for the order-keyed path."""
+    return {
+        "order_id": order_id,
+        "tenant_id": tenant_id,
+        "assigned_driver_id": assigned_driver_id,
+        "status": "in_transit",
+    }
+
+
+def _make_order_repository(order_return=None) -> MagicMock:
+    """Create a mock order repository exposing ``get(tenant_id, order_id)``."""
+    repo = MagicMock()
+    repo.get = AsyncMock(
+        return_value=_order_doc() if order_return is None else order_return
+    )
+    return repo
+
+
 def _make_app(
     es_service=None,
     job_service=None,
+    order_repository=None,
     scheduling_ws=None,
     driver_ws=None,
 ) -> FastAPI:
@@ -109,6 +150,7 @@ def _make_app(
     configure_message_endpoints(
         es_service=es_service or _make_es_service(),
         job_service=job_service or _make_job_service(),
+        order_repository=order_repository,
         scheduling_ws_manager=scheduling_ws,
         driver_ws_manager=driver_ws,
     )
@@ -152,8 +194,15 @@ class TestSendMessage:
         assert "timestamp" in data
         assert data["tenant_id"] == TENANT_ID
 
-    def test_dispatcher_sends_message_succeeds(self):
-        """Dispatcher can send a message to any tenant job. Validates: Req 6.1, 6.4"""
+    def test_body_sender_role_is_ignored(self):
+        """A body ``sender_role`` never wins over the derived role.
+
+        Previously a caller could name ``sender_role: "dispatcher"`` in the body
+        and ``_validate_sender_access`` would skip the assignment check
+        entirely. The role is now derived from ``TenantContext``.
+
+        Validates: Req 7.7
+        """
         es = _make_es_service()
         job_svc = _make_job_service(_job_doc(asset_assigned="driver-1"))
 
@@ -164,7 +213,7 @@ class TestSendMessage:
                 "/api/driver/jobs/JOB_1/messages",
                 json={
                     "body": "Please confirm ETA",
-                    "sender_id": "dispatcher-1",
+                    "sender_id": "driver-1",
                     "sender_role": "dispatcher",
                 },
                 headers=_auth_headers(),
@@ -172,8 +221,36 @@ class TestSendMessage:
 
         assert resp.status_code == 200
         data = resp.json()["data"]
-        assert data["sender_role"] == "dispatcher"
-        assert data["sender_id"] == "dispatcher-1"
+        assert data["sender_role"] == "driver"
+        assert data["sender_id"] == "driver-1"
+
+    def test_body_sender_id_naming_another_driver_is_rejected(self):
+        """A body ``sender_id`` that is not the caller is 403.
+
+        This is the hole that let a driver post as any other driver simply by
+        naming them in the body.
+
+        Validates: Req 7.5, 7.6
+        """
+        es = _make_es_service()
+        job_svc = _make_job_service(_job_doc(asset_assigned="driver-1"))
+
+        app = _make_app(es_service=es, job_service=job_svc)
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.post(
+                "/api/driver/jobs/JOB_1/messages",
+                json={
+                    "body": "Not me",
+                    "sender_id": "driver-99",
+                    "sender_role": "driver",
+                },
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 403
+        assert resp.json()["error_code"] == "SENDER_IDENTITY_MISMATCH"
+        es.index_document.assert_not_called()
 
     def test_unassigned_driver_rejected(self):
         """Driver not assigned to job gets 403. Validates: Req 6.4"""
@@ -195,8 +272,8 @@ class TestSendMessage:
 
         assert resp.status_code == 403
 
-    def test_invalid_sender_role_rejected(self):
-        """Unknown sender_role gets 403. Validates: Req 6.4"""
+    def test_unknown_sender_identity_rejected(self):
+        """A body naming an unrelated sender gets 403. Validates: Req 6.4, 7.6"""
         es = _make_es_service()
         job_svc = _make_job_service(_job_doc(asset_assigned="driver-1"))
 
@@ -495,8 +572,8 @@ class TestMessageBroadcast:
                 "/api/driver/jobs/JOB_1/messages",
                 json={
                     "body": "Test message",
-                    "sender_id": "dispatcher-1",
-                    "sender_role": "dispatcher",
+                    "sender_id": "driver-1",
+                    "sender_role": "driver",
                 },
                 headers=_auth_headers(),
             )
@@ -533,63 +610,328 @@ class TestMessageBroadcast:
 
 
 # ---------------------------------------------------------------------------
-# Test: _validate_sender_access (unit tests for the helper)
+# Test: thread authorization (the resolution, not a handler helper)
 # ---------------------------------------------------------------------------
 
 
-class TestValidateSenderAccess:
-    """Tests for the _validate_sender_access helper."""
+class TestThreadAuthorization:
+    """Both handlers authorize by resolving the Work_Ref.
 
-    @pytest.mark.asyncio
-    async def test_assigned_driver_has_access(self):
-        """Assigned driver can access the job thread. Validates: Req 6.4"""
-        job_svc = _make_job_service(_job_doc(asset_assigned="driver-1"))
-        configure_message_endpoints(
-            es_service=_make_es_service(), job_service=job_svc
-        )
+    ``_validate_sender_access`` is gone: the assignment check now happens in
+    ``WorkRefResolver.resolve_job``, above both the write and the read, which is
+    what closes the unchecked-read hole in ``list_messages``.
+    """
 
-        result = await _validate_sender_access(
-            "JOB_1", "driver-1", "driver", "t1"
-        )
-        assert result["job_id"] == "JOB_1"
+    def test_thread_read_by_unassigned_driver_is_rejected(self):
+        """A driver may not read a thread they are not assigned to.
 
-    @pytest.mark.asyncio
-    async def test_unassigned_driver_rejected(self):
-        """Unassigned driver is rejected. Validates: Req 6.4"""
+        Validates: Req 7.8
+        """
+        es = _make_es_service()
         job_svc = _make_job_service(_job_doc(asset_assigned="driver-2"))
-        configure_message_endpoints(
-            es_service=_make_es_service(), job_service=job_svc
-        )
 
-        with pytest.raises(AppException) as exc_info:
-            await _validate_sender_access(
-                "JOB_1", "driver-1", "driver", "t1"
+        app = _make_app(es_service=es, job_service=job_svc)
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.get(
+                "/api/driver/jobs/JOB_1/messages",
+                headers=_auth_headers(),
             )
-        assert exc_info.value.status_code == 403
 
-    @pytest.mark.asyncio
-    async def test_dispatcher_always_has_access(self):
-        """Dispatcher has access to any tenant job. Validates: Req 6.4"""
+        assert resp.status_code == 403
+        es.search_documents.assert_not_called()
+
+    def test_thread_read_by_assigned_driver_returns_thread(self):
+        """The assigned driver reads their own thread. Validates: Req 7.9"""
+        es = _make_es_service()
         job_svc = _make_job_service(_job_doc(asset_assigned="driver-1"))
-        configure_message_endpoints(
-            es_service=_make_es_service(), job_service=job_svc
-        )
 
-        result = await _validate_sender_access(
-            "JOB_1", "dispatcher-1", "dispatcher", "t1"
-        )
-        assert result["job_id"] == "JOB_1"
-
-    @pytest.mark.asyncio
-    async def test_unknown_role_rejected(self):
-        """Unknown sender_role is rejected. Validates: Req 6.4"""
-        job_svc = _make_job_service(_job_doc(asset_assigned="driver-1"))
-        configure_message_endpoints(
-            es_service=_make_es_service(), job_service=job_svc
-        )
-
-        with pytest.raises(AppException) as exc_info:
-            await _validate_sender_access(
-                "JOB_1", "someone", "customer", "t1"
+        app = _make_app(es_service=es, job_service=job_svc)
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.get(
+                "/api/driver/jobs/JOB_1/messages",
+                headers=_auth_headers(),
             )
-        assert exc_info.value.status_code == 403
+
+        assert resp.status_code == 200
+
+    def test_caller_without_driver_role_is_rejected(self):
+        """A non-driver session cannot reach the driver surface.
+
+        Validates: Req 1.5
+        """
+        es = _make_es_service()
+        job_svc = _make_job_service(_job_doc(asset_assigned="driver-1"))
+
+        app = _make_app(es_service=es, job_service=job_svc)
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.get(
+                "/api/driver/jobs/JOB_1/messages",
+                headers=_auth_headers(roles=["admin"], driver_id=None),
+            )
+
+        assert resp.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Test: order-keyed siblings
+# ---------------------------------------------------------------------------
+
+
+class TestOrderKeyedMessages:
+    """POST / GET /api/driver/orders/{order_id}/messages.
+
+    The siblings are the job-keyed handlers with ``resolve_order`` substituted
+    for ``resolve_job``: no rule of their own, so validation and error codes
+    cannot diverge from the job-keyed path (Req 7.14, 7.17, 7.19).
+    """
+
+    def test_assigned_driver_sends_order_message(self):
+        """The order's assigned driver posts to the order thread.
+
+        Validates: Req 7.14, 7.17
+        """
+        es = _make_es_service()
+        repo = _make_order_repository(_order_doc(assigned_driver_id="driver-1"))
+
+        app = _make_app(es_service=es, order_repository=repo)
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.post(
+                "/api/driver/orders/ORD_1/messages",
+                json={
+                    "body": "Loaded and rolling",
+                    "sender_id": "driver-1",
+                    "sender_role": "driver",
+                },
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["order_id"] == "ORD_1"
+        assert data["driver_id"] == "driver-1"
+        assert "job_id" not in data
+        assert data["sender_id"] == "driver-1"
+        assert data["sender_role"] == "driver"
+        assert data["tenant_id"] == TENANT_ID
+
+        es.index_document.assert_called_once()
+        assert es.index_document.call_args.args[0] == "job_messages"
+
+    def test_order_message_body_sender_id_mismatch_is_rejected(self):
+        """A body ``sender_id`` naming another driver is 403 on this path too.
+
+        Same error code as the job-keyed sibling, because the same service
+        produces it.
+
+        Validates: Req 7.19
+        """
+        es = _make_es_service()
+        repo = _make_order_repository(_order_doc(assigned_driver_id="driver-1"))
+
+        app = _make_app(es_service=es, order_repository=repo)
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.post(
+                "/api/driver/orders/ORD_1/messages",
+                json={
+                    "body": "Not me",
+                    "sender_id": "driver-99",
+                    "sender_role": "driver",
+                },
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 403
+        assert resp.json()["error_code"] == "SENDER_IDENTITY_MISMATCH"
+        es.index_document.assert_not_called()
+
+    def test_unassigned_driver_cannot_post_to_order_thread(self):
+        """A driver who is not the order's assigned driver gets 403 FORBIDDEN.
+
+        Validates: Req 7.21
+        """
+        es = _make_es_service()
+        repo = _make_order_repository(_order_doc(assigned_driver_id="driver-2"))
+
+        app = _make_app(es_service=es, order_repository=repo)
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.post(
+                "/api/driver/orders/ORD_1/messages",
+                json={
+                    "body": "Hello",
+                    "sender_id": "driver-1",
+                    "sender_role": "driver",
+                },
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 403
+        assert resp.json()["error_code"] == "FORBIDDEN"
+        es.index_document.assert_not_called()
+
+    def test_missing_order_returns_404(self):
+        """An order that does not exist in the tenant is 404.
+
+        Validates: Req 7.21
+        """
+        es = _make_es_service()
+        repo = _make_order_repository(order_return=None)
+        repo.get = AsyncMock(return_value=None)
+
+        app = _make_app(es_service=es, order_repository=repo)
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.post(
+                "/api/driver/orders/ORD_404/messages",
+                json={
+                    "body": "Hello",
+                    "sender_id": "driver-1",
+                    "sender_role": "driver",
+                },
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 404
+        assert resp.json()["error_code"] == "RESOURCE_NOT_FOUND"
+
+    def test_cross_tenant_order_returns_404(self):
+        """An order belonging to another tenant is indistinguishable from absent.
+
+        Validates: Req 7.21
+        """
+        es = _make_es_service()
+        repo = _make_order_repository(_order_doc(tenant_id="other-tenant"))
+
+        app = _make_app(es_service=es, order_repository=repo)
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.get(
+                "/api/driver/orders/ORD_1/messages",
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 404
+        es.search_documents.assert_not_called()
+
+    def test_order_thread_read_filters_on_order_id(self):
+        """The thread read filters on ``order_id`` plus ``tenant_id``.
+
+        Validates: Req 7.14, 7.17
+        """
+        es = _make_es_service()
+        es.search_documents.return_value = {
+            "hits": {
+                "total": {"value": 1},
+                "hits": [
+                    {
+                        "_source": {
+                            "message_id": "m1",
+                            "order_id": "ORD_1",
+                            "driver_id": "driver-1",
+                            "sender_id": "driver-1",
+                            "sender_role": "driver",
+                            "body": "First",
+                            "timestamp": "2026-01-01T10:00:00+00:00",
+                            "tenant_id": "t1",
+                        }
+                    }
+                ],
+            }
+        }
+        repo = _make_order_repository(_order_doc(assigned_driver_id="driver-1"))
+
+        app = _make_app(es_service=es, order_repository=repo)
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.get(
+                "/api/driver/orders/ORD_1/messages?page=2&size=10",
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["data"][0]["order_id"] == "ORD_1"
+        assert body["pagination"] == {
+            "page": 2,
+            "size": 10,
+            "total": 1,
+            "total_pages": 1,
+        }
+
+        query = es.search_documents.call_args.args[1]
+        assert query["from"] == 10
+        assert query["sort"] == [{"timestamp": {"order": "asc"}}]
+        filters = query["query"]["bool"]["filter"]
+        assert {"term": {"order_id": "ORD_1"}} in filters
+        assert {"term": {"tenant_id": TENANT_ID}} in filters
+
+    def test_unassigned_driver_cannot_read_order_thread(self):
+        """Resolution is the authorization on the read path as well.
+
+        Validates: Req 7.21
+        """
+        es = _make_es_service()
+        repo = _make_order_repository(_order_doc(assigned_driver_id="driver-2"))
+
+        app = _make_app(es_service=es, order_repository=repo)
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.get(
+                "/api/driver/orders/ORD_1/messages",
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 403
+        es.search_documents.assert_not_called()
+
+    def test_order_message_broadcasts_to_assigned_driver(self):
+        """Delivery reaches the assigned driver over the driver channel.
+
+        Validates: Req 7.17
+        """
+        es = _make_es_service()
+        repo = _make_order_repository(_order_doc(assigned_driver_id="driver-1"))
+        driver_ws = MagicMock()
+        driver_ws.send_to_driver = AsyncMock()
+
+        app = _make_app(es_service=es, order_repository=repo, driver_ws=driver_ws)
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.post(
+                "/api/driver/orders/ORD_1/messages",
+                json={
+                    "body": "On site",
+                    "sender_id": "driver-1",
+                    "sender_role": "driver",
+                },
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 200
+        driver_ws.send_to_driver.assert_called_once()
+        assert driver_ws.send_to_driver.call_args.args[0] == "driver-1"
+        assert driver_ws.send_to_driver.call_args.args[1]["type"] == "job_message"
+
+    def test_caller_without_driver_role_is_rejected_on_order_path(self):
+        """A non-driver session cannot reach the order-keyed surface.
+
+        Validates: Req 1.5, 1.6
+        """
+        es = _make_es_service()
+        repo = _make_order_repository()
+
+        app = _make_app(es_service=es, order_repository=repo)
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.get(
+                "/api/driver/orders/ORD_1/messages",
+                headers=_auth_headers(roles=["admin"], driver_id=None),
+            )
+
+        assert resp.status_code == 403
+        repo.get.assert_not_called()

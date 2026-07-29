@@ -479,21 +479,36 @@ class TestRoleGating:
         _assert_error_envelope(resp.json())
         assert resp.json()["detail"]["error_code"] == "INSUFFICIENT_ROLE"
 
-    def test_driver_can_read_orders(self):
-        """A driver role CAN read orders (GET endpoints)."""
+    def test_driver_can_read_a_single_order_and_its_events(self):
+        """A driver role CAN still read a single order and its event timeline."""
         repo = FakeOrderRepository()
         repo.seed_order(_make_order())
 
         _, client, *_ = _build_app(roles=["driver"], repo=repo)
-
-        resp = client.get("/api/orders")
-        assert resp.status_code == 200
 
         resp = client.get("/api/orders/ord_abc123")
         assert resp.status_code == 200
 
         resp = client.get("/api/orders/ord_abc123/events")
         assert resp.status_code == 200
+
+    def test_driver_cannot_list_orders(self):
+        """A driver role can no longer list every order in the tenant.
+
+        ``GET /api/orders`` is the dispatcher list surface: it takes a
+        ``driver_id`` filter but scopes nothing to the caller, so it now
+        requires dispatcher or admin (driver-mobile-app Req 3.13). Drivers read
+        their own work through ``GET /api/driver/work``.
+        """
+        repo = FakeOrderRepository()
+        repo.seed_order(_make_order())
+
+        _, client, *_ = _build_app(roles=["driver"], repo=repo)
+
+        resp = client.get("/api/orders")
+        assert resp.status_code == 403
+        _assert_error_envelope(resp.json())
+        assert resp.json()["detail"]["error_code"] == "INSUFFICIENT_ROLE"
 
 
 # ---------------------------------------------------------------------------

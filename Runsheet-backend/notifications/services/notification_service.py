@@ -54,14 +54,21 @@ def _map_event_to_notification_type(
     2. ``delay_alert`` → ``delay_alert``
     3. ``status_changed`` with updated ``estimated_arrival`` → ``eta_change``
     4. Any other ``status_changed`` → ``order_status_update``
-    5. A fuel-specific event whose name matches a NotificationType value
+    5. ``pod_otp`` → ``pod_otp``, the dispatch-time proof-of-delivery code
+       (driver-mobile-app R5.27). Named explicitly rather than left to the
+       value-match fallback below, because it must never collapse onto the
+       completion-time ``delivery_confirmation`` body.
+    6. A fuel-specific event whose name matches a NotificationType value
        (``low_tank_autofill_alert``, ``past_due_invoice``,
        ``delivery_completed``, ``e_bol_delivery``) → that type, so its
        dedicated rule + template are used.
-    6. Anything else → ``order_status_update``
+    7. Anything else → ``order_status_update``
 
     Validates: Requirements 1.1, 1.2, 1.3, 1.4
     """
+    if event_type == NotificationType.POD_OTP.value:
+        return NotificationType.POD_OTP
+
     if event_type == "status_changed":
         status = event_data.get("status", "")
         if status == "completed":

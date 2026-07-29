@@ -149,6 +149,182 @@ def _reset_ref_resolver() -> Generator[None, None, None]:
         _reset()
 
 
+#: First observed route inventory of ``main.app``, captured by
+#: :func:`_guard_main_app_routes` the first time a test leaves ``main`` imported.
+_MAIN_APP_ROUTE_BASELINE: "list[tuple] | None" = None
+
+
+@pytest.fixture(autouse=True)
+def _guard_main_app_routes() -> Generator[None, None, None]:
+    """Fail the test that mutates ``main.app``'s route table, not a later one.
+
+    ``main.app`` is a module-level singleton cached in ``sys.modules``, so every
+    test that does ``from main import app`` gets the *same* object. A test that
+    mounts a router on it — most easily by using ``TestClient(app)`` as a context
+    manager, which runs main's lifespan and boots the real bootstrap chain —
+    leaves those routes behind for the rest of the session.
+
+    That is invisible to the polluting test and breaks a later one:
+    ``tests/unit/test_endpoint_registry.py`` generates the endpoint registry
+    from ``main.app`` and compares it to the committed
+    ``docs/endpoint-registry.md``, so extra routes made it fail in-suite while
+    passing in isolation.
+
+    This guard compares the route inventory after every test against the first
+    one observed and fails immediately on a change, so the pollution is
+    attributed to its source and cannot become someone else's flake. A test that
+    genuinely needs a booted app should build its own ``FastAPI()`` instance.
+    """
+    global _MAIN_APP_ROUTE_BASELINE
+
+    yield
+
+    import sys
+
+    main_module = sys.modules.get("main")
+    if main_module is None or not hasattr(main_module, "app"):
+        return
+
+    routes = [
+        (
+            getattr(route, "path", None),
+            tuple(sorted(getattr(route, "methods", None) or ())),
+            type(route).__name__,
+        )
+        for route in main_module.app.routes
+    ]
+
+    if _MAIN_APP_ROUTE_BASELINE is None:
+        _MAIN_APP_ROUTE_BASELINE = routes
+        return
+
+    if routes == _MAIN_APP_ROUTE_BASELINE:
+        return
+
+    baseline = _MAIN_APP_ROUTE_BASELINE
+    # Re-baseline so the whole remaining session is not reported as failing.
+    _MAIN_APP_ROUTE_BASELINE = routes
+    added = [r for r in routes if routes.count(r) > baseline.count(r)]
+    removed = [r for r in baseline if baseline.count(r) > routes.count(r)]
+    pytest.fail(
+        "this test mutated the shared `main.app` route table, which leaks into "
+        f"every later test in the session ({len(baseline)} routes before, "
+        f"{len(routes)} after).\n"
+        f"  added:   {sorted({(p, m) for p, m, _ in added})}\n"
+        f"  removed: {sorted({(p, m) for p, m, _ in removed})}\n"
+        "Do not run main's lifespan against `main.app` (that boots the real "
+        "bootstrap chain and mounts boot-only routers on it): build a local "
+        "`FastAPI()` app instead, or construct `TestClient(app)` without using "
+        "it as a context manager."
+    )
+
+
+#: A single reusable loop installed by :func:`_ensure_current_event_loop` when a
+#: previous test left the thread without one. Reused (rather than creating a
+#: fresh loop per test) so the guard cannot leak thousands of loops/file
+#: descriptors across a full-suite run.
+_SPARE_EVENT_LOOP: "asyncio.AbstractEventLoop | None" = None
+
+
+def _ensure_current_event_loop() -> None:
+    """Guarantee the main thread has a usable current asyncio event loop.
+
+    ``asyncio.run`` — used by dozens of *sync* tests to drive a coroutine —
+    installs a fresh loop and, on exit, sets the thread's current event loop
+    back to ``None`` *and* marks it as explicitly set. From that moment
+    ``asyncio.get_event_loop()`` raises ``RuntimeError: There is no current
+    event loop in thread 'MainThread'`` instead of lazily creating one.
+
+    That turns any later sync fixture which drives a coroutine via
+    ``asyncio.get_event_loop().run_until_complete(...)`` into a setup ERROR —
+    but only when it happens to run after such a test, which is why
+    ``tests/integration`` passed alone and errored after ``tests/unit``.
+
+    Restoring a current loop before every test makes the ambient asyncio state
+    per-test deterministic regardless of collection order. pytest-asyncio still
+    installs and tears down its own loop for async tests; this only repairs the
+    *absent/closed* case.
+    """
+    global _SPARE_EVENT_LOOP
+
+    policy = asyncio.get_event_loop_policy()
+    try:
+        loop = policy.get_event_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop is not None and not loop.is_closed():
+        return
+
+    if _SPARE_EVENT_LOOP is None or _SPARE_EVENT_LOOP.is_closed():
+        _SPARE_EVENT_LOOP = policy.new_event_loop()
+    policy.set_event_loop(_SPARE_EVENT_LOOP)
+
+
+@pytest.fixture(autouse=True)
+def _restore_current_event_loop() -> Generator[None, None, None]:
+    """Autouse wrapper around :func:`_ensure_current_event_loop`."""
+    _ensure_current_event_loop()
+    yield
+
+
+def _supertokens_sdk_live() -> bool:
+    """Return whether the SuperTokens SDK singleton is currently initialized.
+
+    Deliberately probes the SDK itself instead of
+    ``auth.supertokens_init.is_supertokens_initialized()``: the SDK's ``reset()``
+    test hook wipes the SDK singletons but not our module-level ``_initialized``
+    flag, so only the SDK knows the truth.
+    """
+    try:
+        from supertokens_python import Supertokens
+
+        Supertokens.get_instance()
+    except Exception:
+        return False
+    return True
+
+
+@pytest.fixture(autouse=True)
+def _restore_supertokens_init() -> Generator[None, None, None]:
+    """Re-initialize the SuperTokens SDK if a test tears it down.
+
+    ``main`` initializes the SuperTokens SDK at *import* time (module-level, not
+    in the lifespan) because ``auth_provider=supertokens`` under
+    ``ENVIRONMENT=test``. Since ``main`` is cached in ``sys.modules``, that
+    initialization happens exactly once per session — whichever test imports
+    ``main`` first pays for it, and every later test relies on it.
+
+    ``tests/integration/test_supertokens_auth_flow.py`` resets the SDK
+    singletons on fixture teardown for its own isolation. When ``main`` was
+    imported *before* it (i.e. any earlier test did ``from main import app``,
+    such as ``tests/unit/test_endpoint_registry.py``), that reset leaves the
+    process with an app whose auth middleware is wired but whose SDK is gone, so
+    every subsequent request through ``AuthEnforcementMiddleware`` raised
+    ``GeneralError: Initialisation not done`` → HTTP 500. That is what broke
+    ``tests/smoke/test_route_smoke.py`` only in the combined run.
+
+    Restoring the SDK when a test leaves it uninitialized keeps that state
+    per-test regardless of collection order, and cannot regress if another test
+    file starts resetting the SDK too.
+    """
+    was_live = _supertokens_sdk_live()
+    try:
+        yield
+    finally:
+        if was_live and not _supertokens_sdk_live():
+            import sys
+
+            from auth.supertokens_init import init_supertokens
+            from config.settings import get_settings
+
+            main_module = sys.modules.get("main")
+            settings = getattr(main_module, "_auth_settings", None)
+            if settings is None:
+                settings = get_settings()
+            init_supertokens(settings)
+
+
 @pytest.fixture(scope="session")
 def event_loop() -> Generator[asyncio.AbstractEventLoop, None, None]:
     """Create an event loop for the test session."""

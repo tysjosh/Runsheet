@@ -39,6 +39,20 @@ class CommerceIntakeMisconfigurationError(Exception):
     pass
 
 
+class DriverBootstrapMisconfigurationError(Exception):
+    """Raised when the driver surface did not wire completely during bootstrap.
+
+    Two conditions are fatal outside production: ``order_service`` missing from
+    the container (no driver-initiated status transition can reach
+    ``OrderService.apply_status_transition``), and a declared driver index
+    absent from Elasticsearch (its ``dynamic: strict`` declaration is then not
+    in force, because ES auto-creates the index with ``dynamic: true`` on first
+    write).
+    """
+
+    pass
+
+
 async def assert_commerce_requires_intake(container: ServiceContainer) -> None:
     """Assert that every tenant with commerce backbone enabled also has intake pipeline enabled.
 
@@ -135,6 +149,111 @@ async def assert_commerce_requires_intake(container: ServiceContainer) -> None:
         )
         logger.error(msg)
         raise CommerceIntakeMisconfigurationError(msg)
+
+
+async def assert_driver_surface_wired(container: ServiceContainer) -> None:
+    """Assert the driver surface finished wiring: ``order_service`` + every driver index.
+
+    Runs from the post-initialization block in ``bootstrap/__init__.py`` after
+    every module in ``_BOOT_ORDER`` has run, so it sees the fully-populated
+    container. It mirrors :func:`assert_commerce_requires_intake`'s posture —
+    *loud outside production, degrade with an ERROR log inside it* — because a
+    boot-time check must never be the reason a production deployment fails to
+    come up. The ERROR log is the production signal.
+
+    Two invariants, both of which have silently failed in this repository before:
+
+    1. ``container.has("order_service")`` — no ``OrderService(...)`` call site
+       existed outside ``tests/``, so every driver-initiated status transition
+       and all three ``order.delivered`` subscribers were dormant.
+    2. Every index in ``DRIVER_INDEX_MAPPINGS`` exists — ``setup_driver_indices``
+       was only ever called by the seeder, so a deployment that skipped it had
+       its driver indices auto-created on first write with ``dynamic: true``.
+
+    Neither is evaluated when ``settings`` is absent from the container: core
+    never initialized, so the boot never got far enough to wire anything and
+    the fail-open contract for module initialization (Requirement 1.5) owns
+    that failure.
+
+    Raises:
+        DriverBootstrapMisconfigurationError: Outside production, when either
+            invariant is violated.
+
+    Validates: Requirements 4.1, 15.12
+    """
+    from config.settings import Environment
+
+    # ``settings`` is the very first thing ``bootstrap/core.py:initialize``
+    # registers. Its absence means core itself never ran, so *nothing* is on
+    # the container and a missing ``order_service`` is a symptom of that
+    # larger failure rather than a driver misconfiguration. Same reasoning as
+    # the unreachable-cluster skip below: a different fault has its own signal
+    # (the per-module ERROR log from ``initialize_all``), and this assertion
+    # must not convert it into a boot-blocking driver error — that would break
+    # the fail-open contract for module initialization.
+    if not container.has("settings"):
+        logger.warning(
+            "Skipping driver surface wiring assertion: core bootstrap did not "
+            "complete (settings absent from container), so the driver surface "
+            "was never reached"
+        )
+        return
+
+    problems: list[str] = []
+
+    if not container.has("order_service"):
+        problems.append(
+            "container.has('order_service') is false — no driver-initiated "
+            "status transition can reach OrderService.apply_status_transition, "
+            "and the order.delivered subscribers stay dormant"
+        )
+
+    # Declared-index presence. Bounded work: one exists() call per declared
+    # index. A failure of the check itself is never treated as a violation —
+    # an unreachable cluster is a different fault with its own signal.
+    es_service = container.es_service if container.has("es_service") else None
+    if es_service is None or getattr(es_service, "client", None) is None:
+        logger.debug(
+            "Skipping driver index presence assertion: "
+            "Elasticsearch client not connected"
+        )
+    else:
+        try:
+            from driver.services.driver_es_mappings import DRIVER_INDEX_MAPPINGS
+
+            missing = [
+                index_name
+                for index_name in DRIVER_INDEX_MAPPINGS
+                if not es_service.client.indices.exists(index=index_name)
+            ]
+            if missing:
+                problems.append(
+                    "declared driver index absent from Elasticsearch: "
+                    f"{', '.join(sorted(missing))} — the dynamic: strict "
+                    "declaration is not in force for these, so the first write "
+                    "auto-creates them with dynamic: true"
+                )
+        except Exception as exc:
+            logger.warning(
+                "Driver index presence assertion could not complete: %s", exc
+            )
+
+    if not problems:
+        return
+
+    msg = (
+        "Driver surface bootstrap misconfiguration detected: "
+        + "; ".join(problems)
+        + ". The driver surface is wired by bootstrap/driver.py and "
+        "bootstrap/fuel.py."
+    )
+    logger.error(msg)
+
+    if container.settings.environment == Environment.PRODUCTION:
+        # Degrade in production: the ERROR log above names the fault.
+        return
+
+    raise DriverBootstrapMisconfigurationError(msg)
 
 
 async def initialize(app, container: ServiceContainer) -> None:

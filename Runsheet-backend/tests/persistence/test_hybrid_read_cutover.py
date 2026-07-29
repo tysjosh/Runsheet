@@ -377,6 +377,31 @@ async def test_fuel_order_search_served_from_postgres(engine, read_from_pg):
     assert res["orders"][0].order_id == "s1"
 
 
+async def test_fuel_order_search_for_driver_served_from_postgres(engine, read_from_pg):
+    """Driver work read: status terms + window sort + driver scoping."""
+    await _seed("fuel_order", _order_doc(
+        "d2", status="in_transit", assigned_driver_id="drv_1",
+        delivery_window_start="2026-01-02T00:00:00+00:00"))
+    await _seed("fuel_order", _order_doc(
+        "d1", status="dispatched", assigned_driver_id="drv_1",
+        delivery_window_start="2026-01-01T00:00:00+00:00"))
+    # Excluded: another driver, and a status outside the default set.
+    await _seed("fuel_order", _order_doc(
+        "other_drv", status="dispatched", assigned_driver_id="drv_2",
+        delivery_window_start="2026-01-01T00:00:00+00:00"))
+    await _seed("fuel_order", _order_doc(
+        "done", status="delivered", assigned_driver_id="drv_1",
+        delivery_window_start="2026-01-01T00:00:00+00:00"))
+
+    from fuel.order_repository import FuelOrderRepository
+    repo = FuelOrderRepository(_es_raises_on_read())
+    res = await repo.search_for_driver(TENANT, "drv_1")
+
+    assert res["total"] == 2
+    # delivery_window_start ascending
+    assert [o.order_id for o in res["orders"]] == ["d1", "d2"]
+
+
 async def test_fuel_order_list_for_tenant_served_from_postgres(engine, read_from_pg):
     await _seed("fuel_order", _order_doc("l1", created_at="2026-01-02T00:00:00+00:00"))
     await _seed("fuel_order", _order_doc("l2", created_at="2026-01-01T00:00:00+00:00"))

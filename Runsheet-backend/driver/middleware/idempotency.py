@@ -18,10 +18,11 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
-from fastapi import Request
+from fastapi import Depends, Request
 from fastapi.responses import JSONResponse
 
 from driver.services.driver_es_mappings import IDEMPOTENCY_KEYS_INDEX
+from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 from services.elasticsearch_service import ElasticsearchService
 
 logger = logging.getLogger(__name__)
@@ -187,7 +188,10 @@ class IdempotencyResult:
         )
 
 
-async def check_idempotency(request: Request) -> IdempotencyResult:
+async def check_idempotency(
+    request: Request,
+    tenant: TenantContext = Depends(get_tenant_context),
+) -> IdempotencyResult:
     """FastAPI dependency that performs the idempotency check.
 
     Usage in an endpoint::
@@ -205,11 +209,18 @@ async def check_idempotency(request: Request) -> IdempotencyResult:
     returns an ``IdempotencyResult`` with ``key=None`` and
     ``is_replay=False``, so the endpoint processes normally.
 
-    Validates: Requirements 14.1, 14.3
+    The tenant component of the lookup key comes from the verified
+    ``TenantContext`` — the same value the store path uses — so the check
+    key and the store key are always identical (Req 11.1). ``Depends`` is
+    cached per request, so ``get_tenant_context`` still runs once even
+    though the handler declares it too, and the check no longer depends on
+    the incidental signature order of the handler's dependencies.
+
+    Validates: Requirements 11.1, 11.2, 11.4, 11.5
     """
     key = request.headers.get("x-idempotency-key")
     if not key:
-        # No idempotency header — process normally (Req 14.3)
+        # No idempotency header — process without deduplication (Req 11.5)
         return IdempotencyResult()
 
     middleware = get_idempotency_middleware()
@@ -217,14 +228,9 @@ async def check_idempotency(request: Request) -> IdempotencyResult:
         # Middleware not configured — process normally
         return IdempotencyResult(key=key)
 
-    # Extract tenant_id from the request state or auth header
-    tenant_id = getattr(request.state, "tenant_id", None)
-    if tenant_id is None:
-        # Try to get from Authorization header via TenantContext
-        # Fall back to a default for safety
-        tenant_id = "unknown"
-
-    cached = await middleware.check_and_cache(key, tenant_id)
+    # Req 11.1 / 11.4: the verified tenant scopes the lookup, so a key
+    # stored for another tenant is a first-time request here.
+    cached = await middleware.check_and_cache(key, tenant.tenant_id)
     if cached is not None:
         return IdempotencyResult(key=key, cached_response=cached)
 

@@ -24,6 +24,11 @@ JOBS_CURRENT_MAPPING = {
             "order_id":            {"type": "keyword"},
             "customer_id":         {"type": "keyword"},
             "driver_id":           {"type": "keyword"},
+            # Canonical drivers_current identifier recorded alongside the
+            # SuperTokens user_id in asset_assigned on job acceptance
+            # (Requirement 1.13). Nullable: an absent value means a
+            # pre-migration document and no backfill runs (Requirement 15.12).
+            "assigned_driver_id":  {"type": "keyword"},
             "origin":              {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
             "destination":         {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
             "origin_location":     {"type": "geo_point"},

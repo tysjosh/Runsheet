@@ -465,6 +465,51 @@ DEFAULT_TEMPLATES: list[dict] = [
 # ---------------------------------------------------------------------------
 DEFAULT_TEMPLATES.extend(FUEL_NOTIFICATION_TEMPLATES)
 
+# ---------------------------------------------------------------------------
+# pod_otp — the dispatch-time proof-of-delivery code
+# (driver-mobile-app R5.27)
+#
+# ``sms`` and ``email`` only, matching the two dispatchers the ``pod_otp``
+# notification rule enables. This is a NEW dispatch-time entry, not a reuse of
+# the completion-time ``delivery_confirmation`` body: it is sent when the order
+# leaves the terminal so the customer already holds the code when the driver
+# arrives, and it never carries delivered gallons, price, or a BOL link,
+# because none of those exist yet.
+# ---------------------------------------------------------------------------
+POD_OTP_TEMPLATES: list[dict] = [
+    {
+        "event_type": "pod_otp",
+        "channel": "sms",
+        "subject_template": "Your delivery code for order {order_id}",
+        "body_template": (
+            "Your delivery code for order {order_id} is {otp_code}. "
+            "Give it to the driver at delivery. Valid until {valid_until}."
+        ),
+        "placeholders": ["order_id", "otp_code", "valid_until"],
+    },
+    {
+        "event_type": "pod_otp",
+        "channel": "email",
+        "subject_template": "Your delivery code for order {order_id}",
+        "body_template": (
+            "Dear {customer_name},\n\n"
+            "Your fuel delivery for order {order_id} is on its way.\n\n"
+            "Delivery code: {otp_code}\n"
+            "Valid until: {valid_until}\n\n"
+            "Give this code to the driver at delivery to confirm receipt. "
+            "Do not share it with anyone else."
+        ),
+        "placeholders": [
+            "order_id",
+            "customer_name",
+            "otp_code",
+            "valid_until",
+        ],
+    },
+]
+
+DEFAULT_TEMPLATES.extend(POD_OTP_TEMPLATES)
+
 
 class TemplateRenderer:
     """Render and manage notification templates stored in Elasticsearch.

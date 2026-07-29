@@ -609,7 +609,7 @@ class TestBootstrapLifecycle:
         """
         Bootstrap modules are initialized in dependency order:
         core → persistence → middleware → ops → fuel → inventory → scheduling →
-        notifications → compliance → agents → integrations.
+        notifications → compliance → agents → driver → integrations.
         """
         from bootstrap import _BOOT_ORDER
 
@@ -624,6 +624,7 @@ class TestBootstrapLifecycle:
             "notifications",
             "compliance",
             "agents",
+            "driver",
             "integrations",
         ]
         assert _BOOT_ORDER == expected_order, (
@@ -640,6 +641,7 @@ class TestBootstrapLifecycle:
         expected_shutdown = list(reversed(_BOOT_ORDER))
         assert expected_shutdown == [
             "integrations",
+            "driver",
             "agents",
             "compliance",
             "notifications",
@@ -665,7 +667,7 @@ class TestBootstrapLifecycle:
         assert callable(shutdown_all), "shutdown_all is not callable"
 
         # Verify boot order has the expected modules
-        assert len(_BOOT_ORDER) == 11
+        assert len(_BOOT_ORDER) == 12
         assert _BOOT_ORDER[0] == "core", "First module should be 'core'"
         assert _BOOT_ORDER[-1] == "integrations", "Last module should be 'integrations'"
 

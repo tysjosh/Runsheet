@@ -30,8 +30,13 @@ from fastapi.testclient import TestClient
 from driver.api.exception_endpoints import (
     router as exception_router,
     configure_exception_endpoints,
-    _build_risk_signal,
 )
+
+# ``_build_risk_signal`` moved into the extracted ExceptionReportService when
+# the exception rule left the handler (task 5.5). The shim keeps the existing
+# RiskSignal tests expressed in terms of a job id.
+from driver.services.exception_service import ExceptionReportService
+from driver.services.work_ref import WorkRef
 from driver.models import ExceptionRequest, ExceptionType, GeoPoint
 from Agents.overlay.data_contracts import RiskSignal, Severity
 
@@ -52,7 +57,15 @@ _SETTINGS_PATCH = nullcontext()
 
 
 def _auth_headers(tenant_id: str = TENANT_ID) -> dict:
-    return auth_headers(tenant_id, sub="driver-1")
+    """A driver-scoped Test_Auth_Path header set.
+
+    ``/api/driver`` resolution runs ``require_driver_identity``, so the context
+    must hold the exact ``driver`` role and a canonical ``driver_id`` (Req 1.5,
+    1.6).
+    """
+    return auth_headers(
+        tenant_id, sub="driver-1", roles=["driver"], driver_id="driver-1"
+    )
 
 
 def _make_es_service() -> MagicMock:
@@ -62,11 +75,33 @@ def _make_es_service() -> MagicMock:
     return es
 
 
-def _make_job_service() -> MagicMock:
-    """Create a mock JobService with _append_event."""
+def _make_job_service(asset_assigned: str = "driver-1") -> MagicMock:
+    """Create a mock JobService with _append_event and _get_job_doc."""
     svc = MagicMock()
     svc._append_event = AsyncMock(return_value="evt-123")
+    svc._get_job_doc = AsyncMock(
+        return_value={
+            "job_id": "JOB_1",
+            "status": "assigned",
+            "tenant_id": TENANT_ID,
+            "asset_assigned": asset_assigned,
+        }
+    )
     return svc
+
+
+def _build_risk_signal(
+    exception_id: str, job_id: str, body: ExceptionRequest, tenant_id: str
+) -> RiskSignal:
+    """Build a RiskSignal through the extracted service (was a module helper)."""
+    service = ExceptionReportService(es_service=_make_es_service())
+    ref = WorkRef(
+        tenant_id=tenant_id,
+        driver_id="driver-1",
+        kind="job",
+        work_id=job_id,
+    )
+    return service.build_risk_signal(ref, body, exception_id)
 
 
 def _make_signal_bus() -> MagicMock:
@@ -76,12 +111,35 @@ def _make_signal_bus() -> MagicMock:
     return bus
 
 
+def _make_order_repository(
+    tenant_id: str = TENANT_ID,
+    assigned_driver_id: str = "driver-1",
+    order_id: str = "ORD_1",
+) -> MagicMock:
+    """A fake order repository returning one assigned order document.
+
+    ``WorkRefResolver.resolve_order`` accepts either a ``FuelOrder`` or a raw
+    document, so a plain dict is enough here (Req 7.21).
+    """
+    repo = MagicMock()
+    repo.get = AsyncMock(
+        return_value={
+            "order_id": order_id,
+            "tenant_id": tenant_id,
+            "assigned_driver_id": assigned_driver_id,
+            "status": "in_transit",
+        }
+    )
+    return repo
+
+
 def _make_app(
     es_service=None,
     job_service=None,
     signal_bus=None,
     scheduling_ws=None,
     driver_ws=None,
+    order_repository=None,
 ) -> FastAPI:
     """Create a test FastAPI app with the exception router."""
     from errors.handlers import register_exception_handlers
@@ -93,6 +151,7 @@ def _make_app(
     configure_exception_endpoints(
         es_service=es_service or _make_es_service(),
         job_service=job_service,
+        order_repository=order_repository,
         signal_bus=signal_bus,
         scheduling_ws_manager=scheduling_ws,
         driver_ws_manager=driver_ws,
@@ -566,3 +625,200 @@ class TestEscalationBroadcast:
             )
 
         assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Test: the order-keyed sibling
+# ---------------------------------------------------------------------------
+
+
+class TestReportExceptionForOrder:
+    """Tests for POST /api/driver/orders/{order_id}/exceptions.
+
+    Validates: Requirements 7.13, 7.16, 7.19, 7.21
+    """
+
+    def test_stores_exception_keyed_on_order(self):
+        """The sibling route exists and persists with order_id. Validates: Req 7.13"""
+        es = _make_es_service()
+        app = _make_app(
+            es_service=es,
+            job_service=_make_job_service(),
+            order_repository=_make_order_repository(),
+        )
+
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.post(
+                "/api/driver/orders/ORD_1/exceptions",
+                json=_exception_payload(),
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 200
+        doc = es.index_document.call_args.args[2]
+        assert doc["order_id"] == "ORD_1"
+        assert doc["job_id"] is None
+        assert doc["driver_id"] == "driver-1"
+        assert doc["tenant_id"] == TENANT_ID
+
+    def test_no_job_timeline_event_on_order_path(self):
+        """The order-keyed path has no job timeline to append to. Validates: Req 7.16"""
+        job_svc = _make_job_service()
+        app = _make_app(
+            es_service=_make_es_service(),
+            job_service=job_svc,
+            order_repository=_make_order_repository(),
+        )
+
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.post(
+                "/api/driver/orders/ORD_1/exceptions",
+                json=_exception_payload(),
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 200
+        job_svc._append_event.assert_not_called()
+
+    def test_publishes_risk_signal_keyed_on_order(self):
+        """Same service, so the RiskSignal is published here too. Validates: Req 7.16"""
+        signal_bus = _make_signal_bus()
+        app = _make_app(
+            es_service=_make_es_service(),
+            signal_bus=signal_bus,
+            order_repository=_make_order_repository(),
+        )
+
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.post(
+                "/api/driver/orders/ORD_1/exceptions",
+                json=_exception_payload(
+                    exception_type="vehicle_breakdown", severity="high"
+                ),
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 200
+        published = signal_bus.publish.call_args.args[0]
+        assert published.entity_id == "ORD_1"
+        assert published.entity_type == "vehicle_breakdown"
+        assert published.severity == Severity.HIGH
+
+    def test_high_severity_broadcasts_escalation(self):
+        """Escalation fires from the order path unchanged. Validates: Req 7.16"""
+        ws_manager = MagicMock()
+        ws_manager.broadcast = AsyncMock()
+        app = _make_app(
+            es_service=_make_es_service(),
+            scheduling_ws=ws_manager,
+            order_repository=_make_order_repository(),
+        )
+
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            client.post(
+                "/api/driver/orders/ORD_1/exceptions",
+                json=_exception_payload(severity="critical"),
+                headers=_auth_headers(),
+            )
+
+        ws_manager.broadcast.assert_called_once()
+        assert ws_manager.broadcast.call_args.args[0] == "exception_escalation"
+        assert ws_manager.broadcast.call_args.args[1]["order_id"] == "ORD_1"
+
+    def test_unknown_order_returns_404(self):
+        """A missing order is 404 RESOURCE_NOT_FOUND. Validates: Req 7.21"""
+        repo = _make_order_repository()
+        repo.get = AsyncMock(return_value=None)
+        app = _make_app(es_service=_make_es_service(), order_repository=repo)
+
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.post(
+                "/api/driver/orders/ORD_MISSING/exceptions",
+                json=_exception_payload(),
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 404
+        assert resp.json()["error_code"] == "RESOURCE_NOT_FOUND"
+
+    def test_cross_tenant_order_returns_404(self):
+        """An order in another tenant is indistinguishable from absent. Validates: Req 7.21"""
+        app = _make_app(
+            es_service=_make_es_service(),
+            order_repository=_make_order_repository(tenant_id="other-tenant"),
+        )
+
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.post(
+                "/api/driver/orders/ORD_1/exceptions",
+                json=_exception_payload(),
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 404
+        assert resp.json()["error_code"] == "RESOURCE_NOT_FOUND"
+
+    def test_order_assigned_to_another_driver_returns_403(self):
+        """No dual acceptance: a mismatch is 403 FORBIDDEN. Validates: Req 7.21"""
+        es = _make_es_service()
+        app = _make_app(
+            es_service=es,
+            order_repository=_make_order_repository(
+                assigned_driver_id="driver-2"
+            ),
+        )
+
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.post(
+                "/api/driver/orders/ORD_1/exceptions",
+                json=_exception_payload(),
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 403
+        assert resp.json()["error_code"] == "FORBIDDEN"
+        es.index_document.assert_not_called()
+
+    def test_missing_driver_identity_returns_403(self):
+        """A caller without a driver_id claim is rejected. Validates: Req 7.21"""
+        app = _make_app(
+            es_service=_make_es_service(),
+            order_repository=_make_order_repository(),
+        )
+
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.post(
+                "/api/driver/orders/ORD_1/exceptions",
+                json=_exception_payload(),
+                headers=auth_headers(
+                    TENANT_ID, sub="driver-1", roles=["driver"]
+                ),
+            )
+
+        assert resp.status_code == 403
+        assert resp.json()["error_code"] == "DRIVER_IDENTITY_MISSING"
+
+    def test_invalid_exception_type_returns_422(self):
+        """Identical validation to the job-keyed sibling. Validates: Req 7.19"""
+        app = _make_app(
+            es_service=_make_es_service(),
+            order_repository=_make_order_repository(),
+        )
+
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.post(
+                "/api/driver/orders/ORD_1/exceptions",
+                json=_exception_payload(exception_type="alien_invasion"),
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 422

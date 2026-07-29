@@ -360,7 +360,8 @@ class TestInitializeDefaultTemplates:
     async def test_creates_all_default_templates(self):
         """Covers the 12 base templates + 12 severe-weather variants
         introduced by Task 10.9 (Req 9.2.6) + 6 fuel notification
-        templates (Task 14.1/14.2, Req 12.1-12.4)."""
+        templates (Task 14.1/14.2, Req 12.1-12.4) + 2 pod_otp templates
+        (driver-mobile-app R5.27)."""
         es = _make_es_mock()
         es.search_documents = AsyncMock(return_value=_es_response([]))
         renderer = _make_renderer(es)
@@ -369,8 +370,8 @@ class TestInitializeDefaultTemplates:
 
         # 4 base event types × 3 channels + 4 _storm variants × 3 channels
         # + 6 fuel templates (low_tank_autofill_alert×2, past_due_invoice×1,
-        #   delivery_completed×2, e_bol_delivery×1)
-        assert es.index_document.call_count == 30
+        #   delivery_completed×2, e_bol_delivery×1) + pod_otp×2
+        assert es.index_document.call_count == 32
 
         indexed_keys = set()
         for call in es.index_document.call_args_list:
@@ -384,7 +385,7 @@ class TestInitializeDefaultTemplates:
             assert doc["body_template"]  # non-empty
             indexed_keys.add((doc["event_type"], doc["channel"]))
 
-        # Verify all 30 combinations
+        # Verify all 32 combinations
         base_event_types = {
             "delivery_confirmation",
             "delay_alert",
@@ -404,6 +405,10 @@ class TestInitializeDefaultTemplates:
         expected_keys.add(("delivery_completed", "email"))
         expected_keys.add(("delivery_completed", "sms"))
         expected_keys.add(("e_bol_delivery", "email"))
+        # Dispatch-time POD one-time code (driver-mobile-app R5.27) — sms and
+        # email only, matching the two dispatchers its rule enables.
+        expected_keys.add(("pod_otp", "sms"))
+        expected_keys.add(("pod_otp", "email"))
         assert indexed_keys == expected_keys
 
     async def test_skips_existing_templates(self):
@@ -418,8 +423,8 @@ class TestInitializeDefaultTemplates:
 
         await renderer.initialize_default_templates("tenant-1")
 
-        # 30 total - 3 existing = 27 new
-        assert es.index_document.call_count == 27
+        # 32 total - 3 existing = 29 new
+        assert es.index_document.call_count == 29
         created_keys = {
             (call[0][2]["event_type"], call[0][2]["channel"])
             for call in es.index_document.call_args_list
@@ -452,6 +457,9 @@ class TestInitializeDefaultTemplates:
             _template_doc(event_type="delivery_completed", channel="email"),
             _template_doc(event_type="delivery_completed", channel="sms"),
             _template_doc(event_type="e_bol_delivery", channel="email"),
+            # pod_otp (driver-mobile-app R5.27)
+            _template_doc(event_type="pod_otp", channel="sms"),
+            _template_doc(event_type="pod_otp", channel="email"),
         ]
         existing.extend(fuel_templates)
         es = _make_es_mock()

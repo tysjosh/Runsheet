@@ -1525,6 +1525,61 @@ class ElasticsearchService:
         except Exception as e:
             self._handle_elasticsearch_error(f"search_documents({index})", e)
     
+    async def multi_search(
+        self,
+        searches: List[Dict[str, Any]],
+        request_timeout: int = 10,
+    ) -> Dict[str, Any]:
+        """Run several search bodies in ONE round trip via the `_msearch` API.
+
+        The point of this method is the round-trip count: N independent
+        `terms`-filtered lookups cost one network hop instead of N. It is what
+        lets a read model collapse an N+1 fan-out into a fixed budget (see
+        `DriverWorkService`, which resolves compartment prior grades and stop
+        coordinates in a single call).
+
+        Args:
+            searches: One entry per search body, each
+                ``{"index": <index name>, "query": <query body>}``. A missing
+                index is tolerated per body (``ignore_unavailable``), so a
+                deployment that has not created an optional index gets an empty
+                result rather than a failed request.
+            request_timeout: Per-call timeout in seconds.
+
+        Returns:
+            The raw `_msearch` response, ``{"responses": [<search response>, ...]}``
+            in request order. An empty ``searches`` list returns
+            ``{"responses": []}`` without touching the cluster.
+
+        Validates:
+        - Requirement 3.5: Implement circuit breakers for Elasticsearch
+        - Requirement 2.4: Return specific error code indicating database unavailability
+        """
+        if not searches:
+            return {"responses": []}
+
+        try:
+            async def _do_multi_search():
+                body: List[Dict[str, Any]] = []
+                for entry in searches:
+                    header = {
+                        "index": entry["index"],
+                        "ignore_unavailable": True,
+                    }
+                    body.append(header)
+                    body.append(dict(entry.get("query") or {}))
+                return self.client.msearch(
+                    body=body,
+                    request_timeout=request_timeout,
+                )
+
+            return await self._read_circuit_breaker.execute(_do_multi_search)
+        except CircuitOpenException as e:
+            self._handle_circuit_breaker_exception(e)
+        except Exception as e:
+            indices = ",".join(str(entry.get("index")) for entry in searches)
+            self._handle_elasticsearch_error(f"multi_search({indices})", e)
+
     async def get_document(self, index: str, doc_id: str):
         """
         Get a single document by ID with circuit breaker protection.

@@ -497,7 +497,11 @@ class TestIntakeChannelsCrossTenantIsolation:
         """Seed a channel for tenant B."""
         order_repo, driver_repo, intake_repo = repos
         import asyncio
-        asyncio.get_event_loop().run_until_complete(
+        # ``asyncio.run`` owns its loop. Never seed via
+        # ``asyncio.get_event_loop()``: any earlier test that used
+        # ``asyncio.run`` leaves the thread with no current loop, which turns
+        # this fixture into a setup ERROR depending on collection order.
+        asyncio.run(
             intake_repo.create(
                 tenant_id=TENANT_B,
                 channel_id="channel-b-voice",

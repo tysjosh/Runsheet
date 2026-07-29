@@ -30,8 +30,15 @@ def client():
 
         install_test_auth(app)
         try:
-            with TestClient(app, headers=auth_headers("t1")) as c:
-                yield c, mock_es
+            # Deliberately NOT used as a context manager. Entering the client
+            # runs main's lifespan, which boots the real bootstrap chain against
+            # ``main.app`` — a module-level singleton shared with every other
+            # test in the session — and leaves the boot-only routers mounted on
+            # it for good. That pollution used to break
+            # ``test_endpoint_registry.py`` in-suite while it passed in
+            # isolation. This test only needs the route and the patched ES
+            # client, so no lifespan is required.
+            yield TestClient(app, headers=auth_headers("t1")), mock_es
         finally:
             app.dependency_overrides.clear()
 

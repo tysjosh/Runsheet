@@ -133,6 +133,20 @@ class TestOrderIntakeMappingShape:
         for field in required_fields:
             assert field in props, f"drivers_current missing field: {field}"
 
+    def test_drivers_current_declares_duty_status_projection_fields(self):
+        """The projection bookkeeping fields exist and status stays a keyword.
+
+        ``drivers_current`` is ``dynamic: strict``, so the duty-status service
+        cannot write either bookkeeping field until it is declared here. The
+        ``status`` field must stay a single keyword so existing readers work
+        unchanged.
+        """
+        props = DRIVERS_CURRENT_MAPPING["mappings"]["properties"]
+
+        assert props["duty_status_event_id"]["type"] == "keyword"
+        assert props["duty_status_updated_at"]["type"] == "date"
+        assert props["status"] == {"type": "keyword"}
+
     def test_intake_channels_has_all_required_fields(self):
         props = INTAKE_CHANNELS_MAPPING["mappings"]["properties"]
         required_fields = [
@@ -184,7 +198,7 @@ class TestOrderIntakeMappingShape:
             ],
             DRIVERS_CURRENT_INDEX: [
                 "medical_card_expiry", "last_seen", "last_event_timestamp",
-                "created_at", "updated_at",
+                "duty_status_updated_at", "created_at", "updated_at",
             ],
             INTAKE_CHANNELS_INDEX: [
                 "created_at", "updated_at",

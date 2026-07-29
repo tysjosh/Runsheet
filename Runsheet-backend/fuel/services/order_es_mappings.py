@@ -91,6 +91,16 @@ FUEL_ORDERS_CURRENT_MAPPING = {
             "assigned_driver_id": {"type": "keyword"},
             "assigned_asset_id": {"type": "keyword"},
             "assigned_run_id": {"type": "keyword"},
+            # POD one-time code, provisioned by PODOTPService when the order
+            # transitions to ``dispatched`` in a tenant with otp_required
+            # (driver-mobile-app R5.25). The mapping is ``dynamic: strict``, so
+            # the write fails outright until both fields are declared.
+            # ``pod_otp`` is ``"index": False``: it is only ever read back
+            # from the fetched document to compare against the submitted code,
+            # never searched, and an unindexed keyword keeps it out of the
+            # inverted index (R5.26).
+            "pod_otp": {"type": "keyword", "index": False},
+            "pod_otp_generated_at": {"type": "date"},
             "legacy_origin_snapshot": {"type": "text"},
             "source_schema_version": {"type": "keyword"},
             "trace_id": {"type": "keyword"},
@@ -164,7 +174,16 @@ DRIVERS_CURRENT_MAPPING = {
                 "fields": {"keyword": {"type": "keyword"}},
             },
             "phone": {"type": "keyword"},
+            # Current duty-status value. Stays a single keyword carrying one of
+            # the four DriverStatus values so every existing reader of
+            # drivers_current.status keeps working unchanged.
             "status": {"type": "keyword"},
+            # Duty-status projection bookkeeping. Both nullable: absent means
+            # the record predates the duty-status event log. duty_status_event_id
+            # is the id of the duty_status_events document this value projects
+            # and duty_status_updated_at is that event's server_received_at.
+            "duty_status_event_id": {"type": "keyword"},
+            "duty_status_updated_at": {"type": "date"},
             "availability": {"type": "keyword"},
             "assigned_truck_id": {"type": "keyword"},
             "cdl_class": {"type": "keyword"},

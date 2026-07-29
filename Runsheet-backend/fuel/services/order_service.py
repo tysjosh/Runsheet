@@ -187,6 +187,7 @@ class OrderService:
         reason: Optional[str] = None,
         notes: Optional[str] = None,
         actor_user_id: Optional[str] = None,
+        client_event_timestamp: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Apply a status transition to an order.
 
@@ -213,6 +214,13 @@ class OrderService:
                 reason, failure reason).
             notes: Optional notes attached to the event.
             actor_user_id: The user initiating the transition.
+            client_event_timestamp: The caller's own stamp for when the action
+                happened, which may predate the server's receipt (an offline
+                driver queue drains late). Recorded in ``event_payload``
+                alongside the server-stamped ``event_timestamp`` /
+                ``ingested_at``, never in place of them (R4.8). ``event_payload``
+                is the free-form part of the event document, so this needs no
+                ``fuel_order_events`` mapping change.
 
         Returns:
             The updated order document.
@@ -262,6 +270,7 @@ class OrderService:
                 "reason": reason,
                 "notes": notes,
                 "actor_user_id": actor_user_id,
+                "client_event_timestamp": client_event_timestamp,
             },
             "event_timestamp": now,
             "ingested_at": now,

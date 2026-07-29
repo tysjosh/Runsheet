@@ -27,7 +27,7 @@ class MappingDrift:
 
 
 def _collect_all_index_mappings() -> List[Tuple[str, Dict]]:
-    """Collect all (index_name, mapping_dict) pairs from the 5 mapping modules.
+    """Collect all (index_name, mapping_dict) pairs from the mapping modules.
 
     Returns a list of tuples: (index_name, mapping_definition_dict).
     """
@@ -123,6 +123,13 @@ def _collect_all_index_mappings() -> List[Tuple[str, Dict]]:
     pairs.append((INVENTORY_INDEX, INVENTORY_MAPPING))
     pairs.append((INVENTORY_EVENTS_INDEX, INVENTORY_EVENTS_MAPPING))
     pairs.append((RESTOCK_REQUESTS_INDEX, RESTOCK_REQUESTS_MAPPING))
+
+    # 6. driver_es_mappings — without these pairs driver-index drift is neither
+    #    detected nor repaired (Requirement 15.12). The whole registry is used
+    #    so a newly-declared driver index needs no second edit here.
+    from driver.services.driver_es_mappings import DRIVER_INDEX_MAPPINGS
+
+    pairs.extend(DRIVER_INDEX_MAPPINGS.items())
 
     return pairs
 
@@ -263,7 +270,9 @@ class MappingValidator:
         """Attempt to fix additive drift via put_mapping.
 
         For missing fields: calls put_mapping to add the field.
-        For type mismatches: logs a warning (cannot auto-fix, requires reindexing).
+        For type mismatches: logs an ERROR naming the index and the field. It
+        is not repairable at boot and the remedy is an operator-run reindex,
+        never an automatic one.
 
         Args:
             drift_items: List of MappingDrift items to remediate.
@@ -282,7 +291,7 @@ class MappingValidator:
                 # Build the nested property structure from dot-notation path
                 missing_by_index[item.index_name][item.field_path] = item.expected_type
             elif item.drift_type == "type_mismatch":
-                logger.warning(
+                logger.error(
                     f"MappingValidator: Type mismatch in index '{item.index_name}' "
                     f"at field '{item.field_path}': expected '{item.expected_type}', "
                     f"actual '{item.actual_type}'. "

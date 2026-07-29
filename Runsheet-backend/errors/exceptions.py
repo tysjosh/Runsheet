@@ -671,3 +671,362 @@ def kfactor_variance_history_failed(
         message=message,
         details=details
     )
+
+
+# --- Driver Mobile App factory functions ---
+#
+# Every driver-surface rejection is an ``AppException`` (Requirement 15.10) —
+# no driver module raises a raw ``HTTPException``. Requirement 15.14 forbids
+# echoing the caller's held roles or the assigned driver's identity in an
+# authorization rejection, so the default messages below are fixed and
+# non-identifying and only caller-supplied ``details`` are attached.
+
+
+def session_expired(
+    message: str = "The session has expired. Sign in again to continue.",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a session expired exception (HTTP 401).
+
+    Raised for an expired access token regardless of whether the accompanying
+    refresh token is still valid (Requirement 1.8).
+    """
+    return AppException(
+        error_code=ErrorCode.SESSION_EXPIRED,
+        message=message,
+        details=details
+    )
+
+
+def driver_identity_missing(
+    message: str = "This operation requires a driver identity on the session.",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a driver identity missing exception (HTTP 403).
+
+    Raised when a request reaches a ``/api/driver`` surface with a
+    ``TenantContext`` whose ``driver_id`` is absent (Requirement 1.6).
+    """
+    return AppException(
+        error_code=ErrorCode.DRIVER_IDENTITY_MISSING,
+        message=message,
+        details=details
+    )
+
+
+def driver_record_not_provisioned(
+    message: str = "Driver app access is not provisioned for this account.",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a driver record not provisioned exception (HTTP 403).
+
+    Raised at sign-in when a ``driver``-role user has no ``drivers_current``
+    record (Requirement 1.15).
+    """
+    return AppException(
+        error_code=ErrorCode.DRIVER_RECORD_NOT_PROVISIONED,
+        message=message,
+        details=details
+    )
+
+
+def app_access_already_linked(
+    message: str = "Driver app access is already linked to another account.",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create an app access already linked exception (HTTP 409)."""
+    return AppException(
+        error_code=ErrorCode.APP_ACCESS_ALREADY_LINKED,
+        message=message,
+        details=details
+    )
+
+
+def invalid_pin_format(
+    message: str = "The PIN does not meet the required format.",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create an invalid PIN format exception (HTTP 422)."""
+    return AppException(
+        error_code=ErrorCode.INVALID_PIN_FORMAT,
+        message=message,
+        details=details
+    )
+
+
+def weak_pin(
+    message: str = "The PIN is too easily guessed. Choose a different PIN.",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a weak PIN exception (HTTP 422)."""
+    return AppException(
+        error_code=ErrorCode.WEAK_PIN,
+        message=message,
+        details=details
+    )
+
+
+def pin_verification_failed(
+    message: str = "PIN verification failed.",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a PIN verification failed exception (HTTP 403)."""
+    return AppException(
+        error_code=ErrorCode.PIN_VERIFICATION_FAILED,
+        message=message,
+        details=details
+    )
+
+
+def pin_attempts_exceeded(
+    message: str = "Too many failed PIN attempts. Try again later.",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a PIN attempts exceeded exception (HTTP 429)."""
+    return AppException(
+        error_code=ErrorCode.PIN_ATTEMPTS_EXCEEDED,
+        message=message,
+        details=details
+    )
+
+
+def otp_required(
+    message: str = "A proof-of-delivery code is required for this delivery.",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create an OTP required exception (HTTP 422).
+
+    Replaces the former HTTP 200 ``OTP_REQUIRED`` body so the rejection
+    carries a real status code (Requirements 5.9, 15.10).
+    """
+    return AppException(
+        error_code=ErrorCode.OTP_REQUIRED,
+        message=message,
+        details=details
+    )
+
+
+def otp_not_provisioned(
+    message: str = "No proof-of-delivery code is provisioned for this delivery.",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create an OTP not provisioned exception (HTTP 409).
+
+    Fails closed: an OTP is required by policy but none exists to verify
+    against. Replaces the former HTTP 200 body.
+    """
+    return AppException(
+        error_code=ErrorCode.OTP_NOT_PROVISIONED,
+        message=message,
+        details=details
+    )
+
+
+def otp_verification_failed(
+    message: str = "Proof-of-delivery code verification failed",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create an OTP verification failed exception (HTTP 403).
+
+    Replaces the former HTTP 200 ``OTP_INVALID`` body (Requirement 5.9).
+    """
+    return AppException(
+        error_code=ErrorCode.OTP_VERIFICATION_FAILED,
+        message=message,
+        details=details
+    )
+
+
+def otp_window_expired(
+    message: str = "The proof-of-delivery code is outside its validity window.",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create an OTP window expired exception (HTTP 409, Requirement 5.29)."""
+    return AppException(
+        error_code=ErrorCode.OTP_WINDOW_EXPIRED,
+        message=message,
+        details=details
+    )
+
+
+def pod_gallons_confirmation_required(
+    message: str = "Confirm the delivered gallon count to complete this proof of delivery.",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a POD gallons confirmation required exception (HTTP 409).
+
+    Raised when meter-ticket OCR times out, errors, or flags
+    ``requires_manual_review``. Call sites attach the OCR diagnostic string in
+    ``details`` so the app can prompt for a manual entry (Requirement 5.11).
+    """
+    return AppException(
+        error_code=ErrorCode.POD_GALLONS_CONFIRMATION_REQUIRED,
+        message=message,
+        details=details
+    )
+
+
+def delivered_gallons_required(
+    message: str = "A delivered gallon count is required unless the delivery was refused.",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a delivered gallons required exception (HTTP 422, Requirement 5.12)."""
+    return AppException(
+        error_code=ErrorCode.DELIVERED_GALLONS_REQUIRED,
+        message=message,
+        details=details
+    )
+
+
+def pod_order_reference_required(
+    message: str = "A proof of delivery must reference an order.",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a POD order reference required exception (HTTP 422, Requirement 5.22)."""
+    return AppException(
+        error_code=ErrorCode.POD_ORDER_REFERENCE_REQUIRED,
+        message=message,
+        details=details
+    )
+
+
+def stop_already_completed(
+    message: str = "This stop is already completed.",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a stop already completed exception (HTTP 409, Requirement 6.6)."""
+    return AppException(
+        error_code=ErrorCode.STOP_ALREADY_COMPLETED,
+        message=message,
+        details=details
+    )
+
+
+def ambiguous_volume_unit(
+    message: str = (
+        "Supply either actual_quantities (litres) or actual_quantities_gallons, not both."
+    ),
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create an ambiguous volume unit exception (HTTP 422, Requirement 6.16)."""
+    return AppException(
+        error_code=ErrorCode.AMBIGUOUS_VOLUME_UNIT,
+        message=message,
+        details=details
+    )
+
+
+def volume_quantities_required(
+    message: str = (
+        "Supply actual_quantities (litres) or actual_quantities_gallons for this check-in."
+    ),
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a volume quantities required exception (HTTP 422, Requirement 6.17)."""
+    return AppException(
+        error_code=ErrorCode.VOLUME_QUANTITIES_REQUIRED,
+        message=message,
+        details=details
+    )
+
+
+def sender_identity_mismatch(
+    message: str = "The message sender does not match the authenticated identity.",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a sender identity mismatch exception (HTTP 403, Requirement 7.6)."""
+    return AppException(
+        error_code=ErrorCode.SENDER_IDENTITY_MISMATCH,
+        message=message,
+        details=details
+    )
+
+
+def asset_out_of_service(
+    message: str = "The assigned asset is out of service.",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create an asset out of service exception (HTTP 409, Requirement 8.6)."""
+    return AppException(
+        error_code=ErrorCode.ASSET_OUT_OF_SERVICE,
+        message=message,
+        details=details
+    )
+
+
+def pretrip_inspection_required(
+    message: str = "A pre-trip inspection is required before this trip can start.",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a pre-trip inspection required exception (HTTP 409)."""
+    return AppException(
+        error_code=ErrorCode.PRETRIP_INSPECTION_REQUIRED,
+        message=message,
+        details=details
+    )
+
+
+def active_delivery_in_progress(
+    message: str = "A delivery is in progress. Complete it before changing duty status.",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create an active delivery in progress exception (HTTP 409, Requirement 13.6)."""
+    return AppException(
+        error_code=ErrorCode.ACTIVE_DELIVERY_IN_PROGRESS,
+        message=message,
+        details=details
+    )
+
+
+def duty_status_projection_pending(
+    message: str = "The duty status change was recorded and is still being applied.",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a duty status projection pending exception (HTTP 202).
+
+    Unusual by design: a 2xx carrying an ``error_code``. The transition
+    succeeded — the event is durable — and only the ``drivers_current``
+    projection lags, so the offline queue must dequeue rather than retry and
+    append a duplicate event (Requirement 13.18).
+    """
+    return AppException(
+        error_code=ErrorCode.DUTY_STATUS_PROJECTION_PENDING,
+        message=message,
+        details=details
+    )
+
+
+def hos_limit_reached(
+    message: str = "Hours-of-service limit reached.",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create an hours-of-service limit reached exception (HTTP 409)."""
+    return AppException(
+        error_code=ErrorCode.HOS_LIMIT_REACHED,
+        message=message,
+        details=details
+    )
+
+
+def hos_figures_unavailable(
+    message: str = "Hours-of-service figures are unavailable.",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create an hours-of-service figures unavailable exception (HTTP 409)."""
+    return AppException(
+        error_code=ErrorCode.HOS_FIGURES_UNAVAILABLE,
+        message=message,
+        details=details
+    )
+
+
+def driver_not_dispatch_eligible(
+    message: str = "The driver is not eligible for dispatch.",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a driver not dispatch eligible exception (HTTP 409, Requirement 17.31)."""
+    return AppException(
+        error_code=ErrorCode.DRIVER_NOT_DISPATCH_ELIGIBLE,
+        message=message,
+        details=details
+    )

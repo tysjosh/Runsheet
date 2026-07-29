@@ -350,11 +350,19 @@ MVP_PLAN_OUTCOMES_MAPPING = {
                     "quantity_variance_pct":  {"type": "float"},
                     "time_variance_minutes":  {"type": "float"},
                     "status":                {"type": "keyword"},
+                    # --- driver-mobile-app Requirement 6.20 / 6.22 ---
+                    # Unit discriminator for the persisted variance. Written as
+                    # "liter" because both variance operands are litres-typed;
+                    # declared before first write because the mapping is
+                    # ``dynamic: strict``.
+                    "variance_unit":         {"type": "keyword"},   # "liter"
                 },
             },
             "aggregate_quantity_variance_pct":  {"type": "float"},
             "aggregate_time_variance_minutes":  {"type": "float"},
             "missed_stops_count":              {"type": "integer"},
+            # Document-level counterpart of the per-stop discriminator (R6.20).
+            "variance_unit":  {"type": "keyword"},   # "liter"
             "tenant_id":      {"type": "keyword"},
             "timestamp":      {"type": "date"},
             "status":         {"type": "keyword"},
@@ -431,6 +439,24 @@ MVP_PLAN_EXECUTIONS_MAPPING = {
                     "actual_arrival":      {"type": "date"},
                     "planned_quantities":  {"type": "object", "dynamic": True},
                     "actual_quantities":   {"type": "object", "dynamic": True},
+                    # --- driver-mobile-app Requirement 6 (Phase 1) ---
+                    # All nine additions are nullable. The mapping is
+                    # ``dynamic: strict``, so declaring them before the first
+                    # write is the entire migration: a stop record carrying no
+                    # ``actual_quantities_unit`` is read as litres (R6.21), which
+                    # is what pre-feature documents already mean, so no backfill
+                    # runs.
+                    "actual_quantities_unit": {"type": "keyword"},   # "liter" (R6.21, R6.22)
+                    "driver_id":              {"type": "keyword"},   # acting driver (R6.1)
+                    "geotag":                 {"type": "geo_point"},  # (R6.2)
+                    "event_timestamp":        {"type": "date"},      # client-asserted (R6.3)
+                    "server_received_at":     {"type": "date"},      # (R6.3)
+                    "pod_id":                 {"type": "keyword"},   # (R6.8)
+                    "order_id":               {"type": "keyword"},
+                    # Keys are fuel grades, so ``dynamic: True`` matching the
+                    # planned_quantities / actual_quantities treatment above.
+                    "quantity_variance":      {"type": "object", "dynamic": True},  # per-grade litres (R6.9)
+                    "variance_unit":          {"type": "keyword"},   # "liter" (R6.20)
                 },
             },
             "completed_stops":  {"type": "integer"},

@@ -124,7 +124,11 @@ def _make_pod(tenant_id: str, index: int, entry: dict) -> dict:
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    # ``asyncio.run`` owns its loop. ``asyncio.get_event_loop()`` would depend on
+    # ambient process state: any earlier test that used ``asyncio.run`` leaves
+    # the thread with no current loop, making this raise RuntimeError purely
+    # because of collection order.
+    return asyncio.run(coro)
 
 
 # ---------------------------------------------------------------------------
