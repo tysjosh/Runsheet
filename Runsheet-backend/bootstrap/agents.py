@@ -12,6 +12,7 @@ import logging
 import os
 
 import asyncio
+from typing import Optional
 
 from bootstrap.container import ServiceContainer
 from bootstrap.routing import mount_router
@@ -1061,6 +1062,69 @@ async def initialize(app, container: ServiceContainer) -> None:
         logger.info("Route_Planning_Agent depot resolver wired")
     except Exception as exc:  # noqa: BLE001 — degrade to legacy behaviour
         logger.warning("Depot resolver wiring failed: %s", exc)
+
+    # Wire traffic-aware routing (Capability 2 / Req 2.1.2, 2.1.4, 2.1.7).
+    #
+    # Two hooks, both previously unwired, and the second one matters for cost:
+    #
+    # * ``set_tenant_config`` — without it ``_resolve_traffic_provider_name``
+    #   returns ``None`` immediately, so ``overlay.traffic_provider:{tenant}``
+    #   was unreadable and traffic-aware routing never engaged for anyone, even
+    #   with ``overlay.traffic_aware_routing`` switched on.
+    #
+    # * ``set_traffic_provider_factory`` — the agent does fall back to the
+    #   module-level ``build_traffic_provider(name)`` registry, so a provider
+    #   was constructible without this. But that fallback passes no kwargs,
+    #   which means no ``redis_client``, which silently disables both the
+    #   per-pair 900s matrix cache (Req 2.1.4) and the per-tenant monthly
+    #   budget counter (Req 2.1.7). Every route build would then hit the paid
+    #   Directions API uncached and unbudgeted. The factory exists precisely as
+    #   the injection point for that client; nothing had used it.
+    #
+    # Credentials stay in the provider adapters, which read their own env vars
+    # (MAPBOX_ACCESS_TOKEN / HERE_API_KEY / GOOGLE_MAPS_API_KEY). A tenant with
+    # no ``overlay.traffic_provider`` value, or a provider whose credential is
+    # absent, degrades to Haversine with ``traffic_fallback: true`` rather than
+    # failing the plan.
+    try:
+        from fuel.services.traffic_provider import (
+            TrafficProvider,
+            build_traffic_provider,
+        )
+
+        def _traffic_provider_factory(
+            provider_name: str, tenant_id: str
+        ) -> Optional[TrafficProvider]:
+            """Build a provider with the shared Redis client attached.
+
+            Returning ``None`` tells the agent to use Haversine for this
+            tenant, which is the correct outcome for an unknown provider name:
+            the alternative is the registry fallback building a cache-less,
+            budget-less provider that bills on every request.
+            """
+            try:
+                return build_traffic_provider(
+                    provider_name, redis_client=_agent_redis_client
+                )
+            except ValueError:
+                logger.warning(
+                    "Unknown overlay.traffic_provider=%r for tenant %s; "
+                    "using Haversine",
+                    provider_name,
+                    tenant_id,
+                )
+                return None
+
+        route_planning_agent.set_tenant_config(_agent_redis_client)
+        route_planning_agent.set_traffic_provider_factory(
+            _traffic_provider_factory
+        )
+        logger.info(
+            "Route_Planning_Agent traffic-aware routing wired "
+            "(cache + per-tenant budget active)"
+        )
+    except Exception as exc:  # noqa: BLE001 — degrade to Haversine
+        logger.warning("Traffic-aware routing wiring failed: %s", exc)
 
     # ---- Inventory Pipeline Integration ----
     from Agents.autonomous.inventory_monitor import InventoryMonitorAgent
