@@ -1,4 +1,4 @@
-"""Authorization for endpoints that take a ``tenant_id`` path parameter.
+"""Authorization for endpoints acting on a caller-supplied tenant.
 
 The problem this exists to prevent
 ----------------------------------
@@ -23,6 +23,38 @@ Five endpoints were missing that assertion:
   disconnect their WebSocket clients, or, with ``purge_data=true``, delete their
   ops data.
 
+The second shape: an identifier in the request body
+---------------------------------------------------
+
+The same hole also arrives without a ``tenant_id`` anywhere in the URL. When a
+handler takes an identifier in the **request body** — typically a user's email —
+and resolves it against ``auth_users`` with no tenant filter, it acts on
+whichever row it finds, in whatever tenant. The rule is identical: the resolved
+row's ``tenant_id`` must be the caller's unless they hold ``platform_admin``.
+Two endpoints were fixed this way:
+
+* ``POST /api/auth/admin/password-reset-link`` looked up ``body.email`` in
+  ``auth_users`` unscoped, so a tenant-A ``admin`` could mint a working reset
+  link for any provisioned account on the platform — including a
+  ``platform_admin`` staff account — and take it over. That surface scopes the
+  lookup rather than calling :func:`require_tenant_scope`, so an out-of-tenant
+  email is reported as "not provisioned" and cannot be enumerated.
+* ``POST /api/ops/drivers/{driver_id}/app-access`` read the row for
+  ``body.email`` unscoped and then upserted ``ON CONFLICT (email) DO UPDATE SET
+  tenant_id = EXCLUDED.tenant_id``, so the same caller could rewrite another
+  tenant's user into their own tenant. It now compares the row's ``tenant_id``
+  to the caller's — via :func:`is_platform_admin` rather than
+  :func:`require_tenant_scope` — before any write, and reports a denial as the
+  same conflict a legitimately unavailable email produces, again so the
+  address cannot be probed.
+
+The two use opposite mechanics for a reason. The reset link only *reads*, so
+narrowing the query is enough — a scoped miss means nothing happens. The
+app-access grant *writes* through ``ON CONFLICT (email)``, so narrowing its read
+would hide the out-of-tenant row without stopping the write from landing on it;
+there, authorization has to see the row the write will touch and refuse
+explicitly.
+
 Why a role and a tenant check, not one or the other
 ---------------------------------------------------
 
@@ -39,9 +71,9 @@ administer their own company.
 Fail closed
 -----------
 
-A missing or empty ``roles`` list denies. A blank ``tenant_id`` path parameter
-denies rather than matching a blank session tenant, so a malformed route cannot
-authorize itself.
+A missing or empty ``roles`` list denies. A blank target ``tenant_id`` denies
+rather than matching a blank session tenant, so a malformed route — or a blank
+scope derived from a body identifier — cannot authorize itself.
 """
 from __future__ import annotations
 
