@@ -12,7 +12,7 @@ import io
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -27,6 +27,7 @@ from services.import_models import (
 )
 from services.import_service import ImportService
 from services.schema_templates import SchemaTemplate, SchemaTemplates
+from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,27 @@ schema_templates = SchemaTemplates()
 
 # Max upload file size: 10 MB
 MAX_FILE_SIZE = 10 * 1024 * 1024
+
+
+def configure_import_endpoints(
+    *,
+    order_intake_pipeline,
+    tank_import_service,
+) -> None:
+    """Wire canonical domain services into the shared import workflow."""
+
+    import_service.configure_canonical_imports(
+        order_intake_pipeline=order_intake_pipeline,
+        tank_import_service=tank_import_service,
+    )
+
+
+def _require_import_role(tenant: TenantContext) -> None:
+    if not {"admin", "dispatcher"}.intersection(tenant.roles or []):
+        raise HTTPException(
+            status_code=403,
+            detail="Data imports require the admin or dispatcher role.",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -71,6 +93,7 @@ async def upload_csv(
     request: Request,
     file: UploadFile = File(...),
     data_type: str = Form(...),
+    tenant: TenantContext = Depends(get_tenant_context),
 ) -> ParseResult:
     """Upload a CSV file for import.
 
@@ -79,6 +102,7 @@ async def upload_csv(
 
     Requirements: 3.3, 3.4, 11.1
     """
+    _require_import_role(tenant)
     # Validate file extension
     filename = file.filename or ""
     if not filename.lower().endswith(".csv"):
@@ -96,7 +120,12 @@ async def upload_csv(
         )
 
     try:
-        result = await import_service.parse_csv(file_content, data_type)
+        result = await import_service.parse_csv(
+            file_content,
+            data_type,
+            tenant_id=tenant.tenant_id,
+            source_name=filename,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
@@ -108,6 +137,7 @@ async def upload_csv(
 async def upload_sheets(
     request: Request,
     body: SheetsUploadRequest,
+    tenant: TenantContext = Depends(get_tenant_context),
 ) -> ParseResult:
     """Import data from a Google Sheets URL.
 
@@ -116,8 +146,13 @@ async def upload_sheets(
 
     Requirements: 11.2
     """
+    _require_import_role(tenant)
     try:
-        result = await import_service.parse_sheets(body.url, body.data_type)
+        result = await import_service.parse_sheets(
+            body.url,
+            body.data_type,
+            tenant_id=tenant.tenant_id,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
@@ -133,6 +168,7 @@ async def upload_sheets(
 async def validate_import(
     request: Request,
     body: ValidateRequest,
+    tenant: TenantContext = Depends(get_tenant_context),
 ) -> ValidationResult:
     """Validate mapped data against the schema template.
 
@@ -141,8 +177,13 @@ async def validate_import(
 
     Requirements: 11.3
     """
+    _require_import_role(tenant)
     try:
-        result = await import_service.validate(body.session_id, body.field_mapping)
+        result = await import_service.validate(
+            body.session_id,
+            body.field_mapping,
+            tenant_id=tenant.tenant_id,
+        )
     except ValueError as exc:
         detail = str(exc)
         if "not found" in detail.lower():
@@ -161,6 +202,7 @@ async def validate_import(
 async def commit_import(
     request: Request,
     body: CommitRequest,
+    tenant: TenantContext = Depends(get_tenant_context),
 ) -> ImportResult:
     """Commit validated records to Elasticsearch.
 
@@ -169,8 +211,13 @@ async def commit_import(
 
     Requirements: 11.4
     """
+    _require_import_role(tenant)
     try:
-        result = await import_service.commit(body.session_id, body.skip_errors)
+        result = await import_service.commit(
+            body.session_id,
+            body.skip_errors,
+            tenant=tenant,
+        )
     except ValueError as exc:
         detail = str(exc)
         if "not found" in detail.lower():
@@ -192,6 +239,7 @@ async def get_import_history(
     request: Request,
     data_type: Optional[str] = None,
     status: Optional[str] = None,
+    tenant: TenantContext = Depends(get_tenant_context),
 ) -> list[ImportSessionRecord]:
     """List import sessions with optional filters.
 
@@ -199,7 +247,11 @@ async def get_import_history(
 
     Requirements: 11.5
     """
-    return await import_service.get_history(data_type=data_type, status=status)
+    return await import_service.get_history(
+        data_type=data_type,
+        status=status,
+        tenant_id=tenant.tenant_id,
+    )
 
 
 @router.get("/history/{session_id}", response_model=ImportSessionRecord)
@@ -207,12 +259,16 @@ async def get_import_history(
 async def get_import_session(
     request: Request,
     session_id: str,
+    tenant: TenantContext = Depends(get_tenant_context),
 ) -> ImportSessionRecord:
     """Retrieve a single import session by ID.
 
     Requirements: 11.6
     """
-    record = await import_service.get_session(session_id)
+    record = await import_service.get_session(
+        session_id,
+        tenant_id=tenant.tenant_id,
+    )
     if record is None:
         raise HTTPException(
             status_code=404,

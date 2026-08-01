@@ -74,7 +74,8 @@ class InvoiceLineItem(BaseModel):
     """A single line item on an Invoice.
 
     Nested within ``invoices_current.line_items`` (design §3.4).
-    All monetary fields are integer cents (Constraint C1).
+    Totals are integer cents. Precise per-gallon prices are integer
+    micro-dollars so four-decimal fuel rates survive multiplication.
     """
 
     line_id: str = Field(
@@ -88,10 +89,18 @@ class InvoiceLineItem(BaseModel):
         ..., description="Quantity delivered in gallons"
     )
     unit_price_cents: int = Field(
-        ..., description="Unit price in integer cents (Constraint C1)"
+        ...,
+        description="Rounded whole-cent compatibility unit price",
+    )
+    unit_price_micros: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Exact unit price in micro-dollars; preferred for calculations"
+        ),
     )
     subtotal_cents: int = Field(
-        ..., description="Line subtotal in integer cents (quantity × unit_price_cents)"
+        ..., description="Line subtotal rounded once to integer cents"
     )
 
 
@@ -121,6 +130,18 @@ class Invoice(BaseModel):
     order_id: Optional[str] = Field(
         default=None,
         description="Source fuel order identifier (null for QBO-backfilled invoices)",
+    )
+    pod_id: Optional[str] = Field(
+        default=None,
+        description="Proof-of-delivery identifier used to generate this invoice",
+    )
+    delivered_at: Optional[datetime] = Field(
+        default=None,
+        description="Customer delivery timestamp from the canonical POD result",
+    )
+    delivery_result: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Immutable POD snapshot used for invoicing and ERP return",
     )
     invoice_number: Optional[str] = Field(
         default=None,

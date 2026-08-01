@@ -133,6 +133,7 @@ MVP_LOAD_PLANS_MAPPING = {
                 "properties": {
                     "compartment_id":             {"type": "keyword"},
                     "station_id":                 {"type": "keyword"},
+                    "order_id":                   {"type": "keyword"},
                     "fuel_grade":                 {"type": "keyword"},
                     "quantity_liters":            {"type": "float"},
                     "compartment_capacity_liters": {"type": "float"},
@@ -173,6 +174,7 @@ MVP_ROUTES_MAPPING = {
                 "type": "nested",
                 "properties": {
                     "station_id": {"type": "keyword"},
+                    "order_ids":  {"type": "keyword"},
                     "eta":        {"type": "date"},
                     "drop":       {"type": "object", "dynamic": True},
                     "sequence":   {"type": "integer"},
@@ -509,6 +511,29 @@ MVP_INDEX_MAPPINGS = {
     MVP_COST_CONFIGS_INDEX: MVP_COST_CONFIGS_MAPPING,
 }
 
+# Additive mapping upgrades for indices created before exact order linkage was
+# introduced.  Both parent fields are already ``nested``; Elasticsearch permits
+# adding child properties in place, so no reindex or destructive recreation is
+# required.
+MVP_ADDITIVE_MAPPING_UPDATES = {
+    MVP_LOAD_PLANS_INDEX: {
+        "properties": {
+            "assignments": {
+                "type": "nested",
+                "properties": {"order_id": {"type": "keyword"}},
+            }
+        }
+    },
+    MVP_ROUTES_INDEX: {
+        "properties": {
+            "stops": {
+                "type": "nested",
+                "properties": {"order_ids": {"type": "keyword"}},
+            }
+        }
+    },
+}
+
 
 def setup_mvp_indices(es_service) -> None:
     """Create MVP ES indices if they don't already exist.
@@ -532,5 +557,14 @@ def setup_mvp_indices(es_service) -> None:
                 logger.info(f"Created MVP index: {index_name}")
             else:
                 logger.info(f"MVP index already exists: {index_name}")
+                additive_update = MVP_ADDITIVE_MAPPING_UPDATES.get(index_name)
+                if additive_update:
+                    es_client.indices.put_mapping(
+                        index=index_name,
+                        body=additive_update,
+                    )
+                    logger.info(
+                        "Applied additive MVP mapping update: %s", index_name
+                    )
         except Exception:
             logger.exception("Failed to create MVP index %s", index_name)

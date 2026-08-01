@@ -411,10 +411,13 @@ class TestSyncPush:
         )
         assert run.status == "success"
         assert run.record_counts["invoices_pushed"] == 1
+        assert run.result_metadata["external_invoice_id"] == "INV-42"
         assert len(http.calls) == 1
         call = http.calls[0]
         assert call["method"] == "POST"
         assert "/v3/company/realm-1/invoice" in call["url"]
+        assert call["params"]["requestid"].startswith("runsheet-inv-")
+        assert len(call["params"]["requestid"]) <= 50
         assert call["json"]["CustomerRef"] == {"value": "cust-1"}
         line = call["json"]["Line"][0]
         assert line["SalesItemLineDetail"]["Qty"] == 480.0
@@ -438,6 +441,27 @@ class TestSyncPush:
             }
         )
         assert run.status == "error"
+        assert run.record_counts["failed"] == 1
+
+    @pytest.mark.asyncio
+    async def test_missing_provider_invoice_id_is_not_reported_as_pushed(self):
+        http = _ScriptedHTTPClient([_StubResponse(200, {"Invoice": {}})])
+        connector = _seeded_connector(
+            feature_flags=_FakeFeatureFlags(state="active_auto"),
+            http=http,
+        )
+
+        run = await connector.sync_push(
+            {
+                "pod_id": "pod-no-provider-id",
+                "customer_id": "cust-1",
+                "delivered_gallons": 480.0,
+                "unit_price_usd": 3.0,
+            }
+        )
+
+        assert run.status == "error"
+        assert run.record_counts["invoices_pushed"] == 0
         assert run.record_counts["failed"] == 1
 
 
@@ -646,6 +670,9 @@ class TestRefreshOn401:
             }
         )
         assert run.status == "success"
+        assert http.calls[0]["params"]["requestid"] == http.calls[1]["params"][
+            "requestid"
+        ]
         assert run.record_counts["invoices_pushed"] == 1
         # Exactly two QBO HTTP calls: 401, then retry.
         qbo_calls = [c for c in http.calls if "quickbooks.api.intuit.com" in c["url"]]

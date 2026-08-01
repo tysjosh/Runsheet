@@ -1,0 +1,2 @@
+source_system,external_tank_id,customer_tank_id,customer_id,customer_type,fuel_type,fuel_product_code,capacity_gallons,current_level_gallons,last_reading_at,location_lat,location_lon,zip_code,k_factor,use_case,status
+PetroERP,BAD-TANK-01,bad-tank-01,CUST-BAD-01,commercial,diesel,DIESEL_2,500,650,2026-07-29T14:00:00Z,39.7684,-86.1581,46201,,other,active

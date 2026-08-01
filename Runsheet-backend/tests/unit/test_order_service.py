@@ -242,6 +242,25 @@ class TestDriverCounterUpdates:
     """Tests for driver counter increment/decrement logic."""
 
     @pytest.mark.asyncio
+    async def test_scheduled_to_dispatched_increments_active(self):
+        """Active work begins at dispatch, not at driver selection."""
+        counter_svc = AsyncMock()
+        counter_svc.increment_counters = AsyncMock()
+        service, _, _, _ = _build_service(
+            driver_counter_service=counter_svc
+        )
+        order = _make_order(status="scheduled", assigned_driver_id="drv_1")
+
+        await service.apply_status_transition(order, "dispatched")
+
+        counter_svc.increment_counters.assert_called_once_with(
+            driver_id="drv_1",
+            tenant_id="tenant_1",
+            delta_active=1,
+            delta_completed=0,
+        )
+
+    @pytest.mark.asyncio
     async def test_dispatched_to_delivered_decrements_active_increments_completed(self):
         """dispatched → delivered decrements active and increments completed."""
         counter_svc = AsyncMock()
@@ -457,6 +476,45 @@ class TestPlaceOnHold:
         repo.append_event.assert_called_once()
         event = repo.append_event.call_args[0][1]
         assert event["event_type"] == "order_on_hold"
+
+
+class TestReconcileDeliveryResult:
+    @pytest.mark.asyncio
+    async def test_persists_audits_and_replays_delivered_subscribers(self):
+        service, repo, ws, _ = _build_service()
+        subscriber = AsyncMock()
+        service.subscribe("order.delivered", subscriber)
+        order = _make_order(status="delivered")
+        delivery_result = {
+            "pod_id": "pod-1",
+            "actual_gallons": 487.5,
+        }
+
+        result = await service.reconcile_delivery_result(
+            order=order,
+            delivery_result=delivery_result,
+            actor_user_id="driver-1",
+            client_event_timestamp="2026-05-10T11:59:00Z",
+        )
+
+        assert result["delivery_result"] == delivery_result
+        event = repo.append_event.call_args.args[1]
+        assert event["event_type"] == "order_delivery_result_reconciled"
+        assert event["event_payload"]["actual_gallons"] == 487.5
+        repo.upsert_with_last_event_timestamp.assert_awaited_once()
+        subscriber.assert_awaited_once_with(result)
+
+    @pytest.mark.asyncio
+    async def test_rejects_non_delivered_order(self):
+        service, repo, ws, _ = _build_service()
+
+        with pytest.raises(ValueError, match="already delivered"):
+            await service.reconcile_delivery_result(
+                order=_make_order(status="in_transit"),
+                delivery_result={"pod_id": "pod-1", "actual_gallons": 10},
+            )
+
+        repo.append_event.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

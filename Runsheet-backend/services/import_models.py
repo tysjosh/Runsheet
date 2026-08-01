@@ -17,6 +17,8 @@ class DataTypeEnum(str, Enum):
     """Supported data types for import operations."""
     FLEET = "fleet"
     ORDERS = "orders"
+    CUSTOMER_TANKS = "customer_tanks"
+    TANK_READINGS = "tank_readings"
     FUEL_STATIONS = "fuel_stations"
     INVENTORY = "inventory"
     JOBS = "jobs"
@@ -79,6 +81,7 @@ class ImportResult(BaseModel):
 class ImportSessionRecord(BaseModel):
     """Persisted to the import_sessions ES index."""
     session_id: str
+    tenant_id: Optional[str] = None
     data_type: str
     source_type: str  # "csv" or "google_sheets"
     source_name: str  # filename or URL

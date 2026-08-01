@@ -61,7 +61,12 @@ logger = logging.getLogger(__name__)
 
 # Invoice columns whose values may arrive as ISO-8601 strings from the ES-shaped
 # service docs but must be native datetime/date for the Postgres column types.
-_INVOICE_DATETIME_FIELDS = {"issued_at", "finalized_at", "voided_at"}
+_INVOICE_DATETIME_FIELDS = {
+    "issued_at",
+    "finalized_at",
+    "voided_at",
+    "delivered_at",
+}
 _INVOICE_DATE_FIELDS = {"due_date"}
 
 
@@ -291,6 +296,9 @@ class InvoiceRepository:
                      customer_id: str, account_id: str,
                      line_items: List[Dict[str, Any]],
                      order_id: Optional[str] = None,
+                     pod_id: Optional[str] = None,
+                     delivered_at: Any = None,
+                     delivery_result: Optional[Dict[str, Any]] = None,
                      invoice_number: Optional[str] = None,
                      status: str = "draft", tax_cents: int = 0,
                      subtotal_cents: Optional[int] = None,
@@ -309,12 +317,22 @@ class InvoiceRepository:
         total = total_cents if total_cents is not None else subtotal + tax_cents
         remaining = remaining_cents if remaining_cents is not None else total - amount_paid_cents
         _due = _coerce_temporal_fields({"due_date": due_date}).get("due_date") if due_date else None
+        _delivered_at = (
+            _coerce_temporal_fields({"delivered_at": delivered_at}).get(
+                "delivered_at"
+            )
+            if delivered_at
+            else None
+        )
         row = InvoiceORM(
             invoice_id=invoice_id,
             tenant_id=tenant_id,
             customer_id=customer_id,
             account_id=account_id,
             order_id=order_id,
+            pod_id=pod_id,
+            delivered_at=_delivered_at,
+            delivery_result=delivery_result,
             invoice_number=invoice_number,
             status=status,
             subtotal_cents=subtotal,
@@ -333,6 +351,11 @@ class InvoiceRepository:
                     product_code=li["product_code"],
                     quantity_gallons=float(li["quantity_gallons"]),
                     unit_price_cents=int(li["unit_price_cents"]),
+                    unit_price_micros=(
+                        int(li["unit_price_micros"])
+                        if li.get("unit_price_micros") is not None
+                        else None
+                    ),
                     subtotal_cents=int(li["subtotal_cents"]),
                 )
             )
@@ -704,6 +727,11 @@ class PricingRuleRepository:
                 effective_to=vals.get("effective_to"),
                 min_quantity_gallons=vals.get("min_quantity_gallons"),
                 unit_price_cents=int(vals["unit_price_cents"]),
+                unit_price_micros=(
+                    int(vals["unit_price_micros"])
+                    if vals.get("unit_price_micros") is not None
+                    else None
+                ),
             )
             session.add(row)
         else:
@@ -714,6 +742,12 @@ class PricingRuleRepository:
                     setattr(row, key, vals[key])
             if "unit_price_cents" in vals:
                 row.unit_price_cents = int(vals["unit_price_cents"])
+            if "unit_price_micros" in vals:
+                row.unit_price_micros = (
+                    int(vals["unit_price_micros"])
+                    if vals["unit_price_micros"] is not None
+                    else None
+                )
         await session.flush()
         outbox.enqueue(session, aggregate_type="pricing_rule", aggregate_id=rule_id,
                        tenant_id=tenant_id, event_type="upserted", row=row)

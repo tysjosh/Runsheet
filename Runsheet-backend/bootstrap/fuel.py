@@ -417,6 +417,25 @@ async def initialize(app, container: ServiceContainer) -> None:
             container.order_service = order_service
             logger.info("OrderService registered")
 
+            # The router is first configured above before OrderService exists.
+            # Re-point it at this application-scoped instance so dispatcher
+            # transitions publish the same subscribers (notably
+            # ``order.dispatched`` push) as driver and internal transitions.
+            from fuel.api.order_endpoints import configure_order_endpoints
+
+            configure_order_endpoints(
+                order_intake_pipeline=order_intake_pipeline,
+                order_repository=order_repository,
+                driver_repository=driver_repository,
+                driver_counter_service=(
+                    container.driver_counter_service
+                    if container.has("driver_counter_service")
+                    else None
+                ),
+                order_service=order_service,
+            )
+            logger.info("Order REST endpoints re-wired to shared OrderService")
+
             # Registering the service arms the previously dormant
             # ``order.delivered`` subscribers (K-factor calibration at
             # bootstrap/compliance.py and the delivery-completed
@@ -646,4 +665,3 @@ async def shutdown(app, container: ServiceContainer) -> None:
             await container.orders_ws_manager.shutdown()
         except Exception as exc:
             logger.exception("Orders WS manager shutdown failed: %s", exc)
-

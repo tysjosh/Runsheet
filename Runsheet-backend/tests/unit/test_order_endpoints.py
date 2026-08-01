@@ -112,8 +112,11 @@ class FakeOrderRepository:
     async def upsert(self, tenant_id: str, order: FuelOrder) -> None:
         self._orders[self._key(tenant_id, order.order_id)] = order
 
-    async def upsert_with_last_event_timestamp(self, tenant_id: str, order: FuelOrder) -> None:
-        self._orders[self._key(tenant_id, order.order_id)] = order
+    async def upsert_with_last_event_timestamp(
+        self, tenant_id: str, order: FuelOrder | Dict[str, Any]
+    ) -> None:
+        model = order if isinstance(order, FuelOrder) else FuelOrder(**order)
+        self._orders[self._key(tenant_id, model.order_id)] = model
 
     async def append_event(self, tenant_id: str, event: Any) -> None:
         if isinstance(event, dict):

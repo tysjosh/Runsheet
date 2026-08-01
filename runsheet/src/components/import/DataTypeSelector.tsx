@@ -5,7 +5,9 @@ import {
   Database,
   Download,
   Fuel,
+  Gauge,
   Loader2,
+  ShoppingCart,
   Truck,
 } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -24,6 +26,9 @@ const DATA_TYPE_CONFIG: Record<
   DataType,
   { label: string; icon: React.ElementType }
 > = {
+  orders: { label: "Fuel Orders", icon: ShoppingCart },
+  customer_tanks: { label: "Customer Tanks", icon: Fuel },
+  tank_readings: { label: "Tank Readings", icon: Gauge },
   fleet: { label: "Fleet", icon: Truck },
   fuel_stations: { label: "Fuel Stations", icon: Fuel },
   inventory: { label: "Inventory", icon: Boxes },
@@ -31,6 +36,9 @@ const DATA_TYPE_CONFIG: Record<
 };
 
 const ALL_DATA_TYPES: DataType[] = [
+  "orders",
+  "customer_tanks",
+  "tank_readings",
   "fleet",
   "fuel_stations",
   "inventory",

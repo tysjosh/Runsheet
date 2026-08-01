@@ -238,6 +238,11 @@ def _normalize_line_items(raw: list) -> list:
             "product_code": li.get("product_code", ""),
             "quantity_gallons": qty,
             "unit_price_cents": int(li.get("unit_price_cents", 0)),
+            "unit_price_micros": (
+                int(li["unit_price_micros"])
+                if li.get("unit_price_micros") is not None
+                else None
+            ),
             "subtotal_cents": int(li.get("subtotal_cents", 0)),
         })
     return items
@@ -284,6 +289,9 @@ async def mirror_invoice_create(doc: Dict[str, Any]) -> None:
                 account_id=doc["account_id"],
                 line_items=_normalize_line_items(doc.get("line_items")),
                 order_id=doc.get("order_id"),
+                pod_id=doc.get("pod_id"),
+                delivered_at=doc.get("delivered_at"),
+                delivery_result=doc.get("delivery_result"),
                 invoice_number=doc.get("invoice_number"),
                 status=doc.get("status", "draft"),
                 tax_cents=doc.get("tax_cents", 0),

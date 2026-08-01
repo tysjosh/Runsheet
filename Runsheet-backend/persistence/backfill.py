@@ -267,6 +267,9 @@ async def backfill(tenant_id: Optional[str] = None, *, dry_run: bool = False) ->
                 customer_id=src["customer_id"],
                 account_id=src["account_id"],
                 order_id=src.get("order_id"),
+                pod_id=src.get("pod_id"),
+                delivered_at=_parse_dt(src.get("delivered_at")),
+                delivery_result=src.get("delivery_result"),
                 invoice_number=src.get("invoice_number"),
                 status=src.get("status", "draft"),
                 total_cents=src.get("total_cents", 0),
@@ -295,6 +298,11 @@ async def backfill(tenant_id: Optional[str] = None, *, dry_run: bool = False) ->
                     product_code=li.get("product_code", ""),
                     quantity_gallons=float(li.get("quantity_gallons", li.get("quantity", 0)) or 0),
                     unit_price_cents=int(li.get("unit_price_cents", 0)),
+                    unit_price_micros=(
+                        int(li["unit_price_micros"])
+                        if li.get("unit_price_micros") is not None
+                        else None
+                    ),
                     subtotal_cents=int(li.get("subtotal_cents", 0)),
                 ))
             session.add(inv)
@@ -366,6 +374,11 @@ async def backfill(tenant_id: Optional[str] = None, *, dry_run: bool = False) ->
                 effective_to=_parse_dt(src.get("effective_to")),
                 min_quantity_gallons=src.get("min_quantity_gallons"),
                 unit_price_cents=int(src.get("unit_price_cents", 0)),
+                unit_price_micros=(
+                    int(src["unit_price_micros"])
+                    if src.get("unit_price_micros") is not None
+                    else None
+                ),
                 created_at=_parse_dt(src.get("created_at")) or datetime.utcnow(),
                 updated_at=_parse_dt(src.get("updated_at")) or datetime.utcnow(),
             ))

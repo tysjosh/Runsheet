@@ -159,6 +159,9 @@ def invoice_to_doc(row: InvoiceORM) -> Dict[str, Any]:
         "customer_id": row.customer_id,
         "account_id": row.account_id,
         "order_id": row.order_id,
+        "pod_id": row.pod_id,
+        "delivered_at": _iso(row.delivered_at),
+        "delivery_result": row.delivery_result,
         "invoice_number": row.invoice_number,
         "status": row.status,
         "total_cents": row.total_cents,
@@ -172,6 +175,7 @@ def invoice_to_doc(row: InvoiceORM) -> Dict[str, Any]:
                 "product_code": li.product_code,
                 "quantity_gallons": li.quantity_gallons,
                 "unit_price_cents": li.unit_price_cents,
+                "unit_price_micros": li.unit_price_micros,
                 "subtotal_cents": li.subtotal_cents,
             }
             for li in sorted(row.line_items, key=lambda li: li.position)
@@ -259,6 +263,7 @@ def pricing_rule_to_doc(row) -> Dict[str, Any]:
         "effective_to": _iso(row.effective_to),
         "min_quantity_gallons": row.min_quantity_gallons,
         "unit_price_cents": row.unit_price_cents,
+        "unit_price_micros": row.unit_price_micros,
         "created_at": _iso(row.created_at),
         "updated_at": _iso(row.updated_at),
     }

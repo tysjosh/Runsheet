@@ -22,6 +22,7 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
 from middleware.rate_limiter import limiter
+from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 from services.import_models import ImportStatus
 from services.import_service import ImportService
 from services.schema_templates import SchemaTemplates
@@ -33,13 +34,15 @@ pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 # ---------------------------------------------------------------------------
 
 SUPPORTED_DATA_TYPES = [
-    "fleet", "orders", "fuel_stations",
+    "fleet", "orders", "customer_tanks", "tank_readings", "fuel_stations",
     "inventory", "jobs",
 ]
 
 DATA_TYPE_INDEX_MAP = {
     "fleet": "trucks",
-    "orders": "orders",
+    "orders": "fuel_orders_current",
+    "customer_tanks": "customer_tanks",
+    "tank_readings": "atg_readings",
     "fuel_stations": "fuel_stations",
     "inventory": "inventory",
     "jobs": "jobs",
@@ -72,6 +75,7 @@ def _mock_es_service() -> MagicMock:
         return_value={"hits": {"hits": [], "total": {"value": 0}}}
     )
     mock.index_document = AsyncMock(return_value={"result": "created"})
+    mock.get_document = AsyncMock(return_value=None)
     return mock
 
 
@@ -100,6 +104,12 @@ def test_app(mock_es):
     with patch("import_endpoints.import_service", test_import_service):
         from import_endpoints import router
         app.include_router(router)
+        app.dependency_overrides[get_tenant_context] = lambda: TenantContext(
+            tenant_id="tenant-test",
+            user_id="user-test",
+            has_pii_access=True,
+            roles=["admin"],
+        )
         # Store references for test access
         app.state._test_import_service = test_import_service
         app.state._test_mock_es = mock_es
@@ -151,7 +161,7 @@ class TestUploadCSV:
         )
         assert resp.status_code == 200
         body = resp.json()
-        assert "order_id" in body["columns"]
+        assert "source_order_id" in body["columns"]
 
     async def test_upload_oversized_file(self, client):
         """Reject a file exceeding 10 MB. Validates: Requirement 3.3"""
@@ -375,15 +385,15 @@ class TestCommit:
         mock_es.bulk_index_documents = AsyncMock(
             return_value={"successful": 2, "failed": 0, "errors": []}
         )
-        session_id = await self._create_and_validate_session(client, "orders")
+        session_id = await self._create_and_validate_session(client, "inventory")
         resp = await client.post(
             "/api/import/commit",
             json={"session_id": session_id, "skip_errors": True},
         )
         assert resp.status_code == 200
         body = resp.json()
-        assert body["data_type"] == "orders"
-        assert body["es_index"] == "orders"
+        assert body["data_type"] == "inventory"
+        assert body["es_index"] == "inventory"
 
     async def test_commit_invalid_session(self, client):
         """Commit with a non-existent session returns 404."""
@@ -496,6 +506,7 @@ class TestHistorySession:
         """Retrieve a session by valid ID."""
         session_record = {
             "session_id": "sess-abc-123",
+            "tenant_id": "tenant-test",
             "data_type": "orders",
             "source_type": "csv",
             "source_name": "orders.csv",

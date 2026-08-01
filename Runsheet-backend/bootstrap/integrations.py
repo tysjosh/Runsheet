@@ -101,6 +101,35 @@ async def initialize(app, container: ServiceContainer) -> None:
     except Exception as exc:
         logger.debug("Webhook receiver re-point skipped: %s", exc)
 
+    # Canonical CSV / Sheets imports are wired last because they need the
+    # fully-injected OrderIntakePipeline plus the customer-tank repository.
+    try:
+        from fuel.customer_tank_models import CustomerTankRepository
+        from fuel.services.tank_import_service import TankImportService
+        from import_endpoints import configure_import_endpoints
+
+        customer_tank_repo = CustomerTankRepository(es_service)
+        container.customer_tank_repository = customer_tank_repo
+        tank_import_service = TankImportService(
+            es_service=es_service,
+            customer_tank_repository=customer_tank_repo,
+        )
+        container.tank_import_service = tank_import_service
+        if container.has("order_intake_pipeline"):
+            pipeline = container.order_intake_pipeline
+            pipeline.set_customer_tank_repo(customer_tank_repo)
+            configure_import_endpoints(
+                order_intake_pipeline=pipeline,
+                tank_import_service=tank_import_service,
+            )
+            logger.info("Canonical order/tank import workflow configured")
+        else:
+            logger.warning(
+                "Canonical imports not configured: OrderIntakePipeline unavailable"
+            )
+    except Exception as exc:
+        logger.warning("Canonical import wiring failed: %s", exc)
+
     # ------------------------------------------------------------------
     # Dinee voice integration (Surface A submission bridge + Surface B
     # read/driver endpoints). Wired here — the last bootstrap module — so the

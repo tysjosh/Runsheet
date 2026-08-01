@@ -683,6 +683,7 @@ class IntegrationScheduler:
         attempts = self._max_retries + 1  # initial attempt + retries
         last_exc: Optional[BaseException] = None
         record_counts: Dict[str, int] = {}
+        result_metadata: Dict[str, Any] = {}
         last_status: str = "error"
 
         for attempt in range(attempts):
@@ -711,6 +712,7 @@ class IntegrationScheduler:
             # honour backoff.
             if isinstance(produced, SyncRun):
                 record_counts = dict(produced.record_counts or {})
+                result_metadata = dict(produced.result_metadata or {})
                 if produced.status in ("success", "partial"):
                     last_status = produced.status
                     last_exc = None
@@ -745,6 +747,7 @@ class IntegrationScheduler:
                 finished_at=finished_at,
                 status=last_status,  # type: ignore[arg-type]
                 record_counts=record_counts,
+                result_metadata=result_metadata,
                 duration_ms=duration_ms,
             )
             try:
@@ -787,6 +790,7 @@ class IntegrationScheduler:
             finished_at=finished_at,
             status="error",
             record_counts=record_counts,
+            result_metadata=result_metadata,
             error_details=err_text[:1000],  # bound unbounded tracebacks
             duration_ms=duration_ms,
         )

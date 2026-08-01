@@ -26,6 +26,7 @@ _agent_redis_client = None
 # lifecycles that live outside the AgentScheduler.
 _storm_mode_evaluator = None
 _integration_scheduler = None
+_erp_invoice_export_task = None
 # Periodic sweep that transitions pending approvals past their expiry_time to
 # "expired" (the ApprovalQueueService implements expire_stale() but nothing
 # scheduled it, so stale approvals accumulated in the pending queue forever).
@@ -145,6 +146,7 @@ async def initialize(app, container: ServiceContainer) -> None:
     global _autonomous_agents, _agent_scheduler, _agent_redis_client
     global _approval_expiry_task
     global _storm_mode_evaluator, _integration_scheduler
+    global _erp_invoice_export_task
 
     import redis.asyncio as aioredis
 
@@ -753,6 +755,40 @@ async def initialize(app, container: ServiceContainer) -> None:
     plan_execution_service = PlanExecutionService(es_service=es_service)
     plan_execution_ws_manager = get_plan_execution_ws_manager()
 
+    # Bridge dispatcher approval to the canonical fuel-order lifecycle.  The
+    # fuel and scheduling boot modules run before agents, so these collaborators
+    # are application-scoped and already carry the push/WS subscribers.
+    plan_dispatch_service = None
+    dispatch_dependencies = (
+        "order_repository",
+        "order_service",
+        "driver_repository",
+    )
+    if all(container.has(name) for name in dispatch_dependencies):
+        from fuel.services.plan_dispatch_service import FuelPlanDispatchService
+
+        plan_dispatch_service = FuelPlanDispatchService(
+            es_service=es_service,
+            order_repository=container.get("order_repository"),
+            order_service=container.get("order_service"),
+            driver_repository=container.get("driver_repository"),
+            execution_service=plan_execution_service,
+            driver_ws_manager=(
+                container.get("driver_ws_manager")
+                if container.has("driver_ws_manager")
+                else None
+            ),
+        )
+        container.plan_dispatch_service = plan_dispatch_service
+        logger.info("FuelPlanDispatchService registered")
+    else:
+        logger.error(
+            "FuelPlanDispatchService unavailable; missing container services: %s",
+            ", ".join(
+                name for name in dispatch_dependencies if not container.has(name)
+            ),
+        )
+
     configure_mvp_endpoints(
         pipeline=mvp_pipeline,
         es_service=es_service,
@@ -760,6 +796,7 @@ async def initialize(app, container: ServiceContainer) -> None:
         fleet_registration_service=fleet_registration_service,
         plan_execution_service=plan_execution_service,
         plan_execution_ws_manager=plan_execution_ws_manager,
+        plan_dispatch_service=plan_dispatch_service,
     )
     # ``main.py`` already includes this router at import time, so mount through
     # the idempotent helper: including it again would duplicate every MVP route.
@@ -1245,28 +1282,130 @@ async def initialize(app, container: ServiceContainer) -> None:
             integration_instance_repository
         )
 
-        # ConnectorFactory is populated lazily once we register
-        # provider-specific factories. Until then the scheduler is
-        # constructed but not started, so no ticks fire. A future
-        # integration-bootstrap module can replace this stub with a
-        # real factory.
-        async def _placeholder_connector_factory(instance):
+        async def _connector_factory(instance):
+            """Construct the concrete connector for a persisted instance."""
+
+            if instance.provider_name == "quickbooks_online":
+                from integrations.quickbooks_online import (
+                    QuickBooksOnlineConnector,
+                )
+
+                return QuickBooksOnlineConnector(
+                    tenant_id=instance.tenant_id,
+                    instance_id=instance.instance_id,
+                    credentials_vault=credentials_vault,
+                    credentials_ref=instance.credentials_ref,
+                    reconciliation_service=reconciliation_service,
+                    feature_flag_service=ops_feature_flags,
+                    redis_client=_agent_redis_client,
+                    es_service=es_service,
+                )
+            if instance.provider_name == "veeder_root":
+                from fuel.customer_tank_models import CustomerTankRepository
+                from integrations.veeder_root import VeederRootConnector
+
+                return VeederRootConnector(
+                    tenant_id=instance.tenant_id,
+                    instance_id=instance.instance_id,
+                    instance_config=instance.config,
+                    credentials_vault=credentials_vault,
+                    credentials_ref=instance.credentials_ref,
+                    es_service=es_service,
+                    customer_tank_repository=CustomerTankRepository(es_service),
+                    signal_bus=signal_bus,
+                    redis_client=_agent_redis_client,
+                )
+            if instance.provider_name == "geotab":
+                from integrations.geotab import GeotabConnector
+
+                return GeotabConnector(
+                    tenant_id=instance.tenant_id,
+                    instance_id=instance.instance_id,
+                    instance_config=instance.config,
+                    credentials_vault=credentials_vault,
+                    credentials_ref=instance.credentials_ref,
+                    es_service=es_service,
+                )
+            if instance.provider_name == "stripe":
+                from integrations.stripe_connector import StripeConnector
+
+                return StripeConnector(
+                    tenant_id=instance.tenant_id,
+                    instance_id=instance.instance_id,
+                    credentials_vault=credentials_vault,
+                    credentials_ref=instance.credentials_ref,
+                    reconciliation_service=reconciliation_service,
+                    feature_flag_service=ops_feature_flags,
+                    confirmation_protocol=confirmation_protocol,
+                    redis_client=_agent_redis_client,
+                    es_service=es_service,
+                )
             raise RuntimeError(
-                "IntegrationScheduler connector_factory is not configured; "
-                "install the per-provider factory via the integrations "
-                "bootstrap"
+                f"provider {instance.provider_name!r} is catalog-only and "
+                "does not have a production connector factory"
             )
 
         integration_scheduler = IntegrationScheduler(
             repository=integration_instance_repository,
             es_service=es_service,
-            connector_factory=_placeholder_connector_factory,
+            connector_factory=_connector_factory,
             signal_bus=signal_bus,
         )
         container.integration_scheduler = integration_scheduler
+        container.integration_connector_factory = _connector_factory
         _integration_scheduler = integration_scheduler
+        # Commerce boots before Agents, so its external-sync bridge cannot see
+        # tenant integration instances during its first construction. Late-wire
+        # the repository/factory now that credential-aware connectors exist.
+        if container.has("commerce_external_sync"):
+            container.commerce_external_sync.set_integration_resolver(
+                integration_repository=integration_instance_repository,
+                connector_factory=_connector_factory,
+            )
+            from commerce.services.invoice_erp_export_worker import (
+                ERP_EXPORT_INTERVAL_SECONDS,
+                InvoiceERPExportWorker,
+            )
+
+            invoice_erp_export_worker = InvoiceERPExportWorker(
+                es_service=es_service,
+                external_sync=container.commerce_external_sync,
+                redis_client=_agent_redis_client,
+            )
+            container.invoice_erp_export_worker = invoice_erp_export_worker
+
+            async def _periodic_invoice_erp_export() -> None:
+                try:
+                    while True:
+                        try:
+                            counts = (
+                                await invoice_erp_export_worker.export_pending()
+                            )
+                            if counts["examined"]:
+                                logger.info(
+                                    "Invoice ERP export recovery cycle: %s",
+                                    counts,
+                                )
+                        except Exception as exc:
+                            logger.exception(
+                                "Invoice ERP export recovery cycle failed: %s",
+                                exc,
+                            )
+                        await asyncio.sleep(ERP_EXPORT_INTERVAL_SECONDS)
+                except asyncio.CancelledError:
+                    logger.info(
+                        "Invoice ERP export recovery task cancelled"
+                    )
+
+            _erp_invoice_export_task = asyncio.create_task(
+                _periodic_invoice_erp_export()
+            )
+            logger.info(
+                "Invoice ERP export recovery started (interval: %ds)",
+                ERP_EXPORT_INTERVAL_SECONDS,
+            )
         logger.info(
-            "IntegrationScheduler registered (connector_factory pending)"
+            "IntegrationScheduler registered with production connector factory"
         )
 
         # Register the built-in connector catalog entries so
@@ -1321,6 +1460,13 @@ async def initialize(app, container: ServiceContainer) -> None:
         logger.warning(
             "configure_integrations_endpoints() failed: %s", exc
         )
+
+    if integration_scheduler is not None:
+        try:
+            await integration_scheduler.start()
+            logger.info("IntegrationScheduler started")
+        except Exception as exc:
+            logger.warning("IntegrationScheduler start failed: %s", exc)
 
     # ---- Stripe REST + webhook router wiring (Task 12.3, Req 5.5.2 / 5.5.4) ----
     # The Stripe endpoints module exposes two routers (tenant-scoped
@@ -1473,14 +1619,16 @@ async def initialize(app, container: ServiceContainer) -> None:
             redis_client=_agent_redis_client,
             pod_bol_finalizer=pod_bol_finalizer,
             ocr_service=meter_ticket_ocr_service,
+            reconciliation_service=reconciliation_service,
             pod_hash_chain_writer=pod_hash_chain_writer,
         )
         logger.info(
             "POD endpoints re-wired with fuel-ops services "
-            "(file_storage=%s, ocr=%s, bol=%s, hash_chain=%s)",
+            "(file_storage=%s, ocr=%s, bol=%s, reconciliation=%s, hash_chain=%s)",
             file_storage_service is not None,
             meter_ticket_ocr_service is not None,
             pod_bol_finalizer is not None,
+            reconciliation_service is not None,
             pod_hash_chain_writer is not None,
         )
     except Exception as exc:
@@ -1516,6 +1664,7 @@ async def shutdown(app, container: ServiceContainer) -> None:
     """Stop agents in order: L2 → L1 → L0, then close resources (Req 10.5)."""
     global _autonomous_agents, _agent_scheduler, _agent_redis_client
     global _storm_mode_evaluator, _integration_scheduler
+    global _erp_invoice_export_task
     global _approval_expiry_task
 
     # Stop the approval-expiry sweep first — it's a standalone asyncio task
@@ -1527,6 +1676,14 @@ async def shutdown(app, container: ServiceContainer) -> None:
         except (asyncio.CancelledError, Exception):
             pass
         _approval_expiry_task = None
+
+    if _erp_invoice_export_task is not None:
+        _erp_invoice_export_task.cancel()
+        try:
+            await _erp_invoice_export_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        _erp_invoice_export_task = None
 
     # Stop the fuel-ops hardening services FIRST (before the
     # AgentScheduler) so any in-flight tick cannot observe a

@@ -55,6 +55,7 @@ from fuel.intake_channel_models import IntakeChannel
 from fuel.services.order_intake_pipeline import (
     IntakeResponse,
     OrderIntakePipeline,
+    _CsvImportChannel,
 )
 
 
@@ -887,6 +888,105 @@ class TestCompleteOrderDocOverwrites:
         assert result["updated_at"] == FIXED_NOW.isoformat()
         assert result["last_event_timestamp"] == FIXED_NOW.isoformat()
         assert result["trace_id"] == "trace-001"
+
+    def test_csv_source_identity_produces_stable_platform_order_id(self, pipeline):
+        context = IntakeContext(
+            tenant_id=TENANT_A,
+            channel=_CsvImportChannel(
+                channel_id="csv-import",
+                tenant_id=TENANT_A,
+            ),
+            trace_id="trace-csv",
+            request_id="request-csv",
+        )
+        adapter_output = {
+            "intake_channel": "csv",
+            "intake_metadata": {
+                "source_system": "erp-a",
+                "source_record_id": "SO-100",
+            },
+        }
+
+        first = pipeline._complete_order_doc(
+            adapter_output, context, "event-version-1"
+        )
+        second = pipeline._complete_order_doc(
+            adapter_output, context, "event-version-2"
+        )
+
+        assert first["order_id"] == second["order_id"]
+        assert first["order_id"].startswith("ord_import_")
+
+
+class TestCsvSourceUpdates:
+    @pytest.mark.asyncio
+    async def test_older_source_snapshot_is_rejected(self, pipeline):
+        existing = MagicMock()
+        existing.intake_metadata.source_updated_at = datetime(
+            2026, 5, 10, 12, tzinfo=timezone.utc
+        )
+
+        with patch(
+            "fuel.order_repository.FuelOrderRepository.get",
+            new=AsyncMock(return_value=existing),
+        ):
+            state = await pipeline._prepare_csv_source_upsert(
+                tenant_id=TENANT_A,
+                order_doc={
+                    "order_id": "ord_import_123",
+                    "intake_channel": "csv",
+                    "intake_metadata": {
+                        "source_system": "erp-a",
+                        "source_record_id": "SO-100",
+                        "source_updated_at": "2026-05-10T11:59:00Z",
+                    },
+                },
+            )
+
+        assert state == "stale"
+
+    @pytest.mark.asyncio
+    async def test_newer_source_snapshot_preserves_execution_state(self, pipeline):
+        existing = MagicMock()
+        existing.intake_metadata.source_updated_at = datetime(
+            2026, 5, 10, 12, tzinfo=timezone.utc
+        )
+        existing.model_dump.return_value = {
+            "status": "dispatched",
+            "assigned_driver_id": "driver-100",
+            "assigned_asset_id": "truck-100",
+            "assigned_run_id": "run-100",
+            "pod_otp": None,
+            "pod_otp_generated_at": None,
+            "refusal_reason_code": None,
+            "legacy_origin_snapshot": None,
+            "created_at": "2026-05-09T08:00:00Z",
+        }
+        incoming = {
+            "order_id": "ord_import_123",
+            "intake_channel": "csv",
+            "status": "placed",
+            "intake_metadata": {
+                "source_system": "erp-a",
+                "source_record_id": "SO-100",
+                "source_updated_at": "2026-05-10T12:01:00Z",
+            },
+        }
+
+        with patch(
+            "fuel.order_repository.FuelOrderRepository.get",
+            new=AsyncMock(return_value=existing),
+        ):
+            state = await pipeline._prepare_csv_source_upsert(
+                tenant_id=TENANT_A,
+                order_doc=incoming,
+            )
+
+        assert state == "updated"
+        assert incoming["status"] == "dispatched"
+        assert incoming["assigned_driver_id"] == "driver-100"
+        assert incoming["assigned_run_id"] == "run-100"
+        assert incoming["created_at"] == "2026-05-09T08:00:00Z"
 
 
 # ---------------------------------------------------------------------------

@@ -16,6 +16,7 @@ import type {
   VoidInvoicePayload,
 } from "../../services/commerceApi";
 import {
+  finalizeInvoice,
   getInvoice,
   getInvoiceEvents,
   retryQboPush,
@@ -41,6 +42,7 @@ export default function InvoiceDetailPage({
   const [voidReason, setVoidReason] = useState("");
   const [voidForce, setVoidForce] = useState(false);
   const [voiding, setVoiding] = useState(false);
+  const [finalizing, setFinalizing] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
 
   const fetchData = useCallback(async () => {
@@ -164,6 +166,23 @@ export default function InvoiceDetailPage({
     }
   };
 
+  const handleFinalize = async () => {
+    setFinalizing(true);
+    setError(null);
+    try {
+      const res = await finalizeInvoice(invoiceId);
+      setInvoice(res.data);
+      const eventsRes = await getInvoiceEvents(invoiceId);
+      setEvents(eventsRes.data);
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Failed to finalize invoice",
+      );
+    } finally {
+      setFinalizing(false);
+    }
+  };
+
   if (loading) {
     return (
       <div role="status" className="flex justify-center py-12">
@@ -277,6 +296,11 @@ export default function InvoiceDetailPage({
             >
               {invoice.status}
             </Badge>
+            {invoice.status === "draft" && (
+              <Button onClick={handleFinalize} disabled={finalizing}>
+                {finalizing ? "Finalizing…" : "Approve & Send to ERP"}
+              </Button>
+            )}
             {invoice.status !== "void" && invoice.status !== "paid" && (
               <Button variant="danger" onClick={() => setVoidDialogOpen(true)}>
                 Void Invoice
@@ -301,6 +325,53 @@ export default function InvoiceDetailPage({
           ]}
         />
       </section>
+
+      {invoice.delivery_result && (
+        <section aria-labelledby="delivery-result-heading" className="mb-8">
+          <h2
+            id="delivery-result-heading"
+            className="text-lg font-semibold mb-3"
+          >
+            Delivery Result
+          </h2>
+          <dl className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div>
+              <dt className="text-xs uppercase text-gray-500">Actual gallons</dt>
+              <dd className="font-semibold">
+                {invoice.delivery_result.actual_gallons.toLocaleString()} gal
+              </dd>
+            </div>
+            <div>
+              <dt className="text-xs uppercase text-gray-500">Delivered</dt>
+              <dd>
+                {new Date(invoice.delivery_result.delivered_at).toLocaleString()}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-xs uppercase text-gray-500">POD</dt>
+              <dd>{invoice.delivery_result.pod_id}</dd>
+            </div>
+            <div>
+              <dt className="text-xs uppercase text-gray-500">Received by</dt>
+              <dd>{invoice.delivery_result.recipient_name}</dd>
+            </div>
+            <div>
+              <dt className="text-xs uppercase text-gray-500">Source ERP</dt>
+              <dd>
+                {invoice.delivery_result.source_system || "Not imported"}
+              </dd>
+            </div>
+            {invoice.delivery_result.source_record_id && (
+              <div>
+                <dt className="text-xs uppercase text-gray-500">
+                  Source record
+                </dt>
+                <dd>{invoice.delivery_result.source_record_id}</dd>
+              </div>
+            )}
+          </dl>
+        </section>
+      )}
 
       {/* Line items */}
       <section aria-labelledby="line-items-heading" className="mb-8">

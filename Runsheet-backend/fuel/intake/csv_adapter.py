@@ -13,6 +13,11 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from fuel.intake.adapter_base import AdapterError, IntakeContext, IntakeResult
+from services.money import (
+    legacy_unit_price_cents,
+    line_subtotal_cents,
+    unit_price_micros_from_record,
+)
 
 
 class CsvIntakeAdapter:
@@ -59,7 +64,12 @@ class CsvIntakeAdapter:
             "customer_id", "customer_name", "ship_to_address",
             "ship_to_lat", "ship_to_lon", "call_type",
         ]
-        missing = [f for f in required_fields if not payload.get(f)]
+        missing = [
+            f
+            for f in required_fields
+            if payload.get(f) is None
+            or (isinstance(payload.get(f), str) and not payload.get(f).strip())
+        ]
         if missing:
             raise AdapterError(
                 error_type="adapter_validation_failed",
@@ -106,9 +116,29 @@ class CsvIntakeAdapter:
             "intake_metadata": {
                 "import_batch_id": import_batch_id,
                 "csv_row_number": csv_row_number,
+                "source_system": payload.get("source_system"),
+                "source_record_id": payload.get("source_order_id"),
+                "source_updated_at": payload.get("source_updated_at"),
             },
             "source_schema_version": self.schema_version,
         }
+
+        unit_price_micros = unit_price_micros_from_record(payload)
+        if unit_price_micros is not None:
+            order_doc["unit_price_micros"] = unit_price_micros
+            order_doc["unit_price_cents"] = legacy_unit_price_cents(
+                unit_price_micros
+            )
+            requested = payload.get("gallons_requested")
+            if requested:
+                subtotal_cents = line_subtotal_cents(
+                    requested,
+                    unit_price_micros,
+                )
+                tax_cents = int(payload.get("tax_cents") or 0)
+                order_doc["subtotal_cents"] = subtotal_cents
+                order_doc["tax_cents"] = tax_cents
+                order_doc["total_cents"] = subtotal_cents + tax_cents
 
         # Emit a single order_placed event
         event_docs = [
@@ -119,6 +149,8 @@ class CsvIntakeAdapter:
                     "intake_channel_id": context.channel.channel_id,
                     "import_batch_id": import_batch_id,
                     "csv_row_number": csv_row_number,
+                    "source_system": payload.get("source_system"),
+                    "source_record_id": payload.get("source_order_id"),
                 },
             }
         ]

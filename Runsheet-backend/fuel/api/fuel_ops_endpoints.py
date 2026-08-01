@@ -1187,6 +1187,8 @@ class CustomerTankCreateRequest(BaseModel):
             "repository mints a uuid4-based id."
         ),
     )
+    source_system: Optional[str] = Field(default=None, min_length=1)
+    external_tank_id: Optional[str] = Field(default=None, min_length=1)
     customer_id: str = Field(..., min_length=1)
     customer_type: CustomerType
     fuel_type: FuelType
@@ -1222,6 +1224,8 @@ class CustomerTankUpdateRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    source_system: Optional[str] = Field(default=None, min_length=1)
+    external_tank_id: Optional[str] = Field(default=None, min_length=1)
     customer_id: Optional[str] = Field(default=None, min_length=1)
     customer_type: Optional[CustomerType] = None
     fuel_type: Optional[FuelType] = None

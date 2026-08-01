@@ -33,9 +33,11 @@ Validates: Requirements 1.1.6, 2.1, 2.2, 2.3, 9.1.3.
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from errors.exceptions import (
@@ -64,6 +66,25 @@ from services.time_utils import utcnow
 logger = logging.getLogger(__name__)
 
 
+def _optional_utc_datetime(value: Any) -> Optional[datetime]:
+    """Normalize an optional source timestamp for chronology comparisons."""
+
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        try:
+            parsed = datetime.fromisoformat(
+                str(value).strip().replace("Z", "+00:00")
+            )
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 # ---------------------------------------------------------------------------
 # Response dataclass
 # ---------------------------------------------------------------------------
@@ -84,6 +105,17 @@ class IntakeResponse:
     event_id: str
     status: str
     order_id: Optional[str] = None
+
+
+@dataclass
+class _CsvImportChannel:
+    """Ephemeral authenticated channel used by the tenant CSV importer."""
+
+    channel_id: str
+    tenant_id: str
+    channel_type: str = "csv"
+    supported_schema_versions: List[str] = field(default_factory=lambda: ["1.0"])
+    enabled: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +188,11 @@ class OrderIntakePipeline:
         """Inject the credentials vault after construction (see
         :meth:`set_intake_channel_repo` for the boot-order rationale)."""
         self._credentials_vault = vault
+
+    def set_customer_tank_repo(self, repo: Any) -> None:
+        """Late-inject the customer-tank repository for import reference checks."""
+
+        self._customer_tank_repo = repo
 
     # ------------------------------------------------------------------
     # Hook registration
@@ -323,6 +360,44 @@ class OrderIntakePipeline:
             client_event_id=client_event_id,
         )
 
+    async def ingest_csv(
+        self,
+        *,
+        tenant: Any,
+        payload: Dict[str, Any],
+        request_id: str,
+        client_event_id: str,
+        import_batch_id: str,
+        csv_row_number: int,
+    ) -> IntakeResponse:
+        """Ingest one authenticated CSV row through the canonical pipeline.
+
+        CSV uploads are already protected by the tenant session, so they do not
+        need a persisted HMAC intake channel. The ephemeral channel selects the
+        CSV adapter while the same validation, idempotency, event, websocket,
+        and canonical repository path used by partner webhooks remains intact.
+        """
+
+        if not client_event_id:
+            raise missing_client_event_id(details={"path": "csv_import"})
+
+        tenant_id = getattr(tenant, "tenant_id", None) or tenant.get("tenant_id")
+        user_id = getattr(tenant, "user_id", None) or tenant.get("user_id")
+        csv_payload = dict(payload)
+        csv_payload["import_batch_id"] = import_batch_id
+        csv_payload["csv_row_number"] = csv_row_number
+        channel = _CsvImportChannel(
+            channel_id="csv-import",
+            tenant_id=tenant_id,
+        )
+        return await self._ingest_common(
+            channel=channel,
+            payload=csv_payload,
+            request_id=request_id,
+            actor_user_id=user_id,
+            client_event_id=client_event_id,
+        )
+
     # ------------------------------------------------------------------
     # Core pipeline logic
     # ------------------------------------------------------------------
@@ -450,6 +525,28 @@ class OrderIntakePipeline:
         order_doc = self._complete_order_doc(
             result.order_doc, context, event_id
         )
+
+        # ERP files can contain a newer snapshot of an order imported earlier.
+        # Reuse the same source-linked order_id, preserve lifecycle state, and
+        # refuse an older/equal source version before it can overwrite current
+        # dispatcher or driver work.
+        csv_upsert_state = await self._prepare_csv_source_upsert(
+            order_doc=order_doc,
+            tenant_id=tenant_id,
+        )
+        if csv_upsert_state == "stale":
+            await self._idempotency_service.mark_processed(
+                event_id, tenant_id=tenant_id
+            )
+            orders_intake_processed_total.labels(
+                tenant_id=tenant_id,
+                intake_channel=intake_channel_type,
+                status="duplicate",
+            ).inc()
+            return IntakeResponse(event_id=event_id, status="duplicate")
+        if csv_upsert_state == "updated":
+            for event_doc in result.event_docs:
+                event_doc["event_type"] = "order_source_updated"
 
         # (h) Stamp platform-owned fields on each event doc
         event_docs = self._complete_event_docs(
@@ -580,7 +677,24 @@ class OrderIntakePipeline:
         now = self._clock()
         order_doc = dict(adapter_output)  # shallow copy
         # Overwrite platform-owned fields unconditionally
-        order_doc["order_id"] = mint_order_id()
+        intake_metadata = order_doc.get("intake_metadata") or {}
+        source_system = str(intake_metadata.get("source_system") or "").strip()
+        source_record_id = str(
+            intake_metadata.get("source_record_id") or ""
+        ).strip()
+        if (
+            getattr(context.channel, "channel_type", None) == "csv"
+            and source_system
+            and source_record_id
+        ):
+            digest = hashlib.sha256(
+                (
+                    f"{context.tenant_id}|{source_system}|{source_record_id}"
+                ).encode()
+            ).hexdigest()[:32]
+            order_doc["order_id"] = f"ord_import_{digest}"
+        else:
+            order_doc["order_id"] = mint_order_id()
         order_doc["tenant_id"] = context.tenant_id
         order_doc["status"] = "placed"
         order_doc["created_at"] = now.isoformat()
@@ -588,6 +702,66 @@ class OrderIntakePipeline:
         order_doc["last_event_timestamp"] = now.isoformat()
         order_doc["trace_id"] = context.trace_id
         return order_doc
+
+    async def _prepare_csv_source_upsert(
+        self,
+        *,
+        order_doc: Dict[str, Any],
+        tenant_id: str,
+    ) -> str:
+        """Return ``new``, ``updated``, or ``stale`` for a CSV source record."""
+
+        if order_doc.get("intake_channel") != "csv":
+            return "new"
+        metadata = order_doc.get("intake_metadata") or {}
+        if not metadata.get("source_system") or not metadata.get(
+            "source_record_id"
+        ):
+            return "new"
+
+        from fuel.order_repository import FuelOrderRepository
+
+        existing = await FuelOrderRepository(self._es).get(
+            tenant_id, order_doc["order_id"]
+        )
+        if existing is None:
+            return "new"
+
+        incoming_updated_at = _optional_utc_datetime(
+            metadata.get("source_updated_at")
+        )
+        existing_updated_at = existing.intake_metadata.source_updated_at
+        if existing_updated_at is not None:
+            if existing_updated_at.tzinfo is None:
+                existing_updated_at = existing_updated_at.replace(
+                    tzinfo=timezone.utc
+                )
+            else:
+                existing_updated_at = existing_updated_at.astimezone(timezone.utc)
+        if (
+            incoming_updated_at is not None
+            and existing_updated_at is not None
+            and incoming_updated_at <= existing_updated_at
+        ):
+            return "stale"
+
+        # Source snapshots may change commercial fields, but must never reset
+        # execution state that dispatchers and drivers own.
+        existing_doc = existing.model_dump(mode="json")
+        for field_name in (
+            "status",
+            "assigned_driver_id",
+            "assigned_asset_id",
+            "assigned_run_id",
+            "hold_reason",
+            "pod_otp",
+            "pod_otp_generated_at",
+            "refusal_reason_code",
+            "legacy_origin_snapshot",
+            "created_at",
+        ):
+            order_doc[field_name] = existing_doc.get(field_name)
+        return "updated"
 
     def _complete_event_docs(
         self,

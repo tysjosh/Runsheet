@@ -158,6 +158,11 @@ async def initialize(app, container: ServiceContainer) -> None:
         scheduling_ws_manager=scheduling_ws_manager,
         driver_ws_manager=driver_ws_manager,
         ocr_service=ocr_service,
+        reconciliation_service=(
+            container.reconciliation_service
+            if container.has("reconciliation_service")
+            else None
+        ),
         redis_client=redis_client,
     )
     logger.info("Scheduling API configured")

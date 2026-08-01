@@ -1,0 +1,3 @@
+source_system,source_order_id,source_updated_at,customer_id,customer_name,customer_phone,customer_email,ship_to_address,ship_to_lat,ship_to_lon,customer_tank_id,product_code,gallons_requested,fill_to_full,call_type,delivery_window_start,delivery_window_end,po_number,special_instructions
+PetroERP,BAD-ORDER-01,2026-07-29T14:00:00Z,CUST-FARM-01,Heartland Farm Supply,,,100 Farm Service Road,39.7684,-86.1581,tank-100,DIESEL_2,,false,will_call,,,,
+PetroERP,BAD-ORDER-02,2026-07-29T14:05:00Z,CUST-FARM-01,Heartland Farm Supply,,,100 Farm Service Road,39.7684,-86.1581,tank-100,DIESEL_2,500,false,one_off,,,,

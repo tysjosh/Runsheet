@@ -86,7 +86,12 @@ def _make_mock_replanning_agent():
     return agent
 
 
-def _create_test_app(pipeline=None, es_service=None, replanning_agent=None):
+def _create_test_app(
+    pipeline=None,
+    es_service=None,
+    replanning_agent=None,
+    plan_dispatch_service=None,
+):
     """Create a FastAPI test app with MVP endpoints configured."""
     from errors.handlers import register_exception_handlers
 
@@ -108,6 +113,7 @@ def _create_test_app(pipeline=None, es_service=None, replanning_agent=None):
         pipeline=pipeline,
         es_service=es_service,
         exception_replanning_agent=replanning_agent,
+        plan_dispatch_service=plan_dispatch_service,
     )
 
     return app, pipeline, es_service
@@ -269,6 +275,54 @@ class TestReplan:
             json={"disruption_type": "delay"},
         )
         assert resp.status_code == 503
+
+
+class TestApprovePlan:
+    def test_approval_delegates_to_canonical_driver_dispatch(self):
+        es = _make_mock_es()
+        plan = {
+            "plan_id": "plan-1",
+            "run_id": "run-1",
+            "truck_id": "truck-1",
+            "tenant_id": TEST_TENANT_ID,
+            "status": "proposed",
+            "assignments": [{"order_id": "ord-1"}],
+        }
+        es.search_documents = AsyncMock(
+            return_value={"hits": {"hits": [{"_source": plan}]}}
+        )
+        dispatch_result = MagicMock()
+        dispatch_result.as_dict.return_value = {
+            "plan_id": "plan-1",
+            "run_id": "run-1",
+            "driver_id": "driver-1",
+            "truck_id": "truck-1",
+            "route_ids": ["route-1"],
+            "execution_ids": ["execution-1"],
+            "order_ids": ["ord-1"],
+            "newly_dispatched": 1,
+            "already_dispatched": 0,
+        }
+        dispatch_service = MagicMock()
+        dispatch_service.dispatch = AsyncMock(return_value=dispatch_result)
+        app, _, _ = _create_test_app(
+            es_service=es,
+            plan_dispatch_service=dispatch_service,
+        )
+
+        response = TestClient(app).post(
+            "/api/fuel/mvp/plan/plan-1/approve"
+        )
+
+        assert response.status_code == 200
+        assert response.json()["driver_id"] == "driver-1"
+        assert response.json()["order_ids"] == ["ord-1"]
+        assert response.json()["status"] == "dispatched"
+        dispatch_service.dispatch.assert_awaited_once_with(
+            tenant_id=TEST_TENANT_ID,
+            plan_doc=plan,
+            actor_user_id=TEST_USER_ID,
+        )
 
 
 # ---------------------------------------------------------------------------
