@@ -27,6 +27,7 @@ from services.import_models import (
 )
 from services.import_service import ImportService
 from services.schema_templates import SchemaTemplate, SchemaTemplates
+from errors.exceptions import insufficient_role
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 
 logger = logging.getLogger(__name__)
@@ -57,10 +58,17 @@ def configure_import_endpoints(
 
 
 def _require_import_role(tenant: TenantContext) -> None:
+    """Reject callers without the admin or dispatcher role.
+
+    Uses ``insufficient_role`` rather than a bare ``HTTPException`` so the
+    response carries the canonical ``INSUFFICIENT_ROLE`` error code (403) that
+    the rest of the platform's clients already switch on. This also keeps the
+    ``raise HTTPException`` ceiling moving in its intended direction.
+    """
     if not {"admin", "dispatcher"}.intersection(tenant.roles or []):
-        raise HTTPException(
-            status_code=403,
-            detail="Data imports require the admin or dispatcher role.",
+        raise insufficient_role(
+            message="Data imports require the admin or dispatcher role.",
+            details={"required_roles": ["admin", "dispatcher"]},
         )
 
 

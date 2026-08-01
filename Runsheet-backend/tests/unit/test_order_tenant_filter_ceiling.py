@@ -64,6 +64,14 @@ ALLOWLISTED_PATH_PATTERNS: List[str] = [
     # demo seeder. Seeding is deliberately tenant-agnostic (docs are stamped
     # tenant_id="demo") and is gated behind settings.seed_demo_data.
     "seed_all_data.py",
+    # Not queries: static ``SchemaTemplate`` declarations. Each template names
+    # the ``es_index`` an import writes into (``es_index="fuel_orders_current"``
+    # and the data_type -> index map) as catalogue metadata. The module performs
+    # no ES operation whatsoever — no search_documents, index_document, or query
+    # body — so there is no scope to add a tenant filter to. The import that
+    # consumes a template is tenant-scoped where the write happens, in
+    # services/import_service.py, which this ceiling still guards.
+    "services/schema_templates.py",
 ]
 
 #: Directories to skip entirely during scanning.

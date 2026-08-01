@@ -83,14 +83,35 @@ class TestAutoMapSubstringContainment:
         assert result.get("my_truck_id_column") == "truck_id"
 
     def test_source_contained_in_target(self, mapper: FieldMapper):
-        """If the source column name is a substring of the target field name, it should match."""
-        # "name" is a substring of "driver_name"
-        # But "name" is also a substring of "source_name" etc.
-        # For orders, "customer" is a target field
-        result = mapper.auto_map(["order_id", "customer", "status"], "orders")
-        assert result["order_id"] == "order_id"
-        assert result["customer"] == "customer"
-        assert result["status"] == "status"
+        """A source column that is a substring of a target field matches it.
+
+        Asserted against the canonical ``orders`` template, whose fields are
+        the intake shape (``source_order_id``, ``gallons_requested``, ...). The
+        earlier version of this test expected ``order_id`` -> ``order_id``,
+        ``customer`` -> ``customer`` and ``status`` -> ``status``, which only
+        held while the template carried literal fields of those names. None of
+        the three exists now, so those expectations were asserting the absence
+        of substring matching rather than its presence.
+        """
+        result = mapper.auto_map(
+            ["order_id", "gallons", "customer"], "orders"
+        )
+
+        # Each source column is a strict substring of exactly one target field.
+        assert result["order_id"] == "source_order_id"
+        assert result["gallons"] == "gallons_requested"
+        assert result["customer"] == "customer_id"
+
+    def test_a_column_matching_no_target_is_left_unmapped(
+        self, mapper: FieldMapper
+    ):
+        """``status`` is not an orders field, so it must not be invented.
+
+        The canonical orders template describes an intake payload; order status
+        is assigned by the platform, never imported. An unmapped column has to
+        be absent from the result rather than mapped to a near-miss.
+        """
+        assert mapper.auto_map(["status"], "orders") == {}
 
 
 class TestAutoMapUnmappedColumns:
