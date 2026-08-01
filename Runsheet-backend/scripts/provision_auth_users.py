@@ -9,7 +9,7 @@ This is the operator entry point for the User_Provisioner (task 2.3). It:
    via ``connection_uri`` + ``api_key`` from settings (Req 10.1, 10.2). Without
    a configured core the SDK refuses to initialize and the script fails closed.
 2. Creates the canonical SuperTokens UserRoles — ``admin``, ``dispatcher``,
-   ``ops_manager``, ``driver``, ``platform_admin`` — idempotently (Req 4.4).
+   ``driver``, ``platform_admin`` — idempotently (Req 4.4).
    Re-running is safe: a role that already exists is left untouched. The list is
    read from :data:`auth.supertokens_init.CANONICAL_ROLES` rather than repeated
    here, so it cannot drift; the names above are illustrative.
@@ -119,12 +119,18 @@ async def create_canonical_roles(
     A record carrying only ``platform_admin`` is therefore refused on every
     endpoint requiring ``admin``; provision the pair, not the staff role alone.
 
+    This function only ever *creates*. It has no delete path, so a role dropped
+    from :data:`~auth.supertokens_init.CANONICAL_ROLES` — ``ops_manager`` is the
+    first — lingers in the managed core as an unassigned role. That is inert:
+    nothing assigns it, and :func:`auth.authorization.require_role` is
+    exact-match, so no endpoint accepts it. Deleting it would mean mutating a
+    shared hosted system, which is not this script's business.
+
     Args:
         role_creator: Seam that creates one role and returns whether it was
             newly created; defaults to the SuperTokens SDK-backed creator.
         roles: The role names to ensure exist; defaults to the canonical roles
-            (``admin`` / ``dispatcher`` / ``ops_manager`` / ``driver`` /
-            ``platform_admin``).
+            (``admin`` / ``dispatcher`` / ``driver`` / ``platform_admin``).
 
     Returns:
         A mapping of ``role name -> created_new_role`` so the caller can report

@@ -19,6 +19,12 @@ In ``development`` only, a single demo row is seeded
 ``has_pii_access=true``) so the local sign-in loop has a user to provision.
 The seed is skipped in every non-development environment and is idempotent
 (``ON CONFLICT (email) DO NOTHING``).
+
+``ops_manager`` was later retired from ``CANONICAL_ROLES``. The seed below is
+left exactly as it was applied — rewriting an applied revision would make the
+migration history disagree with what already ran against a developer's
+database. Revision ``0006_retire_ops_manager_role`` strips the value forward
+instead.
 """
 from typing import Sequence, Union
 

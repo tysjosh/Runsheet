@@ -242,17 +242,16 @@ def test_session_recipe_enforces_anti_csrf_and_secure_cookies(
 def test_canonical_user_roles_are_declared(initialized_supertokens):
     """The canonical UserRoles are declared and the recipe is live (Req 4.4).
 
-    The platform represents ``admin`` / ``dispatcher`` / ``ops_manager`` /
-    ``driver`` / ``platform_admin`` as SuperTokens roles. Assert the canonical
-    set the provisioning script creates is exactly those and that the UserRoles
-    recipe is initialized to back them.
+    The platform represents ``admin`` / ``dispatcher`` / ``driver`` /
+    ``platform_admin`` as SuperTokens roles. Assert the canonical set the
+    provisioning script creates is exactly those and that the UserRoles recipe
+    is initialized to back them.
     """
     from supertokens_python.recipe.userroles.recipe import UserRolesRecipe
 
     assert set(CANONICAL_ROLES) == {
         "admin",
         "dispatcher",
-        "ops_manager",
         "driver",
         # Runsheet-staff role. Added because staff sign in through the same app
         # as customers, so "may act outside my own tenant" needed a role that
@@ -261,8 +260,10 @@ def test_canonical_user_roles_are_declared(initialized_supertokens):
         # administrator from support staff.
         "platform_admin",
     }
-    # No duplicates / no extras in the declared tuple.
-    assert len(CANONICAL_ROLES) == 5
+    # No duplicates / no extras in the declared tuple. ``ops_manager`` was
+    # removed: it was declared but gated nothing, so it advertised a permission
+    # tier that did not exist.
+    assert len(CANONICAL_ROLES) == 4
     # The UserRoles recipe is registered so the roles can exist in the core.
     assert UserRolesRecipe.get_instance().get_recipe_id() == "userroles"
 

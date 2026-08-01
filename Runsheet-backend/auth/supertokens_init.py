@@ -14,9 +14,9 @@ FastAPI app is created, wiring the three recipes the migration uses:
   access-token payload so those claims are signed by the managed core and can
   never be asserted by the client (Req 3.3).
 * **UserRoles** — represents the canonical roles listed in
-  :data:`CANONICAL_ROLES`: ``admin`` / ``dispatcher`` / ``ops_manager`` /
-  ``driver`` / ``platform_admin`` (Req 4.4). That constant is the single source
-  of truth; enumerate from it rather than restating the list.
+  :data:`CANONICAL_ROLES`: ``admin`` / ``dispatcher`` / ``driver`` /
+  ``platform_admin`` (Req 4.4). That constant is the single source of truth;
+  enumerate from it rather than restating the list.
 
 Deployment is the SuperTokens **managed SaaS core**: the SDK reaches a remote
 core over HTTPS via ``connection_uri`` + ``api_key`` loaded from environment
@@ -78,10 +78,17 @@ logger = logging.getLogger(__name__)
 #: rule is pinned by ``tests/unit/test_tenant_scope_authz.py::
 #: test_platform_admin_alone_does_not_satisfy_require_role``, which fails if
 #: anyone adds the implication.
+#:
+#: ``ops_manager`` was retired. It was declared here from the beginning but
+#: never gated anything: no ``require_role`` call site named it, no inline role
+#: check consulted it, and the frontend never referenced it. A role that grants
+#: nothing is worse than absent — it reads as a real permission tier to anyone
+#: provisioning a user, so an operator could hand it out believing it conferred
+#: access it did not. ``tests/unit/test_tenant_scope_authz.py::
+#: test_ops_manager_is_retired`` fails if it comes back.
 CANONICAL_ROLES: tuple[str, ...] = (
     "admin",
     "dispatcher",
-    "ops_manager",
     "driver",
     "platform_admin",
 )
@@ -92,10 +99,13 @@ PLATFORM_ADMIN_ROLE: str = "platform_admin"
 
 #: Roles a tenant's own administrator may assign. Deliberately excludes
 #: ``platform_admin`` so tenant-scoped admin cannot escalate to cross-tenant.
+#: Every other canonical role is assignable, so this is :data:`CANONICAL_ROLES`
+#: minus the staff role — but it stays an explicit tuple rather than a derived
+#: one, so adding a future privileged role does not silently make it
+#: customer-assignable by omission.
 CUSTOMER_ASSIGNABLE_ROLES: tuple[str, ...] = (
     "admin",
     "dispatcher",
-    "ops_manager",
     "driver",
 )
 

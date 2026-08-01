@@ -65,8 +65,8 @@ def main() -> int:
     parser.add_argument(
         "--roles",
         nargs="+",
-        default=["admin", "ops_manager"],
-        help="User roles (default: admin ops_manager)",
+        default=["admin"],
+        help="User roles (default: admin)",
     )
     parser.add_argument(
         "--no-pii-access",

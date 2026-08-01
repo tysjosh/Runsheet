@@ -78,6 +78,25 @@ def test_customer_assignable_roles_are_all_canonical() -> None:
         assert role in CANONICAL_ROLES
 
 
+def test_ops_manager_is_retired() -> None:
+    """``ops_manager`` must not come back, and a revert must be loud.
+
+    It was declared as a canonical role for the whole SuperTokens migration and
+    gated nothing: zero ``require_role`` call sites named it, no inline role
+    check consulted it, and no frontend surface referenced it. A role that
+    grants nothing is worse than no role at all — it looks like a permission
+    tier to whoever provisions the next ``auth_users`` row, so it invites
+    granting access that is never actually conferred.
+
+    Asserting absence from both tuples matters: dropping it from
+    :data:`~auth.supertokens_init.CANONICAL_ROLES` alone would leave it
+    assignable by a customer administrator, which is the worse of the two
+    halves to get wrong.
+    """
+    assert "ops_manager" not in CANONICAL_ROLES
+    assert "ops_manager" not in CUSTOMER_ASSIGNABLE_ROLES
+
+
 # ---------------------------------------------------------------------------
 # ``platform_admin`` is additive, not a superset: no role implies another
 # ---------------------------------------------------------------------------
@@ -179,9 +198,16 @@ def test_tenant_admin_cannot_act_on_another_tenant() -> None:
     assert PLATFORM_ADMIN_ROLE in str(exc.value.details)
 
 
-@pytest.mark.parametrize("role", ["driver", "dispatcher", "ops_manager"])
+@pytest.mark.parametrize("role", ["driver", "dispatcher", "viewer"])
 def test_non_admin_cannot_act_even_on_own_tenant(role: str) -> None:
-    """The ops endpoints had no role check; a driver could call them."""
+    """The ops endpoints had no role check; a driver could call them.
+
+    Two canonical non-admin roles plus ``viewer``, which is deliberately *not*
+    canonical: the gate must deny an arbitrary role string as firmly as a
+    recognised one, since ``auth_users.roles`` is never validated against
+    :data:`~auth.supertokens_init.CANONICAL_ROLES` and can therefore hold
+    anything an operator typed.
+    """
     caller = _Caller(tenant_id="acme", roles=[role])
     with pytest.raises(AppException) as exc:
         require_tenant_scope(caller, "acme", operation="Disabling the layer")
@@ -697,7 +723,7 @@ async def test_grant_cannot_hijack_a_user_from_another_tenant() -> None:
     that raised *after* the upsert would still leave the account hijacked.
     """
     h = _grant_harness(
-        {"tenant_id": "globex", "roles": ["ops_manager"], "st_user_id": "st-victim"},
+        {"tenant_id": "globex", "roles": ["dispatcher"], "st_user_id": "st-victim"},
         ["admin"],
     )
 
@@ -728,7 +754,7 @@ async def test_grant_cross_tenant_denial_is_audited_distinctly() -> None:
     ``rejected:APP_ACCESS_ALREADY_LINKED``. This pins the distinct outcome.
     """
     h = _grant_harness(
-        {"tenant_id": "globex", "roles": ["ops_manager"], "st_user_id": "st-victim"},
+        {"tenant_id": "globex", "roles": ["dispatcher"], "st_user_id": "st-victim"},
         ["admin"],
     )
 
