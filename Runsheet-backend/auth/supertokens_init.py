@@ -52,10 +52,40 @@ from config.settings import Settings
 
 logger = logging.getLogger(__name__)
 
-#: The four canonical SuperTokens UserRoles for the platform (Req 4.4). The
+#: Canonical SuperTokens UserRoles for the platform (Req 4.4). The
 #: Role_Authorizer matches these by exact name; the provisioning script
 #: (task 2.3) creates them in the core.
-CANONICAL_ROLES: tuple[str, ...] = ("admin", "dispatcher", "ops_manager", "driver")
+#:
+#: ``admin`` is a **tenant-scoped** role: the customer's own administrator. It
+#: confers no rights over any other tenant. That distinction was previously
+#: implicit and cost us a cross-tenant hole in the feature-flag endpoints, where
+#: an ``admin`` in one tenant could flip another tenant's flags.
+#:
+#: ``platform_admin`` is the Runsheet-staff role. Because staff sign in through
+#: the same app as customers, it is the only way to express "may act outside my
+#: own tenant". Nothing grants it by default — it is provisioned deliberately,
+#: and :data:`CUSTOMER_ASSIGNABLE_ROLES` excludes it so a customer administrator
+#: cannot grant it to themselves.
+CANONICAL_ROLES: tuple[str, ...] = (
+    "admin",
+    "dispatcher",
+    "ops_manager",
+    "driver",
+    "platform_admin",
+)
+
+#: The Runsheet-staff role. Callers holding it may target a tenant other than
+#: their own on endpoints that take a ``tenant_id`` parameter.
+PLATFORM_ADMIN_ROLE: str = "platform_admin"
+
+#: Roles a tenant's own administrator may assign. Deliberately excludes
+#: ``platform_admin`` so tenant-scoped admin cannot escalate to cross-tenant.
+CUSTOMER_ASSIGNABLE_ROLES: tuple[str, ...] = (
+    "admin",
+    "dispatcher",
+    "ops_manager",
+    "driver",
+)
 
 #: The form-field id EmailPassword uses for the password field.
 _PASSWORD_FIELD_ID = "password"
@@ -366,7 +396,7 @@ def init_supertokens(settings: Settings) -> None:
                     functions=_override_session_functions,
                 ),
             ),
-            # UserRoles: represents the four canonical roles (Req 4.4).
+            # UserRoles: represents the canonical roles (Req 4.4).
             userroles.init(),
         ],
     )
@@ -387,6 +417,8 @@ def init_supertokens(settings: Settings) -> None:
 
 __all__ = [
     "CANONICAL_ROLES",
+    "CUSTOMER_ASSIGNABLE_ROLES",
+    "PLATFORM_ADMIN_ROLE",
     "SuperTokensConfigError",
     "init_supertokens",
     "is_supertokens_initialized",

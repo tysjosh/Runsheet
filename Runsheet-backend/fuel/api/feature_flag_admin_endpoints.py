@@ -18,7 +18,8 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, Request
 
-from errors.exceptions import forbidden, invalid_request
+from auth.tenant_scope import require_tenant_scope
+from errors.exceptions import invalid_request
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 from ops.services.feature_flags import VALID_OVERLAY_STATES
 
@@ -67,12 +68,15 @@ async def get_order_intake_pipeline_state(
 
     Validates: Requirement 9.3.5.
     """
-    roles = getattr(tenant, "roles", None) or []
-    if "admin" not in roles:
-        raise forbidden(
-            message="Order intake pipeline flag management requires the admin role",
-            details={"required_role": "admin"},
-        )
+    # Role AND tenant scope. The role check alone was insufficient: tenant_id is
+    # a path parameter, so an ``admin`` in one tenant could read another
+    # tenant's kill-switch state.
+    require_tenant_scope(
+        tenant,
+        tenant_id,
+        required_roles=("admin",),
+        operation="Reading the order intake pipeline flag",
+    )
 
     if _feature_flag_service is None:
         from errors.exceptions import elasticsearch_unavailable
@@ -116,19 +120,22 @@ async def set_order_intake_pipeline_state(
         JSON with the previous and new state.
 
     Raises:
-        403: If the caller does not have the ``admin`` role.
+        403: If the caller lacks the ``admin`` role, or targets a tenant other
+            than their own without the ``platform_admin`` role.
         400: If ``new_state`` is not a valid overlay state.
         503: If the feature flag service is not configured.
 
     Validates: Requirement 9.3.5.
     """
-    # Role-gate: admin only
-    roles = getattr(tenant, "roles", None) or []
-    if "admin" not in roles:
-        raise forbidden(
-            message="Order intake pipeline flag management requires the admin role",
-            details={"required_role": "admin"},
-        )
+    # Role AND tenant scope. This flag is the order-intake kill switch; setting
+    # it to ``disabled`` silently stops order intake. Before this check an
+    # ``admin`` in one tenant could disable a different tenant's intake.
+    require_tenant_scope(
+        tenant,
+        tenant_id,
+        required_roles=("admin",),
+        operation="Flipping the order intake pipeline flag",
+    )
 
     # Validate the new state
     if new_state not in VALID_STATES:

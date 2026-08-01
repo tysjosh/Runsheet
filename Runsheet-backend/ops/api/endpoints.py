@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 
 from config.legacy_flags import is_legacy_ng_delivery_enabled
 from config.settings import get_settings
+from auth.tenant_scope import require_tenant_scope
 from errors.exceptions import legacy_ng_delivery_disabled, validation_error
 from middleware.rate_limiter import limiter
 from ops.middleware.pii_masker import PIIMasker, log_pii_access
@@ -1599,6 +1600,16 @@ async def enable_feature_flag(
 
     Validates: Req 27.1
     """
+    # This endpoint previously had NO authorization beyond "is authenticated",
+    # while taking the target tenant from the path — so any caller, including a
+    # driver, could flip another company's Ops Intelligence Layer.
+    require_tenant_scope(
+        tenant,
+        tenant_id,
+        required_roles=("admin",),
+        operation="Enabling the Ops Intelligence Layer",
+    )
+
     if _feature_flag_service is None:
         raise HTTPException(status_code=503, detail="Feature flag service not configured")
 
@@ -1624,6 +1635,15 @@ async def disable_feature_flag(
 
     Validates: Req 27.1
     """
+    # Unauthorized before this check, and disruptive: it also force-disconnects
+    # every WebSocket client for the named tenant.
+    require_tenant_scope(
+        tenant,
+        tenant_id,
+        required_roles=("admin",),
+        operation="Disabling the Ops Intelligence Layer",
+    )
+
     if _feature_flag_service is None:
         raise HTTPException(status_code=503, detail="Feature flag service not configured")
 
@@ -1666,6 +1686,24 @@ async def rollback_feature_flag(
 
     Validates: Req 27.5
     """
+    # The most dangerous of the three: with ``purge_data=true`` this DELETES the
+    # named tenant's data from every ops index. It had no authorization at all,
+    # so any authenticated caller could destroy another company's ops data.
+    #
+    # Purging is irreversible, so it is restricted to platform_admin even for a
+    # caller's own tenant — a customer administrator can disable the layer but
+    # cannot delete the history behind it.
+    require_tenant_scope(
+        tenant,
+        tenant_id,
+        required_roles=("platform_admin",) if purge_data else ("admin",),
+        operation=(
+            "Rolling back the Ops Intelligence Layer with data purge"
+            if purge_data
+            else "Rolling back the Ops Intelligence Layer"
+        ),
+    )
+
     if _feature_flag_service is None:
         raise HTTPException(status_code=503, detail="Feature flag service not configured")
 
