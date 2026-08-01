@@ -128,6 +128,10 @@ MVP_LOAD_PLANS_MAPPING = {
         "properties": {
             "plan_id":  {"type": "keyword"},
             "truck_id": {"type": "keyword"},
+            # Sourcing provenance carried on LoadingPlan. Declared here and in
+            # MVP_ADDITIVE_MAPPING_UPDATES so existing indices gain them too.
+            "contract_id": {"type": "keyword"},
+            "terminal_id": {"type": "keyword"},
             "assignments": {
                 "type": "nested",
                 "properties": {
@@ -135,6 +139,14 @@ MVP_LOAD_PLANS_MAPPING = {
                     "station_id":                 {"type": "keyword"},
                     "order_id":                   {"type": "keyword"},
                     "fuel_grade":                 {"type": "keyword"},
+                    # The exact catalog product. ``fuel_grade`` collapses the
+                    # nine products onto four legacy grades, which is why the
+                    # axle-weight density lookup keys on product_code instead
+                    # (DEF is 1.09 kg/L but maps to AGO at 0.85). This index is
+                    # dynamic:strict, so omitting the field here does not
+                    # degrade gracefully — every load-plan write is rejected
+                    # with strict_dynamic_mapping_exception.
+                    "product_code":               {"type": "keyword"},
                     "quantity_liters":            {"type": "float"},
                     "compartment_capacity_liters": {"type": "float"},
                 },
@@ -518,9 +530,22 @@ MVP_INDEX_MAPPINGS = {
 MVP_ADDITIVE_MAPPING_UPDATES = {
     MVP_LOAD_PLANS_INDEX: {
         "properties": {
+            "contract_id": {"type": "keyword"},
+            "terminal_id": {"type": "keyword"},
             "assignments": {
                 "type": "nested",
-                "properties": {"order_id": {"type": "keyword"}},
+                "properties": {
+                    "order_id": {"type": "keyword"},
+                    # Added with the product-level density fix. It MUST be
+                    # listed here as well as in MVP_LOAD_PLANS_MAPPING: the
+                    # create-time mapping only applies to a brand-new index,
+                    # and every existing cluster already has mvp_load_plans.
+                    # Because the index is dynamic:strict, an undeclared field
+                    # does not get ignored — the whole load-plan write is
+                    # rejected, the agent logs and continues, and the pipeline
+                    # still reports "complete" with nothing persisted.
+                    "product_code": {"type": "keyword"},
+                },
             }
         }
     },
