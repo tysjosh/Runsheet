@@ -98,6 +98,7 @@ from integrations.provider_catalog import (
     ProviderCatalogEntry,
     register_provider,
 )
+from services.unit_conversion import GAL_TO_L
 
 logger = logging.getLogger(__name__)
 
@@ -185,11 +186,12 @@ TLS_IN_TANK_INVENTORY_COMMAND: bytes = b"I20100"
 #: ``fuel.services.fuel_es_mappings``.
 FUEL_STATIONS_INDEX: str = "fuel_stations"
 
-#: US-gallon → liter conversion. Kept here to avoid importing
-#: :mod:`services.unit_conversion` just for a single constant (the
-#: unit_conversion module pulls in additional fuel-ops imports that
-#: blow up unit-test bootstrap time).
-_GAL_TO_L: float = 3.785411784
+#: US-gallon → liter conversion, bound to the platform factor rather than
+#: redeclared. An earlier comment here claimed importing
+#: :mod:`services.unit_conversion` dragged in fuel-ops modules and slowed
+#: unit-test bootstrap; that was not true — the module imports only
+#: ``typing`` and its package ``__init__`` is empty.
+_GAL_TO_L: float = GAL_TO_L
 
 #: ``IntegrationInstance.config`` key carrying the per-instance tank
 #: mapping. Shape: ``{"<vendor_tank_index>": {"target":

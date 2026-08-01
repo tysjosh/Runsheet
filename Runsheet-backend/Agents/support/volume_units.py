@@ -26,8 +26,18 @@ values between a tenant's display units and the platform's canonical units,
 where canonical volume is gallons. This module converts *per-grade mappings*
 across the one storage boundary where litres are canonical. The two are distinct
 concerns, so the numeric definition is shared rather than duplicated —
-``LITERS_PER_US_GALLON`` is bound to ``unit_conversion.GAL_TO_L``, which means
-there is exactly one gallon/litre constant in the backend and it cannot drift.
+``LITERS_PER_US_GALLON`` is bound to ``unit_conversion.GAL_TO_L``.
+
+``services.unit_conversion.GAL_TO_L`` is the backend's only *definition* of the
+gallon/litre factor. Every other name for it is a binding, not a redeclaration:
+``LITERS_PER_US_GALLON`` here, ``GALLONS_TO_LITERS`` in
+``Agents/overlay/compartment_loading_agent.py``, ``LITERS_PER_GALLON`` in
+``Agents/overlay/route_planning_agent.py``, and ``_GAL_TO_L`` in
+``integrations/veeder_root.py``. That invariant is enforced by
+``tests/unit/test_volume_factor_single_source.py``, which fails if any module
+reintroduces a literal. The web frontend holds its own copy in
+``runsheet/src/services/fuelApi.ts`` — outside Python's reach, so it is pinned
+by value in that same test.
 
 Validates: Requirements 6.18, 6.19.
 """

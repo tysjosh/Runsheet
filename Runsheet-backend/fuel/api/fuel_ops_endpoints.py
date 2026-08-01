@@ -314,6 +314,7 @@ from services.reconciliation_service import (
     ReconciliationService,
 )
 from services.ref_resolver import get_ref_resolver
+from services.unit_conversion import GAL_TO_L
 
 logger = logging.getLogger(__name__)
 
@@ -4582,7 +4583,7 @@ async def _compute_remaining_capacity_by_grade(
                 )
 
     # --- Convert to gallons + aggregate per product_code ----------------
-    gallons_per_liter = 1.0 / 3.785411784
+    gallons_per_liter = 1.0 / GAL_TO_L
     remaining_by_grade: Dict[str, float] = {}
     for comp_id, data in per_compartment.items():
         capacity_l = data["capacity_liters"]

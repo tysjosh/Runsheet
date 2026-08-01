@@ -42,7 +42,7 @@ Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9, 3.10,
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, Final, List, Mapping, Optional, Tuple
 from uuid import uuid4
 
 from Agents.overlay.base_overlay_agent import OverlayAgentBase
@@ -104,8 +104,15 @@ from fuel.services.fuel_product_catalog import (
     canonicalize_or_warn,
 )
 from fuel.services.order_es_mappings import FUEL_ORDERS_CURRENT_INDEX
+from services.unit_conversion import GAL_TO_L
 
 logger = logging.getLogger(__name__)
+
+#: US gallons → litres. Bound to :data:`services.unit_conversion.GAL_TO_L` so
+#: this module holds no independent definition of the factor. The agent needs
+#: the conversion because orders are gallons-denominated while the compartment
+#: solver and its kg/L densities are litres-denominated.
+GALLONS_TO_LITERS: Final[float] = GAL_TO_L
 
 # Default minimum delivery quantity in liters (Req 3.5)
 DEFAULT_MIN_DROP_LITERS = 500.0
@@ -571,8 +578,6 @@ class CompartmentLoadingAgent(OverlayAgentBase):
         }
 
         requests: List[DeliveryRequest] = []
-        # US gallons to liters conversion factor (NIST)
-        GALLONS_TO_LITERS = 3.785411784
 
         for order in fuel_orders:
             order_id = order.get("order_id", "")
@@ -993,8 +998,7 @@ class CompartmentLoadingAgent(OverlayAgentBase):
                     })
                     continue
 
-            # Convert gallons to liters (1 gallon ≈ 3.785 liters)
-            quantity_liters = round(target_gallons * 3.785411784, 2)
+            quantity_liters = round(target_gallons * GALLONS_TO_LITERS, 2)
 
             requests.append(
                 DeliveryRequest(
@@ -1724,13 +1728,13 @@ class CompartmentLoadingAgent(OverlayAgentBase):
         if total_liters <= 0.0:
             return
 
-        # Convert liters to canonical gallons for the counter. Using the
-        # exact NIST factor (1 gal = 3.785411784 L) keeps the counter
-        # stable across runs even when source units mix (the agent-side
-        # LoadingPlan is liters-valued, but the Redis counter and
+        # Convert liters to canonical gallons for the counter. Using the one
+        # shared NIST factor keeps the counter stable across runs even when
+        # source units mix (the agent-side LoadingPlan is liters-valued, but
+        # the Redis counter and
         # Supplier_Contract.minimum_lift_gallons_per_month are both in
         # gallons).
-        gallons = total_liters / 3.785411784
+        gallons = total_liters / GALLONS_TO_LITERS
 
         try:
             new_total = await service.record_lift(

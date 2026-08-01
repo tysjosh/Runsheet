@@ -28,7 +28,17 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Final,
+    List,
+    Mapping,
+    Optional,
+    Protocol,
+    Tuple,
+)
 
 import httpx
 
@@ -79,6 +89,7 @@ from fuel.services.truck_start_position import (
     resolve_truck_start_position,
 )
 from fuel.terminal_models import SourcingRecommendation
+from services.unit_conversion import GAL_TO_L
 
 logger = logging.getLogger(__name__)
 
@@ -138,9 +149,10 @@ TRAFFIC_MATRIX_TIMEOUT_SECONDS = 10.0
 
 #: Exact liters-per-gallon factor used to convert Loading_Plan assignment
 #: volumes (stored in liters) into the gallons unit the
-#: :class:`SourcingRecommender` expects (Task 7.10). Keep in sync with
-#: :data:`services.unit_conversion.GAL_TO_L`.
-LITERS_PER_GALLON = 3.785411784
+#: :class:`SourcingRecommender` expects (Task 7.10). Bound to
+#: :data:`services.unit_conversion.GAL_TO_L` rather than redeclared, so it
+#: cannot drift from the platform factor.
+LITERS_PER_GALLON: Final[float] = GAL_TO_L
 
 
 # ---------------------------------------------------------------------------

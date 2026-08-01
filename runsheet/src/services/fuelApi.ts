@@ -41,10 +41,13 @@ const API_BASE_URL =
 // "us_gallon"`` and converts server-side, so {@link checkinStop} sends gallons
 // straight through and converts nothing.
 //
-// ``LITERS_PER_GALLON`` below is pinned to ``LITERS_PER_US_GALLON`` in
-// ``Runsheet-backend/Agents/support/volume_units.py``; the two carry the same
-// exact value and a backend unit test asserts they agree. Do not change one
-// without the other.
+// ``LITERS_PER_GALLON`` below is pinned to ``GAL_TO_L`` in
+// ``Runsheet-backend/services/unit_conversion.py``, which is the backend's only
+// definition of the factor. The two carry the same exact value, and
+// ``test_frontend_constant_matches_backend`` in
+// ``Runsheet-backend/tests/unit/test_volume_factor_single_source.py`` parses
+// this declaration and fails if they diverge. Do not change one without the
+// other.
 
 export const LITERS_PER_GALLON = 3.785411784;
 
