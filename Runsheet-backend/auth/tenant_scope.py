@@ -68,6 +68,18 @@ tenant must be their own unless they are a platform admin.** Checking only the
 role permits cross-tenant action; checking only the tenant permits any driver to
 administer their own company.
 
+Division of labour
+------------------
+
+:func:`auth.authorization.require_role` answers "may you do this at all";
+:func:`require_tenant_scope` answers "may you do it to *this* tenant". The two
+questions are separate, and so are the roles that answer them: a staff account
+holds ``admin`` for the first and ``platform_admin`` for the second.
+``require_role`` is exact-match with no implication graph, so ``platform_admin``
+alone reaches nothing. See
+:data:`~auth.supertokens_init.PLATFORM_STAFF_ROLES` for the bundle and why it is
+two roles rather than one.
+
 Fail closed
 -----------
 

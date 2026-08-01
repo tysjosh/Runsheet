@@ -77,9 +77,10 @@ class AuthUserRow:
     """One row of the ``auth_users`` provisioning source-of-truth.
 
     Mirrors the columns the provisioner cares about. ``email`` is the
-    idempotency key (Req 9.4); ``roles`` carries only the canonical role names
-    (``admin`` / ``dispatcher`` / ``ops_manager`` / ``driver``); ``st_user_id``
-    is the SuperTokens user id once backfilled.
+    idempotency key (Req 9.4); ``roles`` carries only canonical role names —
+    see :data:`auth.supertokens_init.CANONICAL_ROLES`, currently ``admin`` /
+    ``dispatcher`` / ``ops_manager`` / ``driver`` / ``platform_admin``;
+    ``st_user_id`` is the SuperTokens user id once backfilled.
     """
 
     email: str

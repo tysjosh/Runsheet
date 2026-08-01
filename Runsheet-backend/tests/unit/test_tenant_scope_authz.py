@@ -35,10 +35,12 @@ from typing import Any, List
 
 import pytest
 
+from auth.authorization import require_role
 from auth.supertokens_init import (
     CANONICAL_ROLES,
     CUSTOMER_ASSIGNABLE_ROLES,
     PLATFORM_ADMIN_ROLE,
+    PLATFORM_STAFF_ROLES,
 )
 from auth.tenant_scope import is_platform_admin, require_tenant_scope
 from errors.exceptions import AppException, ErrorCode
@@ -74,6 +76,92 @@ def test_platform_admin_is_not_customer_assignable() -> None:
 def test_customer_assignable_roles_are_all_canonical() -> None:
     for role in CUSTOMER_ASSIGNABLE_ROLES:
         assert role in CANONICAL_ROLES
+
+
+# ---------------------------------------------------------------------------
+# ``platform_admin`` is additive, not a superset: no role implies another
+# ---------------------------------------------------------------------------
+#
+# ``require_role`` and ``require_tenant_scope`` answer different questions, and
+# only the latter treats ``platform_admin`` as satisfying ``required_roles``.
+# That is deliberate: ``require_role`` gates "may you do this at all" and must
+# stay exact-match, because an implication graph there widens roughly twenty
+# existing ``require_role(tenant, "admin")`` call sites at once, plus every
+# future one. Staff accounts hold both roles instead — ``PLATFORM_STAFF_ROLES``.
+
+
+@pytest.mark.parametrize("required", ["admin", "dispatcher", "driver"])
+def test_platform_admin_alone_does_not_satisfy_require_role(required: str) -> None:
+    """The anti-implication guard. ``platform_admin`` is not a super-role.
+
+    If this test ever *passes the call* instead of raising, somebody taught
+    :func:`require_role` a role-implication graph, and every
+    ``require_role(tenant, "admin")`` site in the codebase silently widened to
+    accept staff — including surfaces nobody re-reviewed. The intended shape is
+    the opposite: the capability is additive, so a staff account carries
+    ``admin`` explicitly.
+
+    Parametrized across three requirements rather than only ``admin`` because a
+    partial implication graph is as plausible a mistake as a total one: someone
+    could map ``platform_admin -> admin`` and leave the operational roles alone.
+    ``platform_admin`` satisfies none of them.
+    """
+    caller = _Caller(tenant_id="runsheet", roles=[PLATFORM_ADMIN_ROLE])
+    with pytest.raises(AppException) as exc:
+        require_role(caller, required)
+    assert exc.value.error_code == ErrorCode.INSUFFICIENT_ROLE
+
+
+def test_platform_admin_does_not_satisfy_the_platform_prefix() -> None:
+    """``platform_admin`` must not satisfy a requirement for ``"platform"``.
+
+    Exact-match role checking is covered generally by
+    ``tests/unit/test_authorization.py`` and by the property test
+    ``tests/property/test_exact_match_role_authorization_property.py``, so this
+    case is deliberately narrow: it pins the one prefix pair the newest role
+    introduces, where a held role has a required name as a proper prefix. A
+    substring or ``startswith`` regression would make this pass.
+    """
+    caller = _Caller(tenant_id="runsheet", roles=[PLATFORM_ADMIN_ROLE])
+    with pytest.raises(AppException) as exc:
+        require_role(caller, "platform")
+    assert exc.value.error_code == ErrorCode.INSUFFICIENT_ROLE
+
+
+def test_platform_staff_roles_bundles_admin_with_the_staff_capability() -> None:
+    """The bundle must carry ``admin`` too, or staff can reach nothing.
+
+    Without this, the test above would be satisfiable by a "staff bundle" of
+    ``platform_admin`` alone — which is precisely the 403-on-every-admin-route
+    failure mode the decision exists to avoid.
+    """
+    assert "admin" in PLATFORM_STAFF_ROLES
+    assert PLATFORM_ADMIN_ROLE in PLATFORM_STAFF_ROLES
+    for role in PLATFORM_STAFF_ROLES:
+        assert role in CANONICAL_ROLES, f"{role} is not a canonical role"
+
+
+def test_staff_bundle_passes_both_gates() -> None:
+    """End-to-end counterweight: staff can actually work.
+
+    ``require_role`` for "may you do this at all", ``require_tenant_scope`` for
+    "may you do it to that company". Without this case, tightening everything
+    into "deny staff" would pass the guard above.
+    """
+    caller = _Caller(tenant_id="runsheet", roles=list(PLATFORM_STAFF_ROLES))
+    require_role(caller, "admin")
+    require_tenant_scope(caller, "globex", operation="Staff support action")
+
+
+def test_platform_staff_roles_is_not_customer_assignable() -> None:
+    """A tenant admin must not be able to assemble the staff bundle.
+
+    ``admin`` is assignable on its own — that is the ordinary customer
+    administrator. What must not be assignable is the *bundle*, and the reason
+    is the ``platform_admin`` member.
+    """
+    assert not set(PLATFORM_STAFF_ROLES).issubset(set(CUSTOMER_ASSIGNABLE_ROLES))
+    assert PLATFORM_ADMIN_ROLE not in CUSTOMER_ASSIGNABLE_ROLES
 
 
 # ---------------------------------------------------------------------------
