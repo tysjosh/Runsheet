@@ -15,8 +15,10 @@ import { lazy, Suspense, useEffect, useState } from "react";
 import Session from "supertokens-auth-react/recipe/session";
 import ErrorBoundary from "../../components/ErrorBoundary";
 import Header from "../../components/Header";
-import Sidebar from "../../components/Sidebar";
+import Sidebar, { NAV_SECTIONS } from "../../components/Sidebar";
 import { InShellNavProvider } from "../../components/ui/InShellNav";
+import { canSee, moduleDescriptor } from "../../config/modules";
+import { getCurrentUserRoles } from "../../utils/auth";
 import {
   DashboardChromeProvider,
   dashboardActiveItem,
@@ -42,6 +44,9 @@ export default function DashboardLayout({
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [aiChatOpen, setAiChatOpen] = useState(false);
   const [createOrderOpen, setCreateOrderOpen] = useState(false);
+  // `null` until the session's claims resolve. Every visibility decision below
+  // treats that as "no roles", so nothing role-gated renders early.
+  const [roles, setRoles] = useState<readonly string[] | null>(null);
 
   useEffect(() => {
     // Verified SuperTokens session (cookie-managed by the SDK); bounce to
@@ -64,7 +69,41 @@ export default function DashboardLayout({
     };
   }, [router]);
 
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    let cancelled = false;
+    (async () => {
+      const r = await getCurrentUserRoles();
+      if (!cancelled) setRoles(r);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isAuthenticated]);
+
   const activeItem = dashboardActiveItem(pathname);
+
+  // Can this user reach anything at all? Answered only once roles resolve, so a
+  // slow session does not flash a "no access" screen at a legitimate admin.
+  const hasAnyNavAccess =
+    roles === null ||
+    NAV_SECTIONS.some((section) =>
+      section.items.some((item) => canSee(item.id, { roles })),
+    );
+
+  // Route guard: a hidden module reached directly — typed URL, stale bookmark,
+  // a link from before a role change — bounces to the dashboard root.
+  //
+  // Only *registered* ids are guarded. `/dashboard/orders` and
+  // `/dashboard/profile` are not gateable modules and have no registry entry, so
+  // `canSee` would fail them closed; skipping unregistered ids keeps the
+  // fail-closed rule from deleting legitimate routes it was never asked about.
+  useEffect(() => {
+    if (roles === null || !hasAnyNavAccess) return;
+    if (!moduleDescriptor(activeItem)) return;
+    if (canSee(activeItem, { roles })) return;
+    router.replace("/dashboard");
+  }, [roles, hasAnyNavAccess, activeItem, router]);
 
   // In-shell navigation for EntityLink + the Storm_Mode banner: route to the
   // real `/dashboard/*` URL so the address bar reflects the view.
@@ -99,6 +138,36 @@ export default function DashboardLayout({
   }
 
   if (!isAuthenticated) return null;
+
+  // Nothing visible: render a plain explanation rather than an empty shell with
+  // a blank sidebar. This is what a driver-role account sees — the web app is
+  // the dispatcher/admin surface and drivers use the separate driver app.
+  if (!hasAnyNavAccess) {
+    return (
+      <div className="h-screen flex items-center justify-center bg-gray-50 px-6">
+        <div className="max-w-md text-center">
+          <h1 className="text-xl font-semibold text-gray-900 mb-2">
+            No modules available for your role
+          </h1>
+          <p className="text-gray-600 mb-6">
+            This workspace is for dispatchers and administrators. If you drive
+            for this company, use the Runsheet driver app instead. Otherwise ask
+            an administrator to review your account&apos;s roles.
+          </p>
+          <button
+            type="button"
+            onClick={async () => {
+              await Session.signOut();
+              router.push("/signin");
+            }}
+            className="px-4 py-2 rounded-lg bg-primary text-white text-sm font-medium hover:bg-primary-hover focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-[color:var(--color-primary)]"
+          >
+            Sign out
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="h-screen flex flex-col bg-white">
