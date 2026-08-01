@@ -1,14 +1,13 @@
 "use client";
 
 import { TrendingDown, TrendingUp } from "lucide-react";
+import { LITERS_PER_GALLON } from "../../services/fuelApi";
 import type { ConsumptionMetric, FuelType } from "../../services/fuelApi";
 
 interface FuelConsumptionChartProps {
   /** Daily consumption metrics, may include multiple fuel types */
   data: ConsumptionMetric[];
 }
-
-const LITERS_PER_GALLON = 3.785411784;
 
 const FUEL_TYPE_COLORS: Record<FuelType, { bar: string; label: string }> = {
   DIESEL_2: { bar: "bg-info", label: "Diesel #2" },

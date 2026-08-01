@@ -221,3 +221,47 @@ def test_frontend_constant_matches_backend() -> None:
         f"backend GAL_TO_L = {GAL_TO_L!r}. Volumes crossing this boundary "
         f"would be wrong by a factor of {frontend_value / GAL_TO_L!r}."
     )
+
+
+def test_no_frontend_module_redeclares_the_factor() -> None:
+    """``fuelApi.ts`` is the only TypeScript declaration of the factor.
+
+    The sibling test above pins ``fuelApi.ts`` but says nothing about the rest
+    of the frontend, which is how ``FuelConsumptionChart.tsx`` came to declare
+    its own private copy despite ``fuelApi.ts`` already exporting one two
+    directories away. This closes that gap: the AST scan covers the backend,
+    and this covers the web app.
+
+    Scanned textually rather than by parsing TypeScript — a regex over numeric
+    literals is enough, because the only way the factor can appear is as a
+    literal, and a false positive here is a genuine redeclaration by
+    definition.
+    """
+    web_root = _REPO_ROOT / "runsheet" / "src"
+    if not web_root.is_dir():
+        pytest.skip(f"web frontend not present at {web_root}")
+
+    # The factor family: any literal beginning 3.78, so a truncated copy such
+    # as 3.7854 is caught alongside an exact one.
+    factor_re = re.compile(r"(?<![\w.])3\.78\d*")
+    allowed = {web_root / "services" / "fuelApi.ts"}
+
+    offenders: List[str] = []
+    for path in sorted(web_root.rglob("*.ts")) + sorted(web_root.rglob("*.tsx")):
+        if path in allowed or "node_modules" in path.parts:
+            continue
+        text = path.read_text(encoding="utf-8")
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            for hit in factor_re.finditer(line):
+                offenders.append(
+                    f"{path.relative_to(_REPO_ROOT)}:{lineno} declares {hit.group(0)}"
+                )
+
+    assert not offenders, (
+        "The gallon/litre factor must have one frontend declaration, the "
+        "LITERS_PER_GALLON exported from services/fuelApi.ts. These sites "
+        "redeclare it:\n  "
+        + "\n  ".join(offenders)
+        + "\n\nImport it instead: "
+        "`import { LITERS_PER_GALLON } from \"<path>/services/fuelApi\";`"
+    )
