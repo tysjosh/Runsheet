@@ -254,39 +254,12 @@ class CompartmentLoadingAgent(OverlayAgentBase):
     # Mode helpers (Task 6.6 / Req 7.1.2)
     # ------------------------------------------------------------------
 
-    async def _is_active_commit_mode(self, tenant_id: str) -> bool:
-        """Return ``True`` when the overlay's mode represents a real commit.
-
-        Validates: Requirement 7.1.2.
-
-        The spec reserves the ``last_loaded_*`` / ``state`` write on
-        ``truck_compartments`` for "a successful assignment commit — not
-        during shadow-mode evaluation." Mode resolution mirrors the base
-        overlay's :meth:`_get_mode`: anything that is not ``shadow`` nor
-        ``disabled`` is treated as a commit path (``active_gated`` and
-        ``active_auto`` both flow through the ConfirmationProtocol, and
-        by the time the protocol accepts the mutation the compartment
-        has been committed).
-
-        The helper defaults to ``False`` on any error or on a missing
-        feature-flag service so a misconfigured environment never
-        silently overwrites compartment state in what the operator
-        thinks is shadow mode.
-        """
-
-        try:
-            mode = await self._get_mode(tenant_id)
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.warning(
-                "CompartmentLoadingAgent: failed to resolve overlay mode "
-                "for tenant %s, defaulting to shadow (no state write): %s",
-                tenant_id,
-                exc,
-            )
-            return False
-        if mode is None:
-            return False
-        return mode not in ("shadow", "disabled")
+    # ``_is_active_commit_mode`` now lives on :class:`OverlayAgentBase` so the
+    # compartment-state write (Req 7.1.2) and the replan apply share one
+    # definition of "this is a real commit". The behaviour is unchanged: the
+    # spec reserves the ``last_loaded_*`` / ``state`` write on
+    # ``truck_compartments`` for a successful assignment commit, never for
+    # shadow-mode evaluation, and resolution fails closed.
 
     # ------------------------------------------------------------------
     # Signal handling override — buffer DeliveryPriorityList messages

@@ -243,6 +243,34 @@ class OverlayAgentBase(AutonomousAgentBase):
             except Exception:
                 return "shadow"
 
+    async def _is_active_commit_mode(self, tenant_id: str) -> bool:
+        """Whether this tenant's mode represents a real commit path.
+
+        Shadow-mode evaluation must run the full decision logic so the
+        proposal can be logged for retrospective analysis, but it must not
+        mutate live state. Anything that is neither ``shadow`` nor
+        ``disabled`` is a commit path: ``active_gated`` and ``active_auto``
+        both flow through the ConfirmationProtocol.
+
+        Fails closed. A mode that cannot be resolved returns ``False``, so a
+        misconfigured environment never writes live state while an operator
+        believes the overlay is in shadow.
+        """
+        try:
+            mode = await self._get_mode(tenant_id)
+        except Exception as exc:  # pragma: no cover - defensive
+            self.logger.warning(
+                "%s: failed to resolve overlay mode for tenant %s, "
+                "defaulting to shadow (no state write): %s",
+                self.agent_id,
+                tenant_id,
+                exc,
+            )
+            return False
+        if mode is None:
+            return False
+        return mode not in ("shadow", "disabled")
+
     # ------------------------------------------------------------------
     # Proposal routing
     # ------------------------------------------------------------------
