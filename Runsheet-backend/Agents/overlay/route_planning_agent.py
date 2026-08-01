@@ -770,6 +770,28 @@ class RoutePlanningAgent(OverlayAgentBase):
         else:
             await super()._on_signal(signal)
 
+    def _pending_work_tenants(self) -> List[str]:
+        """Tenants with a buffered loading proposal awaiting a route.
+
+        Required because :meth:`_on_signal` files every loading proposal in
+        ``_proposal_buffer`` and nothing in ``_signal_buffer``. Without this,
+        ``monitor_cycle`` saw an empty ``_signal_buffer`` and returned before
+        ``evaluate()``, so on the SignalBus path this agent buffered proposals
+        forever and never produced a route — silently.
+
+        ``evaluate`` drains the whole buffer in one pass and handles each
+        proposal under its own ``tenant_id``, so the extra tenants reported
+        here resolve to no-op cycles rather than duplicated routing work.
+
+        Validates: Requirement 4.1
+        """
+        tenants: List[str] = []
+        for proposal in self._proposal_buffer:
+            tenant_id = getattr(proposal, "tenant_id", None)
+            if tenant_id and tenant_id not in tenants:
+                tenants.append(tenant_id)
+        return tenants
+
     # ------------------------------------------------------------------
     # Core evaluation (Req 4.1–4.9)
     # ------------------------------------------------------------------
@@ -1987,6 +2009,7 @@ class RoutePlanningAgent(OverlayAgentBase):
         """Build a RoutePlan from optimized route order."""
         # Build drop quantities per station
         station_drops: Dict[str, Dict[str, float]] = {}
+        station_order_ids: Dict[str, set[str]] = {}
         for assignment in assignments:
             sid = assignment.get("station_id", "")
             grade = assignment.get("fuel_grade", "")
@@ -1996,6 +2019,9 @@ class RoutePlanningAgent(OverlayAgentBase):
                 station_drops[sid][grade] = (
                     station_drops[sid].get(grade, 0.0) + qty
                 )
+            order_id = assignment.get("order_id")
+            if sid and order_id:
+                station_order_ids.setdefault(sid, set()).add(str(order_id))
 
         # Build set of at-risk stop indices from SLA violations (Req 4.4)
         at_risk_indices = set()
@@ -2034,6 +2060,7 @@ class RoutePlanningAgent(OverlayAgentBase):
             stops.append(
                 RouteStop(
                     station_id=station_id,
+                    order_ids=sorted(station_order_ids.get(station_id, set())),
                     eta=eta.isoformat(),
                     drop=drop,
                     sequence=sequence,

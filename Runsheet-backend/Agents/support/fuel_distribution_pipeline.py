@@ -23,6 +23,8 @@ from enum import Enum
 from typing import Any, Dict, List, Optional
 
 from Agents.agent_ws_manager import AgentActivityWSManager
+from Agents.overlay.data_contracts import InterventionProposal
+from Agents.support.fuel_distribution_models import DeliveryPriorityList
 
 logger = logging.getLogger(__name__)
 
@@ -319,6 +321,7 @@ class FuelDistributionPipeline:
                     current_agent_id=agent_id,
                     captured_messages=captured_messages,
                     next_agent=next_agent,
+                    tenant_id=tenant_id,
                 )
 
                 pipeline_run.stage_results[agent_id] = "completed"
@@ -446,12 +449,46 @@ class FuelDistributionPipeline:
     # Direct buffer injection (Req 1.1, 1.2, 1.3, 1.5)
     # ------------------------------------------------------------------
 
-    # Stage-to-buffer mapping: determines which buffer on the *next* agent
+    # Stage-to-buffer mapping: names the typed buffer on the *next* agent that
     # receives the captured messages from the *current* stage.
+    #
+    # ``tank_forecasting`` is deliberately absent, and that absence is the fix
+    # for a silent pipeline break. ``DeliveryPrioritizationAgent`` owns no typed
+    # buffer: it reads forecasts back out of ``mvp_tank_forecasts``, which
+    # ``TankForecastingAgent`` persists (step 9) *before* it publishes them
+    # (step 10), so within one synchronous run the read is complete and
+    # race-free. What the stage needs from its predecessor is a cycle trigger,
+    # not an in-memory payload.
+    #
+    # Mapping it to ``_forecast_buffer`` — an attribute a refactor removed from
+    # that agent — meant the ``hasattr`` guard below skipped the injection and
+    # returned *before* the trigger was seeded. Prioritization therefore never
+    # ran, loading and routing had empty buffers, and the run still reported
+    # ``complete``. Any stage not named here is triggered with no payload.
     _STAGE_BUFFER_MAP: Dict[str, str] = {
-        "tank_forecasting": "_forecast_buffer",
         "delivery_prioritization": "_priority_buffer",
         "compartment_loading": "_proposal_buffer",
+    }
+
+    # The payload type each typed buffer holds, mirroring the isinstance check
+    # in the receiving agent's own ``_on_signal``.
+    #
+    # A stage publishes more than its payload: ``monitor_cycle`` also routes the
+    # ``InterventionProposal`` that ``evaluate()`` returns, so
+    # ``delivery_prioritization`` emits a ``DeliveryPriorityList`` *and* a
+    # proposal. Injecting both unfiltered put the proposal last in
+    # ``_priority_buffer``, and ``CompartmentLoadingAgent.evaluate`` reads
+    # ``priority_lists[-1]`` — so the loading stage treated a proposal as its
+    # priority list, built no delivery requests, and returned empty while the
+    # run reported ``complete``. The SignalBus path never had this problem
+    # because ``_on_signal`` type-checks before buffering; only the pipeline's
+    # direct injection skipped that check.
+    #
+    # ``test_pipeline_payload_types_match_agent_routing`` pins each entry
+    # against the receiving agent's ``_on_signal``, so the two cannot drift.
+    _STAGE_PAYLOAD_TYPES: Dict[str, type] = {
+        "delivery_prioritization": DeliveryPriorityList,
+        "compartment_loading": InterventionProposal,
     }
 
     async def _capture_and_inject(
@@ -459,85 +496,180 @@ class FuelDistributionPipeline:
         current_agent_id: str,
         captured_messages: List[Any],
         next_agent: Optional[Any],
+        tenant_id: str,
     ) -> None:
-        """Capture stage output and inject into next agent's typed buffer.
+        """Hand one stage's output to the next stage, and always trigger it.
 
-        Determines the target buffer based on the current stage's agent_id
-        and extends that buffer on the next agent with the captured messages.
-        This bypasses the SignalBus subscription mechanism for inter-stage
-        data transfer during synchronous pipeline execution.
+        Two separate things happen here, and conflating them is what previously
+        broke the pipeline:
 
-        If captured_messages is empty, logs a warning and returns.
-        If next_agent is None (last stage), returns immediately.
+        * **Payload transfer.** A stage whose successor consumes a typed buffer
+          (``delivery_prioritization`` → ``_priority_buffer``,
+          ``compartment_loading`` → ``_proposal_buffer``) has its published
+          messages appended to that buffer. This bypasses the SignalBus
+          subscription mechanism, which is what makes a synchronous run work —
+          and because it bypasses ``_on_signal``, it has to reproduce that
+          method's type filter itself via ``_STAGE_PAYLOAD_TYPES``. A stage
+          publishes its payload *and* the ``InterventionProposal`` its
+          ``evaluate()`` returned; appending both left the proposal last in a
+          buffer whose reader takes ``[-1]``.
+        * **Cycle trigger.** ``OverlayAgentBase.monitor_cycle`` collects
+          ``_signal_buffer`` and returns early when it is empty — *before* it
+          groups by tenant and calls ``evaluate()``. Every successor therefore
+          needs one signal here whether or not it also receives a payload, so
+          the trigger is now unconditional. It previously sat behind two early
+          returns, so a stage that published nothing, or one whose mapped buffer
+          was missing, left the remainder of the pipeline dead while the run
+          still reported ``complete``.
 
-        Validates: Requirements 1.1, 1.2, 1.3, 1.5
+        A stage publishing nothing is a data condition, not a fault:
+        prioritization can still score will-call orders from delivery windows
+        with no forecast, and the loading and routing stages return an empty
+        proposal list when their buffer is empty. The successor is triggered
+        regardless so that outcome is reached honestly rather than by
+        short-circuit.
 
         Args:
             current_agent_id: The agent_id of the stage that just completed.
             captured_messages: Messages captured from SignalBus.publish()
                 during the stage's monitor_cycle().
-            next_agent: The next agent in the pipeline sequence, or None
+            next_agent: The next agent in the pipeline sequence, or ``None``
                 if this is the last stage.
+            tenant_id: The run's tenant, taken from the pipeline run rather than
+                inferred from message contents. A stage that published nothing
+                must still trigger its successor under the right tenant —
+                ``_group_by_tenant`` drops any signal without a ``tenant_id``,
+                and the previous ``"unknown"`` fallback silently produced a
+                tenant with no orders.
+
+        Raises:
+            RuntimeError: When a mapped typed buffer, or ``_signal_buffer``, is
+                absent from the next agent. That is a wiring fault rather than a
+                data condition, so the circuit breaker must fail the run instead
+                of reporting success on a stage that cannot run.
+
+        Validates: Requirements 1.1, 1.2, 1.3, 1.5
         """
         if next_agent is None:
             return
 
+        target_buffer_name = self._STAGE_BUFFER_MAP.get(current_agent_id)
+        payload: List[Any] = []
+
+        if target_buffer_name is not None:
+            if not hasattr(next_agent, target_buffer_name):
+                raise RuntimeError(
+                    "FuelDistributionPipeline wiring fault: stage "
+                    f"'{current_agent_id}' is mapped to buffer "
+                    f"'{target_buffer_name}', but "
+                    f"{type(next_agent).__name__} has no such attribute. "
+                    "Either the agent's buffer was renamed or removed, or "
+                    "_STAGE_BUFFER_MAP is stale."
+                )
+
+            expected_type = self._STAGE_PAYLOAD_TYPES.get(current_agent_id)
+            if expected_type is None:
+                raise RuntimeError(
+                    "FuelDistributionPipeline wiring fault: stage "
+                    f"'{current_agent_id}' is mapped to buffer "
+                    f"'{target_buffer_name}' but declares no payload type in "
+                    "_STAGE_PAYLOAD_TYPES, so injected messages cannot be "
+                    "filtered the way the receiving agent's _on_signal "
+                    "filters them."
+                )
+
+            payload = [
+                message
+                for message in captured_messages
+                if isinstance(message, expected_type)
+            ]
+            if payload:
+                getattr(next_agent, target_buffer_name).extend(payload)
+                logger.info(
+                    "FuelDistributionPipeline: injected %d %s message(s) from "
+                    "stage '%s' into %s.%s (%d other message(s) not routed "
+                    "to this buffer)",
+                    len(payload),
+                    expected_type.__name__,
+                    current_agent_id,
+                    getattr(next_agent, "agent_id", "unknown"),
+                    target_buffer_name,
+                    len(captured_messages) - len(payload),
+                )
+            elif captured_messages:
+                # Published something, but nothing the successor can consume.
+                # Not fatal — the successor returns an empty result on an empty
+                # buffer — but it is never expected, so it must be visible.
+                logger.warning(
+                    "FuelDistributionPipeline: stage '%s' published %d "
+                    "message(s), none of them %s, so %s.%s received nothing",
+                    current_agent_id,
+                    len(captured_messages),
+                    expected_type.__name__,
+                    getattr(next_agent, "agent_id", "unknown"),
+                    target_buffer_name,
+                )
+
         if not captured_messages:
             logger.warning(
-                "FuelDistributionPipeline: stage '%s' produced no output; "
-                "injecting empty into next stage",
+                "FuelDistributionPipeline: stage '%s' published nothing; "
+                "triggering the next stage with no payload",
                 current_agent_id,
             )
-            return
 
-        target_buffer_name = self._STAGE_BUFFER_MAP.get(current_agent_id)
-        if target_buffer_name is None:
-            logger.debug(
-                "FuelDistributionPipeline: no buffer mapping for stage '%s', "
-                "skipping injection",
-                current_agent_id,
+        # Skip only when the payload itself already landed in _signal_buffer,
+        # which is the one case where monitor_cycle cannot short-circuit.
+        if not (target_buffer_name == "_signal_buffer" and payload):
+            self._seed_cycle_trigger(
+                next_agent=next_agent,
+                current_agent_id=current_agent_id,
+                tenant_id=tenant_id,
             )
-            return
 
-        if not hasattr(next_agent, target_buffer_name):
-            logger.warning(
-                "FuelDistributionPipeline: next agent does not have buffer '%s', "
-                "skipping injection",
-                target_buffer_name,
+    @staticmethod
+    def _seed_cycle_trigger(
+        *,
+        next_agent: Any,
+        current_agent_id: str,
+        tenant_id: str,
+    ) -> None:
+        """Append the signal that lets the next stage's ``evaluate()`` run.
+
+        ``monitor_cycle`` drains ``_signal_buffer`` first and returns
+        ``([], [])`` when it is empty, so a stage that reads only a typed buffer
+        would never be evaluated without this. The signal carries the run's
+        tenant because ``_group_by_tenant`` skips anything without one and
+        ``evaluate()`` is invoked once per tenant it finds.
+
+        Raises:
+            RuntimeError: When the next agent has no ``_signal_buffer``. Every
+                ``OverlayAgentBase`` subclass does; an agent that does not
+                cannot be triggered at all, and skipping it silently is the
+                defect this method exists to prevent.
+        """
+        if not hasattr(next_agent, "_signal_buffer"):
+            raise RuntimeError(
+                "FuelDistributionPipeline wiring fault: "
+                f"{type(next_agent).__name__} has no _signal_buffer, so the "
+                f"stage after '{current_agent_id}' cannot be triggered."
             )
-            return
 
-        buffer = getattr(next_agent, target_buffer_name)
-        buffer.extend(captured_messages)
+        from Agents.overlay.data_contracts import RiskSignal, Severity
 
-        # If injecting into a typed buffer (not _signal_buffer), we also need
-        # to seed _signal_buffer with a trigger so that monitor_cycle() doesn't
-        # short-circuit with "if not signals: return [], []" before calling
-        # evaluate() which reads the typed buffer.
-        if target_buffer_name != "_signal_buffer" and hasattr(next_agent, "_signal_buffer"):
-            from Agents.overlay.data_contracts import RiskSignal, Severity
-
-            trigger = RiskSignal(
+        next_agent._signal_buffer.append(
+            RiskSignal(
                 source_agent="pipeline_injection",
                 entity_id=f"pipeline_stage_{current_agent_id}",
                 entity_type="pipeline_trigger",
                 severity=Severity.LOW,
                 confidence=1.0,
                 ttl_seconds=3600,
-                context={"trigger": "pipeline_injection", "source_stage": current_agent_id},
-                tenant_id=next_agent._signal_buffer[0].tenant_id if next_agent._signal_buffer else (
-                    captured_messages[0].tenant_id if hasattr(captured_messages[0], 'tenant_id') else "unknown"
-                ),
+                context={
+                    "trigger": "pipeline_injection",
+                    "source_stage": current_agent_id,
+                },
+                tenant_id=tenant_id,
             )
-            next_agent._signal_buffer.append(trigger)
-
-        logger.info(
-            "FuelDistributionPipeline: injected %d message(s) from stage '%s' "
-            "into %s.%s",
-            len(captured_messages),
-            current_agent_id,
-            next_agent.agent_id if hasattr(next_agent, 'agent_id') else 'unknown',
-            target_buffer_name,
         )
 
     async def _broadcast_state_transition(

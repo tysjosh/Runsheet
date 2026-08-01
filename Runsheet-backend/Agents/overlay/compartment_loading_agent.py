@@ -299,6 +299,25 @@ class CompartmentLoadingAgent(OverlayAgentBase):
         else:
             await super()._on_signal(signal)
 
+    def _pending_work_tenants(self) -> List[str]:
+        """Tenants with a buffered priority list awaiting a loading plan.
+
+        Required because :meth:`_on_signal` files every
+        :class:`DeliveryPriorityList` in ``_priority_buffer`` and nothing in
+        ``_signal_buffer``. Without this, ``monitor_cycle`` saw an empty
+        ``_signal_buffer`` and returned before ``evaluate()``, so on the
+        SignalBus path this agent buffered priority lists forever and never
+        produced a plan — silently, with no error and no log line.
+
+        Validates: Requirement 3.1
+        """
+        tenants: List[str] = []
+        for priority_list in self._priority_buffer:
+            tenant_id = getattr(priority_list, "tenant_id", None)
+            if tenant_id and tenant_id not in tenants:
+                tenants.append(tenant_id)
+        return tenants
+
     # ------------------------------------------------------------------
     # Core evaluation (Req 3.1–3.10)
     # ------------------------------------------------------------------
@@ -330,6 +349,27 @@ class CompartmentLoadingAgent(OverlayAgentBase):
         # Use the most recent priority list
         priority_list = priority_lists[-1]
         tenant_id = priority_list.tenant_id
+
+        # The [-1] above discards everything else the buffer held. That is the
+        # long-standing contract (a newer list supersedes an older one), but
+        # when the discarded lists belong to *other* tenants it means their
+        # work is dropped without a trace. Say so.
+        dropped_tenants = sorted(
+            {
+                getattr(other, "tenant_id", None)
+                for other in priority_lists[:-1]
+            }
+            - {tenant_id, None}
+        )
+        if dropped_tenants:
+            logger.warning(
+                "CompartmentLoadingAgent: discarding buffered priority lists "
+                "for tenant(s) %s — this cycle acts only on the most recent "
+                "list (tenant %s). %d list(s) buffered in total.",
+                ", ".join(dropped_tenants),
+                tenant_id,
+                len(priority_lists),
+            )
         # Use pipeline run_id if available, otherwise fall back to priority list's run_id
         run_id = getattr(self, '_current_run_id', None) or priority_list.run_id
 
@@ -676,6 +716,7 @@ class CompartmentLoadingAgent(OverlayAgentBase):
             requests.append(
                 DeliveryRequest(
                     station_id=station_id,
+                    order_id=order_id,
                     fuel_grade=fuel_grade,
                     quantity_liters=round(quantity_liters, 2),
                     min_drop_liters=DEFAULT_MIN_DROP_LITERS,
@@ -980,6 +1021,7 @@ class CompartmentLoadingAgent(OverlayAgentBase):
             requests.append(
                 DeliveryRequest(
                     station_id=customer_tank_id or order_id,
+                    order_id=order_id,
                     fuel_grade=fuel_grade,
                     quantity_liters=quantity_liters,
                     min_drop_liters=DEFAULT_MIN_DROP_LITERS,
@@ -2306,4 +2348,3 @@ def _fuel_density_kg_per_liter(fuel_grade: str) -> float:
     if not isinstance(fuel_grade, str):
         return 0.85
     return _FUEL_DENSITY_CANONICAL.get(fuel_grade.strip().upper(), 0.85)
-
