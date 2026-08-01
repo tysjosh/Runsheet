@@ -82,30 +82,6 @@ from commerce.api.ar_aging_endpoints import (
     router as commerce_ar_aging_router,
     configure_ar_aging_api,
 )
-from compliance.api.tax_endpoints import (
-    router as compliance_tax_router,
-)
-from compliance.api.terminal_bol_endpoints import (
-    router as compliance_terminal_bol_router,
-)
-from compliance.api.ifta_endpoints import (
-    router as compliance_ifta_router,
-)
-from compliance.api.kfactor_endpoints import (
-    router as compliance_kfactor_router,
-)
-from compliance.api.driver_endpoints import (
-    router as compliance_driver_router,
-)
-from compliance.api.asset_certification_endpoints import (
-    router as compliance_asset_cert_router,
-)
-from compliance.api.meter_endpoints import (
-    router as compliance_meter_router,
-)
-from compliance.api.asset_compliance_endpoints import (
-    router as compliance_asset_compliance_router,
-)
 from commerce.api.price_protection_endpoints import (
     router as commerce_price_protection_router,
 )
@@ -227,16 +203,6 @@ for _router in (
     feature_flag_admin_router,
     driver_ops_router,
     stripe_router, stripe_webhook_router,
-    compliance_tax_router,
-    compliance_terminal_bol_router,
-    compliance_ifta_router,
-    compliance_kfactor_router,
-    compliance_driver_router,
-    compliance_asset_cert_router,
-    compliance_meter_router,
-    compliance_asset_compliance_router,
-    commerce_price_protection_router,
-    commerce_pricing_rules_router,
     mvp_fuel_router,
     fuel_ops_router,
     fuel_ops_mvp_router,
@@ -262,10 +228,23 @@ try:
         app.include_router(commerce_invoice_router)
         app.include_router(commerce_payment_router)
         app.include_router(commerce_ar_aging_router)
+        # These two were previously registered unconditionally, so both
+        # commerce pricing surfaces stayed reachable with the master flag
+        # off — the flag's own docstring says "all commerce endpoints
+        # return 404". They now honour it like the rest.
+        app.include_router(commerce_price_protection_router)
+        app.include_router(commerce_pricing_rules_router)
 except Exception:
     # Settings may not load cleanly at import time in test environments;
     # the router will be registered during lifespan if needed.
     pass
+
+# Compliance Backbone REST surface — gated by compliance_backbone_enabled.
+# Imports and the flag check live in bootstrap/compliance_routers.py; see
+# that module for why the pipeline's compliance SERVICES are not gated.
+from bootstrap.compliance_routers import register as _register_compliance
+
+_register_compliance(app)
 
 
 def _c(app: FastAPI) -> ServiceContainer:

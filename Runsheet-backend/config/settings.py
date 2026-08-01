@@ -606,6 +606,43 @@ class Settings(BaseSettings):
         ),
     )
 
+    # ── Compliance Backbone master flag ──────────────────────────────
+    #
+    # Gates the compliance REST surface only: IFTA reporting, terminal
+    # BOL, k-factor calibration, driver qualification, asset
+    # certification, meter tickets, asset compliance, and tax admin.
+    # None of those endpoints is exercised by the seven MVP capabilities.
+    #
+    # It deliberately does NOT gate the compliance *services* that the
+    # delivery pipeline depends on, because four of them are load-bearing:
+    #
+    #   DyedDieselEnforcer  — compartment_loading_agent, invoice_service
+    #                         (IRS dyed-fuel rules; not optional)
+    #   delivery_filter     — route_planning_agent
+    #   VCFCalculator       — reconciliation_service (temperature
+    #                         correction on billed volume)
+    #   HOSStatus           — driver hos_advisory_service
+    #
+    # Turning those off would break load building, routing,
+    # reconciliation, and driver hours-of-service. Shrinking the exposed
+    # API surface is safe; removing the domain logic is not.
+    #
+    # Default: True, so existing deployments and the compliance endpoint
+    # tests are unaffected. Set false for an MVP pilot.
+
+    compliance_backbone_enabled: bool = Field(
+        default=True,
+        description=(
+            "Master feature flag for the Compliance Backbone REST surface "
+            "(IFTA, terminal BOL, k-factor, driver qualification, asset "
+            "certification, meter tickets, asset compliance, tax admin). "
+            "When off those routers are not registered and their paths "
+            "return 404. Compliance services used inline by the delivery "
+            "pipeline (dyed-diesel enforcement, delivery filtering, VCF "
+            "correction, HOS) are unaffected. Default: True."
+        ),
+    )
+
     commerce_customers_enabled: bool = Field(
         default=False,
         description=(
