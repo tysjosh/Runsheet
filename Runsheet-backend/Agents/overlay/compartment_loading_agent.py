@@ -62,6 +62,7 @@ from Agents.support.compartment_models import (
 )
 from Agents.support.compartment_solver import (
     check_feasibility,
+    fuel_density_kg_per_liter,
     optimize_loading_plan,
 )
 from Agents.support.fuel_distribution_models import (
@@ -691,6 +692,10 @@ class CompartmentLoadingAgent(OverlayAgentBase):
                     station_id=station_id,
                     order_id=order_id,
                     fuel_grade=fuel_grade,
+                    # The order's own product code, canonicalized. Carried
+                    # alongside the coarse grade so the solver can weigh the
+                    # exact product — DEF is 1.09 kg/L but maps to AGO.
+                    product_code=canonicalize_or_warn(product_code),
                     quantity_liters=round(quantity_liters, 2),
                     min_drop_liters=DEFAULT_MIN_DROP_LITERS,
                 )
@@ -1857,7 +1862,10 @@ class CompartmentLoadingAgent(OverlayAgentBase):
         )
         new_weight = round(
             sum(
-                _fuel_density_kg_per_liter(a.fuel_grade) * a.quantity_liters
+                fuel_density_kg_per_liter(
+                    product_code=a.product_code,
+                    fuel_grade=a.fuel_grade,
+                ) * a.quantity_liters
                 for a in kept_assignments
             ),
             2,
@@ -2015,7 +2023,10 @@ class CompartmentLoadingAgent(OverlayAgentBase):
         # is correct for mixed-catalog assignments.
         new_weight = round(
             sum(
-                _fuel_density_kg_per_liter(a.fuel_grade) * a.quantity_liters
+                fuel_density_kg_per_liter(
+                    product_code=a.product_code,
+                    fuel_grade=a.fuel_grade,
+                ) * a.quantity_liters
                 for a in kept_assignments
             ),
             2,
@@ -2284,40 +2295,17 @@ class CompartmentLoadingAgent(OverlayAgentBase):
 # ---------------------------------------------------------------------------
 
 
-_FUEL_DENSITY_CANONICAL: Dict[str, float] = {
-    # Canonical US product densities (kg/L). Matches the gasoline/diesel
-    # values used by compartment_solver.FUEL_DENSITY under the legacy NG
-    # codes so plans evaluated before and after Task 6.5 report the same
-    # total_weight_kg for the same assignments.
-    "DIESEL_2": 0.85,
-    "OFF_ROAD_DIESEL": 0.85,
-    "HEATING_OIL": 0.85,
-    "GASOLINE_REG": 0.74,
-    "GASOLINE_PREM": 0.74,
-    "ETHANOL_E85": 0.78,
-    "KEROSENE": 0.80,
-    "PROPANE": 0.51,
-    "DEF": 1.09,
-    # Legacy NG aliases carried forward so pre-canonicalization plans
-    # still compute a sensible weight even if the assignment slipped
-    # through without canonicalization.
-    "AGO": 0.85,
-    "PMS": 0.74,
-    "ATK": 0.80,
-    "LPG": 0.51,
-}
-
-
 def _fuel_density_kg_per_liter(fuel_grade: str) -> float:
-    """Return the fuel density for a canonical or legacy code.
+    """Density for a canonical product code or a legacy grade code.
 
-    Matches :data:`Agents.support.compartment_solver.FUEL_DENSITY` for
-    the legacy NG codes and extends coverage to every catalog product in
-    :data:`fuel.services.fuel_product_catalog.FUEL_PRODUCT_CATALOG`. An
-    unknown code falls back to 0.85 kg/L (the diesel default used by
-    ``compartment_solver``) so weight totals degrade gracefully.
+    Thin wrapper over :func:`Agents.support.compartment_solver.fuel_density_kg_per_liter`.
+    This module previously owned a second, near-identical density table. Only
+    this one had the correct DEF value, and it was reached only when
+    recomputing a plan's weight *after* assignments were stripped — the
+    feasibility gate used the other table, so the more heavily filtered a plan
+    was, the more accurate its weight became. There is now one table, in the
+    solver, and the gate uses it.
     """
-
-    if not isinstance(fuel_grade, str):
-        return 0.85
-    return _FUEL_DENSITY_CANONICAL.get(fuel_grade.strip().upper(), 0.85)
+    return fuel_density_kg_per_liter(
+        product_code=fuel_grade, fuel_grade=fuel_grade
+    )
