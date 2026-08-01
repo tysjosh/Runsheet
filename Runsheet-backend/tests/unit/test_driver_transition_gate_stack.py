@@ -13,6 +13,7 @@ import pytest
 from driver.services.order_transition_service import (
     GATE_ORDER,
     GATED_TARGET_STATUSES,
+    HOS_BLOCK_EVENT,
     PRETRIP_FLAG_KEY,
     DriverTransitionGateStack,
     configure_transition_endpoints,
@@ -68,6 +69,8 @@ class FakeQualificationService:
 
 
 class FakeHOSAdvisoryService:
+    """A dict-shaped verdict — the seam is deliberately shape-agnostic."""
+
     def __init__(self, *, blocked=False, reason_code=None, calls=None):
         self._blocked = blocked
         self._reason_code = reason_code
@@ -82,6 +85,33 @@ class FakeHOSAdvisoryService:
         }
 
 
+class _VerdictService:
+    """Returns a full verdict, including the ``outcome`` the stack honours."""
+
+    def __init__(
+        self,
+        *,
+        outcome="passed",
+        reason_code=None,
+        freshness_state=None,
+        override_id=None,
+        audit_outcome=None,
+        recorded_at="2026-06-01T12:00:00+00:00",
+    ):
+        self._verdict = {
+            "outcome": outcome,
+            "blocked": outcome == "blocked",
+            "reason_code": reason_code,
+            "freshness_state": freshness_state,
+            "recorded_at": recorded_at,
+            "override_id": override_id,
+            "audit_outcome": audit_outcome,
+        }
+
+    async def gate_verdict(self, tenant_id, driver_id):
+        return dict(self._verdict)
+
+
 class FakeFeatureFlagService:
     def __init__(self, state="disabled", raises=None):
         self._state = state
@@ -93,6 +123,19 @@ class FakeFeatureFlagService:
         if self._raises is not None:
             raise self._raises
         return self._state
+
+
+class FakeSchedulingWS:
+    """The dispatcher channel — records every frame it was handed."""
+
+    def __init__(self, *, raises=None):
+        self._raises = raises
+        self.broadcasts = []
+
+    async def broadcast(self, event_type, event_data):
+        self.broadcasts.append((event_type, event_data))
+        if self._raises is not None:
+            raise self._raises
 
 
 def _stack(**kwargs):
@@ -478,7 +521,7 @@ class TestDispatchEligibilityGate:
 
 class TestHOSGate:
     @pytest.mark.asyncio
-    async def test_dormant_in_phase_1(self):
+    async def test_unarmed_gate_is_a_recorded_skip(self):
         """``hos_advisory_service=None`` makes the gate a no-op, not a failure."""
         stack = _stack(
             inspection_service=FakeInspectionService(),
@@ -527,6 +570,248 @@ class TestHOSGate:
 
         assert evaluation.outcomes[3].outcome == "skipped"
         assert evaluation.allowed is True
+
+    @pytest.mark.asyncio
+    async def test_a_skipped_verdict_is_recorded_as_skipped_not_passed(self):
+        """R17.18 asks for the distinction, so the stack honours ``outcome``."""
+        stack = _stack(
+            inspection_service=FakeInspectionService(),
+            driver_qualification_service=FakeQualificationService(),
+            hos_advisory_service=_VerdictService(
+                outcome="skipped",
+                reason_code="HOS_READING_STALE",
+                freshness_state="stale",
+                audit_outcome="hos_gate_skipped",
+            ),
+        )
+
+        evaluation = await _evaluate(stack)
+
+        outcome = evaluation.outcomes[3]
+        assert outcome.outcome == "skipped"
+        assert outcome.reason_code == "HOS_READING_STALE"
+        assert evaluation.allowed is True
+
+    @pytest.mark.asyncio
+    async def test_the_recorded_detail_is_the_audit_record(self):
+        """Validates: Requirements 17.18, 17.26"""
+        stack = _stack(
+            inspection_service=FakeInspectionService(),
+            driver_qualification_service=FakeQualificationService(),
+            hos_advisory_service=_VerdictService(
+                outcome="skipped",
+                reason_code="HOS_READING_STALE",
+                freshness_state="stale",
+                audit_outcome="hos_gate_skipped",
+            ),
+        )
+
+        evaluation = await _evaluate(stack)
+
+        record = evaluation.hos_audit_record()
+        assert record["driver_id"] == DRIVER
+        assert record["outcome"] == "hos_gate_skipped"
+        assert record["gate_outcome"] == "skipped"
+        assert record["reason_code"] == "HOS_READING_STALE"
+        assert record["freshness_state"] == "stale"
+        assert record["recorded_at"] == "2026-06-01T12:00:00+00:00"
+
+    @pytest.mark.asyncio
+    async def test_an_override_identifier_reaches_the_audit_record(self):
+        """Validates: Requirements 17.25, 17.26"""
+        stack = _stack(
+            inspection_service=FakeInspectionService(),
+            driver_qualification_service=FakeQualificationService(),
+            hos_advisory_service=_VerdictService(
+                outcome="passed",
+                reason_code="HOS_OVERRIDE_APPLIED",
+                freshness_state="fresh",
+                override_id="hgo_abc",
+                audit_outcome="hos_gate_overridden",
+            ),
+        )
+
+        evaluation = await _evaluate(stack)
+
+        assert evaluation.outcomes[3].outcome == "passed"
+        assert evaluation.hos_audit_record()["override_id"] == "hgo_abc"
+
+    @pytest.mark.asyncio
+    async def test_gating_disabled_leaves_no_audit_record(self):
+        """R17.19 — no gate at all, so nothing to record."""
+        stack = _stack(
+            inspection_service=FakeInspectionService(),
+            driver_qualification_service=FakeQualificationService(),
+            hos_advisory_service=_VerdictService(
+                outcome="skipped", reason_code="HOS_GATING_DISABLED"
+            ),
+        )
+
+        evaluation = await _evaluate(stack)
+
+        assert evaluation.outcomes[3].reason_code == "HOS_GATING_DISABLED"
+        assert evaluation.hos_audit_record() is None
+
+    @pytest.mark.asyncio
+    async def test_an_ungated_transition_has_no_audit_record(self):
+        stack = _stack(
+            inspection_service=FakeInspectionService(),
+            hos_advisory_service=FakeHOSAdvisoryService(),
+        )
+
+        evaluation = await _evaluate(stack, target_status="delivered")
+
+        assert evaluation.hos_audit_record() is None
+
+    @pytest.mark.asyncio
+    async def test_a_real_verdict_model_blocks_with_its_reason_code(self):
+        """The real :class:`HOSGateVerdict`, not a dict, end to end."""
+        from driver.services.hos_advisory_service import (
+            HOS_AT_LIMIT,
+            HOSGateVerdict,
+        )
+
+        class RealVerdictService:
+            async def gate_verdict(self, tenant_id, driver_id):
+                return HOSGateVerdict(
+                    tenant_id=tenant_id,
+                    driver_id=driver_id,
+                    outcome="blocked",
+                    blocked=True,
+                    gating_enabled=True,
+                    reason_code=HOS_AT_LIMIT,
+                    freshness_state="fresh",
+                    recorded_at="2026-06-01T12:00:00+00:00",
+                    audit_outcome="hos_gate_blocked",
+                )
+
+        stack = _stack(
+            inspection_service=FakeInspectionService(),
+            driver_qualification_service=FakeQualificationService(eligible=True),
+            hos_advisory_service=RealVerdictService(),
+        )
+
+        with pytest.raises(AppException) as exc_info:
+            await _evaluate(stack)
+
+        assert exc_info.value.error_code == "HOS_LIMIT_REACHED"
+        assert exc_info.value.details["reason_code"] == HOS_AT_LIMIT
+        assert exc_info.value.details["recorded_at"] == "2026-06-01T12:00:00+00:00"
+
+
+# ---------------------------------------------------------------------------
+# The dispatcher-channel ``hos_block`` broadcast (R17.22)
+# ---------------------------------------------------------------------------
+
+
+def _blocking_stack(scheduling_ws, *, reason_code="HOS_DRIVING_LIMIT"):
+    return _stack(
+        inspection_service=FakeInspectionService(),
+        driver_qualification_service=FakeQualificationService(eligible=True),
+        hos_advisory_service=FakeHOSAdvisoryService(
+            blocked=True, reason_code=reason_code
+        ),
+        scheduling_ws_manager=scheduling_ws,
+    )
+
+
+class TestHOSBlockBroadcast:
+    """Validates: Requirements 17.22"""
+
+    @pytest.mark.asyncio
+    async def test_a_block_broadcasts_hos_block_with_order_driver_and_reason(self):
+        ws = FakeSchedulingWS()
+        stack = _blocking_stack(ws)
+
+        with pytest.raises(AppException) as exc_info:
+            await _evaluate(stack)
+
+        assert exc_info.value.error_code == "HOS_LIMIT_REACHED"
+        assert len(ws.broadcasts) == 1
+        event_type, event_data = ws.broadcasts[0]
+        assert event_type == HOS_BLOCK_EVENT
+        assert event_data["order_id"] == "ord-1"
+        assert event_data["driver_id"] == DRIVER
+        assert event_data["reason_code"] == "HOS_DRIVING_LIMIT"
+        assert event_data["tenant_id"] == TENANT
+
+    @pytest.mark.asyncio
+    async def test_the_payload_names_no_other_driver(self):
+        """R15.14 — the frame carries the blocked driver's identity and no other."""
+        ws = FakeSchedulingWS()
+
+        with pytest.raises(AppException):
+            await _evaluate(_blocking_stack(ws))
+
+        _, event_data = ws.broadcasts[0]
+        assert set(event_data) == {
+            "tenant_id",
+            "order_id",
+            "driver_id",
+            "reason_code",
+        }
+
+    @pytest.mark.asyncio
+    async def test_a_failed_broadcast_does_not_change_the_rejection(self):
+        ws = FakeSchedulingWS(raises=RuntimeError("dispatcher channel down"))
+        stack = _blocking_stack(ws)
+
+        with pytest.raises(AppException) as exc_info:
+            await _evaluate(stack)
+
+        assert exc_info.value.error_code == "HOS_LIMIT_REACHED"
+        assert exc_info.value.status_code == 409
+        assert len(ws.broadcasts) == 1
+
+    @pytest.mark.asyncio
+    async def test_no_dispatcher_channel_still_rejects(self):
+        stack = _blocking_stack(None)
+
+        with pytest.raises(AppException) as exc_info:
+            await _evaluate(stack)
+
+        assert exc_info.value.error_code == "HOS_LIMIT_REACHED"
+
+    @pytest.mark.asyncio
+    async def test_a_permitted_transition_broadcasts_nothing(self):
+        ws = FakeSchedulingWS()
+        stack = _stack(
+            inspection_service=FakeInspectionService(),
+            driver_qualification_service=FakeQualificationService(eligible=True),
+            hos_advisory_service=_VerdictService(
+                outcome="skipped",
+                reason_code="HOS_READING_STALE",
+                freshness_state="stale",
+                audit_outcome="hos_gate_skipped",
+            ),
+            scheduling_ws_manager=ws,
+        )
+
+        evaluation = await _evaluate(stack)
+
+        assert evaluation.allowed is True
+        assert ws.broadcasts == []
+
+    @pytest.mark.asyncio
+    async def test_a_combined_failure_broadcasts_nothing(self):
+        """R17.31 answers ``DRIVER_NOT_DISPATCH_ELIGIBLE``, so R17.22 does not fire."""
+        ws = FakeSchedulingWS()
+        stack = _stack(
+            inspection_service=FakeInspectionService(),
+            driver_qualification_service=FakeQualificationService(
+                eligible=False, reasons=["Medical card expired on 2026-02-02"]
+            ),
+            hos_advisory_service=FakeHOSAdvisoryService(
+                blocked=True, reason_code="HOS_DRIVING_LIMIT"
+            ),
+            scheduling_ws_manager=ws,
+        )
+
+        with pytest.raises(AppException) as exc_info:
+            await _evaluate(stack)
+
+        assert exc_info.value.error_code == "DRIVER_NOT_DISPATCH_ELIGIBLE"
+        assert ws.broadcasts == []
 
 
 # ---------------------------------------------------------------------------
@@ -584,3 +869,15 @@ class TestConfigureTransitionEndpoints:
         assert get_order_service() is None
         assert get_work_ref_resolver() is None
         assert get_gate_stack() is not None
+
+    def test_threads_the_dispatcher_channel_onto_the_stack(self):
+        """Validates: Requirements 17.22"""
+        ws = FakeSchedulingWS()
+
+        stack = configure_transition_endpoints(scheduling_ws_manager=ws)
+
+        assert stack._scheduling_ws_manager is ws
+
+        configure_transition_endpoints()
+
+        assert get_gate_stack()._scheduling_ws_manager is None

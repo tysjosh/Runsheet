@@ -88,9 +88,55 @@ class IntakeMetadata(BaseModel):
     user_agent: Optional[str] = None
     import_batch_id: Optional[str] = None
     csv_row_number: Optional[int] = Field(default=None, ge=1)
+    source_system: Optional[str] = None
+    source_record_id: Optional[str] = None
+    source_updated_at: Optional[datetime] = None
     edi_interchange_id: Optional[str] = None
     partner_ref: Optional[str] = None
     legacy_shipment_id: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# DeliveryResult
+# ---------------------------------------------------------------------------
+
+
+class DeliveryResultGeoPoint(BaseModel):
+    """Validated WGS-84 position captured with the POD."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    lat: float = Field(..., ge=-90.0, le=90.0)
+    lon: float = Field(..., ge=-180.0, le=180.0)
+
+
+class DeliveryResult(BaseModel):
+    """Immutable delivery facts projected onto a delivered fuel order.
+
+    This is the canonical hand-off contract used by invoicing and outbound ERP
+    adapters.  It snapshots the POD facts before ``order.delivered`` subscribers
+    run, so downstream systems never have to race a second POD lookup.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    pod_id: str = Field(..., min_length=1)
+    actual_gallons: float = Field(..., gt=0)
+    actual_gallons_source: str = Field(..., min_length=1)
+    delivered_at: datetime
+    recipient_name: str = Field(..., min_length=1)
+    driver_id: Optional[str] = None
+    signature_ref: Optional[str] = None
+    photo_refs: List[str] = Field(default_factory=list)
+    meter_ticket_ref: Optional[str] = None
+    bol_id: Optional[str] = None
+    bol_ref: Optional[str] = None
+    pod_hash: Optional[str] = None
+    geotag: DeliveryResultGeoPoint
+    otp_verified: bool = False
+    location_mismatch: bool = False
+    source_system: Optional[str] = None
+    source_record_id: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +175,13 @@ class FuelOrder(BaseModel):
     # canonicalized product_code — enforced in _validate_product_code.
     product_code: Optional[str] = Field(default=None, min_length=1)
     gallons_requested: Optional[float] = Field(default=None, gt=0)
+    # Fuel contracts routinely quote four decimal places per gallon. The
+    # micro-dollar field is canonical; whole cents remain for compatibility.
+    unit_price_micros: Optional[int] = Field(default=None, ge=0)
+    unit_price_cents: Optional[int] = Field(default=None, ge=0)
+    subtotal_cents: Optional[int] = Field(default=None, ge=0)
+    tax_cents: Optional[int] = Field(default=None, ge=0)
+    total_cents: Optional[int] = Field(default=None, ge=0)
     fill_to_full: bool = False
     call_type: CallType
     delivery_window_start: Optional[datetime] = None
@@ -160,6 +213,16 @@ class FuelOrder(BaseModel):
     # serialization (R5.26).
     pod_otp: Optional[str] = None
     pod_otp_generated_at: Optional[datetime] = None
+    # The delivery-refusal reason recorded when a POD submission refuses the
+    # delivery and drives this order to ``failed`` (driver-mobile-app R4.6).
+    # One of the eight ``DeliveryRefusalReason`` values, validated by the POD
+    # request model before it reaches here. Nullable: every order that was not
+    # refused carries no reason.
+    refusal_reason_code: Optional[str] = None
+    # Canonical POD result attached immediately before the transition to
+    # ``delivered``. Downstream invoice and ERP subscribers consume this
+    # snapshot instead of re-reading the proof_of_delivery index.
+    delivery_result: Optional[DeliveryResult] = None
     legacy_origin_snapshot: Optional[str] = None
 
     source_schema_version: str = Field(..., min_length=1)

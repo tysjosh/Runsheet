@@ -420,7 +420,7 @@ class DriverWorkService:
         run_id = doc.get("assigned_run_id") or ""
 
         plan = await self._fetch_loading_plan(tenant_id, asset_id)
-        route = await self._fetch_route_plan(tenant_id, run_id)
+        route = await self._fetch_route_plan(tenant_id, run_id, asset_id)
 
         assignments = _nested_list(plan, "assignments")
         stops = sorted(
@@ -474,15 +474,23 @@ class DriverWorkService:
         )
 
     async def _fetch_route_plan(
-        self, tenant_id: str, run_id: str
+        self, tenant_id: str, run_id: str, asset_id: str = ""
     ) -> Optional[dict]:
-        """The most recent route plan for the order's run (R3.9)."""
+        """The route for this order's run and truck (R3.9).
+
+        A pipeline run can produce one route per truck.  Filtering only by
+        ``run_id`` let a driver receive whichever truck route happened to be
+        newest, so the assigned asset is included whenever it is available.
+        """
         if not run_id:
             return None
+        filters = [{"term": {"run_id": run_id}}]
+        if asset_id:
+            filters.append({"term": {"truck_id": asset_id}})
         return await self._search_one(
             MVP_ROUTES_INDEX,
             tenant_id,
-            [{"term": {"run_id": run_id}}],
+            filters,
             sort=[{"timestamp": {"order": "desc"}}],
         )
 

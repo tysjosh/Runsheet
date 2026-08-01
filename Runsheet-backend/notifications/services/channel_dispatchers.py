@@ -2,10 +2,10 @@
 Channel dispatcher abstract base class and stub implementations.
 
 Defines the ``ChannelDispatcher`` ABC that every delivery channel must
-implement, plus log-only stub dispatchers for SMS, email, and WhatsApp
-used during MVP development.
+implement, plus log-only stub dispatchers for SMS, email, WhatsApp, and
+push used during MVP development and in the test suite.
 
-Requirements: 2.1, 2.4, 2.5, 2.6
+Requirements: 2.1, 2.4, 2.5, 2.6, driver-mobile-app 9.13, 9.14
 """
 
 import logging
@@ -68,6 +68,37 @@ class StubSmsDispatcher(ChannelDispatcher):
             "[SMS STUB] To: %s | %s",
             notification.get("recipient_reference", "unknown"),
             notification.get("message_body", ""),
+        )
+        return "sent"
+
+
+class StubPushDispatcher(ChannelDispatcher):
+    """Log-only push dispatcher for local development and the test suite.
+
+    Registered in place of the real push dispatcher when no provider
+    credential is present outside production, so neither local
+    development nor the test suite needs one.
+
+    Logs identifiers only — no title, no body, no customer identifier —
+    matching the payload restriction the real dispatcher enforces
+    (driver-mobile-app R9.8).
+
+    Validates: Requirements 9.13, 9.14
+    """
+
+    @property
+    def channel_name(self) -> str:
+        return "push"
+
+    async def dispatch(self, notification: dict) -> str:
+        devices = notification.get("devices")
+        device_count = len(devices) if isinstance(devices, list) else 1
+        logger.info(
+            "[PUSH STUB] Driver: %s | Type: %s | Order: %s | Devices: %s",
+            notification.get("driver_id", "unknown"),
+            notification.get("notification_type", "unknown"),
+            notification.get("order_id", "unknown"),
+            device_count,
         )
         return "sent"
 

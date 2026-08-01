@@ -34,6 +34,14 @@ already covers ``in_transit``, so a windowless order answers 409
 the requested status is a status the lifecycle knows at all; an unknown string
 is a malformed request rather than an illegal transition.
 
+The Hours-of-Service gate's verdict is the one thing the handler carries forward
+from the gate stack: :meth:`GateEvaluation.hos_audit_record` is forwarded into
+``event_payload`` as ``hos_gate``, so the acting driver, the reading
+``recorded_at``, the freshness state, the gate outcome, and the override
+identifier that cleared a gate are attributable afterwards (R17.25, R17.26).
+``event_payload`` is free-form, so this needs no ``fuel_order_events`` mapping
+change; a tenant with gating disabled produces no record at all (R17.19).
+
 R4.8's three stamps come from three different places: the acting ``driver_id``
 travels as ``actor_user_id``, the server receipt stamp is
 ``apply_status_transition``'s own injected clock (``event_timestamp`` /
@@ -49,7 +57,7 @@ module raises **zero** raw ``HTTPException``.
 
 Design: see ``.kiro/specs/driver-mobile-app/design.md`` §Order Transition Path.
 
-Validates: Requirements 4.1, 4.2, 4.3, 4.4, 4.8, 4.9, 4.10, 4.11
+Validates: Requirements 4.1, 4.2, 4.3, 4.4, 4.8, 4.9, 4.10, 4.11, 17.25, 17.26
 """
 
 from __future__ import annotations
@@ -240,12 +248,19 @@ async def transition_order_status(
         await _store(idempotency, tenant.tenant_id, result)
         return result
 
-    await _require_gate_stack().evaluate(
+    evaluation = await _require_gate_stack().evaluate(
         tenant_id=ref.tenant_id,
         driver_id=ref.driver_id,
         order=order,
         target_status=target_status,
     )
+
+    # R17.25, R17.26 — the Hours-of-Service gate's own record travels onto the
+    # resulting order event: the acting driver, the reading ``recorded_at``, the
+    # freshness state, the gate outcome, and the override identifier when one
+    # cleared the gate. ``None`` for an ungated transition and for a tenant that
+    # has not enabled gating, so nothing is written where no gate ran (R17.19).
+    hos_record = evaluation.hos_audit_record()
 
     updated = await _require_order_service().apply_status_transition(
         order=order,
@@ -254,6 +269,7 @@ async def transition_order_status(
         notes=body.notes,
         actor_user_id=ref.driver_id,
         client_event_timestamp=body.event_timestamp,
+        event_payload_extra={"hos_gate": hos_record} if hos_record else None,
     )
 
     result = _envelope(updated, status_changed=True, request_id=request_id)

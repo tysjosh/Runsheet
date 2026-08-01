@@ -510,6 +510,58 @@ POD_OTP_TEMPLATES: list[dict] = [
 
 DEFAULT_TEMPLATES.extend(POD_OTP_TEMPLATES)
 
+# ---------------------------------------------------------------------------
+# Driver push notifications (driver-mobile-app R9.5, R9.6, R9.7, R9.8, R7.11)
+#
+# ``push`` channel only. ``subject_template`` is the notification title and
+# ``body_template`` is the notification body, so the wording of a dispatch
+# alert is a template edit rather than a code change.
+#
+# Every placeholder here is an entity identifier. R9.8 excludes customer
+# names, customer phone numbers, and street addresses from every push
+# payload, so no template below may reference one — the app fetches the
+# destination detail over an authenticated request when the driver taps.
+# ---------------------------------------------------------------------------
+DRIVER_PUSH_TEMPLATES: list[dict] = [
+    {
+        "event_type": "driver_assignment",
+        "channel": "push",
+        "subject_template": "New assignment",
+        "body_template": (
+            "Order {order_id} · window {delivery_window_start}"
+            "–{delivery_window_end}"
+        ),
+        "placeholders": [
+            "order_id",
+            "delivery_window_start",
+            "delivery_window_end",
+        ],
+    },
+    {
+        "event_type": "driver_assignment_revoked",
+        "channel": "push",
+        "subject_template": "Assignment revoked",
+        "body_template": "Order {order_id} is no longer assigned to you.",
+        "placeholders": ["order_id"],
+    },
+    {
+        "event_type": "driver_exception_escalation",
+        "channel": "push",
+        "subject_template": "Exception escalated",
+        "body_template": "Order {order_id} · {exception_type}",
+        "placeholders": ["order_id", "exception_type"],
+    },
+    {
+        "event_type": "driver_thread_message",
+        "channel": "push",
+        "subject_template": "New message",
+        "body_template": "Order {order_id} · open the app to read it.",
+        "placeholders": ["order_id"],
+    },
+]
+
+DEFAULT_TEMPLATES.extend(DRIVER_PUSH_TEMPLATES)
+
 
 class TemplateRenderer:
     """Render and manage notification templates stored in Elasticsearch.

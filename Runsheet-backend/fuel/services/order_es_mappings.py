@@ -60,6 +60,11 @@ FUEL_ORDERS_CURRENT_MAPPING = {
             "customer_tank_id": {"type": "keyword"},
             "product_code": {"type": "keyword"},
             "gallons_requested": {"type": "double"},
+            "unit_price_micros": {"type": "long"},
+            "unit_price_cents": {"type": "long"},
+            "subtotal_cents": {"type": "long"},
+            "tax_cents": {"type": "long"},
+            "total_cents": {"type": "long"},
             "fill_to_full": {"type": "boolean"},
             "call_type": {"type": "keyword"},
             "delivery_window_start": {"type": "date"},
@@ -82,6 +87,9 @@ FUEL_ORDERS_CURRENT_MAPPING = {
                     "user_agent": {"type": "keyword"},
                     "import_batch_id": {"type": "keyword"},
                     "csv_row_number": {"type": "integer"},
+                    "source_system": {"type": "keyword"},
+                    "source_record_id": {"type": "keyword"},
+                    "source_updated_at": {"type": "date"},
                     "edi_interchange_id": {"type": "keyword"},
                     "partner_ref": {"type": "keyword"},
                     "legacy_shipment_id": {"type": "keyword"},
@@ -101,6 +109,36 @@ FUEL_ORDERS_CURRENT_MAPPING = {
             # inverted index (R5.26).
             "pod_otp": {"type": "keyword", "index": False},
             "pod_otp_generated_at": {"type": "date"},
+            # Written by PODSubmissionService when a POD records a refusal and
+            # the order transitions to ``failed`` (driver-mobile-app R4.6), so
+            # the order carries its own failure reason without a POD join.
+            "refusal_reason_code": {"type": "keyword"},
+            # Immutable POD snapshot written immediately before the delivered
+            # transition. Commerce and outbound ERP integrations consume this
+            # object from the order.delivered event without a second index read.
+            "delivery_result": {
+                "type": "object",
+                "dynamic": "strict",
+                "properties": {
+                    "pod_id": {"type": "keyword"},
+                    "actual_gallons": {"type": "double"},
+                    "actual_gallons_source": {"type": "keyword"},
+                    "delivered_at": {"type": "date"},
+                    "recipient_name": {"type": "keyword"},
+                    "driver_id": {"type": "keyword"},
+                    "signature_ref": {"type": "keyword"},
+                    "photo_refs": {"type": "keyword"},
+                    "meter_ticket_ref": {"type": "keyword"},
+                    "bol_id": {"type": "keyword"},
+                    "bol_ref": {"type": "keyword"},
+                    "pod_hash": {"type": "keyword"},
+                    "geotag": {"type": "geo_point"},
+                    "otp_verified": {"type": "boolean"},
+                    "location_mismatch": {"type": "boolean"},
+                    "source_system": {"type": "keyword"},
+                    "source_record_id": {"type": "keyword"},
+                },
+            },
             "legacy_origin_snapshot": {"type": "text"},
             "source_schema_version": {"type": "keyword"},
             "trace_id": {"type": "keyword"},

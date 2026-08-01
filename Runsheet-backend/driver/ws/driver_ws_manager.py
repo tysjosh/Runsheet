@@ -31,17 +31,46 @@ SERVER_TO_DRIVER_EVENTS = {
     "assignment_revoked",
 }
 
-# Driver-to-server event types (Req 9.4)
+# Inbound types the driver channel accepts (Req 9.4, 14.10).
+# Everything else is rejected with an error frame; the channel carries no
+# state-changing intent, so a driver's intent is never silently discarded.
 DRIVER_TO_SERVER_EVENTS = {
-    "ack",
-    "status_update",
-    "exception",
     "heartbeat",
     "location_update",
+    "ping",
 }
+
+# Retired inbound types → the REST endpoint that performs the operation.
+# Retained as an explicit map rather than deleted so a client still sending
+# the old type gets a directive rather than a generic "unknown event type".
+#
+# Validates: Requirements 14.10, 14.11
+REST_REDIRECTS: Dict[str, str] = {
+    "ack": "POST /api/driver/orders/{order_id}/status",
+    "status_update": "POST /api/driver/orders/{order_id}/status",
+    "exception": "POST /api/driver/orders/{order_id}/exceptions",
+}
+
+# Error code carried by every rejection frame for an inbound type this
+# channel does not accept (Req 14.10).
+WS_OPERATION_NOT_SUPPORTED = "WS_OPERATION_NOT_SUPPORTED"
 
 # Heartbeat timeout in seconds (Req 9.6)
 HEARTBEAT_TIMEOUT_SECONDS = 120
+
+
+def presence_doc_id(tenant_id: str, driver_id: str) -> str:
+    """Return the Driver_Presence document id for a tenant-driver pair.
+
+    The id is ``{tenant_id}:{driver_id}`` rather than the bare ``driver_id``,
+    so two tenants holding the same ``driver_id`` string address two distinct
+    documents instead of colliding on one. That gives exactly one current
+    record per ``(tenant_id, driver_id)`` pair with no history, which is why
+    the Driver_Presence data class has no retention period to expire.
+
+    Validates: Requirement 10.19
+    """
+    return f"{tenant_id}:{driver_id}"
 
 
 class DriverWSManager(BaseWSManager):
@@ -60,13 +89,15 @@ class DriverWSManager(BaseWSManager):
     - assignment_revoked: job reassigned to another driver
 
     Handles driver-to-server events:
-    - ack: job acknowledgment
-    - status_update: driver status change
-    - exception: field exception report
     - heartbeat: keep-alive signal
     - location_update: GPS position update
+    - ping: liveness probe
 
-    Validates: Requirements 9.1, 9.2, 9.3, 9.4, 9.5, 9.6
+    Every other inbound type is rejected with an error frame and changes no
+    state.  The retired ``ack`` / ``status_update`` / ``exception`` types name
+    the REST endpoint that performs the operation (R14.10, R14.11).
+
+    Validates: Requirements 9.1, 9.2, 9.3, 9.4, 9.5, 9.6, 14.10, 14.11
     """
 
     def __init__(
@@ -267,14 +298,19 @@ class DriverWSManager(BaseWSManager):
         """
         Route driver-to-server events based on message type.
 
-        Supported event types: ack, status_update, exception, heartbeat,
-        location_update.
+        Accepted event types: ``heartbeat``, ``location_update``, ``ping``.
+        Rejection is total: every other type — the three retired REST-backed
+        types and anything unrecognised alike — draws an error frame carrying
+        ``error_code: WS_OPERATION_NOT_SUPPORTED`` and changes no state.  For a
+        retired type the frame also names the REST endpoint that performs the
+        operation, so a stale client build gets a diagnosable directive rather
+        than a silent drop.
 
         Args:
             websocket: The WebSocket that sent the message.
             raw: Raw JSON string from the driver client.
 
-        Validates: Requirements 9.4, 9.5
+        Validates: Requirements 9.4, 9.5, 14.10, 14.11
         """
         try:
             message = json.loads(raw)
@@ -314,26 +350,31 @@ class DriverWSManager(BaseWSManager):
             # Also treat as a heartbeat
             meta["last_heartbeat"] = datetime.now(timezone.utc)
 
-        elif msg_type == "ack":
-            logger.info("Driver %s sent ack for job %s", driver_id, message.get("data", {}).get("job_id"))
-
-        elif msg_type == "status_update":
-            logger.info(
-                "Driver %s status update: %s",
-                driver_id,
-                message.get("data", {}).get("status"),
-            )
-
-        elif msg_type == "exception":
-            logger.info(
-                "Driver %s reported exception: %s",
-                driver_id,
-                message.get("data", {}).get("exception_type"),
-            )
-
         elif msg_type == "ping":
             await self._send_to_client(websocket, {
                 "type": "pong",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+
+        elif msg_type in REST_REDIRECTS:
+            # Retired inbound type: no state change, and the frame names the
+            # REST endpoint that performs the operation (R14.10, R14.11).
+            rest_endpoint = REST_REDIRECTS[msg_type]
+            logger.info(
+                "Rejected retired inbound type '%s' from driver %s; "
+                "directing to %s",
+                msg_type,
+                driver_id,
+                rest_endpoint,
+            )
+            await self._send_to_client(websocket, {
+                "type": "error",
+                "error_code": WS_OPERATION_NOT_SUPPORTED,
+                "message": (
+                    f"'{msg_type}' is not accepted on this channel. "
+                    f"Use {rest_endpoint}."
+                ),
+                "rest_endpoint": rest_endpoint,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             })
 
@@ -345,7 +386,9 @@ class DriverWSManager(BaseWSManager):
             )
             await self._send_to_client(websocket, {
                 "type": "error",
+                "error_code": WS_OPERATION_NOT_SUPPORTED,
                 "message": f"Unknown event type: {msg_type}",
+                "rest_endpoint": None,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             })
 
@@ -364,13 +407,18 @@ class DriverWSManager(BaseWSManager):
         """
         Update driver presence in the driver_presence ES index.
 
+        The write goes through the asynchronous Elasticsearch client, so a
+        heartbeat never blocks the event loop for the duration of a network
+        round trip (R10.14), and it is keyed on ``{tenant_id}:{driver_id}``,
+        so the record is one current record per pair (R10.19).
+
         Args:
             driver_id: The driver's unique identifier.
             status: Presence status ('online' or 'offline').
             tenant_id: Tenant context.
             location: Optional GPS location dict with lat/lng.
 
-        Validates: Requirement 9.5
+        Validates: Requirements 9.5, 10.14, 10.19
         """
         if self._es is None:
             logger.debug(
@@ -396,10 +444,10 @@ class DriverWSManager(BaseWSManager):
             doc["last_location"] = location
 
         try:
-            self._es.client.index(
-                index=DRIVER_PRESENCE_INDEX,
-                id=driver_id,
-                body=doc,
+            await self._es.index_document(
+                DRIVER_PRESENCE_INDEX,
+                presence_doc_id(tenant_id, driver_id),
+                doc,
             )
             logger.debug(
                 "Updated presence for driver %s: status=%s",
@@ -497,36 +545,59 @@ class DriverWSManager(BaseWSManager):
         location: dict,
         tenant_id: str,
     ) -> None:
-        """Update the driver's last known location in the presence index."""
+        """Update the driver's last known location in the presence index.
+
+        Runs on the asynchronous Elasticsearch client so a ``location_update``
+        does not block the event loop (R10.14), keyed on the composite
+        ``{tenant_id}:{driver_id}`` document id (R10.19).
+
+        ``update_document`` is a partial merge with no upsert clause, so when no
+        presence record exists yet — the driver's connect write failed, or the
+        index was rebuilt underneath a live connection — the merge is followed
+        by a full index write that recreates the record. The record is
+        ephemeral and has no history, so recreating it loses nothing.
+
+        Validates: Requirements 10.14, 10.19
+        """
         if self._es is None:
             return
 
         from driver.services.driver_es_mappings import DRIVER_PRESENCE_INDEX
 
+        doc_id = presence_doc_id(tenant_id, driver_id)
+        now = datetime.now(timezone.utc).isoformat()
+
         try:
-            self._es.client.update(
-                index=DRIVER_PRESENCE_INDEX,
-                id=driver_id,
-                body={
-                    "doc": {
-                        "last_location": location,
-                        "last_seen": datetime.now(timezone.utc).isoformat(),
-                    },
-                    "upsert": {
+            await self._es.update_document(
+                DRIVER_PRESENCE_INDEX,
+                doc_id,
+                {"last_location": location, "last_seen": now},
+            )
+        except Exception as exc:
+            logger.warning(
+                "Presence location merge failed for driver %s; recreating "
+                "the record: %s",
+                driver_id,
+                exc,
+            )
+            try:
+                await self._es.index_document(
+                    DRIVER_PRESENCE_INDEX,
+                    doc_id,
+                    {
                         "driver_id": driver_id,
                         "tenant_id": tenant_id,
                         "status": "online",
                         "last_location": location,
-                        "last_seen": datetime.now(timezone.utc).isoformat(),
+                        "last_seen": now,
                     },
-                },
-            )
-        except Exception as exc:
-            logger.error(
-                "Failed to update location for driver %s: %s",
-                driver_id,
-                exc,
-            )
+                )
+            except Exception as index_exc:
+                logger.error(
+                    "Failed to update location for driver %s: %s",
+                    driver_id,
+                    index_exc,
+                )
 
     def get_connected_driver_ids(self) -> list:
         """Return a list of currently connected driver IDs."""

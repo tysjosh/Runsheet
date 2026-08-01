@@ -226,6 +226,27 @@ class DriverPinVault:
             return False
         return verify_pin(pin, record)
 
+    async def has_pin(self, tenant_id: str, driver_id: str) -> bool:
+        """Report whether a PIN hash exists for ``(tenant_id, driver_id)``.
+
+        Returns a **boolean only** — never the stored record, and never any
+        part of it. This is what an enrollment-state read is allowed to know
+        (driver-mobile-app R2.9): the hash, the salt, and the iteration count
+        stay inside the vault. ``False`` for "no PIN on file" and for a record
+        the vault holds but that carries no digest, so a half-written record
+        reads as not enrolled rather than as enrolled-but-unverifiable.
+
+        Cross-tenant access is blocked by the vault (``PermissionError``),
+        which is allowed to propagate.
+        """
+        try:
+            record = await self._vault.get(
+                tenant_id, self._vault_ref(tenant_id, driver_id)
+            )
+        except KeyError:
+            return False
+        return isinstance(record, dict) and bool(record.get("hash"))
+
     async def delete_pin(self, tenant_id: str, driver_id: str) -> bool:
         """Remove a driver's stored PIN hash. Returns ``True`` if one existed."""
         return bool(

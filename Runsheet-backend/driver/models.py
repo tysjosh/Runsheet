@@ -9,10 +9,12 @@ in REST endpoints and internal service communication.
 Requirements: 5.1, 5.3, 6.1, 7.1, 7.3, 8.1
 """
 
+from datetime import datetime
 from enum import Enum
+import math
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from Agents.overlay.data_contracts import Severity
 
@@ -61,8 +63,8 @@ class GeoPoint(BaseModel):
     Validates: Requirements 7.1, 8.1
     """
 
-    lat: float
-    lng: float
+    lat: float = Field(..., ge=-90.0, le=90.0)
+    lng: float = Field(..., ge=-180.0, le=180.0)
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +161,7 @@ class PODRequest(BaseModel):
     Validates: Requirements 8.1, 4.1.4, 4.1.6, 4.2.4, 4.2.5
     """
 
-    recipient_name: str
+    recipient_name: str = Field(..., min_length=1, max_length=200)
     customer_id: Optional[str] = None
     # Preferred: tenant-scoped file_refs returned by the presign endpoint.
     signature_ref: Optional[str] = None
@@ -177,6 +179,46 @@ class PODRequest(BaseModel):
     refused_delivery: bool = False
     refusal_reason_code: Optional[DeliveryRefusalReason] = None
     refusal_note: Optional[str] = None
+
+    @field_validator("recipient_name")
+    @classmethod
+    def _normalize_recipient_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("recipient_name must not be blank")
+        return value
+
+    @field_validator("timestamp")
+    @classmethod
+    def _validate_timestamp(cls, value: str) -> str:
+        """Keep the wire value as a string while requiring a real UTC instant."""
+        candidate = value.strip()
+        try:
+            parsed = datetime.fromisoformat(candidate.replace("Z", "+00:00"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("timestamp must be an ISO 8601 datetime") from exc
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError("timestamp must include a timezone offset")
+        return candidate
+
+    @model_validator(mode="after")
+    def _validate_delivery_volume(self) -> "PODRequest":
+        """A completed delivery must be positive; only a refusal may be zero."""
+        gallons = self.delivered_gallons
+        if gallons is None:
+            return self
+        if not math.isfinite(gallons):
+            raise ValueError("delivered_gallons must be finite")
+        if self.refused_delivery:
+            # Older driver clients may leave the planned quantity in this
+            # field when toggling "refused".  The service canonicalizes a
+            # refusal to zero gallons, so accept the stale client value here.
+            return self
+        if gallons <= 0:
+            raise ValueError(
+                "delivered_gallons must be greater than zero for a completed delivery"
+            )
+        return self
 
 
 class PODPresignUploadRequest(BaseModel):

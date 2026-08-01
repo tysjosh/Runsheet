@@ -18,7 +18,8 @@ service locator, and no FastAPI ``Depends`` for collaborators.
 Design: see ``.kiro/specs/driver-mobile-app/design.md`` §Service interfaces
 and §POD Flow.
 
-Validates: Requirements 5.7, 5.8, 5.14, 5.16, 5.17, 5.23, 5.24, 15.14
+Validates: Requirements 4.5, 4.6, 4.7, 5.7, 5.8, 5.14, 5.16, 5.17, 5.23, 5.24,
+15.14
 - 5.7: a non-refusal submission requires a signature and at least one photo
 - 5.8: ``geotag`` is required — asserted by ``PODRequest.geotag`` being a
   non-optional :class:`~driver.models.GeoPoint`
@@ -64,14 +65,34 @@ R5.15, R5.22):
 - a refusal records the literal ``0`` gallons with
   ``delivered_gallons_source = "refused"``
 
-Deferred by design, not overlooked — ordering the writes so a POD survives a
-failed order transition, and the ``apply_status_transition`` call itself, are
-task 10.2.
+The write order is the contract (R4.5, R4.6, R4.7, task 10.2), and it is fixed
+by one constraint: *a POD must survive a failed order transition so the
+submission can be reconciled without re-capturing artifacts.* Hence
+
+1. :meth:`PodHashChainWriter.persist` under ``pod_chain_lock:{tenant_id}`` —
+   the durable write of record,
+2. ``pod_bol_finalizer.maybe_generate``, documented never to raise,
+3. the ``pod_submitted`` / ``delivery_refused`` timeline event and the
+   broadcast,
+4. ``OrderService.apply_status_transition`` to ``delivered``, or to ``failed``
+   when the submission records a refusal — **last**, and not compensated.
+
+When step 4 fails the POD row is already committed with its hash-chain links
+intact; it is patched with ``pod_status_transition = "pending"`` and
+``pod_status_transition_error = "<error_code>"`` and the response is a 409
+carrying the transition's own error code plus the ``pod_id``, so a dispatcher
+or a reconciliation job can finish the transition later. The order status is
+the reconcilable side because the hash chain is append-only and cannot be
+rolled back at all.
+
+A refusal also writes ``refusal_reason_code`` onto the order document, so the
+order carries its own failure reason without a join back to the POD (R4.6).
 """
 
 import asyncio
 import hmac
 import logging
+import math
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -79,6 +100,7 @@ from typing import Optional
 from driver.models import PODRequest
 from driver.services.driver_es_mappings import PROOF_OF_DELIVERY_INDEX
 from driver.services.geo_utils import haversine_distance_meters
+from driver.services.pod_otp_service import assert_otp_window_open
 from driver.services.work_ref import WorkRef
 from errors.codes import ErrorCode
 from errors.exceptions import (
@@ -131,6 +153,19 @@ OCR_DIAGNOSTIC_UNAVAILABLE: str = "ocr_unavailable"
 #: Job/order document keys that may carry a provisioned delivery OTP, in the
 #: order ``_extract_expected_otp`` reads them.
 _OTP_KEYS: tuple[str, ...] = ("pod_otp", "delivery_otp", "otp_code", "expected_otp")
+
+#: The order status a successful POD submission drives the order to (R4.5).
+POD_DELIVERED_STATUS: str = "delivered"
+
+#: The order status a POD submission recording a refusal drives the order to
+#: (R4.6).
+POD_REFUSED_STATUS: str = "failed"
+
+#: Value written to ``proof_of_delivery.pod_status_transition`` when the POD is
+#: durable but its order transition did not land (R4.7). Nothing compensates
+#: it: a reconciliation job or a dispatcher completes the transition later.
+POD_TRANSITION_PENDING: str = "pending"
+POD_TRANSITION_COMPLETED: str = "completed"
 
 #: Document keys that may carry the customer a POD signature must bind to.
 _CUSTOMER_ID_KEYS: tuple[str, ...] = (
@@ -203,6 +238,22 @@ def _destination_from_document(work_doc: Optional[dict]) -> Optional[dict]:
     return {"lat": dest.get("lat"), "lng": dest.get("lon", dest.get("lng"))}
 
 
+def _as_order_document(order) -> dict:
+    """Normalize a repository result into a plain mutable dict.
+
+    ``FuelOrderRepository.get`` returns a ``FuelOrder``; fakes and the cutover
+    read paths hand back a raw document. Both are accepted, exactly as
+    :class:`~driver.services.work_ref.WorkRefResolver` accepts both, so the
+    transition step depends on the shape of the data rather than on the class.
+    """
+    if isinstance(order, dict):
+        return dict(order)
+    model_dump = getattr(order, "model_dump", None)
+    if callable(model_dump):
+        return model_dump(mode="python")
+    return dict(order)
+
+
 # ---------------------------------------------------------------------------
 # The service
 # ---------------------------------------------------------------------------
@@ -224,9 +275,13 @@ class PODSubmissionService:
         es_service: Elasticsearch service. Required.
         job_service: Scheduling job service, for ``_append_event`` and
             ``_get_job_doc``.
-        order_service: ``fuel`` ``OrderService``. Held for the order status
-            transition wired by a later task in this spec; unused today.
-        order_repository: ``FuelOrderRepository``. Held for the same reason.
+        order_service: ``fuel`` ``OrderService``, the single writer of
+            fuel-order status. Drives the final ``delivered`` / ``failed``
+            transition (R4.5, R4.6). Absent, the POD still persists and the
+            order is left for reconciliation with a loud log.
+        order_repository: ``FuelOrderRepository``, read to obtain the order
+            document the transition mutates on the job-keyed path (the
+            order-keyed path already carries it on the ``WorkRef``).
         file_storage_service: Required once any ``file_ref`` is submitted —
             it is what enforces the tenant prefix (R5.17).
         pod_hash_chain_writer: :class:`PodHashChainWriter` (R5.16).
@@ -249,6 +304,7 @@ class PODSubmissionService:
         pod_hash_chain_writer=None,
         pod_bol_finalizer=None,
         ocr_service=None,
+        reconciliation_service=None,
         driver_ws_manager=None,
         scheduling_ws_manager=None,
         redis_client=None,
@@ -261,6 +317,7 @@ class PODSubmissionService:
         self._pod_hash_chain_writer = pod_hash_chain_writer
         self._pod_bol_finalizer = pod_bol_finalizer
         self._ocr_service = ocr_service
+        self._reconciliation_service = reconciliation_service
         self._driver_ws_manager = driver_ws_manager
         self._scheduling_ws_manager = scheduling_ws_manager
         self._redis_client = redis_client
@@ -277,7 +334,9 @@ class PODSubmissionService:
         """Submit proof of delivery for a resolved unit of work.
 
         Validate artifacts → resolve refusal → verify OTP → resolve gallons →
-        append hash chain → finalize BOL → append event → broadcast.
+        append hash chain → finalize BOL → append event → broadcast → transition
+        the order. The four writes run in that order and the transition is last,
+        so a failed transition leaves a durable POD behind (R4.7).
 
         Args:
             ref: The resolved work reference. Assignment authorization has
@@ -301,10 +360,12 @@ class PODSubmissionService:
                 ``OTP_VERIFICATION_FAILED`` for the OTP failures; 409
                 ``POD_GALLONS_CONFIRMATION_REQUIRED`` or 422
                 ``DELIVERED_GALLONS_REQUIRED`` for an unresolved gallon count;
-                503 / 500 when the hash chain cannot be written.
+                503 / 500 when the hash chain cannot be written; 409 carrying
+                the transition's own error code and the ``pod_id`` when the
+                order transition fails after the POD is durable (R4.7).
 
-        Validates: Requirements 5.7, 5.8, 5.9, 5.11, 5.12, 5.14, 5.15, 5.16,
-        5.17, 5.22, 5.23
+        Validates: Requirements 4.5, 4.6, 4.7, 5.7, 5.8, 5.9, 5.11, 5.12, 5.14,
+        5.15, 5.16, 5.17, 5.22, 5.23, 5.29
         """
         es = self._require_es()
         now = datetime.now(timezone.utc).isoformat()
@@ -386,8 +447,16 @@ class PODSubmissionService:
             order_id=order_id,
         )
 
+        # Step 1 — the durable write. Everything after this point must leave
+        # the POD in place (R4.7).
         pod_doc = await self._persist(es=es, tenant_id=ref.tenant_id, pod_doc=pod_doc)
-        await self._finalize_bol(tenant_id=ref.tenant_id, pod_doc=pod_doc, actor=actor)
+        # Step 2 — the BOL, documented never to raise.
+        bol_doc = await self._finalize_bol(
+            tenant_id=ref.tenant_id,
+            pod_doc=pod_doc,
+            actor=actor,
+        )
+        # Step 3 — the timeline event and the broadcast.
         await self._append_event(
             ref=ref,
             body=body,
@@ -408,6 +477,20 @@ class PODSubmissionService:
             location_mismatch=location_mismatch,
             now=now,
         )
+        # Step 4 — the order transition, last and uncompensated (R4.5-R4.7).
+        transitioned_order = await self._apply_order_transition(
+            ref=ref,
+            body=body,
+            order_id=order_id,
+            refusal=refusal,
+            pod_doc=pod_doc,
+            bol_doc=bol_doc,
+        )
+        if not refusal["is_refusal"] and transitioned_order is not None:
+            await self._compute_reconciliation(
+                pod_doc=pod_doc,
+                order=transitioned_order,
+            )
 
         return {"data": pod_doc, "request_id": request_id}
 
@@ -563,7 +646,7 @@ class PODSubmissionService:
         tenant_id: str,
         actor: str,
         artifacts: dict,
-    ) -> None:
+    ) -> Optional[dict]:
         """Reject any ``file_ref`` that is not the caller's tenant's (R5.17).
 
         ``FileStorageService.validate_ref`` raises ``PermissionError`` on a
@@ -580,7 +663,7 @@ class PODSubmissionService:
             refs_to_validate.append(("meter_ticket_ref", artifacts["meter_ticket_ref"]))
 
         if not refs_to_validate:
-            return
+            return None
 
         file_storage = self._require_file_storage()
         for field_name, ref_value in refs_to_validate:
@@ -693,8 +776,13 @@ class PODSubmissionService:
                 error envelope R15.10 requires, and the offline queue's
                 status-code-driven disposition matrix would dequeue such a
                 submission as successful and lose the delivery record (R11.14).
+                Also 409 ``OTP_WINDOW_EXPIRED`` from
+                :func:`~driver.services.pod_otp_service.assert_otp_window_open`
+                when the right code arrives after its validity window closed
+                (R5.29) — checked *after* the comparison, so a wrong code is
+                never told that it was merely late.
 
-        Validates: Requirements 5.9, 15.10
+        Validates: Requirements 5.9, 5.29, 15.10
         """
         if not otp_required:
             return False
@@ -723,6 +811,11 @@ class PODSubmissionService:
                 ref.driver_id,
             )
             raise otp_verification_failed(details=self._otp_details(ref))
+
+        # The code is the right code — but a code has a lifetime. The window
+        # rule lives in ``pod_otp_service`` beside the generator so the two can
+        # never disagree about what "valid" means (R5.29).
+        assert_otp_window_open(work_doc)
 
         return True
 
@@ -948,8 +1041,20 @@ class PODSubmissionService:
         Raises:
             AppException: 409 or 422 per the above.
         """
-        if ocr_resolution["delivered_gallons"] is not None:
-            return
+        delivered_gallons = ocr_resolution["delivered_gallons"]
+        if delivered_gallons is not None:
+            if math.isfinite(float(delivered_gallons)) and float(delivered_gallons) > 0:
+                return
+            raise invalid_request(
+                message=(
+                    "delivered_gallons must be greater than zero for a "
+                    "completed delivery"
+                ),
+                details={
+                    "field": "delivered_gallons",
+                    "value": delivered_gallons,
+                },
+            )
 
         if meter_ticket_ref:
             raise pod_gallons_confirmation_required(
@@ -1096,6 +1201,10 @@ class PODSubmissionService:
             "refusal_reason_code": refusal["reason_code"],
             "refusal_note": refusal["note"],
             "tenant_id": ref.tenant_id,
+            # Persist as pending before any downstream work. If the process
+            # exits after the immutable POD write, the repair worker can still
+            # discover and complete the order transition.
+            "pod_status_transition": POD_TRANSITION_PENDING,
         }
 
     # -- persistence, BOL, event, broadcast -----------------------------
@@ -1173,7 +1282,7 @@ class PODSubmissionService:
 
     async def _finalize_bol(
         self, *, tenant_id: str, pod_doc: dict, actor: str
-    ) -> None:
+    ):
         """Generate the Bill of Lading through the existing finalizer (R5.16).
 
         Gated per tenant by the ``overlay.bol_generation`` feature flag inside
@@ -1182,9 +1291,9 @@ class PODSubmissionService:
         double safety net: a BOL failure must never block a persisted POD.
         """
         if self._pod_bol_finalizer is None:
-            return
+            return None
         try:
-            await self._pod_bol_finalizer.maybe_generate(
+            return await self._pod_bol_finalizer.maybe_generate(
                 tenant_id=tenant_id,
                 pod=pod_doc,
                 actor=actor,
@@ -1195,6 +1304,7 @@ class PODSubmissionService:
                 pod_doc.get("pod_id"),
                 exc,
             )
+            return None
 
     async def _append_event(
         self,
@@ -1216,7 +1326,7 @@ class PODSubmissionService:
         job timeline.
         """
         if self._job_service is None or not ref.job_id:
-            return
+            return None
         try:
             await self._job_service._append_event(
                 job_id=ref.job_id,
@@ -1324,3 +1434,428 @@ class PODSubmissionService:
                     event_data.get("job_id") or event_data.get("order_id"),
                     exc,
                 )
+
+    # -- step 4: the order transition, last and uncompensated ------------
+
+    async def _apply_order_transition(
+        self,
+        *,
+        ref: WorkRef,
+        body: PODRequest,
+        order_id: str,
+        refusal: dict,
+        pod_doc: dict,
+        bol_doc=None,
+    ) -> Optional[dict]:
+        """Drive the order to ``delivered`` / ``failed`` (R4.5, R4.6, R4.7).
+
+        Runs after the POD is durable, the BOL has been attempted, and the
+        event and broadcast have gone out, because it is the only step that may
+        legitimately fail without taking the POD with it. ``OrderService`` is
+        the single writer of fuel-order status, so the state-machine guard, the
+        delivery-window guard, the order event, the driver counters, the
+        broadcast, and the subscribers all run exactly as they do for a
+        dispatcher-initiated transition (R4.1).
+
+        A refusal carries its ``refusal_reason_code`` onto the order document
+        as well, so the order states its own failure reason without a join back
+        to the POD (R4.6).
+
+        Degradations, all of which leave the POD intact and log loudly:
+        no ``order_service`` wired, no readable order document. Neither is
+        turned into a client-visible error — the POD is the record the driver
+        cannot re-capture, and the order status is reconcilable.
+
+        Raises:
+            AppException: 409 carrying the transition's own error code, the
+                ``pod_id``, and the target status, after patching the POD with
+                ``pod_status_transition = "pending"`` (R4.7).
+
+        Validates: Requirements 4.5, 4.6, 4.7
+        """
+        target_status = (
+            POD_REFUSED_STATUS if refusal["is_refusal"] else POD_DELIVERED_STATUS
+        )
+        pod_id = pod_doc.get("pod_id")
+
+        if self._order_service is None:
+            logger.error(
+                "No order_service wired — POD %s is persisted but order %s "
+                "was not transitioned to %s (tenant=%s). Pass order_service "
+                "to configure_pod_endpoints() during startup.",
+                pod_id,
+                order_id,
+                target_status,
+                ref.tenant_id,
+            )
+            await self._record_transition_failure(
+                tenant_id=ref.tenant_id,
+                pod_doc=pod_doc,
+                error_code="ORDER_SERVICE_UNAVAILABLE",
+            )
+            return None
+
+        order = await self._load_order_for_transition(ref=ref, order_id=order_id)
+        if order is None:
+            logger.error(
+                "Order %s could not be read for the POD transition — POD %s "
+                "is persisted and the order is left at its current status "
+                "(tenant=%s)",
+                order_id,
+                pod_id,
+                ref.tenant_id,
+            )
+            await self._record_transition_failure(
+                tenant_id=ref.tenant_id,
+                pod_doc=pod_doc,
+                error_code="ORDER_NOT_FOUND",
+            )
+            return None
+
+        if (order.get("status") or "") == target_status:
+            # The order is already where this submission would take it (a POD
+            # replayed without an idempotency key, or a dispatcher who got
+            # there first). ``apply_status_transition`` answers 409 for
+            # ``X → X`` because no status maps to itself in
+            # ``VALID_STATUS_TRANSITIONS``, and a 409 here would report a
+            # failure that did not happen — the same reasoning R4.10 applies
+            # to the driver transition endpoint. Nothing is appended.
+            if (
+                target_status == POD_DELIVERED_STATUS
+                and not order.get("delivery_result")
+            ):
+                order = await self._order_service.reconcile_delivery_result(
+                    order=order,
+                    delivery_result=self._build_delivery_result(
+                        order=order,
+                        pod_doc=pod_doc,
+                        bol_doc=bol_doc,
+                    ),
+                    actor_user_id=ref.driver_id,
+                    client_event_timestamp=body.timestamp,
+                )
+            await self._record_transition_completed(
+                tenant_id=ref.tenant_id,
+                pod_doc=pod_doc,
+            )
+            return order
+
+        if refusal["is_refusal"] and refusal["reason_code"]:
+            order["refusal_reason_code"] = refusal["reason_code"]
+        elif not refusal["is_refusal"]:
+            order["delivery_result"] = self._build_delivery_result(
+                order=order,
+                pod_doc=pod_doc,
+                bol_doc=bol_doc,
+            )
+
+        try:
+            transitioned = await self._order_service.apply_status_transition(
+                order=order,
+                new_status=target_status,
+                reason=refusal["reason_code"],
+                actor_user_id=ref.driver_id,
+                client_event_timestamp=body.timestamp,
+            )
+            await self._record_transition_completed(
+                tenant_id=ref.tenant_id,
+                pod_doc=pod_doc,
+            )
+            return transitioned
+        except Exception as exc:
+            error_code = (
+                exc.error_code
+                if isinstance(exc, AppException)
+                else ErrorCode.INTERNAL_ERROR
+            )
+            logger.error(
+                "POD %s is persisted but order %s failed to transition to %s "
+                "(tenant=%s): %s",
+                pod_id,
+                order_id,
+                target_status,
+                ref.tenant_id,
+                exc,
+            )
+            await self._record_transition_failure(
+                tenant_id=ref.tenant_id,
+                pod_doc=pod_doc,
+                error_code=error_code.value,
+            )
+            details = {
+                "reason": "pod_order_transition_failed",
+                "pod_id": pod_id,
+                "order_id": order_id,
+                "target_status": target_status,
+                "transition_error_code": error_code.value,
+                "pod_status_transition": POD_TRANSITION_PENDING,
+            }
+            if isinstance(exc, AppException) and exc.details:
+                details["transition_details"] = exc.details
+            raise AppException(
+                error_code=error_code,
+                message=(
+                    "Proof of delivery was recorded but the order status "
+                    "transition failed"
+                ),
+                status_code=409,
+                details=details,
+            ) from exc
+
+    async def _compute_reconciliation(self, *, pod_doc: dict, order: dict) -> None:
+        """Persist ordered/loaded/delivered variance when a real load is resolvable.
+
+        A missing load plan is not replaced with ordered or delivered gallons:
+        doing so would manufacture a zero variance. The POD and invoice remain
+        valid, while reconciliation logs the absent operational evidence.
+        """
+        if self._reconciliation_service is None:
+            return
+
+        try:
+            loading_plan = await self._resolve_loading_plan(order)
+            if loading_plan is None:
+                logger.warning(
+                    "Reconciliation deferred: no matching load assignment for "
+                    "order=%s tenant=%s",
+                    order.get("order_id"),
+                    order.get("tenant_id"),
+                )
+                return
+
+            reconciliation_order = dict(order)
+            reconciliation_order["ordered_gallons"] = order.get("gallons_requested")
+            invoice = await self._find_invoice_for_order(order)
+            if invoice is not None:
+                reconciliation_order["invoice_id"] = invoice.get("invoice_id")
+                reconciliation_order["invoiced_gallons"] = sum(
+                    float(item.get("quantity_gallons") or 0)
+                    for item in (invoice.get("line_items") or [])
+                )
+
+            await self._reconciliation_service.compute(
+                pod=pod_doc,
+                order=reconciliation_order,
+                loading_plan=loading_plan,
+            )
+        except Exception as exc:
+            # Delivery and invoice writes have already committed. Reconciliation
+            # is a repairable projection and must not make the driver resubmit.
+            logger.exception(
+                "Automatic reconciliation failed for pod=%s order=%s: %s",
+                pod_doc.get("pod_id"),
+                order.get("order_id"),
+                exc,
+            )
+
+    async def _resolve_loading_plan(self, order: dict) -> Optional[dict]:
+        """Resolve and normalize the load-plan assignment for one order."""
+        plan_ref = order.get("assigned_run_id")
+        tenant_id = order.get("tenant_id")
+        if not plan_ref or not tenant_id:
+            return None
+
+        query = {
+            "query": {
+                "bool": {
+                    "must": [{"term": {"tenant_id": tenant_id}}],
+                    "should": [
+                        {"term": {"plan_id": plan_ref}},
+                        {"term": {"run_id": plan_ref}},
+                    ],
+                    "minimum_should_match": 1,
+                }
+            },
+            "size": 5,
+        }
+        response = await self._es_service.search_documents(
+            "mvp_load_plans", query, 5
+        )
+        hits = (response.get("hits") or {}).get("hits") or []
+        station_keys = {
+            str(value)
+            for value in (order.get("customer_tank_id"), order.get("order_id"))
+            if value
+        }
+        for hit in hits:
+            source = hit.get("_source") or {}
+            assignments = source.get("assignments") or []
+            matching = [
+                assignment
+                for assignment in assignments
+                if str(assignment.get("station_id")) in station_keys
+            ]
+            if not matching:
+                continue
+            loaded_liters = sum(
+                float(assignment.get("quantity_liters") or 0)
+                for assignment in matching
+            )
+            if loaded_liters <= 0:
+                continue
+            from Agents.support.volume_units import LITERS_PER_US_GALLON
+
+            return {
+                "plan_id": source.get("plan_id") or plan_ref,
+                "tenant_id": tenant_id,
+                "loaded_gallons": loaded_liters / LITERS_PER_US_GALLON,
+            }
+        return None
+
+    async def _find_invoice_for_order(self, order: dict) -> Optional[dict]:
+        """Return the invoice synchronously created by order.delivered, if any."""
+        response = await self._es_service.search_documents(
+            "invoices_current",
+            {
+                "query": {
+                    "bool": {
+                        "must": [
+                            {"term": {"tenant_id": order.get("tenant_id")}},
+                            {"term": {"order_id": order.get("order_id")}},
+                        ]
+                    }
+                },
+                "size": 1,
+            },
+            1,
+        )
+        hits = (response.get("hits") or {}).get("hits") or []
+        return (hits[0].get("_source") or {}) if hits else None
+
+    @staticmethod
+    def _build_delivery_result(*, order: dict, pod_doc: dict, bol_doc=None) -> dict:
+        """Build the canonical POD snapshot consumed by invoicing and ERP sync."""
+        from fuel.order_models import DeliveryResult
+
+        intake_metadata = order.get("intake_metadata") or {}
+        if hasattr(intake_metadata, "model_dump"):
+            intake_metadata = intake_metadata.model_dump(mode="python")
+
+        def _bol_value(name: str):
+            if bol_doc is None:
+                return None
+            if isinstance(bol_doc, dict):
+                return bol_doc.get(name)
+            return getattr(bol_doc, name, None)
+
+        result = DeliveryResult(
+            pod_id=pod_doc["pod_id"],
+            actual_gallons=pod_doc["delivered_gallons"],
+            actual_gallons_source=pod_doc["delivered_gallons_source"],
+            delivered_at=pod_doc["delivered_at"],
+            recipient_name=pod_doc["recipient_name"],
+            driver_id=pod_doc.get("driver_id"),
+            signature_ref=pod_doc.get("signature_ref"),
+            photo_refs=pod_doc.get("photo_refs") or [],
+            meter_ticket_ref=pod_doc.get("meter_ticket_ref"),
+            bol_id=_bol_value("bol_id"),
+            bol_ref=_bol_value("file_ref"),
+            pod_hash=pod_doc.get("pod_hash"),
+            geotag=pod_doc["geotag"],
+            otp_verified=bool(pod_doc.get("otp_verified")),
+            location_mismatch=bool(pod_doc.get("location_mismatch")),
+            source_system=intake_metadata.get("source_system"),
+            source_record_id=intake_metadata.get("source_record_id"),
+        )
+        return result.model_dump(mode="json")
+
+    async def _load_order_for_transition(
+        self, *, ref: WorkRef, order_id: str
+    ) -> Optional[dict]:
+        """Return the order document the transition mutates, or ``None``.
+
+        The order-keyed path already carries the document the resolver fetched
+        and authorized, so no second read is issued for it. The job-keyed path
+        reads it through ``order_repository.get``, which is tenant-scoped; the
+        returned document's ``tenant_id`` is re-validated here before it is
+        used for anything (R15.11).
+        """
+        if ref.kind == "order" and ref.order_doc is not None:
+            return _as_order_document(ref.order_doc)
+
+        if self._order_repository is None:
+            return None
+
+        try:
+            order = await self._order_repository.get(ref.tenant_id, order_id)
+        except Exception as exc:
+            logger.warning(
+                "Failed to read order %s for the POD transition (tenant=%s): %s",
+                order_id,
+                ref.tenant_id,
+                exc,
+            )
+            return None
+
+        if order is None:
+            return None
+
+        doc = _as_order_document(order)
+        if doc.get("tenant_id") != ref.tenant_id:
+            logger.warning(
+                "Order %s resolved to another tenant during the POD "
+                "transition — treated as unreadable (tenant=%s)",
+                order_id,
+                ref.tenant_id,
+            )
+            return None
+        return doc
+
+    async def _record_transition_failure(
+        self, *, tenant_id: str, pod_doc: dict, error_code: str
+    ) -> None:
+        """Mark the persisted POD as awaiting its order transition (R4.7).
+
+        The patch is bookkeeping for reconciliation, not a compensation: the
+        POD stays exactly as it was chained, and nothing rolls back. A failure
+        to write the patch is logged and swallowed — the 409 the caller is
+        about to receive is what matters, and the POD is durable either way.
+        """
+        fields = {
+            "pod_status_transition": POD_TRANSITION_PENDING,
+            "pod_status_transition_error": error_code,
+        }
+        pod_doc.update(fields)
+
+        if self._es_service is None:  # pragma: no cover - defensive
+            return
+        try:
+            await self._es_service.update_document(
+                PROOF_OF_DELIVERY_INDEX, pod_doc["pod_id"], fields
+            )
+        except Exception as exc:
+            logger.error(
+                "Failed to record the pending order transition on POD %s "
+                "(tenant=%s): %s",
+                pod_doc.get("pod_id"),
+                tenant_id,
+                exc,
+            )
+
+    async def _record_transition_completed(
+        self, *, tenant_id: str, pod_doc: dict
+    ) -> None:
+        """Mark the mutable transition projection complete.
+
+        These fields are deliberately outside the POD hash canonicalization,
+        so operational repair bookkeeping cannot alter the evidence chain.
+        """
+        fields = {
+            "pod_status_transition": POD_TRANSITION_COMPLETED,
+            "pod_status_transition_error": None,
+        }
+        pod_doc.update(fields)
+        try:
+            await self._es_service.update_document(
+                PROOF_OF_DELIVERY_INDEX, pod_doc["pod_id"], fields
+            )
+        except Exception as exc:
+            # A persisted ``pending`` marker is safe: the repair worker will
+            # observe an already-transitioned order and close it idempotently.
+            logger.error(
+                "Failed to mark the order transition complete on POD %s "
+                "(tenant=%s): %s",
+                pod_doc.get("pod_id"),
+                tenant_id,
+                exc,
+            )

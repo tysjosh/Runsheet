@@ -19,6 +19,7 @@
 
 import {
   checkCompartmentLoadEligibility,
+  checkinStop,
   configureCompartments,
   createStation,
   getPodHashProof,
@@ -499,5 +500,88 @@ describe("volume unit boundary", () => {
   it("litersToGallons round-trips the values the read boundary sees", () => {
     expect(litersToGallons(3785.411784)).toBeCloseTo(1000, 6);
     expect(litersToGallons(null)).toBe(0);
+  });
+});
+
+// ─── Stop check-in on the gallons contract (driver-mobile-app Req 6.24) ──────
+//
+// ``POST /fuel/mvp/plan/{plan_id}/checkin`` takes gallons and converts once,
+// server-side. These tests pin that the client sends the gallons field verbatim
+// (a client-side conversion here would double-convert) and forwards the two
+// now-required driver-context fields.
+
+describe("checkinStop", () => {
+  const body = {
+    route_id: "R-1",
+    station_id: "FS-1",
+    sequence: 0,
+    actual_quantities_gallons: { DIESEL_2: 1000 },
+    quantity_unit: "us_gallon" as const,
+    geotag: { lat: 29.7604, lng: -95.3698 },
+    event_timestamp: "2026-05-08T14:32:00Z",
+  };
+
+  it("POSTs actual_quantities_gallons unconverted with the unit and driver context", async () => {
+    mockFetchOnce({
+      ok: true,
+      body: {
+        plan_id: "PLAN-1",
+        route_id: "R-1",
+        station_id: "FS-1",
+        sequence: 0,
+        quantity_unit: "us_gallon",
+        actual_quantities_gallons: { DIESEL_2: 1000 },
+        planned_quantities_gallons: { DIESEL_2: 1000 },
+        variance_gallons: { DIESEL_2: 0 },
+        completed_stops: 1,
+        total_stops: 3,
+        all_complete: false,
+        updated_at: "2026-05-08T14:32:01Z",
+      },
+    });
+
+    const result = await checkinStop("PLAN-1", "tenant-a", body);
+
+    const [url, options] = (global.fetch as jest.Mock).mock.calls[0];
+    expect(url).toBe(
+      `${API_BASE_URL}/fuel/mvp/plan/PLAN-1/checkin?tenant_id=tenant-a`,
+    );
+    expect(options.method).toBe("POST");
+    const sent = JSON.parse(options.body);
+    // Gallons go out as entered — no LITERS_PER_GALLON factor anywhere.
+    expect(sent.actual_quantities_gallons).toEqual({ DIESEL_2: 1000 });
+    expect(sent.quantity_unit).toBe("us_gallon");
+    expect(sent.geotag).toEqual({ lat: 29.7604, lng: -95.3698 });
+    expect(sent.event_timestamp).toBe("2026-05-08T14:32:00Z");
+    // The deprecated litres field is never sent by this client.
+    expect(sent).not.toHaveProperty("actual_quantities");
+    expect(result.completed_stops).toBe(1);
+    expect(result.variance_gallons).toEqual({ DIESEL_2: 0 });
+  });
+
+  it("forwards an optional order_id so the stop can be linked to its POD", async () => {
+    mockFetchOnce({
+      ok: true,
+      body: {
+        plan_id: "PLAN-1",
+        route_id: "R-1",
+        station_id: "FS-1",
+        sequence: 1,
+        quantity_unit: "us_gallon",
+        actual_quantities_gallons: { DIESEL_2: 500 },
+        planned_quantities_gallons: { DIESEL_2: 500 },
+        variance_gallons: { DIESEL_2: 0 },
+        order_id: "ORD-9",
+        completed_stops: 2,
+        total_stops: 3,
+        all_complete: false,
+        updated_at: "2026-05-08T15:02:01Z",
+      },
+    });
+
+    await checkinStop("PLAN-1", "tenant-a", { ...body, order_id: "ORD-9" });
+
+    const [, options] = (global.fetch as jest.Mock).mock.calls[0];
+    expect(JSON.parse(options.body).order_id).toBe("ORD-9");
   });
 });

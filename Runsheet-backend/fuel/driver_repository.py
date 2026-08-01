@@ -5,7 +5,10 @@ Implements :class:`DriverRepository` with:
 
 * ``get`` — single driver by ID, tenant-scoped.
 * ``create`` — persist a new Driver.
-* ``update`` — partial update of a Driver document.
+* ``update`` — partial update of a Driver document, with the duty-status
+  projection fields refused (see below).
+* ``project_duty_status`` — the one sanctioned writer of
+  ``drivers_current.status``, called only by ``DutyStatusService``.
 * ``list_for_tenant`` — paginated listing with tenant isolation.
 * ``search`` — search drivers with filters.
 * ``increment_counters`` — atomically adjust ``active_order_count`` and
@@ -20,7 +23,39 @@ repository boundary. Cross-tenant reads degrade to ``None`` (for ``get``)
 or empty lists (for ``search``/``list_for_tenant``).
 Cross-tenant writes raise :class:`DriverCrossTenantAccessError`.
 
-Validates: Requirements 3.1, 3.2.
+``drivers_current.status`` — one writer only
+-------------------------------------------
+
+``status`` is the current-value projection of the ``duty_status_events`` log,
+and ``DutyStatusService`` is its only writer (driver-mobile-app R13.16). This
+repository is the module that made a second write path possible: ``update``
+accepted an arbitrary partial document, so ``PATCH /api/ops/drivers/{id}`` with
+``{"status": "off_duty"}`` moved the projection without appending an event, and
+the projection then disagreed with the log until something happened to repair it.
+
+Two changes close that path:
+
+* :meth:`DriverRepository.update` **refuses** the duty-status projection fields
+  (:data:`DUTY_STATUS_PROJECTION_FIELDS`) and raises
+  :class:`DutyStatusWriteNotPermittedError`. The refusal is structural — a
+  caller cannot reach the field by naming it — rather than a convention a future
+  edit could forget.
+* :meth:`DriverRepository.project_duty_status` is the sanctioned write, used by
+  ``DutyStatusService`` after it has appended the event. It is the only method
+  that names ``status`` in a write.
+
+Record creation is not a second write path in this sense: :meth:`create` sets
+the initial value on a record that has no event log behind it yet, and
+``DutyStatusService.current`` falls back to the projection precisely while no
+event exists. Drift is only possible once an event exists, and from that point
+on this module offers exactly one way to change the field.
+
+Presence is a different axis entirely. ``DriverWSManager`` writes the
+``driver_presence`` index, never ``drivers_current``, so a WebSocket connect or
+disconnect leaves duty status at the last value set (R13.9).
+
+Validates: Requirements 3.1, 3.2 (order-intake-pipeline) and 13.9, 13.16
+(driver-mobile-app).
 """
 from __future__ import annotations
 
@@ -33,6 +68,17 @@ from ops.middleware.tenant_guard import inject_tenant_filter
 from services.time_utils import utcnow
 
 logger = logging.getLogger(__name__)
+
+
+#: The ``drivers_current`` fields only ``DutyStatusService`` may write (R13.16).
+#: ``status`` is the projection of the latest ``duty_status_events`` document;
+#: the other two record *which* event it projects and are meaningless without
+#: it, so all three move together or not at all.
+DUTY_STATUS_PROJECTION_FIELDS: tuple[str, ...] = (
+    "status",
+    "duty_status_event_id",
+    "duty_status_updated_at",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -61,6 +107,38 @@ class DriverCrossTenantAccessError(PermissionError):
         super().__init__(
             f"Tenant {tenant_id!r} attempted cross-tenant access on "
             f"driver {driver_id!r} (owner={owning_tenant_id!r})"
+        )
+
+
+class DutyStatusWriteNotPermittedError(PermissionError):
+    """Raised when a caller other than ``DutyStatusService`` writes ``status``.
+
+    A programming error rather than a request error: every duty-status change
+    has to append an event first, so a caller reaching for the projection
+    directly has skipped the log. The exception names the offending fields and
+    the method to use instead, because the fix is always the same one.
+
+    Validates: Requirement 13.16
+    """
+
+    def __init__(
+        self,
+        *,
+        tenant_id: str,
+        driver_id: str,
+        fields: List[str],
+    ) -> None:
+        self.tenant_id = tenant_id
+        self.driver_id = driver_id
+        self.fields = list(fields)
+        super().__init__(
+            "drivers_current"
+            f".{{{', '.join(self.fields)}}} is written only by "
+            "DutyStatusService, which appends a duty_status_events document "
+            "first (R13.16). Route this change through "
+            "DutyStatusService.transition(), or call "
+            "DriverRepository.project_duty_status() if you are that service. "
+            f"(tenant={tenant_id!r}, driver={driver_id!r})"
         )
 
 
@@ -245,6 +323,11 @@ class DriverRepository:
     ) -> Driver:
         """Persist a new Driver and return the stored model.
 
+        ``status`` is accepted here because provisioning a record establishes its
+        initial value, and there is no event log to drift from yet — every later
+        change goes through ``DutyStatusService`` (R13.16, see the module
+        docstring).
+
         Raises :class:`DriverCrossTenantAccessError` if the driver's
         ``tenant_id`` does not match the caller's ``tenant_id``.
         """
@@ -284,14 +367,94 @@ class DriverRepository:
         driver_id: str,
         updates: Dict[str, Any],
     ) -> Optional[Driver]:
-        """Partially update a driver document.
+        """Partially update a driver document, minus the duty-status projection.
 
         Fetches the existing driver first to validate tenant ownership,
         then applies the partial update. Returns the updated Driver model
         or ``None`` if the driver does not exist for this tenant.
 
-        Raises :class:`DriverCrossTenantAccessError` if the driver
-        belongs to another tenant.
+        Raises:
+            DriverCrossTenantAccessError: The driver belongs to another tenant.
+            DutyStatusWriteNotPermittedError: ``updates`` names ``status`` or one
+                of its bookkeeping fields. Those belong to
+                ``DutyStatusService``, which appends the event first and then
+                calls :meth:`project_duty_status` (R13.16).
+
+        Validates: Requirement 13.16
+        """
+        blocked = [
+            field
+            for field in DUTY_STATUS_PROJECTION_FIELDS
+            if field in (updates or {})
+        ]
+        if blocked:
+            raise DutyStatusWriteNotPermittedError(
+                tenant_id=tenant_id,
+                driver_id=driver_id,
+                fields=blocked,
+            )
+        return await self._apply_updates(tenant_id, driver_id, updates)
+
+    # ------------------------------------------------------------------
+    # Duty-status projection (the ONLY write path for ``status``) — R13.16
+    # ------------------------------------------------------------------
+
+    async def project_duty_status(
+        self,
+        tenant_id: str,
+        driver_id: str,
+        *,
+        status: str,
+        event_id: Optional[str] = None,
+        updated_at: Optional[Any] = None,
+    ) -> Optional[Driver]:
+        """Write the duty-status projection onto ``drivers_current``.
+
+        Called by ``DutyStatusService`` **after** the ``duty_status_events``
+        append has succeeded, and by nothing else. The three fields move together
+        so the projection always records which event produced it.
+
+        Args:
+            tenant_id: The caller's tenant.
+            driver_id: The driver whose projection to write.
+            status: The new duty status, taken from the appended event's
+                ``new_status``.
+            event_id: The id of that event.
+            updated_at: That event's ``server_received_at``.
+
+        Returns:
+            The updated :class:`Driver`, or ``None`` when this tenant holds no
+            record for ``driver_id`` — which the service reports as a lagging
+            projection (202 ``DUTY_STATUS_PROJECTION_PENDING``, R13.18) rather
+            than as a failed transition.
+
+        Raises:
+            DriverCrossTenantAccessError: The driver belongs to another tenant.
+
+        Validates: Requirements 13.3, 13.15, 13.16
+        """
+        return await self._apply_updates(
+            tenant_id,
+            driver_id,
+            {
+                "status": status,
+                "duty_status_event_id": event_id,
+                "duty_status_updated_at": updated_at,
+            },
+        )
+
+    async def _apply_updates(
+        self,
+        tenant_id: str,
+        driver_id: str,
+        updates: Dict[str, Any],
+    ) -> Optional[Driver]:
+        """Apply a partial update after ownership validation.
+
+        The shared body of :meth:`update` and :meth:`project_duty_status`. It
+        deliberately performs **no** duty-status field check: the check belongs
+        to the public entry points, so the sanctioned writer has one way in and
+        every other caller has none.
         """
         self._require_tenant(tenant_id)
         if not driver_id or not driver_id.strip():
@@ -638,6 +801,8 @@ class DriverRepository:
 # ---------------------------------------------------------------------------
 
 __all__ = [
+    "DUTY_STATUS_PROJECTION_FIELDS",
     "DriverRepository",
     "DriverCrossTenantAccessError",
+    "DutyStatusWriteNotPermittedError",
 ]

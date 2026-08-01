@@ -607,7 +607,8 @@ class ElasticsearchService:
             "inventory": self._get_inventory_mapping(),
             "support_tickets": self._get_support_tickets_mapping(),
             "analytics_events": self._get_analytics_mapping(),
-            "import_sessions": self._get_import_sessions_mapping()
+            "import_sessions": self._get_import_sessions_mapping(),
+            "import_sessions_active": self._get_active_import_sessions_mapping(),
         }
 
         for index_name, mapping in indices.items():
@@ -1028,6 +1029,12 @@ class ElasticsearchService:
                         }
                     },
                     "status": {"type": "keyword"},
+                    # Operational state, distinct from the movement ``status``
+                    # above: ``out_of_service`` is written by
+                    # Inspection_Service when a driver reports a defect of that
+                    # severity (driver-mobile-app R8.5), and tracking updates
+                    # that move ``status`` must not clear it.
+                    "operational_state": {"type": "keyword"},
                     "estimated_arrival": {"type": "date"},
                     "last_update": {"type": "date"},
                     "cargo": {
@@ -1195,6 +1202,7 @@ class ElasticsearchService:
             "mappings": {
                 "properties": {
                     "session_id": {"type": "keyword"},
+                    "tenant_id": {"type": "keyword"},
                     "data_type": {"type": "keyword"},
                     "source_type": {"type": "keyword"},
                     "source_name": {
@@ -1213,6 +1221,30 @@ class ElasticsearchService:
                     "created_at": {"type": "date"},
                     "completed_at": {"type": "date"},
                     "duration_seconds": {"type": "float"}
+                }
+            }
+        }
+
+    def _get_active_import_sessions_mapping(self):
+        """Get mapping for durable in-progress import sessions."""
+        return {
+            "mappings": {
+                "properties": {
+                    "session_id": {"type": "keyword"},
+                    "tenant_id": {"type": "keyword"},
+                    "data_type": {"type": "keyword"},
+                    "source_type": {"type": "keyword"},
+                    "source_name": {"type": "text"},
+                    "rows_json": {"type": "text", "index": False},
+                    "columns": {"type": "keyword"},
+                    "sample_rows": {"type": "object", "enabled": False},
+                    "total_rows": {"type": "integer"},
+                    "suggested_mapping": {"type": "object", "enabled": False},
+                    "field_mapping": {"type": "object", "enabled": False},
+                    "validation_result": {"type": "object", "enabled": False},
+                    "status": {"type": "keyword"},
+                    "created_at": {"type": "date"},
+                    "updated_at": {"type": "date"},
                 }
             }
         }

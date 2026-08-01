@@ -361,7 +361,8 @@ class TestInitializeDefaultTemplates:
         """Covers the 12 base templates + 12 severe-weather variants
         introduced by Task 10.9 (Req 9.2.6) + 6 fuel notification
         templates (Task 14.1/14.2, Req 12.1-12.4) + 2 pod_otp templates
-        (driver-mobile-app R5.27)."""
+        (driver-mobile-app R5.27) + 4 driver push templates
+        (driver-mobile-app R9.5-R9.8, R7.11)."""
         es = _make_es_mock()
         es.search_documents = AsyncMock(return_value=_es_response([]))
         renderer = _make_renderer(es)
@@ -371,7 +372,8 @@ class TestInitializeDefaultTemplates:
         # 4 base event types × 3 channels + 4 _storm variants × 3 channels
         # + 6 fuel templates (low_tank_autofill_alert×2, past_due_invoice×1,
         #   delivery_completed×2, e_bol_delivery×1) + pod_otp×2
-        assert es.index_document.call_count == 32
+        #   + driver push×4
+        assert es.index_document.call_count == 36
 
         indexed_keys = set()
         for call in es.index_document.call_args_list:
@@ -385,7 +387,7 @@ class TestInitializeDefaultTemplates:
             assert doc["body_template"]  # non-empty
             indexed_keys.add((doc["event_type"], doc["channel"]))
 
-        # Verify all 32 combinations
+        # Verify all 36 combinations
         base_event_types = {
             "delivery_confirmation",
             "delay_alert",
@@ -409,6 +411,12 @@ class TestInitializeDefaultTemplates:
         # email only, matching the two dispatchers its rule enables.
         expected_keys.add(("pod_otp", "sms"))
         expected_keys.add(("pod_otp", "email"))
+        # Driver push notifications (driver-mobile-app R9.5-R9.8, R7.11) —
+        # the ``push`` channel only.
+        expected_keys.add(("driver_assignment", "push"))
+        expected_keys.add(("driver_assignment_revoked", "push"))
+        expected_keys.add(("driver_exception_escalation", "push"))
+        expected_keys.add(("driver_thread_message", "push"))
         assert indexed_keys == expected_keys
 
     async def test_skips_existing_templates(self):
@@ -423,8 +431,8 @@ class TestInitializeDefaultTemplates:
 
         await renderer.initialize_default_templates("tenant-1")
 
-        # 32 total - 3 existing = 29 new
-        assert es.index_document.call_count == 29
+        # 36 total - 3 existing = 33 new
+        assert es.index_document.call_count == 33
         created_keys = {
             (call[0][2]["event_type"], call[0][2]["channel"])
             for call in es.index_document.call_args_list
@@ -460,6 +468,15 @@ class TestInitializeDefaultTemplates:
             # pod_otp (driver-mobile-app R5.27)
             _template_doc(event_type="pod_otp", channel="sms"),
             _template_doc(event_type="pod_otp", channel="email"),
+            # Driver push notifications (driver-mobile-app R9.5-R9.8, R7.11)
+            _template_doc(event_type="driver_assignment", channel="push"),
+            _template_doc(
+                event_type="driver_assignment_revoked", channel="push"
+            ),
+            _template_doc(
+                event_type="driver_exception_escalation", channel="push"
+            ),
+            _template_doc(event_type="driver_thread_message", channel="push"),
         ]
         existing.extend(fuel_templates)
         es = _make_es_mock()

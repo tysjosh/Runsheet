@@ -116,6 +116,7 @@ def configure_pod_endpoints(
     redis_client=None,
     pod_bol_finalizer=None,
     ocr_service=None,
+    reconciliation_service=None,
     pod_hash_chain_writer: Optional[PodHashChainWriter] = None,
 ) -> None:
     """
@@ -202,6 +203,7 @@ def configure_pod_endpoints(
             pod_hash_chain_writer=_pod_hash_chain_writer,
             pod_bol_finalizer=pod_bol_finalizer,
             ocr_service=ocr_service,
+            reconciliation_service=reconciliation_service,
             driver_ws_manager=driver_ws_manager,
             scheduling_ws_manager=scheduling_ws_manager,
             redis_client=redis_client,

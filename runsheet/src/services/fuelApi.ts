@@ -35,6 +35,16 @@ const API_BASE_URL =
 // the request builders). Components deal in gallons only. Once the backend
 // accepts ``*_gallons`` request fields, delete ``gallonsToWireLiters`` and
 // the wire mappers that call it.
+//
+// ``POST /fuel/mvp/plan/{plan_id}/checkin`` is the first endpoint to make that
+// move: it takes ``actual_quantities_gallons`` with ``quantity_unit:
+// "us_gallon"`` and converts server-side, so {@link checkinStop} sends gallons
+// straight through and converts nothing.
+//
+// ``LITERS_PER_GALLON`` below is pinned to ``LITERS_PER_US_GALLON`` in
+// ``Runsheet-backend/Agents/support/volume_units.py``; the two carry the same
+// exact value and a backend unit test asserts they agree. Do not change one
+// without the other.
 
 export const LITERS_PER_GALLON = 3.785411784;
 
@@ -474,11 +484,56 @@ export interface PlanListItem {
   cost_variance_pct?: number;
 }
 
+/**
+ * Body for ``POST /fuel/mvp/plan/:id/checkin``. Volumes are US gallons on the
+ * wire: the backend converts to litres once, server-side, so no client-side
+ * conversion happens here (see "Volume unit boundary" above).
+ */
 export interface CheckinRequest {
   route_id: string;
   station_id: string;
   sequence: number;
-  actual_quantities: Record<string, number>;
+  /** Fuel grade to US gallons delivered. */
+  actual_quantities_gallons: Record<string, number>;
+  /** Asserts the unit of {@link actual_quantities_gallons} on the contract. */
+  quantity_unit: "us_gallon";
+  /** Check-in coordinates; the endpoint rejects a body without them. */
+  geotag: CheckinGeotag;
+  /** Client-asserted ISO 8601 check-in time; required by the endpoint. */
+  event_timestamp: string;
+  /** Fuel order this stop delivers; links the stop to its POD. */
+  order_id?: string;
+}
+
+/**
+ * Check-in coordinate pair. Distinct from {@link GeoPoint} because the check-in
+ * contract names the longitude field ``lng`` while the station contracts use
+ * ``lon``.
+ */
+export interface CheckinGeotag {
+  lat: number;
+  lng: number;
+}
+
+/** Response of ``POST /fuel/mvp/plan/:id/checkin``; every volume is gallons. */
+export interface CheckinResponse {
+  plan_id: string;
+  route_id: string;
+  station_id: string;
+  sequence: number;
+  quantity_unit: "us_gallon";
+  actual_quantities_gallons: Record<string, number>;
+  planned_quantities_gallons: Record<string, number>;
+  variance_gallons: Record<string, number>;
+  driver_id?: string | null;
+  order_id?: string | null;
+  pod_id?: string | null;
+  event_timestamp?: string | null;
+  server_received_at?: string | null;
+  completed_stops: number;
+  total_stops: number;
+  all_complete: boolean;
+  updated_at: string;
 }
 
 export interface StopVariance {
@@ -873,27 +928,28 @@ export async function rejectPlan(
   );
 }
 
-/** POST /api/fuel/mvp/plan/:id/checkin — record a driver check-in at a stop */
+/**
+ * POST /api/fuel/mvp/plan/:id/checkin — record a driver check-in at a stop.
+ *
+ * Sends ``actual_quantities_gallons`` with ``quantity_unit: "us_gallon"``; the
+ * gallons-to-litres conversion is server-side, so this call performs none (a
+ * client-side conversion here would double-convert). ``geotag`` and
+ * ``event_timestamp`` are required by the endpoint — a body without either is
+ * rejected with 422.
+ */
 export async function checkinStop(
   planId: string,
   tenantId: string,
   body: CheckinRequest,
-): Promise<{
-  plan_id: string;
-  completed_stops: number;
-  total_stops: number;
-  status: string;
-}> {
+): Promise<CheckinResponse> {
   const qs = buildQueryString({ tenant_id: tenantId });
-  return fuelRequest<{
-    plan_id: string;
-    completed_stops: number;
-    total_stops: number;
-    status: string;
-  }>(`/fuel/mvp/plan/${encodeURIComponent(planId)}/checkin${qs}`, {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
+  return fuelRequest<CheckinResponse>(
+    `/fuel/mvp/plan/${encodeURIComponent(planId)}/checkin${qs}`,
+    {
+      method: "POST",
+      body: JSON.stringify(body),
+    },
+  );
 }
 
 /** GET /api/fuel/mvp/plan/:id/outcomes — get plan vs actual outcome comparison */

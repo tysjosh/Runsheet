@@ -74,6 +74,12 @@ _INCREMENT_COMPLETED_TRANSITIONS: set[tuple[str, str]] = {
     ("in_transit", "delivered"),
 }
 
+# An order becomes active work when it is dispatched, not when a dispatcher
+# merely selects a driver.
+_INCREMENT_ACTIVE_TRANSITIONS: set[tuple[str, str]] = {
+    ("scheduled", "dispatched"),
+}
+
 
 # ---------------------------------------------------------------------------
 # OrderService
@@ -188,6 +194,7 @@ class OrderService:
         notes: Optional[str] = None,
         actor_user_id: Optional[str] = None,
         client_event_timestamp: Optional[str] = None,
+        event_payload_extra: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Apply a status transition to an order.
 
@@ -221,6 +228,14 @@ class OrderService:
                 ``ingested_at``, never in place of them (R4.8). ``event_payload``
                 is the free-form part of the event document, so this needs no
                 ``fuel_order_events`` mapping change.
+            event_payload_extra: Additional free-form keys to merge into
+                ``event_payload``. The driver path uses it to record the
+                Hours-of-Service gate verdict — the acting driver, the reading
+                ``recorded_at``, the freshness state, the gate outcome, and the
+                override identifier when one applied (R17.25, R17.26). The six
+                canonical keys above always win, so no caller can overwrite the
+                transition's own record; and like ``client_event_timestamp`` this
+                needs no ``fuel_order_events`` mapping change.
 
         Returns:
             The updated order document.
@@ -259,19 +274,23 @@ class OrderService:
 
         # 5. Build and append the status-specific event
         event_type = _STATUS_TO_EVENT_TYPE.get(new_status, f"order_{new_status}")
-        event = {
-            "event_id": mint_event_id(),
-            "order_id": order["order_id"],
-            "tenant_id": order["tenant_id"],
-            "event_type": event_type,
-            "event_payload": {
+        event_payload: Dict[str, Any] = dict(event_payload_extra or {})
+        event_payload.update(
+            {
                 "old_status": old_status,
                 "new_status": new_status,
                 "reason": reason,
                 "notes": notes,
                 "actor_user_id": actor_user_id,
                 "client_event_timestamp": client_event_timestamp,
-            },
+            }
+        )
+        event = {
+            "event_id": mint_event_id(),
+            "order_id": order["order_id"],
+            "tenant_id": order["tenant_id"],
+            "event_type": event_type,
+            "event_payload": event_payload,
             "event_timestamp": now,
             "ingested_at": now,
             "source_schema_version": order.get("source_schema_version", "1.0"),
@@ -328,6 +347,59 @@ class OrderService:
             reason=hold_reason,
             actor_user_id=actor_user_id,
         )
+
+    async def reconcile_delivery_result(
+        self,
+        *,
+        order: Dict[str, Any],
+        delivery_result: Dict[str, Any],
+        actor_user_id: Optional[str] = None,
+        client_event_timestamp: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Attach POD facts to an order that is already delivered.
+
+        A dispatcher may have moved the order to ``delivered`` just before the
+        driver's offline POD arrived. Re-applying ``delivered -> delivered`` is
+        invalid, but dropping the actual gallons would make invoicing use the
+        requested amount. This repair path writes an explicit audit event,
+        persists the delivery snapshot, and replays the idempotent delivered
+        subscribers so invoice creation can catch up.
+        """
+        if order.get("status") != "delivered":
+            raise ValueError(
+                "reconcile_delivery_result requires an already delivered order"
+            )
+        if not delivery_result:
+            raise ValueError("delivery_result is required")
+        if order.get("delivery_result") == delivery_result:
+            return order
+
+        now = self._clock()
+        order["delivery_result"] = delivery_result
+        order["updated_at"] = now
+        order["last_event_timestamp"] = now
+        event = {
+            "event_id": mint_event_id(),
+            "order_id": order["order_id"],
+            "tenant_id": order["tenant_id"],
+            "event_type": "order_delivery_result_reconciled",
+            "event_payload": {
+                "pod_id": delivery_result.get("pod_id"),
+                "actual_gallons": delivery_result.get("actual_gallons"),
+                "actor_user_id": actor_user_id,
+                "client_event_timestamp": client_event_timestamp,
+            },
+            "event_timestamp": now,
+            "ingested_at": now,
+            "source_schema_version": order.get("source_schema_version", "1.0"),
+            "trace_id": order.get("trace_id", ""),
+        }
+        await self._order_repo.append_event(order["tenant_id"], event)
+        await self._order_repo.upsert_with_last_event_timestamp(
+            order["tenant_id"], order
+        )
+        await self._notify_event_subscribers(order, "delivered")
+        return order
 
     async def release_hold(
         self,
@@ -409,6 +481,9 @@ class OrderService:
 
         delta_active = 0
         delta_completed = 0
+
+        if transition in _INCREMENT_ACTIVE_TRANSITIONS:
+            delta_active = 1
 
         if transition in _DECREMENT_ACTIVE_TRANSITIONS:
             delta_active = -1

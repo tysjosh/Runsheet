@@ -28,7 +28,7 @@ and its existing module globals: no container, no service locator, no FastAPI
 
 Design: see ``.kiro/specs/driver-mobile-app/design.md`` §Service interfaces.
 
-Validates: Requirements 7.5, 7.6, 7.7, 7.8, 7.9, 7.10, 7.12, 7.17, 15.14
+Validates: Requirements 7.5, 7.6, 7.7, 7.8, 7.9, 7.10, 7.11, 7.12, 7.17, 15.14
 """
 
 import logging
@@ -65,9 +65,11 @@ class ThreadMessageService:
             driver (R7.10).
         scheduling_ws_manager: The scheduling channel — delivery to dispatchers
             (R7.10).
-        push_notifier: Reserved for the R7.11 push fallback, which lands with
-            the push-notifier task; unused here so that wiring this service now
-            does not need a signature change later.
+        push_notifier: ``Driver_Push_Service``. The R7.11 fallback: a posted
+            message becomes a push when the assigned driver holds no open
+            realtime connection. The connection probe itself lives in the
+            notifier, which holds the same ``Driver_WS_Manager``, so the rule
+            exists once rather than on both sides of the call.
     """
 
     def __init__(
@@ -291,24 +293,57 @@ class ThreadMessageService:
                     exc,
                 )
 
-        if self._driver_ws_manager is None:
+        if self._driver_ws_manager is not None:
+            try:
+                if recipient_driver_id and hasattr(
+                    self._driver_ws_manager, "send_to_driver"
+                ):
+                    await self._driver_ws_manager.send_to_driver(
+                        recipient_driver_id,
+                        {"type": MESSAGE_EVENT_TYPE, "data": message_doc},
+                    )
+                elif hasattr(self._driver_ws_manager, "broadcast"):
+                    await self._driver_ws_manager.broadcast(
+                        MESSAGE_EVENT_TYPE, message_doc
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Driver WS broadcast failed for %s on thread %s: %s",
+                    MESSAGE_EVENT_TYPE,
+                    _thread_id(message_doc),
+                    exc,
+                )
+
+        await self._notify_thread_message(
+            message_doc, recipient_driver_id=recipient_driver_id
+        )
+
+    async def _notify_thread_message(
+        self, message_doc: dict, *, recipient_driver_id: Optional[str]
+    ) -> None:
+        """Emit the push fallback for a message the driver cannot see (R7.11).
+
+        Called unconditionally: whether the driver holds an open connection is
+        decided inside the notifier, which reads the same ``Driver_WS_Manager``
+        and is where the R7.11 gate lives. The payload carries identifiers only
+        — never the message body, which the app fetches over an authenticated
+        request (R9.8).
+        """
+        if self._push_notifier is None or not recipient_driver_id:
             return
         try:
-            if recipient_driver_id and hasattr(
-                self._driver_ws_manager, "send_to_driver"
-            ):
-                await self._driver_ws_manager.send_to_driver(
-                    recipient_driver_id,
-                    {"type": MESSAGE_EVENT_TYPE, "data": message_doc},
-                )
-            elif hasattr(self._driver_ws_manager, "broadcast"):
-                await self._driver_ws_manager.broadcast(
-                    MESSAGE_EVENT_TYPE, message_doc
-                )
+            await self._push_notifier.notify_thread_message(
+                driver_id=recipient_driver_id,
+                payload={
+                    "tenant_id": message_doc.get("tenant_id"),
+                    "order_id": message_doc.get("order_id"),
+                    "job_id": message_doc.get("job_id"),
+                    "message_id": message_doc.get("message_id"),
+                },
+            )
         except Exception as exc:
             logger.warning(
-                "Driver WS broadcast failed for %s on thread %s: %s",
-                MESSAGE_EVENT_TYPE,
+                "Thread-message push failed on thread %s: %s",
                 _thread_id(message_doc),
                 exc,
             )

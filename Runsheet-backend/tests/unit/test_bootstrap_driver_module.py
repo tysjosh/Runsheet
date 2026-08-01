@@ -191,9 +191,35 @@ class TestTransitionGateStackWiring:
         assert order_transition_service.get_order_repository() is order_repository
 
     @pytest.mark.asyncio
-    async def test_hos_gate_stays_dormant_in_phase_1(self, app, container):
-        """``hos_advisory_service`` is ``None`` until Phase 2 arms the gate."""
+    async def test_arms_the_hos_gate_with_the_advisory_service(self, app, container):
+        """The gate reads its verdict off the instance the HOS block built.
+
+        Arming the *seam* is not arming the gate: the verdict still requires the
+        ``driver.hos_gating`` overlay toggle **and** an enabled ``gps_eld``
+        instance, both of which default to false, so no tenant is newly gated by
+        this wiring (R17.19, R17.20).
+
+        Validates: Requirements 17.19, 17.20
+        """
+        from driver.api.hos_endpoints import configured_hos_advisory_service
         from driver.services import order_transition_service
+
+        await bootstrap_driver.initialize(app, container)
+
+        built = configured_hos_advisory_service()
+        assert built is not None
+        stack = order_transition_service.get_gate_stack()
+        assert stack._hos_advisory_service is built
+        assert callable(getattr(stack._hos_advisory_service, "gate_verdict"))
+
+    @pytest.mark.asyncio
+    async def test_no_es_service_leaves_the_hos_gate_a_recorded_skip(
+        self, app, container
+    ):
+        """No advisory service means the gate is a skip, not a boot failure."""
+        from driver.services import order_transition_service
+
+        container.es_service = None
 
         await bootstrap_driver.initialize(app, container)
 
@@ -213,13 +239,96 @@ class TestTransitionGateStackWiring:
         assert paths.count("/api/driver/orders/{order_id}/status") == 1
 
     @pytest.mark.asyncio
-    async def test_wires_without_an_inspection_service(self, app, container):
-        """Inspection intake lands in a later task; boot must not depend on it."""
+    async def test_arms_the_out_of_service_gate_in_the_same_boot(
+        self, app, container
+    ):
+        """The gate reads the instance the inspection block built (R8.6).
+
+        Ordering is the whole point: ``configure_transition_endpoints`` assigns
+        its collaborators unconditionally, so the inspection wiring has to run
+        first or the gate sits permanently skipped and an out-of-service asset
+        keeps moving.
+
+        Validates: Requirements 8.6
+        """
+        from driver.api.inspection_endpoints import configured_inspection_service
         from driver.services import order_transition_service
 
         await bootstrap_driver.initialize(app, container)
 
-        assert order_transition_service.get_gate_stack() is not None
+        built = configured_inspection_service()
+        assert built is not None
+        assert container.inspection_service is built
+
+        stack = order_transition_service.get_gate_stack()
+        assert stack is not None
+        assert stack._inspection_service is built
+        assert callable(getattr(stack._inspection_service, "is_asset_out_of_service"))
+
+    @pytest.mark.asyncio
+    async def test_threads_the_dispatcher_channel_onto_the_gate_stack(
+        self, app, container
+    ):
+        """The ``hos_block`` broadcast needs the scheduling WS manager (R17.22).
+
+        Validates: Requirements 17.22
+        """
+        from driver.services import order_transition_service
+
+        ws_manager = object()
+        container.scheduling_ws_manager = ws_manager
+
+        await bootstrap_driver.initialize(app, container)
+
+        stack = order_transition_service.get_gate_stack()
+        assert stack is not None
+        assert stack._scheduling_ws_manager is ws_manager
+
+
+class TestTelemetryWiring:
+    """Driver_Telemetry_Service mount and container registration (task 23.1).
+
+    Validates: Requirements 10.1, 10.3
+    """
+
+    @pytest.mark.asyncio
+    async def test_mounts_the_breadcrumb_route_and_builds_the_service(
+        self, app, container
+    ):
+        await bootstrap_driver.initialize(app, container)
+
+        assert "/api/driver/telemetry/breadcrumbs" in {
+            route.path for route in app.routes
+        }
+
+        from driver.api import telemetry_endpoints
+
+        assert telemetry_endpoints._es_service is container.es_service
+        assert telemetry_endpoints._telemetry_service is not None
+
+    @pytest.mark.asyncio
+    async def test_registers_under_its_own_container_name(self, app, container):
+        """The truck/telematics ``telemetry_service`` is a different service."""
+        existing = object()
+        container.telemetry_service = existing
+
+        await bootstrap_driver.initialize(app, container)
+
+        assert container.has("driver_telemetry_service")
+        assert container.get("telemetry_service") is existing
+
+    @pytest.mark.asyncio
+    async def test_telemetry_mount_is_idempotent(self, app, container):
+        await bootstrap_driver.initialize(app, container)
+        first = [r.path for r in app.routes].count(
+            "/api/driver/telemetry/breadcrumbs"
+        )
+        await bootstrap_driver.initialize(app, container)
+        second = [r.path for r in app.routes].count(
+            "/api/driver/telemetry/breadcrumbs"
+        )
+
+        assert first == second == 1
 
 
 class TestShutdown:

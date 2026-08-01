@@ -2,10 +2,11 @@
 Notifications domain bootstrap module.
 
 Initializes: NotificationService, NotificationWSManager, channel dispatchers
-(real Twilio/SendGrid in production, stubs only outside production),
+(real SMS/email/push providers in production, stubs only outside production),
 notification API endpoints, and ES indices.
 
-Requirements: 1.5, 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 5.6, 7.4
+Requirements: 1.5, 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 5.6, 7.4,
+driver-mobile-app 9.14, 9.17
 """
 import logging
 import os
@@ -19,18 +20,22 @@ def _is_production_environment(environment) -> bool:
     return getattr(environment, "value", environment) == "production"
 
 
-def _create_dispatchers(environment=None):
+def _create_dispatchers(environment=None, es_service=None):
     """Build the list of channel dispatchers.
 
     For each channel, attempt to instantiate the real provider-backed
     dispatcher. In production, missing credentials or unavailable provider SDKs
     are fatal so startup cannot silently pretend notifications were sent. In
     non-production environments we retain the log-only stubs for local tests.
+
+    ``es_service`` is optional and is handed to the push dispatcher, which
+    uses it to prune dead device registrations and audit send attempts.
     """
     from notifications.services.channel_dispatchers import (
         StubSmsDispatcher,
         StubEmailDispatcher,
         StubWhatsAppDispatcher,
+        StubPushDispatcher,
         NotificationDispatcherConfigurationError,
     )
 
@@ -107,6 +112,25 @@ def _create_dispatchers(environment=None):
             )
     else:
         _fallback_or_raise("SendGrid env vars not set", StubEmailDispatcher)
+
+    # --- Push (driver mobile app) ---
+    # This is the one construction site for the push provider; every other
+    # caller depends on the ``push`` channel identifier only
+    # (driver-mobile-app R9.15).
+    if os.environ.get("EXPO_ACCESS_TOKEN"):
+        try:
+            from notifications.services.expo_push_dispatcher import (
+                ExpoPushDispatcher,
+            )
+            dispatchers.append(ExpoPushDispatcher(es_service=es_service))
+            logger.info("Registered REAL push dispatcher")
+        except (ValueError, ImportError) as exc:
+            _fallback_or_raise(
+                f"Push dispatcher unavailable: {exc}",
+                StubPushDispatcher,
+            )
+    else:
+        _fallback_or_raise("Push credentials not set", StubPushDispatcher)
 
     return dispatchers
 
@@ -205,7 +229,10 @@ async def initialize(app, container: ServiceContainer) -> None:
 
     # Register channel dispatchers — real when credentials are present,
     # stub (log-only) otherwise.
-    for dispatcher in _create_dispatchers(environment=container.settings.environment):
+    for dispatcher in _create_dispatchers(
+        environment=container.settings.environment,
+        es_service=es_service,
+    ):
         notification_service.register_dispatcher(
             dispatcher.channel_name, dispatcher
         )

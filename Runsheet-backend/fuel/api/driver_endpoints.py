@@ -9,7 +9,10 @@ Exposes tenant-scoped endpoints for driver CRUD and utilization:
   including active_order_count, completed_today, last_seen,
   current_location, on_duty_minutes_today, qualification_warnings (any role).
 * ``POST /api/ops/drivers`` — create a new driver (admin only).
-* ``PATCH /api/ops/drivers/{driver_id}`` — partial update (admin only).
+* ``PATCH /api/ops/drivers/{driver_id}`` — partial update (admin only). A
+  ``status`` change is routed through ``DutyStatusService`` rather than written
+  to ``drivers_current`` here, so the duty-status event log stays the record the
+  projection is derived from (driver-mobile-app Req 13.16, 13.19).
 * ``POST /api/ops/drivers/{driver_id}/app-access`` — grant driver app access
   (admin only): provision the SuperTokens user for an email, assign the
   ``driver`` role, and link ``auth_users.driver_id``.
@@ -83,6 +86,13 @@ _driver_qualification_service: Any = None
 #: Rebuilt on every :func:`configure_driver_endpoints` call from the same
 #: collaborators, so wiring stays a single step.
 _app_access_service: Any = None
+#: ``DutyStatusService`` — the only writer of ``drivers_current.status``
+#: (driver-mobile-app R13.16). An administrator changing a driver's duty status
+#: through ``PATCH /api/ops/drivers/{driver_id}`` is routed through it so the
+#: transition is appended to ``duty_status_events`` before the projection moves.
+#: Wired by ``bootstrap/driver.py``, which runs after the duty-status service
+#: exists; may also be injected later via :func:`set_duty_status_service`.
+_duty_status_service: Any = None
 
 
 def configure_driver_endpoints(
@@ -94,6 +104,7 @@ def configure_driver_endpoints(
     supertokens_admin: Any = None,
     session_revoker: Any = None,
     telemetry_service: Any = None,
+    duty_status_service: Any = None,
 ) -> None:
     """Wire service dependencies into the driver endpoints module.
 
@@ -120,14 +131,26 @@ def configure_driver_endpoints(
       ``revoke_all_sessions_for_user``, resolved lazily.
     * ``telemetry_service`` — audit sink exposing ``log_audit_event``; grants
       and revokes are always logged, with or without it.
+
+    ``duty_status_service`` is the ``DutyStatusService`` that owns
+    ``drivers_current.status`` (R13.16). Like ``ref_resolver`` and
+    ``driver_qualification_service`` it is assigned only when supplied, because
+    ``bootstrap/fuel.py`` calls this function before the driver domain has built
+    the service: the authoritative pass in ``bootstrap/driver.py`` supplies it,
+    and an earlier pass omitting it must not undo that. Tests that need the
+    global reset call :func:`set_duty_status_service` explicitly. Without it a
+    ``PATCH`` carrying ``status`` fails closed rather than writing the field
+    behind the event log's back.
     """
     global _driver_repository, _ref_resolver, _driver_qualification_service
-    global _app_access_service
+    global _app_access_service, _duty_status_service
     _driver_repository = driver_repository
     if ref_resolver is not None:
         _ref_resolver = ref_resolver
     if driver_qualification_service is not None:
         _driver_qualification_service = driver_qualification_service
+    if duty_status_service is not None:
+        _duty_status_service = duty_status_service
 
     _app_access_service = AppAccessService(
         driver_repository=driver_repository,
@@ -148,6 +171,19 @@ def set_driver_qualification_service(driver_qualification_service: Any) -> None:
     """
     global _driver_qualification_service
     _driver_qualification_service = driver_qualification_service
+
+
+def set_duty_status_service(duty_status_service: Any) -> None:
+    """Inject (or clear) the ``DutyStatusService`` post-construction.
+
+    Assigns unconditionally, so passing ``None`` clears the global — which is
+    what lets a test assert the fail-closed branch without leaking a service
+    into the next test.
+
+    Validates: Requirement 13.16
+    """
+    global _duty_status_service
+    _duty_status_service = duty_status_service
 
 
 def _get_driver_repository():
@@ -653,6 +689,58 @@ async def create_driver(
 # ---------------------------------------------------------------------------
 
 
+async def _apply_admin_duty_status(
+    tenant: TenantContext, driver_id: str, status: str
+) -> None:
+    """Record an administrator-set duty-status change through the service.
+
+    This handler used to hand ``status`` to ``DriverRepository.update`` with the
+    rest of the body, which moved ``drivers_current.status`` without appending a
+    ``duty_status_events`` document — the second write path R13.16 forbids and
+    the reason the projection could disagree with the log. The change now goes
+    through ``DutyStatusService.transition`` with ``source="admin"`` and the
+    acting administrator in ``actor_id``, which is also what R13.19 requires of
+    an administrator-set ``inactive``.
+
+    The service is what raises on a value the vocabulary does not know, and its
+    R13.6 delivery-in-progress gate is scoped to ``source="driver"`` — an
+    administrator handling a breakdown still has a way to move the value.
+
+    Raises:
+        AppException: 500 ``INTERNAL_ERROR`` when no service is wired — failing
+            closed, because the alternative is writing the projection behind the
+            event log's back; plus whatever the service raises for the transition
+            itself (400 on an unknown status, 202 when the event is durable but
+            the projection lags).
+
+    Validates: Requirements 13.16, 13.19
+    """
+    service = _duty_status_service
+    if service is None:
+        logger.error(
+            "Duty-status change requested for driver=%s but no "
+            "DutyStatusService is wired; refusing to write "
+            "drivers_current.status directly (R13.16)",
+            driver_id,
+        )
+        raise internal_error(
+            message="Duty status changes are temporarily unavailable",
+            details={
+                "reason": "duty_status_service_not_configured",
+                "driver_id": driver_id,
+            },
+        )
+
+    await service.transition(
+        tenant.tenant_id,
+        driver_id,
+        status,
+        actor_id=tenant.user_id or "admin",
+        source="admin",
+        event_timestamp="",
+    )
+
+
 @router.patch("/{driver_id}", response_model=DriverResponse)
 async def update_driver(
     driver_id: str,
@@ -661,34 +749,46 @@ async def update_driver(
 ) -> DriverResponse:
     """Partially update a driver.
 
-    Admin role required.
-    Validates: Requirement 3.1.3.
+    Admin role required. ``status`` is handled separately from the rest of the
+    body: it is the duty-status projection, so it travels through
+    ``DutyStatusService`` (which appends the event first) while the remaining
+    fields go through ``DriverRepository.update`` — which now refuses ``status``
+    outright (R13.16).
+
+    Validates: Requirement 3.1.3 (order-intake-pipeline) and Requirements 13.16,
+    13.19 (driver-mobile-app).
     """
     _require_admin_role(tenant)
     repo = _get_driver_repository()
 
-    # Build the update dict from non-None fields
-    updates: Dict[str, Any] = {}
-    body_dict = body.model_dump(exclude_unset=True)
-    for key, value in body_dict.items():
-        updates[key] = value
+    # Build the update dict from the fields the caller actually sent, with the
+    # duty-status projection lifted out of it.
+    updates: Dict[str, Any] = dict(body.model_dump(exclude_unset=True))
+    requested_status = updates.pop("status", None)
 
-    if not updates:
-        # Nothing to update — just return the current driver
-        driver = await repo.get(tenant.tenant_id, driver_id)
-        if driver is None:
-            raise resource_not_found(
-                message=f"Driver '{driver_id}' not found",
-                details={"driver_id": driver_id},
-            )
-        return DriverResponse.from_model(driver)
-
-    driver = await repo.update(tenant.tenant_id, driver_id, updates)
+    # Resolve the record before either write. A duty-status event must never be
+    # appended for a driver this tenant does not own.
+    driver = await repo.get(tenant.tenant_id, driver_id)
     if driver is None:
         raise resource_not_found(
             message=f"Driver '{driver_id}' not found",
             details={"driver_id": driver_id},
         )
+
+    if updates:
+        updated = await repo.update(tenant.tenant_id, driver_id, updates)
+        if updated is None:
+            raise resource_not_found(
+                message=f"Driver '{driver_id}' not found",
+                details={"driver_id": driver_id},
+            )
+        driver = updated
+
+    if requested_status is not None:
+        await _apply_admin_duty_status(tenant, driver_id, requested_status)
+        # Re-read so the response carries the projection the service just wrote.
+        driver = await repo.get(tenant.tenant_id, driver_id) or driver
+
     return DriverResponse.from_model(driver)
 
 

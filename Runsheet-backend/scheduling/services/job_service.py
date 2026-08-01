@@ -71,6 +71,7 @@ class JobService:
         self._inventory_service = None  # Wired by bootstrap for auto-consume
         self._tenant_inventory_config = None  # Wired by bootstrap for tenant settings
         self._readiness_checker = None  # Wired by bootstrap for asset readiness checks
+        self._push_notifier = None  # Wired by bootstrap/driver for R9.5 / R9.6
 
     # ------------------------------------------------------------------
     # Inventory service setter (wired by bootstrap)
@@ -83,6 +84,20 @@ class JobService:
             inventory_service: An InventoryService instance.
         """
         self._inventory_service = inventory_service
+
+    def set_push_notifier(self, push_notifier) -> None:
+        """Wire ``Driver_Push_Service`` for the reassignment push alerts.
+
+        Wired from ``bootstrap/driver.py``, which is the first module in the boot
+        order where the notifier exists. Absent it, :meth:`reassign_asset` sends
+        its realtime events exactly as before and no push is emitted.
+
+        Args:
+            push_notifier: Anything exposing ``notify_assignment`` and
+                ``notify_assignment_revoked``. The notifier owns the R13.8
+                suppression rule, so nothing here consults a duty status.
+        """
+        self._push_notifier = push_notifier
 
     def set_tenant_inventory_config(self, tenant_inventory_config) -> None:
         """Wire the TenantInventoryConfigService for tenant settings checks.
@@ -475,6 +490,9 @@ class JobService:
           DriverWSManager.
         - Publishes ``assignment`` event to new driver via DriverWSManager
           with full job details.
+        - Emits the revocation and assignment push alerts through
+          ``Driver_Push_Service`` when one is wired (driver-mobile-app R9.5,
+          R9.6); both are best-effort and neither can fail the reassignment.
         - Appends ``assignment_revoked`` event to job timeline with
           previous/new driver_id and timestamp.
 
@@ -573,6 +591,24 @@ class JobService:
                     exc,
                 )
 
+        # Push alert for the revoked assignment (driver-mobile-app R9.6). The
+        # notifier decides whether it is delivered — duty-status suppression is
+        # its rule, not this method's — and never raises, so a reassignment
+        # cannot fail because a handset was unreachable.
+        if old_asset_id and self._push_notifier is not None:
+            try:
+                await self._push_notifier.notify_assignment_revoked(
+                    driver_id=old_asset_id,
+                    payload={"tenant_id": tenant_id, "job_id": job_id},
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Revocation push failed for driver %s on job %s: %s",
+                    old_asset_id,
+                    job_id,
+                    exc,
+                )
+
         # Merge updates into doc for return / broadcast
         job_doc.update(update_fields)
 
@@ -586,6 +622,23 @@ class JobService:
             except Exception as exc:
                 logger.warning(
                     "Failed to send assignment to new driver %s for job %s: %s",
+                    new_asset_id,
+                    job_id,
+                    exc,
+                )
+
+        # Push alert for the new assignment (driver-mobile-app R9.5), suppressed
+        # by the notifier while the receiving driver is off duty or inactive
+        # (R13.8).
+        if self._push_notifier is not None:
+            try:
+                await self._push_notifier.notify_assignment(
+                    driver_id=new_asset_id,
+                    payload={"tenant_id": tenant_id, "job_id": job_id},
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Assignment push failed for driver %s on job %s: %s",
                     new_asset_id,
                     job_id,
                     exc,
