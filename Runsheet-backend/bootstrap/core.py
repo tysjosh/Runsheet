@@ -20,6 +20,7 @@ _credit_override_expiry_task = None
 # Module-level reference for the invoice overdue background task
 # so shutdown can cancel it.
 _invoice_overdue_task = None
+_invoice_draft_finalize_task = None
 
 # Module-level reference for the AR aging snapshot background task
 # so shutdown can cancel it.
@@ -841,6 +842,58 @@ async def initialize(app, container: ServiceContainer) -> None:
             logger.info(
                 "Invoice overdue job started (interval: %ds)",
                 INVOICE_OVERDUE_INTERVAL_SECONDS,
+            )
+
+            # ── Invoice draft-grace finalize job (Req 5.2) ───────────────
+            # Transitions draft invoices to open once their grace window
+            # elapses. Without this the delivery→ERP loop stays open: an
+            # invoice generated from a delivered order waits for a human to
+            # call POST /invoices/{id}/finalize, and nothing enqueues the QBO
+            # push. Shares the overdue job's service instance and pattern.
+            global _invoice_draft_finalize_task
+            from commerce.services.invoice_draft_finalize_job import (
+                run_invoice_draft_finalize_cycle,
+                INVOICE_DRAFT_FINALIZE_INTERVAL_SECONDS,
+            )
+
+            _draft_redis = (
+                container.redis_client
+                if container.has("redis_client")
+                else None
+            )
+
+            async def _periodic_invoice_draft_finalize() -> None:
+                """Background task that finalizes drafts past their grace."""
+                try:
+                    while True:
+                        await asyncio.sleep(
+                            INVOICE_DRAFT_FINALIZE_INTERVAL_SECONDS
+                        )
+                        try:
+                            finalized = await run_invoice_draft_finalize_cycle(
+                                es_service=elasticsearch_service,
+                                invoice_service=_overdue_invoice_service,
+                                redis_client=_draft_redis,
+                            )
+                            if finalized:
+                                logger.info(
+                                    "Invoice draft-finalize job: %d "
+                                    "invoice(s) finalized",
+                                    finalized,
+                                )
+                        except Exception as exc:
+                            logger.error(
+                                "Invoice draft-finalize job failed: %s", exc
+                            )
+                except asyncio.CancelledError:
+                    logger.info("Invoice draft-finalize task cancelled")
+
+            _invoice_draft_finalize_task = asyncio.create_task(
+                _periodic_invoice_draft_finalize()
+            )
+            logger.info(
+                "Invoice draft-finalize job started (interval: %ds)",
+                INVOICE_DRAFT_FINALIZE_INTERVAL_SECONDS,
             )
         except Exception as exc:
             logger.warning("Invoice overdue job wiring failed: %s", exc)
