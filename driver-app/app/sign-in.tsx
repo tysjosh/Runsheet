@@ -1,3 +1,4 @@
+import { openURL } from 'expo-linking';
 import { useState } from 'react';
 import { KeyboardAvoidingView, Platform, View } from 'react-native';
 
@@ -7,6 +8,7 @@ import { Text } from '@/components/ui/text';
 import { demoPreviewEnabled } from '@/lib/demo-preview';
 import { notificationManager } from '@/lib/notification-manager';
 import { signIn } from '@/lib/session';
+import { forgotPasswordUrl } from '@/lib/web-app';
 import { driverWebSocket } from '@/lib/websocket';
 
 export default function SignInScreen() {
@@ -18,6 +20,29 @@ export default function SignInScreen() {
   );
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+
+  // Demo preview prefills a fake credential against a local fetch stub, so
+  // there is no real account to recover; and with no configured web origin
+  // there is nowhere to send the driver. Either way, render no affordance
+  // rather than a link that cannot work.
+  const resetUrl = demoPreviewEnabled ? null : forgotPasswordUrl();
+
+  const openPasswordReset = async () => {
+    if (!resetUrl) {
+      return;
+    }
+    setMessage(null);
+    try {
+      // The system browser, not an in-app webview: the reset flow establishes a
+      // SuperTokens session on the web origin and must not share this app's
+      // webview state.
+      await openURL(resetUrl);
+    } catch {
+      setMessage(
+        'The password reset page could not be opened. Contact dispatch to have a reset link sent to you.',
+      );
+    }
+  };
 
   const submit = async () => {
     if (!email.trim() || !password) {
@@ -101,6 +126,16 @@ export default function SignInScreen() {
                   : 'Sign in'}
             </Text>
           </Button>
+          {resetUrl && (
+            <Button
+              variant="link"
+              size="sm"
+              disabled={submitting}
+              onPress={() => void openPasswordReset()}
+            >
+              <Text>Forgot your password?</Text>
+            </Button>
+          )}
         </View>
       </View>
     </KeyboardAvoidingView>
