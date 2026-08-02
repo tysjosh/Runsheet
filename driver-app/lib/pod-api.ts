@@ -27,7 +27,11 @@
  * Requirements: 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 5.14, 5.18, 5.19, 11.6, 11.8, 11.16
  */
 
-import * as FileSystem from 'expo-file-system';
+// SDK 54 (expo-file-system 19) moved the URI-based API to
+// `expo-file-system/legacy`. `uploadAsync` in particular has no equivalent in
+// the new File/Directory API, and the deprecated stub the package root still
+// exports for it throws at runtime, so this must resolve to the legacy entry.
+import * as FileSystem from 'expo-file-system/legacy';
 import { ImageManipulator, SaveFormat } from 'expo-image-manipulator';
 import NetInfo from '@react-native-community/netinfo';
 import * as SQLite from 'expo-sqlite';
