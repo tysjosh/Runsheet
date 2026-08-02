@@ -2,39 +2,55 @@
  * The Runsheet **web app** origin, and the pages on it the driver app links out
  * to.
  *
+ * The origin is not configured in this app. It is fetched from the backend's
+ * unauthenticated `GET /api/auth/public-config`, which publishes
+ * `settings.supertokens_website_domain` — the value
+ * `InputAppInfo(website_domain=...)` is built from, and therefore the origin
+ * SuperTokens mints password-reset links against. Asking the backend is the
+ * whole point: a build-time copy in this app (there used to be one,
+ * `EXPO_PUBLIC_WEB_BASE_URL`) is a second source of truth for one value and can
+ * drift from the authoritative one, sending the driver to a host that cannot
+ * service the reset token.
+ *
  * This is deliberately separate from `EXPO_PUBLIC_API_BASE_URL` in
  * `lib/api-client.ts`: that value is the *backend* origin, and the web app is a
  * different host in general, so the web origin cannot be derived from it.
  *
- * `EXPO_PUBLIC_WEB_BASE_URL` MUST match the backend's
- * `SUPERTOKENS_WEBSITE_DOMAIN` (`config/settings.py` →
- * `settings.supertokens_website_domain`), because that is the origin SuperTokens
- * builds password-reset links against. It is therefore a *second* source of
- * truth for one origin, and the two can drift: point this at a host that is not
- * the one the reset token was minted for and the driver lands on a page that
- * cannot service the token. Whoever changes one must change the other.
- *
  * The origin is TLS-only, matching the transport rule the API client enforces
- * (Requirement 15.4). A value that is absent, blank, or not `https://` yields
- * `null` rather than throwing: these accessors are read by the pre-auth sign-in
- * screen, which hides the affordance instead of rendering a dead link.
+ * (Requirement 15.4). A value that is absent, blank, or not `https://` — and a
+ * config call that fails or never answers — yields `null` rather than throwing:
+ * this is read by the pre-auth sign-in screen, which hides the affordance
+ * instead of rendering a dead link, and must never block signing in.
  */
 
-import { InsecureBaseUrlError, assertTls } from './api-client';
+import { InsecureBaseUrlError, apiRequest, assertTls } from './api-client';
 
 /** Path of the web app's self-service password reset page. */
 export const FORGOT_PASSWORD_PATH = '/auth/forgot-password';
 
+/** Backend route publishing the authoritative web app origin. */
+export const PUBLIC_CONFIG_PATH = '/api/auth/public-config';
+
+/** Shape of the `GET /api/auth/public-config` body. One field, by design. */
+interface PublicConfigBody {
+  website_domain?: string | null;
+}
+
 /**
- * The configured web app origin, or `null` when it is unset or not TLS.
- *
- * Trimmed and stripped of trailing slashes, exactly as `configureApiClient`
- * normalizes the backend origin.
+ * Resolved once per app session. The origin is deployment configuration, so it
+ * does not change under a running app; caching the promise means N renders of
+ * the sign-in screen share one request rather than issuing one each.
  */
-export function webBaseUrl(): string | null {
-  // `EXPO_PUBLIC_*` values are inlined at build time by the Expo bundler.
-  const raw = process.env.EXPO_PUBLIC_WEB_BASE_URL;
-  const trimmed = raw?.trim().replace(/\/+$/, '') ?? '';
+let resolved: Promise<string | null> | null = null;
+
+/** Drop the cached origin so the next read re-fetches. Tests only. */
+export function resetWebAppConfig(): void {
+  resolved = null;
+}
+
+/** Normalize the origin the backend reported, or `null` if it is unusable. */
+function normalizeOrigin(raw: unknown): string | null {
+  const trimmed = typeof raw === 'string' ? raw.trim().replace(/\/+$/, '') : '';
   if (trimmed.length === 0) {
     return null;
   }
@@ -48,11 +64,48 @@ export function webBaseUrl(): string | null {
   }
 }
 
+async function fetchWebBaseUrl(): Promise<string | null> {
+  // `auth: false` — the endpoint is on the backend's Public_Route_Allowlist and
+  // is read before there is any session to attach.
+  const body = await apiRequest<PublicConfigBody>({
+    method: 'GET',
+    path: PUBLIC_CONFIG_PATH,
+    auth: false,
+  });
+  return normalizeOrigin(body?.website_domain);
+}
+
+/**
+ * The web app origin the backend reports, or `null` when it is unset, not TLS,
+ * or could not be fetched.
+ *
+ * A failed call resolves to `null` and is **not** cached, so a transient network
+ * failure hides the link for this attempt rather than for the whole session. A
+ * successful answer — including a `null` origin, which is a definitive answer —
+ * is cached.
+ */
+export function webBaseUrl(): Promise<string | null> {
+  if (resolved === null) {
+    const inFlight: Promise<string | null> = fetchWebBaseUrl().catch(() => {
+      if (resolved === inFlight) {
+        resolved = null;
+      }
+      return null;
+    });
+    resolved = inFlight;
+  }
+  return resolved;
+}
+
 /**
  * Absolute URL of the web app's password reset page, or `null` when the web
  * origin is unknown — in which case the caller renders no affordance at all.
+ *
+ * Asynchronous because the origin comes from the backend. Callers must start
+ * with the affordance hidden and reveal it only once this resolves to a URL, so
+ * the link never flashes visible and then disappears.
  */
-export function forgotPasswordUrl(): string | null {
-  const base = webBaseUrl();
+export async function forgotPasswordUrl(): Promise<string | null> {
+  const base = await webBaseUrl();
   return base === null ? null : `${base}${FORGOT_PASSWORD_PATH}`;
 }

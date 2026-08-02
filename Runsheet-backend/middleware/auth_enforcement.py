@@ -77,9 +77,10 @@ logger = logging.getLogger(__name__)
 #
 # The allowlist is intentionally tiny and contains ONLY sanctioned
 # categories: health checks, API documentation, the SuperTokens auth routes,
-# self-verifying webhook (HMAC) routes, and the self-authenticating voice
+# self-verifying webhook (HMAC) routes, the self-authenticating voice
 # surfaces (Surface A ``/voice-intake`` HMAC, Surface B ``/voice/*`` per-tenant
-# Bearer API key). Everything else is protected by default (Req 6.2).
+# Bearer API key), and the single non-secret pre-auth config route needed to
+# render the sign-in screen. Everything else is protected by default (Req 6.2).
 # Property 16 (task 8.3) asserts this categorization holds.
 # ---------------------------------------------------------------------------
 
@@ -155,6 +156,27 @@ VOICE_SELF_AUTH_ROUTES: frozenset[str] = frozenset({"/voice-intake"})
 #: ``/drivers/...``) are affected.
 VOICE_SELF_AUTH_PREFIXES: tuple[str, ...] = ("/voice/",)
 
+#: The pre-auth client bootstrap route (Req 6.3), served by
+#: ``auth/api/public_config_endpoints.py``:
+#:   * ``GET /api/auth/public-config`` → ``{"website_domain": ...}``
+#: Allowlisted because it is needed *before* a session exists: it serves the
+#: sign-in screen, which uses the web app origin to render its password-reset
+#: link. Unlike the webhook and voice entries this route does not
+#: self-authenticate — it does not need to, because it discloses nothing that
+#: authentication would protect. The website domain is not a secret; it is the
+#: origin in the user's own address bar, already present in every reset email
+#: and in the web app's published bundle. The response takes no parameter, reads
+#: no header, touches no datastore, and derives nothing from the caller, so it
+#: is identical for every requester and carries no tenant data. It is a single
+#: field: no connection URI, API key, or credential of any kind is exposed, and
+#: ``tests/unit/test_public_config_endpoint.py`` pins the exact key set so this
+#: entry cannot later become a config-disclosure surface without a test failing.
+#: NOTE this path is NOT covered by the ``/auth`` ``PUBLIC_PREFIXES`` entry —
+#: that matches ``/auth`` and ``/auth/...`` only, not ``/api/auth/...`` — so the
+#: sibling ``/api/auth/admin/*`` and ``/api/auth/account/*`` routes stay
+#: protected. This is an exact match on one path, not a prefix, for that reason.
+PUBLIC_CONFIG_ROUTES: frozenset[str] = frozenset({"/api/auth/public-config"})
+
 #: auth_provider values under which global enforcement is active. After the
 #: hard cutover ``supertokens`` is the only supported (and only enforcing)
 #: provider.
@@ -185,9 +207,10 @@ def is_public_route(path: str) -> bool:
     """Return whether ``path`` is on the Public_Route_Allowlist (Req 6.3).
 
     Matches the exact health/docs routes, the ``/auth`` SuperTokens prefix, the
-    self-verifying webhook routes, and the self-authenticating voice surfaces
+    self-verifying webhook routes, the self-authenticating voice surfaces
     (Surface A ``/voice-intake`` HMAC, Surface B ``/voice/*`` per-tenant Bearer
-    API key). Everything else is treated as protected so a newly added route is
+    API key), and the pre-auth ``/api/auth/public-config`` bootstrap route.
+    Everything else is treated as protected so a newly added route is
     fail-closed by default (Req 6.2).
     """
     if path in PUBLIC_ROUTE_ALLOWLIST:
@@ -195,6 +218,8 @@ def is_public_route(path: str) -> bool:
     if path in WEBHOOK_HMAC_ROUTES:
         return True
     if path in VOICE_SELF_AUTH_ROUTES:
+        return True
+    if path in PUBLIC_CONFIG_ROUTES:
         return True
     for prefix in PUBLIC_PREFIXES:
         if path == prefix or path.startswith(prefix + "/"):
@@ -400,6 +425,7 @@ __all__ = [
     "WEBHOOK_HMAC_PREFIXES",
     "VOICE_SELF_AUTH_ROUTES",
     "VOICE_SELF_AUTH_PREFIXES",
+    "PUBLIC_CONFIG_ROUTES",
     "is_public_route",
     "provider_enforces",
     "register_auth_enforcement",

@@ -1,5 +1,5 @@
 import { openURL } from 'expo-linking';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { KeyboardAvoidingView, Platform, View } from 'react-native';
 
 import { Button } from '@/components/ui/button';
@@ -22,10 +22,31 @@ export default function SignInScreen() {
   const [message, setMessage] = useState<string | null>(null);
 
   // Demo preview prefills a fake credential against a local fetch stub, so
-  // there is no real account to recover; and with no configured web origin
-  // there is nowhere to send the driver. Either way, render no affordance
-  // rather than a link that cannot work.
-  const resetUrl = demoPreviewEnabled ? null : forgotPasswordUrl();
+  // there is no real account to recover; and with no known web origin there is
+  // nowhere to send the driver. Either way, render no affordance rather than a
+  // link that cannot work.
+  //
+  // The origin comes from the backend, so it is not known at first render.
+  // Starting at `null` keeps the link hidden until it resolves: revealing it
+  // optimistically would flash a link that then vanishes on a deployment with
+  // no configured web origin. Nothing here gates sign-in — a config call that
+  // fails or never answers just leaves the link hidden.
+  const [resetUrl, setResetUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (demoPreviewEnabled) {
+      return;
+    }
+    let active = true;
+    void forgotPasswordUrl().then((url) => {
+      if (active) {
+        setResetUrl(url);
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const openPasswordReset = async () => {
     if (!resetUrl) {
