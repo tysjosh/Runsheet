@@ -27,6 +27,39 @@ logger = logging.getLogger(__name__)
 SHADOW_PROPOSALS_INDEX = "agent_shadow_proposals"
 
 
+# ---------------------------------------------------------------------------
+# Degradation reporting convention (agent → orchestrator)
+# ---------------------------------------------------------------------------
+#
+# An overlay agent can finish a cycle without raising and still have produced
+# nothing useful: RoutePlanningAgent skips every truck it was handed,
+# DeliveryPrioritizationAgent scores no orders, CompartmentLoadingAgent builds
+# no plan. ``monitor_cycle`` returning normally therefore does not mean the
+# cycle succeeded, and an orchestrator that treats it that way reports a silent
+# skip as success.
+#
+# These two keys are the agent-agnostic channel for saying so. Any agent may
+# set them on ``self._cycle_metrics`` at the end of ``evaluate()``; they are
+# read back off the public ``cycle_metrics`` snapshot by
+# ``FuelDistributionPipeline``, which imports these very names so the writer
+# and the reader cannot drift apart. Route-specific detail (``route_skips``,
+# ``trucks_skipped``) still rides alongside for anyone who wants it, but the
+# orchestrator only needs the generic pair.
+#
+# Contract:
+#   * ``CYCLE_METRIC_DEGRADED`` — ``bool``. ``True`` when the cycle completed
+#     but did not do the whole job. Absent is equivalent to ``False``.
+#   * ``CYCLE_METRIC_DEGRADATION_REASONS`` — ``list``. Structured, serialisable
+#     entries explaining the degradation. Never the sole signal: a degraded
+#     cycle with an empty reason list is still degraded.
+#
+# Reading is deliberately fail-safe on the consumer side. A monitoring signal
+# must never take down the run it monitors, so a missing ``cycle_metrics``, a
+# non-mapping one, or a property that raises all read as *not degraded*.
+CYCLE_METRIC_DEGRADED = "degraded"
+CYCLE_METRIC_DEGRADATION_REASONS = "degradation_reasons"
+
+
 class OverlayAgentBase(AutonomousAgentBase):
     """Base class for Layer 1 and Layer 2 overlay agents.
 

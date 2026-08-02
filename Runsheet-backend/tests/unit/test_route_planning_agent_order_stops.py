@@ -28,6 +28,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from Agents.overlay.base_overlay_agent import (
+    CYCLE_METRIC_DEGRADATION_REASONS,
+    CYCLE_METRIC_DEGRADED,
+)
 from Agents.overlay.data_contracts import InterventionProposal, RiskClass
 from Agents.overlay.route_planning_agent import (
     FUEL_ORDERS_CURRENT_INDEX,
@@ -227,7 +231,7 @@ class TestCustomerTankTenantRoutes:
         }
         assert params["distance_km"] > 0.0
         assert agent.last_route_skips == []
-        assert agent.cycle_metrics["routing_degraded"] is False
+        assert agent.cycle_metrics["degraded"] is False
 
     @pytest.mark.asyncio
     async def test_geocoded_ship_to_address_resolves_stop(self):
@@ -355,12 +359,19 @@ class TestSkipReasons:
         assert skips[0].missing == ["cust-1"]
 
         metrics = agent.cycle_metrics
-        assert metrics["routing_degraded"] is True
         assert metrics["trucks_routed"] == 0
         assert metrics["loading_plans_considered"] == 1
         assert [s["reason_code"] for s in metrics["route_skips"]] == [
             "unresolvable_stop_locations"
         ]
+
+        # The agent-agnostic keys FuelDistributionPipeline actually reads. They
+        # are asserted through the imported constants, not literals, so the
+        # writer here and the reader in the pipeline cannot drift apart.
+        assert metrics[CYCLE_METRIC_DEGRADED] is True
+        assert [
+            s["reason_code"] for s in metrics[CYCLE_METRIC_DEGRADATION_REASONS]
+        ] == ["unresolvable_stop_locations"]
 
     @pytest.mark.asyncio
     async def test_assignments_without_station_id_record_reason(self):
@@ -387,7 +398,7 @@ class TestSkipReasons:
             "no_demand_identifiers"
         ]
         assert agent.last_route_skips[0].missing == ["station_id"]
-        assert agent.cycle_metrics["routing_degraded"] is True
+        assert agent.cycle_metrics["degraded"] is True
 
     @pytest.mark.asyncio
     async def test_business_exclusion_records_its_own_reason_code(self):
@@ -449,7 +460,7 @@ class TestSkipReasons:
             "unresolvable_stop_locations"
         ]
         assert recorded[0]["truck_id"] == "truck-bad"
-        assert agent.cycle_metrics["routing_degraded"] is True
+        assert agent.cycle_metrics["degraded"] is True
         assert agent.cycle_metrics["trucks_routed"] == 1
 
 

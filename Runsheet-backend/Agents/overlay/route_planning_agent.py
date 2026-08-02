@@ -42,7 +42,11 @@ from typing import (
 
 import httpx
 
-from Agents.overlay.base_overlay_agent import OverlayAgentBase
+from Agents.overlay.base_overlay_agent import (
+    CYCLE_METRIC_DEGRADATION_REASONS,
+    CYCLE_METRIC_DEGRADED,
+    OverlayAgentBase,
+)
 from Agents.overlay.data_contracts import (
     InterventionProposal,
     RiskClass,
@@ -1225,14 +1229,24 @@ class RoutePlanningAgent(OverlayAgentBase):
         # ``cycle_metrics`` is the agent's existing per-run result surface
         # (the base class updates it at the end of every monitor_cycle), so
         # the skip reasons ride the same channel rather than a parallel one.
-        # ``routing_degraded`` is the flag that stops a run which routed
-        # zero of N loading plans from reading as an unqualified success.
+        #
+        # The flag is the agent-agnostic ``CYCLE_METRIC_DEGRADED`` rather than a
+        # ``routing_degraded`` of its own. Skipping every truck is not a
+        # route-specific failure shape — prioritization scoring nothing and
+        # loading building no plan are the same shape — and the orchestrator
+        # that has to notice must not need a per-agent key to look for.
+        # ``FuelDistributionPipeline`` imports these two names from
+        # ``base_overlay_agent``, so the writer here and the reader there
+        # cannot drift. ``route_skips``/``trucks_skipped`` remain for consumers
+        # that want the route-shaped detail.
+        skip_payload = [s.model_dump(mode="json") for s in skips]
         self._cycle_metrics.update({
             "loading_plans_considered": len(proposals),
             "trucks_routed": len(route_proposals),
             "trucks_skipped": len(skips),
-            "route_skips": [s.model_dump(mode="json") for s in skips],
-            "routing_degraded": bool(skips),
+            "route_skips": skip_payload,
+            CYCLE_METRIC_DEGRADED: bool(skips),
+            CYCLE_METRIC_DEGRADATION_REASONS: skip_payload,
         })
         if skips and not route_proposals:
             logger.error(

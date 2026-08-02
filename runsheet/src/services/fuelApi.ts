@@ -575,10 +575,24 @@ export interface CostConfig {
 
 // ─── Fuel Distribution MVP Types ─────────────────────────────────────────────
 
+/** One stage that finished its cycle without doing its job. */
+export interface PipelineDegradation {
+  agent_id: string;
+  reasons: unknown[];
+}
+
 export interface GeneratePlanResponse {
   run_id: string;
   plan_id?: string | null;
+  /**
+   * Mirrors the backend `PipelineState`. `"complete"` means every stage ran
+   * *and* produced something; `"degraded"` means none of them raised but at
+   * least one produced nothing (e.g. route planning skipped every truck).
+   * Treating `"degraded"` as success is what `degraded` exists to prevent.
+   */
   status: string;
+  degraded?: boolean;
+  degradation_reasons?: PipelineDegradation[];
 }
 
 export interface ReplanRequest {

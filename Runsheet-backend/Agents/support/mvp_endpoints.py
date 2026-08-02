@@ -13,7 +13,7 @@ Validates: Requirements 1.1–1.5, 2.1–2.6, 3.1–3.9, 4.1–4.7, 5.1–5.6, 6
 """
 
 import logging
-from typing import Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
@@ -71,9 +71,20 @@ ROUTER_AUTH_POLICY = "jwt_required"
 
 
 class GeneratePlanResponse(BaseModel):
-    """Response for POST /plan/generate."""
+    """Response for POST /plan/generate.
+
+    ``status`` mirrors :class:`~Agents.support.fuel_distribution_pipeline.PipelineState`
+    verbatim, so it can now be ``"degraded"``: every stage ran without raising
+    but at least one produced nothing — the route stage skipping every truck it
+    was handed, for example. ``degraded`` and ``degradation_reasons`` carry that
+    outcome explicitly so a caller that only inspects a boolean, or only renders
+    a message, is not obliged to know the state vocabulary to avoid reporting a
+    silent skip as success.
+    """
     run_id: str
     status: str
+    degraded: bool = False
+    degradation_reasons: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class ReplanRequest(BaseModel):
@@ -281,10 +292,12 @@ async def generate_plan(
     tenant_id = tenant.tenant_id
     try:
         run_id = await pipeline.run(tenant_id=tenant_id)
-        status_info = await pipeline.get_status(run_id)
+        status_info = await pipeline.get_status(run_id) or {}
         return GeneratePlanResponse(
             run_id=run_id,
-            status=status_info["state"] if status_info else "pending",
+            status=status_info.get("state", "pending"),
+            degraded=bool(status_info.get("degraded", False)),
+            degradation_reasons=list(status_info.get("degradations") or []),
         )
     except Exception as e:
         logger.error("Failed to generate plan: %s", e)

@@ -61,9 +61,12 @@ from Agents.support.mvp_es_mappings import setup_mvp_indices
 
 # Pipeline coordinator
 from Agents.support.fuel_distribution_pipeline import (
+    STAGE_RESULT_COMPLETED,
+    STAGE_RESULT_DEGRADED,
     FuelDistributionPipeline,
     PipelineState,
     broadcast_pipeline_event,
+    read_agent_degradation,
 )
 
 __all__ = [
@@ -111,5 +114,8 @@ __all__ = [
     # Pipeline coordinator
     "FuelDistributionPipeline",
     "PipelineState",
+    "STAGE_RESULT_COMPLETED",
+    "STAGE_RESULT_DEGRADED",
     "broadcast_pipeline_event",
+    "read_agent_degradation",
 ]
