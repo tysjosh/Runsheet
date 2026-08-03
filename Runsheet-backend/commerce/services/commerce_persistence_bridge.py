@@ -1087,9 +1087,27 @@ async def mirror_current_state_fields(
 # read-cutover is active.
 
 
+def _hybrid_cut_over(aggregate_type: str) -> bool:
+    """Whether hybrid reads for this aggregate should come from Postgres.
+
+    Two conditions, not one. The flag has to be on *and* the aggregate has to
+    have a Postgres table to read. Checking only the flag meant a retired
+    aggregate — ``shipment``, dropped with ``shipments_current`` in rev 0007 —
+    took every caller into ``HybridReadRepository.__init__`` and a ``ValueError``
+    as soon as ``COMMERCE_READ_FROM_POSTGRES`` was turned on. An aggregate with
+    no table is not cut over by definition, so the honest answer is to keep
+    serving it from Elasticsearch rather than to fail.
+    """
+    if not read_from_postgres():
+        return False
+    from persistence.read_repositories import HybridReadRepository
+
+    return HybridReadRepository.is_registered(aggregate_type)
+
+
 async def read_hybrid_get(aggregate_type: str, tenant_id: str, doc_id: str):
     """Read one hybrid aggregate from Postgres, or _NOT_CUT_OVER when ES-served."""
-    if not read_from_postgres():
+    if not _hybrid_cut_over(aggregate_type):
         return _NOT_CUT_OVER
     from persistence.database import session_scope
     from persistence.read_repositories import HybridReadRepository
@@ -1105,7 +1123,7 @@ async def read_hybrid_get_any(aggregate_type: str, doc_id: str):
     For lookups where the tenant is derived from the row (e.g. webhook channel
     resolution by globally-unique channel_id).
     """
-    if not read_from_postgres():
+    if not _hybrid_cut_over(aggregate_type):
         return _NOT_CUT_OVER
     from persistence.database import session_scope
     from persistence.read_repositories import HybridReadRepository
@@ -1118,7 +1136,7 @@ async def read_hybrid_get_any(aggregate_type: str, doc_id: str):
 async def read_hybrid_find_one(aggregate_type: str, tenant_id: str, *,
                                term_filters: dict | None = None):
     """First tenant-scoped doc matching term_filters, or _NOT_CUT_OVER off."""
-    if not read_from_postgres():
+    if not _hybrid_cut_over(aggregate_type):
         return _NOT_CUT_OVER
     from persistence.database import session_scope
     from persistence.read_repositories import HybridReadRepository
@@ -1132,7 +1150,7 @@ async def read_hybrid_list(aggregate_type: str, tenant_id: str, *,
                            filters: dict | None = None, cursor: str | None = None,
                            limit: int = 50):
     """List a hybrid aggregate from Postgres, or _NOT_CUT_OVER when ES-served."""
-    if not read_from_postgres():
+    if not _hybrid_cut_over(aggregate_type):
         return _NOT_CUT_OVER
     from persistence.database import session_scope
     from persistence.read_repositories import HybridReadRepository
@@ -1165,7 +1183,7 @@ async def read_hybrid_search(aggregate_type: str, tenant_id: str, *,
     Used for the orders/jobs list endpoints whose contract is offset + total
     (not the keyset ``list`` helper above).
     """
-    if not read_from_postgres():
+    if not _hybrid_cut_over(aggregate_type):
         return _NOT_CUT_OVER
     from persistence.database import session_scope
     from persistence.read_repositories import HybridReadRepository
@@ -1203,7 +1221,7 @@ async def read_hybrid_search_all_tenants(aggregate_type: str, *,
     when reads should still be served from Elasticsearch. System-level only —
     request-path reads must use the tenant-scoped ``read_hybrid_search``.
     """
-    if not read_from_postgres():
+    if not _hybrid_cut_over(aggregate_type):
         return _NOT_CUT_OVER
     from persistence.database import session_scope
     from persistence.read_repositories import HybridReadRepository
@@ -1240,7 +1258,7 @@ async def read_hybrid_fetch_for_aggregation(
     reuses the identical post-processing and stays byte-identical to the ES
     query output.
     """
-    if not read_from_postgres():
+    if not _hybrid_cut_over(aggregate_type):
         return _NOT_CUT_OVER
     from persistence.database import session_scope
     from persistence.read_repositories import HybridReadRepository
@@ -1270,7 +1288,7 @@ async def read_hybrid_list_sorted(
     order is a document field rather than the typed ``created_at`` mirror
     column (e.g. asset_certifications sorted by ``expiry_date asc, cert_id asc``).
     """
-    if not read_from_postgres():
+    if not _hybrid_cut_over(aggregate_type):
         return _NOT_CUT_OVER
     from persistence.database import session_scope
     from persistence.read_repositories import HybridReadRepository
