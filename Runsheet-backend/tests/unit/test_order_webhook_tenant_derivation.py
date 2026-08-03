@@ -242,7 +242,6 @@ def pipeline(
         ws_manager=ws_manager,
         credentials_vault=credentials_vault,
         customer_tank_repo=customer_tank_repo,
-        legacy_dual_writer=None,
         clock=lambda: FIXED_NOW,
     )
 

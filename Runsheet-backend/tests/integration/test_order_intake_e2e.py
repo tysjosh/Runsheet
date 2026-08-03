@@ -324,12 +324,8 @@ def customer_tank_repo():
     return repo
 
 
-@pytest.fixture
-def legacy_dual_writer():
-    """Provide a mock legacy dual writer."""
-    writer = AsyncMock()
-    writer.mirror_order = AsyncMock()
-    return writer
+# The ``legacy_dual_writer`` fixture lived here, mocking the mirror into
+# ``shipments_current``. The pipeline no longer takes that dependency.
 
 
 @pytest.fixture
@@ -343,7 +339,6 @@ def pipeline(
     recording_ws,
     credentials_vault,
     customer_tank_repo,
-    legacy_dual_writer,
 ):
     """Build the full pipeline with recording dependencies."""
     return OrderIntakePipeline(
@@ -356,7 +351,6 @@ def pipeline(
         ws_manager=recording_ws,
         credentials_vault=credentials_vault,
         customer_tank_repo=customer_tank_repo,
-        legacy_dual_writer=legacy_dual_writer,
         clock=lambda: FIXED_NOW,
     )
 

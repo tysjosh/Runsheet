@@ -25,8 +25,6 @@ from fuel.services.order_es_mappings import (
     INTAKE_CHANNELS_INDEX,
     INTAKE_CHANNELS_MAPPING,
     ORDER_INTAKE_INDEX_MAPPINGS,
-    PENDING_LEGACY_MIRRORS_INDEX,
-    PENDING_LEGACY_MIRRORS_MAPPING,
     setup_order_intake_indices,
 )
 
@@ -35,9 +33,10 @@ EXPECTED_INDICES = {
     FUEL_ORDER_EVENTS_INDEX,
     DRIVERS_CURRENT_INDEX,
     INTAKE_CHANNELS_INDEX,
-    PENDING_LEGACY_MIRRORS_INDEX,
     DRIVER_REPORTS_INDEX,
 }
+# NB: ``pending_legacy_mirrors`` was dropped from this set with the legacy
+# mirror retry queue it backed.
 
 # Indices whose documents carry the pipeline's closed ``intake_metadata``
 # sub-mapping. ``driver_reports`` is written directly by the
@@ -158,17 +157,8 @@ class TestOrderIntakeMappingShape:
         for field in required_fields:
             assert field in props, f"intake_channels missing field: {field}"
 
-    def test_pending_legacy_mirrors_has_all_required_fields(self):
-        props = PENDING_LEGACY_MIRRORS_MAPPING["mappings"]["properties"]
-        required_fields = [
-            "entry_id", "tenant_id", "entity_type", "entity_id",
-            "failure_reason", "retry_count", "next_retry_at",
-            "created_at", "updated_at",
-        ]
-        for field in required_fields:
-            assert field in props, (
-                f"pending_legacy_mirrors missing field: {field}"
-            )
+    # ``test_pending_legacy_mirrors_has_all_required_fields`` was removed
+    # here along with the PENDING_LEGACY_MIRRORS mapping it asserted on.
 
     def test_driver_reports_has_all_required_fields(self):
         props = DRIVER_REPORTS_MAPPING["mappings"]["properties"]
@@ -202,9 +192,6 @@ class TestOrderIntakeMappingShape:
             ],
             INTAKE_CHANNELS_INDEX: [
                 "created_at", "updated_at",
-            ],
-            PENDING_LEGACY_MIRRORS_INDEX: [
-                "next_retry_at", "created_at", "updated_at",
             ],
             DRIVER_REPORTS_INDEX: [
                 "created_at",

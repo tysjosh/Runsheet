@@ -47,7 +47,6 @@ from persistence.models import (
     PriceBookORM,
     PriceProtectionContractORM,
     PricingRuleORM,
-    ShipmentCurrentORM,
     SupplierContractORM,
     TaxExemptionORM,
     TaxJurisdictionORM,
@@ -1025,7 +1024,7 @@ class CurrentStateRepository:
 
     Like :class:`ComplianceConfigRepository` but with an optional
     **stale-event guard**: aggregates that carry ``last_event_timestamp``
-    (orders, jobs, shipments) reject an upsert whose incoming timestamp is
+    (orders, jobs) reject an upsert whose incoming timestamp is
     older-or-equal to the stored one — mirroring the ES scripted-upsert
     out-of-order protection so the Postgres row and ES projection converge to
     the same final state regardless of event delivery order.
@@ -1043,11 +1042,7 @@ class CurrentStateRepository:
             ("asset_id", "status", "last_event_timestamp"),
             True,
         ),
-        "shipment": (
-            ShipmentCurrentORM, "shipment_id",
-            ("status", "last_event_timestamp"),
-            True,
-        ),
+        # ``shipment`` was retired with the ``shipments_current`` table (rev 0007).
         "tenant_job_policy": (
             TenantJobPolicyORM, "policy_id", (), False,
         ),

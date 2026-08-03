@@ -240,7 +240,7 @@ async def _fetch_pg_all(agg: str, tenant_id: Optional[str]) -> Dict[str, Dict[st
         "supplier_contract": ("SupplierContractORM", "contract_id"),
         "fuel_order": ("FuelOrderCurrentORM", "order_id"),
         "job": ("JobCurrentORM", "job_id"),
-        "shipment": ("ShipmentCurrentORM", "shipment_id"),
+        # ``shipment`` was retired with the ``shipments_current`` table (rev 0007).
         "tenant_job_policy": ("TenantJobPolicyORM", "policy_id"),
         "driver": ("DriverMasterORM", "driver_id"),
         "depot": ("DepotORM", "depot_id"),

@@ -1,7 +1,7 @@
 """Dual-write tests for orders/jobs current-state aggregates.
 
 Covers the hybrid current-state tables (fuel_orders_current, jobs_current,
-shipments_current, tenant_job_policies): upserts store the verbatim ES
+tenant_job_policies): upserts store the verbatim ES
 document + typed index columns and enqueue an outbox projection event, the
 stale-event guard discards out-of-order writes (mirroring the ES scripted
 upsert), and the projector round-trips the document byte-for-byte.
@@ -17,7 +17,6 @@ from persistence.models import (
     FuelOrderCurrentORM,
     JobCurrentORM,
     OutboxEventORM,
-    ShipmentCurrentORM,
     TenantJobPolicyORM,
 )
 from persistence.projections import _document_passthrough
@@ -95,15 +94,8 @@ async def test_job_upsert(engine):
         assert _document_passthrough(row)["cargo_manifest"][0]["item_id"] == "i1"
 
 
-async def test_shipment_upsert(engine):
-    repo = CurrentStateRepository("shipment")
-    doc = {
-        "shipment_id": "shp_1", "tenant_id": TENANT, "status": "in_transit",
-        "last_event_timestamp": "2026-01-01T00:00:00+00:00",
-    }
-    async with session_scope() as s:
-        row = await repo.upsert(s, doc=doc)
-        assert row.status == "in_transit"
+# ``test_shipment_upsert`` stood here. The ``shipment`` aggregate was retired
+# with the ``shipments_current`` table (rev 0007).
 
 
 async def test_tenant_job_policy_keyed_by_tenant(engine):

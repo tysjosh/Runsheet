@@ -303,7 +303,6 @@ def _build_pipeline(recording_es: RecordingESService, recording_ws: RecordingWSM
         ws_manager=recording_ws,
         credentials_vault=credentials_vault,
         customer_tank_repo=customer_tank_repo,
-        legacy_dual_writer=None,
         clock=lambda: FIXED_NOW,
     )
     pipeline.register_hook(VoiceReviewHoldHook())

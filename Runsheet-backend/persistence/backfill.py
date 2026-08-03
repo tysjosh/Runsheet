@@ -68,7 +68,7 @@ _CONFIG_BACKFILL = [
 # Orders / jobs current-state hybrid aggregates.
 _FUEL_ORDERS_INDEX = "fuel_orders_current"
 _JOBS_INDEX = "jobs_current"
-_SHIPMENTS_INDEX = "shipments_current"
+# ``_SHIPMENTS_INDEX`` was retired with the ``shipments_current`` table (rev 0007).
 _TENANT_JOB_POLICIES_INDEX = "tenant_job_policies"
 
 # (model, es_index, pk_field, tenant-keyed?, typed columns)
@@ -77,8 +77,7 @@ _CURRENT_STATE_BACKFILL = [
      ("customer_id", "assigned_driver_id", "status", "last_event_timestamp")),
     ("JobCurrentORM", _JOBS_INDEX, "job_id", False,
      ("asset_id", "status", "last_event_timestamp")),
-    ("ShipmentCurrentORM", _SHIPMENTS_INDEX, "shipment_id", False,
-     ("status", "last_event_timestamp")),
+    # ``ShipmentCurrentORM`` was retired with the ``shipments_current`` table (rev 0007).
     ("TenantJobPolicyORM", _TENANT_JOB_POLICIES_INDEX, "tenant_id", True, ()),
 ]
 
@@ -502,7 +501,7 @@ async def backfill(tenant_id: Optional[str] = None, *, dry_run: bool = False) ->
     _cs_count_key = {
         _FUEL_ORDERS_INDEX: "fuel_orders_current",
         _JOBS_INDEX: "jobs_current",
-        _SHIPMENTS_INDEX: "shipments_current",
+        # ``shipments_current`` was retired with its table (rev 0007).
         _TENANT_JOB_POLICIES_INDEX: "tenant_job_policies",
     }
     for model_name, index, pk_field, tenant_keyed, typed_cols in _CURRENT_STATE_BACKFILL:

@@ -536,7 +536,7 @@ class HybridReadRepository:
         # orders / jobs current-state
         "fuel_order": ("FuelOrderCurrentORM", "order_id", False),
         "job": ("JobCurrentORM", "job_id", False),
-        "shipment": ("ShipmentCurrentORM", "shipment_id", False),
+        # ``shipment`` was retired with the ``shipments_current`` table (rev 0007).
         "tenant_job_policy": ("TenantJobPolicyORM", "policy_id", False),
         # master data
         "driver": ("DriverMasterORM", "driver_id", False),
