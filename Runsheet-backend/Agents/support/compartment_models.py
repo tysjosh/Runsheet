@@ -13,15 +13,63 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from Agents.support.fuel_distribution_models import FuelGrade
+from fuel.services.fuel_product_catalog import (
+    UnknownFuelProductError,
+    canonicalize,
+)
 
 
 class Compartment(BaseModel):
     compartment_id: str
     truck_id: str
     capacity_liters: float = Field(gt=0)
+    #: Legacy four-value eligibility (AGO/PMS/ATK/LPG). Retained because every
+    #: compartment persisted before the US catalog is described this way, and a
+    #: grade cannot be narrowed after the fact without inventing intent the
+    #: operator never recorded. Treated as *family* eligibility — see
+    #: ``compartment_accepts`` in ``compartment_solver``.
     allowed_grades: List[FuelGrade] = Field(min_length=1)
+    #: Exact canonical US product codes this compartment may carry
+    #: (DIESEL_2, HEATING_OIL, DEF, ...). When set this is authoritative and
+    #: ``allowed_grades`` is ignored for eligibility, which is the only way a
+    #: US tenant can say "this compartment takes heating oil but not road
+    #: diesel" — a distinction the four-value grade cannot express, and one
+    #: that matters because the two carry different tax classes
+    #: (off_road vs road_diesel).
+    allowed_product_codes: Optional[List[str]] = None
     position_index: int = Field(ge=0)
     tenant_id: str
+
+    @field_validator("allowed_product_codes")
+    @classmethod
+    def _canonicalize_allowed_product_codes(
+        cls, value: Optional[List[str]]
+    ) -> Optional[List[str]]:
+        """Store canonical codes so membership tests never compare an alias.
+
+        Rejects unknown codes rather than passing them through: an
+        unrecognised product in an eligibility list silently narrows what the
+        compartment can carry, and a typo'd code that quietly matches nothing
+        is how a segregation rule stops protecting anything.
+        """
+        if value is None:
+            return None
+        if not value:
+            raise ValueError(
+                "allowed_product_codes must be non-empty when provided; "
+                "omit the field entirely to fall back to allowed_grades"
+            )
+        canonical: List[str] = []
+        for code in value:
+            try:
+                resolved = canonicalize(code)
+            except (UnknownFuelProductError, TypeError) as exc:
+                raise ValueError(
+                    f"unknown fuel product in allowed_product_codes: {code!r}"
+                ) from exc
+            if resolved not in canonical:
+                canonical.append(resolved)
+        return canonical
 
 
 class DeliveryRequest(BaseModel):

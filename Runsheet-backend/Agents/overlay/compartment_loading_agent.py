@@ -63,6 +63,7 @@ from Agents.support.compartment_models import (
 from Agents.support.compartment_solver import (
     check_feasibility,
     fuel_density_kg_per_liter,
+    legacy_grade_for_product,
     optimize_loading_plan,
 )
 from Agents.support.fuel_distribution_models import (
@@ -102,6 +103,7 @@ from fuel.services.fuel_product_catalog import (
     UnknownFuelProductError,
     canonicalize,
     canonicalize_or_warn,
+    is_known_product,
 )
 from fuel.services.order_es_mappings import FUEL_ORDERS_CURRENT_INDEX
 from services.unit_conversion import GAL_TO_L
@@ -1115,24 +1117,53 @@ class CompartmentLoadingAgent(OverlayAgentBase):
                 if not truck_id:
                     continue
 
-                # Parse allowed_grades with product code mapping support
-                allowed_grades_raw = source.get("allowed_grades", [])
-                allowed_grades = []
+                # Hydrate eligibility. Two fields can carry it:
+                #
+                #   allowed_product_codes — exact canonical US codes, authoritative
+                #   allowed_grades        — legacy four-value NG family
+                #
+                # A US product code found in ``allowed_grades`` is kept as an
+                # exact code rather than collapsed to its family grade. This
+                # replaces ``fuel_product_mapper.us_to_fuel_grade``, which
+                # mapped HEATING_OIL -> AGO and thereby widened a heating-oil
+                # compartment to accept taxed road diesel — two different tax
+                # classes (off_road vs road_diesel).
+                allowed_grades_raw = source.get("allowed_grades", []) or []
+                explicit_codes: List[str] = [
+                    str(c) for c in (source.get("allowed_product_codes") or [])
+                ]
+                allowed_grades: List[FuelGrade] = []
+
                 for g in allowed_grades_raw:
                     try:
-                        # Try direct FuelGrade enum parsing first
                         allowed_grades.append(FuelGrade(g))
+                        continue
                     except ValueError:
-                        # Try mapping from US product code
-                        from fuel.services.fuel_product_mapping import fuel_product_mapper
-                        mapped_grade = fuel_product_mapper.us_to_fuel_grade(g)
-                        if mapped_grade:
-                            allowed_grades.append(mapped_grade)
-                        else:
-                            logger.debug(
-                                "CompartmentLoadingAgent: unrecognized fuel grade '%s' for truck %s compartment %s",
-                                g, truck_id, source.get("compartment_id")
-                            )
+                        pass
+                    if is_known_product(g):
+                        canonical = canonicalize(g)
+                        if canonical not in explicit_codes:
+                            explicit_codes.append(canonical)
+                    else:
+                        logger.debug(
+                            "CompartmentLoadingAgent: unrecognized fuel grade '%s' "
+                            "for truck %s compartment %s",
+                            g, truck_id, source.get("compartment_id"),
+                        )
+
+                # ``allowed_grades`` is required (min_length=1). When the stored
+                # data was entirely US codes, derive each family so the model
+                # validates; ``allowed_product_codes`` stays authoritative for
+                # eligibility, so the derived grades cannot widen anything.
+                if not allowed_grades and explicit_codes:
+                    for code in explicit_codes:
+                        family = legacy_grade_for_product(code)
+                        if family and FuelGrade(family) not in allowed_grades:
+                            allowed_grades.append(FuelGrade(family))
+                    if not allowed_grades:
+                        # Every code is an isolate (e.g. DEF only). Any grade
+                        # satisfies the field; eligibility comes from the codes.
+                        allowed_grades = [FuelGrade.AGO]
 
                 if not allowed_grades:
                     logger.debug(
@@ -1146,6 +1177,7 @@ class CompartmentLoadingAgent(OverlayAgentBase):
                     truck_id=truck_id,
                     capacity_liters=source.get("capacity_liters", 0.0),
                     allowed_grades=allowed_grades,
+                    allowed_product_codes=explicit_codes or None,
                     position_index=source.get("position_index", 0),
                     tenant_id=tenant_id,
                 )

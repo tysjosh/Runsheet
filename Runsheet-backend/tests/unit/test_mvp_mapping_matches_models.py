@@ -30,12 +30,18 @@ from typing import Dict, Set
 
 import pytest
 
-from Agents.support.compartment_models import CompartmentAssignment, LoadingPlan
+from Agents.support.compartment_models import (
+    Compartment,
+    CompartmentAssignment,
+    LoadingPlan,
+)
 from Agents.support.mvp_es_mappings import (
     MVP_ADDITIVE_MAPPING_UPDATES,
     MVP_INDEX_MAPPINGS,
     MVP_LOAD_PLANS_INDEX,
     MVP_LOAD_PLANS_MAPPING,
+    TRUCK_COMPARTMENTS_INDEX,
+    TRUCK_COMPARTMENTS_MAPPING,
 )
 
 
@@ -93,6 +99,76 @@ def test_compartment_assignment_fields_are_all_declared() -> None:
         f"'assignments' mapping does not declare them. ``product_code`` in "
         f"particular is what the axle-weight density lookup keys on, so "
         f"losing the write loses the DEF/diesel distinction entirely."
+    )
+
+
+def test_truck_compartments_index_is_strict() -> None:
+    """Guard the premise for the compartment assertions below."""
+    assert TRUCK_COMPARTMENTS_MAPPING["mappings"].get("dynamic") == "strict"
+
+
+def test_compartment_fields_are_all_declared() -> None:
+    """Every :class:`Compartment` field exists in the truck_compartments mapping.
+
+    This index was outside the guard until ``allowed_product_codes`` was added
+    for US product segregation — which is how the same class of defect the
+    module docstring describes recurred on a second index.
+    """
+    declared = _declared(TRUCK_COMPARTMENTS_INDEX, TRUCK_COMPARTMENTS_MAPPING)
+    missing = sorted(set(Compartment.model_fields) - declared)
+    assert not missing, (
+        f"Compartment persists {missing} but truck_compartments does not "
+        f"declare them. The index is dynamic:strict, so the ENTIRE compartment "
+        f"write is rejected — the operator loses the whole record, not just "
+        f"the new field. Add them to TRUCK_COMPARTMENTS_MAPPING and to "
+        f"MVP_ADDITIVE_MAPPING_UPDATES."
+    )
+
+
+def test_compartment_fields_reach_a_brand_new_index() -> None:
+    """Create-time mapping specifically, not create-time-or-additive.
+
+    :func:`_declared` unions both tables, so a field present in only one of them
+    satisfies it. That is deliberately lenient for the older assertions, but it
+    cannot catch either single-sided mistake, and the two fail on opposite
+    deployments:
+
+    * additive only  -> missing on a brand-new cluster, because
+      ``setup_mvp_indices`` creates the index from the create-time mapping and
+      applies additive updates only on the ``else`` branch.
+    * create-time only -> missing on every existing cluster.
+
+    This pins the first direction; ``test_allowed_product_codes_reaches_``
+    ``existing_indices`` pins the second.
+    """
+    create_time = set(
+        TRUCK_COMPARTMENTS_MAPPING["mappings"]["properties"]
+    )
+    missing = sorted(set(Compartment.model_fields) - create_time)
+    assert not missing, (
+        f"Compartment persists {missing} but TRUCK_COMPARTMENTS_MAPPING does "
+        f"not declare them, so a brand-new cluster gets an index without them. "
+        f"Being in MVP_ADDITIVE_MAPPING_UPDATES does not help: additive updates "
+        f"only run when the index already exists."
+    )
+
+
+def test_allowed_product_codes_reaches_existing_indices() -> None:
+    """The create-time mapping alone never reaches a deployed cluster.
+
+    ``allowed_product_codes`` is what lets a tenant say "this compartment takes
+    heating oil but not road diesel". Those two carry different tax classes, so
+    a silently-rejected write is not cosmetic: the compartment reverts to
+    family eligibility and the segregation rule stops distinguishing them.
+    """
+    additive = (
+        MVP_ADDITIVE_MAPPING_UPDATES.get(TRUCK_COMPARTMENTS_INDEX, {})
+        .get("properties", {})
+    )
+    assert "allowed_product_codes" in additive, (
+        "allowed_product_codes is missing from MVP_ADDITIVE_MAPPING_UPDATES"
+        f"[{TRUCK_COMPARTMENTS_INDEX!r}]. Every existing cluster already has "
+        "truck_compartments, so only the additive path can add the field there."
     )
 
 
