@@ -1,18 +1,18 @@
 "use client";
 
 /**
- * Notifications route — a top-level home for the notification history that was
- * previously buried under Settings › Support › Notifications. Reuses the
- * self-contained NotificationHistoryTab (summary bar, paginated table, search,
- * filters, detail panel, retry, live WebSocket updates).
+ * Notifications route. The hub itself lives in `components/NotificationsHub`
+ * because an App Router `page.tsx` may not carry arbitrary named exports, and the
+ * hub has to export `TABS` for the registry drift guard in
+ * `config/modules.test.ts` to check the real array rather than a copy.
  */
 
 import { lazy, Suspense } from "react";
 import ErrorBoundary from "../../../components/ErrorBoundary";
 import LoadingSpinner from "../../../components/LoadingSpinner";
 
-const NotificationHistoryTab = lazy(
-  () => import("../../../components/NotificationHistoryTab"),
+const NotificationsHub = lazy(
+  () => import("../../../components/NotificationsHub"),
 );
 
 export default function NotificationsPageRoute() {
@@ -26,7 +26,7 @@ export default function NotificationsPageRoute() {
             </div>
           }
         >
-          <NotificationHistoryTab />
+          <NotificationsHub />
         </Suspense>
       </ErrorBoundary>
     </div>

@@ -40,8 +40,17 @@ export type Role = "admin" | "dispatcher" | "driver" | "platform_admin";
  * - **2** — a dispatcher cannot work a full shift without it.
  * - **3** — legally required (DOT / FMCSA / IRS / IFTA). Not deferrable for
  *   regulatory reasons even though no dispatcher touches it daily.
- * - **4** — deferrable *because the customer's ERP already prices and bills*.
- *   This is the only tier `mvpMode` hides.
+ * - **4** — pricing and billing, which the customer's ERP already owns.
+ *   Every Tier 4 module is gated to `platform_admin`, so it is Runsheet-staff
+ *   only: a customer's own `admin` does not see it, because the authoritative
+ *   price and invoice live in their ERP and a second editable copy here invites
+ *   disagreement about which one is real. Staff retain access to diagnose and
+ *   to run a tenant that has no ERP.
+ *
+ *   Tier 4 is also the only tier `mvpMode` hides. The two controls are
+ *   independent and compose: the role gate decides *who*, `mvpMode` decides
+ *   *whether at all*, so setting `NEXT_PUBLIC_MVP_MODE` hides these from staff
+ *   as well.
  */
 export type ModuleTier = 1 | 2 | 3 | 4;
 
@@ -213,29 +222,70 @@ const MODULES: readonly ModuleDescriptor[] = [
     requiredRoles: ["admin"],
     note: "Contains Feature Flags, whose API 403s for non-admins.",
   },
-  {
-    id: "settings",
-    tier: 1,
-    // Deliberately NOT role-gated. Settings holds password change, which every
-    // signed-in user needs regardless of role. Data Import inside it is
-    // admin/dispatcher per `import_endpoints.py::_require_import_role`, so the
-    // gate belongs on that TAB. Role-gating this nav item would lock a user out
-    // of changing their own password.
-    note: "Holds password change — reachable by every role, by design.",
-  },
+  // There is deliberately no `settings` entry.
+  //
+  // It emptied out one piece at a time: password change moved to
+  // `/dashboard/profile`, Support was deleted, and Data Import moved to
+  // AdminHub. That left a top-level nav item holding a single tab, Agent
+  // Settings — which is admin policy (autonomy level, agent pause/resume,
+  // memory deletion, all gated to `admin` by `Agents/api_authz.py`). AdminHub
+  // already owns `agents` (Agent Monitoring), so Agent Settings now lives
+  // beside it as an AdminHub tab and the nav entry is gone.
+  //
+  // Dispatchers are not blinded by this: `AgentAutonomyBanner` on
+  // `/ops/control` still shows the current autonomy level, and that is the
+  // surface where they work a shift.
 
   // ── CommerceHub tabs ──────────────────────────────────────────────────────
   //
-  // Tier 4 is the pricing/billing side: the deferral argument is that the
-  // customer's ERP already prices and bills. Invoices and Reconciliation are
-  // NOT part of that set — they are capabilities 6 and 7 of the MVP pipeline.
-  { id: "accounts", tier: 4, note: "Customer master lives in the ERP." },
+  // Tier 4 is the pricing/billing side, and it is `platform_admin` only: the
+  // customer's ERP is the authoritative price and invoice, so a tenant admin
+  // gets no second editable copy here. Invoices and Reconciliation are NOT part
+  // of that set — they are capabilities 6 and 7 of the MVP pipeline and stay
+  // Tier 1, visible to the operations roles.
+  //
+  // Note the compound reach this implies. These are tabs, and the nav item that
+  // renders CommerceHub (`billing`) requires `admin` or `dispatcher`, so the
+  // effective audience is someone holding `platform_admin` *alongside* an
+  // operations role — the documented staff shape. `platform_admin` on its own
+  // still reaches nothing, because it implies nothing.
+  {
+    id: "accounts",
+    tier: 4,
+    requiredRoles: ["platform_admin"],
+    note: "Customer master lives in the ERP.",
+  },
   { id: "invoices", tier: 1, note: "Capability 6." },
-  { id: "price-books", tier: 4, note: "ERP prices." },
-  { id: "pricing-rules", tier: 4, note: "ERP prices." },
-  { id: "contracts", tier: 4, note: "Price-protection contracts; ERP prices." },
-  { id: "payments", tier: 4, note: "ERP bills and collects." },
-  { id: "ar-aging", tier: 4, note: "ERP receivables." },
+  {
+    id: "price-books",
+    tier: 4,
+    requiredRoles: ["platform_admin"],
+    note: "ERP prices.",
+  },
+  {
+    id: "pricing-rules",
+    tier: 4,
+    requiredRoles: ["platform_admin"],
+    note: "ERP prices.",
+  },
+  {
+    id: "contracts",
+    tier: 4,
+    requiredRoles: ["platform_admin"],
+    note: "Price-protection contracts; ERP prices.",
+  },
+  {
+    id: "payments",
+    tier: 4,
+    requiredRoles: ["platform_admin"],
+    note: "ERP bills and collects.",
+  },
+  {
+    id: "ar-aging",
+    tier: 4,
+    requiredRoles: ["platform_admin"],
+    note: "ERP receivables.",
+  },
   { id: "reconciliation", tier: 1, note: "Capability 7 — gallon variance." },
 
   // ── ComplianceHub tabs — all legally required ─────────────────────────────
@@ -253,13 +303,24 @@ const MODULES: readonly ModuleDescriptor[] = [
     note: "The feature-flag API 403s for non-admins.",
   },
   { id: "agents", tier: 2, note: "Shadow-mode agent monitoring." },
-  { id: "stripe", tier: 4, note: "Payment collection; ERP bills." },
+  {
+    id: "stripe",
+    tier: 4,
+    requiredRoles: ["platform_admin"],
+    note: "Payment collection; ERP bills.",
+  },
   { id: "integrations", tier: 2, note: "Integration marketplace." },
   { id: "intake-channels", tier: 1, note: "Order intake — capability 1." },
   {
     id: "weather-alerts",
     tier: 2,
     note: "DeliveryPrioritizationAgent takes a storm_mode_evaluator.",
+  },
+  {
+    id: "import",
+    tier: 1,
+    requiredRoles: ["admin"],
+    note: "Matches import_endpoints.py::IMPORT_ADMIN_ROLES — admin only, because one CSV can overwrite the customer, asset, driver or inventory master data for the whole tenant. Lives in AdminHub so the container's admin requirement matches the endpoint's.",
   },
 
   // ── SetupHub tabs ─────────────────────────────────────────────────────────
@@ -278,16 +339,51 @@ const MODULES: readonly ModuleDescriptor[] = [
   { id: "kfactor", tier: 2, note: "Telemetry calibration accuracy." },
   { id: "sourcing", tier: 2, note: "Terminal supply selection." },
 
-  // ── SettingsPage tabs ─────────────────────────────────────────────────────
-  { id: "agent-settings", tier: 2, note: "Read-only for non-admins already." },
+  // ── Notifications page tabs ───────────────────────────────────────────────
+  //
+  // Both sit under the `notifications` nav item, which already requires the same
+  // two roles, so these carry no extra `requiredRoles` of their own. They are
+  // registered rather than left off so `canSee` resolves them and the drift guard
+  // covers them like every other hub tab.
   {
-    id: "import",
-    tier: 1,
-    requiredRoles: ["admin", "dispatcher"],
-    note: "Matches import_endpoints.py::_require_import_role.",
+    id: "notification-history",
+    tier: 2,
+    note: "Delivery log a dispatcher chases during a shift.",
   },
-  { id: "security", tier: 1, note: "Password change. Never gated." },
-  { id: "support", tier: 1, note: "Contact form." },
+  {
+    id: "notification-settings",
+    tier: 2,
+    note: "Rules, templates and per-customer preferences. Backed by notifications/api.",
+  },
+
+  // ── SettingsPage tabs ─────────────────────────────────────────────────────
+  // AdminHub tab. Admin-only, matching the backend: `PATCH /agent/config/`
+  // `autonomy`, `POST /agent/{id}/pause|resume` and `DELETE /agent/memory/{id}`
+  // all require `admin` via `agent_admin_dependency`. The previous note here
+  // claimed "read-only for non-admins already", which overstated it — the
+  // read-only treatment covered the autonomy radios only, while pause/resume
+  // and memory deletion were ungated in both the UI and the API.
+  {
+    id: "agent-settings",
+    tier: 2,
+    requiredRoles: ["admin"],
+    note: "Agent policy: autonomy level, pause/resume, memory. Admin-only.",
+  },
+  // There is deliberately no `security` entry. That tab rendered
+  // `<ChangePassword />`, the same component `ProfilePage` renders, so it was a
+  // second door onto one form. Password change lives on `/dashboard/profile`,
+  // which has no registry entry by design — see the route-guard comment in
+  // `app/dashboard/layout.tsx` — and is reached from the Sidebar avatar rather
+  // than the role-filtered nav, so every role keeps access to it.
+  //
+  // There is deliberately no `support` entry either. That tab was a 791-line
+  // ticketing UI for the legacy Nigerian last-mile CRM: its list endpoint is
+  // gated behind `LEGACY_NG_DELIVERY_ENABLED` (false in development, test,
+  // example and production — audit 2026-05-08 recommendation #1) and its create,
+  // detail and update endpoints were never implemented, so the create-ticket
+  // modal could not work in any environment. Its other two tabs were customer
+  // notifications, which now live at `/dashboard/notifications` under the
+  // `notification-history` and `notification-settings` ids above.
 ];
 
 const MODULE_BY_ID: ReadonlyMap<string, ModuleDescriptor> = new Map(
@@ -314,8 +410,11 @@ export function moduleDescriptor(id: string): ModuleDescriptor | undefined {
  * 1. **Unknown id → `false`.** Fails closed. Safe only because the drift guard
  *    in `modules.test.ts` proves every real nav item and hub tab is registered;
  *    without it, a typo would silently delete navigation.
- * 2. **`mvpMode` and Tier 4 → `false`.** Tier 4 is the deferrable pricing and
- *    billing surface.
+ * 2. **`mvpMode` and Tier 4 → `false`.** Tier 4 is the pricing and billing
+ *    surface the ERP owns. Note that Tier 4 *also* carries
+ *    `requiredRoles: ["platform_admin"]`, so it is refused at step 3 for
+ *    everyone else even when `mvpMode` is off. `mvpMode` is the broader switch:
+ *    it hides Tier 4 from staff too.
  * 3. **`requiredRoles` with no exact match → `false`.** Unresolved roles
  *    (`null`) count as no roles, so nothing role-gated flashes visible.
  * 4. Otherwise visible. A module with no `requiredRoles` shows to any

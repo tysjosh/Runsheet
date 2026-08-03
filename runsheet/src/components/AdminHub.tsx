@@ -23,6 +23,12 @@ const IntakeChannelsAdminPanel = lazy(
 const WeatherAlertsPage = lazy(
   () => import("../app/admin/weather-alerts/page"),
 );
+const DataImport = lazy(() => import("./DataImport"));
+// Agent policy — autonomy level, pause/resume, memory. Moved here from the
+// former top-level Settings nav item, which had emptied down to this one tab.
+// It sits beside `agents` (Agent Monitoring): monitoring is what the agents did,
+// this is what they are allowed to do.
+const AgentSettingsPage = lazy(() => import("./ops/AgentSettingsPage"));
 
 function LoadingPlaceholder() {
   return (
@@ -62,6 +68,20 @@ export const TABS: Tab[] = [
   {
     id: "weather-alerts",
     label: "Weather Alerts",
+  },
+  // Moved here from the Settings hub. It is admin-only
+  // (`import_endpoints.py::IMPORT_ADMIN_ROLES`), and the `admin` nav item that
+  // leads to this hub requires the same role — so the gate and its container now
+  // agree. Under Settings the tab was the only gated thing in an ungated hub,
+  // which meant a dispatcher saw a nav item leading to a tab bar missing its
+  // main entry.
+  {
+    id: "import",
+    label: "Data Import",
+  },
+  {
+    id: "agent-settings",
+    label: "Agent Settings",
   },
 ];
 
@@ -152,6 +172,18 @@ export default function AdminHub({
         return (
           <Suspense fallback={<LoadingPlaceholder />}>
             <WeatherAlertsPage />
+          </Suspense>
+        );
+      case "import":
+        return (
+          <Suspense fallback={<LoadingPlaceholder />}>
+            <DataImport />
+          </Suspense>
+        );
+      case "agent-settings":
+        return (
+          <Suspense fallback={<LoadingPlaceholder />}>
+            <AgentSettingsPage />
           </Suspense>
         );
       default:

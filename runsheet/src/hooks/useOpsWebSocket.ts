@@ -2,7 +2,15 @@
  * Specialized WebSocket hook for ops real-time updates.
  *
  * Wraps the base useWebSocket hook with ops-specific message handling,
- * subscription filters, and typed state for shipment, rider, and SLA breach events.
+ * subscription filters, and typed state for fuel alert events.
+ *
+ * Scope note: this hook used to also carry `shipment_update`, `rider_update`
+ * and `sla_breach` events for the pre-pivot Nigerian last-mile model. Those
+ * read models sit behind `require_ops_enabled` in `ops/api/endpoints.py`
+ * (`LEGACY_NG_DELIVERY_DISABLED`, off in every environment), so the
+ * subscriptions could never deliver. They were removed along with the rest of
+ * the legacy-NG frontend; `fuel_alert` is the one live subscriber, used by
+ * `components/ops/FuelDashboardView.tsx`.
  *
  * Validates:
  * - Requirement 16.5: WHEN the WebSocket connection drops, THE Ops_Dashboard
@@ -11,7 +19,6 @@
  */
 
 import { useCallback, useMemo, useState } from "react";
-import type { OpsRider, OpsShipment } from "../services/opsApi";
 import { getAuthToken } from "../utils/auth";
 import {
   useWebSocket,
@@ -43,13 +50,9 @@ async function buildOpsWebSocketUrl(
 }
 
 /**
- * Event types the ops WebSocket can deliver
+ * Event types the ops WebSocket can deliver.
  */
-export type OpsEventType =
-  | "shipment_update"
-  | "rider_update"
-  | "sla_breach"
-  | "fuel_alert";
+export type OpsEventType = "fuel_alert";
 
 /**
  * Base message structure from the ops WebSocket endpoint
@@ -60,18 +63,6 @@ export interface OpsWebSocketMessage {
   data?: unknown;
   status?: string;
   message?: string;
-}
-
-/**
- * Data payload for an SLA breach event
- */
-export interface SlaBreach {
-  shipment_id: string;
-  tenant_id: string;
-  estimated_delivery: string;
-  breach_duration_minutes: number;
-  rider_id?: string;
-  status: string;
 }
 
 /**
@@ -96,12 +87,6 @@ export interface OpsWebSocketOptions {
   subscriptions?: OpsEventType[];
   /** Whether to automatically connect on mount */
   autoConnect?: boolean;
-  /** Callback when a shipment update is received */
-  onShipmentUpdate?: (shipment: OpsShipment) => void;
-  /** Callback when a rider update is received */
-  onRiderUpdate?: (rider: OpsRider) => void;
-  /** Callback when an SLA breach event is received */
-  onSlaBreach?: (breach: SlaBreach) => void;
   /** Callback when a fuel alert event is received */
   onFuelAlert?: (alert: FuelAlertEvent) => void;
   /** Callback when connection state changes */
@@ -124,12 +109,6 @@ export interface UseOpsWebSocketReturn {
   reconnectAttempt: number;
   /** Time until next reconnection attempt (ms, 0 if not reconnecting) */
   reconnectDelay: number;
-  /** Last received shipment update */
-  lastShipmentUpdate: OpsShipment | null;
-  /** Last received rider update */
-  lastRiderUpdate: OpsRider | null;
-  /** Last received SLA breach event */
-  lastSlaBreach: SlaBreach | null;
   /** Last received fuel alert event */
   lastFuelAlert: FuelAlertEvent | null;
   /** Error if any occurred */
@@ -147,22 +126,19 @@ export interface UseOpsWebSocketReturn {
 /**
  * Custom hook for ops real-time updates via WebSocket.
  *
- * Connects to `/ws/ops` with subscription filters and provides typed state
- * for shipment updates, rider updates, and SLA breach events. Uses exponential
- * backoff (1s initial, 30s max) for auto-reconnection.
+ * Connects to `/ws/ops` with subscription filters and provides typed state for
+ * fuel alerts. Uses exponential backoff (1s initial, 30s max) for
+ * auto-reconnection.
  *
  * @param options - Configuration options
  * @returns Ops WebSocket state and control functions
  *
  * @example
  * ```tsx
- * const { isConnected, lastShipmentUpdate, lastSlaBreach } = useOpsWebSocket({
- *   subscriptions: ['shipment_update', 'sla_breach'],
- *   onShipmentUpdate: (shipment) => {
- *     console.log(`Shipment ${shipment.shipment_id} updated to ${shipment.status}`);
- *   },
- *   onSlaBreach: (breach) => {
- *     console.log(`SLA breach on shipment ${breach.shipment_id}`);
+ * const { isConnected, lastFuelAlert } = useOpsWebSocket({
+ *   subscriptions: ['fuel_alert'],
+ *   onFuelAlert: (alert) => {
+ *     console.log(`${alert.name} at ${alert.stock_percentage}% stock`);
  *   },
  * });
  * ```
@@ -170,20 +146,12 @@ export interface UseOpsWebSocketReturn {
 export function useOpsWebSocket(
   options: OpsWebSocketOptions = {},
 ): UseOpsWebSocketReturn {
-  const [lastShipmentUpdate, setLastShipmentUpdate] =
-    useState<OpsShipment | null>(null);
-  const [lastRiderUpdate, setLastRiderUpdate] = useState<OpsRider | null>(null);
-  const [lastSlaBreach, setLastSlaBreach] = useState<SlaBreach | null>(null);
   const [lastFuelAlert, setLastFuelAlert] = useState<FuelAlertEvent | null>(
     null,
   );
   const [connectionStatus, setConnectionStatus] = useState<string | null>(null);
 
-  const subscriptions = options.subscriptions ?? [
-    "shipment_update",
-    "rider_update",
-    "sla_breach",
-  ];
+  const subscriptions = options.subscriptions ?? ["fuel_alert"];
 
   /**
    * Handle incoming WebSocket messages and dispatch by event type
@@ -200,27 +168,6 @@ export function useOpsWebSocket(
         case "heartbeat":
           // Heartbeat received — connection is alive, nothing to do
           break;
-
-        case "shipment_update": {
-          const shipment = message.data as OpsShipment;
-          setLastShipmentUpdate(shipment);
-          options.onShipmentUpdate?.(shipment);
-          break;
-        }
-
-        case "rider_update": {
-          const rider = message.data as OpsRider;
-          setLastRiderUpdate(rider);
-          options.onRiderUpdate?.(rider);
-          break;
-        }
-
-        case "sla_breach": {
-          const breach = message.data as SlaBreach;
-          setLastSlaBreach(breach);
-          options.onSlaBreach?.(breach);
-          break;
-        }
 
         case "fuel_alert": {
           const alert = message.data as FuelAlertEvent;
@@ -279,9 +226,6 @@ export function useOpsWebSocket(
     isConnected,
     reconnectAttempt,
     reconnectDelay,
-    lastShipmentUpdate,
-    lastRiderUpdate,
-    lastSlaBreach,
     lastFuelAlert,
     error,
     connect,

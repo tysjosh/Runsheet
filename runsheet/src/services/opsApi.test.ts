@@ -1,16 +1,19 @@
 /**
- * Unit tests for the rider/event/replay/drift/feature-flag and Prometheus
- * additions to ``opsApi.ts``.
+ * Unit tests for ``opsApi.ts`` — the surviving, ungated ops surface.
  *
- * Covers the ops-intelligence endpoints the frontend was missing:
+ * Covers:
  *
- *  • ``GET /ops/riders`` / ``GET /ops/riders/:id``
- *  • ``GET /ops/events``
- *  • ``GET /ops/metrics/riders``
+ *  • ``GET /ops/monitoring/{ingestion,indexing,poison-queue}``
  *  • ``GET /ops/metrics/prometheus`` (text, not JSON)
- *  • ``POST /ops/replay/trigger`` / ``GET /ops/replay/status/:id``
- *  • ``POST /ops/drift/run``
  *  • feature-flag enable / disable / rollback
+ *
+ * The rider / event / rider-metrics / replay / drift wrappers that used to be
+ * tested here were deleted with the rest of the legacy-NG frontend: every one
+ * of those routes is behind `require_ops_enabled`, which raises
+ * `LEGACY_NG_DELIVERY_DISABLED` while `LEGACY_NG_DELIVERY_ENABLED` is false
+ * (the default everywhere). The endpoints exercised below are deliberately
+ * exempt from that gate so a disabled surface stays observable and
+ * manageable.
  *
  * We mock ``global.fetch`` to verify URL assembly, HTTP method, and JSON
  * body handling. The Prometheus endpoint is checked separately because it
@@ -21,15 +24,11 @@ import { ApiError } from "./api";
 import {
   disableOpsFeatureFlag,
   enableOpsFeatureFlag,
-  getEvents,
+  getIndexingMonitoring,
+  getIngestionMonitoring,
+  getPoisonQueueMonitoring,
   getPrometheusMetrics,
-  getReplayStatus,
-  getRiderById,
-  getRiderMetrics,
-  getRiders,
   rollbackOpsFeatureFlag,
-  runDriftDetection,
-  triggerReplay,
 } from "./opsApi";
 
 const API_BASE_URL = "http://localhost:8080/api";
@@ -53,87 +52,46 @@ afterEach(() => {
   jest.restoreAllMocks();
 });
 
-// ─── Riders ──────────────────────────────────────────────────────────────────
+// ─── Monitoring ──────────────────────────────────────────────────────────────
 
-describe("getRiders", () => {
-  it("serializes status/page/size filters", async () => {
-    mockFetchOnce({
-      ok: true,
-      body: {
-        data: [],
-        pagination: { page: 1, size: 20, total: 0, total_pages: 1 },
-        request_id: "r",
-      },
-    });
+describe("monitoring endpoints", () => {
+  it("getIngestionMonitoring GETs the ingestion path", async () => {
+    mockFetchOnce({ ok: true, body: { events_received: 5, request_id: "r" } });
 
-    await getRiders({ status: "active", page: 2, size: 10 });
+    const result = await getIngestionMonitoring();
 
+    expect(result.events_received).toBe(5);
     const [url] = (global.fetch as jest.Mock).mock.calls[0];
-    expect(url).toContain(`${API_BASE_URL}/ops/riders?`);
-    expect(url).toContain("status=active");
-    expect(url).toContain("page=2");
-    expect(url).toContain("size=10");
+    expect(url).toBe(`${API_BASE_URL}/ops/monitoring/ingestion`);
   });
-});
 
-describe("getRiderById", () => {
-  it("GETs the rider and returns assigned shipments", async () => {
+  it("getIndexingMonitoring GETs the indexing path", async () => {
     mockFetchOnce({
       ok: true,
-      body: {
-        data: { rider_id: "rider-1", assigned_shipments: [] },
-        request_id: "r",
-      },
+      body: { documents_indexed: 12, request_id: "r" },
     });
 
-    const result = await getRiderById("rider-1");
+    const result = await getIndexingMonitoring();
 
-    expect(result.data.rider_id).toBe("rider-1");
+    expect(result.documents_indexed).toBe(12);
     const [url] = (global.fetch as jest.Mock).mock.calls[0];
-    expect(url).toBe(`${API_BASE_URL}/ops/riders/rider-1`);
+    expect(url).toBe(`${API_BASE_URL}/ops/monitoring/indexing`);
   });
-});
 
-// ─── Events ────────────────────────────────────────────────────────────────
+  it("getPoisonQueueMonitoring GETs the poison-queue path", async () => {
+    mockFetchOnce({ ok: true, body: { queue_depth: 0, request_id: "r" } });
 
-describe("getEvents", () => {
-  it("serializes shipment_id and event_type filters", async () => {
-    mockFetchOnce({
-      ok: true,
-      body: {
-        data: [],
-        pagination: { page: 1, size: 20, total: 0, total_pages: 1 },
-        request_id: "r",
-      },
-    });
+    const result = await getPoisonQueueMonitoring();
 
-    await getEvents({ shipment_id: "ship-1", event_type: "delivered" });
-
+    expect(result.queue_depth).toBe(0);
     const [url] = (global.fetch as jest.Mock).mock.calls[0];
-    expect(url).toContain("shipment_id=ship-1");
-    expect(url).toContain("event_type=delivered");
+    expect(url).toBe(`${API_BASE_URL}/ops/monitoring/poison-queue`);
   });
-});
 
-// ─── Rider metrics ───────────────────────────────────────────────────────────
+  it("surfaces a non-2xx monitoring response as ApiError", async () => {
+    mockFetchOnce({ ok: false, status: 503, body: { message: "down" } });
 
-describe("getRiderMetrics", () => {
-  it("GETs the rider metrics endpoint with bucket filter", async () => {
-    mockFetchOnce({
-      ok: true,
-      body: {
-        data: [],
-        bucket: "daily",
-        start_date: "",
-        end_date: "",
-        request_id: "r",
-      },
-    });
-
-    await getRiderMetrics({ bucket: "daily" });
-
-    const [url] = (global.fetch as jest.Mock).mock.calls[0];
-    expect(url).toBe(`${API_BASE_URL}/ops/metrics/riders?bucket=daily`);
+    await expect(getIngestionMonitoring()).rejects.toThrow(ApiError);
   });
 });
 
@@ -154,66 +112,6 @@ describe("getPrometheusMetrics", () => {
     mockFetchOnce({ ok: false, status: 503, text: "unavailable" });
 
     await expect(getPrometheusMetrics()).rejects.toThrow(ApiError);
-  });
-});
-
-// ─── Replay ────────────────────────────────────────────────────────────────
-
-describe("replay", () => {
-  it("triggerReplay POSTs the tenant + time range", async () => {
-    mockFetchOnce({
-      ok: true,
-      body: { data: { job_id: "job-1", status: "running" }, request_id: "r" },
-    });
-
-    const payload = {
-      tenant_id: "tenant-a",
-      start_time: "2026-01-01T00:00:00Z",
-      end_time: "2026-01-02T00:00:00Z",
-    };
-    const result = await triggerReplay(payload);
-
-    expect(result.data.job_id).toBe("job-1");
-    const [url, options] = (global.fetch as jest.Mock).mock.calls[0];
-    expect(url).toBe(`${API_BASE_URL}/ops/replay/trigger`);
-    expect(options.method).toBe("POST");
-    expect(JSON.parse(options.body)).toEqual(payload);
-  });
-
-  it("getReplayStatus GETs the job by id", async () => {
-    mockFetchOnce({
-      ok: true,
-      body: {
-        data: { job_id: "job-1", status: "completed" },
-        request_id: "r",
-      },
-    });
-
-    await getReplayStatus("job-1");
-
-    const [url] = (global.fetch as jest.Mock).mock.calls[0];
-    expect(url).toBe(`${API_BASE_URL}/ops/replay/status/job-1`);
-  });
-});
-
-// ─── Drift ─────────────────────────────────────────────────────────────────
-
-describe("runDriftDetection", () => {
-  it("POSTs the drift run payload", async () => {
-    mockFetchOnce({
-      ok: true,
-      body: {
-        data: { tenant_id: "tenant-a", drift_percentage: 0 },
-        request_id: "r",
-      },
-    });
-
-    await runDriftDetection({ tenant_id: "tenant-a" });
-
-    const [url, options] = (global.fetch as jest.Mock).mock.calls[0];
-    expect(url).toBe(`${API_BASE_URL}/ops/drift/run`);
-    expect(options.method).toBe("POST");
-    expect(JSON.parse(options.body)).toEqual({ tenant_id: "tenant-a" });
   });
 });
 
