@@ -27,6 +27,7 @@ from Agents.agent_ws_manager import AgentActivityWSManager
 from Agents.overlay.base_overlay_agent import (
     CYCLE_METRIC_DEGRADATION_REASONS,
     CYCLE_METRIC_DEGRADED,
+    DEGRADATION_KIND_NO_INPUT,
 )
 from Agents.overlay.data_contracts import InterventionProposal
 from Agents.support.fuel_distribution_models import DeliveryPriorityList
@@ -288,6 +289,29 @@ class PipelineRun:
         """Whether any stage completed without doing its job."""
         return bool(self.degradations)
 
+    @property
+    def has_produced_nothing_degradation(self) -> bool:
+        """Whether any reason is a ``produced_nothing`` rather than ``no_input``.
+
+        Drives log severity only — :attr:`degraded` and the run state are
+        unaffected, because a plan run that yielded no plan is not a success
+        whichever kind it was. Fail-safe in the *loud* direction here: an
+        unrecognized or malformed reason entry counts as produced_nothing, so a
+        reason shape we fail to parse is over-reported rather than silenced.
+        """
+        for entry in self.degradations:
+            reasons = entry.get("reasons") or []
+            if not reasons:
+                # Degraded with no reasons attached — the flag is the signal,
+                # and we cannot show it is merely "nothing to do".
+                return True
+            for reason in reasons:
+                if not isinstance(reason, Mapping):
+                    return True
+                if reason.get("kind") != DEGRADATION_KIND_NO_INPUT:
+                    return True
+        return False
+
     def record_degradation(self, agent_id: str, reasons: List[Any]) -> None:
         """Record that ``agent_id`` finished but produced nothing useful."""
         self.degradations.append({"agent_id": agent_id, "reasons": list(reasons)})
@@ -541,12 +565,27 @@ class FuelDistributionPipeline:
         await self._broadcast_state_transition(pipeline_run, "pipeline")
 
         if pipeline_run.degraded:
-            logger.error(
-                "FuelDistributionPipeline: run %s completed DEGRADED — "
-                "stage(s) %s finished without doing their job",
-                run_id,
-                ", ".join(d["agent_id"] for d in pipeline_run.degradations),
-            )
+            # ERROR only when a stage had input and produced nothing from it.
+            # A tenant with no tanks and no pending orders degrades every
+            # 30-minute sweep, and logging that at ERROR 48 times a day is how
+            # a signal becomes noise people filter out — taking the
+            # produced_nothing case with it. The run state is DEGRADED either
+            # way, so the API still refuses to call it COMPLETE.
+            stages = ", ".join(d["agent_id"] for d in pipeline_run.degradations)
+            if pipeline_run.has_produced_nothing_degradation:
+                logger.error(
+                    "FuelDistributionPipeline: run %s completed DEGRADED — "
+                    "stage(s) %s had work and produced nothing",
+                    run_id,
+                    stages,
+                )
+            else:
+                logger.warning(
+                    "FuelDistributionPipeline: run %s completed DEGRADED — "
+                    "stage(s) %s had nothing to work on",
+                    run_id,
+                    stages,
+                )
         else:
             logger.info(
                 "FuelDistributionPipeline: run %s completed successfully",
