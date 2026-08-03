@@ -33,6 +33,7 @@ from driver.models import GeoPoint
 from errors.exceptions import (
     AppException,
     ambiguous_volume_unit,
+    elasticsearch_unavailable,
     internal_error,
     resource_not_found,
     validation_error,
@@ -324,7 +325,17 @@ async def get_plan(
 
     # Try plan_id first, then fall back to run_id (the generate endpoint
     # returns run_id, which is what the frontend passes here).
+    #
+    # Both lookups below used to swallow their exception and only log it. With
+    # Elasticsearch down every attempt failed, ``loading_plan`` stayed None, and
+    # the endpoint returned the same ``200 {"loading_plan": null,
+    # "route_plan": null}`` it returns for a plan id that simply does not exist.
+    # An outage was therefore indistinguishable from a miss — to the dispatcher
+    # UI, and to anyone reading the metrics. ``lookup_failed`` keeps that apart:
+    # "I looked and there is nothing" still answers 200, "I could not look"
+    # answers 503.
     loading_plan = None
+    lookup_failed = False
     for field in ("plan_id", "run_id"):
         loading_query = {
             "query": {
@@ -344,12 +355,31 @@ async def get_plan(
                 loading_plan = hits[0]["_source"]
                 break
         except Exception as e:
+            lookup_failed = True
             logger.error("Failed to query loading plan %s (field=%s): %s", plan_id, field, e)
+
+    if loading_plan is None and lookup_failed:
+        # Never report "no plan" on the strength of a query that did not run.
+        # 503 rather than 500: the fault is a dependency being unavailable, and
+        # the request is worth retrying unchanged.
+        raise elasticsearch_unavailable(
+            message=(
+                "The plan store could not be queried, so whether this plan "
+                "exists is unknown"
+            ),
+            details={"plan_id": plan_id, "index": "mvp_load_plans"},
+        )
 
     if loading_plan is None:
         # No loading plan found — could be a run_id for a pipeline that
         # completed without producing plans (e.g. no truck compartments
         # configured). Return an empty plan instead of 404.
+        #
+        # Deliberately 200, unlike the sibling ``/costs`` (400) and
+        # ``/outcomes`` (404) for an unknown id. Left as-is because the
+        # dispatcher UI polls this immediately after ``/plan/generate`` and
+        # relies on the empty body while the run is still producing; the bug
+        # here was only ever the outage case above.
         return {
             "plan_id": plan_id,
             "loading_plan": None,
@@ -358,6 +388,7 @@ async def get_plan(
 
     # Query associated route plan(s) using the same fallback strategy
     route_plan = None
+    route_lookup_failed = False
     for field in ("plan_id", "run_id"):
         route_query = {
             "query": {
@@ -383,7 +414,20 @@ async def get_plan(
                 }
                 break
         except Exception as e:
+            route_lookup_failed = True
             logger.error("Failed to query route plan for %s (field=%s): %s", plan_id, field, e)
+
+    if route_plan is None and route_lookup_failed:
+        # The loading plan was found, so the plan exists — but a null
+        # ``route_plan`` here would tell the caller it has no route, which is a
+        # claim this request cannot support. Same 503 as above.
+        raise elasticsearch_unavailable(
+            message=(
+                "The route store could not be queried, so this plan's routes "
+                "are unknown"
+            ),
+            details={"plan_id": plan_id, "index": "mvp_routes"},
+        )
 
     return {
         "plan_id": plan_id,
