@@ -3,7 +3,8 @@ Shared response models for the Dinee voice submission surface (Surface A).
 
 The :class:`VoiceSubmissionResponse` is the acceptance-response contract the
 :class:`~fuel.voice.dinee_voice_bridge.DineeVoiceBridge` produces and the
-``voice_submission_router`` (task 5.2) returns from ``POST /voice/orders``.
+``voice_submission_router`` (task 5.2) returns from ``POST /voice-intake``
+(the bare path — not ``/voice/orders``, which is a Surface B *read* prefix).
 It lives in this shared module (rather than the router) so the bridge can
 map an :class:`~fuel.services.order_intake_pipeline.IntakeResponse` onto it
 without creating a bridge→router import cycle.
