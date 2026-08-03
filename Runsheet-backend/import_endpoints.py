@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from auth.router_guards import roles_dependency
 from config.settings import get_settings
 from middleware.rate_limiter import limiter
 from services.elasticsearch_service import elasticsearch_service
@@ -27,14 +28,39 @@ from services.import_models import (
 )
 from services.import_service import ImportService
 from services.schema_templates import SchemaTemplate, SchemaTemplates
-from errors.exceptions import insufficient_role
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 
 logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
-router = APIRouter(prefix="/api/import")
+#: Roles permitted to reach any import route.
+#:
+#: Narrowed from ``{admin, dispatcher}`` to ``admin`` alone. A bulk import is the
+#: highest-leverage write in the product: one CSV can create or overwrite the
+#: customer roster, the asset fleet, the driver list, or the inventory catalogue
+#: in a single call, and the resulting rows feed pricing, routing and readiness
+#: decisions for the whole tenant. That is master-data administration rather than
+#: shift work, so it sits with the same role that owns Feature Flags.
+#:
+#: Applied at the router so it covers every route, not only the four that
+#: previously called a per-handler helper. ``GET /history``, ``/history/{id}``,
+#: ``/templates/{data_type}`` and ``/schemas/{data_type}`` had **no** role check
+#: at all, which let any signed-in user — a driver included — read what data had
+#: been imported, by whom, and how many rows landed.
+IMPORT_ADMIN_ROLES: tuple[str, ...] = ("admin",)
+
+#: Router-level gate. Rejections carry the canonical ``INSUFFICIENT_ROLE`` code
+#: (403) via :func:`auth.authorization.require_role`, which is why this is not a
+#: bare ``HTTPException`` — it keeps that ceiling moving in its intended
+#: direction and matches what the platform's clients already switch on.
+import_admin_dependency = roles_dependency(*IMPORT_ADMIN_ROLES)
+
+
+router = APIRouter(
+    prefix="/api/import",
+    dependencies=[Depends(import_admin_dependency)],
+)
 
 # Module-level service instances
 import_service = ImportService(elasticsearch_service)
@@ -55,21 +81,6 @@ def configure_import_endpoints(
         order_intake_pipeline=order_intake_pipeline,
         tank_import_service=tank_import_service,
     )
-
-
-def _require_import_role(tenant: TenantContext) -> None:
-    """Reject callers without the admin or dispatcher role.
-
-    Uses ``insufficient_role`` rather than a bare ``HTTPException`` so the
-    response carries the canonical ``INSUFFICIENT_ROLE`` error code (403) that
-    the rest of the platform's clients already switch on. This also keeps the
-    ``raise HTTPException`` ceiling moving in its intended direction.
-    """
-    if not {"admin", "dispatcher"}.intersection(tenant.roles or []):
-        raise insufficient_role(
-            message="Data imports require the admin or dispatcher role.",
-            details={"required_roles": ["admin", "dispatcher"]},
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -110,7 +121,6 @@ async def upload_csv(
 
     Requirements: 3.3, 3.4, 11.1
     """
-    _require_import_role(tenant)
     # Validate file extension
     filename = file.filename or ""
     if not filename.lower().endswith(".csv"):
@@ -154,7 +164,6 @@ async def upload_sheets(
 
     Requirements: 11.2
     """
-    _require_import_role(tenant)
     try:
         result = await import_service.parse_sheets(
             body.url,
@@ -185,7 +194,6 @@ async def validate_import(
 
     Requirements: 11.3
     """
-    _require_import_role(tenant)
     try:
         result = await import_service.validate(
             body.session_id,
@@ -219,7 +227,6 @@ async def commit_import(
 
     Requirements: 11.4
     """
-    _require_import_role(tenant)
     try:
         result = await import_service.commit(
             body.session_id,

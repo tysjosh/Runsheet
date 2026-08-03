@@ -21,6 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from config.settings import get_settings
+from commerce.api._authz import require_commerce_staff
 from commerce.services.payment_service import PaymentService
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 from services.ref_resolver import get_ref_resolver
@@ -114,6 +115,11 @@ async def require_payments_enabled(
                 "message": "Commerce invoicing module is not enabled for this tenant",
             },
         )
+
+    # Payments are a Tier 4 / staff surface: the ERP bills and collects. Applied
+    # after the flag check so a tenant without the module still sees 404 rather
+    # than 403.
+    require_commerce_staff(tenant)
 
     return tenant
 

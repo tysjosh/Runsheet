@@ -40,6 +40,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, File
 from pydantic import BaseModel, ConfigDict, Field
 
+from compliance.api._authz import compliance_ops_dependency
 from compliance.services.compliance_es_mappings import TERMINAL_BOLS_INDEX
 from compliance.services.terminal_bol_ingestion_service import (
     TerminalBOLIngestionService,
@@ -61,8 +62,12 @@ logger = logging.getLogger(__name__)
 _bol_service: Optional[TerminalBOLIngestionService] = None
 _es_service: Optional[Any] = None
 
+# DOT / IRS records, gated to the operations roles. Attached to the router
+# rather than to each handler so a route added later inherits it: every module
+# in this package previously had no role check at all.
 router = APIRouter(
-    prefix="/api/compliance/terminal-bols", tags=["Compliance"]
+    prefix="/api/compliance/terminal-bols", tags=["Compliance"],
+    dependencies=[Depends(compliance_ops_dependency)],
 )
 
 

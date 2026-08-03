@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from config.settings import get_settings
+from commerce.api._authz import require_commerce_ops
 from commerce.services.customer_service import CustomerService
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 
@@ -95,6 +96,11 @@ async def require_customers_enabled(
                 "message": "Commerce customers module is not enabled for this tenant",
             },
         )
+
+    # Customers are an operations surface — an order needs a customer and a tank,
+    # so a dispatcher works these during a shift. Applied after the flag check so a
+    # tenant without the module still sees 404 rather than 403.
+    require_commerce_ops(tenant)
 
     return tenant
 

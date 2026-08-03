@@ -7,6 +7,16 @@
  * with last activity timestamp. Provides pause/resume controls wired to the
  * POST `/agent/{agent_id}/pause` and `/agent/{agent_id}/resume` endpoints.
  *
+ * Audience: this panel renders inside `OperationsControlView` and `/ops/command`,
+ * both of which are `admin` + `dispatcher` surfaces — but pausing an agent is a
+ * tenant-wide lifecycle change, so the backend restricts it to `admin` via
+ * `agent_admin_dependency` (see `Agents/api_authz.py`). The status list stays
+ * visible to dispatchers; only the pause/resume control is admin-gated, so a
+ * dispatcher is not shown a button that can only return 403.
+ *
+ * The role check here is presentation-only. The backend re-checks on every
+ * pause/resume and answers 403 regardless of what this component renders.
+ *
  * Validates:
  * - Requirement 9.5: Agent health indicators with status and last activity
  * - Requirement 9.6: Pause and resume individual autonomous agents
@@ -20,6 +30,7 @@ import {
   pauseAgent,
   resumeAgent,
 } from "../../services/agentApi";
+import { getCurrentUserRoles } from "../../utils/auth";
 
 /** Human-readable agent name and description mapping */
 const AGENT_META: Record<string, { label: string; description: string }> = {
@@ -74,6 +85,20 @@ export default function AgentHealth() {
   const [agents, setAgents] = useState<Record<string, AgentHealthEntry>>({});
   const [loading, setLoading] = useState(true);
   const [actionInProgress, setActionInProgress] = useState<string | null>(null);
+  // Defaults to false so a dispatcher never briefly sees an actionable control
+  // before the session's claims resolve.
+  const [isAdmin, setIsAdmin] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const roles = await getCurrentUserRoles();
+      if (!cancelled) setIsAdmin(roles.includes("admin"));
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const loadHealth = useCallback(async () => {
     try {
@@ -203,29 +228,38 @@ export default function AgentHealth() {
                   </p>
                 </div>
 
-                {/* Pause/Resume button */}
-                <button
-                  onClick={() =>
-                    isRunning
-                      ? handlePause(agent.agent_id)
-                      : handleResume(agent.agent_id)
-                  }
-                  disabled={isProcessing || agent.status === "error"}
-                  className={`flex-shrink-0 p-2 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
-                    isRunning
-                      ? "text-warning hover:bg-warning-light"
-                      : "text-success hover:bg-success-light"
-                  }`}
-                  title={isRunning ? "Pause agent" : "Resume agent"}
-                >
-                  {isProcessing ? (
-                    <div className="w-4 h-4 border-2 border-gray-400 border-t-transparent rounded-full animate-spin" />
-                  ) : isRunning ? (
-                    <Pause className="w-4 h-4" />
-                  ) : (
-                    <Play className="w-4 h-4" />
-                  )}
-                </button>
+                {/* Pause/Resume button — admin only. Agent lifecycle is a
+                    tenant-wide change, so `agent_admin_dependency` answers 403
+                    for a dispatcher; omitting the control rather than disabling
+                    it keeps the panel honest about what this role can do. */}
+                {isAdmin && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      isRunning
+                        ? handlePause(agent.agent_id)
+                        : handleResume(agent.agent_id)
+                    }
+                    disabled={isProcessing || agent.status === "error"}
+                    className={`flex-shrink-0 p-2 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+                      isRunning
+                        ? "text-warning hover:bg-warning-light"
+                        : "text-success hover:bg-success-light"
+                    }`}
+                    title={isRunning ? "Pause agent" : "Resume agent"}
+                    aria-label={
+                      isRunning ? `Pause ${meta.label}` : `Resume ${meta.label}`
+                    }
+                  >
+                    {isProcessing ? (
+                      <div className="w-4 h-4 border-2 border-gray-400 border-t-transparent rounded-full animate-spin" />
+                    ) : isRunning ? (
+                      <Pause className="w-4 h-4" />
+                    ) : (
+                      <Play className="w-4 h-4" />
+                    )}
+                  </button>
+                )}
               </div>
             );
           })

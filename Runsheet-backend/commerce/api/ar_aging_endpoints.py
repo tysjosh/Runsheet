@@ -18,6 +18,7 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from config.settings import get_settings
+from commerce.api._authz import require_commerce_staff
 from commerce.services.ar_aging_service import ARAgingService
 from commerce.services.commerce_es_mappings import AR_AGING_SNAPSHOTS_INDEX
 from ops.middleware.tenant_guard import (
@@ -86,6 +87,11 @@ async def require_ar_aging_enabled(
                 "message": "Commerce backbone is not enabled for this tenant",
             },
         )
+
+    # Receivables aging is a Tier 4 / staff surface: the ERP owns the invoice, so
+    # a tenant's own admin is refused here. Applied after the flag check so a
+    # tenant without the backbone still sees 404 rather than 403.
+    require_commerce_staff(tenant)
 
     return tenant
 
