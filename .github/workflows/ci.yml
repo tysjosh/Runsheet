@@ -1,21 +1,35 @@
 name: CI
 
 on:
+  # Any base branch, not just main. A stacked pull request targets the branch
+  # below it rather than main, so `branches: [main]` meant CI did not run on it
+  # at all — every check reported as "skipped" and the PR looked reviewable when
+  # nothing had been verified. Silence is the worst possible result here, so the
+  # filter is removed rather than extended with a list that the next stack
+  # naming convention would fall outside of.
   pull_request:
-    branches: [main]
   push:
     branches: [main]
 
 env:
   PYTHON_VERSION: "3.11"
-  # Must stay on the same npm *major* that wrote driver-app/package-lock.json.
-  # Node 20 ships npm 10, which auto-installs peer dependencies; Node 24 ships
-  # npm 11, which does not. The lock was written by npm 11, so npm 10 refused it
-  # with "Missing: prettier@3.9.6 from lock file" (a peer of
-  # prettier-plugin-tailwindcss) plus three @emnapi version conflicts, and
-  # `npm ci` aborted before a single check ran. Aligning CI with the version
-  # developers actually use is the durable fix; regenerating the lock under npm 10
-  # would only invert which side breaks. GitHub is also retiring Node 20 runners.
+  # Kept at 24 to match the npm major that wrote driver-app/package-lock.json,
+  # and because GitHub is retiring Node 20 runners.
+  #
+  # This does NOT fix the driver-app `npm ci` failure, contrary to what this
+  # comment previously claimed. The earlier explanation was that Node 20's npm 10
+  # auto-installs peer dependencies while npm 11 does not, so npm 10 refused a
+  # lock written by npm 11. The evidence contradicts it: the driver-app job has
+  # since run on Node v24.18.0 — the same version developers use — and `npm ci`
+  # still aborted with the same "Missing: prettier@3.9.6" plus three @emnapi
+  # conflicts.
+  #
+  # The actual cause is platform, not npm major. `@emnapi/*` arrive through a
+  # Linux-only optional dependency subtree. macOS npm never evaluates that
+  # subtree, so `npm install --package-lock-only` reports "up to date" and writes
+  # nothing locally, while `npm ci` on a Linux runner finds the entries absent.
+  # The durable fix is a lockfile generated on Linux; until then the driver-app
+  # job stays red and no amount of NODE_VERSION tuning changes that.
   NODE_VERSION: "24"
   COVERAGE_THRESHOLD: 70
 
