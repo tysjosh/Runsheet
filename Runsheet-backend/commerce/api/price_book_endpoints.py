@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, model_validator
 
 from config.settings import get_settings
+from commerce.api._authz import require_commerce_staff
 from commerce.services.price_book_service import PriceBookService
 from commerce.services.pricing_engine import PricingEngine, PricingError
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
@@ -121,6 +122,10 @@ async def require_pricing_enabled(
                 "message": "Commerce pricing engine is not enabled for this tenant",
             },
         )
+
+    # Price books are a Tier 4 / staff surface: the ERP prices. Applied after the
+    # flag check so a tenant without the engine still sees 404 rather than 403.
+    require_commerce_staff(tenant)
 
     return tenant
 

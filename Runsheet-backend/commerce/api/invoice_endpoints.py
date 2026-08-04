@@ -21,6 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from config.settings import get_settings
+from commerce.api._authz import require_commerce_ops
 from commerce.services.invoice_service import InvoiceService
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 from services.ref_resolver import get_ref_resolver
@@ -115,6 +116,11 @@ async def require_invoicing_enabled(
                 "message": "Commerce invoicing module is not enabled for this tenant",
             },
         )
+
+    # Invoices are capability 6 of the delivery pipeline, not a deferrable ERP
+    # surface, so they stay with the operations roles. Applied after the flag check
+    # so a tenant without the module still sees 404 rather than 403.
+    require_commerce_ops(tenant)
 
     return tenant
 

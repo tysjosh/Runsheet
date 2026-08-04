@@ -44,6 +44,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
+from compliance.api._authz import compliance_ops_dependency
 from compliance.models.jurisdiction_rate import JurisdictionRate
 from compliance.models.tax_exemption import TaxExemption
 from compliance.services.compliance_es_mappings import (
@@ -71,7 +72,13 @@ logger = logging.getLogger(__name__)
 
 _es_service: Optional[Any] = None
 
-router = APIRouter(prefix="/api/compliance", tags=["Compliance"])
+# DOT / IRS records, gated to the operations roles. Attached to the router
+# rather than to each handler so a route added later inherits it: every module
+# in this package previously had no role check at all.
+router = APIRouter(
+    prefix="/api/compliance", tags=["Compliance"],
+    dependencies=[Depends(compliance_ops_dependency)],
+)
 
 
 def configure_tax_api(*, es_service: Any) -> None:

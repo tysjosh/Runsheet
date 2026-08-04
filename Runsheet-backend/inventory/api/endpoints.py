@@ -16,6 +16,10 @@ from config.settings import get_settings
 from middleware.rate_limiter import limiter
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 from schemas.common import paginated_response_dict
+from inventory.api._authz import (
+    inventory_admin_dependency,
+    inventory_ops_dependency,
+)
 from inventory.models import (
     CreateInventoryItem,
     StockAdjustment,
@@ -65,7 +69,7 @@ def _get_request_id(request: Request) -> str:
 # ---------------------------------------------------------------------------
 
 
-@router.get("/items")
+@router.get("/items", dependencies=[Depends(inventory_ops_dependency)])
 @limiter.limit(_inventory_rate)
 async def list_items(
     request: Request,
@@ -102,7 +106,7 @@ async def list_items(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/items/{item_id}")
+@router.get("/items/{item_id}", dependencies=[Depends(inventory_ops_dependency)])
 @limiter.limit(_inventory_rate)
 async def get_item(
     request: Request,
@@ -123,7 +127,7 @@ async def get_item(
 # ---------------------------------------------------------------------------
 
 
-@router.post("/items", status_code=201)
+@router.post("/items", status_code=201, dependencies=[Depends(inventory_admin_dependency)])
 @limiter.limit(_inventory_rate)
 async def create_item(
     request: Request,
@@ -144,7 +148,7 @@ async def create_item(
 # ---------------------------------------------------------------------------
 
 
-@router.patch("/items/{item_id}")
+@router.patch("/items/{item_id}", dependencies=[Depends(inventory_admin_dependency)])
 @limiter.limit(_inventory_rate)
 async def update_item(
     request: Request,
@@ -168,7 +172,7 @@ async def update_item(
 # ---------------------------------------------------------------------------
 
 
-@router.delete("/items/{item_id}", status_code=204, response_model=None)
+@router.delete("/items/{item_id}", status_code=204, response_model=None, dependencies=[Depends(inventory_admin_dependency)])
 @limiter.limit(_inventory_rate)
 async def delete_item(
     request: Request,
@@ -186,7 +190,7 @@ async def delete_item(
 # ---------------------------------------------------------------------------
 
 
-@router.post("/items/{item_id}/adjust")
+@router.post("/items/{item_id}/adjust", dependencies=[Depends(inventory_ops_dependency)])
 @limiter.limit(_inventory_rate)
 async def adjust_stock(
     request: Request,
@@ -219,7 +223,7 @@ async def adjust_stock(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/alerts")
+@router.get("/alerts", dependencies=[Depends(inventory_ops_dependency)])
 @limiter.limit(_inventory_rate)
 async def get_alerts(
     request: Request,
@@ -240,7 +244,7 @@ async def get_alerts(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/summary")
+@router.get("/summary", dependencies=[Depends(inventory_ops_dependency)])
 @limiter.limit(_inventory_rate)
 async def get_summary(
     request: Request,
@@ -260,7 +264,7 @@ async def get_summary(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/items/{item_id}/history")
+@router.get("/items/{item_id}/history", dependencies=[Depends(inventory_ops_dependency)])
 @limiter.limit(_inventory_rate)
 async def get_item_history(
     request: Request,
