@@ -398,6 +398,19 @@ TRUCK_COMPARTMENTS_MAPPING = {
             "truck_id":       {"type": "keyword"},
             "capacity_liters": {"type": "float"},
             "allowed_grades":  {"type": "keyword"},
+            # Exact canonical US product codes (DIESEL_2, HEATING_OIL, DEF...).
+            # ``allowed_grades`` above holds the legacy four-value NG family and
+            # cannot distinguish road diesel from dyed heating oil, which carry
+            # different tax classes. Nullable: compartments indexed before this
+            # field fall back to family eligibility (see
+            # ``compartment_solver.compartment_accepts``).
+            #
+            # This mapping is required, not optional — the index is
+            # ``dynamic: strict``, so a compartment carrying
+            # ``allowed_product_codes`` without it is rejected at write time
+            # with ``strict_dynamic_mapping_exception`` rather than silently
+            # dropping the field.
+            "allowed_product_codes": {"type": "keyword"},
             "position_index":  {"type": "integer"},
             "depot_city":      {"type": "keyword"},
             "depot_location":  {"type": "geo_point"},
@@ -555,6 +568,18 @@ MVP_ADDITIVE_MAPPING_UPDATES = {
                 "type": "nested",
                 "properties": {"order_ids": {"type": "keyword"}},
             }
+        }
+    },
+    TRUCK_COMPARTMENTS_INDEX: {
+        "properties": {
+            # Added with the US product-catalog segregation fix. Same reasoning
+            # as ``product_code`` above, and the same trap: declaring it only
+            # in TRUCK_COMPARTMENTS_MAPPING reaches brand-new indices and no
+            # existing cluster. ``truck_compartments`` is dynamic:strict, so a
+            # compartment carrying ``allowed_product_codes`` against an
+            # already-created index is rejected in full — the operator loses
+            # the whole compartment record, not just the new field.
+            "allowed_product_codes": {"type": "keyword"},
         }
     },
 }

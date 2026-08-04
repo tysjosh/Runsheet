@@ -18,7 +18,7 @@ heavily filtered a plan was, the more accurate its weight became.
 Validates: Requirements 3.3, 3.7
 """
 
-from typing import List
+from typing import List, Optional
 
 import pytest
 
@@ -47,13 +47,28 @@ def _catalog_density_kg_per_liter(lbs_per_gallon: float) -> float:
     return lbs_per_gallon * KG_PER_LB / LITERS_PER_US_GALLON
 
 
-def _compartments(count: int = 2, capacity: float = 5000.0) -> List[Compartment]:
+def _compartments(
+    count: int = 2,
+    capacity: float = 5000.0,
+    allowed_product_codes: Optional[List[str]] = None,
+) -> List[Compartment]:
+    """Compartments for the weight tests.
+
+    ``allowed_product_codes`` is needed for the DEF cases. A legacy
+    ``allowed_grades`` list cannot express DEF eligibility: DEF is its own
+    catalog category (``tax_class=non_fuel``) and belongs to no legacy grade
+    family, so ``compartment_accepts`` refuses it from a diesel compartment —
+    which is what ``compatibility_matrix`` Req 7.2.1 already required ("DEF
+    with any non-DEF blocked"). Declaring DEF explicitly is how a tenant says
+    this compartment really does carry it.
+    """
     return [
         Compartment(
             compartment_id=f"c{i}",
             truck_id="t1",
             capacity_liters=capacity,
             allowed_grades=list(FuelGrade),
+            allowed_product_codes=allowed_product_codes,
             position_index=i,
             tenant_id="tenant-1",
         )
@@ -147,7 +162,9 @@ class TestDefIsNotWeighedAsDiesel:
         )
 
         result = check_feasibility(
-            compartments=_compartments(),
+            # A compartment that genuinely carries DEF, so this test exercises
+            # the weight gate rather than stopping at eligibility.
+            compartments=_compartments(allowed_product_codes=["DEF"]),
             requests=[request],
             max_weight_kg=3000.0,
         )
@@ -237,7 +254,7 @@ class TestProductCodeReachesTheAssignment:
         Validates: Requirement 3.4
         """
         plan = optimize_loading_plan(
-            compartments=_compartments(),
+            compartments=_compartments(allowed_product_codes=["DEF"]),
             requests=[
                 DeliveryRequest(
                     station_id="s1",
@@ -258,7 +275,7 @@ class TestProductCodeReachesTheAssignment:
     def test_plan_weight_uses_the_assignment_product_code(self):
         """The reported total_weight_kg must match the gate's arithmetic."""
         plan = optimize_loading_plan(
-            compartments=_compartments(count=1),
+            compartments=_compartments(count=1, allowed_product_codes=["DEF"]),
             requests=[
                 DeliveryRequest(
                     station_id="s1",
