@@ -15,6 +15,7 @@
 
 import { Database, Map as MapIcon, Receipt, ScrollText } from "lucide-react";
 import { lazy, Suspense, useEffect, useState } from "react";
+import { canSee, visibleByCanSee } from "../config/modules";
 import { getCurrentUserRoles } from "../utils/auth";
 import LoadingSpinner from "./LoadingSpinner";
 import { PageHeader, type Tab, TabNavigation } from "./ui";
@@ -28,7 +29,8 @@ const TaxJurisdictionsPage = lazy(
 );
 const ExemptionsPage = lazy(() => import("./compliance/ExemptionsPage"));
 
-const TABS: Tab[] = [
+// Exported for the registry drift guard in `config/modules.test.ts`.
+export const TABS: Tab[] = [
   { id: "depots", label: "Depots", icon: <Database className="w-4 h-4" /> },
   {
     id: "road-restrictions",
@@ -51,9 +53,10 @@ type TabId = string;
 
 export default function SetupHub() {
   const [activeTab, setActiveTab] = useState<TabId>("depots");
-  // Session roles gate the Storm_Mode road-restriction upload form (the
-  // backend re-checks on submit).
-  const [roles, setRoles] = useState<readonly string[]>([]);
+  // Session roles do two jobs here: they gate the Storm_Mode road-restriction
+  // upload form (the backend re-checks on submit) and they feed `canSee` for the
+  // tab bar. `null` means unresolved, which `canSee` treats as no roles.
+  const [roles, setRoles] = useState<readonly string[] | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -66,6 +69,13 @@ export default function SetupHub() {
     };
   }, []);
 
+  const visibleTabs = visibleByCanSee(TABS, { roles });
+  const effectiveTab =
+    visibleTabs.some((t) => t.id === activeTab) || visibleTabs.length === 0
+      ? activeTab
+      : visibleTabs[0].id;
+  const shows = (id: string) => effectiveTab === id && canSee(id, { roles });
+
   return (
     <div className="flex flex-col h-full">
       <PageHeader
@@ -74,18 +84,18 @@ export default function SetupHub() {
         icon={<Database className="w-5 h-5" />}
       />
       <TabNavigation
-        tabs={TABS}
-        activeTab={activeTab}
+        tabs={visibleTabs}
+        activeTab={effectiveTab}
         onChange={setActiveTab}
       />
       <div className="flex-1 overflow-auto">
         <Suspense fallback={<LoadingSpinner message="Loading..." />}>
-          {activeTab === "depots" && <DepotsPage />}
-          {activeTab === "road-restrictions" && (
-            <RoadRestrictionsPanel roles={roles} />
+          {shows("depots") && <DepotsPage />}
+          {shows("road-restrictions") && (
+            <RoadRestrictionsPanel roles={roles ?? []} />
           )}
-          {activeTab === "tax" && <TaxJurisdictionsPage />}
-          {activeTab === "exemptions" && <ExemptionsPage />}
+          {shows("tax") && <TaxJurisdictionsPage />}
+          {shows("exemptions") && <ExemptionsPage />}
         </Suspense>
       </div>
     </div>

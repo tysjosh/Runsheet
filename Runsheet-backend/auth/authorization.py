@@ -42,6 +42,15 @@ def require_role(tenant: TenantContext, *allowed: str) -> None:
     requirement for ``admin`` (Req 4.2). Raises an HTTP 403 authorization
     error when none of the required roles is present (Req 4.3).
 
+    No role implies another, and none ever will here. The staff role
+    ``platform_admin`` does not satisfy a requirement for ``admin`` any more
+    than ``admin_ops`` does — an implication graph would silently widen every
+    ``require_role(tenant, "admin")`` call site in the codebase, present and
+    future. Staff accounts therefore hold *both* roles; see
+    :data:`auth.supertokens_init.PLATFORM_STAFF_ROLES` for the bundle and the
+    reasoning. If a staff account is getting a 403 here, it was granted the
+    staff capability without the underlying role.
+
     Args:
         tenant: The verified Auth_Context for the request.
         *allowed: One or more role names; holding any one grants access.

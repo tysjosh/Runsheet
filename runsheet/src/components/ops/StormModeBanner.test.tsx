@@ -9,7 +9,11 @@
  *   - Renders triggering alert, activation window, override indicator
  *     and "Full details" link when state is ``active``.
  *   - Role-gated override form is hidden for non-dispatcher/admin
- *     callers and shown for dispatcher/admin roles.
+ *     callers and shown for dispatcher/admin roles. The gate is an
+ *     **exact** role match mirroring the backend's
+ *     ``require_role(tenant, "dispatcher", "admin")``; it used to be a
+ *     substring match, which enabled the form for role names the API
+ *     then refused.
  *   - Override submission forwards the full payload including the
  *     ``actor_id`` and trimmed ``reason``; surfaces HTTP 403 as a
  *     user-visible error.
@@ -103,8 +107,17 @@ describe("canSubmitStormModeOverride", () => {
   it("allows dispatcher and admin roles case-insensitively", () => {
     expect(canSubmitStormModeOverride(["dispatcher"])).toBe(true);
     expect(canSubmitStormModeOverride(["Admin"])).toBe(true);
-    expect(canSubmitStormModeOverride(["dispatcher_lead"])).toBe(true);
-    expect(canSubmitStormModeOverride(["ops_admin"])).toBe(true);
+    expect(canSubmitStormModeOverride([" admin "])).toBe(true);
+  });
+
+  it("refuses a role that merely contains dispatcher or admin", () => {
+    // These two assertions used to expect `true`, from a substring gate whose
+    // docstring pointed at a backend `_STORM_MODE_OVERRIDE_ROLES` frozenset that
+    // no longer exists. `POST /api/fuel/storm-mode/override` is now
+    // `require_role(tenant, "dispatcher", "admin")` — exact — so the permissive
+    // gate showed an override form the API answered with 403.
+    expect(canSubmitStormModeOverride(["dispatcher_lead"])).toBe(false);
+    expect(canSubmitStormModeOverride(["ops_admin"])).toBe(false);
   });
 
   it("rejects other roles and empty inputs", () => {
@@ -307,11 +320,18 @@ describe("StormModeBanner", () => {
     const fetchStatus = jest.fn().mockResolvedValue(activeStatusFixture());
     submitMock.mockRejectedValue(new ApiError("forbidden_role", 403));
 
+    // `dispatcher`, not `dispatcher_lead`. This case used to lean on the UI
+    // gate's substring match to open a form the backend would refuse — the very
+    // mismatch that has now been fixed, so that premise is unreachable. The
+    // scenario itself is still real (a role revoked mid-session, a tenant policy
+    // the client cannot see), so it is exercised with an allowed role and a
+    // mocked 403: what is under test is that the error surfaces and the form
+    // stays mounted, not how the caller earned the 403.
     render(
       <StormModeBanner
         fetchStatus={fetchStatus}
         pollIntervalMs={10_000}
-        roles={["dispatcher_lead"]}
+        roles={["dispatcher"]}
       />,
     );
     fireEvent.click(await screen.findByRole("button", { name: /^override$/i }));

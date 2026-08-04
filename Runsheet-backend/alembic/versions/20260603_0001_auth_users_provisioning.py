@@ -8,8 +8,9 @@ Creates the ``auth_users`` table — the PostgreSQL source of truth the
 User_Provisioner reads to create/update SuperTokens users, assign UserRoles,
 and set the ``tenant_id`` / ``has_pii_access`` session claims. ``email`` is a
 CITEXT UNIQUE column so it doubles as the idempotency key for provisioning
-(Req 9.4); ``roles`` holds only the four canonical role names so the backend
-Role_Authorizer can use exact matching (Req 4.4, 9.6); ``st_user_id`` is
+(Req 9.4); ``roles`` holds only canonical role names — the set is owned by
+``auth.supertokens_init.CANONICAL_ROLES`` — so the backend Role_Authorizer can
+use exact matching (Req 4.4, 9.6); ``st_user_id`` is
 backfilled on first successful provision and ``provision_error`` records a
 per-row failure (Req 9.7).
 
@@ -18,6 +19,12 @@ In ``development`` only, a single demo row is seeded
 ``has_pii_access=true``) so the local sign-in loop has a user to provision.
 The seed is skipped in every non-development environment and is idempotent
 (``ON CONFLICT (email) DO NOTHING``).
+
+``ops_manager`` was later retired from ``CANONICAL_ROLES``. The seed below is
+left exactly as it was applied — rewriting an applied revision would make the
+migration history disagree with what already ran against a developer's
+database. Revision ``0006_retire_ops_manager_role`` strips the value forward
+instead.
 """
 from typing import Sequence, Union
 

@@ -52,6 +52,7 @@ from errors.exceptions import (
     resource_not_found,
 )
 from auth.authorization import require_role
+from auth.tenant_scope import is_platform_admin
 from fuel.order_models import Driver, DriverStatus
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 from services.ref_resolver import get_ref_resolver
@@ -1229,6 +1230,9 @@ class AppAccessService:
 
         existing_roles: List[str] = []
         provisioned = False
+        # Set when a rejection needs an audit outcome more specific than the
+        # error code the client sees (see the cross-tenant guard below).
+        audit_outcome: Optional[str] = None
 
         try:
             async with self._uow_factory() as uow:
@@ -1242,6 +1246,55 @@ class AppAccessService:
                     )
 
                 existing = await uow.read_row(email) or {}
+
+                # ``read_row`` is keyed on email alone, and the upsert below is
+                # ``ON CONFLICT (email) DO UPDATE SET tenant_id = EXCLUDED...``.
+                # Without this guard, an admin of tenant A passing a tenant-B
+                # (or Runsheet-staff) user's email would rewrite that row's
+                # tenant_id to A, point its driver_id at one of A's drivers and
+                # append ``driver`` to its roles — hijacking the account into A
+                # and cutting it off from its own tenant. The email arrives in
+                # the request body, so the tenant boundary has to be re-checked
+                # against the row we actually found. Raised before any write and
+                # before provision_user touches SuperTokens (Req 1.17/1.19).
+                #
+                # The read stays UNSCOPED on purpose. Scoping it would hide the
+                # victim's row, and the upsert — keyed on the unique ``email``
+                # column — would then overwrite it anyway. Authorization has to
+                # see the row the write will actually land on.
+                #
+                # The client-facing error is deliberately the same 409 as
+                # "that driver is already linked": a distinguishable 403 would
+                # confirm that the address holds an account somewhere else on
+                # the platform, making this route an enumeration oracle over
+                # every customer's user base. The real reason is kept
+                # server-side, in the log line below and in the audit event
+                # (Req 1.26), which carries ``rejected:cross_tenant_email``.
+                existing_tenant = existing.get("tenant_id")
+                if (
+                    existing_tenant
+                    and existing_tenant != tenant.tenant_id
+                    and not is_platform_admin(tenant)
+                ):
+                    logger.warning(
+                        "Cross-tenant app-access grant denied: user=%s "
+                        "caller_tenant=%s target_email=%s row_tenant=%s "
+                        "driver_id=%s",
+                        tenant.user_id,
+                        tenant.tenant_id,
+                        email,
+                        existing_tenant,
+                        driver_id,
+                    )
+                    audit_outcome = "rejected:cross_tenant_email"
+                    raise app_access_already_linked(
+                        message=(
+                            "That email cannot be granted app access in this "
+                            "tenant."
+                        ),
+                        details={"driver_id": driver_id},
+                    )
+
                 existing_roles = [
                     r for r in (existing.get("roles") or []) if isinstance(r, str)
                 ]
@@ -1278,7 +1331,7 @@ class AppAccessService:
                 tenant=tenant,
                 driver_id=driver_id,
                 email=email,
-                outcome=f"rejected:{_error_code_value(exc)}",
+                outcome=audit_outcome or f"rejected:{_error_code_value(exc)}",
             )
             raise
         except Exception:
