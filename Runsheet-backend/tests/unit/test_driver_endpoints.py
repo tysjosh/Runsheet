@@ -355,6 +355,118 @@ class TestAcceptJob:
 
 
 # ---------------------------------------------------------------------------
+# Test: accept_job writes the canonical driver identifier (Req 1.13, 1.14)
+# ---------------------------------------------------------------------------
+
+
+def _install_driver_session(
+    app,
+    *,
+    driver_id,
+    user_id: str = "driver-1",
+    tenant_id: str = TENANT_ID,
+) -> None:
+    """Override the tenant context with a driver session carrying driver_id.
+
+    The header-driven seam in ``tests.support.auth_seam`` carries no driver
+    identity yet, so the driver-surface contexts are issued directly through
+    ``issue_test_context``.
+    """
+    from auth.test_auth import issue_test_context
+    from ops.middleware.tenant_guard import get_tenant_context
+
+    app.dependency_overrides[get_tenant_context] = lambda: issue_test_context(
+        tenant_id,
+        roles=["driver"],
+        has_pii_access=False,
+        user_id=user_id,
+        driver_id=driver_id,
+    )
+
+
+class TestAcceptJobRecordsAssignedDriverId:
+    """Accept records both identifier namespaces on the job document.
+
+    Validates: Requirements 1.13, 1.14
+    """
+
+    def test_scheduled_accept_writes_both_identifiers(self):
+        """asset_assigned keeps the user_id; assigned_driver_id gets driver_id."""
+        svc = _make_job_service()
+        svc._get_job_doc.return_value = _job_doc(status="scheduled", asset_assigned=None)
+
+        app = _make_app(svc)
+        _install_driver_session(app, driver_id="DRV-77")
+        with _SETTINGS_PATCH:
+            resp = TestClient(app).post(
+                "/api/scheduling/jobs/JOB_1/accept",
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 200
+        update_fields = svc._es.update_document.call_args.args[2]
+        assert update_fields["asset_assigned"] == "driver-1"
+        assert update_fields["assigned_driver_id"] == "DRV-77"
+        assert update_fields["status"] == "assigned"
+
+    def test_assigned_accept_backfills_only_the_driver_id(self):
+        """Confirming an assignment stamps driver_id without touching status."""
+        svc = _make_job_service()
+        svc._get_job_doc.return_value = _job_doc(status="assigned")
+
+        app = _make_app(svc)
+        _install_driver_session(app, driver_id="DRV-77")
+        with _SETTINGS_PATCH:
+            resp = TestClient(app).post(
+                "/api/scheduling/jobs/JOB_1/accept",
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 200
+        assert resp.json()["data"]["new_status"] == "assigned"
+        update_fields = svc._es.update_document.call_args.args[2]
+        assert update_fields["assigned_driver_id"] == "DRV-77"
+        assert "status" not in update_fields
+        assert "asset_assigned" not in update_fields
+
+    def test_already_linked_accept_writes_nothing(self):
+        """A repeated accept for the same driver stays a read."""
+        svc = _make_job_service()
+        doc = _job_doc(status="assigned")
+        doc["assigned_driver_id"] = "DRV-77"
+        svc._get_job_doc.return_value = doc
+
+        app = _make_app(svc)
+        _install_driver_session(app, driver_id="DRV-77")
+        with _SETTINGS_PATCH:
+            resp = TestClient(app).post(
+                "/api/scheduling/jobs/JOB_1/accept",
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 200
+        svc._es.update_document.assert_not_called()
+
+    def test_session_without_driver_id_writes_no_assigned_driver_id(self):
+        """No driver claim means no assigned_driver_id — a pre-migration write."""
+        svc = _make_job_service()
+        svc._get_job_doc.return_value = _job_doc(status="scheduled", asset_assigned=None)
+
+        app = _make_app(svc)
+        _install_driver_session(app, driver_id=None)
+        with _SETTINGS_PATCH:
+            resp = TestClient(app).post(
+                "/api/scheduling/jobs/JOB_1/accept",
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 200
+        update_fields = svc._es.update_document.call_args.args[2]
+        assert "assigned_driver_id" not in update_fields
+        assert update_fields["asset_assigned"] == "driver-1"
+
+
+# ---------------------------------------------------------------------------
 # Test: reject_job endpoint
 # ---------------------------------------------------------------------------
 

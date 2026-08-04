@@ -64,6 +64,17 @@ SINGLE_RESOURCE_ENDPOINTS = [
 TENANT_SCOPED_ENDPOINTS = LIST_ENDPOINTS + SINGLE_RESOURCE_ENDPOINTS
 
 
+@pytest.fixture(autouse=True)
+def enable_legacy_ng_delivery(monkeypatch):
+    """This module asserts the *per-tenant* ops flag behaviour, so the
+    deployment-wide ``legacy_ng_delivery`` gate (default OFF) is enabled
+    explicitly — otherwise every route 404s for the wrong reason.
+
+    Audit reference: product-owner-audit-2026-05-08 recommendation #1.
+    """
+    monkeypatch.setenv("LEGACY_NG_DELIVERY_ENABLED", "true")
+
+
 @pytest.fixture()
 def mock_ff_service():
     """A mock FeatureFlagService."""

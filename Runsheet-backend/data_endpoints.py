@@ -16,10 +16,18 @@ import logging
 from services.elasticsearch_service import elasticsearch_service
 from services.time_utils import utcnow
 from middleware.rate_limiter import limiter
+from config.legacy_flags import is_legacy_ng_delivery_enabled
 from config.settings import Environment, get_settings
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context, inject_tenant_filter
 from auth.authorization import require_role
-from errors.exceptions import AppException, forbidden, internal_error, resource_not_found, validation_error
+from errors.exceptions import (
+    AppException,
+    forbidden,
+    internal_error,
+    legacy_ng_delivery_disabled,
+    resource_not_found,
+    validation_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +40,18 @@ router = APIRouter(prefix="/api")
 # Auth policy declaration for this router (Req 5.2)
 # Default: JWT_REQUIRED for all data endpoints
 ROUTER_AUTH_POLICY = "jwt_required"
+
+
+def _require_legacy_ng_delivery(surface: str) -> None:
+    """Raise the ``LEGACY_NG_DELIVERY_DISABLED`` 404 when the legacy NG
+    last-mile surface is disabled.
+
+    Shared by the legacy support-ticket routes so they emit the same
+    structured envelope as the gated ops read API.
+    """
+    if not is_legacy_ng_delivery_enabled():
+        logger.info("Blocked legacy NG surface '%s': flag is off", surface)
+        raise legacy_ng_delivery_disabled(surface=surface)
 
 # Data Models
 class Location(BaseModel):
@@ -936,6 +956,11 @@ async def update_fleet_asset(asset_id: str, body: UpdateAsset, request: Request,
 @router.get("/support/tickets")
 @limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
 async def get_support_tickets(request: Request, tenant: TenantContext = Depends(get_tenant_context)):
+    # Legacy NG last-mile CRM surface — gated behind ``legacy_ng_delivery``
+    # (default OFF). Raised before the try block so the 404 is not swallowed
+    # by the generic handler below.
+    # Audit reference: product-owner-audit-2026-05-08 recommendation #1.
+    _require_legacy_ng_delivery("support_tickets")
     try:
         # Tenant-scoped query for support tickets
         query = inject_tenant_filter(
@@ -1005,6 +1030,11 @@ async def semantic_search(request: Request, q: str, tenant: TenantContext = Depe
     """
     Perform semantic search across different indices
     """
+    # The ``support_tickets`` index is part of the legacy NG last-mile CRM
+    # surface, so searching it is gated behind ``legacy_ng_delivery``
+    # (default OFF). ``trucks`` stays available either way.
+    if index == "support_tickets":
+        _require_legacy_ng_delivery("support_tickets_search")
     try:
         if index == "trucks":
             results = await elasticsearch_service.semantic_search(

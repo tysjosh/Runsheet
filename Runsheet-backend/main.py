@@ -48,6 +48,9 @@ from fuel.api.order_endpoints import router as order_router
 from fuel.api.feature_flag_admin_endpoints import router as feature_flag_admin_router
 from fuel.api.order_webhook_endpoints import router as order_webhook_router
 from fuel.api.driver_endpoints import router as driver_ops_router
+from fuel.voice.voice_submission_router import router as voice_submission_router
+from fuel.voice.voice_read_driver_router import router as voice_read_driver_router
+from fuel.voice.intake_vectors import run_intake_vector_self_check
 from auth.api.password_admin_endpoints import router as auth_admin_router
 from auth.api.account_endpoints import router as auth_account_router
 from integrations.api.stripe_endpoints import (
@@ -78,30 +81,6 @@ from commerce.api.payment_endpoints import (
 from commerce.api.ar_aging_endpoints import (
     router as commerce_ar_aging_router,
     configure_ar_aging_api,
-)
-from compliance.api.tax_endpoints import (
-    router as compliance_tax_router,
-)
-from compliance.api.terminal_bol_endpoints import (
-    router as compliance_terminal_bol_router,
-)
-from compliance.api.ifta_endpoints import (
-    router as compliance_ifta_router,
-)
-from compliance.api.kfactor_endpoints import (
-    router as compliance_kfactor_router,
-)
-from compliance.api.driver_endpoints import (
-    router as compliance_driver_router,
-)
-from compliance.api.asset_certification_endpoints import (
-    router as compliance_asset_cert_router,
-)
-from compliance.api.meter_endpoints import (
-    router as compliance_meter_router,
-)
-from compliance.api.asset_compliance_endpoints import (
-    router as compliance_asset_compliance_router,
 )
 from commerce.api.price_protection_endpoints import (
     router as commerce_price_protection_router,
@@ -197,10 +176,18 @@ app.add_middleware(
         "X-RateLimit-Reset", "X-Idempotent-Replayed",
         # SuperTokens issues the new session via these response headers; the
         # browser SDK must be able to read them across origins (Req 2.3, 8.4).
-        "front-token", "anti-csrf",
+        # st-access-token / st-refresh-token carry the session in header-based
+        # transfer mode, which the Expo-web driver client uses.
+        "front-token", "anti-csrf", "st-access-token", "st-refresh-token",
     ],
     max_age=600,
 )
+
+# Dinee voice canonicalization self-check (Req 3.5/3.6): recompute the HMAC for
+# every vendored intake vector before mounting /voice/orders. A mismatch raises
+# here (fail-closed) so the submission endpoint is never served.
+run_intake_vector_self_check()
+logger.info("Voice intake vector self-check passed")
 
 # Routers (middleware is registered by bootstrap/middleware.py).
 # The Integration Marketplace and Stripe routers are configured by
@@ -216,21 +203,13 @@ for _router in (
     feature_flag_admin_router,
     driver_ops_router,
     stripe_router, stripe_webhook_router,
-    compliance_tax_router,
-    compliance_terminal_bol_router,
-    compliance_ifta_router,
-    compliance_kfactor_router,
-    compliance_driver_router,
-    compliance_asset_cert_router,
-    compliance_meter_router,
-    compliance_asset_compliance_router,
-    commerce_price_protection_router,
-    commerce_pricing_rules_router,
     mvp_fuel_router,
     fuel_ops_router,
     fuel_ops_mvp_router,
     auth_admin_router,
     auth_account_router,
+    voice_submission_router,  # Dinee voice Surface A (gated by self-check above)
+    voice_read_driver_router,  # Dinee voice Surface B read/driver endpoints
 ):
     app.include_router(_router)
 
@@ -249,10 +228,23 @@ try:
         app.include_router(commerce_invoice_router)
         app.include_router(commerce_payment_router)
         app.include_router(commerce_ar_aging_router)
+        # These two were previously registered unconditionally, so both
+        # commerce pricing surfaces stayed reachable with the master flag
+        # off — the flag's own docstring says "all commerce endpoints
+        # return 404". They now honour it like the rest.
+        app.include_router(commerce_price_protection_router)
+        app.include_router(commerce_pricing_rules_router)
 except Exception:
     # Settings may not load cleanly at import time in test environments;
     # the router will be registered during lifespan if needed.
     pass
+
+# Compliance Backbone REST surface — gated by compliance_backbone_enabled.
+# Imports and the flag check live in bootstrap/compliance_routers.py; see
+# that module for why the pipeline's compliance SERVICES are not gated.
+from bootstrap.compliance_routers import register as _register_compliance
+
+_register_compliance(app)
 
 
 def _c(app: FastAPI) -> ServiceContainer:

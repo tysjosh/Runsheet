@@ -357,6 +357,7 @@ class SyncRunView(BaseModel):
     finished_at: Optional[str] = None
     status: Literal["running", "success", "partial", "error"]
     record_counts: Dict[str, int] = Field(default_factory=dict)
+    result_metadata: Dict[str, Any] = Field(default_factory=dict)
     error_details: Optional[str] = None
     duration_ms: Optional[int] = None
 
@@ -623,6 +624,8 @@ async def create_integration_instance(
         instance.instance_id,
         instance.provider_name,
     )
+    if _scheduler is not None and instance.enabled:
+        await _scheduler.schedule_instance(instance)
     return IntegrationInstanceView.from_model(instance)
 
 
@@ -664,8 +667,13 @@ async def update_integration_instance(
     if vault is not None and body.credentials:
         try:
             if existing.credentials_ref:
-                await vault.rotate(tenant.tenant_id, existing.credentials_ref)
-                credentials_ref = existing.credentials_ref
+                credentials_ref = await vault.put(
+                    tenant.tenant_id,
+                    f"{existing.provider_name}_credentials",
+                    body.credentials,
+                    provider_name=existing.provider_name,
+                    ref=existing.credentials_ref,
+                )
             else:
                 credentials_ref = await vault.put(
                     tenant.tenant_id,
@@ -717,6 +725,11 @@ async def update_integration_instance(
         instance_id,
         sorted(patch.keys()),
     )
+    if _scheduler is not None:
+        if updated.enabled:
+            await _scheduler.reschedule_instance(updated)
+        else:
+            await _scheduler.unschedule_instance(instance_id)
     return IntegrationInstanceView.from_model(updated)
 
 

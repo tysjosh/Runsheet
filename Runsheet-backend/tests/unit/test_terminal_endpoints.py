@@ -28,11 +28,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import pytest
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from errors.exceptions import AppException
+from errors.handlers import handle_app_exception
 from fuel.api.fuel_ops_endpoints import (
     configure_fuel_ops_endpoints,
     router,
@@ -172,14 +172,11 @@ def _build_app(
     app = FastAPI()
     app.include_router(router)
 
-    # The shared Role_Authorizer raises AppException; register the same
-    # structured handler the app uses in production so the admin-gate
-    # response renders as the canonical 403 error envelope.
-    @app.exception_handler(AppException)
-    async def _app_exception_handler(request: Request, exc: AppException):
-        return JSONResponse(
-            status_code=exc.status_code, content={"detail": exc.to_dict()}
-        )
+    # The shared Role_Authorizer and the deactivate handler both raise
+    # AppException; register the exact handler main.py installs so responses
+    # render as the canonical top-level ``ErrorResponse`` envelope rather
+    # than a test-only shape.
+    app.add_exception_handler(AppException, handle_app_exception)
 
     app.dependency_overrides[get_tenant_context] = _tenant_ctx_factory(
         tenant_id=tenant_id, roles=roles

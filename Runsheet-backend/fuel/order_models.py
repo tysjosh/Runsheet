@@ -88,9 +88,55 @@ class IntakeMetadata(BaseModel):
     user_agent: Optional[str] = None
     import_batch_id: Optional[str] = None
     csv_row_number: Optional[int] = Field(default=None, ge=1)
+    source_system: Optional[str] = None
+    source_record_id: Optional[str] = None
+    source_updated_at: Optional[datetime] = None
     edi_interchange_id: Optional[str] = None
     partner_ref: Optional[str] = None
     legacy_shipment_id: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# DeliveryResult
+# ---------------------------------------------------------------------------
+
+
+class DeliveryResultGeoPoint(BaseModel):
+    """Validated WGS-84 position captured with the POD."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    lat: float = Field(..., ge=-90.0, le=90.0)
+    lon: float = Field(..., ge=-180.0, le=180.0)
+
+
+class DeliveryResult(BaseModel):
+    """Immutable delivery facts projected onto a delivered fuel order.
+
+    This is the canonical hand-off contract used by invoicing and outbound ERP
+    adapters.  It snapshots the POD facts before ``order.delivered`` subscribers
+    run, so downstream systems never have to race a second POD lookup.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    pod_id: str = Field(..., min_length=1)
+    actual_gallons: float = Field(..., gt=0)
+    actual_gallons_source: str = Field(..., min_length=1)
+    delivered_at: datetime
+    recipient_name: str = Field(..., min_length=1)
+    driver_id: Optional[str] = None
+    signature_ref: Optional[str] = None
+    photo_refs: List[str] = Field(default_factory=list)
+    meter_ticket_ref: Optional[str] = None
+    bol_id: Optional[str] = None
+    bol_ref: Optional[str] = None
+    pod_hash: Optional[str] = None
+    geotag: DeliveryResultGeoPoint
+    otp_verified: bool = False
+    location_mismatch: bool = False
+    source_system: Optional[str] = None
+    source_record_id: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -116,8 +162,12 @@ class FuelOrder(BaseModel):
     customer_phone: Optional[str] = None
     customer_email: Optional[str] = None
     ship_to_address: str = Field(..., min_length=1)
-    ship_to_lat: float = Field(..., ge=-90.0, le=90.0)
-    ship_to_lon: float = Field(..., ge=-180.0, le=180.0)
+    # Coordinates are optional at the model level so voice orders (which capture
+    # only a free-text address, no geocoding) can be accepted and reconciled
+    # during review-hold. Every non-voice / non-legacy channel MUST still carry
+    # them — enforced in _validate_coordinates.
+    ship_to_lat: Optional[float] = Field(default=None, ge=-90.0, le=90.0)
+    ship_to_lon: Optional[float] = Field(default=None, ge=-180.0, le=180.0)
     customer_tank_id: Optional[str] = None
 
     # product_code is nullable ONLY for legacy-channel orders during
@@ -125,6 +175,13 @@ class FuelOrder(BaseModel):
     # canonicalized product_code — enforced in _validate_product_code.
     product_code: Optional[str] = Field(default=None, min_length=1)
     gallons_requested: Optional[float] = Field(default=None, gt=0)
+    # Fuel contracts routinely quote four decimal places per gallon. The
+    # micro-dollar field is canonical; whole cents remain for compatibility.
+    unit_price_micros: Optional[int] = Field(default=None, ge=0)
+    unit_price_cents: Optional[int] = Field(default=None, ge=0)
+    subtotal_cents: Optional[int] = Field(default=None, ge=0)
+    tax_cents: Optional[int] = Field(default=None, ge=0)
+    total_cents: Optional[int] = Field(default=None, ge=0)
     fill_to_full: bool = False
     call_type: CallType
     delivery_window_start: Optional[datetime] = None
@@ -145,6 +202,27 @@ class FuelOrder(BaseModel):
     # existing same-tenant asset at write time (Req 2.3).
     assigned_asset_id: Optional[str] = None
     assigned_run_id: Optional[str] = None
+    # POD one-time code provisioned at dispatch by ``PODOTPService`` and the
+    # instant its validity window is measured from (driver-mobile-app R5.25,
+    # R5.28-R5.30). Both nullable: absent means the tenant does not require a
+    # code, which is the default. ``model_config`` is ``extra="forbid"`` and
+    # the ES mapping is ``dynamic: strict``, so either half alone would reject
+    # the write — and a stored document carrying an undeclared field would be
+    # dropped by ``_safe_order_load``. Never leaves the server on a
+    # ``/api/driver`` response: ``DriverWorkService`` strips ``pod_otp`` before
+    # serialization (R5.26).
+    pod_otp: Optional[str] = None
+    pod_otp_generated_at: Optional[datetime] = None
+    # The delivery-refusal reason recorded when a POD submission refuses the
+    # delivery and drives this order to ``failed`` (driver-mobile-app R4.6).
+    # One of the eight ``DeliveryRefusalReason`` values, validated by the POD
+    # request model before it reaches here. Nullable: every order that was not
+    # refused carries no reason.
+    refusal_reason_code: Optional[str] = None
+    # Canonical POD result attached immediately before the transition to
+    # ``delivered``. Downstream invoice and ERP subscribers consume this
+    # snapshot instead of re-reading the proof_of_delivery index.
+    delivery_result: Optional[DeliveryResult] = None
     legacy_origin_snapshot: Optional[str] = None
 
     source_schema_version: str = Field(..., min_length=1)
@@ -178,6 +256,21 @@ class FuelOrder(BaseModel):
         """Non-legacy channels MUST carry a canonicalized product_code."""
         if self.product_code is None and self.intake_channel != "legacy":
             raise ValueError("missing_product_code")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_coordinates(self) -> "FuelOrder":
+        """Require ship-to coordinates for every channel except voice/legacy.
+
+        ``voice`` orders capture only a free-text delivery address (no
+        geocoding); the coordinates are reconciled by a human during
+        review-hold. ``legacy`` orders are exempt during the migration window.
+        Every other channel MUST carry both coordinates so downstream routing
+        has a geolocation at intake.
+        """
+        if self.intake_channel not in ("voice", "legacy"):
+            if self.ship_to_lat is None or self.ship_to_lon is None:
+                raise ValueError("missing_coordinates")
         return self
 
     @model_validator(mode="after")
@@ -269,6 +362,12 @@ class Driver(BaseModel):
     driver_name: str = Field(..., min_length=1)
     phone: Optional[str] = None
     status: DriverStatus
+    # Duty-status projection bookkeeping. ``duty_status_event_id`` is the id of
+    # the Duty_Status_Event_Log document ``status`` projects and
+    # ``duty_status_updated_at`` is that event's ``server_received_at``. Both are
+    # optional: absent means the record predates the duty-status event log.
+    duty_status_event_id: Optional[str] = None
+    duty_status_updated_at: Optional[datetime] = None
     availability: Optional[str] = None
     assigned_truck_id: Optional[str] = None
     cdl_class: Optional[str] = None

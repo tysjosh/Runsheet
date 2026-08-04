@@ -8,13 +8,14 @@ Tests cover:
 - Rate-limit (429) handling
 - General error handling
 - WhatsApp prefix logic
-- Bootstrap fallback logic
+- Bootstrap fallback logic, including push registration (driver-mobile-app
+  R9.14, R9.17)
 
 All provider SDKs are mocked — these tests do not make real API calls.
 The twilio/sendgrid packages are optional runtime dependencies and may
 not be installed in the test environment.
 
-Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6
+Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, driver-mobile-app 9.14, 9.17
 """
 
 import os
@@ -571,20 +572,22 @@ class TestBootstrapDispatcherFallback:
 
             dispatchers = _create_dispatchers()
 
-        assert len(dispatchers) == 3
+        assert len(dispatchers) == 4
         names = {d.channel_name for d in dispatchers}
-        assert names == {"sms", "whatsapp", "email"}
+        assert names == {"sms", "whatsapp", "email", "push"}
 
         from notifications.services.channel_dispatchers import (
             StubSmsDispatcher,
             StubEmailDispatcher,
             StubWhatsAppDispatcher,
+            StubPushDispatcher,
         )
 
         types_set = {type(d) for d in dispatchers}
         assert StubSmsDispatcher in types_set
         assert StubEmailDispatcher in types_set
         assert StubWhatsAppDispatcher in types_set
+        assert StubPushDispatcher in types_set
 
     def test_real_dispatchers_when_env_vars_present(self):
         """Real dispatchers are returned when all env vars are set."""
@@ -595,15 +598,16 @@ class TestBootstrapDispatcherFallback:
             "TWILIO_WHATSAPP_FROM_NUMBER": "+15559876543",
             "SENDGRID_API_KEY": "SG.test_key",
             "SENDGRID_FROM_EMAIL": "noreply@example.com",
+            "EXPO_ACCESS_TOKEN": "expo_test_token",
         }
         with patch.dict(os.environ, env, clear=True):
             from bootstrap.notifications import _create_dispatchers
 
             dispatchers = _create_dispatchers()
 
-        assert len(dispatchers) == 3
+        assert len(dispatchers) == 4
         names = {d.channel_name for d in dispatchers}
-        assert names == {"sms", "whatsapp", "email"}
+        assert names == {"sms", "whatsapp", "email", "push"}
 
         from notifications.services.twilio_sms_dispatcher import TwilioSmsDispatcher
         from notifications.services.twilio_whatsapp_dispatcher import (
@@ -612,11 +616,13 @@ class TestBootstrapDispatcherFallback:
         from notifications.services.sendgrid_email_dispatcher import (
             SendGridEmailDispatcher,
         )
+        from notifications.services.expo_push_dispatcher import ExpoPushDispatcher
 
         types_set = {type(d) for d in dispatchers}
         assert TwilioSmsDispatcher in types_set
         assert TwilioWhatsAppDispatcher in types_set
         assert SendGridEmailDispatcher in types_set
+        assert ExpoPushDispatcher in types_set
 
     def test_partial_env_vars_mixed_dispatchers(self):
         """Only channels with full credentials get real dispatchers."""
@@ -626,21 +632,102 @@ class TestBootstrapDispatcherFallback:
             "TWILIO_FROM_NUMBER": "+15551234567",
             # WhatsApp from number missing
             # SendGrid vars missing
+            # Push credentials missing
         }
         with patch.dict(os.environ, env, clear=True):
             from bootstrap.notifications import _create_dispatchers
 
             dispatchers = _create_dispatchers()
 
-        assert len(dispatchers) == 3
+        assert len(dispatchers) == 4
         dispatcher_map = {d.channel_name: d for d in dispatchers}
 
         from notifications.services.twilio_sms_dispatcher import TwilioSmsDispatcher
         from notifications.services.channel_dispatchers import (
             StubWhatsAppDispatcher,
             StubEmailDispatcher,
+            StubPushDispatcher,
         )
 
         assert isinstance(dispatcher_map["sms"], TwilioSmsDispatcher)
         assert isinstance(dispatcher_map["whatsapp"], StubWhatsAppDispatcher)
         assert isinstance(dispatcher_map["email"], StubEmailDispatcher)
+        assert isinstance(dispatcher_map["push"], StubPushDispatcher)
+
+
+# ---------------------------------------------------------------------------
+# Push dispatcher registration (driver-mobile-app R9.14, R9.17)
+# ---------------------------------------------------------------------------
+
+
+class TestBootstrapPushRegistration:
+    """The push channel follows the same posture as the other channels.
+
+    Validates: Requirements 9.14, 9.17
+    """
+
+    @staticmethod
+    def _push_dispatcher(dispatchers):
+        matches = [d for d in dispatchers if d.channel_name == "push"]
+        assert len(matches) == 1, "exactly one push dispatcher expected"
+        return matches[0]
+
+    def test_real_push_dispatcher_when_token_present(self):
+        """Credentials present → the real dispatcher lands on channel push."""
+        from notifications.services.expo_push_dispatcher import ExpoPushDispatcher
+
+        with patch.dict(
+            os.environ, {"EXPO_ACCESS_TOKEN": "expo_test_token"}, clear=True
+        ):
+            from bootstrap.notifications import _create_dispatchers
+
+            dispatchers = _create_dispatchers()
+
+        assert isinstance(self._push_dispatcher(dispatchers), ExpoPushDispatcher)
+
+    def test_es_service_is_handed_to_the_real_push_dispatcher(self):
+        """The ES service is passed through so pruning/auditing can work."""
+        es_service = MagicMock()
+
+        with patch.dict(
+            os.environ, {"EXPO_ACCESS_TOKEN": "expo_test_token"}, clear=True
+        ):
+            from bootstrap.notifications import _create_dispatchers
+
+            dispatchers = _create_dispatchers(es_service=es_service)
+
+        assert self._push_dispatcher(dispatchers)._es is es_service
+
+    def test_stub_push_dispatcher_outside_production_when_token_absent(self):
+        """No credential outside production → log-only stub, no raise."""
+        from notifications.services.channel_dispatchers import StubPushDispatcher
+
+        with patch.dict(os.environ, {}, clear=True):
+            from bootstrap.notifications import _create_dispatchers
+
+            dispatchers = _create_dispatchers(environment="development")
+
+        assert isinstance(self._push_dispatcher(dispatchers), StubPushDispatcher)
+
+    def test_production_without_token_raises(self):
+        """No credential in production is fatal at startup (R9.17)."""
+        from notifications.services.channel_dispatchers import (
+            NotificationDispatcherConfigurationError,
+        )
+
+        env = {
+            "TWILIO_ACCOUNT_SID": "AC_test",
+            "TWILIO_AUTH_TOKEN": "tok_test",
+            "TWILIO_FROM_NUMBER": "+15551234567",
+            "TWILIO_WHATSAPP_FROM_NUMBER": "+15559876543",
+            "SENDGRID_API_KEY": "SG.test_key",
+            "SENDGRID_FROM_EMAIL": "noreply@example.com",
+            # EXPO_ACCESS_TOKEN deliberately absent
+        }
+        with patch.dict(os.environ, env, clear=True):
+            from bootstrap.notifications import _create_dispatchers
+
+            with pytest.raises(NotificationDispatcherConfigurationError) as exc_info:
+                _create_dispatchers(environment="production")
+
+        assert "Push credentials not set" in str(exc_info.value)

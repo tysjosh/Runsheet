@@ -621,6 +621,8 @@
     "primary_email": "keyword",
     "tax_id": "keyword",
     "status": "keyword",
+    "phone": "keyword",
+    "account_id": "keyword",
     "created_at": "date",
     "updated_at": "date",
     "external_refs": {

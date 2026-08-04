@@ -14,6 +14,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from fuel.services.order_es_mappings import (
+    DRIVER_REPORTS_INDEX,
+    DRIVER_REPORTS_MAPPING,
     DRIVERS_CURRENT_INDEX,
     DRIVERS_CURRENT_MAPPING,
     FUEL_ORDER_EVENTS_INDEX,
@@ -34,7 +36,14 @@ EXPECTED_INDICES = {
     DRIVERS_CURRENT_INDEX,
     INTAKE_CHANNELS_INDEX,
     PENDING_LEGACY_MIRRORS_INDEX,
+    DRIVER_REPORTS_INDEX,
 }
+
+# Indices whose documents carry the pipeline's closed ``intake_metadata``
+# sub-mapping. ``driver_reports`` is written directly by the
+# DriverReportRepository with its own closed field set (no intake_metadata),
+# so it is scoped out of the intake_metadata convention check.
+INTAKE_METADATA_INDICES = EXPECTED_INDICES - {DRIVER_REPORTS_INDEX}
 
 
 # ---------------------------------------------------------------------------
@@ -45,9 +54,9 @@ EXPECTED_INDICES = {
 class TestOrderIntakeMappingShape:
     """Every mapping is strict, tenant-scoped, and uses canonical settings."""
 
-    def test_catalog_contains_all_5_indices(self):
+    def test_catalog_contains_all_indices(self):
         assert set(ORDER_INTAKE_INDEX_MAPPINGS.keys()) == EXPECTED_INDICES
-        assert len(ORDER_INTAKE_INDEX_MAPPINGS) == 5
+        assert len(ORDER_INTAKE_INDEX_MAPPINGS) == len(EXPECTED_INDICES)
 
     @pytest.mark.parametrize("index_name", sorted(EXPECTED_INDICES))
     def test_each_mapping_is_strict(self, index_name):
@@ -70,7 +79,7 @@ class TestOrderIntakeMappingShape:
         assert settings["number_of_shards"] == 1
         assert settings["number_of_replicas"] == 1
 
-    @pytest.mark.parametrize("index_name", sorted(EXPECTED_INDICES))
+    @pytest.mark.parametrize("index_name", sorted(INTAKE_METADATA_INDICES))
     def test_each_mapping_has_strict_intake_metadata(self, index_name):
         props = ORDER_INTAKE_INDEX_MAPPINGS[index_name]["mappings"]["properties"]
         assert "intake_metadata" in props, (
@@ -124,6 +133,20 @@ class TestOrderIntakeMappingShape:
         for field in required_fields:
             assert field in props, f"drivers_current missing field: {field}"
 
+    def test_drivers_current_declares_duty_status_projection_fields(self):
+        """The projection bookkeeping fields exist and status stays a keyword.
+
+        ``drivers_current`` is ``dynamic: strict``, so the duty-status service
+        cannot write either bookkeeping field until it is declared here. The
+        ``status`` field must stay a single keyword so existing readers work
+        unchanged.
+        """
+        props = DRIVERS_CURRENT_MAPPING["mappings"]["properties"]
+
+        assert props["duty_status_event_id"]["type"] == "keyword"
+        assert props["duty_status_updated_at"]["type"] == "date"
+        assert props["status"] == {"type": "keyword"}
+
     def test_intake_channels_has_all_required_fields(self):
         props = INTAKE_CHANNELS_MAPPING["mappings"]["properties"]
         required_fields = [
@@ -147,6 +170,22 @@ class TestOrderIntakeMappingShape:
                 f"pending_legacy_mirrors missing field: {field}"
             )
 
+    def test_driver_reports_has_all_required_fields(self):
+        props = DRIVER_REPORTS_MAPPING["mappings"]["properties"]
+        required_fields = [
+            "report_id", "tenant_id", "driver_id", "assignment_id",
+            "kind", "detail", "eta_minutes", "created_at",
+        ]
+        for field in required_fields:
+            assert field in props, (
+                f"driver_reports missing field: {field}"
+            )
+        # Tenant-scoping and category fields must be keyword for term filters.
+        assert props["tenant_id"]["type"] == "keyword"
+        assert props["driver_id"]["type"] == "keyword"
+        assert props["assignment_id"]["type"] == "keyword"
+        assert props["kind"]["type"] == "keyword"
+
     def test_date_fields_are_typed_correctly(self):
         """All date fields across all indices use type 'date'."""
         date_fields_by_index = {
@@ -159,13 +198,16 @@ class TestOrderIntakeMappingShape:
             ],
             DRIVERS_CURRENT_INDEX: [
                 "medical_card_expiry", "last_seen", "last_event_timestamp",
-                "created_at", "updated_at",
+                "duty_status_updated_at", "created_at", "updated_at",
             ],
             INTAKE_CHANNELS_INDEX: [
                 "created_at", "updated_at",
             ],
             PENDING_LEGACY_MIRRORS_INDEX: [
                 "next_retry_at", "created_at", "updated_at",
+            ],
+            DRIVER_REPORTS_INDEX: [
+                "created_at",
             ],
         }
         for index_name, fields in date_fields_by_index.items():
@@ -204,7 +246,7 @@ class TestSetupOrderIntakeIndices:
             sys.modules, {"services.elasticsearch_service": fake_module}
         )
 
-    def test_creates_all_5_indices_when_none_exist(self):
+    def test_creates_all_indices_when_none_exist(self):
         es_service = self._make_es_service()
         with self._patch_es_module():
             setup_order_intake_indices(es_service)

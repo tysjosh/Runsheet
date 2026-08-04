@@ -174,6 +174,13 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from errors.exceptions import (
+    depot_not_found,
+    driver_not_found,
+    supplier_contract_not_found,
+    terminal_not_found,
+    validation_error,
+)
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 from auth.authorization import require_role
 from Agents.confirmation_protocol import ConfirmationProtocol, MutationRequest
@@ -307,6 +314,7 @@ from services.reconciliation_service import (
     ReconciliationService,
 )
 from services.ref_resolver import get_ref_resolver
+from services.unit_conversion import GAL_TO_L
 
 logger = logging.getLogger(__name__)
 
@@ -1180,6 +1188,8 @@ class CustomerTankCreateRequest(BaseModel):
             "repository mints a uuid4-based id."
         ),
     )
+    source_system: Optional[str] = Field(default=None, min_length=1)
+    external_tank_id: Optional[str] = Field(default=None, min_length=1)
     customer_id: str = Field(..., min_length=1)
     customer_type: CustomerType
     fuel_type: FuelType
@@ -1215,6 +1225,8 @@ class CustomerTankUpdateRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    source_system: Optional[str] = Field(default=None, min_length=1)
+    external_tank_id: Optional[str] = Field(default=None, min_length=1)
     customer_id: Optional[str] = Field(default=None, min_length=1)
     customer_type: Optional[CustomerType] = None
     fuel_type: Optional[FuelType] = None
@@ -1996,9 +2008,10 @@ async def get_depot(
     lists the assets whose ``assigned_depot_id`` references this depot
     (Req 10.2).
 
-    Returns 404 when the depot does not exist or belongs to another tenant —
-    a cross-tenant fetch is suppressed to a 404 so depot existence does not
-    leak across tenants.
+    Returns 404 (``depot_not_found``) when the depot does not exist or belongs
+    to another tenant — a cross-tenant fetch is suppressed to a 404 so depot
+    existence does not leak across tenants. Both error paths go through the
+    structured ``ErrorResponse`` envelope.
 
     Validates: Requirements 10.2, 10.3.
     """
@@ -2008,15 +2021,12 @@ async def get_depot(
     try:
         depot = await repo.get(tenant.tenant_id, depot_id)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise validation_error(str(exc))
 
     if depot is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error_code": "depot_not_found",
-                "depot_id": depot_id,
-            },
+        raise depot_not_found(
+            f"Depot {depot_id} not found.",
+            details={"depot_id": depot_id},
         )
 
     expansions = {
@@ -2753,13 +2763,9 @@ async def record_cleaning_event(
                 tenant.tenant_id, "driver", body.driver_id.strip()
             )
             if not driver_ref.is_resolved:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail={
-                        "error_code": "driver_not_found",
-                        "message": (
-                            "Referenced driver does not exist in this tenant."
-                        ),
+                raise driver_not_found(
+                    "Referenced driver does not exist in this tenant.",
+                    details={
                         "field": "driver_id",
                         "driver_id": body.driver_id,
                     },
@@ -4577,7 +4583,7 @@ async def _compute_remaining_capacity_by_grade(
                 )
 
     # --- Convert to gallons + aggregate per product_code ----------------
-    gallons_per_liter = 1.0 / 3.785411784
+    gallons_per_liter = 1.0 / GAL_TO_L
     remaining_by_grade: Dict[str, float] = {}
     for comp_id, data in per_compartment.items():
         capacity_l = data["capacity_liters"]
@@ -5622,12 +5628,9 @@ async def deactivate_terminal(
         raise _translate_validation_error(exc)
 
     if updated is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error_code": "terminal_not_found",
-                "terminal_id": terminal_id,
-            },
+        raise terminal_not_found(
+            f"Terminal {terminal_id} not found.",
+            details={"terminal_id": terminal_id},
         )
 
     logger.info(
@@ -7294,12 +7297,9 @@ async def deactivate_supplier_contract(
     # and an already-inactive contract short-circuits to an idempotent 200.
     existing = await repo.get(tenant.tenant_id, contract_id)
     if existing is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error_code": "supplier_contract_not_found",
-                "contract_id": contract_id,
-            },
+        raise supplier_contract_not_found(
+            f"Supplier contract {contract_id} not found.",
+            details={"contract_id": contract_id},
         )
     if existing.status == "inactive":
         return await _build_contract_response(existing)
@@ -7316,12 +7316,9 @@ async def deactivate_supplier_contract(
         raise _translate_validation_error(exc)
 
     if updated is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error_code": "supplier_contract_not_found",
-                "contract_id": contract_id,
-            },
+        raise supplier_contract_not_found(
+            f"Supplier contract {contract_id} not found.",
+            details={"contract_id": contract_id},
         )
 
     logger.info(

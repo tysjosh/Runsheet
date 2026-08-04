@@ -21,8 +21,11 @@ EXPECTED_INLINE_ROUTES = {
     "/api/chat",
     "/api/chat/fallback",
     "/api/chat/clear",
-    "/api/demo/reset",
-    "/api/demo/status",
+    # NOTE: ``/api/demo/reset`` and ``/api/demo/status`` were deliberately
+    # UNREGISTERED — they could wipe a tenant's Elasticsearch data and were one
+    # policy misconfiguration away from doing it in production.
+    # ``tests/unit/test_demo_cleanup_role_gating.py`` asserts they stay absent,
+    # so they must not be listed here.
     "/api/upload/csv",
     "/api/upload/batch",
     "/api/upload/selective",

@@ -232,6 +232,10 @@ class DeliveryPriorityList(BaseModel):
 class RouteStop(BaseModel):
     """A single stop in a delivery route."""
     station_id: str
+    # One customer stop may contain more than one order.  Keeping the exact
+    # identifiers on the route makes dispatcher approval deterministic while
+    # remaining backward compatible with older route documents.
+    order_ids: List[str] = Field(default_factory=list)
     eta: str  # ISO 8601
     drop: Dict[str, float]  # grade -> liters
     sequence: int = Field(ge=0)

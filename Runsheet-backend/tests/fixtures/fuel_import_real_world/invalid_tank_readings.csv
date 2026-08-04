@@ -1,0 +1,3 @@
+source_system,external_tank_id,source_reading_id,customer_tank_id,volume_gallons,water_level_in,temperature_f,reading_at
+VeederRoot,T-100,BAD-READING-01,tank-100,-5,0.1,70.2,2026-07-29T14:00:00Z
+VeederRoot,T-100,BAD-READING-02,tank-100,1200,0.1,70.2,2026-07-29T14:05:00Z

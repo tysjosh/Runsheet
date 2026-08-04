@@ -55,6 +55,7 @@ from fuel.intake_channel_models import IntakeChannel
 from fuel.services.order_intake_pipeline import (
     IntakeResponse,
     OrderIntakePipeline,
+    _CsvImportChannel,
 )
 
 
@@ -888,6 +889,105 @@ class TestCompleteOrderDocOverwrites:
         assert result["last_event_timestamp"] == FIXED_NOW.isoformat()
         assert result["trace_id"] == "trace-001"
 
+    def test_csv_source_identity_produces_stable_platform_order_id(self, pipeline):
+        context = IntakeContext(
+            tenant_id=TENANT_A,
+            channel=_CsvImportChannel(
+                channel_id="csv-import",
+                tenant_id=TENANT_A,
+            ),
+            trace_id="trace-csv",
+            request_id="request-csv",
+        )
+        adapter_output = {
+            "intake_channel": "csv",
+            "intake_metadata": {
+                "source_system": "erp-a",
+                "source_record_id": "SO-100",
+            },
+        }
+
+        first = pipeline._complete_order_doc(
+            adapter_output, context, "event-version-1"
+        )
+        second = pipeline._complete_order_doc(
+            adapter_output, context, "event-version-2"
+        )
+
+        assert first["order_id"] == second["order_id"]
+        assert first["order_id"].startswith("ord_import_")
+
+
+class TestCsvSourceUpdates:
+    @pytest.mark.asyncio
+    async def test_older_source_snapshot_is_rejected(self, pipeline):
+        existing = MagicMock()
+        existing.intake_metadata.source_updated_at = datetime(
+            2026, 5, 10, 12, tzinfo=timezone.utc
+        )
+
+        with patch(
+            "fuel.order_repository.FuelOrderRepository.get",
+            new=AsyncMock(return_value=existing),
+        ):
+            state = await pipeline._prepare_csv_source_upsert(
+                tenant_id=TENANT_A,
+                order_doc={
+                    "order_id": "ord_import_123",
+                    "intake_channel": "csv",
+                    "intake_metadata": {
+                        "source_system": "erp-a",
+                        "source_record_id": "SO-100",
+                        "source_updated_at": "2026-05-10T11:59:00Z",
+                    },
+                },
+            )
+
+        assert state == "stale"
+
+    @pytest.mark.asyncio
+    async def test_newer_source_snapshot_preserves_execution_state(self, pipeline):
+        existing = MagicMock()
+        existing.intake_metadata.source_updated_at = datetime(
+            2026, 5, 10, 12, tzinfo=timezone.utc
+        )
+        existing.model_dump.return_value = {
+            "status": "dispatched",
+            "assigned_driver_id": "driver-100",
+            "assigned_asset_id": "truck-100",
+            "assigned_run_id": "run-100",
+            "pod_otp": None,
+            "pod_otp_generated_at": None,
+            "refusal_reason_code": None,
+            "legacy_origin_snapshot": None,
+            "created_at": "2026-05-09T08:00:00Z",
+        }
+        incoming = {
+            "order_id": "ord_import_123",
+            "intake_channel": "csv",
+            "status": "placed",
+            "intake_metadata": {
+                "source_system": "erp-a",
+                "source_record_id": "SO-100",
+                "source_updated_at": "2026-05-10T12:01:00Z",
+            },
+        }
+
+        with patch(
+            "fuel.order_repository.FuelOrderRepository.get",
+            new=AsyncMock(return_value=existing),
+        ):
+            state = await pipeline._prepare_csv_source_upsert(
+                tenant_id=TENANT_A,
+                order_doc=incoming,
+            )
+
+        assert state == "updated"
+        assert incoming["status"] == "dispatched"
+        assert incoming["assigned_driver_id"] == "driver-100"
+        assert incoming["assigned_run_id"] == "run-100"
+        assert incoming["created_at"] == "2026-05-09T08:00:00Z"
+
 
 # ---------------------------------------------------------------------------
 # Tests — Legacy dual-write failure does NOT fail the main path
@@ -1259,3 +1359,202 @@ class TestLegacyDualBroadcast:
         assert shipment_data["destination"] == "123 Main St, Houston TX"
         assert shipment_data["current_location"] == {"lat": 29.76, "lon": -95.37}
         assert "trace_id" in shipment_data
+
+
+# ---------------------------------------------------------------------------
+# Tests — ingest_webhook additive override kwargs (Task 1.3 / Req 2.3)
+# ---------------------------------------------------------------------------
+
+
+class TestIngestWebhookOverrides:
+    """The additive ``idempotency_key_override`` / ``schema_version_override``
+    kwargs on ``ingest_webhook`` are behavior-preserving when ``None`` and take
+    precedence over the payload-derived values when supplied.
+
+    The Dinee voice bridge maps the ``X-Idempotency-Key`` and
+    ``X-Schema-Version`` headers onto the pipeline through these kwargs.
+
+    Validates: Requirements 2.3.
+    """
+
+    # -- Behavior unchanged when both overrides are None --------------------
+
+    @pytest.mark.asyncio
+    async def test_defaults_derive_idempotency_key_from_payload_event_id(
+        self, pipeline, idempotency_service
+    ):
+        """With no override, the idempotency key is ``payload['event_id']``."""
+        payload = _valid_order_payload(event_id="evt-from-payload")
+        body = json.dumps(payload).encode()
+        signature = _sign_body(body)
+
+        result = await pipeline.ingest_webhook(
+            channel_id=CHANNEL_ID,
+            body=body,
+            signature=signature,
+            request_id="req-ovr-001",
+        )
+
+        assert result.status == "processed"
+        # is_duplicate is called with the payload-derived event_id
+        assert idempotency_service.is_duplicate.call_args[0][0] == (
+            "evt-from-payload"
+        )
+        # And the processed response echoes the same event_id
+        assert result.event_id == "evt-from-payload"
+
+    @pytest.mark.asyncio
+    async def test_defaults_derive_schema_version_from_payload(
+        self, pipeline, intake_channel_repo
+    ):
+        """With no override, an unsupported payload schema_version routes to
+        the poison queue (schema derived from the payload)."""
+        # Payload declares a version the channel does not support.
+        payload = _valid_order_payload(schema_version="99.0")
+        body = json.dumps(payload).encode()
+        signature = _sign_body(body)
+
+        result = await pipeline.ingest_webhook(
+            channel_id=CHANNEL_ID,
+            body=body,
+            signature=signature,
+            request_id="req-ovr-002",
+        )
+
+        # Payload schema_version=99.0 is unsupported → queued_for_review.
+        assert result.status == "queued_for_review"
+
+    @pytest.mark.asyncio
+    async def test_none_overrides_match_omitted_kwargs(
+        self, pipeline, idempotency_service
+    ):
+        """Passing the overrides explicitly as ``None`` behaves identically to
+        omitting them."""
+        payload = _valid_order_payload(event_id="evt-none-override")
+        body = json.dumps(payload).encode()
+        signature = _sign_body(body)
+
+        result = await pipeline.ingest_webhook(
+            channel_id=CHANNEL_ID,
+            body=body,
+            signature=signature,
+            request_id="req-ovr-003",
+            idempotency_key_override=None,
+            schema_version_override=None,
+        )
+
+        assert result.status == "processed"
+        assert result.event_id == "evt-none-override"
+        assert idempotency_service.is_duplicate.call_args[0][0] == (
+            "evt-none-override"
+        )
+
+    # -- Overrides take precedence when supplied ----------------------------
+
+    @pytest.mark.asyncio
+    async def test_idempotency_key_override_takes_precedence(
+        self, pipeline, idempotency_service
+    ):
+        """When supplied, ``idempotency_key_override`` is used as the
+        tenant-scoped idempotency key instead of ``payload['event_id']``."""
+        payload = _valid_order_payload(event_id="evt-from-payload")
+        body = json.dumps(payload).encode()
+        signature = _sign_body(body)
+
+        result = await pipeline.ingest_webhook(
+            channel_id=CHANNEL_ID,
+            body=body,
+            signature=signature,
+            request_id="req-ovr-004",
+            idempotency_key_override="idem-header-key-XYZ",
+        )
+
+        assert result.status == "processed"
+        # The header-supplied key wins over the payload event_id.
+        assert idempotency_service.is_duplicate.call_args[0][0] == (
+            "idem-header-key-XYZ"
+        )
+        # It is also tenant-scoped (same call carries the channel tenant).
+        assert idempotency_service.is_duplicate.call_args[1]["tenant_id"] == (
+            TENANT_A
+        )
+        assert result.event_id == "idem-header-key-XYZ"
+        # Idempotency is marked processed under the override key.
+        assert idempotency_service.mark_processed.call_args[0][0] == (
+            "idem-header-key-XYZ"
+        )
+
+    @pytest.mark.asyncio
+    async def test_schema_version_override_drives_unsupported_rejection(
+        self, pipeline
+    ):
+        """When ``schema_version_override`` names an unsupported version, the
+        submission routes to the poison queue even though the payload's own
+        ``schema_version`` is supported — the override drives the check."""
+        # Payload schema_version=1.0 IS supported by the channel; the override
+        # is not, so the override must be the one that is checked.
+        payload = _valid_order_payload(schema_version="1.0")
+        body = json.dumps(payload).encode()
+        signature = _sign_body(body)
+
+        result = await pipeline.ingest_webhook(
+            channel_id=CHANNEL_ID,
+            body=body,
+            signature=signature,
+            request_id="req-ovr-005",
+            schema_version_override="2.5",
+        )
+
+        assert result.status == "queued_for_review"
+
+    @pytest.mark.asyncio
+    async def test_schema_version_override_drives_adapter_dispatch(
+        self, pipeline
+    ):
+        """When ``schema_version_override`` names a supported version, the
+        submission is processed even though the payload declares an
+        unsupported version — the override drives dispatch."""
+        # Payload declares an unsupported version; the override is supported.
+        payload = _valid_order_payload(schema_version="99.0")
+        body = json.dumps(payload).encode()
+        signature = _sign_body(body)
+
+        result = await pipeline.ingest_webhook(
+            channel_id=CHANNEL_ID,
+            body=body,
+            signature=signature,
+            request_id="req-ovr-006",
+            schema_version_override="1.0",
+        )
+
+        # The supported override wins → the adapter runs and the order is made.
+        assert result.status == "processed"
+        assert result.order_id is not None
+
+    @pytest.mark.asyncio
+    async def test_both_overrides_supplied_together(
+        self, pipeline, idempotency_service
+    ):
+        """Both overrides can be supplied together and each takes precedence
+        over its payload-derived counterpart."""
+        payload = _valid_order_payload(
+            event_id="evt-from-payload", schema_version="99.0"
+        )
+        body = json.dumps(payload).encode()
+        signature = _sign_body(body)
+
+        result = await pipeline.ingest_webhook(
+            channel_id=CHANNEL_ID,
+            body=body,
+            signature=signature,
+            request_id="req-ovr-007",
+            idempotency_key_override="idem-header-key-ABC",
+            schema_version_override="1.0",
+        )
+
+        assert result.status == "processed"
+        assert result.order_id is not None
+        assert result.event_id == "idem-header-key-ABC"
+        assert idempotency_service.is_duplicate.call_args[0][0] == (
+            "idem-header-key-ABC"
+        )

@@ -39,7 +39,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from compliance.services.kfactor_calibration_service import (
     KFactorCalibrationService,
 )
-from errors.exceptions import AppException
+from errors.exceptions import AppException, kfactor_variance_history_failed
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 
 logger = logging.getLogger(__name__)
@@ -360,13 +360,7 @@ async def get_variance_history(
             tank_id,
             exc,
         )
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "error_code": "kfactor.variance_history_failed",
-                "message": "Failed to load K-factor variance history.",
-            },
-        )
+        raise kfactor_variance_history_failed()
 
     return {
         "data": history,

@@ -50,9 +50,11 @@ jest.mock("../../../services/commerceApi", () => ({
   getInvoiceEvents: jest.fn(),
   voidInvoice: jest.fn(),
   retryQboPush: jest.fn(),
+  finalizeInvoice: jest.fn(),
 }));
 
 import {
+  finalizeInvoice,
   getInvoice,
   getInvoiceEvents,
   retryQboPush,
@@ -67,6 +69,9 @@ const mockGetInvoiceEvents = getInvoiceEvents as jest.MockedFunction<
 const mockVoidInvoice = voidInvoice as jest.MockedFunction<typeof voidInvoice>;
 const mockRetryQboPush = retryQboPush as jest.MockedFunction<
   typeof retryQboPush
+>;
+const mockFinalizeInvoice = finalizeInvoice as jest.MockedFunction<
+  typeof finalizeInvoice
 >;
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
@@ -286,6 +291,65 @@ describe("InvoiceDetailPage", () => {
     await waitFor(() => {
       expect(mockRetryQboPush).toHaveBeenCalledWith("inv_001");
     });
+  });
+
+  it("approves a draft invoice and starts ERP export", async () => {
+    const draft = invoiceFixture({
+      status: "draft",
+      invoice_number: null,
+      issued_at: null,
+      finalized_at: null,
+    });
+    const finalized = invoiceFixture({ status: "open" });
+    mockGetInvoice.mockResolvedValue({ data: draft, request_id: "r1" } as any);
+    mockGetInvoiceEvents.mockResolvedValue({
+      data: [eventFixture()],
+      request_id: "r2",
+    } as any);
+    mockFinalizeInvoice.mockResolvedValue({
+      data: finalized,
+      request_id: "r3",
+    } as any);
+
+    render(<InvoiceDetailPage invoiceId="inv_001" />);
+
+    const approve = await screen.findByRole("button", {
+      name: /Approve & Send to ERP/i,
+    });
+    fireEvent.click(approve);
+
+    await waitFor(() => {
+      expect(mockFinalizeInvoice).toHaveBeenCalledWith("inv_001");
+      expect(screen.getByText("open")).toBeInTheDocument();
+    });
+  });
+
+  it("shows the POD delivery result used for billing", async () => {
+    mockGetInvoice.mockResolvedValue({
+      data: invoiceFixture({
+        pod_id: "pod-42",
+        delivered_at: "2024-06-01T09:45:00Z",
+        delivery_result: {
+          pod_id: "pod-42",
+          actual_gallons: 975.25,
+          actual_gallons_source: "manual",
+          recipient_name: "Alex Receiver",
+          delivered_at: "2024-06-01T09:45:00Z",
+        },
+      }),
+      request_id: "r1",
+    } as any);
+    mockGetInvoiceEvents.mockResolvedValue({
+      data: [eventFixture()],
+      request_id: "r2",
+    } as any);
+
+    render(<InvoiceDetailPage invoiceId="inv_001" />);
+
+    expect(await screen.findByText("Delivery Result")).toBeInTheDocument();
+    expect(screen.getByText("975.25 gal")).toBeInTheDocument();
+    expect(screen.getByText("Alex Receiver")).toBeInTheDocument();
+    expect(screen.getByText("pod-42")).toBeInTheDocument();
   });
 
   it("receives live updates via WebSocket", async () => {

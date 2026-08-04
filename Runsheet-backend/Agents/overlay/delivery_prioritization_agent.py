@@ -131,7 +131,22 @@ class DeliveryPrioritizationAgent(OverlayAgentBase):
         super().__init__(
             agent_id="delivery_prioritization",
             signal_bus=signal_bus,
-            subscriptions=[],
+            # Subscribe to the forecasts published by TankForecastingAgent.
+            #
+            # This agent reads forecasts back out of ``mvp_tank_forecasts``
+            # rather than from the message body, so the subscription exists to
+            # *wake the cycle*, not to deliver a payload — which is why there is
+            # no typed buffer here and why ``_on_signal`` is not overridden.
+            #
+            # It was previously ``subscriptions=[]``. With nothing subscribed,
+            # ``_signal_buffer`` never filled, ``monitor_cycle`` returned before
+            # ``evaluate()``, and the agent's background decision loop was a
+            # permanent no-op: it ran on schedule and did nothing, silently. The
+            # pipeline path worked only because the coordinator seeds
+            # ``_signal_buffer`` directly.
+            subscriptions=[
+                {"message_type": TankForecast},
+            ],
             activity_log_service=activity_log_service,
             ws_manager=ws_manager,
             confirmation_protocol=confirmation_protocol,
@@ -165,17 +180,30 @@ class DeliveryPrioritizationAgent(OverlayAgentBase):
     async def evaluate(
         self, signals: List[RiskSignal]
     ) -> List[InterventionProposal]:
-        """Score and rank pending fuel orders for each tenant.
+        """Score and rank pending fuel orders for the tenants this cycle covers.
 
         Steps:
-        1. Discover tenants with pending orders.
+        1. Resolve which tenants to score (see below).
         2. For each tenant, fetch orders with status in
            {placed, confirmed, scheduled}.
         3. Score each order based on call_type.
         4. Publish a DeliveryPriorityList on the SignalBus.
         5. Return InterventionProposals.
+
+        ``OverlayAgentBase.monitor_cycle`` groups buffered signals by tenant and
+        calls this method once per tenant, so ``signals`` already names the
+        tenant this invocation is for. Honouring that matters on the pipeline
+        path: a run for one tenant used to publish priority lists for *every*
+        tenant with pending orders, and because the coordinator hands the
+        captured lists to the loading stage — which acts on the last one — a run
+        could build a load plan for a tenant it was never started for.
+
+        Cross-tenant discovery remains the behaviour when ``signals`` is empty,
+        which is how the periodic sweep and direct callers invoke this method.
         """
-        tenant_ids = await self._discover_tenants_with_pending_orders()
+        tenant_ids = self._tenants_from_signals(signals)
+        if not tenant_ids:
+            tenant_ids = await self._discover_tenants_with_pending_orders()
         proposals: List[InterventionProposal] = []
 
         for tenant_id in tenant_ids:
@@ -186,6 +214,22 @@ class DeliveryPrioritizationAgent(OverlayAgentBase):
                 proposals.append(proposal)
 
         return proposals
+
+    @staticmethod
+    def _tenants_from_signals(signals: List[Any]) -> List[str]:
+        """Distinct tenant_ids carried by the signals that woke this cycle.
+
+        Preserves first-seen order so the scoring order is deterministic.
+        ``monitor_cycle`` already groups by tenant, so in practice this yields
+        at most one id; it is written as a list because direct callers may pass
+        a mixed batch.
+        """
+        tenants: List[str] = []
+        for signal in signals or []:
+            tenant_id = getattr(signal, "tenant_id", None)
+            if tenant_id and tenant_id not in tenants:
+                tenants.append(tenant_id)
+        return tenants
 
     async def _discover_tenants_with_pending_orders(self) -> List[str]:
         """Aggregate distinct tenant_ids from fuel_orders_current with

@@ -95,8 +95,11 @@ OPS_PAGINATED_PATHS = [
 
 
 @pytest.mark.parametrize("path", OPS_PAGINATED_PATHS)
-def test_ops_paginated_response_conformance(ops_client, path):
+def test_ops_paginated_response_conformance(ops_client, path, monkeypatch):
     """Ops paginated endpoints return PaginatedResponse-conforming JSON."""
+    # These are legacy NG last-mile routes, gated behind ``legacy_ng_delivery``
+    # (default OFF). Enable it so envelope conformance stays covered.
+    monkeypatch.setenv("LEGACY_NG_DELIVERY_ENABLED", "true")
     resp = ops_client.get(path)
     assert resp.status_code == 200
     body = resp.json()
@@ -236,7 +239,16 @@ def scheduling_client(scheduling_mock_es):
     )
 
     async def _override_tenant():
-        return TenantContext(tenant_id="t1", user_id="u1", has_pii_access=False)
+        # ``GET /api/scheduling/jobs`` is a dispatcher surface and now carries
+        # ``require_role(tenant, "dispatcher", "admin")`` (driver-mobile-app
+        # Req 3.13), so this envelope-conformance session has to hold one of
+        # those roles to reach the handler.
+        return TenantContext(
+            tenant_id="t1",
+            user_id="u1",
+            has_pii_access=False,
+            roles=["dispatcher"],
+        )
 
     app.dependency_overrides[get_tenant_context] = _override_tenant
 
@@ -353,7 +365,14 @@ def agent_client():
 
     app.add_middleware(FakeRequestID)
     app.include_router(agent_router)
-    return TestClient(app)
+    # The agent routes depend on ``get_tenant_context``; without the
+    # Test_Auth_Path override the dependency reaches the real SuperTokens
+    # verifier and raises "Initialisation not done". The fuel/scheduling
+    # fixtures above already override it — do the same here.
+    from tests.support.auth_seam import auth_headers, install_test_auth
+
+    install_test_auth(app)
+    return TestClient(app, headers=auth_headers("t1"))
 
 
 AGENT_PAGINATED_PATHS = [

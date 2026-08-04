@@ -30,6 +30,8 @@ from fuel.api.fuel_ops_endpoints import (
     mvp_router,
     router,
 )
+from errors.exceptions import AppException
+from errors.handlers import handle_app_exception
 from fuel.depot_models import DepotRepository
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 
@@ -151,6 +153,9 @@ def _build_app(tenant_id: str = "tenant-1") -> tuple[FastAPI, _FakeESService]:
     app = FastAPI()
     app.include_router(router)
     app.include_router(mvp_router)
+    # Mirror main.py: handlers that raise through errors.exceptions must be
+    # rendered as the structured ``ErrorResponse`` envelope, not propagate.
+    app.add_exception_handler(AppException, handle_app_exception)
     app.dependency_overrides[get_tenant_context] = _tenant_ctx_factory(
         tenant_id=tenant_id
     )
@@ -733,7 +738,11 @@ class TestGetDepot:
 
         resp = client.get("/api/fuel/mvp/depots/does_not_exist")
         assert resp.status_code == 404
-        assert resp.json()["detail"]["error_code"] == "depot_not_found"
+        # Structured ErrorResponse envelope — the ``depot_not_found`` code is
+        # preserved at the top level of the body.
+        body = resp.json()
+        assert body["error_code"] == "depot_not_found"
+        assert body["details"]["depot_id"] == "does_not_exist"
 
     def test_cross_tenant_depot_is_404(self):
         """Fetching another tenant's depot is suppressed to a 404, not 403."""

@@ -179,6 +179,11 @@ class PricingEngine:
         scope_type = PricingScopeType(winning_rule["scope_type"])
         result = PricingResult(
             unit_price_cents=int(winning_rule["unit_price_cents"]),
+            unit_price_micros=(
+                int(winning_rule["unit_price_micros"])
+                if winning_rule.get("unit_price_micros") is not None
+                else None
+            ),
             rule_id=winning_rule["rule_id"],
             scope_type=scope_type,
             matched_from_cache=matched_from_cache,

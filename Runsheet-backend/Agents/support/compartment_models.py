@@ -26,7 +26,17 @@ class Compartment(BaseModel):
 
 class DeliveryRequest(BaseModel):
     station_id: str
+    # Preserve the originating FuelOrder through the loading solver.  Legacy
+    # station-priority requests have no order and therefore leave this unset.
+    order_id: Optional[str] = None
     fuel_grade: FuelGrade
+    # Canonical US product code (DIESEL_2, DEF, ...).  ``fuel_grade`` above is
+    # the coarse family the solver matches compartments on, and nine catalog
+    # products collapse onto four grades — so the grade alone cannot tell DEF
+    # (1.09 kg/L) from diesel (0.85).  Axle weight needs the exact product,
+    # hence this field.  Optional: legacy station-priority requests carry no
+    # product code and fall back to the grade.
+    product_code: Optional[str] = None
     quantity_liters: float = Field(gt=0)
     min_drop_liters: float = Field(default=500.0, ge=0)
 
@@ -34,7 +44,15 @@ class DeliveryRequest(BaseModel):
 class CompartmentAssignment(BaseModel):
     compartment_id: str
     station_id: str
+    # Exact FuelOrder carried by this load assignment.  Optional keeps plans
+    # written before the send-to-driver workflow readable.
+    order_id: Optional[str] = None
     fuel_grade: str
+    # Canonical product code carried through from the DeliveryRequest so a
+    # persisted plan can be re-weighed correctly.  Without it, recomputing
+    # ``total_weight_kg`` from a stored plan would have to re-derive the
+    # product from the order, and would weigh DEF as diesel if it could not.
+    product_code: Optional[str] = None
     quantity_liters: float = Field(gt=0)
     compartment_capacity_liters: float = Field(gt=0)
 

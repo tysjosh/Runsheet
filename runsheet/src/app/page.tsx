@@ -32,11 +32,14 @@ import { useEffect, useRef, useState } from "react";
 // ─── Theme ─────────────────────────────────────────────────────────────────────
 
 const ACCENT = "#16b88c";
+// Canonical US product codes from the backend fuel product catalog
+// (fuel.services.fuel_product_catalog). Kept short so the tanker graphic's
+// per-compartment labels stay inside their cells.
 const GRADE = {
-  AGO: "#16b88c",
-  PMS: "#f59e0b",
-  ATK: "#3b82f6",
-  LPG: "#a78bfa",
+  DIESEL_2: "#16b88c",
+  KEROSENE: "#f59e0b",
+  PROPANE: "#3b82f6",
+  DEF: "#a78bfa",
 } as const;
 
 interface GfxTheme {
@@ -469,10 +472,10 @@ function ReplanGfx({ theme }: { theme: GfxTheme }) {
 
 function LoadGfx({ theme }: { theme: GfxTheme }) {
   const comps = [
-    { grade: "AGO", color: GRADE.AGO, fill: 0.9 },
-    { grade: "PMS", color: GRADE.PMS, fill: 0.82 },
-    { grade: "ATK", color: GRADE.ATK, fill: 0.95 },
-    { grade: "LPG", color: GRADE.LPG, fill: 0.7 },
+    { grade: "DIESEL_2", color: GRADE.DIESEL_2, fill: 0.9 },
+    { grade: "KEROSENE", color: GRADE.KEROSENE, fill: 0.82 },
+    { grade: "PROPANE", color: GRADE.PROPANE, fill: 0.95 },
+    { grade: "DEF", color: GRADE.DEF, fill: 0.7 },
   ];
   const x0 = 70;
   const w = 70;

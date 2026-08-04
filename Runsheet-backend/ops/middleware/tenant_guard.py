@@ -87,6 +87,13 @@ class TenantContext:
     This shape is deliberately **unchanged** by the SuperTokens migration: it is
     the integration seam that lets ``get_tenant_context`` be re-implemented
     without touching the handlers that depend on it.
+
+    ``driver_id`` is the caller's canonical ``drivers_current.driver_id`` when the
+    verified session carries a ``driver_id`` claim, and ``None`` for every
+    non-driver caller. It is appended **last with a default** so every existing
+    positional and keyword construction of ``TenantContext`` keeps working.
+
+    Validates: Requirements 1.2, 1.3, 1.4
     """
 
     tenant_id: str
@@ -97,6 +104,7 @@ class TenantContext:
     measurement_units: Dict[str, str] = field(
         default_factory=lambda: default_measurement_units_for_region("US").to_dict()
     )
+    driver_id: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -233,6 +241,7 @@ def _build_context(
     has_pii_access: bool,
     roles: list[str],
     settings: TenantSettings,
+    driver_id: Optional[str] = None,
 ) -> TenantContext:
     return TenantContext(
         tenant_id=tenant_id,
@@ -241,6 +250,7 @@ def _build_context(
         roles=roles,
         region=settings.region,
         measurement_units=settings.measurement_units.to_dict(),
+        driver_id=driver_id,
     )
 
 
@@ -263,7 +273,7 @@ async def get_tenant_context(request: Request) -> TenantContext:
     Validates: Requirements 2.6, 3.1, 3.2, 3.3, 3.5, 5.1, 5.3, 5.4
     """
     user_id, claims = await _verify_supertokens_session(request, required=True)
-    return await _context_from_session_claims(user_id, claims)
+    return await _context_from_session_claims(user_id, claims, request=request)
 
 
 async def _verify_supertokens_session(
@@ -289,13 +299,24 @@ async def _verify_supertokens_session(
 
 
 async def _context_from_session_claims(
-    user_id: Optional[str], claims: Dict[str, Any]
+    user_id: Optional[str],
+    claims: Dict[str, Any],
+    *,
+    request: Optional[Request] = None,
 ) -> TenantContext:
     """Build a ``TenantContext`` from verified SuperTokens session claims.
 
     Derives ``tenant_id`` / ``roles`` / ``has_pii_access`` exclusively from the
     signed access-token payload (Req 3.3, 3.5). A session lacking a ``tenant_id``
     claim is rejected with 401 and no context is produced (Req 5.3).
+
+    ``driver_id`` is read from the same signed payload: a non-empty string
+    becomes the context value, anything else (absent, ``None``, blank, or a
+    non-string) coerces to ``None`` so non-driver callers still receive a
+    context (Req 1.3, 1.4). When the ``Request`` is available, ``tenant_id`` and
+    ``driver_id`` are also stamped onto ``request.state`` so middleware that
+    runs without the dependency (idempotency replay, per-driver rate limiting)
+    can read them (Req 11.1, 15.13).
     """
     tenant_id = claims.get("tenant_id")
     if not tenant_id or not isinstance(tenant_id, str):
@@ -305,7 +326,18 @@ async def _context_from_session_claims(
             details={"reason": "Verified session must carry a tenant_id claim"},
         )
 
+    raw_driver_id = claims.get("driver_id")
+    driver_id = (
+        raw_driver_id if isinstance(raw_driver_id, str) and raw_driver_id else None
+    )
+
     request_tenant_id_var.set(tenant_id)
+    if request is not None:
+        # Stamped for middleware that cannot depend on get_tenant_context:
+        # tenant_id unblocks idempotency replay, driver_id unblocks per-driver
+        # rate limiting.
+        request.state.tenant_id = tenant_id
+        request.state.driver_id = driver_id
     resolved_user_id = user_id if user_id else "unknown"
     has_pii_access = bool(claims.get("has_pii_access", False))
     roles = [r for r in (claims.get("roles") or []) if isinstance(r, str)]
@@ -325,6 +357,7 @@ async def _context_from_session_claims(
         has_pii_access=has_pii_access,
         roles=roles,
         settings=tenant_settings,
+        driver_id=driver_id,
     )
 
 

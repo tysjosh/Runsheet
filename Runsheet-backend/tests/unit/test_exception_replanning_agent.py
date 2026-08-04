@@ -80,7 +80,9 @@ def _make_plan_snapshot(
             }
             for i, sid in enumerate(station_ids)
         ],
-        "status": "proposed",
+        # "dispatched", not "proposed": a replan acts on a plan that is in
+        # flight. See REPLANNABLE_PLAN_STATUSES.
+        "status": "dispatched",
         "tenant_id": "tenant-1",
     }
 
@@ -93,7 +95,7 @@ def _make_plan_snapshot(
             for i, sid in enumerate(station_ids)
         ],
         "distance_km": 150.0,
-        "status": "proposed",
+        "status": "dispatched",
         "tenant_id": "tenant-1",
     }
 

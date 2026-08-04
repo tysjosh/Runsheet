@@ -302,7 +302,14 @@ async def accept_job(
     If the job is already ``assigned``, confirms the assignment.
     Appends an ``accept`` event to the job event timeline.
 
-    Validates: Requirements 5.2, 5.4, 5.5, 14.1, 14.3, 14.4
+    Records both driver identifier namespaces on the job document: the
+    SuperTokens ``user_id`` in ``asset_assigned`` (unchanged, so every
+    existing reader keeps working) and the canonical ``drivers_current``
+    identifier in ``assigned_driver_id``. Historical documents are not
+    backfilled — an absent ``assigned_driver_id`` means a pre-migration
+    document (Requirements 1.13, 1.14).
+
+    Validates: Requirements 5.2, 5.4, 5.5, 14.1, 14.3, 14.4, 1.13, 1.14
     """
     if idempotency.is_replay:
         return idempotency.replay_response()
@@ -321,6 +328,8 @@ async def accept_job(
     now = datetime.now(timezone.utc).isoformat()
     current_status = JobStatus(job_doc["status"])
 
+    update_fields: dict = {}
+
     # If scheduled, transition to assigned
     if current_status == JobStatus.SCHEDULED:
         update_fields = {
@@ -328,6 +337,17 @@ async def accept_job(
             "updated_at": now,
             "asset_assigned": tenant.user_id,
         }
+
+    # Stamp the canonical driver identifier alongside the SuperTokens user id
+    # (Req 1.13). Written only when the session carries a driver_id and the
+    # stored value is not already that driver, so a confirmation of an
+    # already-linked assignment stays a read.
+    driver_id = (tenant.driver_id or "").strip()
+    if driver_id and (job_doc.get("assigned_driver_id") or "").strip() != driver_id:
+        update_fields["assigned_driver_id"] = driver_id
+        update_fields.setdefault("updated_at", now)
+
+    if update_fields:
         await svc._es.update_document(
             "jobs_current", job_id, update_fields
         )

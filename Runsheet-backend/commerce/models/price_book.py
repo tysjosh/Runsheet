@@ -123,7 +123,12 @@ class PricingRule(BaseModel):
         description="Minimum quantity in gallons for this rule to apply (quantity break)",
     )
     unit_price_cents: int = Field(
-        ..., description="Unit price in integer cents (Constraint C1)"
+        ..., description="Rounded whole-cent compatibility unit price"
+    )
+    unit_price_micros: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="Exact price per gallon in integer micro-dollars",
     )
     created_at: datetime = Field(
         default_factory=utcnow,
@@ -205,7 +210,12 @@ class PricingResult(BaseModel):
     """
 
     unit_price_cents: int = Field(
-        ..., description="Resolved unit price in integer cents"
+        ..., description="Rounded whole-cent compatibility unit price"
+    )
+    unit_price_micros: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="Exact resolved unit price in integer micro-dollars",
     )
     rule_id: str = Field(
         ..., description="Identifier of the matched pricing rule"

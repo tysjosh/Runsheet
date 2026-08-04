@@ -455,6 +455,23 @@ class Settings(BaseSettings):
         le=720,
         description="Idempotency store TTL in hours"
     )
+    voice_api_key_salt: str = Field(
+        default="",
+        description="Salt used to derive the stored salted-hash of Dinee voice "
+        "Surface B per-tenant API keys (voice_api_keys.api_key_sha256). The "
+        "plaintext key is never stored in the reverse-lookup index; only its "
+        "salted hash is compared in constant time during authentication.",
+    )
+    voice_replay_window_seconds: int = Field(
+        default=300,
+        ge=1,
+        le=86400,
+        description="Allowed clock skew (in seconds) for the Dinee voice "
+        "submission X-Timestamp replay window. Requests whose timestamp is "
+        "missing, unparseable, or more than this many seconds from server "
+        "time are rejected with HTTP 401 before the pipeline is invoked "
+        "(Req 4.1-4.4).",
+    )
     seed_tenant_id: str = Field(
         default="",
         description="Tenant to seed default notification rules/templates for "
@@ -541,6 +558,32 @@ class Settings(BaseSettings):
         description="Maximum concurrent active jobs per asset"
     )
 
+    # ── Legacy Nigerian Last-Mile Feature Flag ─────────────────────────
+    #
+    # Single kill switch for the pre-pivot Nigerian last-mile delivery
+    # surface (riders / shipments read API, Dinee event replay, Dinee drift
+    # comparison, the legacy support-ticket CRM). Default OFF so a fresh US
+    # fuel tenant never sees rider/shipment semantics.
+    #
+    # This flag gates *presentation and read surfaces only*. It deliberately
+    # does NOT touch the driver→rider dual-write, the ``riders_current``
+    # index, or the legacy webhook ingestion path — those are data-migration
+    # decisions with their own rollout mechanisms.
+    #
+    # Read it through ``config.legacy_flags.is_legacy_ng_delivery_enabled()``
+    # rather than off Settings directly, so the ``LEGACY_NG_DELIVERY_ENABLED``
+    # environment variable can flip the surface without a settings-cache
+    # reload.
+    legacy_ng_delivery_enabled: bool = Field(
+        default=False,
+        description=(
+            "Master feature flag for the legacy Nigerian last-mile delivery "
+            "surface (rider/shipment ops read API, Dinee replay + drift, "
+            "legacy support tickets). When off, those endpoints return 404. "
+            "Default: False."
+        ),
+    )
+
     # ── Commerce Backbone Feature Flags ────────────────────────────────
     #
     # These flags control the commerce backbone rollout per-tenant.
@@ -560,6 +603,43 @@ class Settings(BaseSettings):
             "Requires intake.pipeline_enabled to be active for the same "
             "tenant. Default: False (off in production, override to True "
             "in development)."
+        ),
+    )
+
+    # ── Compliance Backbone master flag ──────────────────────────────
+    #
+    # Gates the compliance REST surface only: IFTA reporting, terminal
+    # BOL, k-factor calibration, driver qualification, asset
+    # certification, meter tickets, asset compliance, and tax admin.
+    # None of those endpoints is exercised by the seven MVP capabilities.
+    #
+    # It deliberately does NOT gate the compliance *services* that the
+    # delivery pipeline depends on, because four of them are load-bearing:
+    #
+    #   DyedDieselEnforcer  — compartment_loading_agent, invoice_service
+    #                         (IRS dyed-fuel rules; not optional)
+    #   delivery_filter     — route_planning_agent
+    #   VCFCalculator       — reconciliation_service (temperature
+    #                         correction on billed volume)
+    #   HOSStatus           — driver hos_advisory_service
+    #
+    # Turning those off would break load building, routing,
+    # reconciliation, and driver hours-of-service. Shrinking the exposed
+    # API surface is safe; removing the domain logic is not.
+    #
+    # Default: True, so existing deployments and the compliance endpoint
+    # tests are unaffected. Set false for an MVP pilot.
+
+    compliance_backbone_enabled: bool = Field(
+        default=True,
+        description=(
+            "Master feature flag for the Compliance Backbone REST surface "
+            "(IFTA, terminal BOL, k-factor, driver qualification, asset "
+            "certification, meter tickets, asset compliance, tax admin). "
+            "When off those routers are not registered and their paths "
+            "return 404. Compliance services used inline by the delivery "
+            "pipeline (dyed-diesel enforcement, delivery filtering, VCF "
+            "correction, HOS) are unaffected. Default: True."
         ),
     )
 

@@ -24,6 +24,7 @@ Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 5.7, 5.8
 """
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -51,6 +52,7 @@ from Agents.support.replan_diff_models import (
     ReplanDiff as StructuredReplanDiff,
     compute_replan_diff,
 )
+from fuel.services.order_es_mappings import FUEL_ORDERS_CURRENT_INDEX
 from inventory.es_mappings import INVENTORY_INDEX
 
 logger = logging.getLogger(__name__)
@@ -73,8 +75,54 @@ DISRUPTION_SOURCE_AGENTS = {
 # Repair part categories queried during breakdown handling (Req 4.1)
 REPAIR_PART_CATEGORIES = ["tires", "brake_parts", "engine_parts"]
 
+#: Plan statuses this agent can replan.
+#:
+#: Both snapshot queries previously filtered ``status: "proposed"``, which is
+#: backwards: ``proposed`` means the dispatcher has not approved the plan yet,
+#: and ``PlanDispatchService`` flips both ``mvp_load_plans`` and ``mvp_routes``
+#: to ``dispatched`` on approval. A disruption happens to a plan that is *in
+#: flight*, so the agent could only ever see plans that nobody was executing,
+#: and every real breakdown or outage found "no active plan" and was skipped.
+#:
+#: ``proposed`` is deliberately excluded: replanning a plan the dispatcher has
+#: not committed to is pointless — regenerating it is cheaper and correct.
+REPLANNABLE_PLAN_STATUSES = ("dispatched", "in_transit")
+
+#: Replan outcomes recorded on the persisted event.
+#:
+#: ``ReplanEvent.status`` used to be hardcoded to ``"applied"`` regardless of
+#: what happened, so an advisory-only replan claimed to have changed a plan it
+#: never touched.
+REPLAN_APPLIED = "applied"
+REPLAN_PROPOSED = "proposed"
+REPLAN_ESCALATED = "escalated"
+
 # Default estimated repair time in minutes per part category
 DEFAULT_REPAIR_ETA_MINUTES = 45
+
+
+@dataclass(frozen=True)
+class ReplanApplyOutcome:
+    """What actually happened to the live plan when a replan was applied.
+
+    Kept separate from :class:`ReplanEvent` because the event's ``status`` is a
+    single word and the interesting part is *why* — a replan that was withheld
+    because the diff needs solver re-validation is a very different situation
+    from one withheld because the overlay is in shadow mode, and an operator
+    reading ``mvp_replan_events`` needs to tell them apart.
+    """
+
+    #: ``True`` only when a live document was written.
+    applied: bool
+    #: One of ``REPLAN_APPLIED`` / ``REPLAN_PROPOSED`` / ``REPLAN_ESCALATED``.
+    status: str
+    #: Machine-readable reason, e.g. ``"shadow_mode"``,
+    #: ``"needs_replacement_truck"``, ``"needs_capacity_revalidation"``.
+    reason: str
+    #: Route document updated, when one was.
+    patched_route_id: Optional[str] = None
+    #: Human-readable detail for the dispatcher UI.
+    detail: str = ""
 
 
 class ExceptionReplanningAgent(OverlayAgentBase):
@@ -147,6 +195,12 @@ class ExceptionReplanningAgent(OverlayAgentBase):
         #: haven't wired the manager yet continue to work — broadcasts are
         #: silently skipped when the manager is ``None``.
         self._fuel_planning_ws = fuel_planning_ws_manager
+
+        #: Driver WS manager used to push a patched route to the driver
+        #: currently executing it. ``None`` means "resolve the process-wide
+        #: manager on first use" (see :meth:`set_driver_ws_manager`), so the
+        #: notification works without new bootstrap wiring.
+        self._driver_ws_manager: Optional[Any] = None
 
     # ------------------------------------------------------------------
     # Core evaluation (Req 5.1–5.8)
@@ -260,13 +314,16 @@ class ExceptionReplanningAgent(OverlayAgentBase):
         Returns a dict with 'loading_plan' and 'route_plan' keys,
         or None if no active plan exists.
         """
-        # Query most recent loading plan
+        # Query most recent loading plan that is actually in flight.
+        # See REPLANNABLE_PLAN_STATUSES for why "proposed" is not it.
         loading_query = {
             "query": {
                 "bool": {
                     "must": [
                         {"term": {"tenant_id": tenant_id}},
-                        {"term": {"status": "proposed"}},
+                        {"terms": {
+                            "status": list(REPLANNABLE_PLAN_STATUSES)
+                        }},
                     ],
                 },
             },
@@ -290,13 +347,15 @@ class ExceptionReplanningAgent(OverlayAgentBase):
         if not loading_plan:
             return None
 
-        # Query most recent route plan
+        # Query most recent route plan, same in-flight statuses.
         route_query = {
             "query": {
                 "bool": {
                     "must": [
                         {"term": {"tenant_id": tenant_id}},
-                        {"term": {"status": "proposed"}},
+                        {"terms": {
+                            "status": list(REPLANNABLE_PLAN_STATUSES)
+                        }},
                     ],
                 },
             },
@@ -367,16 +426,28 @@ class ExceptionReplanningAgent(OverlayAgentBase):
 
         diff, patched_plan_id, risk_class = result
 
-        # Persist replan event (Req 5.7)
+        # Apply the patch to the live plan (Req 5.3). Until this existed the
+        # agent computed a diff, wrote an event claiming status "applied", and
+        # left mvp_routes untouched — the plan the driver was executing never
+        # changed, so "live replanning" was advisory only.
+        apply_outcome = await self._apply_replan(
+            diff=diff,
+            plan_snapshot=plan_snapshot,
+            tenant_id=tenant_id,
+            disruption_type=disruption_type,
+        )
+
+        # Persist replan event (Req 5.7) with the outcome that actually
+        # occurred rather than an unconditional "applied".
         replan_event = ReplanEvent(
             original_plan_id=plan_snapshot.get("loading_plan", {}).get(
                 "plan_id", ""
             ),
-            patched_plan_id=patched_plan_id,
+            patched_plan_id=patched_plan_id or apply_outcome.patched_route_id,
             trigger_signal_id=signal.signal_id,
             replan_type=disruption_type,
             diff=diff,
-            status="applied",
+            status=apply_outcome.status,
             tenant_id=tenant_id,
         )
 
@@ -399,8 +470,21 @@ class ExceptionReplanningAgent(OverlayAgentBase):
         )
 
         await self._persist_replan_event(
-            replan_event, structured_diff=structured_diff
+            replan_event,
+            structured_diff=structured_diff,
+            apply_outcome=apply_outcome,
         )
+
+        # Tell the driver, but only about a patch that actually landed.
+        # Notifying on an advisory replan would put the driver's app out of
+        # step with the plan ES still holds.
+        if apply_outcome.applied:
+            await self._notify_driver_of_replan(
+                plan_snapshot=plan_snapshot,
+                replan_event=replan_event,
+                tenant_id=tenant_id,
+                disruption_type=disruption_type,
+            )
 
         # Req 2.5.4: broadcast replan_diff_ready on /ws/fuel-planning after
         # the event has been written so dispatcher UIs can fetch the full
@@ -951,6 +1035,378 @@ class ExceptionReplanningAgent(OverlayAgentBase):
         )
 
     # ------------------------------------------------------------------
+    # Apply the replan to the live plan (Req 5.3)
+    # ------------------------------------------------------------------
+
+    async def _apply_replan(
+        self,
+        *,
+        diff: ReplanDiff,
+        plan_snapshot: Dict[str, Any],
+        tenant_id: str,
+        disruption_type: str,
+    ) -> ReplanApplyOutcome:
+        """Write the patched stop sequence to ``mvp_routes``.
+
+        Two classes of change are deliberately **not** applied here, because
+        applying them would produce a plan no solver has validated:
+
+        * **Truck swap.** ``_handle_truck_breakdown`` sets
+          ``diff.truck_swapped`` to the *broken* truck's id. No replacement is
+          ever chosen — picking one needs the compartment solver to re-check
+          capacity and grade compatibility against the new truck. Writing the
+          broken truck id back onto the route would be actively wrong.
+        * **Volume reallocation.** ``diff.volumes_reallocated`` adds litres to
+          a station. Compartment capacity and axle weight are enforced by
+          ``compartment_solver``, not here, so raising a volume in place could
+          produce an overloaded or illegal load.
+
+        Both escalate to the dispatcher instead. That is a real outcome, not a
+        silent one: the event records ``escalated`` with a reason.
+
+        Stop resequencing and station deferral *are* applied. Neither changes
+        how much fuel is carried, so no feasibility question arises.
+
+        Returns:
+            A :class:`ReplanApplyOutcome` describing what happened. Never
+            raises — a failed write degrades to an escalation so the
+            disruption still reaches a human.
+        """
+        route_plan = plan_snapshot.get("route_plan") or {}
+        route_id = str(route_plan.get("route_id") or "")
+
+        if diff.truck_swapped:
+            return ReplanApplyOutcome(
+                applied=False,
+                status=REPLAN_ESCALATED,
+                reason="needs_replacement_truck",
+                detail=(
+                    f"Truck {diff.truck_swapped} is out of service. Choosing a "
+                    "replacement requires the compartment solver to re-check "
+                    "capacity and grade compatibility, so the plan was left "
+                    "unchanged for dispatcher action."
+                ),
+            )
+
+        if diff.volumes_reallocated:
+            return ReplanApplyOutcome(
+                applied=False,
+                status=REPLAN_ESCALATED,
+                reason="needs_capacity_revalidation",
+                detail=(
+                    "Volume reallocation changes compartment load; capacity "
+                    "and weight limits are enforced by the loading solver, so "
+                    "the plan was left unchanged for dispatcher action."
+                ),
+            )
+
+        if not route_id:
+            return ReplanApplyOutcome(
+                applied=False,
+                status=REPLAN_ESCALATED,
+                reason="no_route_to_patch",
+                detail=(
+                    "The plan snapshot carries no route_id, so there is no "
+                    "route document to patch."
+                ),
+            )
+
+        if not diff.stops_reordered and not diff.stations_deferred:
+            return ReplanApplyOutcome(
+                applied=False,
+                status=REPLAN_PROPOSED,
+                reason="no_route_change",
+                detail="The replan changed no stops, so nothing was written.",
+                patched_route_id=route_id,
+            )
+
+        patched_stops = self._resequence_stops(
+            current_stops=route_plan.get("stops") or [],
+            new_order=list(diff.stops_reordered),
+            deferred=set(diff.stations_deferred or []),
+        )
+        if patched_stops is None:
+            return ReplanApplyOutcome(
+                applied=False,
+                status=REPLAN_ESCALATED,
+                reason="stop_set_mismatch",
+                detail=(
+                    "The patched sequence does not account for every stop on "
+                    "the route. Applying it would silently drop a delivery, "
+                    "so the plan was left unchanged."
+                ),
+                patched_route_id=route_id,
+            )
+
+        # Shadow mode runs everything above so the proposal and diff are still
+        # produced for retrospective analysis, and stops here.
+        if not await self._is_active_commit_mode(tenant_id):
+            return ReplanApplyOutcome(
+                applied=False,
+                status=REPLAN_PROPOSED,
+                reason="shadow_mode",
+                detail=(
+                    "Overlay is not in an active mode for this tenant, so the "
+                    "patch was computed but not written."
+                ),
+                patched_route_id=route_id,
+            )
+
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            await self._es.update_document(
+                MVP_ROUTES_INDEX,
+                route_id,
+                {
+                    "stops": patched_stops,
+                    "updated_at": now,
+                    "replanned_at": now,
+                    "replan_type": disruption_type,
+                },
+            )
+        except Exception as exc:
+            logger.error(
+                "ExceptionReplanningAgent: failed to patch route %s for "
+                "tenant %s: %s",
+                route_id,
+                tenant_id,
+                exc,
+            )
+            return ReplanApplyOutcome(
+                applied=False,
+                status=REPLAN_ESCALATED,
+                reason="route_write_failed",
+                detail=f"Writing the patched route failed: {exc}",
+                patched_route_id=route_id,
+            )
+
+        logger.info(
+            "ExceptionReplanningAgent: patched route %s for tenant %s "
+            "(%s) — %d stop(s), %d deferred",
+            route_id,
+            tenant_id,
+            disruption_type,
+            len(patched_stops),
+            len(diff.stations_deferred or []),
+        )
+        return ReplanApplyOutcome(
+            applied=True,
+            status=REPLAN_APPLIED,
+            reason="route_patched",
+            detail=f"Route {route_id} resequenced to {len(patched_stops)} stops.",
+            patched_route_id=route_id,
+        )
+
+    @staticmethod
+    def _resequence_stops(
+        *,
+        current_stops: List[Dict[str, Any]],
+        new_order: List[str],
+        deferred: set,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Reorder stop documents to match ``new_order``, dropping ``deferred``.
+
+        Stop objects are carried across whole rather than rebuilt, so fields
+        this agent knows nothing about (ETAs, quantities, per-stop status)
+        survive the patch. ``sequence`` is renumbered when present.
+
+        Returns ``None`` when the requested sequence does not account for every
+        stop currently on the route. That is the case worth refusing: a stop
+        named in neither ``new_order`` nor ``deferred`` would vanish from the
+        driver's route, which is a missed delivery rather than a reordering.
+        Completed stops are exempt — they are history, not work, so a
+        sequence covering only the remaining stops is valid.
+        """
+        by_station: Dict[str, Dict[str, Any]] = {}
+        for stop in current_stops:
+            station_id = stop.get("station_id")
+            if station_id:
+                by_station[str(station_id)] = stop
+
+        accounted = set(new_order) | set(deferred)
+        unaccounted = {
+            station_id
+            for station_id, stop in by_station.items()
+            if station_id not in accounted
+            and stop.get("status") != "completed"
+        }
+        if unaccounted:
+            logger.warning(
+                "ExceptionReplanningAgent: refusing to patch route — stop(s) "
+                "%s appear in neither the new sequence nor the deferred list",
+                ", ".join(sorted(unaccounted)),
+            )
+            return None
+
+        patched: List[Dict[str, Any]] = []
+        for position, station_id in enumerate(new_order, start=1):
+            if station_id in deferred:
+                continue
+            stop = by_station.get(str(station_id))
+            if stop is None:
+                # Named in the sequence but absent from the route. The
+                # handlers derive the sequence from these very stops, so this
+                # means the snapshot moved under us; skip rather than invent.
+                logger.warning(
+                    "ExceptionReplanningAgent: patched sequence names unknown "
+                    "station %s; skipping it",
+                    station_id,
+                )
+                continue
+            patched_stop = dict(stop)
+            if "sequence" in patched_stop:
+                patched_stop["sequence"] = position
+            patched.append(patched_stop)
+
+        return patched
+
+    # ------------------------------------------------------------------
+    # Driver notification (Req 5.3)
+    # ------------------------------------------------------------------
+
+    def set_driver_ws_manager(self, manager: Optional[Any]) -> None:
+        """Override the driver WS manager (tests, or explicit bootstrap wiring).
+
+        Left unset, :meth:`_notify_driver_of_replan` resolves the process-wide
+        manager through ``get_driver_ws_manager()``, which bootstrap already
+        binds to the container. That avoids adding a constructor dependency
+        that would have to be threaded through every existing call site — and
+        avoids the alternative failure mode where the capability exists but
+        nothing ever wires it.
+        """
+        self._driver_ws_manager = manager
+
+    async def _notify_driver_of_replan(
+        self,
+        *,
+        plan_snapshot: Dict[str, Any],
+        replan_event: ReplanEvent,
+        tenant_id: str,
+        disruption_type: str,
+    ) -> None:
+        """Push the patched route to the driver executing it.
+
+        Without this the plan changed in ES and the driver kept working the
+        old sequence, which is worse than not replanning at all. Failures are
+        logged and swallowed: the patched route is already persisted and the
+        app re-fetches on next poll, so a dropped socket must not fail the
+        replan.
+        """
+        driver_id = await self._resolve_driver_for_plan(
+            plan_snapshot=plan_snapshot, tenant_id=tenant_id
+        )
+        if not driver_id:
+            logger.warning(
+                "ExceptionReplanningAgent: patched route for tenant %s but "
+                "could not resolve the assigned driver, so no driver was "
+                "notified (event %s)",
+                tenant_id,
+                replan_event.event_id,
+            )
+            return
+
+        manager = getattr(self, "_driver_ws_manager", None)
+        if manager is None:
+            try:
+                from driver.ws.driver_ws_manager import get_driver_ws_manager
+
+                manager = get_driver_ws_manager()
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(
+                    "ExceptionReplanningAgent: no driver WS manager available, "
+                    "driver %s not notified of replan %s: %s",
+                    driver_id,
+                    replan_event.event_id,
+                    exc,
+                )
+                return
+
+        route_plan = plan_snapshot.get("route_plan") or {}
+        try:
+            await manager.send_new_route(
+                driver_id,
+                {
+                    "route_id": route_plan.get("route_id", ""),
+                    "plan_id": replan_event.original_plan_id,
+                    "run_id": route_plan.get("run_id", ""),
+                    "replan_event_id": replan_event.event_id,
+                    "replan_type": disruption_type,
+                    "reason": disruption_type,
+                    "stations_deferred": list(
+                        replan_event.diff.stations_deferred or []
+                    ),
+                    "stop_order": list(replan_event.diff.stops_reordered or []),
+                },
+            )
+        except Exception as exc:
+            logger.warning(
+                "ExceptionReplanningAgent: failed to notify driver %s of "
+                "replan %s: %s",
+                driver_id,
+                replan_event.event_id,
+                exc,
+            )
+
+    async def _resolve_driver_for_plan(
+        self,
+        *,
+        plan_snapshot: Dict[str, Any],
+        tenant_id: str,
+    ) -> Optional[str]:
+        """Find the driver executing this plan, via the dispatched orders.
+
+        ``PlanDispatchService`` stamps ``assigned_driver_id`` and
+        ``assigned_run_id`` onto each order it dispatches, so the run id on the
+        plan is enough to find the driver. Reading it back from the orders
+        reuses dispatch's own answer instead of re-deriving "which driver owns
+        this truck", which is a rule that lives in dispatch and would drift if
+        copied here.
+        """
+        route_plan = plan_snapshot.get("route_plan") or {}
+        loading_plan = plan_snapshot.get("loading_plan") or {}
+
+        # A driver stamped directly on either document wins — no query needed.
+        for source in (route_plan, loading_plan):
+            for field in ("assigned_driver_id", "driver_id"):
+                candidate = source.get(field)
+                if candidate:
+                    return str(candidate)
+
+        run_id = str(route_plan.get("run_id") or loading_plan.get("run_id") or "")
+        if not run_id:
+            return None
+
+        query = {
+            "query": {
+                "bool": {
+                    "must": [
+                        {"term": {"tenant_id": tenant_id}},
+                        {"term": {"assigned_run_id": run_id}},
+                    ],
+                },
+            },
+            "size": 10,
+        }
+        try:
+            resp = await self._es.search_documents(
+                FUEL_ORDERS_CURRENT_INDEX, query, 10
+            )
+        except Exception as exc:
+            logger.warning(
+                "ExceptionReplanningAgent: driver lookup failed for run %s: %s",
+                run_id,
+                exc,
+            )
+            return None
+
+        for hit in (resp or {}).get("hits", {}).get("hits", []) or []:
+            source = hit.get("_source") or {}
+            driver_id = source.get("assigned_driver_id")
+            if driver_id:
+                return str(driver_id)
+        return None
+
+    # ------------------------------------------------------------------
     # Persistence (Req 5.7)
     # ------------------------------------------------------------------
 
@@ -958,6 +1414,7 @@ class ExceptionReplanningAgent(OverlayAgentBase):
         self,
         replan_event: ReplanEvent,
         structured_diff: Optional[StructuredReplanDiff] = None,
+        apply_outcome: Optional[ReplanApplyOutcome] = None,
     ) -> None:
         """Persist a ReplanEvent to the mvp_replan_events ES index.
 
@@ -969,6 +1426,17 @@ class ExceptionReplanningAgent(OverlayAgentBase):
         """
         try:
             doc = replan_event.model_dump(mode="json")
+            if apply_outcome is not None:
+                # ReplanEvent.status is one word; an operator reading this
+                # index needs to know whether the plan actually changed and,
+                # if not, why. Carried on the document rather than the model
+                # so no consumer of the typed contract has to change.
+                doc["apply_outcome"] = {
+                    "applied": apply_outcome.applied,
+                    "reason": apply_outcome.reason,
+                    "detail": apply_outcome.detail,
+                    "patched_route_id": apply_outcome.patched_route_id,
+                }
             if structured_diff is not None:
                 # ``model_dump(mode="json")`` on StructuredReplanDiff
                 # produces ES-friendly primitives (ISO timestamps for

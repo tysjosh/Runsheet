@@ -23,12 +23,12 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Request
 
 from compliance.services.asset_compliance_status_service import (
     AssetComplianceStatusService,
 )
-from errors.exceptions import AppException
+from errors.exceptions import AppException, internal_error
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 
 logger = logging.getLogger(__name__)
@@ -118,12 +118,9 @@ async def get_asset_compliance_status(
             asset_id,
             exc,
         )
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "error_code": "asset_compliance.status_failed",
-                "message": "Failed to compute asset compliance status.",
-            },
+        raise internal_error(
+            message="Failed to compute asset compliance status.",
+            details={"asset_id": asset_id},
         )
 
     return {

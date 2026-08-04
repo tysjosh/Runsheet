@@ -370,3 +370,54 @@ class TestIntakeMetadataExtraForbid:
             session_id="sess-abc",
         )
         assert meta.dispatcher_user_id == "user-1"
+
+
+# ---------------------------------------------------------------------------
+# Driver duty-status projection bookkeeping
+# ---------------------------------------------------------------------------
+
+
+def _base_driver(**overrides) -> dict:
+    """Return a minimal valid Driver dict."""
+    payload = {
+        "driver_id": "drv-1",
+        "tenant_id": "tenant-1",
+        "driver_name": "Ada Driver",
+        "status": "active",
+        "last_event_timestamp": _NOW,
+        "source_schema_version": "1.0.0",
+        "trace_id": "trace-1",
+        "created_at": _NOW,
+        "updated_at": _NOW,
+    }
+    payload.update(overrides)
+    return payload
+
+
+class TestDriverDutyStatusProjectionFields:
+    """Driver carries the two nullable duty-status projection fields.
+
+    ``Driver.model_config`` is ``extra="forbid"``, so the duty-status service
+    cannot write either field until the model declares it.
+    """
+
+    def test_fields_default_to_none(self):
+        driver = Driver(**_base_driver())
+
+        assert driver.duty_status_event_id is None
+        assert driver.duty_status_updated_at is None
+
+    def test_fields_accepted_when_supplied(self):
+        driver = Driver(
+            **_base_driver(
+                duty_status_event_id="01HZ0000000000000000000000",
+                duty_status_updated_at=_LATER,
+            )
+        )
+
+        assert driver.duty_status_event_id == "01HZ0000000000000000000000"
+        assert driver.duty_status_updated_at == _LATER
+
+    def test_status_still_required_and_constrained(self):
+        with pytest.raises(ValidationError):
+            Driver(**_base_driver(status="on_duty"))

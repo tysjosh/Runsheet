@@ -256,7 +256,13 @@ class TestQueryTimeline:
         assert result[1]["timeline_event_id"] == "evt-2"
 
     async def test_queries_with_job_id_and_tenant_id(self):
-        """query_timeline always filters by job_id and tenant_id."""
+        """query_timeline always scopes by job_id and tenant_id.
+
+        ``job_id`` is a ``must`` clause; the tenant term lives in the bool
+        ``filter`` slot (non-scoring, cacheable) rather than ``must``. Both are
+        mandatory for a document to match, so the isolation guarantee is the
+        same — assert each in its actual clause.
+        """
         es = _make_es_mock()
         service = AuditTimelineService(es)
 
@@ -264,9 +270,9 @@ class TestQueryTimeline:
 
         call_args = es.search_documents.call_args
         query = call_args[0][1]
-        must = query["query"]["bool"]["must"]
-        assert {"term": {"job_id": "JOB_1"}} in must
-        assert {"term": {"tenant_id": "tenant-1"}} in must
+        bool_query = query["query"]["bool"]
+        assert {"term": {"job_id": "JOB_1"}} in bool_query["must"]
+        assert {"term": {"tenant_id": "tenant-1"}} in bool_query["filter"]
 
     async def test_sorts_by_timestamp_ascending(self):
         """query_timeline sorts results by timestamp ascending."""
@@ -391,14 +397,16 @@ class TestQueryTimeline:
 
         call_args = es.search_documents.call_args
         query = call_args[0][1]
-        must = query["query"]["bool"]["must"]
+        bool_query = query["query"]["bool"]
+        must = bool_query["must"]
 
-        # Should have 5 clauses: job_id, tenant_id, event_type, actor_type, time range
-        assert len(must) == 5
+        # 4 ``must`` clauses (job_id, event_type, actor_type, time range) plus
+        # the tenant term in the non-scoring ``filter`` slot.
+        assert len(must) == 4
         assert {"term": {"job_id": "JOB_1"}} in must
-        assert {"term": {"tenant_id": "tenant-1"}} in must
         assert {"term": {"event_type": "status_changed"}} in must
         assert {"term": {"actor_type": "dispatcher"}} in must
+        assert {"term": {"tenant_id": "tenant-1"}} in bool_query["filter"]
 
     async def test_returns_empty_when_no_events(self):
         """query_timeline returns empty list when no events found."""

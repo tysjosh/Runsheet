@@ -112,11 +112,16 @@ def client():
 
         app.dependency_overrides[get_tenant_context] = _override_tenant
 
-        with TestClient(app) as c:
-            yield c, mock_es
-
-        # Clean up override
-        app.dependency_overrides.pop(get_tenant_context, None)
+        # Deliberately NOT used as a context manager: entering the client runs
+        # main's lifespan, which boots the real bootstrap chain against the
+        # shared ``main.app`` singleton and leaves boot-only routers mounted on
+        # it for every later test in the session. These tests need the routes
+        # and the patched ES client, not the boot.
+        try:
+            yield TestClient(app), mock_es
+        finally:
+            # Clean up override
+            app.dependency_overrides.pop(get_tenant_context, None)
 
 
 # ---------------------------------------------------------------------------

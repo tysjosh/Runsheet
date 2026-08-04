@@ -42,7 +42,7 @@ Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9, 3.10,
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, Final, List, Mapping, Optional, Tuple
 from uuid import uuid4
 
 from Agents.overlay.base_overlay_agent import OverlayAgentBase
@@ -62,6 +62,7 @@ from Agents.support.compartment_models import (
 )
 from Agents.support.compartment_solver import (
     check_feasibility,
+    fuel_density_kg_per_liter,
     optimize_loading_plan,
 )
 from Agents.support.fuel_distribution_models import (
@@ -103,8 +104,15 @@ from fuel.services.fuel_product_catalog import (
     canonicalize_or_warn,
 )
 from fuel.services.order_es_mappings import FUEL_ORDERS_CURRENT_INDEX
+from services.unit_conversion import GAL_TO_L
 
 logger = logging.getLogger(__name__)
+
+#: US gallons → litres. Bound to :data:`services.unit_conversion.GAL_TO_L` so
+#: this module holds no independent definition of the factor. The agent needs
+#: the conversion because orders are gallons-denominated while the compartment
+#: solver and its kg/L densities are litres-denominated.
+GALLONS_TO_LITERS: Final[float] = GAL_TO_L
 
 # Default minimum delivery quantity in liters (Req 3.5)
 DEFAULT_MIN_DROP_LITERS = 500.0
@@ -254,39 +262,12 @@ class CompartmentLoadingAgent(OverlayAgentBase):
     # Mode helpers (Task 6.6 / Req 7.1.2)
     # ------------------------------------------------------------------
 
-    async def _is_active_commit_mode(self, tenant_id: str) -> bool:
-        """Return ``True`` when the overlay's mode represents a real commit.
-
-        Validates: Requirement 7.1.2.
-
-        The spec reserves the ``last_loaded_*`` / ``state`` write on
-        ``truck_compartments`` for "a successful assignment commit — not
-        during shadow-mode evaluation." Mode resolution mirrors the base
-        overlay's :meth:`_get_mode`: anything that is not ``shadow`` nor
-        ``disabled`` is treated as a commit path (``active_gated`` and
-        ``active_auto`` both flow through the ConfirmationProtocol, and
-        by the time the protocol accepts the mutation the compartment
-        has been committed).
-
-        The helper defaults to ``False`` on any error or on a missing
-        feature-flag service so a misconfigured environment never
-        silently overwrites compartment state in what the operator
-        thinks is shadow mode.
-        """
-
-        try:
-            mode = await self._get_mode(tenant_id)
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.warning(
-                "CompartmentLoadingAgent: failed to resolve overlay mode "
-                "for tenant %s, defaulting to shadow (no state write): %s",
-                tenant_id,
-                exc,
-            )
-            return False
-        if mode is None:
-            return False
-        return mode not in ("shadow", "disabled")
+    # ``_is_active_commit_mode`` now lives on :class:`OverlayAgentBase` so the
+    # compartment-state write (Req 7.1.2) and the replan apply share one
+    # definition of "this is a real commit". The behaviour is unchanged: the
+    # spec reserves the ``last_loaded_*`` / ``state`` write on
+    # ``truck_compartments`` for a successful assignment commit, never for
+    # shadow-mode evaluation, and resolution fails closed.
 
     # ------------------------------------------------------------------
     # Signal handling override — buffer DeliveryPriorityList messages
@@ -298,6 +279,25 @@ class CompartmentLoadingAgent(OverlayAgentBase):
             self._priority_buffer.append(signal)
         else:
             await super()._on_signal(signal)
+
+    def _pending_work_tenants(self) -> List[str]:
+        """Tenants with a buffered priority list awaiting a loading plan.
+
+        Required because :meth:`_on_signal` files every
+        :class:`DeliveryPriorityList` in ``_priority_buffer`` and nothing in
+        ``_signal_buffer``. Without this, ``monitor_cycle`` saw an empty
+        ``_signal_buffer`` and returned before ``evaluate()``, so on the
+        SignalBus path this agent buffered priority lists forever and never
+        produced a plan — silently, with no error and no log line.
+
+        Validates: Requirement 3.1
+        """
+        tenants: List[str] = []
+        for priority_list in self._priority_buffer:
+            tenant_id = getattr(priority_list, "tenant_id", None)
+            if tenant_id and tenant_id not in tenants:
+                tenants.append(tenant_id)
+        return tenants
 
     # ------------------------------------------------------------------
     # Core evaluation (Req 3.1–3.10)
@@ -330,6 +330,27 @@ class CompartmentLoadingAgent(OverlayAgentBase):
         # Use the most recent priority list
         priority_list = priority_lists[-1]
         tenant_id = priority_list.tenant_id
+
+        # The [-1] above discards everything else the buffer held. That is the
+        # long-standing contract (a newer list supersedes an older one), but
+        # when the discarded lists belong to *other* tenants it means their
+        # work is dropped without a trace. Say so.
+        dropped_tenants = sorted(
+            {
+                getattr(other, "tenant_id", None)
+                for other in priority_lists[:-1]
+            }
+            - {tenant_id, None}
+        )
+        if dropped_tenants:
+            logger.warning(
+                "CompartmentLoadingAgent: discarding buffered priority lists "
+                "for tenant(s) %s — this cycle acts only on the most recent "
+                "list (tenant %s). %d list(s) buffered in total.",
+                ", ".join(dropped_tenants),
+                tenant_id,
+                len(priority_lists),
+            )
         # Use pipeline run_id if available, otherwise fall back to priority list's run_id
         run_id = getattr(self, '_current_run_id', None) or priority_list.run_id
 
@@ -557,8 +578,6 @@ class CompartmentLoadingAgent(OverlayAgentBase):
         }
 
         requests: List[DeliveryRequest] = []
-        # US gallons to liters conversion factor (NIST)
-        GALLONS_TO_LITERS = 3.785411784
 
         for order in fuel_orders:
             order_id = order.get("order_id", "")
@@ -676,7 +695,12 @@ class CompartmentLoadingAgent(OverlayAgentBase):
             requests.append(
                 DeliveryRequest(
                     station_id=station_id,
+                    order_id=order_id,
                     fuel_grade=fuel_grade,
+                    # The order's own product code, canonicalized. Carried
+                    # alongside the coarse grade so the solver can weigh the
+                    # exact product — DEF is 1.09 kg/L but maps to AGO.
+                    product_code=canonicalize_or_warn(product_code),
                     quantity_liters=round(quantity_liters, 2),
                     min_drop_liters=DEFAULT_MIN_DROP_LITERS,
                 )
@@ -974,12 +998,12 @@ class CompartmentLoadingAgent(OverlayAgentBase):
                     })
                     continue
 
-            # Convert gallons to liters (1 gallon ≈ 3.785 liters)
-            quantity_liters = round(target_gallons * 3.785411784, 2)
+            quantity_liters = round(target_gallons * GALLONS_TO_LITERS, 2)
 
             requests.append(
                 DeliveryRequest(
                     station_id=customer_tank_id or order_id,
+                    order_id=order_id,
                     fuel_grade=fuel_grade,
                     quantity_liters=quantity_liters,
                     min_drop_liters=DEFAULT_MIN_DROP_LITERS,
@@ -1704,13 +1728,13 @@ class CompartmentLoadingAgent(OverlayAgentBase):
         if total_liters <= 0.0:
             return
 
-        # Convert liters to canonical gallons for the counter. Using the
-        # exact NIST factor (1 gal = 3.785411784 L) keeps the counter
-        # stable across runs even when source units mix (the agent-side
-        # LoadingPlan is liters-valued, but the Redis counter and
+        # Convert liters to canonical gallons for the counter. Using the one
+        # shared NIST factor keeps the counter stable across runs even when
+        # source units mix (the agent-side LoadingPlan is liters-valued, but
+        # the Redis counter and
         # Supplier_Contract.minimum_lift_gallons_per_month are both in
         # gallons).
-        gallons = total_liters / 3.785411784
+        gallons = total_liters / GALLONS_TO_LITERS
 
         try:
             new_total = await service.record_lift(
@@ -1842,7 +1866,10 @@ class CompartmentLoadingAgent(OverlayAgentBase):
         )
         new_weight = round(
             sum(
-                _fuel_density_kg_per_liter(a.fuel_grade) * a.quantity_liters
+                fuel_density_kg_per_liter(
+                    product_code=a.product_code,
+                    fuel_grade=a.fuel_grade,
+                ) * a.quantity_liters
                 for a in kept_assignments
             ),
             2,
@@ -2000,7 +2027,10 @@ class CompartmentLoadingAgent(OverlayAgentBase):
         # is correct for mixed-catalog assignments.
         new_weight = round(
             sum(
-                _fuel_density_kg_per_liter(a.fuel_grade) * a.quantity_liters
+                fuel_density_kg_per_liter(
+                    product_code=a.product_code,
+                    fuel_grade=a.fuel_grade,
+                ) * a.quantity_liters
                 for a in kept_assignments
             ),
             2,
@@ -2269,41 +2299,17 @@ class CompartmentLoadingAgent(OverlayAgentBase):
 # ---------------------------------------------------------------------------
 
 
-_FUEL_DENSITY_CANONICAL: Dict[str, float] = {
-    # Canonical US product densities (kg/L). Matches the gasoline/diesel
-    # values used by compartment_solver.FUEL_DENSITY under the legacy NG
-    # codes so plans evaluated before and after Task 6.5 report the same
-    # total_weight_kg for the same assignments.
-    "DIESEL_2": 0.85,
-    "OFF_ROAD_DIESEL": 0.85,
-    "HEATING_OIL": 0.85,
-    "GASOLINE_REG": 0.74,
-    "GASOLINE_PREM": 0.74,
-    "ETHANOL_E85": 0.78,
-    "KEROSENE": 0.80,
-    "PROPANE": 0.51,
-    "DEF": 1.09,
-    # Legacy NG aliases carried forward so pre-canonicalization plans
-    # still compute a sensible weight even if the assignment slipped
-    # through without canonicalization.
-    "AGO": 0.85,
-    "PMS": 0.74,
-    "ATK": 0.80,
-    "LPG": 0.51,
-}
-
-
 def _fuel_density_kg_per_liter(fuel_grade: str) -> float:
-    """Return the fuel density for a canonical or legacy code.
+    """Density for a canonical product code or a legacy grade code.
 
-    Matches :data:`Agents.support.compartment_solver.FUEL_DENSITY` for
-    the legacy NG codes and extends coverage to every catalog product in
-    :data:`fuel.services.fuel_product_catalog.FUEL_PRODUCT_CATALOG`. An
-    unknown code falls back to 0.85 kg/L (the diesel default used by
-    ``compartment_solver``) so weight totals degrade gracefully.
+    Thin wrapper over :func:`Agents.support.compartment_solver.fuel_density_kg_per_liter`.
+    This module previously owned a second, near-identical density table. Only
+    this one had the correct DEF value, and it was reached only when
+    recomputing a plan's weight *after* assignments were stripped — the
+    feasibility gate used the other table, so the more heavily filtered a plan
+    was, the more accurate its weight became. There is now one table, in the
+    solver, and the gate uses it.
     """
-
-    if not isinstance(fuel_grade, str):
-        return 0.85
-    return _FUEL_DENSITY_CANONICAL.get(fuel_grade.strip().upper(), 0.85)
-
+    return fuel_density_kg_per_liter(
+        product_code=fuel_grade, fuel_grade=fuel_grade
+    )

@@ -52,6 +52,33 @@ def get_client_ip(request: Request) -> str:
     return get_remote_address(request)
 
 
+def driver_rate_key(request: Request) -> str:
+    """
+    Build the per-driver rate-limit key for driver-surface write endpoints.
+
+    Returns ``driver:{tenant_id}:{driver_id}`` when the authenticated driver
+    identity has been stamped onto ``request.state`` by the driver tenant
+    guard. When either value is missing — unauthenticated requests, or any
+    path that does not stamp the driver identity — the key falls back to the
+    client IP so the endpoint is still rate limited.
+
+    Validates:
+    - Requirement 15.13: per-driver rate limit on every driver-surface write
+      endpoint, rejecting over-limit requests with HTTP 429
+
+    Args:
+        request: The incoming FastAPI request
+
+    Returns:
+        The rate-limit bucket key as a string
+    """
+    driver_id = getattr(request.state, "driver_id", None)
+    if driver_id:
+        tenant_id = getattr(request.state, "tenant_id", "") or ""
+        return f"driver:{tenant_id}:{driver_id}"
+    return get_client_ip(request)
+
+
 # Create the limiter instance with IP-based key function
 limiter = Limiter(key_func=get_client_ip)
 

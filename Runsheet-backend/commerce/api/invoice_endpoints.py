@@ -358,6 +358,31 @@ async def void_invoice(
 
 
 # ---------------------------------------------------------------------------
+# POST /api/commerce/invoices/{invoice_id}/finalize
+# ---------------------------------------------------------------------------
+
+
+@router.post("/{invoice_id}/finalize")
+async def finalize_invoice(
+    invoice_id: str,
+    request: Request,
+    tenant: TenantContext = Depends(require_invoicing_enabled),
+) -> dict:
+    """Approve a draft invoice and start its configured ERP/QBO export."""
+    service = _get_invoice_service()
+    invoice = await service.finalize_draft(
+        tenant_id=tenant.tenant_id,
+        invoice_id=invoice_id,
+        actor=tenant.user_id,
+    )
+    return {
+        "data": invoice,
+        "message": "Invoice finalized; ERP export scheduled",
+        "request_id": _get_request_id(request),
+    }
+
+
+# ---------------------------------------------------------------------------
 # GET /api/commerce/invoices/{invoice_id}/events
 # ---------------------------------------------------------------------------
 
@@ -433,36 +458,21 @@ async def retry_qbo_push(
             },
         )
 
-    # Reset qbo_push_state to pending and clear retry counter
-    from commerce.services.commerce_es_mappings import INVOICES_CURRENT_INDEX
-    from services.time_utils import utcnow
-
-    now = utcnow()
-    update_doc: Dict[str, Any] = {
-        "qbo_push_state": "pending",
-        "qbo_push_attempts": 0,
-        "qbo_push_last_error": None,
-        "updated_at": now.isoformat(),
-    }
-
-    await service._es.update_document(
-        INVOICES_CURRENT_INDEX,
-        invoice_id,
-        update_doc,
-    )
-
     logger.info(
-        "Reset qbo_push_state to pending for invoice %s (tenant %s) — "
-        "re-enqueued for QBO push",
+        "Executing QBO retry for invoice %s (tenant %s)",
         invoice_id,
         tenant.tenant_id,
     )
 
-    # Return the updated invoice
-    updated_invoice = {**invoice, **update_doc}
+    # The service owns the pending-state reset and persistence mirror, then
+    # returns only after the provider result is recorded.
+    updated_invoice = await service.retry_external_sync(
+        tenant_id=tenant.tenant_id,
+        invoice_id=invoice_id,
+    )
 
     return {
         "data": updated_invoice,
-        "message": "QBO push retry enqueued",
+        "message": "QBO push retry executed",
         "request_id": _get_request_id(request),
     }
