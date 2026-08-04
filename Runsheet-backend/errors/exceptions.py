@@ -576,6 +576,30 @@ def voice_payload_invalid(
     )
 
 
+def order_payload_invalid(
+    invalid_fields: Optional[list[str]] = None,
+    message: str = "The order payload failed value validation",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create an order payload value-validation exception (HTTP 422).
+
+    Raised by :class:`~fuel.services.order_intake_pipeline.OrderIntakePipeline`
+    when ``FuelOrder.model_validate`` rejects an adapter's output — the
+    cross-field invariants the per-channel request models cannot express.
+
+    ``details.invalid_fields`` names the offending field paths and/or rule
+    codes. Field names and rule codes only: never the submitted values, so no
+    customer address, phone, or credential can leak into an error response.
+    """
+    if details is None:
+        details = {"invalid_fields": list(invalid_fields or [])}
+    return AppException(
+        error_code=ErrorCode.ORDER_PAYLOAD_INVALID,
+        message=message,
+        details=details
+    )
+
+
 def voice_unauthorized(
     message: str = "Authentication required",
     details: Optional[dict[str, Any]] = None

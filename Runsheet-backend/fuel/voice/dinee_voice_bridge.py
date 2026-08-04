@@ -69,7 +69,9 @@ from typing import Any, Callable, List, Optional
 
 from pydantic import ValidationError
 
+from errors.codes import ErrorCode
 from errors.exceptions import (
+    AppException,
     idempotency_conflict,
     missing_idempotency_key,
     resource_not_found,
@@ -261,15 +263,22 @@ class DineeVoiceBridge:
         #
         # The bridge's stage (6) validates that the required *fields* are
         # present, but the canonical ``FuelOrder`` also enforces value-level
-        # invariants inside the pipeline (e.g. a ``one_off`` order must carry a
-        # delivery window, gallons must be > 0, lat/lon must be in range).
-        # Those raise ``pydantic.ValidationError`` from
-        # ``FuelOrder.model_validate`` *after* the adapter runs. Left
-        # unhandled they surface as an HTTP 500, which is wrong: the input is
-        # bad, not the server. Catch them here and map to a uniform 422
-        # ``VOICE_PAYLOAD_INVALID`` naming the offending field(s)/rule(s), the
-        # same envelope shape as the required-field rejection. Non-validation
-        # failures (ES/network/etc.) are *not* caught and still surface as 500.
+        # invariants (a ``one_off`` order must carry a delivery window, gallons
+        # must be > 0, lat/lon must be in range). Those are enforced inside the
+        # pipeline, after the adapter runs.
+        #
+        # The pipeline now maps them to a 422 ``ORDER_PAYLOAD_INVALID`` for
+        # every channel — this bridge used to be the only place that mapping
+        # happened, which meant dispatcher, bulk, CSV and api_partner intake all
+        # returned 500 for a bad payload. The bridge keeps its own documented
+        # envelope (``VOICE_PAYLOAD_INVALID`` with ``details.missing_fields``,
+        # Req 7.3) by re-mapping, so the Dinee contract is unchanged.
+        #
+        # Only that one error code is re-mapped. Every other AppException the
+        # pipeline raises — channel_disabled, resource_not_found,
+        # webhook_signature_invalid, security_tenant_id_mismatch — passes
+        # through with its own status, and a genuine ES/network fault still
+        # surfaces as 500.
         try:
             result: IntakeResponse = await self._pipeline.ingest_webhook(
                 channel_id=channel.channel_id,
@@ -279,10 +288,13 @@ class DineeVoiceBridge:
                 idempotency_key_override=idempotency_key,
                 schema_version_override=schema_version,
             )
-        except ValidationError as exc:
+        except AppException as exc:
+            if exc.error_code is not ErrorCode.ORDER_PAYLOAD_INVALID:
+                raise
+            invalid = (exc.details or {}).get("invalid_fields", [])
             raise voice_payload_invalid(
                 message="The voice submission failed value validation",
-                details={"missing_fields": _extract_invalid_fields(exc)},
+                details={"missing_fields": list(invalid)},
             ) from exc
 
         return await self._map_result(
@@ -573,41 +585,12 @@ def _extract_missing_fields(exc: ValidationError) -> List[str]:
     return deduped
 
 
-def _extract_invalid_fields(exc: ValidationError) -> List[str]:
-    """Name the offending fields/rules for a value-level ``ValidationError``.
-
-    Unlike :func:`_extract_missing_fields` (absent required fields), this is
-    used for value violations surfaced by ``FuelOrder.model_validate`` inside
-    the pipeline. It handles two error shapes:
-
-        * **field-level** errors (e.g. ``ship_to_lat`` out of range) carry a
-          non-empty ``loc`` — the dotted field path is used.
-        * **model-level** validator errors (e.g. ``invalid_delivery_window``)
-          carry an empty ``loc``; the ``ValueError`` code from the message is
-          used instead so the caller learns *which rule* failed.
-
-    Only field names / rule codes are returned — never submitted values, so
-    no tenant data or credentials leak into the response.
-    """
-    out: List[str] = []
-    for err in exc.errors():
-        loc = ".".join(str(part) for part in err.get("loc", ()))
-        if loc:
-            out.append(loc)
-            continue
-        # Model-level validator: recover the ValueError code from the message
-        # (pydantic v2 renders it as "Value error, <code>").
-        msg = str(err.get("msg", "")).strip()
-        code = msg.split("Value error,", 1)[-1].strip() if "Value error," in msg else msg
-        out.append(code or "value_error")
-    # De-duplicate while preserving order.
-    seen: set = set()
-    deduped: List[str] = []
-    for f in out:
-        if f not in seen:
-            seen.add(f)
-            deduped.append(f)
-    return deduped
+# ``_extract_invalid_fields`` stood here. It named the fields/rules behind a
+# value-level ``FuelOrder`` ValidationError, and this bridge was the only caller
+# — which is why only the voice channel reported those failures properly. It now
+# lives beside the validation it describes, as
+# ``fuel.services.order_intake_pipeline.extract_invalid_fields``, and the
+# pipeline raises ORDER_PAYLOAD_INVALID for every channel.
 
 
 __all__ = ["DineeVoiceBridge"]

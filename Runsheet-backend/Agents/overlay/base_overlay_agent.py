@@ -59,6 +59,49 @@ SHADOW_PROPOSALS_INDEX = "agent_shadow_proposals"
 CYCLE_METRIC_DEGRADED = "degraded"
 CYCLE_METRIC_DEGRADATION_REASONS = "degradation_reasons"
 
+# Every reason entry carries a ``kind`` drawn from the two below. Both mean the
+# cycle produced nothing, so both make the run DEGRADED rather than COMPLETE —
+# an explicitly requested plan that contains no plan is not a success under
+# either. They are distinguished because they need different *attention*:
+#
+#   * ``PRODUCED_NOTHING`` — the stage had input and turned none of it into
+#     output. Always a defect or a real operational block worth paging on.
+#   * ``NO_INPUT`` — there was nothing to work on (no tanks, no pending
+#     orders, no buffered priority list). Newsworthy when a dispatcher just
+#     asked for a plan, unremarkable on the 30-minute sweep of a quiet tenant.
+#
+# Without the distinction the orchestrator would have to log every quiet sweep
+# at ERROR, and a signal that fires 48 times a day for a tenant with no orders
+# is one people learn to ignore — which would cost us the ``PRODUCED_NOTHING``
+# case this convention exists to surface.
+DEGRADATION_KIND_PRODUCED_NOTHING = "produced_nothing"
+DEGRADATION_KIND_NO_INPUT = "no_input"
+
+
+def build_degradation_reason(
+    *,
+    reason_code: str,
+    kind: str = DEGRADATION_KIND_PRODUCED_NOTHING,
+    detail: Optional[str] = None,
+    **extra: Any,
+) -> Dict[str, Any]:
+    """Build one entry for ``CYCLE_METRIC_DEGRADATION_REASONS``.
+
+    Matches the shape ``RoutePlanningAgent`` already emits for route skips
+    (``reason_code`` + ``detail``) so a consumer can read every stage's reasons
+    the same way, and adds the ``kind`` marker the orchestrator keys its log
+    severity off.
+
+    ``extra`` carries stage-shaped counters (``tanks=0``, ``trucks=0``). Keep it
+    to counts and identifiers: these entries are serialized into an API
+    response, so no customer data or credentials belong here.
+    """
+    entry: Dict[str, Any] = {"reason_code": reason_code, "kind": kind}
+    if detail:
+        entry["detail"] = detail
+    entry.update(extra)
+    return entry
+
 
 class OverlayAgentBase(AutonomousAgentBase):
     """Base class for Layer 1 and Layer 2 overlay agents.
@@ -378,6 +421,25 @@ class OverlayAgentBase(AutonomousAgentBase):
     def cycle_metrics(self) -> Dict[str, Any]:
         """Return a snapshot of the most recent cycle metrics."""
         return dict(self._cycle_metrics)
+
+    def report_degradation(self, *reasons: Dict[str, Any]) -> None:
+        """Record that this cycle finished without producing its output.
+
+        The producer half of the convention at the top of this module. Call it
+        from ``evaluate()`` on every path that returns without the output the
+        stage exists to produce — including the early ``return []`` guards,
+        which are exactly the paths that used to look like success.
+
+        Accumulates rather than overwrites, so a stage that gives up on several
+        tenants in one cycle reports all of them.
+        Idempotent in effect: calling it with no reasons still marks the cycle
+        degraded, because the flag rather than the list is the signal.
+        """
+        existing = self._cycle_metrics.get(CYCLE_METRIC_DEGRADATION_REASONS)
+        merged = list(existing) if isinstance(existing, (list, tuple)) else []
+        merged.extend(reasons)
+        self._cycle_metrics[CYCLE_METRIC_DEGRADED] = True
+        self._cycle_metrics[CYCLE_METRIC_DEGRADATION_REASONS] = merged
 
     # ------------------------------------------------------------------
     # Abstract interface

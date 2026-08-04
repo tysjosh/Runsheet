@@ -45,7 +45,12 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Final, List, Mapping, Optional, Tuple
 from uuid import uuid4
 
-from Agents.overlay.base_overlay_agent import OverlayAgentBase
+from Agents.overlay.base_overlay_agent import (
+    DEGRADATION_KIND_NO_INPUT,
+    DEGRADATION_KIND_PRODUCED_NOTHING,
+    OverlayAgentBase,
+    build_degradation_reason,
+)
 from Agents.overlay.data_contracts import (
     InterventionProposal,
     RiskClass,
@@ -327,6 +332,19 @@ class CompartmentLoadingAgent(OverlayAgentBase):
         self._priority_buffer.clear()
 
         if not priority_lists:
+            # No priority list was buffered, so there is nothing to load and the
+            # routing stage downstream will receive no plan. Silence here is
+            # what let a plan run with zero load plans report COMPLETE.
+            self.report_degradation(
+                build_degradation_reason(
+                    reason_code="no_priority_lists_buffered",
+                    kind=DEGRADATION_KIND_NO_INPUT,
+                    detail=(
+                        "the prioritization stage published no DeliveryPriority"
+                        "List, so no load plan could be built"
+                    ),
+                )
+            )
             return []
 
         # Use the most recent priority list
@@ -365,14 +383,55 @@ class CompartmentLoadingAgent(OverlayAgentBase):
             tenant_id, priority_list
         )
         if not delivery_requests:
+            # A priority list arrived but none of its entries resolved to a
+            # loadable request. Unlike the empty-buffer case above there *was*
+            # input, so this is a produced-nothing outcome: the orders exist and
+            # the stage turned none of them into demand.
+            logger.warning(
+                "CompartmentLoadingAgent: priority list for tenant %s yielded "
+                "no delivery requests from %d prioritized order(s)",
+                tenant_id,
+                len(getattr(priority_list, "priorities", []) or []),
+            )
+            self.report_degradation(
+                build_degradation_reason(
+                    reason_code="no_delivery_requests",
+                    kind=DEGRADATION_KIND_PRODUCED_NOTHING,
+                    detail=(
+                        "no prioritized order resolved to a loadable delivery "
+                        "request (missing product_code, gallons, or tank link)"
+                    ),
+                    priorities=len(getattr(priority_list, "priorities", []) or []),
+                    delivery_requests=0,
+                )
+            )
             return []
 
         # Step 3: Query available trucks with equipment check (Req 3.1, 3.2, 3.3)
         trucks = await self._query_trucks_with_equipment_check(tenant_id)
         if not trucks:
-            logger.info(
-                "CompartmentLoadingAgent: no trucks found for tenant %s",
+            # Demand exists and there is no truck to put it on. Reported as
+            # no_input rather than produced_nothing: the stage was not handed
+            # the fleet it needs, which is a provisioning gap, not a planning
+            # defect. Either way the run has no load plan and must not claim
+            # COMPLETE.
+            logger.warning(
+                "CompartmentLoadingAgent: no trucks found for tenant %s — "
+                "%d delivery request(s) cannot be loaded",
                 tenant_id,
+                len(delivery_requests),
+            )
+            self.report_degradation(
+                build_degradation_reason(
+                    reason_code="no_trucks_available",
+                    kind=DEGRADATION_KIND_NO_INPUT,
+                    detail=(
+                        "no truck passed the equipment check, so the "
+                        "outstanding delivery requests could not be loaded"
+                    ),
+                    delivery_requests=len(delivery_requests),
+                    trucks=0,
+                )
             )
             return []
 
@@ -478,6 +537,35 @@ class CompartmentLoadingAgent(OverlayAgentBase):
             tenant_id,
             run_id,
         )
+
+        # Trucks and demand were both present and the loop produced no plan —
+        # every truck fell out of one of the four ``continue`` branches above
+        # (infeasible, all assignments cross-contamination-blocked, all blocked
+        # by dyed-diesel rules). This is the loading equivalent of the route
+        # stage skipping every truck it was handed, and it is the one case here
+        # that is unambiguously produced_nothing.
+        if not proposals:
+            logger.error(
+                "CompartmentLoadingAgent: built 0 loading plans for tenant %s "
+                "from %d truck(s) and %d delivery request(s) (run_id=%s)",
+                tenant_id,
+                len(trucks),
+                len(delivery_requests),
+                run_id,
+            )
+            self.report_degradation(
+                build_degradation_reason(
+                    reason_code="no_feasible_loading_plan",
+                    kind=DEGRADATION_KIND_PRODUCED_NOTHING,
+                    detail=(
+                        "every truck was rejected as infeasible or had all of "
+                        "its assignments blocked by compatibility rules"
+                    ),
+                    trucks=len(trucks),
+                    delivery_requests=len(delivery_requests),
+                    loading_plans=0,
+                )
+            )
 
         return proposals
 

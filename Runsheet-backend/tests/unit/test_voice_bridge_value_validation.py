@@ -20,8 +20,16 @@ from pydantic import ValidationError
 from errors.codes import ErrorCode
 from errors.exceptions import AppException
 from fuel.order_models import FuelOrder
-from fuel.services.order_intake_pipeline import IntakeResponse
-from fuel.voice.dinee_voice_bridge import DineeVoiceBridge, _extract_invalid_fields
+# ``extract_invalid_fields`` moved out of the voice bridge and into the
+# pipeline, alongside the ``FuelOrder.model_validate`` call whose errors it
+# names. The bridge was its only caller, which is why only the voice channel
+# reported those failures as 422 while dispatcher/bulk/CSV/api_partner returned
+# 500. See tests/unit/test_order_payload_invalid_not_500.py.
+from fuel.services.order_intake_pipeline import (
+    IntakeResponse,
+    extract_invalid_fields as _extract_invalid_fields,
+)
+from fuel.voice.dinee_voice_bridge import DineeVoiceBridge
 
 TENANT_ID = "tenant-value-validation"
 CHANNEL_ID = "voice-value-chan-01"
@@ -166,21 +174,63 @@ def _window_validation_error() -> ValidationError:
 
 
 def test_pipeline_validation_error_maps_to_422(anyio_backend=None):
+    """The bridge re-maps the pipeline's rejection to its own 422 envelope.
+
+    The pipeline used to let ``pydantic.ValidationError`` escape and this bridge
+    was the only caller that caught it — so voice returned 422 while dispatcher,
+    bulk, CSV and api_partner all returned 500. The pipeline now raises
+    ORDER_PAYLOAD_INVALID itself, for every channel. The bridge still owes Dinee
+    ``VOICE_PAYLOAD_INVALID`` with ``details.missing_fields`` (Req 7.3), so it
+    re-maps that one code.
+
+    ``RaisingPipeline`` therefore raises what the real pipeline now raises. It
+    previously raised a bare ``ValidationError``; leaving it that way would have
+    kept passing against a bridge that no longer catches one, which is exactly
+    the sort of fake-drifts-from-collaborator false green worth avoiding.
+    """
     import asyncio
 
-    exc = _window_validation_error()
+    from errors.exceptions import order_payload_invalid
+    from fuel.services.order_intake_pipeline import extract_invalid_fields
+
+    validation_exc = _window_validation_error()
+    pipeline_exc = order_payload_invalid(
+        invalid_fields=extract_invalid_fields(validation_exc),
+    )
     ledger = FakeLedger()
-    bridge = _bridge(RaisingPipeline(exc), ledger)
+    bridge = _bridge(RaisingPipeline(pipeline_exc), ledger)
 
     with pytest.raises(AppException) as ei:
         asyncio.run(_submit(bridge))
 
     app_exc = ei.value
     assert app_exc.error_code == ErrorCode.VOICE_PAYLOAD_INVALID
+    assert app_exc.status_code == 422
     # The offending rule is named (invalid_delivery_window) in missing_fields.
     assert "invalid_delivery_window" in app_exc.details["missing_fields"]
     # Nothing was recorded in the ledger (no order persisted outcome).
     assert ledger.records == []
+
+
+def test_bridge_passes_through_other_pipeline_errors(anyio_backend=None):
+    """Only ORDER_PAYLOAD_INVALID is re-mapped; other codes keep their status.
+
+    Guards against the re-map being written as a bare ``except AppException``,
+    which would flatten channel_disabled, resource_not_found and
+    webhook_signature_invalid into a 422 payload error.
+    """
+    import asyncio
+
+    from errors.exceptions import channel_disabled
+
+    ledger = FakeLedger()
+    bridge = _bridge(RaisingPipeline(channel_disabled()), ledger)
+
+    with pytest.raises(AppException) as ei:
+        asyncio.run(_submit(bridge))
+
+    assert ei.value.error_code is not ErrorCode.VOICE_PAYLOAD_INVALID
+    assert ei.value.error_code is ErrorCode.CHANNEL_DISABLED
 
 
 def test_control_case_still_processes():

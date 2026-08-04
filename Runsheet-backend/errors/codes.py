@@ -164,6 +164,18 @@ class ErrorCode(str, Enum):
     VOICE_PAYLOAD_INVALID = "VOICE_PAYLOAD_INVALID"
     """VoiceIntakePayload is missing required fields — carries details.missing_fields (HTTP 422)"""
 
+    ORDER_PAYLOAD_INVALID = "ORDER_PAYLOAD_INVALID"
+    """An intake payload failed a ``FuelOrder`` value-level rule inside the
+    pipeline — carries details.invalid_fields (HTTP 422).
+
+    Distinct from the framework's own 422 on the request schema: this fires for
+    cross-field invariants the request model cannot express (a ``one_off`` order
+    must carry a delivery window, a window must end after it starts, a
+    non-legacy channel must carry a canonical product_code). Raised by
+    ``OrderIntakePipeline`` so every channel reports it identically; the voice
+    bridge re-maps it to VOICE_PAYLOAD_INVALID to keep its own documented
+    envelope."""
+
     VOICE_UNAUTHORIZED = "VOICE_UNAUTHORIZED"
     """Voice request failed Bearer/API-key authentication (HTTP 401)"""
 
@@ -336,6 +348,11 @@ ERROR_CODE_STATUS_MAP: dict[ErrorCode, int] = {
     ErrorCode.IDEMPOTENCY_CONFLICT: 409,
     ErrorCode.UNSUPPORTED_SCHEMA_VERSION: 422,
     ErrorCode.VOICE_PAYLOAD_INVALID: 422,
+    # 422, matching VOICE_PAYLOAD_INVALID: the request is well-formed and
+    # authorised, but a value-level order invariant is violated. Not 400,
+    # because the caller's syntax is fine; not 500, because the fault is the
+    # input's, which is precisely the bug this code exists to fix.
+    ErrorCode.ORDER_PAYLOAD_INVALID: 422,
     ErrorCode.VOICE_UNAUTHORIZED: 401,
     ErrorCode.VOICE_TENANT_MISMATCH: 403,
     # Fuel-ops / compliance entity-lookup error codes

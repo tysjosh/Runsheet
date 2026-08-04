@@ -549,6 +549,25 @@ class HybridReadRepository:
         "location": ("LocationORM", "location_id", True),
     }
 
+    @classmethod
+    def is_registered(cls, aggregate_type: str) -> bool:
+        """Whether this aggregate has a Postgres table to read from.
+
+        An aggregate absent from :attr:`_SPECS` has no table, so it cannot be
+        read-cut-over no matter what ``COMMERCE_READ_FROM_POSTGRES`` says. The
+        hybrid read helpers consult this and fall back to Elasticsearch instead
+        of constructing a repository that would raise.
+
+        Exists because retiring an aggregate leaves callers behind. ``shipment``
+        was removed here when ``shipments_current`` was dropped (rev 0007), but
+        seven ``ops`` endpoints still ask for it; with the flag on they raised
+        ``ValueError`` from the constructor below. They are behind a default-off
+        feature flag, so nobody hit it — which is exactly why a guard is better
+        placed here than in seven call sites that can be added faster than they
+        are found.
+        """
+        return aggregate_type in cls._SPECS
+
     def __init__(self, aggregate_type: str) -> None:
         if aggregate_type not in self._SPECS:
             raise ValueError(f"Unknown hybrid aggregate_type: {aggregate_type!r}")

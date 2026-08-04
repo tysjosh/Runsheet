@@ -42,10 +42,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
+from pydantic import ValidationError
+
 from errors.exceptions import (
     channel_disabled,
     invalid_customer_tank_ref,
     missing_client_event_id,
+    order_payload_invalid,
     security_tenant_id_mismatch,
     webhook_signature_invalid,
 )
@@ -66,6 +69,48 @@ from fuel.services.order_metrics import (
 from services.time_utils import utcnow
 
 logger = logging.getLogger(__name__)
+
+
+def extract_invalid_fields(exc: ValidationError) -> List[str]:
+    """Name the offending fields/rules for a value-level ``ValidationError``.
+
+    Used for the value violations ``FuelOrder.model_validate`` surfaces at step
+    (j). Two error shapes are handled:
+
+        * **field-level** errors (e.g. ``ship_to_lat`` out of range) carry a
+          non-empty ``loc`` — the dotted field path is used.
+        * **model-level** validator errors (e.g. ``invalid_delivery_window``)
+          carry an empty ``loc``; the ``ValueError`` code from the message is
+          used instead so the caller learns *which rule* failed.
+
+    Only field names / rule codes are returned — never submitted values, so no
+    customer address, phone, or credential can leak into an error response.
+
+    Lives here rather than in the Dinee voice bridge, which is where it was
+    first written. The bridge is one of five callers of the pipeline; the
+    validation it describes happens inside the pipeline, so the pipeline owns
+    the helper and the bridge imports it. Putting it the other way round would
+    have every channel depend on the voice module to report its own errors.
+    """
+    out: List[str] = []
+    for err in exc.errors():
+        loc = ".".join(str(part) for part in err.get("loc", ()))
+        if loc:
+            out.append(loc)
+            continue
+        # Model-level validator: recover the ValueError code from the message
+        # (pydantic v2 renders it as "Value error, <code>").
+        msg = str(err.get("msg", "")).strip()
+        code = msg.split("Value error,", 1)[-1].strip() if "Value error," in msg else msg
+        out.append(code or "value_error")
+    # De-duplicate while preserving order.
+    seen: set = set()
+    deduped: List[str] = []
+    for f in out:
+        if f not in seen:
+            seen.add(f)
+            deduped.append(f)
+    return deduped
 
 
 def _optional_utc_datetime(value: Any) -> Optional[datetime]:
@@ -590,8 +635,31 @@ class OrderIntakePipeline:
                 # (e.g. PricingError.no_rule_matched).
                 raise hook_exc
 
-        # (j) Validate via FuelOrder.model_validate BEFORE writing
-        FuelOrder.model_validate(order_doc)
+        # (j) Validate via FuelOrder.model_validate BEFORE writing.
+        #
+        # ``FuelOrder`` enforces cross-field invariants that no per-channel
+        # request model can express: a ``one_off`` order must carry a delivery
+        # window, a window must end after it starts, a non-legacy channel must
+        # carry a canonical product_code, coordinates must be present outside
+        # voice/legacy. Those raise ``pydantic.ValidationError`` here, after the
+        # adapter has run.
+        #
+        # Left unhandled they became an HTTP 500 with a generic "unexpected
+        # error" body: the caller could not tell what it had sent wrong, and
+        # metrics could not separate client error from server fault. The voice
+        # bridge had already diagnosed this and caught it at its own call site,
+        # which fixed exactly one of five channels — dispatcher, bulk, CSV and
+        # api_partner all still 500'd. Mapping it here fixes every channel at
+        # the point the rule is actually enforced.
+        #
+        # Only ValidationError is caught. An ES or network failure below is a
+        # real server fault and must keep surfacing as 500.
+        try:
+            FuelOrder.model_validate(order_doc)
+        except ValidationError as exc:
+            raise order_payload_invalid(
+                invalid_fields=extract_invalid_fields(exc),
+            ) from exc
 
         # (k) Upsert the order document
         from fuel.order_repository import FuelOrderRepository
@@ -975,4 +1043,5 @@ class OrderIntakePipeline:
 __all__ = [
     "IntakeResponse",
     "OrderIntakePipeline",
+    "extract_invalid_fields",
 ]
