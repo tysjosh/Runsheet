@@ -1,5 +1,18 @@
-fastapi==0.115.0
-uvicorn==0.24.0
+# Web stack pinned to the versions the suite is actually validated against.
+#
+# These three had drifted from what anyone runs. requirements.txt still said
+# fastapi==0.115.0 from the original project scaffold, while development and
+# every local test run happened on 0.128.0 — so CI was the only place 0.115 was
+# ever exercised, and a local green run was not evidence about CI. It cost us a
+# real failure: tests/unit/test_device_registry.py asserted 422 == 200 in CI and
+# passed locally, invisible until the pypdf fix let the run get that far.
+#
+# starlette is pinned explicitly rather than left to fastapi's range because it
+# does the request parsing these tests assert on; leaving it floating reproduces
+# the same class of drift one layer down.
+fastapi==0.128.0
+starlette==0.50.0
+uvicorn==0.40.0
 # pydantic floor is set by supertokens-python 0.31.3 (requires >=2.10.6);
 # pinned to the versions the test suite is validated against.
 pydantic==2.12.5
@@ -44,13 +57,23 @@ opentelemetry-sdk>=1.28.0
 opentelemetry-exporter-otlp>=1.28.0
 
 # Testing infrastructure (Requirement 11.6)
-pytest==8.3.0
-pytest-asyncio==0.24.0
-pytest-cov==6.0.0
-pytest-timeout==2.3.1
+#
+# Aligned with the versions the suite is validated against, for the same reason
+# as the web stack above. CI was running pytest 8.3 / pytest-asyncio 0.24 while
+# every local run used 9.0 / 1.3 — a major jump in the plugin that owns
+# ``asyncio_mode=auto`` and fixture loop scoping. A test harness that differs
+# from the one developers run makes a green local suite unfalsifiable evidence
+# about CI, which is how a failing test sat unnoticed behind an earlier error.
+pytest==9.0.2
+pytest-asyncio==1.3.0
+pytest-cov==7.0.0
+pytest-timeout==2.4.0
 
 # Property-based testing (Requirement 11.1)
-hypothesis==6.115.0
+# Aligned with the validated version; the shrinker and database format both
+# moved between these, so a counterexample reproduced locally is only
+# reproducible in CI on the same version.
+hypothesis==6.151.4
 
 # JWT token verification (Requirement 9.6)
 python-jose[cryptography]==3.3.0
