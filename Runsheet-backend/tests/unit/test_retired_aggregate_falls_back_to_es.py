@@ -102,3 +102,81 @@ class TestHelpersFallBackRatherThanRaise:
         assert (
             await read_hybrid_fetch_for_aggregation(RETIRED, "t") is _NOT_CUT_OVER
         )
+
+
+class TestWriteSideDoesNotMirrorARetiredAggregate:
+    """The read helpers were only half of it — two write paths mirrored too.
+
+    ``OpsElasticsearchService.upsert_shipment_current`` dual-wrote every applied
+    upsert into the ``shipment`` current-state table, and ``seed_all_data``'s
+    shipment seeder wrote there exclusively. Rev 0007 dropped that table, so the
+    seeder failed its whole entity outright and the ops path logged a
+    "Postgres dual-write failed" for a table that no longer exists — a real
+    error line for a write that should never have been attempted.
+
+    Read-side fallback cannot help here: there is nowhere to fall back *to* for
+    a write, so the mirror has to go rather than degrade.
+    """
+
+    def test_the_current_state_repository_does_not_register_shipment(self):
+        from persistence.repositories import CurrentStateRepository
+
+        assert RETIRED not in CurrentStateRepository._SPECS
+        with pytest.raises(ValueError, match=RETIRED):
+            CurrentStateRepository(RETIRED)
+
+    @pytest.mark.asyncio
+    async def test_an_applied_shipment_upsert_mirrors_nothing(self, monkeypatch):
+        from ops.services.ops_es_service import OpsElasticsearchService
+
+        calls: list = []
+
+        async def _record(aggregate_type, doc, **kwargs):
+            calls.append(aggregate_type)
+
+        monkeypatch.setattr(
+            "commerce.services.commerce_persistence_bridge."
+            "mirror_current_state_upsert",
+            _record,
+        )
+
+        service = OpsElasticsearchService.__new__(OpsElasticsearchService)
+
+        async def _applied(**kwargs):
+            return True
+
+        monkeypatch.setattr(service, "_scripted_upsert", _applied, raising=False)
+
+        applied = await service.upsert_shipment_current(
+            {"shipment_id": "SHP-1", "tenant_id": "t", "status": "delivered"}
+        )
+
+        assert applied is True, "the ES write must still be reported"
+        assert calls == [], f"mirrored into a retired aggregate: {calls}"
+
+    def test_the_seeder_never_opens_a_repository_over_the_retired_aggregate(self):
+        """``seed_all_data`` must not reach for the dropped table.
+
+        Asserted on the source rather than by calling the seeder because
+        importing ``seed_all_data`` builds a live Elasticsearch client at module
+        scope. The two constructor calls below are verbatim what raised, and
+        they are scoped to the whole module so moving the code into a helper
+        does not slip past the check.
+        """
+        import pathlib
+
+        source = (
+            pathlib.Path(__file__).resolve().parents[2] / "seed_all_data.py"
+        ).read_text()
+
+        for constructor in (
+            f'CurrentStateRepository("{RETIRED}")',
+            f'HybridReadRepository("{RETIRED}")',
+        ):
+            assert constructor not in source, (
+                f"seed_all_data.py still constructs {constructor} — rev 0007 "
+                "dropped that table"
+            )
+        assert "SHIPMENTS_CURRENT" in source, (
+            "the shipment seeder should target the surviving ES index"
+        )
