@@ -82,6 +82,54 @@ report_finding() {
 }
 
 # -------------------------------------------------------------------------
+# Placeholder vocabulary
+#
+# Several patterns below already exempted values beginning with `your-`. That
+# single prefix was too narrow: `.env.test` — which is tracked on purpose, because
+# ENVIRONMENT=test config must be reproducible — carries
+# `DINEE_WEBHOOK_SECRET=test-webhook-secret`, an obvious fixture that failed the
+# scan and blocked CI.
+#
+# Defined once here rather than repeated per pattern, so the next fixture that
+# trips a rule is fixed in one place. Deliberately a vocabulary of *English
+# prefixes*: a real generated credential is random base64 or hex and will not
+# start with one of these, so recognising them does not blunt the patterns'
+# shape. The alternative — skipping `.env.test` wholesale the way `.env.example`
+# is skipped — would also stop the AWS, Google, and private-key rules from ever
+# looking at that file, which is strictly weaker.
+# -------------------------------------------------------------------------
+PLACEHOLDER='(your-|test-|dev-|example-|placeholder|changeme|change-me|dummy-|fake-|xxx)'
+
+# -------------------------------------------------------------------------
+# Assignment check — evaluated per LINE, not per file
+#
+# The exemption this replaces was file-scoped: it asked "does this file contain a
+# placeholder assignment?" and, if so, cleared every other assignment matching the
+# same rule. A file holding one fixture and one real credential therefore passed,
+# silently. Verified against a probe file: `DINEE_WEBHOOK_SECRET=test-webhook-secret`
+# on line 1 suppressed a 32-character random secret on line 2.
+#
+# Each matching line is now judged on its own value, so one fixture cannot vouch
+# for its neighbours.
+#
+# $1 = file, $2 = variable-name regex, $3 = value regex, $4 = finding description
+# -------------------------------------------------------------------------
+check_assignment() {
+    local file="$1" var_regex="$2" value_regex="$3" description="$4"
+    local line
+
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        # The value begins after the first `=`. A placeholder there clears this
+        # line only.
+        if ! printf '%s' "$line" | grep -Eiq "=[ ]*${PLACEHOLDER}"; then
+            report_finding "$file" "$description"
+            return
+        fi
+    done < <(grep -Ei "${var_regex}[ ]*=[ ]*${value_regex}" "$file" 2>/dev/null)
+}
+
+# -------------------------------------------------------------------------
 # Secret detection patterns
 # Uses grep -Ei (extended regex, case-insensitive) for portability
 # across macOS and Linux (avoids -P which requires GNU grep).
@@ -111,26 +159,17 @@ check_file() {
     fi
 
     # Pattern 4: Elasticsearch API keys (base64, 20+ chars, non-placeholder)
-    if grep -Eiq 'ELASTIC_API_KEY[ ]*=[ ]*[A-Za-z0-9+/=]{20,}' "$file" 2>/dev/null; then
-        if ! grep -Eiq 'ELASTIC_API_KEY[ ]*=[ ]*your-' "$file" 2>/dev/null; then
-            report_finding "$file" "Possible Elasticsearch API key"
-        fi
-    fi
+    check_assignment "$file" 'ELASTIC_API_KEY' '[A-Za-z0-9+/=]{20,}' \
+        "Possible Elasticsearch API key"
 
     # Pattern 5: JWT secrets in env-style files (KEY=value, no quotes, non-placeholder)
     # Skips Python assignments (KEY = "value") and test fixtures
-    if grep -Eiq '^JWT_SECRET=[^ "'"'"']+' "$file" 2>/dev/null; then
-        if ! grep -Eiq '^JWT_SECRET=your-' "$file" 2>/dev/null; then
-            report_finding "$file" "Possible JWT secret"
-        fi
-    fi
+    check_assignment "$file" '^JWT_SECRET' '[^ "'"'"']+' \
+        "Possible JWT secret"
 
     # Pattern 6: Webhook secrets in env-style files (KEY=value, non-placeholder)
-    if grep -Eiq '^[A-Z_]*WEBHOOK_SECRET=[^ "'"'"']+' "$file" 2>/dev/null; then
-        if ! grep -Eiq 'WEBHOOK_SECRET=your-' "$file" 2>/dev/null; then
-            report_finding "$file" "Possible webhook secret"
-        fi
-    fi
+    check_assignment "$file" '^[A-Z_]*WEBHOOK_SECRET' '[^ "'"'"']+' \
+        "Possible webhook secret"
 
     # Pattern 7: Redis URLs with passwords (redis://:<password>@host)
     if grep -Eiq 'redis://:[^@]+@' "$file" 2>/dev/null; then
@@ -138,11 +177,8 @@ check_file() {
     fi
 
     # Pattern 8: Generic password assignments in env-style files (KEY=value, non-placeholder)
-    if grep -Eiq '^[A-Z_]*(PASSWORD|PASSWD|DB_PASS)=[^ "'"'"']{8,}' "$file" 2>/dev/null; then
-        if ! grep -Eiq '(PASSWORD|PASSWD|DB_PASS)=your-' "$file" 2>/dev/null; then
-            report_finding "$file" "Possible password assignment"
-        fi
-    fi
+    check_assignment "$file" '^[A-Z_]*(PASSWORD|PASSWD|DB_PASS)' '[^ "'"'"']{8,}' \
+        "Possible password assignment"
 
     # Pattern 9: Google API keys (AIzaSy followed by 33 chars)
     if grep -Eq 'AIzaSy[0-9A-Za-z_-]{33}' "$file" 2>/dev/null; then

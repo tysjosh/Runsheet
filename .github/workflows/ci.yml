@@ -1,14 +1,36 @@
 name: CI
 
 on:
+  # Any base branch, not just main. A stacked pull request targets the branch
+  # below it rather than main, so `branches: [main]` meant CI did not run on it
+  # at all — every check reported as "skipped" and the PR looked reviewable when
+  # nothing had been verified. Silence is the worst possible result here, so the
+  # filter is removed rather than extended with a list that the next stack
+  # naming convention would fall outside of.
   pull_request:
-    branches: [main]
   push:
     branches: [main]
 
 env:
   PYTHON_VERSION: "3.11"
-  NODE_VERSION: "20"
+  # Kept at 24 to match the npm major that wrote driver-app/package-lock.json,
+  # and because GitHub is retiring Node 20 runners.
+  #
+  # This does NOT fix the driver-app `npm ci` failure, contrary to what this
+  # comment previously claimed. The earlier explanation was that Node 20's npm 10
+  # auto-installs peer dependencies while npm 11 does not, so npm 10 refused a
+  # lock written by npm 11. The evidence contradicts it: the driver-app job has
+  # since run on Node v24.18.0 — the same version developers use — and `npm ci`
+  # still aborted with the same "Missing: prettier@3.9.6" plus three @emnapi
+  # conflicts.
+  #
+  # The actual cause is platform, not npm major. `@emnapi/*` arrive through a
+  # Linux-only optional dependency subtree. macOS npm never evaluates that
+  # subtree, so `npm install --package-lock-only` reports "up to date" and writes
+  # nothing locally, while `npm ci` on a Linux runner finds the entries absent.
+  # The durable fix is a lockfile generated on Linux; until then the driver-app
+  # job stays red and no amount of NODE_VERSION tuning changes that.
+  NODE_VERSION: "24"
   COVERAGE_THRESHOLD: 70
 
 jobs:
