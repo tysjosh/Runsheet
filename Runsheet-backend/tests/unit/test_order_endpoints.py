@@ -1024,3 +1024,130 @@ class TestOrderResolverRead:
         resp = client.get("/api/orders/ord_b1?expand=customer")
         assert resp.status_code == 404
         _assert_error_envelope(resp.json())
+
+
+# ---------------------------------------------------------------------------
+# Tests — Nullable ship-to coordinates on the response model
+# ---------------------------------------------------------------------------
+
+
+def _make_voice_order_without_coordinates(
+    order_id: str = "ord_voice1",
+    tenant_id: str = "tenant-A",
+) -> FuelOrder:
+    """A voice order held for review with no geocoded ship-to coordinates.
+
+    This is a legitimate entity, not a corrupt one:
+    ``FuelOrder._validate_coordinates`` exempts ``voice`` and ``legacy`` intake
+    because a phone order captures only a free-text address, and a human
+    reconciles the coordinates during review-hold.
+    """
+    return FuelOrder(
+        order_id=order_id,
+        tenant_id=tenant_id,
+        customer_id="cust-1",
+        customer_name="Phone Customer",
+        ship_to_address="1200 Industrial Pkwy, Houston, TX",
+        ship_to_lat=None,
+        ship_to_lon=None,
+        product_code="DIESEL_2",
+        gallons_requested=500.0,
+        call_type="will_call",
+        intake_channel="voice",
+        intake_channel_id="voice-default",
+        status="on_hold",
+        hold_reason="awaiting address confirmation",
+        source_schema_version="1.0",
+        trace_id="trace-voice",
+        created_at=_NOW,
+        updated_at=_NOW,
+        last_event_timestamp=_NOW,
+    )
+
+
+class TestNullableShipToCoordinates:
+    """``OrderResponse`` must not be stricter than the entity it serializes.
+
+    ``OrderResponse.ship_to_lat``/``ship_to_lon`` were declared as required
+    ``float`` while :class:`fuel.order_models.FuelOrder` permits ``None`` for
+    ``voice`` and ``legacy`` intake. The consequence was worse than a wrong
+    field: ``list_orders`` builds its page inside a list comprehension, so one
+    coordinate-less voice order raised ``ValidationError`` and returned 500 for
+    **the entire page** — the observed failure was 2 on-hold voice orders taking
+    down a list of 125.
+    """
+
+    def test_list_serializes_an_order_with_null_coordinates(self):
+        """A voice order with no coordinates does not 500 the list page."""
+        repo = FakeOrderRepository()
+        repo.seed_order(_make_voice_order_without_coordinates())
+        _, client, *_ = _build_app(repo=repo)
+
+        resp = client.get("/api/orders")
+
+        assert resp.status_code == 200
+        item = resp.json()["items"][0]
+        assert item["order_id"] == "ord_voice1"
+        assert item["ship_to_lat"] is None
+        assert item["ship_to_lon"] is None
+        # The address is what a dispatcher actually reconciles against.
+        assert item["ship_to_address"] == "1200 Industrial Pkwy, Houston, TX"
+
+    def test_one_coordinateless_order_does_not_hide_its_neighbours(self):
+        """The whole page still renders, not just the well-formed rows.
+
+        This is the property that failed in production: the page is built by a
+        list comprehension, so a single invalid row is not skipped — it aborts
+        the response.
+        """
+        repo = FakeOrderRepository()
+        repo.seed_order(_make_order(order_id="ord_ok1"))
+        repo.seed_order(_make_voice_order_without_coordinates())
+        repo.seed_order(_make_order(order_id="ord_ok2"))
+        _, client, *_ = _build_app(repo=repo)
+
+        resp = client.get("/api/orders")
+
+        assert resp.status_code == 200
+        returned = {item["order_id"] for item in resp.json()["items"]}
+        assert returned == {"ord_ok1", "ord_voice1", "ord_ok2"}
+
+    def test_single_order_read_serializes_null_coordinates(self):
+        """``GET /api/orders/{id}`` shares ``OrderResponse`` and so shared the bug."""
+        repo = FakeOrderRepository()
+        repo.seed_order(_make_voice_order_without_coordinates())
+        _, client, *_ = _build_app(repo=repo)
+
+        resp = client.get("/api/orders/ord_voice1")
+
+        assert resp.status_code == 200
+        assert resp.json()["ship_to_lat"] is None
+
+    def test_create_still_requires_coordinates(self):
+        """Relaxing the *response* must not relax dispatcher *intake*.
+
+        ``CreateOrderRequest`` keeps both coordinates required: a dispatcher
+        creating an order has an address on screen and must geocode it, so
+        downstream routing has a stop at intake.
+        """
+        _, client, *_ = _build_app()
+
+        resp = client.post(
+            "/api/orders",
+            json={
+                "client_event_id": "evt-nocoord",
+                "customer_id": "cust-1",
+                "customer_name": "Test Customer",
+                "ship_to_address": "123 Main St",
+                "product_code": "DIESEL_2",
+                "gallons_requested": 500,
+                "call_type": "one_off",
+            },
+        )
+
+        assert resp.status_code == 422
+        missing = {
+            tuple(err["loc"][-1:]) for err in resp.json()["detail"]
+        }
+        assert ("ship_to_lat",) in missing
+        assert ("ship_to_lon",) in missing

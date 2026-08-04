@@ -316,8 +316,17 @@ class OrderResponse(BaseModel):
     customer_phone: Optional[str] = None
     customer_email: Optional[str] = None
     ship_to_address: str
-    ship_to_lat: float
-    ship_to_lon: float
+    # Nullable to match :class:`fuel.order_models.FuelOrder`, which permits null
+    # coordinates for ``voice`` and ``legacy`` intake (see its
+    # ``_validate_coordinates``): a voice order captures only a free-text address
+    # and is reconciled by a human during review-hold. Declaring these required
+    # here made the *response* model stricter than the entity it serializes, so a
+    # single on-hold voice order raised ValidationError inside the list
+    # comprehension and returned 500 for the whole page — not just for that row.
+    # ``CreateOrderRequest`` and ``BulkOrderRow`` above still require them,
+    # because those channels must geocode at intake.
+    ship_to_lat: Optional[float] = None
+    ship_to_lon: Optional[float] = None
     customer_tank_id: Optional[str] = None
     product_code: Optional[str] = None
     gallons_requested: Optional[float] = None
