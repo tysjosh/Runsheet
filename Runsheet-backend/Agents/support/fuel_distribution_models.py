@@ -299,6 +299,10 @@ class RouteSkipEntry(BaseModel):
       Counting it as produced is how a strict-mapping rejection on
       ``mvp_routes`` discarded a whole run's routes while the run reported
       ``complete``.
+    * nothing left to drive — ``all_stops_deferred``: Storm_Mode guard-rails
+      deferred every stop, so the plan has no stops. ``missing`` carries the
+      deferred station ids and ``detail`` the causes and the window/cap that
+      rejected them.
 
     ``missing`` names the specific identifiers or fields that could not
     be resolved (station ids, order ids, field names) so the gap is

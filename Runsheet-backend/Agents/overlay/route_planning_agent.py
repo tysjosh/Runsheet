@@ -66,6 +66,7 @@ from Agents.support.mvp_es_mappings import MVP_ROUTES_INDEX
 from Agents.support.route_solver import (
     build_distance_matrix,
     check_sla_windows,
+    compute_distance,
     optimize_route,
 )
 from fuel.services.fuel_product_catalog import (
@@ -1217,6 +1218,43 @@ class RoutePlanningAgent(OverlayAgentBase):
                 station_locations=resolved_locations,
                 start_position=start_position,
             )
+
+            # Step 5d: a route with no stops left is not a route.
+            #
+            # The guard-rails above can defer every stop — an evening run under a
+            # 08:00-16:00 storm window defers all of them — and the plan then
+            # carried ``stops: []`` while the run reported ``complete`` and
+            # ``degraded: false``. Four such plans were persisted and four
+            # HIGH-risk ``apply_route_plan_storm_mode`` approvals were queued
+            # against them, and approving one would dispatch a truck to visit
+            # nothing.
+            #
+            # The deferrals themselves are not lost: they are recorded on the
+            # skip below with their causes, and the individual stops carry their
+            # next eligible window. What changes is that the run stops claiming
+            # it produced something dispatchable. This is deliberately narrower
+            # than "any deferral degrades the run" — a partially deferred route
+            # is still a real route with real stops.
+            if not route_plan.stops:
+                causes = sorted(
+                    {d.deferral_cause for d in route_plan.deferred_stops}
+                )
+                self._record_route_skip(
+                    skips,
+                    truck_id=truck_id,
+                    plan_id=plan_id,
+                    reason_code="all_stops_deferred",
+                    detail=(
+                        f"storm_mode guard-rails deferred every stop "
+                        f"({', '.join(causes) or 'no cause recorded'}); "
+                        f"window="
+                        f"{route_plan.storm_mode_delivery_window_start_hour}"
+                        f"-{route_plan.storm_mode_delivery_window_end_hour}, "
+                        f"cap={route_plan.storm_mode_max_stops_per_truck}"
+                    ),
+                    missing=[d.station_id for d in route_plan.deferred_stops],
+                )
+                continue
 
             # Step 6: Persist route plan to ES (Req 4.7).
             #
@@ -3312,6 +3350,19 @@ class RoutePlanningAgent(OverlayAgentBase):
         route_plan.stops = kept
         route_plan.deferred_stops = deferred
 
+        # ``distance_km`` described the solve BEFORE any stop was deferred, and
+        # nothing updated it here — so a plan that lost stops kept claiming the
+        # mileage of a route it is no longer going to drive. The extreme case was
+        # visible in production data: every stop deferred, ``stops: []``, and
+        # ``distance_km: 1633.99``. Distance feeds ``objective_value`` and the
+        # cost-analysis endpoint, so a stale figure is not cosmetic.
+        if deferred:
+            self._recompute_distance_km(
+                route_plan=route_plan,
+                station_locations=station_locations,
+                start_position=start_position,
+            )
+
         if deferred:
             logger.info(
                 "RoutePlanningAgent: Storm_Mode deferred %d stop(s) for "
@@ -3331,6 +3382,88 @@ class RoutePlanningAgent(OverlayAgentBase):
                 truck_id,
                 len(kept),
             )
+
+    def _recompute_distance_km(
+        self,
+        *,
+        route_plan: RoutePlan,
+        station_locations: Optional[Mapping[str, Mapping[str, float]]],
+        start_position: Optional[TruckStartPosition],
+    ) -> None:
+        """Recompute ``route_plan.distance_km`` over its surviving stops.
+
+        Haversine path length ``start → stop_0 → … → stop_n``, matching the
+        Haversine matrix the solver used when no traffic provider is wired.
+        Where a traffic provider *was* used the recomputed figure is a
+        straight-line approximation rather than a road distance, which is still
+        strictly better than reporting the mileage of a route that lost stops.
+
+        Zero surviving stops means zero distance — the truck is not going
+        anywhere. That case is also refused as a route entirely by the caller
+        (``all_stops_deferred``), so this mostly matters for partial deferral.
+
+        Leaves the value untouched when coordinates are unavailable: inventing a
+        number would be worse than carrying a stale one, and the caller's log
+        records the deferral either way.
+        """
+        if not route_plan.stops:
+            route_plan.distance_km = 0.0
+            return
+        if not station_locations:
+            logger.warning(
+                "RoutePlanningAgent: cannot recompute distance for route=%s "
+                "after deferral — no station locations supplied; the persisted "
+                "distance_km=%.2f still describes the pre-deferral solve",
+                route_plan.route_id,
+                route_plan.distance_km,
+            )
+            return
+
+        points: List[Tuple[float, float]] = []
+        if start_position is not None:
+            points.append((float(start_position.lat), float(start_position.lon)))
+        missing: List[str] = []
+        for stop in route_plan.stops:
+            loc = station_locations.get(stop.station_id)
+            if not loc or loc.get("lat") is None or loc.get("lon") is None:
+                missing.append(stop.station_id)
+                continue
+            points.append((float(loc["lat"]), float(loc["lon"])))
+
+        if missing:
+            logger.warning(
+                "RoutePlanningAgent: cannot recompute distance for route=%s — "
+                "no coordinates for %s; leaving distance_km=%.2f",
+                route_plan.route_id,
+                ",".join(missing),
+                route_plan.distance_km,
+            )
+            return
+
+        total = 0.0
+        for (lat1, lon1), (lat2, lon2) in zip(points, points[1:]):
+            try:
+                total += compute_distance(lat1, lon1, lat2, lon2)
+            except ValueError:
+                logger.warning(
+                    "RoutePlanningAgent: out-of-range coordinates while "
+                    "recomputing distance for route=%s — leaving distance_km "
+                    "=%.2f",
+                    route_plan.route_id,
+                    route_plan.distance_km,
+                )
+                return
+
+        previous = route_plan.distance_km
+        route_plan.distance_km = round(total, 2)
+        logger.info(
+            "RoutePlanningAgent: route=%s distance_km %.2f -> %.2f after "
+            "deferring %d stop(s)",
+            route_plan.route_id,
+            previous,
+            route_plan.distance_km,
+            len(route_plan.deferred_stops),
+        )
 
     async def _apply_road_restriction_filter(
         self,
