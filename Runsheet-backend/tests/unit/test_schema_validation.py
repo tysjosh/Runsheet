@@ -19,20 +19,14 @@ from typing import Dict, Any
 import pytest
 
 
-# Mock the elasticsearch_service module before importing
-@pytest.fixture(autouse=True)
-def mock_elasticsearch_module():
-    """Mock the elasticsearch service module to prevent connection attempts."""
-    # Create mock settings
-    mock_settings = MagicMock()
-    mock_settings.elastic_api_key = "test-api-key"
-    mock_settings.elastic_endpoint = "https://test.elasticsearch.com:9200"
-    
-    # Mock get_settings before importing
-    with patch.dict('sys.modules', {
-        'services.elasticsearch_service': MagicMock()
-    }):
-        yield
+# There used to be an autouse fixture here that replaced
+# ``sys.modules['services.elasticsearch_service']`` with a MagicMock "to prevent
+# connection attempts". That premise is stale — under ENVIRONMENT=test the
+# singleton skips connecting entirely ("⏭️ Skipping Elasticsearch connection in
+# test environment"), and unit tests across the suite import it directly. The
+# mock's only effect was to make it impossible for this file to call the code it
+# claims to test, which is why every helper below was hand-copied and why
+# removing a rule from the real ``_is_compatible_type`` broke nothing here.
 
 
 class TestCompareProperties:
@@ -220,10 +214,19 @@ class TestCompareProperties:
 class TestIsCompatibleType:
     """Tests for type compatibility checking."""
     
-    def test_semantic_text_compatible_with_text(self):
-        """Test that semantic_text and text types are compatible."""
-        assert _is_compatible_type_logic("semantic_text", "text") is True
-        assert _is_compatible_type_logic("text", "semantic_text") is True
+    def test_semantic_text_is_no_longer_compatible_with_text(self):
+        """The pair was removed because it hid a real failure.
+
+        ``trucks`` and ``locations`` declared ``semantic_text``, which made
+        ``indices.create`` fail on clusters without the type; the index was then
+        built by dynamic mapping, and this validator reported the resulting
+        ``text`` field as "compatible" with the declaration. That is precisely
+        the case it needed to report, since the same dynamic mapping had turned
+        ``tenant_id`` into analyzed text and killed every tenant-scoped read.
+        """
+        assert _is_compatible_type_logic("semantic_text", "text") is False
+        assert _is_compatible_type_logic("text", "semantic_text") is False
+
     
     def test_integer_compatible_with_long(self):
         """Test that integer and long types are compatible."""
@@ -424,19 +427,21 @@ class TestGetSchemaValidationSummary:
 
 
 # Helper functions that replicate the logic from elasticsearch_service.py
-# These allow testing the logic without importing the module
+# These allow testing the logic without importing the module.
+#
+# ``_is_compatible_type_logic`` no longer replicates anything — it delegates. The
+# copy it used to hold was a liability: when ``("semantic_text", "text")`` was
+# removed from the service (it was masking indices whose declared mapping had
+# been rejected and replaced by a dynamic one), this file kept asserting the pair
+# and kept passing, so the test said nothing about the code it names. A pure
+# function on an already-importable module has no reason to be duplicated here.
+
 
 def _is_compatible_type_logic(expected_type: str, actual_type: str) -> bool:
-    """Check if two Elasticsearch field types are compatible."""
-    compatible_types = {
-        ("semantic_text", "text"): True,
-        ("text", "semantic_text"): True,
-        ("integer", "long"): True,
-        ("long", "integer"): True,
-        ("float", "double"): True,
-        ("double", "float"): True,
-    }
-    return compatible_types.get((expected_type, actual_type), False)
+    """Delegate to the real implementation under test."""
+    from services.elasticsearch_service import elasticsearch_service
+
+    return elasticsearch_service._is_compatible_type(expected_type, actual_type)
 
 
 def _compare_properties_logic(

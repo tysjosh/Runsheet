@@ -213,6 +213,7 @@ def _index_setup_functions():
     from driver.services.driver_es_mappings import setup_driver_indices
     from fuel.services.fuel_es_mappings import setup_fuel_indices
     from fuel.services.fuel_ops_es_mappings import setup_fuel_ops_indices
+    from integrations.stripe_es_mappings import setup_stripe_indices
 
     # ``setup_fuel_indices`` takes (es_client, es_service); wrap it so every
     # entry in this list shares the uniform ``setup_fn(es_service)`` shape.
@@ -247,6 +248,10 @@ def _index_setup_functions():
         ("Driver indices", setup_driver_indices),
         ("Fuel monitoring indices", _setup_fuel),
         ("Fuel Ops indices", setup_fuel_ops_indices),
+        # Must run before the JSON fixtures load: stripe_payment_seeds.json
+        # bulk-writes into stripe_payment_intents, and a bulk write to a
+        # non-existent index creates it with a dynamic mapping.
+        ("Stripe demo indices", setup_stripe_indices),
     ]
 
 
@@ -353,6 +358,10 @@ def _managed_index_mappings() -> dict:
         JOB_AUDIT_TIMELINE_INDEX, JOB_AUDIT_TIMELINE_MAPPING,
     )
     mappings.update({JOB_AUDIT_TIMELINE_INDEX: JOB_AUDIT_TIMELINE_MAPPING})
+
+    # Stripe demo payment intents (fixture-populated, connector-read).
+    from integrations.stripe_es_mappings import STRIPE_INDEX_MAPPINGS
+    mappings.update(STRIPE_INDEX_MAPPINGS)
 
     # Legacy core indices (mappings are methods on the ES singleton).
     from services.elasticsearch_service import elasticsearch_service as _es
