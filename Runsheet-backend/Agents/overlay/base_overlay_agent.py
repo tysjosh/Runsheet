@@ -27,6 +27,82 @@ logger = logging.getLogger(__name__)
 SHADOW_PROPOSALS_INDEX = "agent_shadow_proposals"
 
 
+# ---------------------------------------------------------------------------
+# Degradation reporting convention (agent → orchestrator)
+# ---------------------------------------------------------------------------
+#
+# An overlay agent can finish a cycle without raising and still have produced
+# nothing useful: RoutePlanningAgent skips every truck it was handed,
+# DeliveryPrioritizationAgent scores no orders, CompartmentLoadingAgent builds
+# no plan. ``monitor_cycle`` returning normally therefore does not mean the
+# cycle succeeded, and an orchestrator that treats it that way reports a silent
+# skip as success.
+#
+# These two keys are the agent-agnostic channel for saying so. Any agent may
+# set them on ``self._cycle_metrics`` at the end of ``evaluate()``; they are
+# read back off the public ``cycle_metrics`` snapshot by
+# ``FuelDistributionPipeline``, which imports these very names so the writer
+# and the reader cannot drift apart. Route-specific detail (``route_skips``,
+# ``trucks_skipped``) still rides alongside for anyone who wants it, but the
+# orchestrator only needs the generic pair.
+#
+# Contract:
+#   * ``CYCLE_METRIC_DEGRADED`` — ``bool``. ``True`` when the cycle completed
+#     but did not do the whole job. Absent is equivalent to ``False``.
+#   * ``CYCLE_METRIC_DEGRADATION_REASONS`` — ``list``. Structured, serialisable
+#     entries explaining the degradation. Never the sole signal: a degraded
+#     cycle with an empty reason list is still degraded.
+#
+# Reading is deliberately fail-safe on the consumer side. A monitoring signal
+# must never take down the run it monitors, so a missing ``cycle_metrics``, a
+# non-mapping one, or a property that raises all read as *not degraded*.
+CYCLE_METRIC_DEGRADED = "degraded"
+CYCLE_METRIC_DEGRADATION_REASONS = "degradation_reasons"
+
+# Every reason entry carries a ``kind`` drawn from the two below. Both mean the
+# cycle produced nothing, so both make the run DEGRADED rather than COMPLETE —
+# an explicitly requested plan that contains no plan is not a success under
+# either. They are distinguished because they need different *attention*:
+#
+#   * ``PRODUCED_NOTHING`` — the stage had input and turned none of it into
+#     output. Always a defect or a real operational block worth paging on.
+#   * ``NO_INPUT`` — there was nothing to work on (no tanks, no pending
+#     orders, no buffered priority list). Newsworthy when a dispatcher just
+#     asked for a plan, unremarkable on the 30-minute sweep of a quiet tenant.
+#
+# Without the distinction the orchestrator would have to log every quiet sweep
+# at ERROR, and a signal that fires 48 times a day for a tenant with no orders
+# is one people learn to ignore — which would cost us the ``PRODUCED_NOTHING``
+# case this convention exists to surface.
+DEGRADATION_KIND_PRODUCED_NOTHING = "produced_nothing"
+DEGRADATION_KIND_NO_INPUT = "no_input"
+
+
+def build_degradation_reason(
+    *,
+    reason_code: str,
+    kind: str = DEGRADATION_KIND_PRODUCED_NOTHING,
+    detail: Optional[str] = None,
+    **extra: Any,
+) -> Dict[str, Any]:
+    """Build one entry for ``CYCLE_METRIC_DEGRADATION_REASONS``.
+
+    Matches the shape ``RoutePlanningAgent`` already emits for route skips
+    (``reason_code`` + ``detail``) so a consumer can read every stage's reasons
+    the same way, and adds the ``kind`` marker the orchestrator keys its log
+    severity off.
+
+    ``extra`` carries stage-shaped counters (``tanks=0``, ``trucks=0``). Keep it
+    to counts and identifiers: these entries are serialized into an API
+    response, so no customer data or credentials belong here.
+    """
+    entry: Dict[str, Any] = {"reason_code": reason_code, "kind": kind}
+    if detail:
+        entry["detail"] = detail
+    entry.update(extra)
+    return entry
+
+
 class OverlayAgentBase(AutonomousAgentBase):
     """Base class for Layer 1 and Layer 2 overlay agents.
 
@@ -118,6 +194,33 @@ class OverlayAgentBase(AutonomousAgentBase):
         async with self._buffer_lock:
             self._signal_buffer.append(signal)
 
+    def _pending_work_tenants(self) -> List[str]:
+        """Tenants with buffered work that does **not** live in ``_signal_buffer``.
+
+        Subclasses that override :meth:`_on_signal` to route typed messages
+        into their own buffer must override this too, because
+        :meth:`monitor_cycle` otherwise has no way to know they have work: it
+        reads ``_signal_buffer`` alone, and an agent that files every message it
+        cares about elsewhere leaves that buffer empty forever.
+
+        That was a live defect. ``CompartmentLoadingAgent`` put every
+        ``DeliveryPriorityList`` in ``_priority_buffer`` and
+        ``RoutePlanningAgent`` put every loading proposal in
+        ``_proposal_buffer``, so on the SignalBus path both agents accumulated
+        work indefinitely while ``monitor_cycle`` returned ``([], [])`` before
+        reaching ``evaluate()``. Nothing failed and nothing was logged.
+
+        Returning a tenant here makes ``monitor_cycle`` evaluate for it even
+        with an empty ``_signal_buffer``. ``evaluate()`` receives an empty
+        signal list for such a tenant, which is correct: these agents read
+        their typed buffer rather than the signals argument.
+
+        Returns:
+            Tenant ids to evaluate for. The default is empty — an agent whose
+            messages all land in ``_signal_buffer`` needs nothing here.
+        """
+        return []
+
     # ------------------------------------------------------------------
     # Decision cycle (replaces monitor_cycle)
     # ------------------------------------------------------------------
@@ -140,12 +243,21 @@ class OverlayAgentBase(AutonomousAgentBase):
             signals = list(self._signal_buffer)
             self._signal_buffer.clear()
 
-        if not signals:
+        # Work reaches an overlay agent through two doors: ``_signal_buffer``,
+        # and a subclass's own typed buffer filled by an overridden
+        # ``_on_signal``. Gating the cycle on ``signals`` alone ignored the
+        # second door, so agents that route everything they consume into a
+        # typed buffer were never evaluated at all. Evaluate for the union.
+        tenant_groups = self._group_by_tenant(signals)
+        for tenant_id in self._pending_work_tenants():
+            tenant_groups.setdefault(tenant_id, [])
+
+        if not tenant_groups:
             return [], []
 
         # Process per-tenant
         proposals_generated: List[Any] = []
-        for tenant_id, tenant_signals in self._group_by_tenant(signals).items():
+        for tenant_id, tenant_signals in tenant_groups.items():
             mode = await self._get_mode(tenant_id)
             self._cycle_metrics["mode"] = mode
 
@@ -206,6 +318,34 @@ class OverlayAgentBase(AutonomousAgentBase):
                 return "shadow" if enabled else "disabled"
             except Exception:
                 return "shadow"
+
+    async def _is_active_commit_mode(self, tenant_id: str) -> bool:
+        """Whether this tenant's mode represents a real commit path.
+
+        Shadow-mode evaluation must run the full decision logic so the
+        proposal can be logged for retrospective analysis, but it must not
+        mutate live state. Anything that is neither ``shadow`` nor
+        ``disabled`` is a commit path: ``active_gated`` and ``active_auto``
+        both flow through the ConfirmationProtocol.
+
+        Fails closed. A mode that cannot be resolved returns ``False``, so a
+        misconfigured environment never writes live state while an operator
+        believes the overlay is in shadow.
+        """
+        try:
+            mode = await self._get_mode(tenant_id)
+        except Exception as exc:  # pragma: no cover - defensive
+            self.logger.warning(
+                "%s: failed to resolve overlay mode for tenant %s, "
+                "defaulting to shadow (no state write): %s",
+                self.agent_id,
+                tenant_id,
+                exc,
+            )
+            return False
+        if mode is None:
+            return False
+        return mode not in ("shadow", "disabled")
 
     # ------------------------------------------------------------------
     # Proposal routing
@@ -281,6 +421,25 @@ class OverlayAgentBase(AutonomousAgentBase):
     def cycle_metrics(self) -> Dict[str, Any]:
         """Return a snapshot of the most recent cycle metrics."""
         return dict(self._cycle_metrics)
+
+    def report_degradation(self, *reasons: Dict[str, Any]) -> None:
+        """Record that this cycle finished without producing its output.
+
+        The producer half of the convention at the top of this module. Call it
+        from ``evaluate()`` on every path that returns without the output the
+        stage exists to produce — including the early ``return []`` guards,
+        which are exactly the paths that used to look like success.
+
+        Accumulates rather than overwrites, so a stage that gives up on several
+        tenants in one cycle reports all of them.
+        Idempotent in effect: calling it with no reasons still marks the cycle
+        degraded, because the flag rather than the list is the signal.
+        """
+        existing = self._cycle_metrics.get(CYCLE_METRIC_DEGRADATION_REASONS)
+        merged = list(existing) if isinstance(existing, (list, tuple)) else []
+        merged.extend(reasons)
+        self._cycle_metrics[CYCLE_METRIC_DEGRADED] = True
+        self._cycle_metrics[CYCLE_METRIC_DEGRADATION_REASONS] = merged
 
     # ------------------------------------------------------------------
     # Abstract interface

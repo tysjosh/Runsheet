@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from Agents.autonomous.base_agent import AutonomousAgentBase
 from Agents.confirmation_protocol import MutationRequest
+from config.legacy_flags import is_legacy_ng_delivery_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +111,29 @@ class SLAGuardianAgent(AutonomousAgentBase):
         detections: List[str] = []
         actions: List[Dict[str, Any]] = []
 
+        # The rider/shipment read model this agent monitors is the pre-pivot
+        # Nigerian last-mile surface, gated deployment-wide by
+        # ``legacy_ng_delivery`` (default OFF). ``require_ops_enabled`` 404s the
+        # whole HTTP surface, but this agent runs on the scheduler and never
+        # consulted the flag — so it kept sweeping ``shipments_current`` and
+        # filing ``escalate_shipment`` proposals into the approval queue for
+        # shipments that no longer exist. Observed on a running instance: 24
+        # queued approvals against an index with 0 documents, all expiring
+        # unactioned.
+        #
+        # That queue is the dispatcher's human-in-the-loop surface for the agent
+        # overlay. Filling it with proposals nobody can action trains dispatchers
+        # to ignore it, which defeats the control rather than exercising it.
+        #
+        # Exiting cleanly (not raising) keeps ``RestartPolicy.ALWAYS`` from
+        # treating this as a crash loop.
+        if not is_legacy_ng_delivery_enabled():
+            logger.debug(
+                "SLAGuardianAgent cycle skipped: legacy_ng_delivery is disabled, "
+                "so shipments_current is not a live read model"
+            )
+            return detections, actions
+
         now = datetime.now(timezone.utc)
         threshold_time = now + timedelta(minutes=self._sla_threshold_minutes)
 
@@ -135,28 +159,14 @@ class SLAGuardianAgent(AutonomousAgentBase):
             "sort": [{"estimated_delivery": {"order": "asc"}}],
         }
 
-        # Read-cutover: serve the cross-tenant sweep from Postgres when enabled
-        # (each shipment is dispatched per its own tenant below). Same status +
-        # date-range + sort as the ES query.
-        from commerce.services.commerce_persistence_bridge import (
-            _NOT_CUT_OVER,
-            read_hybrid_search_all_tenants,
+        # The Postgres read-cutover branch stood here. The ``shipment``
+        # aggregate was retired with the ``shipments_current`` table
+        # (rev 0007), so ``shipments_current`` is an Elasticsearch-only index
+        # again and this sweep always reads from ES.
+        resp = await self._es.search_documents(
+            SHIPMENTS_CURRENT_INDEX, query, 200
         )
-
-        pg = await read_hybrid_search_all_tenants(
-            "shipment",
-            term_filters={"status": "in_transit"},
-            range_field="estimated_delivery",
-            range_lte=threshold_time.isoformat(),
-            sort_field="estimated_delivery", sort_order="asc", size=200,
-        )
-        if pg is not _NOT_CUT_OVER:
-            at_risk_shipments = pg
-        else:
-            resp = await self._es.search_documents(
-                SHIPMENTS_CURRENT_INDEX, query, 200
-            )
-            at_risk_shipments = [h["_source"] for h in resp["hits"]["hits"]]
+        at_risk_shipments = [h["_source"] for h in resp["hits"]["hits"]]
 
         for shipment in at_risk_shipments:
             shipment_id = shipment.get("shipment_id")

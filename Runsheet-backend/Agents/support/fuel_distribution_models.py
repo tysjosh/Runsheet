@@ -232,6 +232,10 @@ class DeliveryPriorityList(BaseModel):
 class RouteStop(BaseModel):
     """A single stop in a delivery route."""
     station_id: str
+    # One customer stop may contain more than one order.  Keeping the exact
+    # identifiers on the route makes dispatcher approval deterministic while
+    # remaining backward compatible with older route documents.
+    order_ids: List[str] = Field(default_factory=list)
     eta: str  # ISO 8601
     drop: Dict[str, float]  # grade -> liters
     sequence: int = Field(ge=0)
@@ -274,6 +278,42 @@ class WindowMissEntry(BaseModel):
     delivery_window_start: Optional[str] = None
     delivery_window_end: Optional[str] = None
     detail: Optional[str] = None
+
+
+class RouteSkipEntry(BaseModel):
+    """A loading plan the Route_Planning_Agent declined to route.
+
+    Every early exit in the agent's per-truck loop records one of these
+    so a run that routes zero of N trucks reports *why* instead of
+    coming back as an unqualified success. Two families of reason exist
+    and both matter to a dispatcher:
+
+    * business exclusions — ``driver_ineligible``, ``hos_blocked``,
+      ``asset_certification_expired``: the truck was deliberately held
+      back, and the dispatcher needs to see which rule fired.
+    * data gaps — ``no_loading_plan``, ``no_demand_identifiers``,
+      ``unresolvable_stop_locations``, ``no_depot_configured``: the
+      agent could not build a route from what it was given.
+    * write failures — ``route_persist_failed``: the route was solved but
+      could not be stored, so nothing can retrieve, dispatch or execute it.
+      Counting it as produced is how a strict-mapping rejection on
+      ``mvp_routes`` discarded a whole run's routes while the run reported
+      ``complete``.
+    * nothing left to drive — ``all_stops_deferred``: Storm_Mode guard-rails
+      deferred every stop, so the plan has no stops. ``missing`` carries the
+      deferred station ids and ``detail`` the causes and the window/cap that
+      rejected them.
+
+    ``missing`` names the specific identifiers or fields that could not
+    be resolved (station ids, order ids, field names) so the gap is
+    actionable without re-reading logs.
+    """
+
+    truck_id: str
+    plan_id: Optional[str] = None
+    reason_code: str
+    detail: Optional[str] = None
+    missing: List[str] = Field(default_factory=list)
 
 
 class RoutePlan(BaseModel):

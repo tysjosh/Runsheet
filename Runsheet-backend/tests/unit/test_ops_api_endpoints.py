@@ -85,6 +85,17 @@ SAMPLE_RIDER = {
 # Fixtures
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def enable_legacy_ng_delivery(monkeypatch):
+    """Every route exercised in this module belongs to the legacy NG last-mile
+    surface, which is gated behind ``legacy_ng_delivery`` (default OFF).
+    Enable it explicitly so this coverage survives the audit gate.
+
+    Audit reference: product-owner-audit-2026-05-08 recommendation #1.
+    """
+    monkeypatch.setenv("LEGACY_NG_DELIVERY_ENABLED", "true")
+
+
 @pytest.fixture()
 def mock_es_client():
     """Mock ES client whose .search is a MagicMock (ops API calls search synchronously)."""

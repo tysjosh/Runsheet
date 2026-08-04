@@ -1,17 +1,41 @@
 """
 Job-thread messaging endpoints for the Driver Communication module.
 
-Provides REST endpoints for drivers and dispatchers to exchange messages
-within the context of a specific job. Messages are stored in the
-``job_messages`` Elasticsearch index and broadcast through both the
-Driver WebSocket and the scheduling WebSocket.
+Provides REST endpoints for drivers to exchange messages within the context of
+a specific job.
 
-Validates: Requirements 6.1, 6.2, 6.3, 6.4
+The messaging business rule does **not** live here. Both handlers resolve the
+path parameter and the verified :class:`TenantContext` into a
+:class:`~driver.services.work_ref.WorkRef` and delegate to
+:class:`~driver.services.message_service.ThreadMessageService`, which holds
+sender-identity enforcement, persistence, delivery, and pagination exactly once
+(R7.17, R7.18). The order-keyed siblings resolve through the same resolver and
+call the same service, so the two paths cannot diverge (R7.19).
+
+Two authorization holes close by construction with this delegation:
+
+* ``_validate_sender_access`` compared the **request body's** ``sender_id`` to
+  ``job_doc["asset_assigned"]`` and never to the verified context, so a driver
+  could post as any other driver simply by naming them in the body, and any
+  caller could bypass the assignment check entirely by claiming
+  ``sender_role: "dispatcher"``. The helper is gone: the acting identity is now
+  derived here from ``TenantContext`` and passed to the service, which rejects a
+  differing body value with 403 ``SENDER_IDENTITY_MISMATCH`` and ignores a body
+  ``sender_role`` outright (R7.5, R7.6, R7.7).
+* ``list_messages`` filtered on ``job_id`` + ``tenant_id`` and performed no
+  assignment check, so any authenticated caller in the tenant could read any
+  thread. The read now takes a resolved ``WorkRef``, and resolution *is* the
+  authorization (R7.8, R7.9).
+
+Collaborators still arrive through the module-level globals
+:func:`configure_message_endpoints` sets — that wiring pattern is preserved
+rather than replaced (R7.20).
+
+Validates: Requirements 6.1, 6.2, 6.3, 6.4, 7.5, 7.6, 7.7, 7.8, 7.9, 7.10,
+7.12, 7.15, 7.17, 7.18, 7.19, 7.20
 """
 
 import logging
-import uuid
-from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -23,9 +47,12 @@ from driver.middleware.idempotency import (
     store_idempotency_response,
 )
 from driver.models import MessageRequest
-from driver.services.driver_es_mappings import JOB_MESSAGES_INDEX
-from errors.exceptions import forbidden, resource_not_found
-from middleware.rate_limiter import limiter
+from driver.services.message_service import (
+    ALLOWED_SENDER_ROLES,
+    ThreadMessageService,
+)
+from driver.services.work_ref import WorkRef, WorkRefResolver
+from middleware.rate_limiter import driver_rate_key, limiter
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 from services.elasticsearch_service import ElasticsearchService
 
@@ -41,6 +68,12 @@ _job_service = None
 _scheduling_ws_manager = None
 _driver_ws_manager = None
 
+# The two globals task 5.5 adds: the resolver that turns a path parameter into a
+# ``WorkRef`` and the service that holds the whole messaging rule. Both are
+# built by ``configure_message_endpoints`` from the same globals above (R7.20).
+_work_ref_resolver: Optional[WorkRefResolver] = None
+_message_service: Optional[ThreadMessageService] = None
+
 router = APIRouter(prefix="/api/driver", tags=["driver-messaging"])
 
 
@@ -53,30 +86,67 @@ def configure_message_endpoints(
     *,
     es_service: ElasticsearchService,
     job_service=None,
+    order_repository=None,
     scheduling_ws_manager=None,
     driver_ws_manager=None,
+    push_notifier=None,
 ) -> None:
     """
     Wire service dependencies into the message endpoints module.
 
     Called once during application startup (from bootstrap) so that the
     router handlers can access the shared services.
+
+    ``order_repository`` feeds :meth:`WorkRefResolver.resolve_order` on the
+    order-keyed siblings and ``push_notifier`` is reserved for the R7.11 push
+    fallback. Both are optional and default to ``None``. Because this function
+    assigns every module global unconditionally, a caller that omits an argument
+    resets it to ``None`` — every call site must pass its full argument set.
     """
     global _es_service, _job_service, _scheduling_ws_manager, _driver_ws_manager
+    global _work_ref_resolver, _message_service
     _es_service = es_service
     _job_service = job_service
     _scheduling_ws_manager = scheduling_ws_manager
     _driver_ws_manager = driver_ws_manager
 
+    # The resolver and the service, built from the globals just assigned.
+    _work_ref_resolver = WorkRefResolver(
+        job_service=job_service,
+        order_repository=order_repository,
+    )
+    _message_service = (
+        ThreadMessageService(
+            es_service=es_service,
+            job_service=job_service,
+            order_repository=order_repository,
+            driver_ws_manager=driver_ws_manager,
+            scheduling_ws_manager=scheduling_ws_manager,
+            push_notifier=push_notifier,
+        )
+        if es_service is not None
+        else None
+    )
 
-def _get_es_service() -> ElasticsearchService:
-    """Return the configured ElasticsearchService or raise."""
-    if _es_service is None:
+
+def _get_resolver() -> WorkRefResolver:
+    """Return the configured :class:`WorkRefResolver` or raise."""
+    if _work_ref_resolver is None:
         raise RuntimeError(
             "Message endpoints not configured. "
             "Call configure_message_endpoints() during startup."
         )
-    return _es_service
+    return _work_ref_resolver
+
+
+def _get_message_service() -> ThreadMessageService:
+    """Return the configured :class:`ThreadMessageService` or raise."""
+    if _message_service is None:
+        raise RuntimeError(
+            "Message endpoints not configured. "
+            "Call configure_message_endpoints() during startup."
+        )
+    return _message_service
 
 
 def _get_request_id(request: Request) -> str:
@@ -85,102 +155,34 @@ def _get_request_id(request: Request) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Access control helpers
+# Sender identity — derived, never accepted
 # ---------------------------------------------------------------------------
 
 
-async def _validate_sender_access(
-    job_id: str,
-    sender_id: str,
-    sender_role: str,
-    tenant_id: str,
-) -> dict:
-    """Validate that the sender has access to the job thread.
+def _derive_sender_role(tenant: TenantContext) -> str:
+    """Return the thread role the caller acts in, from ``TenantContext.roles``.
 
-    A sender is authorised if:
-    - sender_role is ``driver`` and the sender is the assigned driver, OR
-    - sender_role is ``dispatcher`` (dispatchers have access to all tenant jobs)
-
-    Returns the job document on success.
-
-    Raises:
-        AppException: 403 if the sender does not have access.
-        AppException: 404 if the job is not found.
-
-    Validates: Requirements 6.4, 11.2
+    Matching is exact and the preference order is
+    :data:`~driver.services.message_service.ALLOWED_SENDER_ROLES` — ``driver``
+    first, because this is the driver surface and resolution has already proven
+    the caller holds that role. A caller holding neither participating role
+    yields the empty string, which the service turns into a 403 (R7.7).
     """
-    if _job_service is None:
-        raise RuntimeError(
-            "Message endpoints not configured — job_service is required."
-        )
-
-    # Fetch the job document (raises 404 if not found)
-    job_doc = await _job_service._get_job_doc(job_id, tenant_id)
-
-    if sender_role == "dispatcher":
-        # Dispatchers have access to all jobs within their tenant
-        return job_doc
-
-    if sender_role == "driver":
-        assigned_driver = job_doc.get("asset_assigned")
-        if assigned_driver != sender_id:
-            raise forbidden(
-                message="Assignment revoked",
-                details={
-                    "job_id": job_id,
-                    "sender_id": sender_id,
-                    "assigned_driver": assigned_driver,
-                },
-            )
-        return job_doc
-
-    # Unknown sender_role — reject
-    raise forbidden(
-        message=f"Invalid sender_role '{sender_role}' for job messaging",
-        details={
-            "job_id": job_id,
-            "sender_role": sender_role,
-            "allowed_roles": ["driver", "dispatcher"],
-        },
-    )
+    held = {role for role in (tenant.roles or []) if isinstance(role, str)}
+    for role in ALLOWED_SENDER_ROLES:
+        if role in held:
+            return role
+    return ""
 
 
-async def _broadcast_message_event(
-    event_type: str, event_data: dict, driver_id: Optional[str] = None
-) -> None:
-    """Broadcast a message event through both WS managers.
+def _derive_sender(ref: WorkRef, tenant: TenantContext) -> tuple[str, str]:
+    """Return the ``(sender_id, sender_role)`` the message is stamped with.
 
-    Validates: Requirement 6.3
+    ``sender_id`` is the canonical ``driver_id`` on the resolved ``WorkRef``,
+    which came from the verified session claim rather than from the request
+    (R7.5).
     """
-    # Broadcast through scheduling WS (for dispatchers)
-    if _scheduling_ws_manager is not None:
-        try:
-            await _scheduling_ws_manager.broadcast(event_type, event_data)
-        except Exception as exc:
-            logger.warning(
-                "Scheduling WS broadcast failed for %s on job %s: %s",
-                event_type,
-                event_data.get("job_id"),
-                exc,
-            )
-
-    # Broadcast through driver WS (for the assigned driver)
-    if _driver_ws_manager is not None:
-        try:
-            if driver_id and hasattr(_driver_ws_manager, "send_to_driver"):
-                await _driver_ws_manager.send_to_driver(
-                    driver_id,
-                    {"type": event_type, "data": event_data},
-                )
-            elif hasattr(_driver_ws_manager, "broadcast"):
-                await _driver_ws_manager.broadcast(event_type, event_data)
-        except Exception as exc:
-            logger.warning(
-                "Driver WS broadcast failed for %s on job %s: %s",
-                event_type,
-                event_data.get("job_id"),
-                exc,
-            )
+    return ref.driver_id, _derive_sender_role(tenant)
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +191,7 @@ async def _broadcast_message_event(
 
 
 @router.post("/jobs/{job_id}/messages")
-@limiter.limit(_driver_rate)
+@limiter.limit(_driver_rate, key_func=driver_rate_key)
 async def send_message(
     job_id: str,
     body: MessageRequest,
@@ -200,51 +202,29 @@ async def send_message(
     """
     Post a message to a job thread.
 
-    Stores the message in the ``job_messages`` ES index and broadcasts
-    it through the Driver WebSocket and the scheduling WebSocket.
+    Resolve the ``Work_Ref``, derive the acting identity from
+    ``TenantContext``, delegate, store the idempotency response. Thread
+    authorization, sender-identity enforcement, persistence, and delivery all
+    live below the resolution in
+    :class:`~driver.services.message_service.ThreadMessageService` (R7.18).
 
-    The sender must be the assigned driver for the job or a dispatcher
-    for the tenant.
+    The request and response contract of this endpoint is unchanged (R7.15).
 
-    Validates: Requirements 6.1, 6.3, 6.4, 14.1, 14.3, 14.4
+    Validates: Requirements 6.1, 6.3, 6.4, 7.5, 7.6, 7.7, 7.10, 7.15, 7.18,
+    14.1, 14.3, 14.4
     """
     if idempotency.is_replay:
         return idempotency.replay_response()
 
-    es = _get_es_service()
-
-    # Validate sender access (raises 403/404 on failure)
-    job_doc = await _validate_sender_access(
-        job_id=job_id,
-        sender_id=body.sender_id,
-        sender_role=body.sender_role,
-        tenant_id=tenant.tenant_id,
+    ref = await _get_resolver().resolve_job(job_id, tenant)
+    sender_id, sender_role = _derive_sender(ref, tenant)
+    result = await _get_message_service().send(
+        ref,
+        body,
+        sender_id=sender_id,
+        sender_role=sender_role,
+        request_id=_get_request_id(request),
     )
-
-    now = datetime.now(timezone.utc).isoformat()
-    message_id = str(uuid.uuid4())
-
-    message_doc = {
-        "message_id": message_id,
-        "job_id": job_id,
-        "sender_id": body.sender_id,
-        "sender_role": body.sender_role,
-        "body": body.body,
-        "timestamp": now,
-        "tenant_id": tenant.tenant_id,
-    }
-
-    # Store message in ES
-    await es.index_document(JOB_MESSAGES_INDEX, message_id, message_doc)
-
-    # Broadcast to WS channels
-    driver_id = job_doc.get("asset_assigned")
-    await _broadcast_message_event("job_message", message_doc, driver_id=driver_id)
-
-    result = {
-        "data": message_doc,
-        "request_id": _get_request_id(request),
-    }
 
     # Store idempotency response (Req 14.2)
     if idempotency.key:
@@ -267,40 +247,92 @@ async def list_messages(
     """
     Return messages for a job thread sorted by timestamp ascending.
 
-    Supports pagination via ``page`` and ``size`` query parameters.
+    Resolve the ``Work_Ref``, delegate. Resolution is the authorization: a
+    caller who is not assigned to this job never reaches the thread read
+    (R7.8, R7.9).
 
-    Validates: Requirements 6.2
+    The request and response contract of this endpoint is unchanged (R7.15).
+
+    Validates: Requirements 6.2, 7.8, 7.9, 7.12, 7.15, 7.18
     """
-    es = _get_es_service()
+    ref = await _get_resolver().resolve_job(job_id, tenant)
+    return await _get_message_service().list(
+        ref,
+        page=page,
+        size=size,
+        request_id=_get_request_id(request),
+    )
 
-    offset = (page - 1) * size
 
-    query = {
-        "query": {
-            "bool": {
-                "filter": [
-                    {"term": {"job_id": job_id}},
-                    {"term": {"tenant_id": tenant.tenant_id}},
-                ]
-            }
-        },
-        "sort": [{"timestamp": {"order": "asc"}}],
-        "from": offset,
-        "size": size,
-    }
+# ---------------------------------------------------------------------------
+# Order-keyed siblings (R7.14)
+# ---------------------------------------------------------------------------
 
-    response = await es.search_documents(JOB_MESSAGES_INDEX, query, size=size)
-    hits = response.get("hits", {})
-    total = hits.get("total", {}).get("value", 0)
-    messages = [hit["_source"] for hit in hits.get("hits", [])]
 
-    return {
-        "data": messages,
-        "pagination": {
-            "page": page,
-            "size": size,
-            "total": total,
-            "total_pages": max(1, -(-total // size)),  # ceil division
-        },
-        "request_id": _get_request_id(request),
-    }
+@router.post("/orders/{order_id}/messages")
+@limiter.limit(_driver_rate, key_func=driver_rate_key)
+async def send_order_message(
+    order_id: str,
+    body: MessageRequest,
+    request: Request,
+    tenant: TenantContext = Depends(get_tenant_context),
+    idempotency: IdempotencyResult = Depends(check_idempotency),
+) -> dict:
+    """
+    Post a message to an order thread.
+
+    The job-keyed sibling above with ``resolve_order`` substituted for
+    ``resolve_job``: resolve, derive the acting identity, delegate, store the
+    idempotency response. No messaging rule lives here, so the two paths cannot
+    diverge on a validation rule or an error code (R7.17, R7.19). Assignment
+    authorization is the resolution, on the canonical ``assigned_driver_id``
+    alone with no dual acceptance (R7.21).
+
+    Validates: Requirements 7.14, 7.17, 7.19, 7.21, 14.1, 14.3, 14.4
+    """
+    if idempotency.is_replay:
+        return idempotency.replay_response()
+
+    ref = await _get_resolver().resolve_order(order_id, tenant)
+    sender_id, sender_role = _derive_sender(ref, tenant)
+    result = await _get_message_service().send(
+        ref,
+        body,
+        sender_id=sender_id,
+        sender_role=sender_role,
+        request_id=_get_request_id(request),
+    )
+
+    if idempotency.key:
+        await store_idempotency_response(
+            idempotency.key, tenant.tenant_id, result
+        )
+
+    return result
+
+
+@router.get("/orders/{order_id}/messages")
+@limiter.limit(_driver_rate)
+async def list_order_messages(
+    order_id: str,
+    request: Request,
+    page: int = Query(1, ge=1, description="Page number (1-based)"),
+    size: int = Query(50, ge=1, le=200, description="Page size"),
+    tenant: TenantContext = Depends(get_tenant_context),
+) -> dict:
+    """
+    Return messages for an order thread sorted by timestamp ascending.
+
+    The job-keyed sibling above with ``resolve_order`` substituted for
+    ``resolve_job``. Resolution is the authorization: a caller who is not the
+    order's assigned driver never reaches the thread read (R7.21).
+
+    Validates: Requirements 7.14, 7.17, 7.19, 7.21
+    """
+    ref = await _get_resolver().resolve_order(order_id, tenant)
+    return await _get_message_service().list(
+        ref,
+        page=page,
+        size=size,
+        request_id=_get_request_id(request),
+    )

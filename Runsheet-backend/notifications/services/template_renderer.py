@@ -465,6 +465,103 @@ DEFAULT_TEMPLATES: list[dict] = [
 # ---------------------------------------------------------------------------
 DEFAULT_TEMPLATES.extend(FUEL_NOTIFICATION_TEMPLATES)
 
+# ---------------------------------------------------------------------------
+# pod_otp — the dispatch-time proof-of-delivery code
+# (driver-mobile-app R5.27)
+#
+# ``sms`` and ``email`` only, matching the two dispatchers the ``pod_otp``
+# notification rule enables. This is a NEW dispatch-time entry, not a reuse of
+# the completion-time ``delivery_confirmation`` body: it is sent when the order
+# leaves the terminal so the customer already holds the code when the driver
+# arrives, and it never carries delivered gallons, price, or a BOL link,
+# because none of those exist yet.
+# ---------------------------------------------------------------------------
+POD_OTP_TEMPLATES: list[dict] = [
+    {
+        "event_type": "pod_otp",
+        "channel": "sms",
+        "subject_template": "Your delivery code for order {order_id}",
+        "body_template": (
+            "Your delivery code for order {order_id} is {otp_code}. "
+            "Give it to the driver at delivery. Valid until {valid_until}."
+        ),
+        "placeholders": ["order_id", "otp_code", "valid_until"],
+    },
+    {
+        "event_type": "pod_otp",
+        "channel": "email",
+        "subject_template": "Your delivery code for order {order_id}",
+        "body_template": (
+            "Dear {customer_name},\n\n"
+            "Your fuel delivery for order {order_id} is on its way.\n\n"
+            "Delivery code: {otp_code}\n"
+            "Valid until: {valid_until}\n\n"
+            "Give this code to the driver at delivery to confirm receipt. "
+            "Do not share it with anyone else."
+        ),
+        "placeholders": [
+            "order_id",
+            "customer_name",
+            "otp_code",
+            "valid_until",
+        ],
+    },
+]
+
+DEFAULT_TEMPLATES.extend(POD_OTP_TEMPLATES)
+
+# ---------------------------------------------------------------------------
+# Driver push notifications (driver-mobile-app R9.5, R9.6, R9.7, R9.8, R7.11)
+#
+# ``push`` channel only. ``subject_template`` is the notification title and
+# ``body_template`` is the notification body, so the wording of a dispatch
+# alert is a template edit rather than a code change.
+#
+# Every placeholder here is an entity identifier. R9.8 excludes customer
+# names, customer phone numbers, and street addresses from every push
+# payload, so no template below may reference one — the app fetches the
+# destination detail over an authenticated request when the driver taps.
+# ---------------------------------------------------------------------------
+DRIVER_PUSH_TEMPLATES: list[dict] = [
+    {
+        "event_type": "driver_assignment",
+        "channel": "push",
+        "subject_template": "New assignment",
+        "body_template": (
+            "Order {order_id} · window {delivery_window_start}"
+            "–{delivery_window_end}"
+        ),
+        "placeholders": [
+            "order_id",
+            "delivery_window_start",
+            "delivery_window_end",
+        ],
+    },
+    {
+        "event_type": "driver_assignment_revoked",
+        "channel": "push",
+        "subject_template": "Assignment revoked",
+        "body_template": "Order {order_id} is no longer assigned to you.",
+        "placeholders": ["order_id"],
+    },
+    {
+        "event_type": "driver_exception_escalation",
+        "channel": "push",
+        "subject_template": "Exception escalated",
+        "body_template": "Order {order_id} · {exception_type}",
+        "placeholders": ["order_id", "exception_type"],
+    },
+    {
+        "event_type": "driver_thread_message",
+        "channel": "push",
+        "subject_template": "New message",
+        "body_template": "Order {order_id} · open the app to read it.",
+        "placeholders": ["order_id"],
+    },
+]
+
+DEFAULT_TEMPLATES.extend(DRIVER_PUSH_TEMPLATES)
+
 
 class TemplateRenderer:
     """Render and manage notification templates stored in Elasticsearch.

@@ -43,19 +43,9 @@ def _make_websocket(*, fail_send: bool = False) -> MagicMock:
     return ws
 
 
-def _make_ops_ws_manager() -> MagicMock:
-    """Create a mock OpsWebSocketManager for dual-broadcast tests."""
-    mgr = MagicMock()
-    mgr.broadcast_shipment_update = AsyncMock(return_value=1)
-    mgr.broadcast_rider_update = AsyncMock(return_value=1)
-    return mgr
-
-
-def _make_feature_flag_service(overlay_state: str = "active_gated") -> MagicMock:
-    """Create a mock FeatureFlagService."""
-    ff = MagicMock()
-    ff.get_overlay_state = AsyncMock(return_value=overlay_state)
-    return ff
+# ``_make_ops_ws_manager`` and ``_make_feature_flag_service`` lived here.
+# Both existed only for the legacy dual-broadcast / dual-write tests below,
+# which went out with the legacy mirror.
 
 
 # ---------------------------------------------------------------------------
@@ -329,229 +319,20 @@ class TestBackpressure:
 # ---------------------------------------------------------------------------
 
 
-class TestDualBroadcast:
-    """During `active_gated`, legacy events still flow through the
-    OpsWebSocketManager.
+class TestOrdersBroadcast:
+    """The new OrdersWSManager broadcast fires on every write.
 
-    The OrderIntakePipeline / OrderCreationService calls both
-    OrdersWSManager.broadcast_order_placed AND
-    OpsWebSocketManager.broadcast_shipment_update for every write so
-    legacy /ws/ops subscribers continue receiving shipment_update events
-    until the tenant flips to active_auto.
+    This class used to also assert the legacy dual-broadcast /
+    dual-write behaviour (``test_dual_broadcast_calls_legacy_ops_ws_during_active_gated``,
+    ``test_legacy_broadcast_skipped_during_active_auto``,
+    ``test_legacy_broadcast_active_during_shadow``,
+    ``test_legacy_dual_write_failure_does_not_block_main_path``). All four
+    exercised the retired LegacyDualWriter mirror into
+    ``shipments_current`` and were removed with it — there is no longer an
+    overlay state in which a write reaches the legacy surface.
 
     Validates: Requirement 4.1.3
     """
-
-    @pytest.mark.asyncio
-    async def test_dual_broadcast_calls_legacy_ops_ws_during_active_gated(self):
-        """When overlay state is active_gated, both new and legacy WS
-        managers receive broadcasts."""
-        from fuel.services.order_creation_service import OrderCreationService
-
-        # Set up mocks
-        order_repo = AsyncMock()
-        order_repo.upsert_with_last_event_timestamp = AsyncMock()
-        order_repo.append_event = AsyncMock()
-
-        orders_ws = MagicMock()
-        orders_ws.broadcast = AsyncMock(return_value=1)
-
-        legacy_dual_writer = AsyncMock()
-        legacy_dual_writer.mirror_order = AsyncMock()
-
-        ff_service = _make_feature_flag_service("active_gated")
-
-        svc = OrderCreationService(
-            order_repo=order_repo,
-            ws_manager=orders_ws,
-            legacy_dual_writer=legacy_dual_writer,
-            feature_flag_service=ff_service,
-        )
-
-        # Create a mock adapter result
-        adapter_result = MagicMock()
-        adapter_result.order_doc = {
-            "customer_id": "cust-1",
-            "customer_name": "Test Customer",
-            "product_code": "DIESEL_2",
-            "gallons_requested": 500.0,
-            "intake_channel": "dispatcher",
-            "intake_channel_id": "dispatcher",
-            "source_schema_version": "1.0",
-        }
-        adapter_result.event_docs = [
-            {"event_type": "order_placed", "event_payload": {}}
-        ]
-
-        # Execute
-        result = await svc.create_order(
-            tenant_id="tenant-A",
-            channel="dispatcher",
-            adapter_result=adapter_result,
-            request_id="req-123",
-        )
-
-        # Verify: new WS manager was called
-        orders_ws.broadcast.assert_awaited_once()
-
-        # Verify: legacy dual-writer was called (active_gated enables it)
-        ff_service.get_overlay_state.assert_awaited_once_with(
-            "order_intake_pipeline", "tenant-A"
-        )
-        legacy_dual_writer.mirror_order.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_legacy_broadcast_skipped_during_active_auto(self):
-        """When overlay state is active_auto, legacy dual-write is skipped."""
-        from fuel.services.order_creation_service import OrderCreationService
-
-        order_repo = AsyncMock()
-        order_repo.upsert_with_last_event_timestamp = AsyncMock()
-        order_repo.append_event = AsyncMock()
-
-        orders_ws = MagicMock()
-        orders_ws.broadcast = AsyncMock(return_value=1)
-
-        legacy_dual_writer = AsyncMock()
-        legacy_dual_writer.mirror_order = AsyncMock()
-
-        ff_service = _make_feature_flag_service("active_auto")
-
-        svc = OrderCreationService(
-            order_repo=order_repo,
-            ws_manager=orders_ws,
-            legacy_dual_writer=legacy_dual_writer,
-            feature_flag_service=ff_service,
-        )
-
-        adapter_result = MagicMock()
-        adapter_result.order_doc = {
-            "customer_id": "cust-1",
-            "customer_name": "Test Customer",
-            "product_code": "DIESEL_2",
-            "gallons_requested": 500.0,
-            "intake_channel": "dispatcher",
-            "intake_channel_id": "dispatcher",
-            "source_schema_version": "1.0",
-        }
-        adapter_result.event_docs = [
-            {"event_type": "order_placed", "event_payload": {}}
-        ]
-
-        result = await svc.create_order(
-            tenant_id="tenant-A",
-            channel="dispatcher",
-            adapter_result=adapter_result,
-            request_id="req-456",
-        )
-
-        # New WS manager still called
-        orders_ws.broadcast.assert_awaited_once()
-
-        # Legacy dual-writer NOT called (active_auto disables it)
-        legacy_dual_writer.mirror_order.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_legacy_broadcast_active_during_shadow(self):
-        """When overlay state is shadow, legacy dual-write is still active."""
-        from fuel.services.order_creation_service import OrderCreationService
-
-        order_repo = AsyncMock()
-        order_repo.upsert_with_last_event_timestamp = AsyncMock()
-        order_repo.append_event = AsyncMock()
-
-        orders_ws = MagicMock()
-        orders_ws.broadcast = AsyncMock(return_value=1)
-
-        legacy_dual_writer = AsyncMock()
-        legacy_dual_writer.mirror_order = AsyncMock()
-
-        ff_service = _make_feature_flag_service("shadow")
-
-        svc = OrderCreationService(
-            order_repo=order_repo,
-            ws_manager=orders_ws,
-            legacy_dual_writer=legacy_dual_writer,
-            feature_flag_service=ff_service,
-        )
-
-        adapter_result = MagicMock()
-        adapter_result.order_doc = {
-            "customer_id": "cust-1",
-            "customer_name": "Test Customer",
-            "product_code": "DIESEL_2",
-            "gallons_requested": 500.0,
-            "intake_channel": "dispatcher",
-            "intake_channel_id": "dispatcher",
-            "source_schema_version": "1.0",
-        }
-        adapter_result.event_docs = [
-            {"event_type": "order_placed", "event_payload": {}}
-        ]
-
-        result = await svc.create_order(
-            tenant_id="tenant-A",
-            channel="dispatcher",
-            adapter_result=adapter_result,
-            request_id="req-789",
-        )
-
-        # Both new WS and legacy dual-writer called
-        orders_ws.broadcast.assert_awaited_once()
-        legacy_dual_writer.mirror_order.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_legacy_dual_write_failure_does_not_block_main_path(self):
-        """Legacy mirror failure does NOT fail the main creation path."""
-        from fuel.services.order_creation_service import OrderCreationService
-
-        order_repo = AsyncMock()
-        order_repo.upsert_with_last_event_timestamp = AsyncMock()
-        order_repo.append_event = AsyncMock()
-
-        orders_ws = MagicMock()
-        orders_ws.broadcast = AsyncMock(return_value=1)
-
-        legacy_dual_writer = AsyncMock()
-        legacy_dual_writer.mirror_order = AsyncMock(
-            side_effect=RuntimeError("Legacy ES down")
-        )
-
-        ff_service = _make_feature_flag_service("active_gated")
-
-        svc = OrderCreationService(
-            order_repo=order_repo,
-            ws_manager=orders_ws,
-            legacy_dual_writer=legacy_dual_writer,
-            feature_flag_service=ff_service,
-        )
-
-        adapter_result = MagicMock()
-        adapter_result.order_doc = {
-            "customer_id": "cust-1",
-            "customer_name": "Test Customer",
-            "product_code": "DIESEL_2",
-            "gallons_requested": 500.0,
-            "intake_channel": "dispatcher",
-            "intake_channel_id": "dispatcher",
-            "source_schema_version": "1.0",
-        }
-        adapter_result.event_docs = [
-            {"event_type": "order_placed", "event_payload": {}}
-        ]
-
-        # Should NOT raise despite legacy mirror failure
-        result = await svc.create_order(
-            tenant_id="tenant-A",
-            channel="dispatcher",
-            adapter_result=adapter_result,
-            request_id="req-fail",
-        )
-
-        # Order was still created successfully
-        assert result["status"] == "placed"
-        assert result["tenant_id"] == "tenant-A"
-        order_repo.upsert_with_last_event_timestamp.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_new_orders_ws_broadcast_always_fires(self):

@@ -536,7 +536,7 @@ class HybridReadRepository:
         # orders / jobs current-state
         "fuel_order": ("FuelOrderCurrentORM", "order_id", False),
         "job": ("JobCurrentORM", "job_id", False),
-        "shipment": ("ShipmentCurrentORM", "shipment_id", False),
+        # ``shipment`` was retired with the ``shipments_current`` table (rev 0007).
         "tenant_job_policy": ("TenantJobPolicyORM", "policy_id", False),
         # master data
         "driver": ("DriverMasterORM", "driver_id", False),
@@ -548,6 +548,25 @@ class HybridReadRepository:
         "truck": ("TruckORM", "truck_id", True),
         "location": ("LocationORM", "location_id", True),
     }
+
+    @classmethod
+    def is_registered(cls, aggregate_type: str) -> bool:
+        """Whether this aggregate has a Postgres table to read from.
+
+        An aggregate absent from :attr:`_SPECS` has no table, so it cannot be
+        read-cut-over no matter what ``COMMERCE_READ_FROM_POSTGRES`` says. The
+        hybrid read helpers consult this and fall back to Elasticsearch instead
+        of constructing a repository that would raise.
+
+        Exists because retiring an aggregate leaves callers behind. ``shipment``
+        was removed here when ``shipments_current`` was dropped (rev 0007), but
+        seven ``ops`` endpoints still ask for it; with the flag on they raised
+        ``ValueError`` from the constructor below. They are behind a default-off
+        feature flag, so nobody hit it — which is exactly why a guard is better
+        placed here than in seven call sites that can be added faster than they
+        are found.
+        """
+        return aggregate_type in cls._SPECS
 
     def __init__(self, aggregate_type: str) -> None:
         if aggregate_type not in self._SPECS:

@@ -53,10 +53,10 @@ export type {
 } from "./useNotificationWebSocket";
 export { useNotificationWebSocket } from "./useNotificationWebSocket";
 export type {
+  FuelAlertEvent,
   OpsEventType,
   OpsWebSocketMessage,
   OpsWebSocketOptions,
-  SlaBreach,
   UseOpsWebSocketReturn,
 } from "./useOpsWebSocket";
 export { useOpsWebSocket } from "./useOpsWebSocket";

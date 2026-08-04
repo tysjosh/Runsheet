@@ -8,8 +8,6 @@ restores full access without application restart.
 Validates: Requirements 9.1, 9.2, 9.4
 """
 
-import hashlib
-import hmac
 import json
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -28,23 +26,30 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from ops.webhooks.receiver import configure_webhook_receiver, router as webhook_router
 from ops.api.endpoints import router as ops_router, configure_ops_api
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
-from ops.ingestion.adapter import AdapterTransformer
-from ops.ingestion.handlers.v1_0 import V1SchemaHandler
 from ops.websocket.ops_ws import OpsWebSocketManager
 from ops.services.ops_es_service import OpsElasticsearchService
 
 pytestmark = pytest.mark.integration
 
+
+@pytest.fixture(autouse=True)
+def enable_legacy_ng_delivery(monkeypatch):
+    """The matrix asserts *per-tenant* ops flag behaviour; the deployment-wide
+    ``legacy_ng_delivery`` gate (default OFF) is enabled explicitly so the
+    matrix still exercises the per-tenant path.
+
+    Audit reference: product-owner-audit-2026-05-08 recommendation #1.
+    """
+    monkeypatch.setenv("LEGACY_NG_DELIVERY_ENABLED", "true")
+
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-WEBHOOK_SECRET = "matrix-test-secret"
 ENABLED_TENANT = "tenant-enabled"
 DISABLED_TENANT = "tenant-disabled"
-FIXTURE_TENANT = "tenant-test-1"  # tenant_id in webhook fixtures
 
 
 # ---------------------------------------------------------------------------
@@ -113,11 +118,6 @@ class FakeRequestIDMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         request.state.request_id = "req-matrix-test"
         return await call_next(request)
-
-
-def _sign(payload: dict, secret: str = WEBHOOK_SECRET) -> str:
-    body = json.dumps(payload).encode("utf-8")
-    return hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
 
 
 def _mock_es_search_result(hits=None, total=0):
@@ -422,110 +422,16 @@ class TestReEnableTenantRestoresAccess:
 
 
 # ===========================================================================
-# Test: Webhook processing gated by feature flag (Req 9.1, 9.2)
+# Removed: TestWebhookFeatureFlagMatrix
 # ===========================================================================
-
-class TestWebhookFeatureFlagMatrix:
-    """
-    Test webhook processing is correctly gated by feature flags.
-
-    Validates: Requirements 9.1, 9.2
-    """
-
-    @pytest.fixture(autouse=True)
-    def setup(self):
-        self.ff_service = FakeFeatureFlagService()
-        self.indexed_shipments: list[dict] = []
-        self.indexed_events: list[dict] = []
-
-        app = FastAPI()
-        app.include_router(webhook_router)
-
-        adapter = AdapterTransformer()
-        adapter.register_handler("1.0", V1SchemaHandler())
-
-        idempotency = AsyncMock()
-        idempotency.is_duplicate = AsyncMock(return_value=False)
-        idempotency.mark_processed = AsyncMock()
-
-        ops_es = AsyncMock()
-        ops_es.upsert_shipment_current = AsyncMock(
-            side_effect=lambda doc: self.indexed_shipments.append(doc) or True
-        )
-        ops_es.append_shipment_event = AsyncMock(
-            side_effect=lambda doc: self.indexed_events.append(doc)
-        )
-        ops_es.upsert_rider_current = AsyncMock()
-
-        configure_webhook_receiver(
-            adapter=adapter,
-            idempotency_service=idempotency,
-            poison_queue_service=AsyncMock(),
-            ops_es_service=ops_es,
-            ws_manager=None,
-            feature_flag_service=self.ff_service,
-            webhook_secret=WEBHOOK_SECRET,
-            webhook_tenant_id="",
-        )
-
-        self.client = TestClient(app)
-
-    def test_disabled_tenant_webhook_skips_indexing(self):
-        from tests.fixtures import load_fixture
-        payload = load_fixture("shipment_created")
-        body = json.dumps(payload)
-        sig = _sign(payload)
-        resp = self.client.post(
-            "/webhooks/dinee",
-            content=body,
-            headers={"X-Dinee-Signature": sig, "Content-Type": "application/json"},
-        )
-        assert resp.status_code == 200
-        assert len(self.indexed_shipments) == 0
-
-    def test_enabled_tenant_webhook_processes(self):
-        from tests.fixtures import load_fixture
-        # Enable the tenant that's in the fixture (tenant-test-1)
-        self.ff_service._flags[FIXTURE_TENANT] = True
-        payload = load_fixture("shipment_created")
-        body = json.dumps(payload)
-        sig = _sign(payload)
-        resp = self.client.post(
-            "/webhooks/dinee",
-            content=body,
-            headers={"X-Dinee-Signature": sig, "Content-Type": "application/json"},
-        )
-        assert resp.status_code == 200
-        assert resp.json()["status"] == "processed"
-        assert len(self.indexed_shipments) == 1
-
-    def test_re_enable_restores_webhook_processing(self):
-        from tests.fixtures import load_fixture
-
-        # Disabled
-        payload1 = load_fixture("shipment_created")
-        body1 = json.dumps(payload1)
-        sig1 = _sign(payload1)
-        resp1 = self.client.post(
-            "/webhooks/dinee",
-            content=body1,
-            headers={"X-Dinee-Signature": sig1, "Content-Type": "application/json"},
-        )
-        assert resp1.status_code == 200
-        assert len(self.indexed_shipments) == 0
-
-        # Enable the fixture tenant
-        self.ff_service._flags[FIXTURE_TENANT] = True
-
-        # Re-enabled — use a different event to avoid idempotency
-        payload2 = load_fixture("shipment_updated")
-        body2 = json.dumps(payload2)
-        sig2 = _sign(payload2)
-        resp2 = self.client.post(
-            "/webhooks/dinee",
-            content=body2,
-            headers={"X-Dinee-Signature": sig2, "Content-Type": "application/json"},
-        )
-        assert resp2.status_code == 200
-        assert resp2.json()["status"] == "processed"
-        assert len(self.indexed_shipments) == 1
+#
+# That class asserted that inbound webhook processing was gated by the
+# per-tenant ops flag. The gate itself lived inside the ``POST /webhooks/dinee``
+# handler, which has been removed along with its module. The surviving ops
+# ingestion entry point, ``ReplayService._process_record``, does not consult the
+# feature flag service at all — so there is no longer a behaviour here to
+# assert, and writing one would be testing the test.
+#
+# The per-tenant flag remains covered above for every surface that still
+# enforces it: the ops REST endpoints, the WebSocket closure path, and the ops
+# AI tool guard.

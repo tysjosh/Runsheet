@@ -74,6 +74,12 @@ _INCREMENT_COMPLETED_TRANSITIONS: set[tuple[str, str]] = {
     ("in_transit", "delivered"),
 }
 
+# An order becomes active work when it is dispatched, not when a dispatcher
+# merely selects a driver.
+_INCREMENT_ACTIVE_TRANSITIONS: set[tuple[str, str]] = {
+    ("scheduled", "dispatched"),
+}
+
 
 # ---------------------------------------------------------------------------
 # OrderService
@@ -88,11 +94,15 @@ class OrderService:
         ws_manager: OrdersWSManager (or compatible) for broadcasting.
         driver_counter_service: Optional DriverCounterService for
             incrementing/decrementing driver counters.
-        legacy_dual_writer: Optional LegacyDualWriter for mirroring
-            to the legacy shipment surface.
-        feature_flag_service: FeatureFlagService for checking overlay
-            state (controls whether legacy dual-write is active).
+        feature_flag_service: FeatureFlagService for overlay-state
+            checks.
         clock: Optional clock override for testing (defaults to utcnow).
+
+    NB: the ``legacy_dual_writer`` dependency was removed with the
+    legacy dual-write shim — nothing mirrors transitions into
+    ``shipments_current`` any more. ``feature_flag_service`` is kept
+    because callers still inject it and it stays the hook for overlay
+    gating, even though the mirror was its last in-service consumer.
     """
 
     def __init__(
@@ -101,14 +111,12 @@ class OrderService:
         order_repo: Any,
         ws_manager: Any,
         driver_counter_service: Optional[Any] = None,
-        legacy_dual_writer: Optional[Any] = None,
         feature_flag_service: Optional[Any] = None,
         clock: Optional[Callable] = None,
     ) -> None:
         self._order_repo = order_repo
         self._ws_manager = ws_manager
         self._driver_counter_service = driver_counter_service
-        self._legacy_dual_writer = legacy_dual_writer
         self._feature_flag_service = feature_flag_service
         self._clock = clock or utcnow
 
@@ -187,6 +195,8 @@ class OrderService:
         reason: Optional[str] = None,
         notes: Optional[str] = None,
         actor_user_id: Optional[str] = None,
+        client_event_timestamp: Optional[str] = None,
+        event_payload_extra: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Apply a status transition to an order.
 
@@ -213,6 +223,21 @@ class OrderService:
                 reason, failure reason).
             notes: Optional notes attached to the event.
             actor_user_id: The user initiating the transition.
+            client_event_timestamp: The caller's own stamp for when the action
+                happened, which may predate the server's receipt (an offline
+                driver queue drains late). Recorded in ``event_payload``
+                alongside the server-stamped ``event_timestamp`` /
+                ``ingested_at``, never in place of them (R4.8). ``event_payload``
+                is the free-form part of the event document, so this needs no
+                ``fuel_order_events`` mapping change.
+            event_payload_extra: Additional free-form keys to merge into
+                ``event_payload``. The driver path uses it to record the
+                Hours-of-Service gate verdict — the acting driver, the reading
+                ``recorded_at``, the freshness state, the gate outcome, and the
+                override identifier when one applied (R17.25, R17.26). The six
+                canonical keys above always win, so no caller can overwrite the
+                transition's own record; and like ``client_event_timestamp`` this
+                needs no ``fuel_order_events`` mapping change.
 
         Returns:
             The updated order document.
@@ -251,18 +276,23 @@ class OrderService:
 
         # 5. Build and append the status-specific event
         event_type = _STATUS_TO_EVENT_TYPE.get(new_status, f"order_{new_status}")
-        event = {
-            "event_id": mint_event_id(),
-            "order_id": order["order_id"],
-            "tenant_id": order["tenant_id"],
-            "event_type": event_type,
-            "event_payload": {
+        event_payload: Dict[str, Any] = dict(event_payload_extra or {})
+        event_payload.update(
+            {
                 "old_status": old_status,
                 "new_status": new_status,
                 "reason": reason,
                 "notes": notes,
                 "actor_user_id": actor_user_id,
-            },
+                "client_event_timestamp": client_event_timestamp,
+            }
+        )
+        event = {
+            "event_id": mint_event_id(),
+            "order_id": order["order_id"],
+            "tenant_id": order["tenant_id"],
+            "event_type": event_type,
+            "event_payload": event_payload,
             "event_timestamp": now,
             "ingested_at": now,
             "source_schema_version": order.get("source_schema_version", "1.0"),
@@ -282,10 +312,10 @@ class OrderService:
         # 8. Broadcast via WebSocket
         await self._broadcast_status_change(order, old_status, new_status)
 
-        # 9. Legacy dual-write (when enabled)
-        await self._mirror_legacy_if_enabled(order)
-
-        # 10. Notify event subscribers (e.g. commerce invoice generation)
+        # 9. Notify event subscribers (e.g. commerce invoice generation)
+        # NB: the former step 9 mirrored the transition into the legacy
+        # shipment surface via LegacyDualWriter. The shim is gone, so
+        # the subscriber notification moved up a slot.
         await self._notify_event_subscribers(order, new_status)
 
         return order
@@ -319,6 +349,59 @@ class OrderService:
             reason=hold_reason,
             actor_user_id=actor_user_id,
         )
+
+    async def reconcile_delivery_result(
+        self,
+        *,
+        order: Dict[str, Any],
+        delivery_result: Dict[str, Any],
+        actor_user_id: Optional[str] = None,
+        client_event_timestamp: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Attach POD facts to an order that is already delivered.
+
+        A dispatcher may have moved the order to ``delivered`` just before the
+        driver's offline POD arrived. Re-applying ``delivered -> delivered`` is
+        invalid, but dropping the actual gallons would make invoicing use the
+        requested amount. This repair path writes an explicit audit event,
+        persists the delivery snapshot, and replays the idempotent delivered
+        subscribers so invoice creation can catch up.
+        """
+        if order.get("status") != "delivered":
+            raise ValueError(
+                "reconcile_delivery_result requires an already delivered order"
+            )
+        if not delivery_result:
+            raise ValueError("delivery_result is required")
+        if order.get("delivery_result") == delivery_result:
+            return order
+
+        now = self._clock()
+        order["delivery_result"] = delivery_result
+        order["updated_at"] = now
+        order["last_event_timestamp"] = now
+        event = {
+            "event_id": mint_event_id(),
+            "order_id": order["order_id"],
+            "tenant_id": order["tenant_id"],
+            "event_type": "order_delivery_result_reconciled",
+            "event_payload": {
+                "pod_id": delivery_result.get("pod_id"),
+                "actual_gallons": delivery_result.get("actual_gallons"),
+                "actor_user_id": actor_user_id,
+                "client_event_timestamp": client_event_timestamp,
+            },
+            "event_timestamp": now,
+            "ingested_at": now,
+            "source_schema_version": order.get("source_schema_version", "1.0"),
+            "trace_id": order.get("trace_id", ""),
+        }
+        await self._order_repo.append_event(order["tenant_id"], event)
+        await self._order_repo.upsert_with_last_event_timestamp(
+            order["tenant_id"], order
+        )
+        await self._notify_event_subscribers(order, "delivered")
+        return order
 
     async def release_hold(
         self,
@@ -401,6 +484,9 @@ class OrderService:
         delta_active = 0
         delta_completed = 0
 
+        if transition in _INCREMENT_ACTIVE_TRANSITIONS:
+            delta_active = 1
+
         if transition in _DECREMENT_ACTIVE_TRANSITIONS:
             delta_active = -1
 
@@ -456,43 +542,10 @@ class OrderService:
                 exc,
             )
 
-    async def _mirror_legacy_if_enabled(
-        self, order: Dict[str, Any]
-    ) -> None:
-        """Mirror the order to the legacy shipment surface when the
-        overlay flag is in shadow or active_gated state."""
-        if not self._legacy_dual_writer:
-            return
-        if not self._feature_flag_service:
-            return
-
-        try:
-            overlay_state = await self._feature_flag_service.get_overlay_state(
-                "order_intake_pipeline", order["tenant_id"]
-            )
-        except Exception as exc:
-            logger.warning(
-                "Failed to read overlay state for tenant=%s: %s — "
-                "skipping legacy mirror",
-                order.get("tenant_id"),
-                exc,
-            )
-            return
-
-        if overlay_state in ("shadow", "active_gated"):
-            try:
-                # mirror_order never raises by contract, but we guard
-                # defensively so the main path is never blocked.
-                await self._legacy_dual_writer.mirror_order(
-                    order, tenant_id=order["tenant_id"]
-                )
-            except Exception as exc:
-                logger.warning(
-                    "LegacyDualWriter.mirror_order raised unexpectedly "
-                    "for order=%s: %s",
-                    order.get("order_id"),
-                    exc,
-                )
+    # NB: ``_mirror_legacy_if_enabled`` was removed here. It read the
+    # overlay flag and mirrored each transition into ``shipments_current``
+    # through LegacyDualWriter. The legacy surface is being dropped, so
+    # the mirror and its overlay gate went with it.
 
     async def _notify_event_subscribers(
         self,

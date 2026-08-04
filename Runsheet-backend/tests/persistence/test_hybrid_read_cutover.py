@@ -377,6 +377,31 @@ async def test_fuel_order_search_served_from_postgres(engine, read_from_pg):
     assert res["orders"][0].order_id == "s1"
 
 
+async def test_fuel_order_search_for_driver_served_from_postgres(engine, read_from_pg):
+    """Driver work read: status terms + window sort + driver scoping."""
+    await _seed("fuel_order", _order_doc(
+        "d2", status="in_transit", assigned_driver_id="drv_1",
+        delivery_window_start="2026-01-02T00:00:00+00:00"))
+    await _seed("fuel_order", _order_doc(
+        "d1", status="dispatched", assigned_driver_id="drv_1",
+        delivery_window_start="2026-01-01T00:00:00+00:00"))
+    # Excluded: another driver, and a status outside the default set.
+    await _seed("fuel_order", _order_doc(
+        "other_drv", status="dispatched", assigned_driver_id="drv_2",
+        delivery_window_start="2026-01-01T00:00:00+00:00"))
+    await _seed("fuel_order", _order_doc(
+        "done", status="delivered", assigned_driver_id="drv_1",
+        delivery_window_start="2026-01-01T00:00:00+00:00"))
+
+    from fuel.order_repository import FuelOrderRepository
+    repo = FuelOrderRepository(_es_raises_on_read())
+    res = await repo.search_for_driver(TENANT, "drv_1")
+
+    assert res["total"] == 2
+    # delivery_window_start ascending
+    assert [o.order_id for o in res["orders"]] == ["d1", "d2"]
+
+
 async def test_fuel_order_list_for_tenant_served_from_postgres(engine, read_from_pg):
     await _seed("fuel_order", _order_doc("l1", created_at="2026-01-02T00:00:00+00:00"))
     await _seed("fuel_order", _order_doc("l2", created_at="2026-01-01T00:00:00+00:00"))
@@ -1453,28 +1478,9 @@ async def test_job_sla_monitor_served_from_postgres(engine, read_from_pg):
     assert "j_ok" not in detections
 
 
-async def test_sla_guardian_served_from_postgres(engine, read_from_pg):
-    from datetime import datetime, timedelta, timezone
-
-    soon = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
-    await _seed("shipment", {
-        "shipment_id": "shp_g", "tenant_id": TENANT, "status": "in_transit",
-        "estimated_delivery": soon, "rider_id": None,
-        "created_at": "2026-01-01T00:00:00+00:00",
-        "updated_at": "2026-01-01T00:00:00+00:00",
-    })
-
-    from Agents.autonomous.sla_guardian_agent import SLAGuardianAgent
-    agent = SLAGuardianAgent(
-        es_service=_agent_es_guard(),
-        activity_log_service=_noop_activity_log(),
-        ws_manager=_noop_ws(),
-        confirmation_protocol=MagicMock(),
-        feature_flag_service=None,
-        sla_threshold_minutes=30,
-    )
-    detections, _actions = await agent.monitor_cycle()
-    assert "shp_g" in detections
+# ``test_sla_guardian_served_from_postgres`` stood here. The ``shipment``
+# aggregate was retired with the ``shipments_current`` table (rev 0007), so
+# ``SLAGuardianAgent`` has no Postgres read path left to cover.
 
 
 def _noop_activity_log():

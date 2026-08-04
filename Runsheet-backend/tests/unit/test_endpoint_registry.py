@@ -8,6 +8,7 @@ Requirements: 3.4, Correctness Property P15
 """
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -216,6 +217,49 @@ class TestEndpointRegistryCompleteness:
             )
 
 
+@pytest.fixture(scope="module")
+def pristine_registry(tmp_path_factory) -> str:
+    """Generate the registry in a fresh interpreter and return the Markdown.
+
+    Deliberately *not* generated in-process. ``generate_registry()`` introspects
+    ``main.app``, a module-level singleton cached in ``sys.modules``: whatever an
+    earlier test mounted on it is still there, and boot-only routers (the driver
+    session router, the reroute router) plus re-mounted ones would show up as
+    rows the committed document cannot contain. Running the generator in a
+    subprocess is what "statically-imported app" means here — the app is built
+    by importing ``main``, its lifespan never runs, and no test has touched it.
+
+    This also makes the check exactly equivalent to CI's endpoint-registry job,
+    which runs ``python scripts/generate_endpoint_registry.py`` in a clean
+    process and diffs the result.
+    """
+    output_path = tmp_path_factory.mktemp("registry") / "endpoint-registry.md"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(_BACKEND_DIR / "scripts" / "generate_endpoint_registry.py"),
+            "--output",
+            str(output_path),
+        ],
+        cwd=str(_BACKEND_DIR),
+        env={**os.environ, "PYTHONPATH": str(_BACKEND_DIR)},
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, (
+        "scripts/generate_endpoint_registry.py failed:\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr[-4000:]}"
+    )
+    assert output_path.exists(), (
+        "generator reported success but wrote no file:\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr[-4000:]}"
+    )
+
+    return output_path.read_text(encoding="utf-8")
+
+
 class TestEndpointRegistryFreshness:
     """CI freshness check: the committed registry matches a fresh generation.
 
@@ -226,16 +270,16 @@ class TestEndpointRegistryFreshness:
     Requirements: 3.4, Correctness Property P15
     """
 
-    def test_registry_is_up_to_date(self, app_and_registry):
+    def test_registry_is_up_to_date(self, pristine_registry):
         """Committed docs/endpoint-registry.md matches freshly generated output.
 
         This is the equivalent of running:
             python3 scripts/generate_endpoint_registry.py
             git diff --exit-code docs/endpoint-registry.md
         """
-        _, fresh_registry = app_and_registry
+        fresh_registry = pristine_registry
 
-        registry_path = Path(__file__).resolve().parent.parent.parent.parent / "docs" / "endpoint-registry.md"
+        registry_path = _BACKEND_DIR.parent / "docs" / "endpoint-registry.md"
 
         assert registry_path.exists(), (
             f"docs/endpoint-registry.md does not exist at {registry_path}. "

@@ -42,10 +42,15 @@ Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9, 3.10,
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, Final, List, Mapping, Optional, Tuple
 from uuid import uuid4
 
-from Agents.overlay.base_overlay_agent import OverlayAgentBase
+from Agents.overlay.base_overlay_agent import (
+    DEGRADATION_KIND_NO_INPUT,
+    DEGRADATION_KIND_PRODUCED_NOTHING,
+    OverlayAgentBase,
+    build_degradation_reason,
+)
 from Agents.overlay.data_contracts import (
     InterventionProposal,
     RiskClass,
@@ -62,6 +67,8 @@ from Agents.support.compartment_models import (
 )
 from Agents.support.compartment_solver import (
     check_feasibility,
+    fuel_density_kg_per_liter,
+    legacy_grade_for_product,
     optimize_loading_plan,
 )
 from Agents.support.fuel_distribution_models import (
@@ -101,10 +108,18 @@ from fuel.services.fuel_product_catalog import (
     UnknownFuelProductError,
     canonicalize,
     canonicalize_or_warn,
+    is_known_product,
 )
 from fuel.services.order_es_mappings import FUEL_ORDERS_CURRENT_INDEX
+from services.unit_conversion import GAL_TO_L
 
 logger = logging.getLogger(__name__)
+
+#: US gallons → litres. Bound to :data:`services.unit_conversion.GAL_TO_L` so
+#: this module holds no independent definition of the factor. The agent needs
+#: the conversion because orders are gallons-denominated while the compartment
+#: solver and its kg/L densities are litres-denominated.
+GALLONS_TO_LITERS: Final[float] = GAL_TO_L
 
 # Default minimum delivery quantity in liters (Req 3.5)
 DEFAULT_MIN_DROP_LITERS = 500.0
@@ -254,39 +269,12 @@ class CompartmentLoadingAgent(OverlayAgentBase):
     # Mode helpers (Task 6.6 / Req 7.1.2)
     # ------------------------------------------------------------------
 
-    async def _is_active_commit_mode(self, tenant_id: str) -> bool:
-        """Return ``True`` when the overlay's mode represents a real commit.
-
-        Validates: Requirement 7.1.2.
-
-        The spec reserves the ``last_loaded_*`` / ``state`` write on
-        ``truck_compartments`` for "a successful assignment commit — not
-        during shadow-mode evaluation." Mode resolution mirrors the base
-        overlay's :meth:`_get_mode`: anything that is not ``shadow`` nor
-        ``disabled`` is treated as a commit path (``active_gated`` and
-        ``active_auto`` both flow through the ConfirmationProtocol, and
-        by the time the protocol accepts the mutation the compartment
-        has been committed).
-
-        The helper defaults to ``False`` on any error or on a missing
-        feature-flag service so a misconfigured environment never
-        silently overwrites compartment state in what the operator
-        thinks is shadow mode.
-        """
-
-        try:
-            mode = await self._get_mode(tenant_id)
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.warning(
-                "CompartmentLoadingAgent: failed to resolve overlay mode "
-                "for tenant %s, defaulting to shadow (no state write): %s",
-                tenant_id,
-                exc,
-            )
-            return False
-        if mode is None:
-            return False
-        return mode not in ("shadow", "disabled")
+    # ``_is_active_commit_mode`` now lives on :class:`OverlayAgentBase` so the
+    # compartment-state write (Req 7.1.2) and the replan apply share one
+    # definition of "this is a real commit". The behaviour is unchanged: the
+    # spec reserves the ``last_loaded_*`` / ``state`` write on
+    # ``truck_compartments`` for a successful assignment commit, never for
+    # shadow-mode evaluation, and resolution fails closed.
 
     # ------------------------------------------------------------------
     # Signal handling override — buffer DeliveryPriorityList messages
@@ -298,6 +286,25 @@ class CompartmentLoadingAgent(OverlayAgentBase):
             self._priority_buffer.append(signal)
         else:
             await super()._on_signal(signal)
+
+    def _pending_work_tenants(self) -> List[str]:
+        """Tenants with a buffered priority list awaiting a loading plan.
+
+        Required because :meth:`_on_signal` files every
+        :class:`DeliveryPriorityList` in ``_priority_buffer`` and nothing in
+        ``_signal_buffer``. Without this, ``monitor_cycle`` saw an empty
+        ``_signal_buffer`` and returned before ``evaluate()``, so on the
+        SignalBus path this agent buffered priority lists forever and never
+        produced a plan — silently, with no error and no log line.
+
+        Validates: Requirement 3.1
+        """
+        tenants: List[str] = []
+        for priority_list in self._priority_buffer:
+            tenant_id = getattr(priority_list, "tenant_id", None)
+            if tenant_id and tenant_id not in tenants:
+                tenants.append(tenant_id)
+        return tenants
 
     # ------------------------------------------------------------------
     # Core evaluation (Req 3.1–3.10)
@@ -325,11 +332,45 @@ class CompartmentLoadingAgent(OverlayAgentBase):
         self._priority_buffer.clear()
 
         if not priority_lists:
+            # No priority list was buffered, so there is nothing to load and the
+            # routing stage downstream will receive no plan. Silence here is
+            # what let a plan run with zero load plans report COMPLETE.
+            self.report_degradation(
+                build_degradation_reason(
+                    reason_code="no_priority_lists_buffered",
+                    kind=DEGRADATION_KIND_NO_INPUT,
+                    detail=(
+                        "the prioritization stage published no DeliveryPriority"
+                        "List, so no load plan could be built"
+                    ),
+                )
+            )
             return []
 
         # Use the most recent priority list
         priority_list = priority_lists[-1]
         tenant_id = priority_list.tenant_id
+
+        # The [-1] above discards everything else the buffer held. That is the
+        # long-standing contract (a newer list supersedes an older one), but
+        # when the discarded lists belong to *other* tenants it means their
+        # work is dropped without a trace. Say so.
+        dropped_tenants = sorted(
+            {
+                getattr(other, "tenant_id", None)
+                for other in priority_lists[:-1]
+            }
+            - {tenant_id, None}
+        )
+        if dropped_tenants:
+            logger.warning(
+                "CompartmentLoadingAgent: discarding buffered priority lists "
+                "for tenant(s) %s — this cycle acts only on the most recent "
+                "list (tenant %s). %d list(s) buffered in total.",
+                ", ".join(dropped_tenants),
+                tenant_id,
+                len(priority_lists),
+            )
         # Use pipeline run_id if available, otherwise fall back to priority list's run_id
         run_id = getattr(self, '_current_run_id', None) or priority_list.run_id
 
@@ -342,14 +383,55 @@ class CompartmentLoadingAgent(OverlayAgentBase):
             tenant_id, priority_list
         )
         if not delivery_requests:
+            # A priority list arrived but none of its entries resolved to a
+            # loadable request. Unlike the empty-buffer case above there *was*
+            # input, so this is a produced-nothing outcome: the orders exist and
+            # the stage turned none of them into demand.
+            logger.warning(
+                "CompartmentLoadingAgent: priority list for tenant %s yielded "
+                "no delivery requests from %d prioritized order(s)",
+                tenant_id,
+                len(getattr(priority_list, "priorities", []) or []),
+            )
+            self.report_degradation(
+                build_degradation_reason(
+                    reason_code="no_delivery_requests",
+                    kind=DEGRADATION_KIND_PRODUCED_NOTHING,
+                    detail=(
+                        "no prioritized order resolved to a loadable delivery "
+                        "request (missing product_code, gallons, or tank link)"
+                    ),
+                    priorities=len(getattr(priority_list, "priorities", []) or []),
+                    delivery_requests=0,
+                )
+            )
             return []
 
         # Step 3: Query available trucks with equipment check (Req 3.1, 3.2, 3.3)
         trucks = await self._query_trucks_with_equipment_check(tenant_id)
         if not trucks:
-            logger.info(
-                "CompartmentLoadingAgent: no trucks found for tenant %s",
+            # Demand exists and there is no truck to put it on. Reported as
+            # no_input rather than produced_nothing: the stage was not handed
+            # the fleet it needs, which is a provisioning gap, not a planning
+            # defect. Either way the run has no load plan and must not claim
+            # COMPLETE.
+            logger.warning(
+                "CompartmentLoadingAgent: no trucks found for tenant %s — "
+                "%d delivery request(s) cannot be loaded",
                 tenant_id,
+                len(delivery_requests),
+            )
+            self.report_degradation(
+                build_degradation_reason(
+                    reason_code="no_trucks_available",
+                    kind=DEGRADATION_KIND_NO_INPUT,
+                    detail=(
+                        "no truck passed the equipment check, so the "
+                        "outstanding delivery requests could not be loaded"
+                    ),
+                    delivery_requests=len(delivery_requests),
+                    trucks=0,
+                )
             )
             return []
 
@@ -456,6 +538,35 @@ class CompartmentLoadingAgent(OverlayAgentBase):
             run_id,
         )
 
+        # Trucks and demand were both present and the loop produced no plan —
+        # every truck fell out of one of the four ``continue`` branches above
+        # (infeasible, all assignments cross-contamination-blocked, all blocked
+        # by dyed-diesel rules). This is the loading equivalent of the route
+        # stage skipping every truck it was handed, and it is the one case here
+        # that is unambiguously produced_nothing.
+        if not proposals:
+            logger.error(
+                "CompartmentLoadingAgent: built 0 loading plans for tenant %s "
+                "from %d truck(s) and %d delivery request(s) (run_id=%s)",
+                tenant_id,
+                len(trucks),
+                len(delivery_requests),
+                run_id,
+            )
+            self.report_degradation(
+                build_degradation_reason(
+                    reason_code="no_feasible_loading_plan",
+                    kind=DEGRADATION_KIND_PRODUCED_NOTHING,
+                    detail=(
+                        "every truck was rejected as infeasible or had all of "
+                        "its assignments blocked by compatibility rules"
+                    ),
+                    trucks=len(trucks),
+                    delivery_requests=len(delivery_requests),
+                    loading_plans=0,
+                )
+            )
+
         return proposals
 
     # ------------------------------------------------------------------
@@ -557,8 +668,6 @@ class CompartmentLoadingAgent(OverlayAgentBase):
         }
 
         requests: List[DeliveryRequest] = []
-        # US gallons to liters conversion factor (NIST)
-        GALLONS_TO_LITERS = 3.785411784
 
         for order in fuel_orders:
             order_id = order.get("order_id", "")
@@ -676,7 +785,12 @@ class CompartmentLoadingAgent(OverlayAgentBase):
             requests.append(
                 DeliveryRequest(
                     station_id=station_id,
+                    order_id=order_id,
                     fuel_grade=fuel_grade,
+                    # The order's own product code, canonicalized. Carried
+                    # alongside the coarse grade so the solver can weigh the
+                    # exact product — DEF is 1.09 kg/L but maps to AGO.
+                    product_code=canonicalize_or_warn(product_code),
                     quantity_liters=round(quantity_liters, 2),
                     min_drop_liters=DEFAULT_MIN_DROP_LITERS,
                 )
@@ -974,12 +1088,12 @@ class CompartmentLoadingAgent(OverlayAgentBase):
                     })
                     continue
 
-            # Convert gallons to liters (1 gallon ≈ 3.785 liters)
-            quantity_liters = round(target_gallons * 3.785411784, 2)
+            quantity_liters = round(target_gallons * GALLONS_TO_LITERS, 2)
 
             requests.append(
                 DeliveryRequest(
                     station_id=customer_tank_id or order_id,
+                    order_id=order_id,
                     fuel_grade=fuel_grade,
                     quantity_liters=quantity_liters,
                     min_drop_liters=DEFAULT_MIN_DROP_LITERS,
@@ -1091,24 +1205,53 @@ class CompartmentLoadingAgent(OverlayAgentBase):
                 if not truck_id:
                     continue
 
-                # Parse allowed_grades with product code mapping support
-                allowed_grades_raw = source.get("allowed_grades", [])
-                allowed_grades = []
+                # Hydrate eligibility. Two fields can carry it:
+                #
+                #   allowed_product_codes — exact canonical US codes, authoritative
+                #   allowed_grades        — legacy four-value NG family
+                #
+                # A US product code found in ``allowed_grades`` is kept as an
+                # exact code rather than collapsed to its family grade. This
+                # replaces ``fuel_product_mapper.us_to_fuel_grade``, which
+                # mapped HEATING_OIL -> AGO and thereby widened a heating-oil
+                # compartment to accept taxed road diesel — two different tax
+                # classes (off_road vs road_diesel).
+                allowed_grades_raw = source.get("allowed_grades", []) or []
+                explicit_codes: List[str] = [
+                    str(c) for c in (source.get("allowed_product_codes") or [])
+                ]
+                allowed_grades: List[FuelGrade] = []
+
                 for g in allowed_grades_raw:
                     try:
-                        # Try direct FuelGrade enum parsing first
                         allowed_grades.append(FuelGrade(g))
+                        continue
                     except ValueError:
-                        # Try mapping from US product code
-                        from fuel.services.fuel_product_mapping import fuel_product_mapper
-                        mapped_grade = fuel_product_mapper.us_to_fuel_grade(g)
-                        if mapped_grade:
-                            allowed_grades.append(mapped_grade)
-                        else:
-                            logger.debug(
-                                "CompartmentLoadingAgent: unrecognized fuel grade '%s' for truck %s compartment %s",
-                                g, truck_id, source.get("compartment_id")
-                            )
+                        pass
+                    if is_known_product(g):
+                        canonical = canonicalize(g)
+                        if canonical not in explicit_codes:
+                            explicit_codes.append(canonical)
+                    else:
+                        logger.debug(
+                            "CompartmentLoadingAgent: unrecognized fuel grade '%s' "
+                            "for truck %s compartment %s",
+                            g, truck_id, source.get("compartment_id"),
+                        )
+
+                # ``allowed_grades`` is required (min_length=1). When the stored
+                # data was entirely US codes, derive each family so the model
+                # validates; ``allowed_product_codes`` stays authoritative for
+                # eligibility, so the derived grades cannot widen anything.
+                if not allowed_grades and explicit_codes:
+                    for code in explicit_codes:
+                        family = legacy_grade_for_product(code)
+                        if family and FuelGrade(family) not in allowed_grades:
+                            allowed_grades.append(FuelGrade(family))
+                    if not allowed_grades:
+                        # Every code is an isolate (e.g. DEF only). Any grade
+                        # satisfies the field; eligibility comes from the codes.
+                        allowed_grades = [FuelGrade.AGO]
 
                 if not allowed_grades:
                     logger.debug(
@@ -1122,6 +1265,7 @@ class CompartmentLoadingAgent(OverlayAgentBase):
                     truck_id=truck_id,
                     capacity_liters=source.get("capacity_liters", 0.0),
                     allowed_grades=allowed_grades,
+                    allowed_product_codes=explicit_codes or None,
                     position_index=source.get("position_index", 0),
                     tenant_id=tenant_id,
                 )
@@ -1704,13 +1848,13 @@ class CompartmentLoadingAgent(OverlayAgentBase):
         if total_liters <= 0.0:
             return
 
-        # Convert liters to canonical gallons for the counter. Using the
-        # exact NIST factor (1 gal = 3.785411784 L) keeps the counter
-        # stable across runs even when source units mix (the agent-side
-        # LoadingPlan is liters-valued, but the Redis counter and
+        # Convert liters to canonical gallons for the counter. Using the one
+        # shared NIST factor keeps the counter stable across runs even when
+        # source units mix (the agent-side LoadingPlan is liters-valued, but
+        # the Redis counter and
         # Supplier_Contract.minimum_lift_gallons_per_month are both in
         # gallons).
-        gallons = total_liters / 3.785411784
+        gallons = total_liters / GALLONS_TO_LITERS
 
         try:
             new_total = await service.record_lift(
@@ -1842,7 +1986,10 @@ class CompartmentLoadingAgent(OverlayAgentBase):
         )
         new_weight = round(
             sum(
-                _fuel_density_kg_per_liter(a.fuel_grade) * a.quantity_liters
+                fuel_density_kg_per_liter(
+                    product_code=a.product_code,
+                    fuel_grade=a.fuel_grade,
+                ) * a.quantity_liters
                 for a in kept_assignments
             ),
             2,
@@ -2000,7 +2147,10 @@ class CompartmentLoadingAgent(OverlayAgentBase):
         # is correct for mixed-catalog assignments.
         new_weight = round(
             sum(
-                _fuel_density_kg_per_liter(a.fuel_grade) * a.quantity_liters
+                fuel_density_kg_per_liter(
+                    product_code=a.product_code,
+                    fuel_grade=a.fuel_grade,
+                ) * a.quantity_liters
                 for a in kept_assignments
             ),
             2,
@@ -2269,41 +2419,17 @@ class CompartmentLoadingAgent(OverlayAgentBase):
 # ---------------------------------------------------------------------------
 
 
-_FUEL_DENSITY_CANONICAL: Dict[str, float] = {
-    # Canonical US product densities (kg/L). Matches the gasoline/diesel
-    # values used by compartment_solver.FUEL_DENSITY under the legacy NG
-    # codes so plans evaluated before and after Task 6.5 report the same
-    # total_weight_kg for the same assignments.
-    "DIESEL_2": 0.85,
-    "OFF_ROAD_DIESEL": 0.85,
-    "HEATING_OIL": 0.85,
-    "GASOLINE_REG": 0.74,
-    "GASOLINE_PREM": 0.74,
-    "ETHANOL_E85": 0.78,
-    "KEROSENE": 0.80,
-    "PROPANE": 0.51,
-    "DEF": 1.09,
-    # Legacy NG aliases carried forward so pre-canonicalization plans
-    # still compute a sensible weight even if the assignment slipped
-    # through without canonicalization.
-    "AGO": 0.85,
-    "PMS": 0.74,
-    "ATK": 0.80,
-    "LPG": 0.51,
-}
-
-
 def _fuel_density_kg_per_liter(fuel_grade: str) -> float:
-    """Return the fuel density for a canonical or legacy code.
+    """Density for a canonical product code or a legacy grade code.
 
-    Matches :data:`Agents.support.compartment_solver.FUEL_DENSITY` for
-    the legacy NG codes and extends coverage to every catalog product in
-    :data:`fuel.services.fuel_product_catalog.FUEL_PRODUCT_CATALOG`. An
-    unknown code falls back to 0.85 kg/L (the diesel default used by
-    ``compartment_solver``) so weight totals degrade gracefully.
+    Thin wrapper over :func:`Agents.support.compartment_solver.fuel_density_kg_per_liter`.
+    This module previously owned a second, near-identical density table. Only
+    this one had the correct DEF value, and it was reached only when
+    recomputing a plan's weight *after* assignments were stripped — the
+    feasibility gate used the other table, so the more heavily filtered a plan
+    was, the more accurate its weight became. There is now one table, in the
+    solver, and the gate uses it.
     """
-
-    if not isinstance(fuel_grade, str):
-        return 0.85
-    return _FUEL_DENSITY_CANONICAL.get(fuel_grade.strip().upper(), 0.85)
-
+    return fuel_density_kg_per_liter(
+        product_code=fuel_grade, fuel_grade=fuel_grade
+    )

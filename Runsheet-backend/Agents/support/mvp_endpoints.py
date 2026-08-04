@@ -13,18 +13,31 @@ Validates: Requirements 1.1–1.5, 2.1–2.6, 3.1–3.9, 4.1–4.7, 5.1–5.6, 6
 """
 
 import logging
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
 
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 
+from Agents.support.volume_units import (
+    liters_to_us_gallons,
+    us_gallons_to_liters,
+)
+from driver.middleware.idempotency import (
+    IdempotencyResult,
+    check_idempotency,
+    store_idempotency_response,
+)
+from driver.models import GeoPoint
 from errors.exceptions import (
     AppException,
+    ambiguous_volume_unit,
+    elasticsearch_unavailable,
     internal_error,
     resource_not_found,
     validation_error,
+    volume_quantities_required,
 )
 from errors.codes import ErrorCode
 from services.time_utils import utcnow
@@ -45,6 +58,7 @@ _exception_replanning_agent = None
 _fleet_registration_service = None
 _plan_execution_service = None
 _plan_execution_ws_manager = None
+_plan_dispatch_service = None
 
 router = APIRouter(prefix="/api/fuel/mvp", tags=["fuel-mvp"])
 
@@ -58,9 +72,20 @@ ROUTER_AUTH_POLICY = "jwt_required"
 
 
 class GeneratePlanResponse(BaseModel):
-    """Response for POST /plan/generate."""
+    """Response for POST /plan/generate.
+
+    ``status`` mirrors :class:`~Agents.support.fuel_distribution_pipeline.PipelineState`
+    verbatim, so it can now be ``"degraded"``: every stage ran without raising
+    but at least one produced nothing — the route stage skipping every truck it
+    was handed, for example. ``degraded`` and ``degradation_reasons`` carry that
+    outcome explicitly so a caller that only inspects a boolean, or only renders
+    a message, is not obliged to know the state vocabulary to avoid reporting a
+    silent skip as success.
+    """
     run_id: str
     status: str
+    degraded: bool = False
+    degradation_reasons: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class ReplanRequest(BaseModel):
@@ -95,12 +120,53 @@ class CompartmentConfigRequest(BaseModel):
 
 
 class CheckinRequest(BaseModel):
-    """Body for POST /plan/{plan_id}/checkin."""
+    """Body for POST /plan/{plan_id}/checkin.
+
+    US gallons is canonical on the driver-facing contract; litres stay canonical
+    in ``mvp_plan_executions``. Both volume fields are ``Optional`` so the
+    exactly-one rule can be enforced with named error codes
+    (``AMBIGUOUS_VOLUME_UNIT`` / ``VOLUME_QUANTITIES_REQUIRED``) rather than a
+    generic Pydantic "field required".
+
+    Validates: Requirements 6.2, 6.3, 6.8, 6.14, 6.15
+    """
     route_id: str = Field(..., description="Route identifier")
     station_id: str = Field(..., description="Station being checked into")
     sequence: int = Field(..., ge=0, description="Stop sequence number")
-    actual_quantities: Dict[str, float] = Field(
-        ..., description="Fuel grade to liters delivered mapping"
+    actual_quantities: Optional[Dict[str, float]] = Field(
+        default=None,
+        deprecated=True,
+        description=(
+            "DEPRECATED — fuel grade to LITRES delivered. Retains its litres "
+            "meaning for the whole deprecation window (R6.15). Use "
+            "actual_quantities_gallons."
+        ),
+    )
+    actual_quantities_gallons: Optional[Dict[str, float]] = Field(
+        default=None,
+        description="Fuel grade to US gallons delivered (R6.14).",
+    )
+    quantity_unit: Optional[Literal["us_gallon"]] = Field(
+        default=None,
+        description=(
+            "Required with actual_quantities_gallons. Only 'us_gallon' is "
+            "accepted, so the unit is asserted by the contract rather than by "
+            "a docstring (R6.14)."
+        ),
+    )
+    geotag: GeoPoint = Field(
+        ..., description="Check-in coordinates, latitude and longitude (R6.2)"
+    )
+    event_timestamp: str = Field(
+        ...,
+        description=(
+            "Client-asserted ISO 8601 timestamp of the check-in, persisted "
+            "alongside the server receipt timestamp (R6.3)"
+        ),
+    )
+    order_id: Optional[str] = Field(
+        default=None,
+        description="Fuel order this stop delivers; links the stop to its POD (R6.8)",
     )
 
 
@@ -140,6 +206,7 @@ def configure_mvp_endpoints(
     fleet_registration_service=None,
     plan_execution_service=None,
     plan_execution_ws_manager=None,
+    plan_dispatch_service=None,
 ) -> None:
     """Wire service dependencies into the MVP endpoints module.
 
@@ -148,13 +215,14 @@ def configure_mvp_endpoints(
     """
     global _pipeline, _es_service, _exception_replanning_agent
     global _fleet_registration_service, _plan_execution_service
-    global _plan_execution_ws_manager
+    global _plan_execution_ws_manager, _plan_dispatch_service
     _pipeline = pipeline
     _es_service = es_service
     _exception_replanning_agent = exception_replanning_agent
     _fleet_registration_service = fleet_registration_service
     _plan_execution_service = plan_execution_service
     _plan_execution_ws_manager = plan_execution_ws_manager
+    _plan_dispatch_service = plan_dispatch_service
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +266,15 @@ def _get_ws_manager():
     return _plan_execution_ws_manager
 
 
+def _get_dispatch_service():
+    if _plan_dispatch_service is None:
+        raise RuntimeError(
+            "FuelPlanDispatchService not configured. "
+            "The order, driver, and execution services must be available."
+        )
+    return _plan_dispatch_service
+
+
 # ---------------------------------------------------------------------------
 # POST /api/fuel/mvp/plan/generate (Req 8.1)
 # ---------------------------------------------------------------------------
@@ -216,10 +293,12 @@ async def generate_plan(
     tenant_id = tenant.tenant_id
     try:
         run_id = await pipeline.run(tenant_id=tenant_id)
-        status_info = await pipeline.get_status(run_id)
+        status_info = await pipeline.get_status(run_id) or {}
         return GeneratePlanResponse(
             run_id=run_id,
-            status=status_info["state"] if status_info else "pending",
+            status=status_info.get("state", "pending"),
+            degraded=bool(status_info.get("degraded", False)),
+            degradation_reasons=list(status_info.get("degradations") or []),
         )
     except Exception as e:
         logger.error("Failed to generate plan: %s", e)
@@ -246,7 +325,17 @@ async def get_plan(
 
     # Try plan_id first, then fall back to run_id (the generate endpoint
     # returns run_id, which is what the frontend passes here).
+    #
+    # Both lookups below used to swallow their exception and only log it. With
+    # Elasticsearch down every attempt failed, ``loading_plan`` stayed None, and
+    # the endpoint returned the same ``200 {"loading_plan": null,
+    # "route_plan": null}`` it returns for a plan id that simply does not exist.
+    # An outage was therefore indistinguishable from a miss — to the dispatcher
+    # UI, and to anyone reading the metrics. ``lookup_failed`` keeps that apart:
+    # "I looked and there is nothing" still answers 200, "I could not look"
+    # answers 503.
     loading_plan = None
+    lookup_failed = False
     for field in ("plan_id", "run_id"):
         loading_query = {
             "query": {
@@ -266,12 +355,31 @@ async def get_plan(
                 loading_plan = hits[0]["_source"]
                 break
         except Exception as e:
+            lookup_failed = True
             logger.error("Failed to query loading plan %s (field=%s): %s", plan_id, field, e)
+
+    if loading_plan is None and lookup_failed:
+        # Never report "no plan" on the strength of a query that did not run.
+        # 503 rather than 500: the fault is a dependency being unavailable, and
+        # the request is worth retrying unchanged.
+        raise elasticsearch_unavailable(
+            message=(
+                "The plan store could not be queried, so whether this plan "
+                "exists is unknown"
+            ),
+            details={"plan_id": plan_id, "index": "mvp_load_plans"},
+        )
 
     if loading_plan is None:
         # No loading plan found — could be a run_id for a pipeline that
         # completed without producing plans (e.g. no truck compartments
         # configured). Return an empty plan instead of 404.
+        #
+        # Deliberately 200, unlike the sibling ``/costs`` (400) and
+        # ``/outcomes`` (404) for an unknown id. Left as-is because the
+        # dispatcher UI polls this immediately after ``/plan/generate`` and
+        # relies on the empty body while the run is still producing; the bug
+        # here was only ever the outage case above.
         return {
             "plan_id": plan_id,
             "loading_plan": None,
@@ -280,6 +388,7 @@ async def get_plan(
 
     # Query associated route plan(s) using the same fallback strategy
     route_plan = None
+    route_lookup_failed = False
     for field in ("plan_id", "run_id"):
         route_query = {
             "query": {
@@ -305,7 +414,20 @@ async def get_plan(
                 }
                 break
         except Exception as e:
+            route_lookup_failed = True
             logger.error("Failed to query route plan for %s (field=%s): %s", plan_id, field, e)
+
+    if route_plan is None and route_lookup_failed:
+        # The loading plan was found, so the plan exists — but a null
+        # ``route_plan`` here would tell the caller it has no route, which is a
+        # claim this request cannot support. Same 503 as above.
+        raise elasticsearch_unavailable(
+            message=(
+                "The route store could not be queried, so this plan's routes "
+                "are unknown"
+            ),
+            details={"plan_id": plan_id, "index": "mvp_routes"},
+        )
 
     return {
         "plan_id": plan_id,
@@ -665,19 +787,19 @@ async def approve_plan(
 ):
     """Approve a plan, transitioning from draft to dispatched.
 
-    Validates plan is in "draft" status, updates to "dispatched" with
-    dispatcher_id and approved_at timestamp, then creates execution
-    records for each route associated with the plan.
+    Validates the plan, resolves its truck's active driver, links every fuel
+    order to the driver/asset/run, transitions the orders through the canonical
+    OrderService, creates route executions, and emits push/realtime delivery.
 
     The ``dispatcher_id`` is derived server-side from the verified
     session (``tenant.user_id``); it is never accepted from the client.
 
-    Returns 409 if plan is not in draft status.
+    Replaying an already-dispatched plan is idempotent. Other statuses return
+    409.
 
     Validates: Requirements 2.1, 2.3, 2.4
     """
     es = _get_es()
-    execution_service = _get_execution_service()
 
     tenant_id = tenant.tenant_id
     dispatcher_id = tenant.user_id
@@ -707,67 +829,39 @@ async def approve_plan(
         plan_doc = hits[0]["_source"]
         plan_status = plan_doc.get("status", "")
 
-        if plan_status != "draft" and plan_status != "proposed":
+        if plan_status not in ("draft", "proposed", "dispatched"):
             raise AppException(
                 error_code=ErrorCode.INVALID_STATUS_TRANSITION,
-                message=f"Plan {plan_id} is not in 'draft' or 'proposed' status (current: {plan_status}). "
-                       "Only draft/proposed plans can be approved.",
+                message=(
+                    f"Plan {plan_id} cannot be dispatched from status "
+                    f"{plan_status}."
+                ),
                 status_code=409,
                 details={"plan_id": plan_id, "current_status": plan_status},
             )
 
-        # Update plan status to dispatched
+        dispatch_result = await _get_dispatch_service().dispatch(
+            tenant_id=tenant_id,
+            plan_doc=plan_doc,
+            actor_user_id=dispatcher_id,
+        )
+        summary = dispatch_result.as_dict()
         now = utcnow().isoformat()
-        update_doc = {
-            "status": "dispatched",
-            "approved_by": dispatcher_id,
-            "approved_at": now,
-        }
-        await es.update_document("mvp_load_plans", plan_id, update_doc)
-
-        # Fetch routes for this plan and create execution records
-        route_query = {
-            "query": {
-                "bool": {
-                    "must": [
-                        {"term": {"tenant_id": tenant_id}},
-                        {"term": {"plan_id": plan_id}},
-                    ],
-                },
-            },
-            "size": 20,
-        }
-        route_resp = await es.search_documents("mvp_routes", route_query, 20)
-        route_hits = route_resp.get("hits", {}).get("hits", [])
-
-        executions_created = []
-        for route_hit in route_hits:
-            route_doc = route_hit["_source"]
-            route_id = route_doc.get("route_id", "")
-            stops = route_doc.get("stops", [])
-
-            execution = await execution_service.create_execution(
-                plan_id=plan_id,
-                route_id=route_id,
-                tenant_id=tenant_id,
-                stops=stops,
-            )
-            executions_created.append(execution["execution_id"])
 
         logger.info(
-            "Approved plan %s (tenant=%s, dispatcher=%s), created %d executions",
+            "Approved plan %s (tenant=%s, dispatcher=%s), dispatched %d orders",
             plan_id,
             tenant_id,
             dispatcher_id,
-            len(executions_created),
+            summary["newly_dispatched"],
         )
 
         return {
-            "plan_id": plan_id,
+            **summary,
             "status": "dispatched",
             "approved_by": dispatcher_id,
             "approved_at": now,
-            "executions_created": len(executions_created),
+            "executions_created": len(summary["execution_ids"]),
         }
 
     except AppException:
@@ -881,6 +975,57 @@ async def reject_plan(
 # POST /api/fuel/mvp/plan/{plan_id}/checkin (Req 3.1–3.7)
 # ---------------------------------------------------------------------------
 
+#: Unit stated on every volume this endpoint returns (R6.23).
+RESPONSE_VOLUME_UNIT = "us_gallon"
+
+
+def _resolve_checkin_liters(body: CheckinRequest) -> Dict[str, float]:
+    """Return the check-in's per-grade quantities in litres.
+
+    The single gallons→litres conversion on the check-in path. Exactly one of
+    the two volume fields must be present:
+
+    ==========================================  ======  ==========================
+    Condition                                   Status  Code
+    ==========================================  ======  ==========================
+    both supplied                               422     ``AMBIGUOUS_VOLUME_UNIT``
+    neither supplied                            422     ``VOLUME_QUANTITIES_REQUIRED``
+    gallons without ``quantity_unit``            422     ``VALIDATION_ERROR``
+    ==========================================  ======  ==========================
+
+    ``actual_quantities`` keeps its litres meaning and is passed through
+    untouched, so a client still on the deprecated field is not converted twice.
+
+    Validates: Requirements 6.14, 6.15, 6.16, 6.17, 6.18
+    """
+    has_liters = body.actual_quantities is not None
+    has_gallons = body.actual_quantities_gallons is not None
+
+    if has_liters and has_gallons:
+        raise ambiguous_volume_unit()
+    if not has_liters and not has_gallons:
+        raise volume_quantities_required()
+
+    if has_gallons:
+        if body.quantity_unit != RESPONSE_VOLUME_UNIT:
+            # 422 rather than the ``VALIDATION_ERROR`` default of 400: this is
+            # a semantic rejection of an otherwise well-formed body, and it
+            # sits beside the two named 422s above so a client sees one status
+            # for "your volume field is not usable".
+            raise AppException(
+                error_code=ErrorCode.VALIDATION_ERROR,
+                status_code=422,
+                message=(
+                    "actual_quantities_gallons requires "
+                    f"quantity_unit='{RESPONSE_VOLUME_UNIT}'."
+                ),
+                details={"quantity_unit": body.quantity_unit},
+            )
+        # The ONE call site. Everything downstream of here is litres (R6.18).
+        return us_gallons_to_liters(body.actual_quantities_gallons)
+
+    return dict(body.actual_quantities)
+
 
 @router.post("/plan/{plan_id}/checkin")
 async def driver_checkin(
@@ -888,22 +1033,38 @@ async def driver_checkin(
     body: CheckinRequest,
     request: Request,
     tenant: TenantContext = Depends(get_tenant_context),
+    idempotency: IdempotencyResult = Depends(check_idempotency),
 ):
     """Record a driver check-in at a stop.
 
-    Validates plan is "dispatched", validates stop not already completed,
-    records check-in via PlanExecutionService, broadcasts via WebSocket,
-    and transitions to "completed" if all stops are done (triggering
-    outcome computation and actual cost calculation).
+    Resolves the submitted volumes to litres through the single named boundary,
+    validates plan is "dispatched", validates the stop is not already completed,
+    records the check-in via PlanExecutionService, broadcasts via WebSocket,
+    and transitions to "completed" if all stops are done (triggering outcome
+    computation and actual cost calculation).
 
-    Returns 409 if plan is not dispatched or stop already completed.
+    Every volume on the response is US gallons with ``quantity_unit:
+    "us_gallon"`` (R6.23); no litre value is echoed. An ``X-Idempotency-Key``
+    header replays the stored response (R6.13).
 
-    Validates: Requirements 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7
+    Returns 409 if plan is not dispatched or the stop is already completed, 404
+    if the sequence names no stop, 403 if the driver is not assigned to the
+    plan's truck, and 422 for an ambiguous, absent, or unlabelled volume field.
+
+    Validates: Requirements 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, and
+    driver-mobile-app Requirements 6.4, 6.13, 6.14, 6.15, 6.16, 6.17, 6.18,
+    6.23
     """
+    if idempotency.is_replay:
+        return idempotency.replay_response()
+
     execution_service = _get_execution_service()
     ws_manager = _get_ws_manager()
 
     tenant_id = tenant.tenant_id
+
+    # Converted once, here, before record_checkin ever sees a number (R6.18).
+    actual_quantities_liters = _resolve_checkin_liters(body)
 
     try:
         # record_checkin validates plan status and stop state internally
@@ -912,8 +1073,12 @@ async def driver_checkin(
             route_id=body.route_id,
             station_id=body.station_id,
             sequence=body.sequence,
-            actual_quantities=body.actual_quantities,
+            actual_quantities=actual_quantities_liters,
             tenant_id=tenant_id,
+            driver_id=tenant.driver_id,
+            geotag={"lat": body.geotag.lat, "lon": body.geotag.lng},
+            event_timestamp=body.event_timestamp,
+            order_id=body.order_id,
         )
 
         # Broadcast execution update via WebSocket
@@ -960,16 +1125,41 @@ async def driver_checkin(
                 plan_id,
             )
 
-        return {
+        # Response boundary (R6.23): litres in, gallons out, no litre value
+        # echoed. This is the only other conversion on the path.
+        response_body = {
             "plan_id": plan_id,
             "route_id": body.route_id,
             "station_id": body.station_id,
             "sequence": body.sequence,
+            "quantity_unit": RESPONSE_VOLUME_UNIT,
+            "actual_quantities_gallons": liters_to_us_gallons(
+                result.get("actual_quantities") or {}
+            ),
+            "planned_quantities_gallons": liters_to_us_gallons(
+                result.get("planned_quantities") or {}
+            ),
+            "variance_gallons": liters_to_us_gallons(
+                result.get("quantity_variance") or {}
+            ),
+            "driver_id": result.get("driver_id"),
+            "order_id": result.get("order_id"),
+            "pod_id": result.get("pod_id"),
+            "event_timestamp": result.get("event_timestamp"),
+            "server_received_at": result.get("server_received_at"),
             "completed_stops": result["completed_stops"],
             "total_stops": result["total_stops"],
             "all_complete": result["all_complete"],
             "updated_at": result["updated_at"],
         }
+
+        # R6.13 — a repeated key returns exactly this body.
+        if idempotency.key:
+            await store_idempotency_response(
+                idempotency.key, tenant_id, response_body
+            )
+
+        return response_body
 
     except ValueError as e:
         # PlanExecutionService raises ValueError for state conflicts

@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from config.settings import get_settings
+from commerce.api._authz import require_commerce_staff
 from commerce.services.account_service import AccountService
 from commerce.services.credit_service import CreditService
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
@@ -113,6 +114,11 @@ async def require_accounts_enabled(
                 "message": "Commerce backbone is not enabled for this tenant",
             },
         )
+
+    # Accounts are a Tier 4 / staff surface: the customer master and its credit
+    # terms live in the ERP. Applied after the flag check so a tenant without the
+    # backbone still sees 404 rather than 403.
+    require_commerce_staff(tenant)
 
     return tenant
 

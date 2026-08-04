@@ -210,3 +210,9 @@ ipython_config.py
 !**/.coveragerc
 !pytest.ini
 !**/pytest.ini
+
+# =============================================================================
+# Throwaway / ad-hoc debug scripts (never commit)
+# =============================================================================
+Runsheet-backend/scripts/_tmp_*
+Runsheet-backend/_tmp_*

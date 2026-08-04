@@ -128,12 +128,25 @@ MVP_LOAD_PLANS_MAPPING = {
         "properties": {
             "plan_id":  {"type": "keyword"},
             "truck_id": {"type": "keyword"},
+            # Sourcing provenance carried on LoadingPlan. Declared here and in
+            # MVP_ADDITIVE_MAPPING_UPDATES so existing indices gain them too.
+            "contract_id": {"type": "keyword"},
+            "terminal_id": {"type": "keyword"},
             "assignments": {
                 "type": "nested",
                 "properties": {
                     "compartment_id":             {"type": "keyword"},
                     "station_id":                 {"type": "keyword"},
+                    "order_id":                   {"type": "keyword"},
                     "fuel_grade":                 {"type": "keyword"},
+                    # The exact catalog product. ``fuel_grade`` collapses the
+                    # nine products onto four legacy grades, which is why the
+                    # axle-weight density lookup keys on product_code instead
+                    # (DEF is 1.09 kg/L but maps to AGO at 0.85). This index is
+                    # dynamic:strict, so omitting the field here does not
+                    # degrade gracefully — every load-plan write is rejected
+                    # with strict_dynamic_mapping_exception.
+                    "product_code":               {"type": "keyword"},
                     "quantity_liters":            {"type": "float"},
                     "compartment_capacity_liters": {"type": "float"},
                 },
@@ -173,6 +186,7 @@ MVP_ROUTES_MAPPING = {
                 "type": "nested",
                 "properties": {
                     "station_id": {"type": "keyword"},
+                    "order_ids":  {"type": "keyword"},
                     "eta":        {"type": "date"},
                     "drop":       {"type": "object", "dynamic": True},
                     "sequence":   {"type": "integer"},
@@ -217,6 +231,23 @@ MVP_ROUTES_MAPPING = {
                     "original_eta":               {"type": "date"},
                     "next_eligible_window_start": {"type": "date"},
                     "next_eligible_window_end":   {"type": "date"},
+                },
+            },
+            # Req 5.2.3 — orders whose delivery window cannot be satisfied.
+            # ``RoutePlan.window_misses`` shipped without a mapping entry, and
+            # this index is dynamic:strict, so ES rejected the *whole document*:
+            # every route the agent built was discarded with a 400 while the
+            # agent logged "produced N route plans" and the run reported
+            # complete. Adding a field to a model is not free when the target
+            # mapping is strict.
+            "window_misses": {
+                "type": "nested",
+                "properties": {
+                    "order_id":               {"type": "keyword"},
+                    "reason":                 {"type": "keyword"},
+                    "delivery_window_start":  {"type": "date"},
+                    "delivery_window_end":    {"type": "date"},
+                    "detail":                 {"type": "text"},
                 },
             },
         },
@@ -350,11 +381,19 @@ MVP_PLAN_OUTCOMES_MAPPING = {
                     "quantity_variance_pct":  {"type": "float"},
                     "time_variance_minutes":  {"type": "float"},
                     "status":                {"type": "keyword"},
+                    # --- driver-mobile-app Requirement 6.20 / 6.22 ---
+                    # Unit discriminator for the persisted variance. Written as
+                    # "liter" because both variance operands are litres-typed;
+                    # declared before first write because the mapping is
+                    # ``dynamic: strict``.
+                    "variance_unit":         {"type": "keyword"},   # "liter"
                 },
             },
             "aggregate_quantity_variance_pct":  {"type": "float"},
             "aggregate_time_variance_minutes":  {"type": "float"},
             "missed_stops_count":              {"type": "integer"},
+            # Document-level counterpart of the per-stop discriminator (R6.20).
+            "variance_unit":  {"type": "keyword"},   # "liter"
             "tenant_id":      {"type": "keyword"},
             "timestamp":      {"type": "date"},
             "status":         {"type": "keyword"},
@@ -376,6 +415,19 @@ TRUCK_COMPARTMENTS_MAPPING = {
             "truck_id":       {"type": "keyword"},
             "capacity_liters": {"type": "float"},
             "allowed_grades":  {"type": "keyword"},
+            # Exact canonical US product codes (DIESEL_2, HEATING_OIL, DEF...).
+            # ``allowed_grades`` above holds the legacy four-value NG family and
+            # cannot distinguish road diesel from dyed heating oil, which carry
+            # different tax classes. Nullable: compartments indexed before this
+            # field fall back to family eligibility (see
+            # ``compartment_solver.compartment_accepts``).
+            #
+            # This mapping is required, not optional — the index is
+            # ``dynamic: strict``, so a compartment carrying
+            # ``allowed_product_codes`` without it is rejected at write time
+            # with ``strict_dynamic_mapping_exception`` rather than silently
+            # dropping the field.
+            "allowed_product_codes": {"type": "keyword"},
             "position_index":  {"type": "integer"},
             "depot_city":      {"type": "keyword"},
             "depot_location":  {"type": "geo_point"},
@@ -431,6 +483,24 @@ MVP_PLAN_EXECUTIONS_MAPPING = {
                     "actual_arrival":      {"type": "date"},
                     "planned_quantities":  {"type": "object", "dynamic": True},
                     "actual_quantities":   {"type": "object", "dynamic": True},
+                    # --- driver-mobile-app Requirement 6 (Phase 1) ---
+                    # All nine additions are nullable. The mapping is
+                    # ``dynamic: strict``, so declaring them before the first
+                    # write is the entire migration: a stop record carrying no
+                    # ``actual_quantities_unit`` is read as litres (R6.21), which
+                    # is what pre-feature documents already mean, so no backfill
+                    # runs.
+                    "actual_quantities_unit": {"type": "keyword"},   # "liter" (R6.21, R6.22)
+                    "driver_id":              {"type": "keyword"},   # acting driver (R6.1)
+                    "geotag":                 {"type": "geo_point"},  # (R6.2)
+                    "event_timestamp":        {"type": "date"},      # client-asserted (R6.3)
+                    "server_received_at":     {"type": "date"},      # (R6.3)
+                    "pod_id":                 {"type": "keyword"},   # (R6.8)
+                    "order_id":               {"type": "keyword"},
+                    # Keys are fuel grades, so ``dynamic: True`` matching the
+                    # planned_quantities / actual_quantities treatment above.
+                    "quantity_variance":      {"type": "object", "dynamic": True},  # per-grade litres (R6.9)
+                    "variance_unit":          {"type": "keyword"},   # "liter" (R6.20)
                 },
             },
             "completed_stops":  {"type": "integer"},
@@ -483,6 +553,68 @@ MVP_INDEX_MAPPINGS = {
     MVP_COST_CONFIGS_INDEX: MVP_COST_CONFIGS_MAPPING,
 }
 
+# Additive mapping upgrades for indices created before exact order linkage was
+# introduced.  Both parent fields are already ``nested``; Elasticsearch permits
+# adding child properties in place, so no reindex or destructive recreation is
+# required.
+MVP_ADDITIVE_MAPPING_UPDATES = {
+    MVP_LOAD_PLANS_INDEX: {
+        "properties": {
+            "contract_id": {"type": "keyword"},
+            "terminal_id": {"type": "keyword"},
+            "assignments": {
+                "type": "nested",
+                "properties": {
+                    "order_id": {"type": "keyword"},
+                    # Added with the product-level density fix. It MUST be
+                    # listed here as well as in MVP_LOAD_PLANS_MAPPING: the
+                    # create-time mapping only applies to a brand-new index,
+                    # and every existing cluster already has mvp_load_plans.
+                    # Because the index is dynamic:strict, an undeclared field
+                    # does not get ignored — the whole load-plan write is
+                    # rejected, the agent logs and continues, and the pipeline
+                    # still reports "complete" with nothing persisted.
+                    "product_code": {"type": "keyword"},
+                },
+            }
+        }
+    },
+    MVP_ROUTES_INDEX: {
+        "properties": {
+            "stops": {
+                "type": "nested",
+                "properties": {"order_ids": {"type": "keyword"}},
+            },
+            # Declaring ``window_misses`` in MVP_ROUTES_MAPPING alone reaches
+            # brand-new indices only; every existing cluster keeps the strict
+            # mapping it was created with and keeps rejecting the field. It has
+            # to be here too, which is the whole reason this dict exists.
+            "window_misses": {
+                "type": "nested",
+                "properties": {
+                    "order_id":              {"type": "keyword"},
+                    "reason":                {"type": "keyword"},
+                    "delivery_window_start": {"type": "date"},
+                    "delivery_window_end":   {"type": "date"},
+                    "detail":                {"type": "text"},
+                },
+            },
+        }
+    },
+    TRUCK_COMPARTMENTS_INDEX: {
+        "properties": {
+            # Added with the US product-catalog segregation fix. Same reasoning
+            # as ``product_code`` above, and the same trap: declaring it only
+            # in TRUCK_COMPARTMENTS_MAPPING reaches brand-new indices and no
+            # existing cluster. ``truck_compartments`` is dynamic:strict, so a
+            # compartment carrying ``allowed_product_codes`` against an
+            # already-created index is rejected in full — the operator loses
+            # the whole compartment record, not just the new field.
+            "allowed_product_codes": {"type": "keyword"},
+        }
+    },
+}
+
 
 def setup_mvp_indices(es_service) -> None:
     """Create MVP ES indices if they don't already exist.
@@ -506,5 +638,14 @@ def setup_mvp_indices(es_service) -> None:
                 logger.info(f"Created MVP index: {index_name}")
             else:
                 logger.info(f"MVP index already exists: {index_name}")
+                additive_update = MVP_ADDITIVE_MAPPING_UPDATES.get(index_name)
+                if additive_update:
+                    es_client.indices.put_mapping(
+                        index=index_name,
+                        body=additive_update,
+                    )
+                    logger.info(
+                        "Applied additive MVP mapping update: %s", index_name
+                    )
         except Exception:
             logger.exception("Failed to create MVP index %s", index_name)

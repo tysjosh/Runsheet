@@ -98,6 +98,7 @@ from integrations.provider_catalog import (
     ProviderCatalogEntry,
     register_provider,
 )
+from services.unit_conversion import GAL_TO_L
 
 logger = logging.getLogger(__name__)
 
@@ -185,11 +186,12 @@ TLS_IN_TANK_INVENTORY_COMMAND: bytes = b"I20100"
 #: ``fuel.services.fuel_es_mappings``.
 FUEL_STATIONS_INDEX: str = "fuel_stations"
 
-#: US-gallon → liter conversion. Kept here to avoid importing
-#: :mod:`services.unit_conversion` just for a single constant (the
-#: unit_conversion module pulls in additional fuel-ops imports that
-#: blow up unit-test bootstrap time).
-_GAL_TO_L: float = 3.785411784
+#: US-gallon → liter conversion, bound to the platform factor rather than
+#: redeclared. An earlier comment here claimed importing
+#: :mod:`services.unit_conversion` dragged in fuel-ops modules and slowed
+#: unit-test bootstrap; that was not true — the module imports only
+#: ``typing`` and its package ``__init__`` is empty.
+_GAL_TO_L: float = GAL_TO_L
 
 #: ``IntegrationInstance.config`` key carrying the per-instance tank
 #: mapping. Shape: ``{"<vendor_tank_index>": {"target":
@@ -1266,6 +1268,29 @@ class VeederRootConnector(IntegrationConnector):
         # when no repo was injected (e.g. during bootstrap test runs).
         if self._customer_tank_repo is not None:
             try:
+                current = await self._customer_tank_repo.get(
+                    self._tenant_id, customer_tank_id
+                )
+                if current is None:
+                    return False
+                current_reading_at = getattr(current, "last_reading_at", None)
+                # Some repository adapters created before tank telemetry was
+                # introduced do not expose ``last_reading_at``. Treat that as
+                # an unknown prior reading rather than blocking a valid update.
+                if not isinstance(current_reading_at, datetime):
+                    current_reading_at = None
+                if current_reading_at is not None:
+                    if current_reading_at.tzinfo is None:
+                        current_reading_at = current_reading_at.replace(
+                            tzinfo=timezone.utc
+                        )
+                    normalized_incoming = reading_at
+                    if normalized_incoming.tzinfo is None:
+                        normalized_incoming = normalized_incoming.replace(
+                            tzinfo=timezone.utc
+                        )
+                    if normalized_incoming <= current_reading_at:
+                        return False
                 updated = await self._customer_tank_repo.update(
                     self._tenant_id,
                     customer_tank_id,
@@ -1287,6 +1312,29 @@ class VeederRootConnector(IntegrationConnector):
 
         if self._es is None:
             return False
+        current_doc = await self._es.get_document(
+            self._customer_tanks_index, customer_tank_id
+        )
+        if current_doc:
+            current_reading_raw = current_doc.get("last_reading_at")
+            if current_reading_raw:
+                try:
+                    current_reading = datetime.fromisoformat(
+                        str(current_reading_raw).replace("Z", "+00:00")
+                    )
+                    if current_reading.tzinfo is None:
+                        current_reading = current_reading.replace(
+                            tzinfo=timezone.utc
+                        )
+                    normalized_incoming = reading_at
+                    if normalized_incoming.tzinfo is None:
+                        normalized_incoming = normalized_incoming.replace(
+                            tzinfo=timezone.utc
+                        )
+                    if normalized_incoming <= current_reading:
+                        return False
+                except (TypeError, ValueError):
+                    pass
         partial = {
             "current_level_gallons": volume,
             "last_reading_at": _iso(reading_at),

@@ -18,7 +18,11 @@ from .container import ServiceContainer
 logger = logging.getLogger("bootstrap")
 
 # Ordered list of bootstrap modules — dependency order matters.
-_BOOT_ORDER = ["core", "persistence", "middleware", "ops", "fuel", "inventory", "scheduling", "notifications", "compliance", "agents", "integrations"]
+#
+# ``driver`` sits after ``agents`` and before ``integrations``: ``redis_client``
+# is not registered until ``bootstrap/agents.py``, so this is the earliest point
+# at which the driver surface can be wired completely and once.
+_BOOT_ORDER = ["core", "persistence", "middleware", "ops", "fuel", "inventory", "scheduling", "notifications", "compliance", "agents", "driver", "integrations"]
 
 
 async def initialize_all(app, container: ServiceContainer) -> None:
@@ -57,6 +61,20 @@ async def initialize_all(app, container: ServiceContainer) -> None:
             raise
         logger.warning(
             "Post-initialization assertion failed: %s", exc
+        )
+
+    try:
+        from bootstrap.core import assert_driver_surface_wired
+
+        await assert_driver_surface_wired(container)
+    except Exception as exc:
+        # Re-raise configuration errors so the app fails loudly.
+        from bootstrap.core import DriverBootstrapMisconfigurationError
+
+        if isinstance(exc, DriverBootstrapMisconfigurationError):
+            raise
+        logger.warning(
+            "Post-initialization driver assertion failed: %s", exc
         )
 
 

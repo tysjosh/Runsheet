@@ -1,0 +1,6 @@
+source_system,external_tank_id,customer_tank_id,customer_id,customer_type,fuel_type,fuel_product_code,capacity_gallons,current_level_gallons,last_reading_at,location_lat,location_lon,zip_code,k_factor,use_case,status
+PetroERP,T-100,tank-100,CUST-FARM-01,commercial,diesel,AGO,1000,275,2026-07-29T12:00:00Z,39.7684,-86.1581,46201,,farm,active
+PetroERP,T-200,tank-200,CUST-APT-02,keep_full,propane,PROPANE,500,110,2026-07-29T12:05:00Z,39.7795,-86.1470,46202,0.8,commercial_heat,active
+PetroERP,T-300,tank-300,CUST-HOSP-03,auto_fill,generator_fuel,DIESEL_2,750,390,2026-07-29T12:10:00Z,39.7904,-86.1490,46204,,generator,active
+PetroERP,T-400,tank-400,CUST-HOME-04,will_call,heating_oil,HEATING_OIL,275,90,2026-07-29T12:15:00Z,40.7357,-74.1724,07001,,residential_heat,active
+PetroERP,T-500,tank-500,CUST-FLEET-05,commercial,gasoline,GASOLINE_REG,2000,640,2026-07-29T12:20:00Z,39.7173,-86.2944,46241,,other,active

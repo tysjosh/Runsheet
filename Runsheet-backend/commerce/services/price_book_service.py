@@ -30,6 +30,10 @@ from commerce.services.commerce_es_mappings import (
 from errors.exceptions import conflict, resource_not_found, validation_error
 from ops.middleware.tenant_guard import inject_tenant_filter
 from services.elasticsearch_service import ElasticsearchService
+from services.money import (
+    legacy_unit_price_cents,
+    unit_price_micros_from_record,
+)
 from services.time_utils import utcnow
 
 logger = logging.getLogger(__name__)
@@ -123,23 +127,25 @@ class PriceBookService:
             else:
                 product_code = str(product_code).strip()
 
-            # Validate unit_price_cents
-            unit_price_cents = rule_data.get("unit_price_cents")
-            if unit_price_cents is None:
+            # Resolve an exact micro-dollar rate. Legacy rules with only whole
+            # cents are losslessly upgraded; precise rules may additionally
+            # provide unit_price_micros.
+            try:
+                unit_price_micros = unit_price_micros_from_record(rule_data)
+            except ValueError as exc:
                 raise validation_error(
-                    f"Rule {idx}: unit_price_cents is required",
+                    f"Rule {idx}: invalid unit price",
+                    details={"rule_index": idx, "error": str(exc)},
+                ) from exc
+            if unit_price_micros is None:
+                raise validation_error(
+                    (
+                        f"Rule {idx}: unit_price_cents or "
+                        "unit_price_micros is required"
+                    ),
                     details={"rule_index": idx},
                 )
-            if not isinstance(unit_price_cents, int):
-                raise validation_error(
-                    f"Rule {idx}: unit_price_cents must be an integer",
-                    details={"rule_index": idx, "unit_price_cents": unit_price_cents},
-                )
-            if unit_price_cents < 0:
-                raise validation_error(
-                    f"Rule {idx}: unit_price_cents must be >= 0",
-                    details={"rule_index": idx, "unit_price_cents": unit_price_cents},
-                )
+            unit_price_cents = legacy_unit_price_cents(unit_price_micros)
 
             # Validate effective window
             effective_from = rule_data.get("effective_from")
@@ -201,6 +207,7 @@ class PriceBookService:
                 "effective_to": _serialize_datetime(effective_to) if effective_to else None,
                 "min_quantity_gallons": rule_data.get("min_quantity_gallons"),
                 "unit_price_cents": unit_price_cents,
+                "unit_price_micros": unit_price_micros,
                 "created_at": _serialize_datetime(rule_data.get("created_at") or now),
             }
             validated.append(validated_rule)

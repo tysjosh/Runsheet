@@ -14,10 +14,12 @@ integration lands here. The pipeline enforces:
        schema before ES upsert.
     6. Atomic upsert of fuel_orders_current + fuel_order_events.
     7. /ws/orders broadcast.
-    8. Deprecation dual-write to shipments_current / shipment_events /
-       riders_current when the feature flag is in ``shadow`` or
-       ``active_gated``.
-    9. Idempotency mark_processed on success.
+    8. Idempotency mark_processed on success.
+
+Step 8 used to be the deprecation dual-write into shipments_current /
+riders_current (plus the legacy /ws/ops dual-broadcast and the
+shadow-mode divergence comparison). The legacy surface is being dropped,
+so that whole step is gone and mark_processed moved up.
 
 Adapter exceptions are caught and routed to the ``ops_poison_queue`` via
 the existing :class:`PoisonQueueService` — they never propagate to the
@@ -26,24 +28,27 @@ caller.
 Constructor deps:
     es_service, intake_channel_repo, adapter_registry, idempotency_service,
     feature_flag_service, poison_queue_service, ws_manager, credentials_vault,
-    customer_tank_repo, optional legacy_dual_writer, optional clock.
+    customer_tank_repo, optional clock.
 
 Validates: Requirements 1.1.6, 2.1, 2.2, 2.3, 9.1.3.
 """
 from __future__ import annotations
 
-import hashlib
-import hmac as hmac_mod
 import json
+import hashlib
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
+
+from pydantic import ValidationError
 
 from errors.exceptions import (
     channel_disabled,
     invalid_customer_tank_ref,
     missing_client_event_id,
+    order_payload_invalid,
     security_tenant_id_mismatch,
     webhook_signature_invalid,
 )
@@ -54,6 +59,7 @@ from fuel.intake.adapter_base import (
 )
 from fuel.order_models import FuelOrder
 from fuel.services.order_id_generator import mint_event_id, mint_order_id
+from ops.webhooks.hmac_util import verify_hmac_sha256_hex
 from fuel.services.order_metrics import (
     orders_adapter_errors_total,
     orders_intake_latency_seconds,
@@ -63,6 +69,67 @@ from fuel.services.order_metrics import (
 from services.time_utils import utcnow
 
 logger = logging.getLogger(__name__)
+
+
+def extract_invalid_fields(exc: ValidationError) -> List[str]:
+    """Name the offending fields/rules for a value-level ``ValidationError``.
+
+    Used for the value violations ``FuelOrder.model_validate`` surfaces at step
+    (j). Two error shapes are handled:
+
+        * **field-level** errors (e.g. ``ship_to_lat`` out of range) carry a
+          non-empty ``loc`` — the dotted field path is used.
+        * **model-level** validator errors (e.g. ``invalid_delivery_window``)
+          carry an empty ``loc``; the ``ValueError`` code from the message is
+          used instead so the caller learns *which rule* failed.
+
+    Only field names / rule codes are returned — never submitted values, so no
+    customer address, phone, or credential can leak into an error response.
+
+    Lives here rather than in the Dinee voice bridge, which is where it was
+    first written. The bridge is one of five callers of the pipeline; the
+    validation it describes happens inside the pipeline, so the pipeline owns
+    the helper and the bridge imports it. Putting it the other way round would
+    have every channel depend on the voice module to report its own errors.
+    """
+    out: List[str] = []
+    for err in exc.errors():
+        loc = ".".join(str(part) for part in err.get("loc", ()))
+        if loc:
+            out.append(loc)
+            continue
+        # Model-level validator: recover the ValueError code from the message
+        # (pydantic v2 renders it as "Value error, <code>").
+        msg = str(err.get("msg", "")).strip()
+        code = msg.split("Value error,", 1)[-1].strip() if "Value error," in msg else msg
+        out.append(code or "value_error")
+    # De-duplicate while preserving order.
+    seen: set = set()
+    deduped: List[str] = []
+    for f in out:
+        if f not in seen:
+            seen.add(f)
+            deduped.append(f)
+    return deduped
+
+
+def _optional_utc_datetime(value: Any) -> Optional[datetime]:
+    """Normalize an optional source timestamp for chronology comparisons."""
+
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        try:
+            parsed = datetime.fromisoformat(
+                str(value).strip().replace("Z", "+00:00")
+            )
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 # ---------------------------------------------------------------------------
@@ -87,6 +154,17 @@ class IntakeResponse:
     order_id: Optional[str] = None
 
 
+@dataclass
+class _CsvImportChannel:
+    """Ephemeral authenticated channel used by the tenant CSV importer."""
+
+    channel_id: str
+    tenant_id: str
+    channel_type: str = "csv"
+    supported_schema_versions: List[str] = field(default_factory=lambda: ["1.0"])
+    enabled: bool = True
+
+
 # ---------------------------------------------------------------------------
 # Pipeline
 # ---------------------------------------------------------------------------
@@ -98,7 +176,7 @@ class OrderIntakePipeline:
     Every webhook, dispatcher POST, bulk upload, CSV import, and future
     partner integration lands here. The pipeline enforces channel
     resolution, authentication, idempotency, schema validation, adapter
-    dispatch, model validation, persistence, broadcast, and dual-write.
+    dispatch, model validation, persistence, and broadcast.
     """
 
     def __init__(
@@ -113,7 +191,10 @@ class OrderIntakePipeline:
         ws_manager: Any,
         credentials_vault: Any,
         customer_tank_repo: Any,
-        legacy_dual_writer: Optional[Any] = None,
+        # ``legacy_dual_writer`` was removed with the legacy mirror shim.
+        # ``legacy_ws_manager`` is retained only because bootstrap and
+        # several callers still pass it; the dual-broadcast that consumed
+        # it went out with the mirror.
         legacy_ws_manager: Optional[Any] = None,
         clock: Optional[Callable] = None,
     ) -> None:
@@ -126,7 +207,6 @@ class OrderIntakePipeline:
         self._ws_manager = ws_manager
         self._credentials_vault = credentials_vault
         self._customer_tank_repo = customer_tank_repo
-        self._legacy_dual_writer = legacy_dual_writer
         self._legacy_ws_manager = legacy_ws_manager
         self._clock = clock or utcnow
 
@@ -157,6 +237,11 @@ class OrderIntakePipeline:
         """Inject the credentials vault after construction (see
         :meth:`set_intake_channel_repo` for the boot-order rationale)."""
         self._credentials_vault = vault
+
+    def set_customer_tank_repo(self, repo: Any) -> None:
+        """Late-inject the customer-tank repository for import reference checks."""
+
+        self._customer_tank_repo = repo
 
     # ------------------------------------------------------------------
     # Hook registration
@@ -194,6 +279,9 @@ class OrderIntakePipeline:
         body: bytes,
         signature: str,
         request_id: str,
+        *,
+        idempotency_key_override: Optional[str] = None,
+        schema_version_override: Optional[str] = None,
     ) -> IntakeResponse:
         """Ingest an order from an HMAC-signed webhook.
 
@@ -210,6 +298,17 @@ class OrderIntakePipeline:
             body: The raw request body bytes.
             signature: The ``X-Runsheet-Signature`` header value.
             request_id: A unique request/trace identifier.
+            idempotency_key_override: When provided, this value is used as the
+                tenant-scoped idempotency key (``client_event_id``) instead of
+                the payload-derived ``event_id``. Additive; used by the Dinee
+                voice bridge to map the ``X-Idempotency-Key`` header onto the
+                pipeline. When ``None`` (the default), behavior is unchanged.
+            schema_version_override: When provided, this value is used for the
+                schema-version whitelist check and adapter dispatch instead of
+                the payload-derived ``schema_version``. Additive; used by the
+                Dinee voice bridge to map the ``X-Schema-Version`` header onto
+                the pipeline. When ``None`` (the default), behavior is
+                unchanged.
 
         Returns:
             An :class:`IntakeResponse` with the outcome.
@@ -255,7 +354,12 @@ class OrderIntakePipeline:
             payload=payload,
             request_id=request_id,
             actor_user_id=None,
-            client_event_id=payload.get("event_id"),
+            client_event_id=(
+                idempotency_key_override
+                if idempotency_key_override is not None
+                else payload.get("event_id")
+            ),
+            schema_version_override=schema_version_override,
         )
 
     async def ingest_dispatcher(
@@ -305,6 +409,44 @@ class OrderIntakePipeline:
             client_event_id=client_event_id,
         )
 
+    async def ingest_csv(
+        self,
+        *,
+        tenant: Any,
+        payload: Dict[str, Any],
+        request_id: str,
+        client_event_id: str,
+        import_batch_id: str,
+        csv_row_number: int,
+    ) -> IntakeResponse:
+        """Ingest one authenticated CSV row through the canonical pipeline.
+
+        CSV uploads are already protected by the tenant session, so they do not
+        need a persisted HMAC intake channel. The ephemeral channel selects the
+        CSV adapter while the same validation, idempotency, event, websocket,
+        and canonical repository path used by partner webhooks remains intact.
+        """
+
+        if not client_event_id:
+            raise missing_client_event_id(details={"path": "csv_import"})
+
+        tenant_id = getattr(tenant, "tenant_id", None) or tenant.get("tenant_id")
+        user_id = getattr(tenant, "user_id", None) or tenant.get("user_id")
+        csv_payload = dict(payload)
+        csv_payload["import_batch_id"] = import_batch_id
+        csv_payload["csv_row_number"] = csv_row_number
+        channel = _CsvImportChannel(
+            channel_id="csv-import",
+            tenant_id=tenant_id,
+        )
+        return await self._ingest_common(
+            channel=channel,
+            payload=csv_payload,
+            request_id=request_id,
+            actor_user_id=user_id,
+            client_event_id=client_event_id,
+        )
+
     # ------------------------------------------------------------------
     # Core pipeline logic
     # ------------------------------------------------------------------
@@ -316,15 +458,17 @@ class OrderIntakePipeline:
         request_id: str,
         actor_user_id: Optional[str],
         client_event_id: Optional[str],
+        schema_version_override: Optional[str] = None,
     ) -> IntakeResponse:
         """Shared pipeline logic for all intake paths.
 
         Steps:
             (0) Check ``overlay.order_intake_pipeline`` feature flag state:
-                - ``disabled``: short-circuit to the legacy path.
-                - ``shadow``: dual-write and compare (divergence checker).
-                - ``active_gated``: write to new path + dual-mirror to legacy.
-                - ``active_auto``: write only to the new path.
+                - ``disabled``: short-circuit (no legacy path remains).
+                - every other state: write to the new path.
+                NB: ``shadow`` / ``active_gated`` used to additionally
+                dual-write and compare against the legacy surface. With
+                the legacy mirror retired they behave like ``active_auto``.
             (d) Check tenant-scoped idempotency.
             (e) Validate schema version against channel whitelist.
             (f) Dispatch to the matching adapter.
@@ -335,8 +479,11 @@ class OrderIntakePipeline:
             (k) Call ``FuelOrderRepository.upsert_with_last_event_timestamp``.
             (l) Append each event via ``append_event``.
             (m) Broadcast through ``OrdersWSManager``.
-            (n) Dual-write through ``LegacyDualWriter`` (if enabled).
-            (o) Mark processed via idempotency service.
+            (n) Mark processed via idempotency service.
+
+        Step (n) was the ``LegacyDualWriter`` dual-write; it has been
+        removed along with the legacy mirror, so mark_processed took
+        over the letter.
         """
         tenant_id = channel.tenant_id
         ingest_start = time.monotonic()
@@ -344,10 +491,14 @@ class OrderIntakePipeline:
         # (0) Check overlay.order_intake_pipeline feature flag state
         overlay_state = await self._get_overlay_state(tenant_id)
 
-        # ``disabled`` → short-circuit to the legacy path entirely.
-        # The caller (webhook receiver / dispatcher endpoint) is
-        # responsible for routing to the legacy handler when this
-        # response is returned.
+        # ``disabled`` → short-circuit. The caller is responsible for deciding
+        # what to do with a ``legacy_passthrough`` response.
+        #
+        # NB: the only caller that ever had a legacy handler to fall back to was
+        # the ``POST /webhooks/dinee`` receiver, which has been removed. Every
+        # remaining caller treats this as "not processed", so with the flag
+        # ``disabled`` an order is simply not ingested rather than being written
+        # by an older path.
         if overlay_state == "disabled":
             return IntakeResponse(
                 event_id=client_event_id or "",
@@ -357,8 +508,14 @@ class OrderIntakePipeline:
         # Generate or use the client-supplied event_id for idempotency
         event_id = client_event_id or mint_event_id()
 
-        # (e) Extract schema version early for metrics
-        schema_version = payload.get("schema_version", "1.0")
+        # (e) Extract schema version early for metrics. When a caller supplies
+        # a schema_version_override (e.g. the Dinee voice bridge mapping the
+        # X-Schema-Version header), it takes precedence over the payload value.
+        schema_version = (
+            schema_version_override
+            if schema_version_override is not None
+            else payload.get("schema_version", "1.0")
+        )
         intake_channel_type = getattr(channel, "channel_type", "unknown")
 
         # Record intake received metric
@@ -426,6 +583,28 @@ class OrderIntakePipeline:
             result.order_doc, context, event_id
         )
 
+        # ERP files can contain a newer snapshot of an order imported earlier.
+        # Reuse the same source-linked order_id, preserve lifecycle state, and
+        # refuse an older/equal source version before it can overwrite current
+        # dispatcher or driver work.
+        csv_upsert_state = await self._prepare_csv_source_upsert(
+            order_doc=order_doc,
+            tenant_id=tenant_id,
+        )
+        if csv_upsert_state == "stale":
+            await self._idempotency_service.mark_processed(
+                event_id, tenant_id=tenant_id
+            )
+            orders_intake_processed_total.labels(
+                tenant_id=tenant_id,
+                intake_channel=intake_channel_type,
+                status="duplicate",
+            ).inc()
+            return IntakeResponse(event_id=event_id, status="duplicate")
+        if csv_upsert_state == "updated":
+            for event_doc in result.event_docs:
+                event_doc["event_type"] = "order_source_updated"
+
         # (h) Stamp platform-owned fields on each event doc
         event_docs = self._complete_event_docs(
             result.event_docs, order_doc, context
@@ -456,8 +635,31 @@ class OrderIntakePipeline:
                 # (e.g. PricingError.no_rule_matched).
                 raise hook_exc
 
-        # (j) Validate via FuelOrder.model_validate BEFORE writing
-        FuelOrder.model_validate(order_doc)
+        # (j) Validate via FuelOrder.model_validate BEFORE writing.
+        #
+        # ``FuelOrder`` enforces cross-field invariants that no per-channel
+        # request model can express: a ``one_off`` order must carry a delivery
+        # window, a window must end after it starts, a non-legacy channel must
+        # carry a canonical product_code, coordinates must be present outside
+        # voice/legacy. Those raise ``pydantic.ValidationError`` here, after the
+        # adapter has run.
+        #
+        # Left unhandled they became an HTTP 500 with a generic "unexpected
+        # error" body: the caller could not tell what it had sent wrong, and
+        # metrics could not separate client error from server fault. The voice
+        # bridge had already diagnosed this and caught it at its own call site,
+        # which fixed exactly one of five channels — dispatcher, bulk, CSV and
+        # api_partner all still 500'd. Mapping it here fixes every channel at
+        # the point the rule is actually enforced.
+        #
+        # Only ValidationError is caught. An ES or network failure below is a
+        # real server fault and must keep surfacing as 500.
+        try:
+            FuelOrder.model_validate(order_doc)
+        except ValidationError as exc:
+            raise order_payload_invalid(
+                invalid_fields=extract_invalid_fields(exc),
+            ) from exc
 
         # (k) Upsert the order document
         from fuel.order_repository import FuelOrderRepository
@@ -474,11 +676,8 @@ class OrderIntakePipeline:
         # (m) Broadcast through OrdersWSManager
         await self._broadcast(order_doc, event_docs)
 
-        # (m2) Dual-broadcast to legacy /ws/ops subscribers during
-        # the deprecation window (Req 4.1.3, 9.3). Gate on overlay
-        # state: disabled/shadow/active_gated → dual-broadcast;
-        # active_auto → stop legacy broadcast.
-        await self._dual_broadcast_legacy_if_enabled(order_doc, tenant_id)
+        # (m2) used to dual-broadcast shipment_update / rider_update to
+        # legacy /ws/ops subscribers. Removed with the legacy mirror.
 
         # (m3) Run registered IntakeHook.after_accept hooks.
         # Side-effects only — failures are logged but do not block intake.
@@ -494,18 +693,12 @@ class OrderIntakePipeline:
                     hook_exc,
                 )
 
-        # (n) Dual-write through LegacyDualWriter (if enabled)
-        await self._dual_write_legacy_if_enabled(order_doc, tenant_id)
+        # The former step (n) mirrored the order into the legacy surface
+        # through LegacyDualWriter, and (n2) ran the shadow-mode
+        # divergence comparison against the legacy adapter output. Both
+        # depended on the legacy surface and were removed with it.
 
-        # (n2) Shadow-mode divergence comparison (Req 9.3.2).
-        # When in ``shadow`` state, run the divergence checker to compare
-        # the new adapter output against the legacy adapter output.
-        if overlay_state == "shadow":
-            await self._run_shadow_divergence_check(
-                order_doc, payload, channel, tenant_id
-            )
-
-        # (o) Mark processed in idempotency store
+        # (n) Mark processed in idempotency store
         await self._idempotency_service.mark_processed(
             event_id, tenant_id=tenant_id
         )
@@ -555,7 +748,24 @@ class OrderIntakePipeline:
         now = self._clock()
         order_doc = dict(adapter_output)  # shallow copy
         # Overwrite platform-owned fields unconditionally
-        order_doc["order_id"] = mint_order_id()
+        intake_metadata = order_doc.get("intake_metadata") or {}
+        source_system = str(intake_metadata.get("source_system") or "").strip()
+        source_record_id = str(
+            intake_metadata.get("source_record_id") or ""
+        ).strip()
+        if (
+            getattr(context.channel, "channel_type", None) == "csv"
+            and source_system
+            and source_record_id
+        ):
+            digest = hashlib.sha256(
+                (
+                    f"{context.tenant_id}|{source_system}|{source_record_id}"
+                ).encode()
+            ).hexdigest()[:32]
+            order_doc["order_id"] = f"ord_import_{digest}"
+        else:
+            order_doc["order_id"] = mint_order_id()
         order_doc["tenant_id"] = context.tenant_id
         order_doc["status"] = "placed"
         order_doc["created_at"] = now.isoformat()
@@ -563,6 +773,66 @@ class OrderIntakePipeline:
         order_doc["last_event_timestamp"] = now.isoformat()
         order_doc["trace_id"] = context.trace_id
         return order_doc
+
+    async def _prepare_csv_source_upsert(
+        self,
+        *,
+        order_doc: Dict[str, Any],
+        tenant_id: str,
+    ) -> str:
+        """Return ``new``, ``updated``, or ``stale`` for a CSV source record."""
+
+        if order_doc.get("intake_channel") != "csv":
+            return "new"
+        metadata = order_doc.get("intake_metadata") or {}
+        if not metadata.get("source_system") or not metadata.get(
+            "source_record_id"
+        ):
+            return "new"
+
+        from fuel.order_repository import FuelOrderRepository
+
+        existing = await FuelOrderRepository(self._es).get(
+            tenant_id, order_doc["order_id"]
+        )
+        if existing is None:
+            return "new"
+
+        incoming_updated_at = _optional_utc_datetime(
+            metadata.get("source_updated_at")
+        )
+        existing_updated_at = existing.intake_metadata.source_updated_at
+        if existing_updated_at is not None:
+            if existing_updated_at.tzinfo is None:
+                existing_updated_at = existing_updated_at.replace(
+                    tzinfo=timezone.utc
+                )
+            else:
+                existing_updated_at = existing_updated_at.astimezone(timezone.utc)
+        if (
+            incoming_updated_at is not None
+            and existing_updated_at is not None
+            and incoming_updated_at <= existing_updated_at
+        ):
+            return "stale"
+
+        # Source snapshots may change commercial fields, but must never reset
+        # execution state that dispatchers and drivers own.
+        existing_doc = existing.model_dump(mode="json")
+        for field_name in (
+            "status",
+            "assigned_driver_id",
+            "assigned_asset_id",
+            "assigned_run_id",
+            "hold_reason",
+            "pod_otp",
+            "pod_otp_generated_at",
+            "refusal_reason_code",
+            "legacy_origin_snapshot",
+            "created_at",
+        ):
+            order_doc[field_name] = existing_doc.get(field_name)
+        return "updated"
 
     def _complete_event_docs(
         self,
@@ -684,19 +954,16 @@ class OrderIntakePipeline:
     def _verify_hmac(body: bytes, signature: str, secret: str) -> None:
         """Verify the HMAC-SHA256 signature of the request body.
 
+        Delegates to the shared :func:`verify_hmac_sha256_hex` helper so there
+        is a single HMAC verification implementation across the codebase.
+
         The secret is used only for this comparison and MUST be discarded
         immediately after — never logged, never stored.
 
         Raises:
             webhook_signature_invalid: If the signature does not match.
         """
-        expected = hmac_mod.new(
-            secret.encode("utf-8"),
-            body,
-            hashlib.sha256,
-        ).hexdigest()
-
-        if not hmac_mod.compare_digest(expected, signature):
+        if not verify_hmac_sha256_hex(secret, body, signature):
             raise webhook_signature_invalid(
                 details={"reason": "HMAC-SHA256 mismatch"},
             )
@@ -750,224 +1017,23 @@ class OrderIntakePipeline:
             )
 
     # ------------------------------------------------------------------
-    # Shadow-mode divergence check
+    # Legacy mirror surface — removed
     # ------------------------------------------------------------------
-
-    async def _run_shadow_divergence_check(
-        self,
-        order_doc: Dict[str, Any],
-        original_payload: Dict[str, Any],
-        channel: Any,
-        tenant_id: str,
-    ) -> None:
-        """Run the shadow divergence checker when in shadow mode.
-
-        Compares the new adapter output against the legacy adapter output
-        on a sampled basis. Failures are logged but MUST NOT block the
-        main intake path.
-        """
-        try:
-            from fuel.services.shadow_divergence_checker import (
-                ShadowDivergenceChecker,
-            )
-
-            checker = ShadowDivergenceChecker()
-            await checker.compare(
-                new_output=order_doc,
-                original_payload=original_payload,
-                channel=channel,
-                tenant_id=tenant_id,
-            )
-        except Exception as exc:
-            logger.warning(
-                "OrderIntakePipeline: shadow divergence check failed for "
-                "order=%s, tenant=%s: %s",
-                order_doc.get("order_id"),
-                tenant_id,
-                exc,
-            )
-
-    # ------------------------------------------------------------------
-    # Legacy dual-broadcast (deprecation window — Req 4.1.3, 9.3)
-    # ------------------------------------------------------------------
-
-    async def _dual_broadcast_legacy_if_enabled(
-        self,
-        order_doc: Dict[str, Any],
-        tenant_id: str,
-    ) -> None:
-        """Broadcast shipment/rider events to legacy ``/ws/ops`` subscribers.
-
-        During the deprecation window, legacy subscribers on ``/ws/ops``
-        still expect ``shipment_update`` and ``rider_update`` events.
-        This method projects the order into the legacy shipment shape
-        and broadcasts via ``OpsWebSocketManager.broadcast_shipment_update``.
-
-        If the order has an ``assigned_driver_id``, it also broadcasts a
-        ``rider_update`` event so legacy driver-tracking UIs stay current.
-
-        Gating:
-            - ``disabled``, ``shadow``, ``active_gated`` → dual-broadcast
-            - ``active_auto`` → stop legacy broadcast (deprecation ended)
-
-        Failures are logged but MUST NOT block the main intake path.
-        """
-        if self._legacy_ws_manager is None:
-            return
-
-        try:
-            # Check the overlay state for this tenant
-            state = await self._feature_flag_service.get_overlay_state(
-                "order_intake_pipeline", tenant_id
-            )
-            # active_auto means the deprecation window has ended for
-            # this tenant — stop legacy broadcast.
-            if state == "active_auto":
-                return
-
-            # Project the order into the legacy shipment shape
-            shipment_data = self._project_order_to_shipment_broadcast(
-                order_doc
-            )
-            await self._legacy_ws_manager.broadcast_shipment_update(
-                shipment_data
-            )
-
-            # If the order has an assigned driver, also broadcast a
-            # rider_update so legacy driver-tracking UIs stay current.
-            if order_doc.get("assigned_driver_id"):
-                rider_data = self._project_order_to_rider_broadcast(order_doc)
-                await self._legacy_ws_manager.broadcast_rider_update(rider_data)
-
-        except Exception as exc:
-            # Legacy broadcast failures MUST NOT block the main path
-            logger.warning(
-                "OrderIntakePipeline: legacy /ws/ops dual-broadcast failed "
-                "for order=%s, tenant=%s: %s",
-                order_doc.get("order_id"),
-                tenant_id,
-                exc,
-            )
-
-    @staticmethod
-    def _project_order_to_shipment_broadcast(
-        order_doc: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """Project a FuelOrder dict into the legacy shipment broadcast shape.
-
-        Mirrors the projection in ``LegacyDualWriter._project_order_to_shipment``
-        but tailored for the WebSocket broadcast envelope.
-        """
-        origin = order_doc.get("legacy_origin_snapshot") or "depot"
-        return {
-            "shipment_id": order_doc["order_id"],
-            "status": order_doc["status"],
-            "tenant_id": order_doc["tenant_id"],
-            "rider_id": order_doc.get("assigned_driver_id"),
-            "origin": origin,
-            "destination": order_doc.get("ship_to_address", ""),
-            "estimated_delivery": order_doc.get("delivery_window_end"),
-            "last_event_timestamp": order_doc.get("last_event_timestamp"),
-            "current_location": (
-                {"lat": order_doc["ship_to_lat"], "lon": order_doc["ship_to_lon"]}
-                if order_doc.get("ship_to_lat") is not None
-                and order_doc.get("ship_to_lon") is not None
-                else None
-            ),
-            "trace_id": order_doc.get("trace_id", ""),
-            "updated_at": order_doc.get("updated_at"),
-        }
-
-    @staticmethod
-    def _project_order_to_rider_broadcast(
-        order_doc: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """Project a FuelOrder's driver assignment into the legacy rider
-        broadcast shape for ``/ws/ops`` subscribers.
-        """
-        return {
-            "rider_id": order_doc.get("assigned_driver_id"),
-            "tenant_id": order_doc["tenant_id"],
-            "status": "active",
-            "current_location": (
-                {"lat": order_doc["ship_to_lat"], "lon": order_doc["ship_to_lon"]}
-                if order_doc.get("ship_to_lat") is not None
-                and order_doc.get("ship_to_lon") is not None
-                else None
-            ),
-            "last_event_timestamp": order_doc.get("last_event_timestamp"),
-            "trace_id": order_doc.get("trace_id", ""),
-        }
-
-    # ------------------------------------------------------------------
-    # Legacy dual-write
-    # ------------------------------------------------------------------
-
-    async def _dual_write_legacy_if_enabled(
-        self,
-        order_doc: Dict[str, Any],
-        tenant_id: str,
-    ) -> None:
-        """Dual-write to the legacy surface if the feature flag allows.
-
-        Failures are logged and enqueued in ``pending_legacy_mirrors``
-        for background retry — they MUST NOT fail the main intake path.
-        """
-        if self._legacy_dual_writer is None:
-            return
-
-        try:
-            # Check the overlay state for this tenant
-            state = await self._feature_flag_service.get_overlay_state(
-                "order_intake_pipeline", tenant_id
-            )
-            # Dual-write when in shadow or active_gated
-            if state in ("shadow", "active_gated"):
-                await self._legacy_dual_writer.mirror_order(order_doc)
-        except Exception as exc:
-            # Legacy dual-write failures go to pending_legacy_mirrors
-            # retry queue — never fail the main path
-            logger.warning(
-                "OrderIntakePipeline: legacy dual-write failed for "
-                "order=%s, tenant=%s: %s — enqueueing for retry",
-                order_doc.get("order_id"),
-                tenant_id,
-                exc,
-            )
-            try:
-                await self._enqueue_pending_legacy_mirror(order_doc, tenant_id)
-            except Exception as enqueue_exc:
-                logger.error(
-                    "OrderIntakePipeline: failed to enqueue pending legacy "
-                    "mirror for order=%s: %s",
-                    order_doc.get("order_id"),
-                    enqueue_exc,
-                )
-
-    async def _enqueue_pending_legacy_mirror(
-        self,
-        order_doc: Dict[str, Any],
-        tenant_id: str,
-    ) -> None:
-        """Enqueue a failed legacy mirror write for background retry."""
-        from fuel.services.order_es_mappings import PENDING_LEGACY_MIRRORS_INDEX
-
-        now = self._clock()
-        doc = {
-            "order_id": order_doc.get("order_id"),
-            "tenant_id": tenant_id,
-            "entity_type": "order",
-            "payload": order_doc,
-            "retry_count": 0,
-            "next_retry_at": now.isoformat(),
-            "created_at": now.isoformat(),
-            "status": "pending",
-        }
-        await self._es.index_document(
-            PENDING_LEGACY_MIRRORS_INDEX,
-            f"mirror_{order_doc.get('order_id')}",
-            doc,
-        )
+    # Six methods lived below this line and all six went out with the
+    # legacy dual-write shim:
+    #
+    #   _run_shadow_divergence_check      compared new vs legacy adapter
+    #                                     output on a sampled basis
+    #   _dual_broadcast_legacy_if_enabled pushed shipment_update /
+    #                                     rider_update to legacy /ws/ops
+    #   _project_order_to_shipment_broadcast
+    #   _project_order_to_rider_broadcast the two legacy projections that
+    #                                     fed that broadcast
+    #   _dual_write_legacy_if_enabled     mirrored into shipments_current
+    #   _enqueue_pending_legacy_mirror    retry queue for mirror failures
+    #
+    # Nothing reads the legacy surface any more, so keeping inert copies
+    # would only invite them back.
 
 
 # ---------------------------------------------------------------------------
@@ -977,4 +1043,5 @@ class OrderIntakePipeline:
 __all__ = [
     "IntakeResponse",
     "OrderIntakePipeline",
+    "extract_invalid_fields",
 ]

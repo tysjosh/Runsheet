@@ -33,6 +33,7 @@ from compliance.services.compliance_es_mappings import (
     TAX_EXEMPTIONS_INDEX,
     TAX_JURISDICTIONS_INDEX,
 )
+from errors.handlers import register_exception_handlers
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 
 
@@ -139,13 +140,20 @@ class _FakeESService:
 # ---------------------------------------------------------------------------
 
 
-def _tenant_ctx_factory(tenant_id: str = "tenant-A"):
+def _tenant_ctx_factory(
+    tenant_id: str = "tenant-A",
+    roles: list[str] | None = None,
+):
+    # Tax jurisdictions and exemptions are a compliance surface, gated to the
+    # operations roles. These tests previously used `roles=["operator"]`, which is
+    # not a canonical role at all and passed only because the router had no role
+    # gate; see tests/unit/test_compliance_api_authz.py.
     def _factory() -> TenantContext:
         return TenantContext(
             tenant_id=tenant_id,
             user_id="user-1",
             has_pii_access=False,
-            roles=["operator"],
+            roles=list(roles) if roles is not None else ["admin"],
             region="US",
             measurement_units={"volume": "gal", "distance": "mi"},
         )
@@ -153,14 +161,21 @@ def _tenant_ctx_factory(tenant_id: str = "tenant-A"):
     return _factory
 
 
-def _build_app(tenant_id: str = "tenant-A") -> tuple[FastAPI, _FakeESService]:
+def _build_app(
+    tenant_id: str = "tenant-A",
+    roles: list[str] | None = None,
+) -> tuple[FastAPI, _FakeESService]:
     es = _FakeESService()
     configure_tax_api(es_service=es)
 
     app = FastAPI()
+    # The role gate raises AppException, which only becomes a 403 once the app's
+    # handlers are registered. Without this a rejected request would surface as a
+    # raised exception rather than an HTTP status.
+    register_exception_handlers(app)
     app.include_router(router)
     app.dependency_overrides[get_tenant_context] = _tenant_ctx_factory(
-        tenant_id=tenant_id
+        tenant_id=tenant_id, roles=roles
     )
     return app, es
 
@@ -564,3 +579,36 @@ class TestListExemptions:
         assert resp.status_code == 200, resp.text
         data = resp.json()["data"]
         assert {row["exemption_id"] for row in data} == {"exempt_a"}
+
+
+class TestRouterLevelAuthorization:
+    """The compliance gate is attached to this router, so prove it through HTTP.
+
+    ``tests/unit/test_compliance_api_authz.py`` covers the policy and the drift
+    guard. This covers the wiring on *this* router: that removing
+    ``dependencies=[Depends(compliance_ops_dependency)]`` from the ``APIRouter``
+    would fail a test rather than pass silently.
+    """
+
+    def test_driver_is_refused(self) -> None:
+        app, _ = _build_app(roles=["driver"])
+        response = TestClient(app).get("/api/compliance/tax-jurisdictions")
+        assert response.status_code == 403, response.text
+
+    def test_platform_admin_alone_is_refused(self) -> None:
+        app, _ = _build_app(roles=["platform_admin"])
+        response = TestClient(app).get("/api/compliance/tax-jurisdictions")
+        assert response.status_code == 403, response.text
+
+    def test_dispatcher_is_allowed(self) -> None:
+        # A dispatcher works compliance during a shift; this is the customer's own
+        # regulatory obligation, not a staff-only surface.
+        app, _ = _build_app(roles=["dispatcher"])
+        response = TestClient(app).get("/api/compliance/tax-jurisdictions")
+        assert response.status_code == 200, response.text
+
+    def test_rejection_does_not_echo_held_roles(self) -> None:
+        app, _ = _build_app(roles=["some-internal-role-name"])
+        response = TestClient(app).get("/api/compliance/tax-jurisdictions")
+        assert response.status_code == 403
+        assert "some-internal-role-name" not in response.text

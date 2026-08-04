@@ -2118,7 +2118,24 @@ function PlansTab() {
     setError("");
     try {
       const response = await generatePlan(activeTenantId());
-      addToast("Plan generated successfully", "success");
+      // A run can finish every stage without raising and still have produced
+      // nothing — route planning skipping every truck it was handed, say. The
+      // backend reports that as `degraded` rather than folding it into
+      // `complete`, so an unconditional success toast here would be the last
+      // place the silent skip got laundered into success.
+      if (response.degraded || response.status === "degraded") {
+        const stages = (response.degradation_reasons ?? [])
+          .map((d) => d.agent_id)
+          .join(", ");
+        addToast(
+          stages
+            ? `Plan generated with problems: ${stages} produced nothing`
+            : "Plan generated with problems: a stage produced nothing",
+          "error",
+        );
+      } else {
+        addToast("Plan generated successfully", "success");
+      }
 
       // Reset to page 1 and clear status filter to show the new plan
       setPlanPage(1);

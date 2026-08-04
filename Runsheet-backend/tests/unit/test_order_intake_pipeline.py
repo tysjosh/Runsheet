@@ -27,8 +27,10 @@ Covers:
 * ``customer_tank_id = None`` bypasses the tank check.
 * ``_complete_order_doc`` overwrites adapter-set ``order_id`` /
   ``tenant_id`` / ``status`` / timestamps.
-* Legacy dual-write failure logs a warning AND enqueues the order in
-  ``pending_legacy_mirrors`` — does NOT fail the main path.
+
+The legacy dual-write and legacy ``/ws/ops`` dual-broadcast coverage was
+removed with the mirror itself — no flag state reaches the legacy surface
+any more.
 
 Validates: Requirements 1.1.6, 2.2.2, 2.2.3, 2.2.5, 2.2.6, 2.2.7, 10.2.1.
 """
@@ -55,6 +57,7 @@ from fuel.intake_channel_models import IntakeChannel
 from fuel.services.order_intake_pipeline import (
     IntakeResponse,
     OrderIntakePipeline,
+    _CsvImportChannel,
 )
 
 
@@ -277,11 +280,8 @@ def customer_tank_repo():
     return repo
 
 
-@pytest.fixture
-def legacy_dual_writer():
-    writer = AsyncMock()
-    writer.mirror_order = AsyncMock()
-    return writer
+# The ``legacy_dual_writer`` fixture lived here. The pipeline no longer
+# accepts that dependency, so there is nothing left to fake.
 
 
 @pytest.fixture
@@ -308,7 +308,6 @@ def pipeline(
     ws_manager,
     credentials_vault,
     customer_tank_repo,
-    legacy_dual_writer,
     legacy_ws_manager,
     clock,
 ):
@@ -322,7 +321,6 @@ def pipeline(
         ws_manager=ws_manager,
         credentials_vault=credentials_vault,
         customer_tank_repo=customer_tank_repo,
-        legacy_dual_writer=legacy_dual_writer,
         legacy_ws_manager=legacy_ws_manager,
         clock=clock,
     )
@@ -493,7 +491,6 @@ class TestTenantScopedIdempotency:
         ws_manager,
         credentials_vault,
         customer_tank_repo,
-        legacy_dual_writer,
         clock,
     ):
         """Tenant-scoped idempotency: same event_id under different tenants
@@ -530,7 +527,6 @@ class TestTenantScopedIdempotency:
             ws_manager=ws_manager,
             credentials_vault=credentials_vault,
             customer_tank_repo=customer_tank_repo,
-            legacy_dual_writer=legacy_dual_writer,
             clock=clock,
         )
 
@@ -555,7 +551,6 @@ class TestTenantScopedIdempotency:
             ws_manager=ws_manager,
             credentials_vault=credentials_vault,
             customer_tank_repo=customer_tank_repo,
-            legacy_dual_writer=legacy_dual_writer,
             clock=clock,
         )
 
@@ -671,7 +666,6 @@ class TestAdapterValidationFailure:
         ws_manager,
         credentials_vault,
         customer_tank_repo,
-        legacy_dual_writer,
         clock,
     ):
         """An adapter that raises AdapterError routes to poison queue."""
@@ -696,7 +690,6 @@ class TestAdapterValidationFailure:
             ws_manager=ws_manager,
             credentials_vault=credentials_vault,
             customer_tank_repo=customer_tank_repo,
-            legacy_dual_writer=legacy_dual_writer,
             clock=clock,
         )
 
@@ -888,136 +881,144 @@ class TestCompleteOrderDocOverwrites:
         assert result["last_event_timestamp"] == FIXED_NOW.isoformat()
         assert result["trace_id"] == "trace-001"
 
+    def test_csv_source_identity_produces_stable_platform_order_id(self, pipeline):
+        context = IntakeContext(
+            tenant_id=TENANT_A,
+            channel=_CsvImportChannel(
+                channel_id="csv-import",
+                tenant_id=TENANT_A,
+            ),
+            trace_id="trace-csv",
+            request_id="request-csv",
+        )
+        adapter_output = {
+            "intake_channel": "csv",
+            "intake_metadata": {
+                "source_system": "erp-a",
+                "source_record_id": "SO-100",
+            },
+        }
 
-# ---------------------------------------------------------------------------
-# Tests — Legacy dual-write failure does NOT fail the main path
-# ---------------------------------------------------------------------------
+        first = pipeline._complete_order_doc(
+            adapter_output, context, "event-version-1"
+        )
+        second = pipeline._complete_order_doc(
+            adapter_output, context, "event-version-2"
+        )
+
+        assert first["order_id"] == second["order_id"]
+        assert first["order_id"].startswith("ord_import_")
 
 
-class TestLegacyDualWriteFailure:
-    """Legacy dual-write failure logs a warning AND enqueues the order in
-    ``pending_legacy_mirrors`` — does NOT fail the main path."""
-
+class TestCsvSourceUpdates:
     @pytest.mark.asyncio
-    async def test_dual_write_failure_does_not_fail_main_path(
-        self,
-        pipeline,
-        legacy_dual_writer,
-        feature_flag_service,
-        es_service,
-        idempotency_service,
-        caplog,
-    ):
-        """When legacy dual-write fails, the main path still succeeds."""
-        # Enable dual-write by setting overlay state to active_gated
-        feature_flag_service.get_overlay_state = AsyncMock(
-            return_value="active_gated"
-        )
-        # Make the dual-writer fail
-        legacy_dual_writer.mirror_order = AsyncMock(
-            side_effect=RuntimeError("Legacy ES is down")
+    async def test_older_source_snapshot_is_rejected(self, pipeline):
+        existing = MagicMock()
+        existing.intake_metadata.source_updated_at = datetime(
+            2026, 5, 10, 12, tzinfo=timezone.utc
         )
 
-        payload = _valid_order_payload()
-        body = json.dumps(payload).encode()
-        signature = _sign_body(body)
-
-        with caplog.at_level(logging.WARNING):
-            result = await pipeline.ingest_webhook(
-                channel_id=CHANNEL_ID,
-                body=body,
-                signature=signature,
-                request_id="req-016",
+        with patch(
+            "fuel.order_repository.FuelOrderRepository.get",
+            new=AsyncMock(return_value=existing),
+        ):
+            state = await pipeline._prepare_csv_source_upsert(
+                tenant_id=TENANT_A,
+                order_doc={
+                    "order_id": "ord_import_123",
+                    "intake_channel": "csv",
+                    "intake_metadata": {
+                        "source_system": "erp-a",
+                        "source_record_id": "SO-100",
+                        "source_updated_at": "2026-05-10T11:59:00Z",
+                    },
+                },
             )
 
-        # Main path still succeeds
-        assert result.status == "processed"
-        assert result.order_id is not None
-
-        # Idempotency was still marked processed
-        idempotency_service.mark_processed.assert_called_once()
-
-        # A warning was logged
-        assert any(
-            "legacy dual-write failed" in record.message
-            for record in caplog.records
-        )
+        assert state == "stale"
 
     @pytest.mark.asyncio
-    async def test_dual_write_failure_enqueues_pending_mirror(
-        self,
-        pipeline,
-        legacy_dual_writer,
-        feature_flag_service,
-        es_service,
-    ):
-        """When legacy dual-write fails, the order is enqueued in
-        pending_legacy_mirrors for background retry."""
-        feature_flag_service.get_overlay_state = AsyncMock(
-            return_value="shadow"
+    async def test_newer_source_snapshot_preserves_execution_state(self, pipeline):
+        existing = MagicMock()
+        existing.intake_metadata.source_updated_at = datetime(
+            2026, 5, 10, 12, tzinfo=timezone.utc
         )
-        legacy_dual_writer.mirror_order = AsyncMock(
-            side_effect=RuntimeError("Connection refused")
-        )
+        existing.model_dump.return_value = {
+            "status": "dispatched",
+            "assigned_driver_id": "driver-100",
+            "assigned_asset_id": "truck-100",
+            "assigned_run_id": "run-100",
+            "pod_otp": None,
+            "pod_otp_generated_at": None,
+            "refusal_reason_code": None,
+            "legacy_origin_snapshot": None,
+            "created_at": "2026-05-09T08:00:00Z",
+        }
+        incoming = {
+            "order_id": "ord_import_123",
+            "intake_channel": "csv",
+            "status": "placed",
+            "intake_metadata": {
+                "source_system": "erp-a",
+                "source_record_id": "SO-100",
+                "source_updated_at": "2026-05-10T12:01:00Z",
+            },
+        }
 
-        payload = _valid_order_payload()
-        body = json.dumps(payload).encode()
-        signature = _sign_body(body)
+        with patch(
+            "fuel.order_repository.FuelOrderRepository.get",
+            new=AsyncMock(return_value=existing),
+        ):
+            state = await pipeline._prepare_csv_source_upsert(
+                tenant_id=TENANT_A,
+                order_doc=incoming,
+            )
 
-        result = await pipeline.ingest_webhook(
-            channel_id=CHANNEL_ID,
-            body=body,
-            signature=signature,
-            request_id="req-017",
-        )
-
-        assert result.status == "processed"
-
-        # Verify that es_service.index_document was called for the
-        # pending_legacy_mirrors enqueue
-        mirror_calls = [
-            call
-            for call in es_service.index_document.call_args_list
-            if call[0][0] == "pending_legacy_mirrors"
-        ]
-        assert len(mirror_calls) == 1
-        mirror_doc = mirror_calls[0][0][2]
-        assert mirror_doc["entity_type"] == "order"
-        assert mirror_doc["status"] == "pending"
-        assert mirror_doc["retry_count"] == 0
+        assert state == "updated"
+        assert incoming["status"] == "dispatched"
+        assert incoming["assigned_driver_id"] == "driver-100"
+        assert incoming["assigned_run_id"] == "run-100"
+        assert incoming["created_at"] == "2026-05-09T08:00:00Z"
 
 
 # ---------------------------------------------------------------------------
-# Tests — Legacy /ws/ops dual-broadcast (Req 4.1.3, 9.3)
+# Tests — Legacy dual-write / dual-broadcast (removed)
+# ---------------------------------------------------------------------------
+# Two classes lived here. ``TestLegacyDualWriteFailure`` proved a failed
+# mirror logged a warning, enqueued the order in ``pending_legacy_mirrors``,
+# and never failed intake. ``TestLegacyDualBroadcast`` proved the overlay
+# gating on the legacy ``/ws/ops`` shipment_update / rider_update broadcast,
+# its projection shape, and its failure isolation. Both surfaces are gone.
+#
+# The ``disabled`` short-circuit that the first dual-broadcast test also
+# covered is still asserted by TestFeatureFlagStateBehaviour in
+# tests/unit/test_order_intake_feature_flag.py.
+
+
+# ---------------------------------------------------------------------------
+# Tests — ingest_webhook additive override kwargs (Task 1.3 / Req 2.3)
 # ---------------------------------------------------------------------------
 
 
-class TestLegacyDualBroadcast:
-    """During the deprecation window, OrderIntakePipeline MUST also call
-    OpsWebSocketManager.broadcast_shipment_update and broadcast_rider_update
-    via the existing manager so legacy /ws/ops subscribers continue
-    receiving shipment/rider events.
+class TestIngestWebhookOverrides:
+    """The additive ``idempotency_key_override`` / ``schema_version_override``
+    kwargs on ``ingest_webhook`` are behavior-preserving when ``None`` and take
+    precedence over the payload-derived values when supplied.
 
-    Gate on overlay.order_intake_pipeline state:
-    - disabled, shadow, active_gated → dual-broadcast
-    - active_auto → stop the legacy broadcast
+    The Dinee voice bridge maps the ``X-Idempotency-Key`` and
+    ``X-Schema-Version`` headers onto the pipeline through these kwargs.
 
-    Validates: Requirements 4.1.3, 9.3.
+    Validates: Requirements 2.3.
     """
 
-    @pytest.mark.asyncio
-    async def test_dual_broadcast_fires_in_disabled_state(
-        self,
-        pipeline,
-        legacy_ws_manager,
-        feature_flag_service,
-    ):
-        """When overlay state is 'disabled', pipeline short-circuits to legacy_passthrough."""
-        feature_flag_service.get_overlay_state = AsyncMock(
-            return_value="disabled"
-        )
+    # -- Behavior unchanged when both overrides are None --------------------
 
-        payload = _valid_order_payload()
+    @pytest.mark.asyncio
+    async def test_defaults_derive_idempotency_key_from_payload_event_id(
+        self, pipeline, idempotency_service
+    ):
+        """With no override, the idempotency key is ``payload['event_id']``."""
+        payload = _valid_order_payload(event_id="evt-from-payload")
         body = json.dumps(payload).encode()
         signature = _sign_body(body)
 
@@ -1025,52 +1026,25 @@ class TestLegacyDualBroadcast:
             channel_id=CHANNEL_ID,
             body=body,
             signature=signature,
-            request_id="req-dual-001",
-        )
-
-        # disabled state short-circuits — no processing, no broadcast
-        assert result.status == "legacy_passthrough"
-        legacy_ws_manager.broadcast_shipment_update.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_dual_broadcast_fires_in_shadow_state(
-        self,
-        pipeline,
-        legacy_ws_manager,
-        feature_flag_service,
-    ):
-        """When overlay state is 'shadow', legacy broadcast fires."""
-        feature_flag_service.get_overlay_state = AsyncMock(
-            return_value="shadow"
-        )
-
-        payload = _valid_order_payload()
-        body = json.dumps(payload).encode()
-        signature = _sign_body(body)
-
-        result = await pipeline.ingest_webhook(
-            channel_id=CHANNEL_ID,
-            body=body,
-            signature=signature,
-            request_id="req-dual-002",
+            request_id="req-ovr-001",
         )
 
         assert result.status == "processed"
-        legacy_ws_manager.broadcast_shipment_update.assert_called_once()
+        # is_duplicate is called with the payload-derived event_id
+        assert idempotency_service.is_duplicate.call_args[0][0] == (
+            "evt-from-payload"
+        )
+        # And the processed response echoes the same event_id
+        assert result.event_id == "evt-from-payload"
 
     @pytest.mark.asyncio
-    async def test_dual_broadcast_fires_in_active_gated_state(
-        self,
-        pipeline,
-        legacy_ws_manager,
-        feature_flag_service,
+    async def test_defaults_derive_schema_version_from_payload(
+        self, pipeline, intake_channel_repo
     ):
-        """When overlay state is 'active_gated', legacy broadcast fires."""
-        feature_flag_service.get_overlay_state = AsyncMock(
-            return_value="active_gated"
-        )
-
-        payload = _valid_order_payload()
+        """With no override, an unsupported payload schema_version routes to
+        the poison queue (schema derived from the payload)."""
+        # Payload declares a version the channel does not support.
+        payload = _valid_order_payload(schema_version="99.0")
         body = json.dumps(payload).encode()
         signature = _sign_body(body)
 
@@ -1078,25 +1052,19 @@ class TestLegacyDualBroadcast:
             channel_id=CHANNEL_ID,
             body=body,
             signature=signature,
-            request_id="req-dual-003",
+            request_id="req-ovr-002",
         )
 
-        assert result.status == "processed"
-        legacy_ws_manager.broadcast_shipment_update.assert_called_once()
+        # Payload schema_version=99.0 is unsupported → queued_for_review.
+        assert result.status == "queued_for_review"
 
     @pytest.mark.asyncio
-    async def test_dual_broadcast_stops_in_active_auto_state(
-        self,
-        pipeline,
-        legacy_ws_manager,
-        feature_flag_service,
+    async def test_none_overrides_match_omitted_kwargs(
+        self, pipeline, idempotency_service
     ):
-        """When overlay state is 'active_auto', legacy broadcast does NOT fire."""
-        feature_flag_service.get_overlay_state = AsyncMock(
-            return_value="active_auto"
-        )
-
-        payload = _valid_order_payload()
+        """Passing the overrides explicitly as ``None`` behaves identically to
+        omitting them."""
+        payload = _valid_order_payload(event_id="evt-none-override")
         body = json.dumps(payload).encode()
         signature = _sign_body(body)
 
@@ -1104,140 +1072,108 @@ class TestLegacyDualBroadcast:
             channel_id=CHANNEL_ID,
             body=body,
             signature=signature,
-            request_id="req-dual-004",
+            request_id="req-ovr-003",
+            idempotency_key_override=None,
+            schema_version_override=None,
         )
 
         assert result.status == "processed"
-        legacy_ws_manager.broadcast_shipment_update.assert_not_called()
-        legacy_ws_manager.broadcast_rider_update.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_dual_broadcast_does_not_send_rider_update_without_driver(
-        self,
-        pipeline,
-        legacy_ws_manager,
-        feature_flag_service,
-    ):
-        """When no driver is assigned, rider_update is NOT broadcast."""
-        feature_flag_service.get_overlay_state = AsyncMock(
-            return_value="active_gated"
+        assert result.event_id == "evt-none-override"
+        assert idempotency_service.is_duplicate.call_args[0][0] == (
+            "evt-none-override"
         )
 
-        # Default payload has no assigned_driver_id
-        payload = _valid_order_payload()
+    # -- Overrides take precedence when supplied ----------------------------
+
+    @pytest.mark.asyncio
+    async def test_idempotency_key_override_takes_precedence(
+        self, pipeline, idempotency_service
+    ):
+        """When supplied, ``idempotency_key_override`` is used as the
+        tenant-scoped idempotency key instead of ``payload['event_id']``."""
+        payload = _valid_order_payload(event_id="evt-from-payload")
         body = json.dumps(payload).encode()
         signature = _sign_body(body)
 
-        await pipeline.ingest_webhook(
+        result = await pipeline.ingest_webhook(
             channel_id=CHANNEL_ID,
             body=body,
             signature=signature,
-            request_id="req-dual-005",
+            request_id="req-ovr-004",
+            idempotency_key_override="idem-header-key-XYZ",
         )
 
-        legacy_ws_manager.broadcast_shipment_update.assert_called_once()
-        legacy_ws_manager.broadcast_rider_update.assert_not_called()
+        assert result.status == "processed"
+        # The header-supplied key wins over the payload event_id.
+        assert idempotency_service.is_duplicate.call_args[0][0] == (
+            "idem-header-key-XYZ"
+        )
+        # It is also tenant-scoped (same call carries the channel tenant).
+        assert idempotency_service.is_duplicate.call_args[1]["tenant_id"] == (
+            TENANT_A
+        )
+        assert result.event_id == "idem-header-key-XYZ"
+        # Idempotency is marked processed under the override key.
+        assert idempotency_service.mark_processed.call_args[0][0] == (
+            "idem-header-key-XYZ"
+        )
 
     @pytest.mark.asyncio
-    async def test_dual_broadcast_failure_does_not_block_main_path(
-        self,
-        pipeline,
-        legacy_ws_manager,
-        feature_flag_service,
-        caplog,
+    async def test_schema_version_override_drives_unsupported_rejection(
+        self, pipeline
     ):
-        """Legacy broadcast failure MUST NOT block the main intake path."""
-        feature_flag_service.get_overlay_state = AsyncMock(
-            return_value="active_gated"
-        )
-        legacy_ws_manager.broadcast_shipment_update = AsyncMock(
-            side_effect=RuntimeError("WS broadcast exploded")
-        )
-
-        payload = _valid_order_payload()
+        """When ``schema_version_override`` names an unsupported version, the
+        submission routes to the poison queue even though the payload's own
+        ``schema_version`` is supported — the override drives the check."""
+        # Payload schema_version=1.0 IS supported by the channel; the override
+        # is not, so the override must be the one that is checked.
+        payload = _valid_order_payload(schema_version="1.0")
         body = json.dumps(payload).encode()
         signature = _sign_body(body)
 
-        with caplog.at_level(logging.WARNING):
-            result = await pipeline.ingest_webhook(
-                channel_id=CHANNEL_ID,
-                body=body,
-                signature=signature,
-                request_id="req-dual-006",
-            )
+        result = await pipeline.ingest_webhook(
+            channel_id=CHANNEL_ID,
+            body=body,
+            signature=signature,
+            request_id="req-ovr-005",
+            schema_version_override="2.5",
+        )
 
-        # Main path still succeeds
+        assert result.status == "queued_for_review"
+
+    @pytest.mark.asyncio
+    async def test_schema_version_override_drives_adapter_dispatch(
+        self, pipeline
+    ):
+        """When ``schema_version_override`` names a supported version, the
+        submission is processed even though the payload declares an
+        unsupported version — the override drives dispatch."""
+        # Payload declares an unsupported version; the override is supported.
+        payload = _valid_order_payload(schema_version="99.0")
+        body = json.dumps(payload).encode()
+        signature = _sign_body(body)
+
+        result = await pipeline.ingest_webhook(
+            channel_id=CHANNEL_ID,
+            body=body,
+            signature=signature,
+            request_id="req-ovr-006",
+            schema_version_override="1.0",
+        )
+
+        # The supported override wins → the adapter runs and the order is made.
         assert result.status == "processed"
         assert result.order_id is not None
 
-        # A warning was logged
-        assert any(
-            "legacy /ws/ops dual-broadcast failed" in record.message
-            for record in caplog.records
-        )
-
     @pytest.mark.asyncio
-    async def test_dual_broadcast_skipped_when_no_legacy_ws_manager(
-        self,
-        es_service,
-        intake_channel_repo,
-        adapter_registry,
-        idempotency_service,
-        feature_flag_service,
-        poison_queue_service,
-        ws_manager,
-        credentials_vault,
-        customer_tank_repo,
-        legacy_dual_writer,
-        clock,
+    async def test_both_overrides_supplied_together(
+        self, pipeline, idempotency_service
     ):
-        """When legacy_ws_manager is None, dual-broadcast is skipped."""
-        feature_flag_service.get_overlay_state = AsyncMock(
-            return_value="active_gated"
+        """Both overrides can be supplied together and each takes precedence
+        over its payload-derived counterpart."""
+        payload = _valid_order_payload(
+            event_id="evt-from-payload", schema_version="99.0"
         )
-
-        pipeline_no_legacy_ws = OrderIntakePipeline(
-            es_service=es_service,
-            intake_channel_repo=intake_channel_repo,
-            adapter_registry=adapter_registry,
-            idempotency_service=idempotency_service,
-            feature_flag_service=feature_flag_service,
-            poison_queue_service=poison_queue_service,
-            ws_manager=ws_manager,
-            credentials_vault=credentials_vault,
-            customer_tank_repo=customer_tank_repo,
-            legacy_dual_writer=legacy_dual_writer,
-            legacy_ws_manager=None,
-            clock=clock,
-        )
-
-        payload = _valid_order_payload()
-        body = json.dumps(payload).encode()
-        signature = _sign_body(body)
-
-        result = await pipeline_no_legacy_ws.ingest_webhook(
-            channel_id=CHANNEL_ID,
-            body=body,
-            signature=signature,
-            request_id="req-dual-007",
-        )
-
-        # Main path still succeeds — no error from missing legacy manager
-        assert result.status == "processed"
-
-    @pytest.mark.asyncio
-    async def test_dual_broadcast_shipment_shape_projection(
-        self,
-        pipeline,
-        legacy_ws_manager,
-        feature_flag_service,
-    ):
-        """The shipment broadcast data is correctly projected from the order."""
-        feature_flag_service.get_overlay_state = AsyncMock(
-            return_value="active_gated"
-        )
-
-        payload = _valid_order_payload()
         body = json.dumps(payload).encode()
         signature = _sign_body(body)
 
@@ -1245,17 +1181,14 @@ class TestLegacyDualBroadcast:
             channel_id=CHANNEL_ID,
             body=body,
             signature=signature,
-            request_id="req-dual-008",
+            request_id="req-ovr-007",
+            idempotency_key_override="idem-header-key-ABC",
+            schema_version_override="1.0",
         )
 
         assert result.status == "processed"
-        shipment_data = legacy_ws_manager.broadcast_shipment_update.call_args[0][0]
-
-        # Verify the projected shipment shape
-        assert shipment_data["shipment_id"] == result.order_id
-        assert shipment_data["status"] == "placed"
-        assert shipment_data["tenant_id"] == TENANT_A
-        assert shipment_data["origin"] == "depot"  # fallback when no legacy_origin_snapshot
-        assert shipment_data["destination"] == "123 Main St, Houston TX"
-        assert shipment_data["current_location"] == {"lat": 29.76, "lon": -95.37}
-        assert "trace_id" in shipment_data
+        assert result.order_id is not None
+        assert result.event_id == "idem-header-key-ABC"
+        assert idempotency_service.is_duplicate.call_args[0][0] == (
+            "idem-header-key-ABC"
+        )

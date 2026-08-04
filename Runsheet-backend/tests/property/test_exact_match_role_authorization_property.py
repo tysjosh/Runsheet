@@ -50,6 +50,11 @@ _ROLE_POOL = [
     "driver_lead",
     "superadmin",
     "viewer",
+    # ``platform_admin`` and the bare prefix it contains. The staff role is a
+    # canonical role like any other here — it is not a super-role, so it must
+    # satisfy a requirement for exactly itself and nothing else.
+    "platform_admin",
+    "platform",
 ]
 
 _held_roles = st.lists(
@@ -124,6 +129,8 @@ class TestSuperstringNeverSatisfies:
         ("ops", "ops_manager"),
         ("driver_lead", "driver"),
         ("admin", "admin_ops"),  # held is a substring of required
+        ("platform_admin", "platform"),
+        ("platform_admin", "admin"),  # also the anti-implication pair
     ]
 
     @given(pair=st.sampled_from(_AFFIX_PAIRS))

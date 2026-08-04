@@ -12,10 +12,11 @@ import io
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from auth.router_guards import roles_dependency
 from config.settings import get_settings
 from middleware.rate_limiter import limiter
 from services.elasticsearch_service import elasticsearch_service
@@ -27,12 +28,39 @@ from services.import_models import (
 )
 from services.import_service import ImportService
 from services.schema_templates import SchemaTemplate, SchemaTemplates
+from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 
 logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
-router = APIRouter(prefix="/api/import")
+#: Roles permitted to reach any import route.
+#:
+#: Narrowed from ``{admin, dispatcher}`` to ``admin`` alone. A bulk import is the
+#: highest-leverage write in the product: one CSV can create or overwrite the
+#: customer roster, the asset fleet, the driver list, or the inventory catalogue
+#: in a single call, and the resulting rows feed pricing, routing and readiness
+#: decisions for the whole tenant. That is master-data administration rather than
+#: shift work, so it sits with the same role that owns Feature Flags.
+#:
+#: Applied at the router so it covers every route, not only the four that
+#: previously called a per-handler helper. ``GET /history``, ``/history/{id}``,
+#: ``/templates/{data_type}`` and ``/schemas/{data_type}`` had **no** role check
+#: at all, which let any signed-in user — a driver included — read what data had
+#: been imported, by whom, and how many rows landed.
+IMPORT_ADMIN_ROLES: tuple[str, ...] = ("admin",)
+
+#: Router-level gate. Rejections carry the canonical ``INSUFFICIENT_ROLE`` code
+#: (403) via :func:`auth.authorization.require_role`, which is why this is not a
+#: bare ``HTTPException`` — it keeps that ceiling moving in its intended
+#: direction and matches what the platform's clients already switch on.
+import_admin_dependency = roles_dependency(*IMPORT_ADMIN_ROLES)
+
+
+router = APIRouter(
+    prefix="/api/import",
+    dependencies=[Depends(import_admin_dependency)],
+)
 
 # Module-level service instances
 import_service = ImportService(elasticsearch_service)
@@ -40,6 +68,19 @@ schema_templates = SchemaTemplates()
 
 # Max upload file size: 10 MB
 MAX_FILE_SIZE = 10 * 1024 * 1024
+
+
+def configure_import_endpoints(
+    *,
+    order_intake_pipeline,
+    tank_import_service,
+) -> None:
+    """Wire canonical domain services into the shared import workflow."""
+
+    import_service.configure_canonical_imports(
+        order_intake_pipeline=order_intake_pipeline,
+        tank_import_service=tank_import_service,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -71,6 +112,7 @@ async def upload_csv(
     request: Request,
     file: UploadFile = File(...),
     data_type: str = Form(...),
+    tenant: TenantContext = Depends(get_tenant_context),
 ) -> ParseResult:
     """Upload a CSV file for import.
 
@@ -96,7 +138,12 @@ async def upload_csv(
         )
 
     try:
-        result = await import_service.parse_csv(file_content, data_type)
+        result = await import_service.parse_csv(
+            file_content,
+            data_type,
+            tenant_id=tenant.tenant_id,
+            source_name=filename,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
@@ -108,6 +155,7 @@ async def upload_csv(
 async def upload_sheets(
     request: Request,
     body: SheetsUploadRequest,
+    tenant: TenantContext = Depends(get_tenant_context),
 ) -> ParseResult:
     """Import data from a Google Sheets URL.
 
@@ -117,7 +165,11 @@ async def upload_sheets(
     Requirements: 11.2
     """
     try:
-        result = await import_service.parse_sheets(body.url, body.data_type)
+        result = await import_service.parse_sheets(
+            body.url,
+            body.data_type,
+            tenant_id=tenant.tenant_id,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
@@ -133,6 +185,7 @@ async def upload_sheets(
 async def validate_import(
     request: Request,
     body: ValidateRequest,
+    tenant: TenantContext = Depends(get_tenant_context),
 ) -> ValidationResult:
     """Validate mapped data against the schema template.
 
@@ -142,7 +195,11 @@ async def validate_import(
     Requirements: 11.3
     """
     try:
-        result = await import_service.validate(body.session_id, body.field_mapping)
+        result = await import_service.validate(
+            body.session_id,
+            body.field_mapping,
+            tenant_id=tenant.tenant_id,
+        )
     except ValueError as exc:
         detail = str(exc)
         if "not found" in detail.lower():
@@ -161,6 +218,7 @@ async def validate_import(
 async def commit_import(
     request: Request,
     body: CommitRequest,
+    tenant: TenantContext = Depends(get_tenant_context),
 ) -> ImportResult:
     """Commit validated records to Elasticsearch.
 
@@ -170,7 +228,11 @@ async def commit_import(
     Requirements: 11.4
     """
     try:
-        result = await import_service.commit(body.session_id, body.skip_errors)
+        result = await import_service.commit(
+            body.session_id,
+            body.skip_errors,
+            tenant=tenant,
+        )
     except ValueError as exc:
         detail = str(exc)
         if "not found" in detail.lower():
@@ -192,6 +254,7 @@ async def get_import_history(
     request: Request,
     data_type: Optional[str] = None,
     status: Optional[str] = None,
+    tenant: TenantContext = Depends(get_tenant_context),
 ) -> list[ImportSessionRecord]:
     """List import sessions with optional filters.
 
@@ -199,7 +262,11 @@ async def get_import_history(
 
     Requirements: 11.5
     """
-    return await import_service.get_history(data_type=data_type, status=status)
+    return await import_service.get_history(
+        data_type=data_type,
+        status=status,
+        tenant_id=tenant.tenant_id,
+    )
 
 
 @router.get("/history/{session_id}", response_model=ImportSessionRecord)
@@ -207,12 +274,16 @@ async def get_import_history(
 async def get_import_session(
     request: Request,
     session_id: str,
+    tenant: TenantContext = Depends(get_tenant_context),
 ) -> ImportSessionRecord:
     """Retrieve a single import session by ID.
 
     Requirements: 11.6
     """
-    record = await import_service.get_session(session_id)
+    record = await import_service.get_session(
+        session_id,
+        tenant_id=tenant.tenant_id,
+    )
     if record is None:
         raise HTTPException(
             status_code=404,

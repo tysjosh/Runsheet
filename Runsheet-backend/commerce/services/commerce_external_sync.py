@@ -42,8 +42,10 @@ Validates: Design §7, Requirements 5.6, 6.1, 6.2.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from typing import Any, Dict, Optional
 
+from services.money import unit_price_micros_from_record, unit_price_usd
 from services.time_utils import utcnow
 
 logger = logging.getLogger(__name__)
@@ -69,11 +71,22 @@ class CommerceExternalSync:
         stripe_connector: Optional[Any],
         invoice_service: Any,
         payment_service: Any,
+        integration_repository: Optional[Any] = None,
+        connector_factory: Optional[Any] = None,
     ) -> None:
         self._qbo_connector = qbo_connector
         self._stripe_connector = stripe_connector
         self._invoice_service = invoice_service
         self._payment_service = payment_service
+        self._integration_repository = integration_repository
+        self._connector_factory = connector_factory
+
+    def set_integration_resolver(
+        self, *, integration_repository: Any, connector_factory: Any
+    ) -> None:
+        """Late-wire tenant-specific connectors after integrations bootstrap."""
+        self._integration_repository = integration_repository
+        self._connector_factory = connector_factory
 
     async def on_invoice_finalized(self, invoice: Dict[str, Any]) -> None:
         """Enqueue a QBO push for a finalized invoice.
@@ -91,15 +104,18 @@ class CommerceExternalSync:
             invoice: The finalized Invoice document dict from
                 invoices_current.
         """
-        if self._qbo_connector is None:
-            logger.debug(
-                "CommerceExternalSync.on_invoice_finalized: no QBO connector "
-                "configured, skipping push for invoice=%s",
-                invoice.get("invoice_id"),
-            )
-            return
-
         try:
+            connector = await self._resolve_qbo_connector(
+                invoice.get("tenant_id")
+            )
+            if connector is None:
+                logger.debug(
+                    "CommerceExternalSync.on_invoice_finalized: no QBO "
+                    "connector configured, leaving invoice pending=%s",
+                    invoice.get("invoice_id"),
+                )
+                return
+
             # Build the push payload matching the QBO connector's
             # expected shape. The connector translates this into a QBO
             # Invoice create call.
@@ -110,14 +126,39 @@ class CommerceExternalSync:
             # this, but when called as a callback we invoke sync_push
             # directly — the connector handles feature-flag gating,
             # rate limiting, and retry internally.
-            sync_run = await self._qbo_connector.sync_push(payload)
+            sync_run = await connector.sync_push(payload)
 
             # Update the invoice's qbo_push_state based on the result
             invoice_id = invoice.get("invoice_id")
             tenant_id = invoice.get("tenant_id")
 
             if sync_run and hasattr(sync_run, "status"):
-                if sync_run.status in ("success", "partial"):
+                raw_counts = getattr(sync_run, "record_counts", {}) or {}
+                counts = raw_counts if isinstance(raw_counts, Mapping) else {}
+                skipped = int(counts.get("skipped_disabled", 0) or 0) > 0
+                pushed = int(counts.get("invoices_pushed", 0) or 0) > 0
+                if skipped and sync_run.status in ("success", "partial"):
+                    # A tenant-controlled feature flag is not a transport
+                    # failure. Leave the durable state pending so enabling the
+                    # integration later lets the recovery worker export it.
+                    logger.debug(
+                        "CommerceExternalSync: QBO push disabled; leaving "
+                        "invoice=%s pending",
+                        invoice_id,
+                    )
+                    return
+                if sync_run.status in ("success", "partial") and pushed:
+                    raw_metadata = getattr(sync_run, "result_metadata", {}) or {}
+                    result_metadata = (
+                        raw_metadata if isinstance(raw_metadata, Mapping) else {}
+                    )
+                    external_invoice_id = result_metadata.get(
+                        "external_invoice_id"
+                    )
+                    await self._mark_qbo_push_success(
+                        invoice=invoice,
+                        external_invoice_id=external_invoice_id,
+                    )
                     logger.info(
                         "CommerceExternalSync: QBO push succeeded for "
                         "invoice=%s tenant=%s run_id=%s",
@@ -130,6 +171,8 @@ class CommerceExternalSync:
                     current_attempts = invoice.get("qbo_push_attempts", 0) or 0
                     new_attempts = current_attempts + 1
                     error_details = getattr(sync_run, "error_details", None)
+                    if sync_run.status in ("success", "partial") and not pushed:
+                        error_details = "QBO connector returned success without creating an invoice"
 
                     if new_attempts >= 3:
                         # Dead-letter after 3 consecutive failures
@@ -156,6 +199,17 @@ class CommerceExternalSync:
                 exc,
                 exc_info=True,
             )
+            current_attempts = invoice.get("qbo_push_attempts", 0) or 0
+            await self._mark_qbo_push_retry(
+                tenant_id=invoice.get("tenant_id"),
+                invoice_id=invoice.get("invoice_id"),
+                attempts=current_attempts + 1,
+                last_error=str(exc),
+            )
+
+    async def retry_invoice_push(self, invoice: Dict[str, Any]) -> None:
+        """Retry a finalized invoice through the same tenant connector path."""
+        await self.on_invoice_finalized(invoice)
 
     async def on_qbo_payment_observed(self, qbo_event: Dict[str, Any]) -> None:
         """Ingest a payment observed from a QBO sync_pull.
@@ -399,6 +453,37 @@ class CommerceExternalSync:
     # Private helpers
     # ------------------------------------------------------------------
 
+    async def _resolve_qbo_connector(self, tenant_id: Optional[str]):
+        if self._qbo_connector is not None:
+            return self._qbo_connector
+        if (
+            not tenant_id
+            or self._integration_repository is None
+            or self._connector_factory is None
+        ):
+            return None
+
+        instances = await self._integration_repository.list_for_tenant(
+            tenant_id,
+            provider_name="quickbooks_online",
+            enabled=True,
+            size=10,
+        )
+        if not instances:
+            return None
+        instance = next(
+            (
+                candidate
+                for candidate in instances
+                if getattr(candidate, "status", None) == "connected"
+            ),
+            instances[0],
+        )
+        connector = self._connector_factory(instance)
+        if hasattr(connector, "__await__"):
+            connector = await connector
+        return connector
+
     def _build_qbo_push_payload(self, invoice: Dict[str, Any]) -> Dict[str, Any]:
         """Build the payload for the QBO connector's sync_push method.
 
@@ -406,6 +491,11 @@ class CommerceExternalSync:
         connector expects for creating a QBO Invoice.
         """
         line_items = invoice.get("line_items") or []
+        first_line_price_micros = (
+            unit_price_micros_from_record(line_items[0])
+            if line_items
+            else None
+        )
 
         # Build the payload matching the QBO connector's expected shape
         payload: Dict[str, Any] = {
@@ -413,9 +503,7 @@ class CommerceExternalSync:
             "customer_id": invoice.get("customer_id"),
             "customer_name": invoice.get("customer_name", ""),
             "delivery_date": (
-                invoice.get("issued_at", "")[:10]
-                if invoice.get("issued_at")
-                else ""
+                str(invoice.get("delivered_at") or invoice.get("issued_at") or "")[:10]
             ),
             "product_code": (
                 line_items[0].get("product_code", "")
@@ -428,8 +516,8 @@ class CommerceExternalSync:
                 else 0
             ),
             "unit_price_usd": (
-                (line_items[0].get("unit_price_cents", 0) / 100.0)
-                if line_items
+                float(unit_price_usd(first_line_price_micros))
+                if first_line_price_micros is not None
                 else 0.0
             ),
             "total_cents": invoice.get("total_cents", 0),
@@ -444,6 +532,54 @@ class CommerceExternalSync:
             "external_refs": invoice.get("external_refs", {}),
         }
         return payload
+
+    async def _mark_qbo_push_success(
+        self,
+        *,
+        invoice: Dict[str, Any],
+        external_invoice_id: Optional[str],
+    ) -> None:
+        """Persist the provider acknowledgement on the canonical invoice."""
+        from commerce.services.commerce_es_mappings import INVOICES_CURRENT_INDEX
+
+        tenant_id = invoice.get("tenant_id")
+        invoice_id = invoice.get("invoice_id")
+        external_refs = dict(invoice.get("external_refs") or {})
+        if external_invoice_id:
+            external_refs["qbo"] = f"inv:{external_invoice_id}"
+        update_doc = {
+            "qbo_push_state": "pushed",
+            "qbo_push_attempts": int(invoice.get("qbo_push_attempts") or 0) + 1,
+            "qbo_push_last_error": None,
+            "external_refs": external_refs,
+            "updated_at": utcnow().isoformat(),
+        }
+        await self._invoice_service._es.update_document(
+            INVOICES_CURRENT_INDEX,
+            invoice_id,
+            update_doc,
+        )
+        try:
+            from commerce.services.commerce_persistence_bridge import (
+                mirror_invoice_fields,
+            )
+
+            await mirror_invoice_fields(
+                tenant_id,
+                invoice_id,
+                {
+                    key: value
+                    for key, value in update_doc.items()
+                    if key != "updated_at"
+                },
+                event_type="qbo_pushed",
+            )
+        except Exception:
+            logger.exception(
+                "CommerceExternalSync: failed to mirror QBO acknowledgement "
+                "for invoice=%s",
+                invoice_id,
+            )
 
     async def _mark_qbo_push_dead_letter(
         self,

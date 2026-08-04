@@ -1,7 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { lazy, Suspense, useState } from "react";
 import ErrorBoundary from "../../../components/ErrorBoundary";
 import LoadingSpinner from "../../../components/LoadingSpinner";
@@ -24,19 +24,35 @@ function Loading({ message = "Loading..." }: { message?: string }) {
   );
 }
 
-export default function FleetPageRoute() {
+/**
+ * The Fleet hub body. Reads `?asset=<id>` — the canonical asset destination
+ * produced by `entityHref("asset", id)` — and hands it down so the tracking
+ * table selects (and the map focuses) that asset instead of the link landing
+ * on an unchanged view.
+ */
+function FleetPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const focusAssetId = searchParams.get("asset");
   const [selectedTruck, setSelectedTruck] = useState<Truck | null>(null);
 
   return (
+    <FleetDashboard
+      selectedTruck={selectedTruck}
+      onTruckSelect={setSelectedTruck}
+      focusAssetId={focusAssetId}
+      mapView={<MapView selectedTruck={selectedTruck} />}
+      onNavigate={(item) => router.push(dashboardPathForItem(item))}
+    />
+  );
+}
+
+export default function FleetPageRoute() {
+  return (
     <ErrorBoundary componentName="Fleet">
+      {/* Suspense also covers `useSearchParams` in FleetPage. */}
       <Suspense fallback={<Loading />}>
-        <FleetDashboard
-          selectedTruck={selectedTruck}
-          onTruckSelect={setSelectedTruck}
-          mapView={<MapView selectedTruck={selectedTruck} />}
-          onNavigate={(item) => router.push(dashboardPathForItem(item))}
-        />
+        <FleetPage />
       </Suspense>
     </ErrorBoundary>
   );

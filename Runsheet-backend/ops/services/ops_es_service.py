@@ -388,31 +388,18 @@ class OpsElasticsearchService:
             logger.error("Cannot upsert shipment: missing shipment_id")
             return False
 
-        applied = await self._scripted_upsert(
+        # Elasticsearch is the only store for shipments. Rev 0007 dropped the
+        # ``shipments_current`` Postgres table, so the dual-write that used to
+        # live here mirrored into a retired aggregate: every applied upsert
+        # raised ``ValueError: Unknown hybrid aggregate_type: 'shipment'``
+        # inside the bridge, which swallowed it and logged a misleading
+        # "Postgres dual-write failed" for a table that no longer exists.
+        return await self._scripted_upsert(
             index=self.SHIPMENTS_CURRENT,
             doc_id=shipment_id,
             doc=doc,
             entity_label="shipment",
         )
-
-        # Dual-write the shipment current-state to the Postgres source-of-truth.
-        # The repository's stale-event guard mirrors the ES scripted upsert's
-        # out-of-order protection, so it's safe to mirror on every call; we only
-        # do so when the ES write was applied (not a stale noop) to avoid
-        # re-sending discarded events. Best-effort: ES remains authoritative
-        # during the soak.
-        if applied:
-            try:
-                from commerce.services.commerce_persistence_bridge import (
-                    mirror_current_state_upsert,
-                )
-                await mirror_current_state_upsert("shipment", doc, doc_id=shipment_id)
-            except Exception:  # noqa: BLE001 — best-effort during soak
-                logger.exception(
-                    "Postgres dual-write failed for shipment %s", shipment_id
-                )
-
-        return applied
 
     async def upsert_rider_current(self, doc: Dict[str, Any]) -> bool:
         """

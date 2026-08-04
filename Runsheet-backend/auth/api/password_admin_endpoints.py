@@ -24,6 +24,16 @@ Security posture
 * The underlying service (:mod:`auth.password_admin`) only operates on emails
   present in the ``auth_users`` source of truth, so this surface can never mint
   a credential for an un-provisioned address.
+* **The target user must be in the caller's own tenant** unless the caller holds
+  :data:`~auth.supertokens_init.PLATFORM_ADMIN_ROLE`. ``admin`` is tenant-scoped
+  ("administrator of my own company"), so on its own it does not authorize
+  minting a reset link for an account outside that company. The target email
+  arrives in the request body, so the scope cannot be inferred from the route —
+  the handler passes ``tenant_id`` explicitly and the lookup enforces it. A
+  target outside the scope is reported as "not provisioned", identical to a
+  non-existent address, so this route cannot be used to enumerate accounts on
+  other tenants. A caller with a blank tenant and no staff role is denied
+  outright rather than searched for with a blank scope.
 
 Validates: SuperTokens Auth Migration Req 1.1/1.7 follow-up (OQ6).
 """
@@ -40,7 +50,14 @@ from auth.password_admin import (
     PasswordAdminError,
     create_password_set_link,
 )
-from errors.exceptions import internal_error, resource_not_found, validation_error
+from auth.supertokens_init import PLATFORM_ADMIN_ROLE
+from auth.tenant_scope import is_platform_admin
+from errors.exceptions import (
+    forbidden,
+    internal_error,
+    resource_not_found,
+    validation_error,
+)
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 
 logger = logging.getLogger(__name__)
@@ -101,11 +118,39 @@ async def issue_password_reset_link(
     body: PasswordResetLinkRequest,
     tenant: TenantContext = Depends(get_tenant_context),
 ) -> PasswordResetLinkResponse:
-    """Mint a password-set (reset) link for a provisioned user (admin only)."""
+    """Mint a password-set (reset) link for a provisioned user (admin only).
+
+    The link is equivalent to the account's credential, so the target must live
+    in the caller's own tenant. Only ``platform_admin`` may mint one for an
+    account in another tenant.
+    """
     require_role(tenant, "admin")
 
+    staff = is_platform_admin(tenant)
+    if not staff and not tenant.tenant_id:
+        # Fail closed on a blank caller tenant. Passing "" as the scope would
+        # search for a row whose tenant_id is also blank, which is the same
+        # "a falsy value authorizes itself" defect auth/tenant_scope.py denies
+        # for a blank path parameter.
+        raise forbidden(
+            message=(
+                "Minting a password-reset link requires a tenant-scoped "
+                f"session. Acting without one requires the "
+                f"{PLATFORM_ADMIN_ROLE} role."
+            ),
+            details={
+                "operation": "Minting a password-reset link",
+                "required_role_for_cross_tenant": PLATFORM_ADMIN_ROLE,
+            },
+        )
+
+    # None = unscoped lookup, permitted for staff only.
+    scope_tenant_id = None if staff else tenant.tenant_id
+
     try:
-        result = await create_password_set_link(str(body.email))
+        result = await create_password_set_link(
+            str(body.email), tenant_id=scope_tenant_id
+        )
     except PasswordAdminError as exc:
         logger.info(
             "Password-reset-link request for %s rejected: %s",

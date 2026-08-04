@@ -95,12 +95,27 @@ async def initialize(app, container: ServiceContainer) -> None:
         driver_ws_manager=driver_ws_manager,
     )
 
-    # Wire driver messaging endpoints
+    # Wire driver messaging endpoints. ``order_repository`` / ``push_notifier``
+    # are looked up rather than omitted: every ``configure_*`` call on the
+    # driver surface assigns each module global unconditionally, so an omitted
+    # argument resets it to ``None`` and un-wires the order-keyed path.
+    order_repository = (
+        container.get("order_repository")
+        if container.has("order_repository")
+        else None
+    )
+    driver_push_notifier = (
+        container.get("driver_push_notifier")
+        if container.has("driver_push_notifier")
+        else None
+    )
     configure_message_endpoints(
         es_service=es_service,
         job_service=job_service,
+        order_repository=order_repository,
         scheduling_ws_manager=scheduling_ws_manager,
         driver_ws_manager=driver_ws_manager,
+        push_notifier=driver_push_notifier,
     )
 
     # Wire driver exception reporting endpoints
@@ -108,9 +123,11 @@ async def initialize(app, container: ServiceContainer) -> None:
     configure_exception_endpoints(
         es_service=es_service,
         job_service=job_service,
+        order_repository=order_repository,
         signal_bus=signal_bus,
         scheduling_ws_manager=scheduling_ws_manager,
         driver_ws_manager=driver_ws_manager,
+        push_notifier=driver_push_notifier,
     )
 
     # Wire driver POD endpoints. The ``ocr_service`` is optional: when the
@@ -130,12 +147,22 @@ async def initialize(app, container: ServiceContainer) -> None:
     redis_client = (
         container.redis_client if container.has("redis_client") else None
     )
+    order_service = (
+        container.get("order_service") if container.has("order_service") else None
+    )
     configure_pod_endpoints(
         es_service=es_service,
         job_service=job_service,
+        order_repository=order_repository,
+        order_service=order_service,
         scheduling_ws_manager=scheduling_ws_manager,
         driver_ws_manager=driver_ws_manager,
         ocr_service=ocr_service,
+        reconciliation_service=(
+            container.reconciliation_service
+            if container.has("reconciliation_service")
+            else None
+        ),
         redis_client=redis_client,
     )
     logger.info("Scheduling API configured")

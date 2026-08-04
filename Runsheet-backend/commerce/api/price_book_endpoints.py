@@ -17,9 +17,10 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from config.settings import get_settings
+from commerce.api._authz import require_commerce_staff
 from commerce.services.price_book_service import PriceBookService
 from commerce.services.pricing_engine import PricingEngine, PricingError
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
@@ -122,6 +123,10 @@ async def require_pricing_enabled(
             },
         )
 
+    # Price books are a Tier 4 / staff surface: the ERP prices. Applied after the
+    # flag check so a tenant without the engine still sees 404 rather than 403.
+    require_commerce_staff(tenant)
+
     return tenant
 
 
@@ -149,7 +154,27 @@ class PricingRuleRequest(BaseModel):
     min_quantity_gallons: Optional[float] = Field(
         default=None, description="Minimum quantity in gallons for this break"
     )
-    unit_price_cents: int = Field(..., description="Unit price in cents (integer)")
+    unit_price_cents: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="Rounded unit price in whole cents",
+    )
+    unit_price_micros: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="Exact price per gallon in micro-dollars",
+    )
+
+    @model_validator(mode="after")
+    def unit_price_is_present(self) -> "PricingRuleRequest":
+        if (
+            self.unit_price_cents is None
+            and self.unit_price_micros is None
+        ):
+            raise ValueError(
+                "unit_price_cents or unit_price_micros is required"
+            )
+        return self
 
 
 class CreatePriceBookRequest(BaseModel):

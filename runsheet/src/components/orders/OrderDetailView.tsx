@@ -18,7 +18,12 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
-import { EntityLink, ToastContainer, useToasts } from "@/components/ui";
+import {
+  EntityLink,
+  entityHref,
+  ToastContainer,
+  useToasts,
+} from "@/components/ui";
 import { ApiError } from "../../services/api";
 import {
   type AssignDriverPayload,
@@ -934,9 +939,11 @@ export default function OrderDetailView({
                       <LinkedRefField
                         link={order.links?.driver}
                         fallbackId={order.assigned_driver_id}
-                        href={(id) =>
-                          `/ops/drivers?driver=${encodeURIComponent(id)}`
-                        }
+                        // Resolve through the canonical route map rather than a
+                        // hardcoded path. This used to point at
+                        // `/ops/drivers?driver=`, which is not a route (the
+                        // directory has no `page.tsx`) and so 404'd.
+                        href={(id) => entityHref("driver", id)}
                       />
                     </p>
                     {order.assigned_run_id && (
@@ -970,7 +977,7 @@ export default function OrderDetailView({
                     <LinkedRefField
                       link={order.links?.asset}
                       fallbackId={order.assigned_asset_id}
-                      href={(id) => `/ops/tracking/${encodeURIComponent(id)}`}
+                      href={(id) => entityHref("asset", id)}
                     />
                   </p>
                 </div>

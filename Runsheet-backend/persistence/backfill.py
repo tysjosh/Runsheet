@@ -51,35 +51,34 @@ _PRICE_PROTECTION_INDEX = "price_protection_contracts"
 _COMPLIANCE_PRICING_RULES_INDEX = "pricing_rules"
 _SUPPLIER_CONTRACTS_INDEX = "supplier_contracts"
 
-# Hybrid config aggregates: (es_index, pk_field, typed columns to lift).
+# Hybrid config aggregates: (aggregate_type, es_index).
 _CONFIG_BACKFILL = [
-    ("TaxJurisdictionORM", _TAX_JURISDICTIONS_INDEX, "jurisdiction_id",
-     ("fips_code", "tax_type", "status")),
-    ("TaxExemptionORM", _TAX_EXEMPTIONS_INDEX, "exemption_id",
-     ("customer_id", "certificate_number", "status")),
-    ("PriceProtectionContractORM", _PRICE_PROTECTION_INDEX, "contract_id",
-     ("customer_id", "product_code", "status", "version")),
-    ("CompliancePricingRuleORM", _COMPLIANCE_PRICING_RULES_INDEX, "rule_id",
-     ("customer_id", "product_code", "strategy", "status")),
-    ("SupplierContractORM", _SUPPLIER_CONTRACTS_INDEX, "contract_id",
-     ("supplier_name", "product_code", "status")),
+    ("tax_jurisdiction", _TAX_JURISDICTIONS_INDEX),
+    ("tax_exemption", _TAX_EXEMPTIONS_INDEX),
+    ("price_protection_contract", _PRICE_PROTECTION_INDEX),
+    ("compliance_pricing_rule", _COMPLIANCE_PRICING_RULES_INDEX),
+    ("supplier_contract", _SUPPLIER_CONTRACTS_INDEX),
 ]
 
 # Orders / jobs current-state hybrid aggregates.
 _FUEL_ORDERS_INDEX = "fuel_orders_current"
 _JOBS_INDEX = "jobs_current"
-_SHIPMENTS_INDEX = "shipments_current"
+# ``_SHIPMENTS_INDEX`` was retired with the ``shipments_current`` table (rev 0007).
 _TENANT_JOB_POLICIES_INDEX = "tenant_job_policies"
 
-# (model, es_index, pk_field, tenant-keyed?, typed columns)
+# The model, pk field and typed mirror columns all come from
+# ``repositories.hybrid_spec_for`` so this file cannot drift from the live write
+# path. It used to repeat them, and depot's copy went stale in both places at
+# once — neither wrote the ``status`` mirror column that
+# ``HybridReadRepository.list`` filters on, so every depot query narrowed by
+# status came back empty once reads were cut over to Postgres.
+
+# (aggregate_type, es_index, tenant-keyed?)
 _CURRENT_STATE_BACKFILL = [
-    ("FuelOrderCurrentORM", _FUEL_ORDERS_INDEX, "order_id", False,
-     ("customer_id", "assigned_driver_id", "status", "last_event_timestamp")),
-    ("JobCurrentORM", _JOBS_INDEX, "job_id", False,
-     ("asset_id", "status", "last_event_timestamp")),
-    ("ShipmentCurrentORM", _SHIPMENTS_INDEX, "shipment_id", False,
-     ("status", "last_event_timestamp")),
-    ("TenantJobPolicyORM", _TENANT_JOB_POLICIES_INDEX, "tenant_id", True, ()),
+    ("fuel_order", _FUEL_ORDERS_INDEX, False),
+    ("job", _JOBS_INDEX, False),
+    # ``shipment`` was retired with the ``shipments_current`` table (rev 0007).
+    ("tenant_job_policy", _TENANT_JOB_POLICIES_INDEX, True),
 ]
 
 # Master-data hybrid aggregates.
@@ -91,15 +90,15 @@ _INTAKE_CHANNELS_INDEX = "intake_channels"
 _TRUCKS_INDEX = "trucks"
 _LOCATIONS_INDEX = "locations"
 
-# (model, es_index, pk_field, typed columns)
+# (aggregate_type, es_index)
 _MASTER_DATA_BACKFILL = [
-    ("DriverMasterORM", _DRIVERS_INDEX, "driver_id", ("cdl_number", "status")),
-    ("DepotORM", _DEPOTS_INDEX, "depot_id", ("is_default",)),
-    ("TerminalORM", _TERMINALS_INDEX, "terminal_id", ("status",)),
-    ("AssetCertificationORM", _ASSET_CERTS_INDEX, "cert_id", ("asset_id", "status")),
-    ("IntakeChannelORM", _INTAKE_CHANNELS_INDEX, "channel_id", ()),
-    ("TruckORM", _TRUCKS_INDEX, "truck_id", ()),
-    ("LocationORM", _LOCATIONS_INDEX, "location_id", ()),
+    ("driver", _DRIVERS_INDEX),
+    ("depot", _DEPOTS_INDEX),
+    ("terminal", _TERMINALS_INDEX),
+    ("asset_certification", _ASSET_CERTS_INDEX),
+    ("intake_channel", _INTAKE_CHANNELS_INDEX),
+    ("truck", _TRUCKS_INDEX),
+    ("location", _LOCATIONS_INDEX),
 ]
 
 _SCROLL_SIZE = 500
@@ -172,6 +171,7 @@ async def backfill(tenant_id: Optional[str] = None, *, dry_run: bool = False) ->
         PriceBookORM,
         PricingRuleORM,
     )
+    from persistence.repositories import hybrid_spec_for
     from services.elasticsearch_service import elasticsearch_service
 
     if not is_persistence_enabled():
@@ -267,6 +267,9 @@ async def backfill(tenant_id: Optional[str] = None, *, dry_run: bool = False) ->
                 customer_id=src["customer_id"],
                 account_id=src["account_id"],
                 order_id=src.get("order_id"),
+                pod_id=src.get("pod_id"),
+                delivered_at=_parse_dt(src.get("delivered_at")),
+                delivery_result=src.get("delivery_result"),
                 invoice_number=src.get("invoice_number"),
                 status=src.get("status", "draft"),
                 total_cents=src.get("total_cents", 0),
@@ -295,6 +298,11 @@ async def backfill(tenant_id: Optional[str] = None, *, dry_run: bool = False) ->
                     product_code=li.get("product_code", ""),
                     quantity_gallons=float(li.get("quantity_gallons", li.get("quantity", 0)) or 0),
                     unit_price_cents=int(li.get("unit_price_cents", 0)),
+                    unit_price_micros=(
+                        int(li["unit_price_micros"])
+                        if li.get("unit_price_micros") is not None
+                        else None
+                    ),
                     subtotal_cents=int(li.get("subtotal_cents", 0)),
                 ))
             session.add(inv)
@@ -366,6 +374,11 @@ async def backfill(tenant_id: Optional[str] = None, *, dry_run: bool = False) ->
                 effective_to=_parse_dt(src.get("effective_to")),
                 min_quantity_gallons=src.get("min_quantity_gallons"),
                 unit_price_cents=int(src.get("unit_price_cents", 0)),
+                unit_price_micros=(
+                    int(src["unit_price_micros"])
+                    if src.get("unit_price_micros") is not None
+                    else None
+                ),
                 created_at=_parse_dt(src.get("created_at")) or datetime.utcnow(),
                 updated_at=_parse_dt(src.get("updated_at")) or datetime.utcnow(),
             ))
@@ -453,8 +466,6 @@ async def backfill(tenant_id: Optional[str] = None, *, dry_run: bool = False) ->
             ))
 
     # --- Compliance config (hybrid document tables) -------------------------
-    import persistence.models as _models
-
     _count_key = {
         _TAX_JURISDICTIONS_INDEX: "tax_jurisdictions",
         _TAX_EXEMPTIONS_INDEX: "tax_exemptions",
@@ -462,8 +473,8 @@ async def backfill(tenant_id: Optional[str] = None, *, dry_run: bool = False) ->
         _COMPLIANCE_PRICING_RULES_INDEX: "compliance_pricing_rules",
         _SUPPLIER_CONTRACTS_INDEX: "supplier_contracts",
     }
-    for model_name, index, pk_field, typed_cols in _CONFIG_BACKFILL:
-        model = getattr(_models, model_name)
+    for aggregate_type, index in _CONFIG_BACKFILL:
+        model, pk_field, typed_cols = hybrid_spec_for(aggregate_type)
         ckey = _count_key[index]
         async with session_scope() as session:
             for src in _scroll(es_client, index, tenant_id):
@@ -489,14 +500,16 @@ async def backfill(tenant_id: Optional[str] = None, *, dry_run: bool = False) ->
     _cs_count_key = {
         _FUEL_ORDERS_INDEX: "fuel_orders_current",
         _JOBS_INDEX: "jobs_current",
-        _SHIPMENTS_INDEX: "shipments_current",
+        # ``shipments_current`` was retired with its table (rev 0007).
         _TENANT_JOB_POLICIES_INDEX: "tenant_job_policies",
     }
-    for model_name, index, pk_field, tenant_keyed, typed_cols in _CURRENT_STATE_BACKFILL:
-        model = getattr(_models, model_name)
+    for aggregate_type, index, tenant_keyed in _CURRENT_STATE_BACKFILL:
+        model, pk_field, typed_cols = hybrid_spec_for(aggregate_type)
         ckey = _cs_count_key[index]
         async with session_scope() as session:
             for src in _scroll(es_client, index, tenant_id):
+                # tenant_job_policies is one row per tenant: ES keys the doc on
+                # tenant_id while the column is named policy_id.
                 doc_id = src["tenant_id"] if tenant_keyed else src.get(pk_field)
                 if not doc_id or await session.get(model, doc_id):
                     continue
@@ -505,7 +518,7 @@ async def backfill(tenant_id: Optional[str] = None, *, dry_run: bool = False) ->
                     continue
                 typed = {c: src.get(c) for c in typed_cols if c in src}
                 session.add(model(
-                    **{("policy_id" if tenant_keyed else pk_field): doc_id},
+                    **{pk_field: doc_id},
                     tenant_id=src.get("tenant_id") or "unknown",
                     document=dict(src),
                     created_at=_parse_dt(src.get("created_at")) or datetime.utcnow(),
@@ -523,8 +536,8 @@ async def backfill(tenant_id: Optional[str] = None, *, dry_run: bool = False) ->
         _TRUCKS_INDEX: "trucks",
         _LOCATIONS_INDEX: "locations",
     }
-    for model_name, index, pk_field, typed_cols in _MASTER_DATA_BACKFILL:
-        model = getattr(_models, model_name)
+    for aggregate_type, index in _MASTER_DATA_BACKFILL:
+        model, pk_field, typed_cols = hybrid_spec_for(aggregate_type)
         ckey = _md_count_key[index]
         async with session_scope() as session:
             for src in _scroll(es_client, index, tenant_id):

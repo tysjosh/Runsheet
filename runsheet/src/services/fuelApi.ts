@@ -14,6 +14,41 @@ export type { PaginatedResponse, PaginationMeta } from "./utils";
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080/api";
 
+// ─── Volume unit boundary ────────────────────────────────────────────────────
+//
+// The UI is gallons-only. A subset of legacy endpoints still declares its
+// volumes in liters on the wire:
+//
+//   * ``POST /fuel/stations`` / ``PATCH /fuel/stations/{id}`` —
+//     ``fuel.models.CreateFuelStation.capacity_liters`` /
+//     ``initial_stock_liters`` (required; no gallons field exists).
+//   * ``POST /fuel/consumption`` / ``POST /fuel/refill`` —
+//     ``fuel.models.ConsumptionEvent.quantity_liters`` (required).
+//   * ``PUT /fuel/mvp/compartments/{truck_id}`` —
+//     ``Agents.support.mvp_endpoints.CompartmentConfig.capacity_liters``
+//     (required); the ``truck_compartments`` ES mapping stores liters too.
+//
+// Those request fields cannot be renamed client-side without breaking the
+// integration, so all conversion is confined to this module:
+// ``litersToGallons`` on the read boundary (via the ``get*Gallons``
+// accessors below) and ``gallonsToWireLiters`` on the write boundary (inside
+// the request builders). Components deal in gallons only. Once the backend
+// accepts ``*_gallons`` request fields, delete ``gallonsToWireLiters`` and
+// the wire mappers that call it.
+//
+// ``POST /fuel/mvp/plan/{plan_id}/checkin`` is the first endpoint to make that
+// move: it takes ``actual_quantities_gallons`` with ``quantity_unit:
+// "us_gallon"`` and converts server-side, so {@link checkinStop} sends gallons
+// straight through and converts nothing.
+//
+// ``LITERS_PER_GALLON`` below is pinned to ``GAL_TO_L`` in
+// ``Runsheet-backend/services/unit_conversion.py``, which is the backend's only
+// definition of the factor. The two carry the same exact value, and
+// ``test_frontend_constant_matches_backend`` in
+// ``Runsheet-backend/tests/unit/test_volume_factor_single_source.py`` parses
+// this declaration and fails if they diverge. Do not change one without the
+// other.
+
 export const LITERS_PER_GALLON = 3.785411784;
 
 export function litersToGallons(liters: number | null | undefined): number {
@@ -21,7 +56,12 @@ export function litersToGallons(liters: number | null | undefined): number {
   return liters / LITERS_PER_GALLON;
 }
 
-export function gallonsToLiters(gallons: number | null | undefined): number {
+/**
+ * Write boundary: converts a gallons value entered in the UI into the liters
+ * value a legacy endpoint still requires. Deliberately module-private so
+ * conversions cannot spread back into components.
+ */
+function gallonsToWireLiters(gallons: number | null | undefined): number {
   if (gallons == null || Number.isNaN(gallons)) return 0;
   return gallons * LITERS_PER_GALLON;
 }
@@ -88,6 +128,31 @@ export interface RefillEvent {
   quantity_liters: number;
   supplier: string;
   delivery_reference?: string | null;
+  operator_id: string;
+}
+
+/**
+ * Consumption-event input as the UI captures it: quantity in gallons.
+ * {@link recordConsumption} converts it to the ``quantity_liters`` field the
+ * endpoint requires. Distinct from {@link ConsumptionEvent}, which is the
+ * read shape returned by the station-detail endpoint.
+ */
+export interface RecordConsumptionInput {
+  station_id: string;
+  fuel_type: FuelType;
+  quantity_gallons: number;
+  asset_id: string;
+  operator_id: string;
+  odometer_reading?: number;
+}
+
+/** Refill-event input in gallons; {@link recordRefill} maps it to liters. */
+export interface RecordRefillInput {
+  station_id: string;
+  fuel_type: FuelType;
+  quantity_gallons: number;
+  supplier: string;
+  delivery_reference?: string;
   operator_id: string;
 }
 
@@ -382,24 +447,27 @@ export async function getEfficiencyMetrics(
 
 // ─── Station CRUD Types ──────────────────────────────────────────────────────
 
+/**
+ * Station-create input as the UI holds it: volumes in gallons. Converted to
+ * the ``*_liters`` fields ``fuel.models.CreateFuelStation`` requires by
+ * {@link createStation} (see "Volume unit boundary" above).
+ */
 export interface CreateStationPayload {
   station_id: string;
   name: string;
   fuel_type: FuelType;
   capacity_gallons: number;
   initial_stock_gallons: number;
-  capacity_liters?: number;
-  initial_stock_liters?: number;
   location?: GeoPoint;
   location_name?: string;
   alert_threshold_pct: number;
 }
 
+/** Station-update input in gallons; {@link updateStation} maps it to liters. */
 export interface UpdateStationPayload {
   name?: string;
   fuel_type?: FuelType;
   capacity_gallons?: number;
-  capacity_liters?: number;
   location?: GeoPoint;
   location_name?: string;
   alert_threshold_pct?: number;
@@ -419,11 +487,56 @@ export interface PlanListItem {
   cost_variance_pct?: number;
 }
 
+/**
+ * Body for ``POST /fuel/mvp/plan/:id/checkin``. Volumes are US gallons on the
+ * wire: the backend converts to litres once, server-side, so no client-side
+ * conversion happens here (see "Volume unit boundary" above).
+ */
 export interface CheckinRequest {
   route_id: string;
   station_id: string;
   sequence: number;
-  actual_quantities: Record<string, number>;
+  /** Fuel grade to US gallons delivered. */
+  actual_quantities_gallons: Record<string, number>;
+  /** Asserts the unit of {@link actual_quantities_gallons} on the contract. */
+  quantity_unit: "us_gallon";
+  /** Check-in coordinates; the endpoint rejects a body without them. */
+  geotag: CheckinGeotag;
+  /** Client-asserted ISO 8601 check-in time; required by the endpoint. */
+  event_timestamp: string;
+  /** Fuel order this stop delivers; links the stop to its POD. */
+  order_id?: string;
+}
+
+/**
+ * Check-in coordinate pair. Distinct from {@link GeoPoint} because the check-in
+ * contract names the longitude field ``lng`` while the station contracts use
+ * ``lon``.
+ */
+export interface CheckinGeotag {
+  lat: number;
+  lng: number;
+}
+
+/** Response of ``POST /fuel/mvp/plan/:id/checkin``; every volume is gallons. */
+export interface CheckinResponse {
+  plan_id: string;
+  route_id: string;
+  station_id: string;
+  sequence: number;
+  quantity_unit: "us_gallon";
+  actual_quantities_gallons: Record<string, number>;
+  planned_quantities_gallons: Record<string, number>;
+  variance_gallons: Record<string, number>;
+  driver_id?: string | null;
+  order_id?: string | null;
+  pod_id?: string | null;
+  event_timestamp?: string | null;
+  server_received_at?: string | null;
+  completed_stops: number;
+  total_stops: number;
+  all_complete: boolean;
+  updated_at: string;
 }
 
 export interface StopVariance {
@@ -462,10 +575,24 @@ export interface CostConfig {
 
 // ─── Fuel Distribution MVP Types ─────────────────────────────────────────────
 
+/** One stage that finished its cycle without doing its job. */
+export interface PipelineDegradation {
+  agent_id: string;
+  reasons: unknown[];
+}
+
 export interface GeneratePlanResponse {
   run_id: string;
   plan_id?: string | null;
+  /**
+   * Mirrors the backend `PipelineState`. `"complete"` means every stage ran
+   * *and* produced something; `"degraded"` means none of them raised but at
+   * least one produced nothing (e.g. route planning skipped every truck).
+   * Treating `"degraded"` as success is what `degraded` exists to prevent.
+   */
   status: string;
+  degraded?: boolean;
+  degradation_reasons?: PipelineDegradation[];
 }
 
 export interface ReplanRequest {
@@ -656,30 +783,53 @@ export async function getPriorities(
 
 // ─── Station CRUD Endpoints ──────────────────────────────────────────────────
 
-/** POST /fuel/stations — create a new fuel station */
+/**
+ * POST /fuel/stations — create a new fuel station.
+ *
+ * Wire mapper: ``capacity_gallons`` / ``initial_stock_gallons`` from the UI
+ * become the ``capacity_liters`` / ``initial_stock_liters`` fields
+ * ``fuel.models.CreateFuelStation`` requires.
+ */
 export async function createStation(
   data: CreateStationPayload,
   tenantId: string,
 ): Promise<FuelStation> {
   const qs = buildQueryString({ tenant_id: tenantId });
+  const { capacity_gallons, initial_stock_gallons, ...rest } = data;
+  const body = {
+    ...rest,
+    capacity_liters: gallonsToWireLiters(capacity_gallons),
+    initial_stock_liters: gallonsToWireLiters(initial_stock_gallons),
+  };
   return fuelRequest<FuelStation>(`/fuel/stations${qs}`, {
     method: "POST",
-    body: JSON.stringify(data),
+    body: JSON.stringify(body),
   });
 }
 
-/** PATCH /fuel/stations/:id — update an existing fuel station */
+/**
+ * PATCH /fuel/stations/:id — update an existing fuel station.
+ *
+ * Wire mapper: ``capacity_gallons`` becomes ``capacity_liters`` (the field
+ * ``fuel.models.UpdateFuelStation`` declares) and is omitted entirely when
+ * the caller left it undefined, so PATCH semantics are preserved.
+ */
 export async function updateStation(
   stationId: string,
   data: UpdateStationPayload,
   tenantId: string,
 ): Promise<FuelStation> {
   const qs = buildQueryString({ tenant_id: tenantId });
+  const { capacity_gallons, ...rest } = data;
+  const body: Record<string, unknown> = { ...rest };
+  if (capacity_gallons !== undefined) {
+    body.capacity_liters = gallonsToWireLiters(capacity_gallons);
+  }
   return fuelRequest<FuelStation>(
     `/fuel/stations/${encodeURIComponent(stationId)}${qs}`,
     {
       method: "PATCH",
-      body: JSON.stringify(data),
+      body: JSON.stringify(body),
     },
   );
 }
@@ -702,28 +852,46 @@ export async function updateStationThreshold(
 
 // ─── Fuel Event Recording Endpoints ──────────────────────────────────────────
 
-/** POST /fuel/consumption — record a fuel dispensing event */
+/**
+ * POST /fuel/consumption — record a fuel dispensing event.
+ *
+ * Wire mapper: ``quantity_gallons`` from the UI becomes the
+ * ``quantity_liters`` field ``fuel.models.ConsumptionEvent`` requires.
+ */
 export async function recordConsumption(
-  data: ConsumptionEvent,
+  data: RecordConsumptionInput,
 ): Promise<{ data: Record<string, unknown>; request_id: string }> {
+  const { quantity_gallons, ...rest } = data;
   return fuelRequest<{ data: Record<string, unknown>; request_id: string }>(
     "/fuel/consumption",
     {
       method: "POST",
-      body: JSON.stringify(data),
+      body: JSON.stringify({
+        ...rest,
+        quantity_liters: gallonsToWireLiters(quantity_gallons),
+      }),
     },
   );
 }
 
-/** POST /fuel/refill — record a fuel delivery/refill event */
+/**
+ * POST /fuel/refill — record a fuel delivery/refill event.
+ *
+ * Wire mapper: ``quantity_gallons`` becomes ``quantity_liters`` (the field
+ * ``fuel.models.RefillEvent`` requires).
+ */
 export async function recordRefill(
-  data: RefillEvent,
+  data: RecordRefillInput,
 ): Promise<{ data: Record<string, unknown>; request_id: string }> {
+  const { quantity_gallons, ...rest } = data;
   return fuelRequest<{ data: Record<string, unknown>; request_id: string }>(
     "/fuel/refill",
     {
       method: "POST",
-      body: JSON.stringify(data),
+      body: JSON.stringify({
+        ...rest,
+        quantity_liters: gallonsToWireLiters(quantity_gallons),
+      }),
     },
   );
 }
@@ -777,27 +945,28 @@ export async function rejectPlan(
   );
 }
 
-/** POST /api/fuel/mvp/plan/:id/checkin — record a driver check-in at a stop */
+/**
+ * POST /api/fuel/mvp/plan/:id/checkin — record a driver check-in at a stop.
+ *
+ * Sends ``actual_quantities_gallons`` with ``quantity_unit: "us_gallon"``; the
+ * gallons-to-litres conversion is server-side, so this call performs none (a
+ * client-side conversion here would double-convert). ``geotag`` and
+ * ``event_timestamp`` are required by the endpoint — a body without either is
+ * rejected with 422.
+ */
 export async function checkinStop(
   planId: string,
   tenantId: string,
   body: CheckinRequest,
-): Promise<{
-  plan_id: string;
-  completed_stops: number;
-  total_stops: number;
-  status: string;
-}> {
+): Promise<CheckinResponse> {
   const qs = buildQueryString({ tenant_id: tenantId });
-  return fuelRequest<{
-    plan_id: string;
-    completed_stops: number;
-    total_stops: number;
-    status: string;
-  }>(`/fuel/mvp/plan/${encodeURIComponent(planId)}/checkin${qs}`, {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
+  return fuelRequest<CheckinResponse>(
+    `/fuel/mvp/plan/${encodeURIComponent(planId)}/checkin${qs}`,
+    {
+      method: "POST",
+      body: JSON.stringify(body),
+    },
+  );
 }
 
 /** GET /api/fuel/mvp/plan/:id/outcomes — get plan vs actual outcome comparison */
@@ -2451,14 +2620,19 @@ export async function listCompartmentTrucks(): Promise<CompartmentTrucksResponse
 }
 
 /**
- * One compartment definition sent to
- * ``PUT /api/fuel/mvp/compartments/{truck_id}``. ``allowed_grades`` accepts
- * canonical product codes or NG aliases (AGO/PMS/ATK/LPG); the backend
- * canonicalizes and rejects unknown codes with a 400.
+ * One compartment definition as the UI holds it, with capacity in gallons.
+ * {@link configureCompartments} converts it to the ``capacity_liters`` field
+ * ``Agents.support.mvp_endpoints.CompartmentConfig`` requires.
+ *
+ * ``allowed_grades`` should carry canonical US product codes from
+ * ``fuel.services.fuel_product_catalog`` (DIESEL_2, GASOLINE_REG,
+ * GASOLINE_PREM, HEATING_OIL, PROPANE, KEROSENE, OFF_ROAD_DIESEL, DEF,
+ * ETHANOL_E85). The backend canonicalizes on write — legacy NG aliases still
+ * resolve — and rejects unknown codes with a 400.
  */
 export interface CompartmentConfigInput {
   compartment_id: string;
-  capacity_liters: number;
+  capacity_gallons: number;
   allowed_grades: string[];
   position_index: number;
 }
@@ -2475,14 +2649,23 @@ export interface ConfigureCompartmentsResponse {
  * tanker's compartments. Also registers the truck in the fleet index
  * server-side (FleetRegistrationService), so a brand-new tanker becomes
  * both compartment-aware and fleet-visible in one call.
+ *
+ * Wire mapper: each ``capacity_gallons`` becomes the ``capacity_liters``
+ * field the endpoint requires.
  */
 export async function configureCompartments(
   truckId: string,
   compartments: CompartmentConfigInput[],
 ): Promise<ConfigureCompartmentsResponse> {
+  const wireCompartments = compartments.map(
+    ({ capacity_gallons, ...rest }) => ({
+      ...rest,
+      capacity_liters: gallonsToWireLiters(capacity_gallons),
+    }),
+  );
   return fuelRequest<ConfigureCompartmentsResponse>(
     `/fuel/mvp/compartments/${encodeURIComponent(truckId)}`,
-    { method: "PUT", body: JSON.stringify({ compartments }) },
+    { method: "PUT", body: JSON.stringify({ compartments: wireCompartments }) },
   );
 }
 

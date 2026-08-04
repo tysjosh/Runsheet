@@ -156,21 +156,23 @@ class _FakeVault:
         key: str,
         plaintext: Dict[str, Any],
         provider_name: Optional[str] = None,
+        ref: Optional[str] = None,
     ) -> str:
         self._counter += 1
-        ref = f"cred:{tenant_id}:{key}:{self._counter}"
+        stored_ref = ref or f"cred:{tenant_id}:{key}:{self._counter}"
         self.put_calls.append(
             {
                 "tenant_id": tenant_id,
                 "key": key,
                 "provider_name": provider_name,
+                "ref": ref,
                 # We intentionally keep a copy of the plaintext so the
                 # test can assert the values crossed into the vault;
                 # nothing in production logs the plaintext.
                 "plaintext_keys": sorted(plaintext.keys()),
             }
         )
-        return ref
+        return stored_ref
 
     async def rotate(self, tenant_id: str, ref: str) -> str:
         self.rotate_calls.append({"tenant_id": tenant_id, "ref": ref})
@@ -193,6 +195,10 @@ class _FakeScheduler:
         self._side_effect = sync_now_side_effect
 
     async def schedule_instance(self, instance: IntegrationInstance) -> bool:
+        self.schedule_calls.append(instance.instance_id)
+        return True
+
+    async def reschedule_instance(self, instance: IntegrationInstance) -> bool:
         self.schedule_calls.append(instance.instance_id)
         return True
 
@@ -469,7 +475,7 @@ class TestPatchIntegration:
         assert resp.status_code == 404
         assert resp.json()["detail"]["error_code"] == "integration_instance_not_found"
 
-    def test_credentials_rotation_invokes_vault_rotate(self):
+    def test_credentials_update_replaces_plaintext_under_existing_ref(self):
         app, es, _, vault = _build_app()
         _seed_instance(es, credentials_ref="cred:tenant-A:qbo:1")
         client = TestClient(app)
@@ -482,10 +488,16 @@ class TestPatchIntegration:
         body = resp.json()
         assert body["credentials_ref"] == "cred:tenant-A:qbo:1"
         assert "credentials" not in body
-        assert vault.rotate_calls == [
-            {"tenant_id": "tenant-A", "ref": "cred:tenant-A:qbo:1"}
+        assert vault.rotate_calls == []
+        assert vault.put_calls == [
+            {
+                "tenant_id": "tenant-A",
+                "key": "quickbooks_online_credentials",
+                "provider_name": "quickbooks_online",
+                "ref": "cred:tenant-A:qbo:1",
+                "plaintext_keys": ["refresh_token"],
+            }
         ]
-        assert vault.put_calls == []  # rotation, not a fresh put
 
     def test_credentials_first_time_uses_put(self):
         app, es, _, vault = _build_app()

@@ -197,7 +197,8 @@
       "address": "1500 Industrial Blvd, Houston, TX 77020",
       "timezone": "America/Chicago",
       "fuel_types_supported": ["DIESEL_2", "GASOLINE_REG", "GASOLINE_PREM", "HEATING_OIL", "KEROSENE"],
-      "status": "active"
+      "status": "active",
+      "is_default": true
     },
     {
       "depot_id": "DEPOT-DAL",

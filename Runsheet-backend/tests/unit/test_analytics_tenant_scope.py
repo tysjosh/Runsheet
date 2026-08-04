@@ -268,9 +268,14 @@ def test_static_analytics_mock_routes_are_not_registered() -> None:
 
 
 @pytest.mark.parametrize("index", ["trucks", "support_tickets"])
-def test_semantic_search_emits_tenant_filter(index: str) -> None:
+def test_semantic_search_emits_tenant_filter(index: str, monkeypatch) -> None:
     """GET /api/search runs through ``semantic_search`` which must scope its
     multi_match query to the caller's tenant."""
+    if index == "support_tickets":
+        # ``support_tickets`` is part of the legacy NG last-mile surface and is
+        # gated behind ``legacy_ng_delivery`` (default OFF). Enable it so the
+        # tenant-scoping coverage for that index is preserved.
+        monkeypatch.setenv("LEGACY_NG_DELIVERY_ENABLED", "true")
     tenant_id = "tenant-a"
     app, fake_es = _build_app(tenant_id=tenant_id)
 

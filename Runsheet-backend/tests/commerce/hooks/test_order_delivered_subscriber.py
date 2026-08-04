@@ -44,7 +44,7 @@ def _make_order(
     total_cents: int = 185938,
 ) -> dict:
     """Build a minimal delivered order dict for testing."""
-    return {
+    order = {
         "order_id": order_id,
         "tenant_id": tenant_id,
         "customer_id": customer_id,
@@ -57,6 +57,13 @@ def _make_order(
         "total_cents": total_cents,
         "status": status,
     }
+    order["delivery_result"] = {
+        "pod_id": "pod-default",
+        "actual_gallons": gallons_requested,
+        "actual_gallons_source": "manual",
+        "delivered_at": "2026-07-29T14:30:00Z",
+    }
+    return order
 
 
 def _make_settings(invoicing_enabled: bool = True):
@@ -101,12 +108,31 @@ class TestOrderDeliveredInvoiceSubscriber:
                     "product_code": "ULSD",
                     "quantity_gallons": 500.0,
                     "unit_price_cents": 350,
+                    "unit_price_micros": 3_500_000,
                     "subtotal_cents": 175000,
                 }
             ],
             tax_cents=10938,
             actor="system",
+            delivery_result=order["delivery_result"],
         )
+
+    @pytest.mark.asyncio
+    async def test_defers_invoice_until_pod_snapshot_arrives(self):
+        """A dispatcher delivery transition cannot bill planned gallons."""
+        invoice_service = MagicMock()
+        invoice_service.generate_from_order = AsyncMock()
+        subscriber = OrderDeliveredInvoiceSubscriber(invoice_service)
+        order = _make_order()
+        order.pop("delivery_result")
+
+        with patch(
+            "commerce.hooks.order_delivered_subscriber.get_settings",
+            return_value=_make_settings(invoicing_enabled=True),
+        ):
+            await subscriber(order)
+
+        invoice_service.generate_from_order.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_skips_when_invoicing_disabled(self):
@@ -198,8 +224,42 @@ class TestOrderDeliveredInvoiceSubscriber:
             "product_code": "JET-A",
             "quantity_gallons": 1000.0,
             "unit_price_cents": 425,
+            "unit_price_micros": 4_250_000,
             "subtotal_cents": 425000,
         }
+
+    @pytest.mark.asyncio
+    async def test_actual_gallons_drive_invoice_quantity_subtotal_and_tax(self):
+        """A short delivery never bills the requested quantity."""
+        invoice_service = MagicMock()
+        invoice_service.generate_from_order = AsyncMock(
+            return_value={"invoice_id": "inv_actual", "total_cents": 0}
+        )
+        subscriber = OrderDeliveredInvoiceSubscriber(invoice_service)
+        order = _make_order(
+            gallons_requested=500,
+            unit_price_cents=350,
+            subtotal_cents=175000,
+            tax_cents=10000,
+        )
+        order["delivery_result"] = {
+            "pod_id": "pod-1",
+            "actual_gallons": 475.5,
+            "actual_gallons_source": "manual",
+            "delivered_at": "2026-07-29T14:30:00Z",
+        }
+
+        with patch(
+            "commerce.hooks.order_delivered_subscriber.get_settings",
+            return_value=_make_settings(invoicing_enabled=True),
+        ):
+            await subscriber(order)
+
+        kwargs = invoice_service.generate_from_order.call_args.kwargs
+        assert kwargs["line_items"][0]["quantity_gallons"] == 475.5
+        assert kwargs["line_items"][0]["subtotal_cents"] == 166425
+        assert kwargs["tax_cents"] == 9510
+        assert kwargs["delivery_result"]["pod_id"] == "pod-1"
 
     @pytest.mark.asyncio
     async def test_checks_flag_per_event_not_at_startup(self):

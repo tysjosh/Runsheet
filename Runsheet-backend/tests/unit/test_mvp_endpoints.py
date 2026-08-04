@@ -86,7 +86,12 @@ def _make_mock_replanning_agent():
     return agent
 
 
-def _create_test_app(pipeline=None, es_service=None, replanning_agent=None):
+def _create_test_app(
+    pipeline=None,
+    es_service=None,
+    replanning_agent=None,
+    plan_dispatch_service=None,
+):
     """Create a FastAPI test app with MVP endpoints configured."""
     from errors.handlers import register_exception_handlers
 
@@ -108,6 +113,7 @@ def _create_test_app(pipeline=None, es_service=None, replanning_agent=None):
         pipeline=pipeline,
         es_service=es_service,
         exception_replanning_agent=replanning_agent,
+        plan_dispatch_service=plan_dispatch_service,
     )
 
     return app, pipeline, es_service
@@ -128,6 +134,51 @@ class TestGeneratePlan:
         data = resp.json()
         assert data["run_id"] == "run_test_123"
         assert data["status"] == "complete"
+        assert data["degraded"] is False
+        assert data["degradation_reasons"] == []
+
+    def test_forwards_a_degraded_run_rather_than_reporting_complete(self):
+        """Req 6.4 — the endpoint is a consumer of the completion signal.
+
+        A run whose route stage skipped every truck it was handed reaches this
+        endpoint having raised nothing. Forwarding ``"complete"`` for it, or
+        dropping the reasons, would relaunder the silent skip into success at
+        the API boundary.
+        """
+        pipeline = _make_mock_pipeline()
+        degradations = [
+            {
+                "agent_id": "route_planning",
+                "reasons": [
+                    {
+                        "truck_id": "truck-9",
+                        "reason_code": "unresolvable_stop_locations",
+                    }
+                ],
+            }
+        ]
+        pipeline.get_status = AsyncMock(return_value={
+            "run_id": "run_test_123",
+            "tenant_id": TEST_TENANT_ID,
+            "state": "degraded",
+            "started_at": "2024-01-01T00:00:00+00:00",
+            "completed_at": "2024-01-01T00:01:00+00:00",
+            "failed_agent": None,
+            "error_message": None,
+            "degraded": True,
+            "degradations": degradations,
+            "stage_results": {},
+        })
+        app, _, _ = _create_test_app(pipeline=pipeline)
+        client = TestClient(app)
+
+        resp = client.post("/api/fuel/mvp/plan/generate")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "degraded"
+        assert data["degraded"] is True
+        assert data["degradation_reasons"] == degradations
 
     def test_calls_pipeline_run(self):
         app, pipeline, _ = _create_test_app()
@@ -211,19 +262,30 @@ class TestGetPlan:
         assert data["route_plan"] is None
 
     def test_returns_plan_without_route(self):
-        """Loading plan exists but no route yet."""
+        """Loading plan exists but no route yet.
+
+        Answers by index rather than by a fixed list of canned responses. The
+        route lookup tries ``plan_id`` and then falls back to ``run_id``, so a
+        two-element ``side_effect`` is exhausted by the third call and raises
+        ``StopIteration`` — which the endpoint used to swallow along with real
+        Elasticsearch errors, so this test passed on an exception the fake
+        invented. Now that a failed lookup is reported as 503 rather than
+        silently treated as "no route", the fake has to behave like the
+        collaborator it stands in for: an empty result, not a raise.
+        """
         es = _make_mock_es()
         loading_doc = {
             "plan_id": "plan-1",
             "truck_id": "truck-1",
             "tenant_id": "tenant-1",
         }
-        es.search_documents = AsyncMock(
-            side_effect=[
-                {"hits": {"hits": [{"_source": loading_doc}]}},
-                {"hits": {"hits": []}},
-            ]
-        )
+
+        async def _search(index, query, size=10, *args, **kwargs):
+            if index == "mvp_load_plans":
+                return {"hits": {"hits": [{"_source": loading_doc}]}}
+            return {"hits": {"hits": []}}
+
+        es.search_documents = AsyncMock(side_effect=_search)
 
         app, _, _ = _create_test_app(es_service=es)
         client = TestClient(app)
@@ -269,6 +331,54 @@ class TestReplan:
             json={"disruption_type": "delay"},
         )
         assert resp.status_code == 503
+
+
+class TestApprovePlan:
+    def test_approval_delegates_to_canonical_driver_dispatch(self):
+        es = _make_mock_es()
+        plan = {
+            "plan_id": "plan-1",
+            "run_id": "run-1",
+            "truck_id": "truck-1",
+            "tenant_id": TEST_TENANT_ID,
+            "status": "proposed",
+            "assignments": [{"order_id": "ord-1"}],
+        }
+        es.search_documents = AsyncMock(
+            return_value={"hits": {"hits": [{"_source": plan}]}}
+        )
+        dispatch_result = MagicMock()
+        dispatch_result.as_dict.return_value = {
+            "plan_id": "plan-1",
+            "run_id": "run-1",
+            "driver_id": "driver-1",
+            "truck_id": "truck-1",
+            "route_ids": ["route-1"],
+            "execution_ids": ["execution-1"],
+            "order_ids": ["ord-1"],
+            "newly_dispatched": 1,
+            "already_dispatched": 0,
+        }
+        dispatch_service = MagicMock()
+        dispatch_service.dispatch = AsyncMock(return_value=dispatch_result)
+        app, _, _ = _create_test_app(
+            es_service=es,
+            plan_dispatch_service=dispatch_service,
+        )
+
+        response = TestClient(app).post(
+            "/api/fuel/mvp/plan/plan-1/approve"
+        )
+
+        assert response.status_code == 200
+        assert response.json()["driver_id"] == "driver-1"
+        assert response.json()["order_ids"] == ["ord-1"]
+        assert response.json()["status"] == "dispatched"
+        dispatch_service.dispatch.assert_awaited_once_with(
+            tenant_id=TEST_TENANT_ID,
+            plan_doc=plan,
+            actor_user_id=TEST_USER_ID,
+        )
 
 
 # ---------------------------------------------------------------------------

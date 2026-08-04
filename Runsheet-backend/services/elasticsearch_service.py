@@ -607,7 +607,8 @@ class ElasticsearchService:
             "inventory": self._get_inventory_mapping(),
             "support_tickets": self._get_support_tickets_mapping(),
             "analytics_events": self._get_analytics_mapping(),
-            "import_sessions": self._get_import_sessions_mapping()
+            "import_sessions": self._get_import_sessions_mapping(),
+            "import_sessions_active": self._get_active_import_sessions_mapping(),
         }
 
         for index_name, mapping in indices.items():
@@ -799,6 +800,26 @@ class ElasticsearchService:
                 path=""
             )
             
+            # tenant_id is not just another field: every read is scoped with
+            # ``{"term": {"tenant_id": ...}}`` (inject_tenant_filter), and a term
+            # query against analyzed text matches only when a produced token
+            # equals the whole term. A tenant id containing a hyphen is split by
+            # the standard analyzer, so an index that inferred ``text`` here
+            # serves ZERO rows to every tenant while looking perfectly healthy.
+            # Say so at ERROR, separately from the generic type-mismatch list,
+            # because the fix is a reindex rather than a mapping update.
+            actual_tenant = actual_properties.get("tenant_id")
+            if actual_tenant is not None and actual_tenant.get("type") != "keyword":
+                result["valid"] = False
+                detail = (
+                    f"tenant_id is mapped as '{actual_tenant.get('type')}', not "
+                    f"'keyword' — every tenant-scoped term filter on "
+                    f"'{index_name}' will match nothing. The index needs a "
+                    f"reindex; a put-mapping cannot change a field's type."
+                )
+                result["mismatches"].append(detail)
+                logger.error(f"❌ Schema validation [{index_name}]: {detail}")
+
             # Log warnings for any mismatches
             if result["missing_fields"]:
                 logger.warning(
@@ -922,9 +943,13 @@ class ElasticsearchService:
         """
         # Define compatible type pairs
         compatible_types = {
-            # semantic_text may be stored as text with additional inference config
-            ("semantic_text", "text"): True,
-            ("text", "semantic_text"): True,
+            # ``("semantic_text", "text")`` used to be declared compatible here.
+            # No mapping declares ``semantic_text`` any more (see the note above
+            # _get_locations_mapping), so the pair is unreachable — but it was
+            # also actively harmful while it lasted: it made this validator
+            # report "compatible" for exactly the indices whose declared mapping
+            # had been rejected and replaced by a dynamic one, which is how the
+            # dead tenant filters went unreported at every startup.
             # long and integer are often interchangeable
             ("integer", "long"): True,
             ("long", "integer"): True,
@@ -1028,6 +1053,12 @@ class ElasticsearchService:
                         }
                     },
                     "status": {"type": "keyword"},
+                    # Operational state, distinct from the movement ``status``
+                    # above: ``out_of_service`` is written by
+                    # Inspection_Service when a driver reports a defect of that
+                    # severity (driver-mobile-app R8.5), and tracking updates
+                    # that move ``status`` must not clear it.
+                    "operational_state": {"type": "keyword"},
                     "estimated_arrival": {"type": "date"},
                     "last_update": {"type": "date"},
                     "cargo": {
@@ -1035,7 +1066,15 @@ class ElasticsearchService:
                             "type": {"type": "keyword"},
                             "weight": {"type": "float"},
                             "volume": {"type": "float"},
-                            "description": {"type": "semantic_text"},
+                            # ``semantic_text`` until it was found to be
+                            # load-bearing in the worst way — see the note above
+                            # _get_locations_mapping. The only consumer,
+                            # ``semantic_search``, issues a plain multi_match,
+                            # which behaves identically on ``text``.
+                            "description": {
+                                "type": "text",
+                                "fields": {"keyword": {"type": "keyword", "ignore_above": 256}},
+                            },
                             "priority": {"type": "keyword"}
                         }
                     },
@@ -1073,6 +1112,33 @@ class ElasticsearchService:
             }
         }
     
+    # ------------------------------------------------------------------
+    # Why these four mappings no longer declare ``semantic_text``
+    # ------------------------------------------------------------------
+    #
+    # ``semantic_text`` needs Elasticsearch 8.15+ AND an inference endpoint.
+    # Nothing in this codebase ever creates one, and the sole consumer of these
+    # fields — :meth:`semantic_search` — issues a plain ``multi_match``, which is
+    # lexical and behaves identically on ``text``. So the type bought nothing
+    # even where it is supported.
+    #
+    # What it cost was severe and silent. On a cluster without the type,
+    # ``indices.create`` fails with ``No handler for type [semantic_text]``;
+    # :meth:`setup_indices` logs that and moves on, so the first write creates
+    # the index by DYNAMIC mapping instead. Dynamic mapping infers analyzed
+    # ``text`` for every string — including ``tenant_id`` — and
+    # ``inject_tenant_filter`` scopes every read with
+    # ``{"term": {"tenant_id": ...}}``. A term query against analyzed text
+    # matches only if a produced token equals the whole term, and the standard
+    # analyzer splits ``demo-tenant`` into ``demo`` + ``tenant``. So every
+    # tenant-scoped read returned zero rows from a populated index: ``trucks``
+    # held 10 documents and matched 0, ``locations`` 4 and matched 0, and
+    # ``support_tickets`` was never created at all.
+    #
+    # Existing indices keep the mapping they were created with, so a cluster
+    # that already went down this path needs a reindex — a put-mapping cannot
+    # change a field's type. See ``.kiro/runbooks`` for the repair.
+
     def _get_locations_mapping(self):
         """Get mapping for locations index"""
         return {
@@ -1082,8 +1148,14 @@ class ElasticsearchService:
                     "name": {"type": "text"},
                     "type": {"type": "keyword"},
                     "coordinates": {"type": "geo_point"},
-                    "address": {"type": "semantic_text"},
+                    "address": {
+                        "type": "text",
+                        "fields": {"keyword": {"type": "keyword", "ignore_above": 256}},
+                    },
                     "region": {"type": "keyword"},
+                    # Declared so it is never inferred as analyzed text: reads go
+                    # through inject_tenant_filter, which uses a term query.
+                    "tenant_id": {"type": "keyword"},
                     "created_at": {"type": "date"},
                     "updated_at": {"type": "date"}
                 }
@@ -1096,12 +1168,16 @@ class ElasticsearchService:
             "mappings": {
                 "properties": {
                     "item_id": {"type": "keyword"},
-                    "name": {"type": "semantic_text"},
+                    "name": {
+                        "type": "text",
+                        "fields": {"keyword": {"type": "keyword", "ignore_above": 256}},
+                    },
                     "category": {"type": "keyword"},
                     "quantity": {"type": "integer"},
                     "unit": {"type": "keyword"},
                     "location": {"type": "text"},
                     "status": {"type": "keyword"},
+                    "tenant_id": {"type": "keyword"},
                     "last_updated": {"type": "date"},
                     "created_at": {"type": "date"},
                     "updated_at": {"type": "date"}
@@ -1117,12 +1193,19 @@ class ElasticsearchService:
                     "ticket_id": {"type": "keyword"},
                     "customer": {"type": "text"},
                     "customer_id": {"type": "keyword"},
-                    "issue": {"type": "semantic_text"},
-                    "description": {"type": "semantic_text"},
+                    "issue": {
+                        "type": "text",
+                        "fields": {"keyword": {"type": "keyword", "ignore_above": 256}},
+                    },
+                    "description": {
+                        "type": "text",
+                        "fields": {"keyword": {"type": "keyword", "ignore_above": 256}},
+                    },
                     "priority": {"type": "keyword"},
                     "status": {"type": "keyword"},
                     "assigned_to": {"type": "keyword"},
                     "related_order": {"type": "keyword"},
+                    "tenant_id": {"type": "keyword"},
                     "created_at": {"type": "date"},
                     "updated_at": {"type": "date"},
                     "resolved_at": {"type": "date"}
@@ -1195,6 +1278,7 @@ class ElasticsearchService:
             "mappings": {
                 "properties": {
                     "session_id": {"type": "keyword"},
+                    "tenant_id": {"type": "keyword"},
                     "data_type": {"type": "keyword"},
                     "source_type": {"type": "keyword"},
                     "source_name": {
@@ -1213,6 +1297,30 @@ class ElasticsearchService:
                     "created_at": {"type": "date"},
                     "completed_at": {"type": "date"},
                     "duration_seconds": {"type": "float"}
+                }
+            }
+        }
+
+    def _get_active_import_sessions_mapping(self):
+        """Get mapping for durable in-progress import sessions."""
+        return {
+            "mappings": {
+                "properties": {
+                    "session_id": {"type": "keyword"},
+                    "tenant_id": {"type": "keyword"},
+                    "data_type": {"type": "keyword"},
+                    "source_type": {"type": "keyword"},
+                    "source_name": {"type": "text"},
+                    "rows_json": {"type": "text", "index": False},
+                    "columns": {"type": "keyword"},
+                    "sample_rows": {"type": "object", "enabled": False},
+                    "total_rows": {"type": "integer"},
+                    "suggested_mapping": {"type": "object", "enabled": False},
+                    "field_mapping": {"type": "object", "enabled": False},
+                    "validation_result": {"type": "object", "enabled": False},
+                    "status": {"type": "keyword"},
+                    "created_at": {"type": "date"},
+                    "updated_at": {"type": "date"},
                 }
             }
         }
@@ -1525,6 +1633,61 @@ class ElasticsearchService:
         except Exception as e:
             self._handle_elasticsearch_error(f"search_documents({index})", e)
     
+    async def multi_search(
+        self,
+        searches: List[Dict[str, Any]],
+        request_timeout: int = 10,
+    ) -> Dict[str, Any]:
+        """Run several search bodies in ONE round trip via the `_msearch` API.
+
+        The point of this method is the round-trip count: N independent
+        `terms`-filtered lookups cost one network hop instead of N. It is what
+        lets a read model collapse an N+1 fan-out into a fixed budget (see
+        `DriverWorkService`, which resolves compartment prior grades and stop
+        coordinates in a single call).
+
+        Args:
+            searches: One entry per search body, each
+                ``{"index": <index name>, "query": <query body>}``. A missing
+                index is tolerated per body (``ignore_unavailable``), so a
+                deployment that has not created an optional index gets an empty
+                result rather than a failed request.
+            request_timeout: Per-call timeout in seconds.
+
+        Returns:
+            The raw `_msearch` response, ``{"responses": [<search response>, ...]}``
+            in request order. An empty ``searches`` list returns
+            ``{"responses": []}`` without touching the cluster.
+
+        Validates:
+        - Requirement 3.5: Implement circuit breakers for Elasticsearch
+        - Requirement 2.4: Return specific error code indicating database unavailability
+        """
+        if not searches:
+            return {"responses": []}
+
+        try:
+            async def _do_multi_search():
+                body: List[Dict[str, Any]] = []
+                for entry in searches:
+                    header = {
+                        "index": entry["index"],
+                        "ignore_unavailable": True,
+                    }
+                    body.append(header)
+                    body.append(dict(entry.get("query") or {}))
+                return self.client.msearch(
+                    body=body,
+                    request_timeout=request_timeout,
+                )
+
+            return await self._read_circuit_breaker.execute(_do_multi_search)
+        except CircuitOpenException as e:
+            self._handle_circuit_breaker_exception(e)
+        except Exception as e:
+            indices = ",".join(str(entry.get("index")) for entry in searches)
+            self._handle_elasticsearch_error(f"multi_search({indices})", e)
+
     async def get_document(self, index: str, doc_id: str):
         """
         Get a single document by ID with circuit breaker protection.
@@ -1601,7 +1764,16 @@ class ElasticsearchService:
     
     async def semantic_search(self, tenant_id: str, index: str, text: str, fields: List[str], size: int = 10):
         """
-        Perform semantic search using semantic_text fields with circuit breaker protection.
+        Full-text search across ``fields``, with circuit breaker protection.
+
+        The name is historical and the docstring used to claim "semantic search
+        using semantic_text fields". It never did: the query below is a plain
+        ``multi_match``, which is lexical, and no inference endpoint is
+        configured anywhere in the codebase. The four mappings that declared
+        ``semantic_text`` for these fields have been changed to ``text`` (see the
+        note above ``_get_locations_mapping``) precisely because this method
+        behaves identically either way — while the type made index creation fail
+        outright on any cluster that does not support it.
 
         The query is scoped to the supplied tenant: every request is wrapped
         with a ``{"term": {"tenant_id": tenant_id}}`` filter so a caller

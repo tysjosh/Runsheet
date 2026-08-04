@@ -2,8 +2,8 @@
 Prometheus metrics for the Order Intake Pipeline — full observability surface.
 
 Defines counters and histograms for the intake pipeline, adapter errors,
-shadow divergence, legacy shim, state-machine rejections, drift alerts,
-and driver daily reset. All metrics are registered on the shared
+shadow divergence, state-machine rejections, drift alerts, and driver
+daily reset. All metrics are registered on the shared
 :data:`services.metrics.FUELOPS_REGISTRY`.
 
 Validates: Requirements 9.2.1, 9.2.2, 9.2.3, 9.2.5.
@@ -20,8 +20,6 @@ __all__ = [
     "orders_intake_latency_seconds",
     "orders_adapter_errors_total",
     "orders_shadow_divergence_total",
-    "orders_legacy_route_hits_total",
-    "orders_legacy_mirror_errors_total",
     "orders_state_transition_rejections_total",
     "orders_drift_alert_total",
     "fuelops_driver_daily_reset_errors_total",
@@ -95,29 +93,14 @@ orders_shadow_divergence_total = Counter(
     registry=FUELOPS_REGISTRY,
 )
 
-# ---------------------------------------------------------------------------
-# Legacy Route Hits
-# ---------------------------------------------------------------------------
-
-orders_legacy_route_hits_total = Counter(
-    "orders_legacy_route_hits_total",
-    "Total hits on deprecated legacy routes during the deprecation "
-    "window. Tracks remaining consumers of the old surface.",
-    ["route", "tenant_id"],
-    registry=FUELOPS_REGISTRY,
-)
-
-# ---------------------------------------------------------------------------
-# Legacy Mirror Errors
-# ---------------------------------------------------------------------------
-
-orders_legacy_mirror_errors_total = Counter(
-    "orders_legacy_mirror_errors_total",
-    "Total legacy mirror write failures. Incremented when mirror_order "
-    "or mirror_driver fails and the entity is enqueued for retry.",
-    ["tenant_id", "entity_type"],
-    registry=FUELOPS_REGISTRY,
-)
+# NB: ``orders_legacy_route_hits_total`` was removed with the only route it
+# counted (``POST /webhooks/dinee``). It measured remaining consumers of the
+# deprecated surface; with the surface gone there is nothing to measure.
+#
+# ``orders_legacy_mirror_errors_total`` followed it out. It counted
+# ``mirror_order`` / ``mirror_driver`` failures on the LegacyDualWriter shim;
+# the shim and its ``pending_legacy_mirrors`` retry queue have been retired,
+# so no code path can increment it.
 
 # ---------------------------------------------------------------------------
 # State Transition Rejections

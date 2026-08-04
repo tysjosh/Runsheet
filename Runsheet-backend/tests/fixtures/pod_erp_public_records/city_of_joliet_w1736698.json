@@ -1,0 +1,23 @@
+{
+  "provenance": {
+    "publisher": "City of Joliet, Illinois",
+    "invoice_list_url": "https://www.joliet.gov/home/showpublisheddocument/36236/638839385669600000",
+    "fuel_award_url": "https://joliet.legistar.com/gateway.aspx/matter.aspx?key=11984",
+    "notes": [
+      "The vendor invoice list publishes invoice W1736698, PO 25000102, invoice date 2025-05-06, description Diesel, and amount 20762.00 USD.",
+      "The 2025 award publishes the Grade #2 diesel rate of 2.9660 USD per gallon.",
+      "Delivered gallons are derived as 20762.00 / 2.9660 = 7000.0."
+    ]
+  },
+  "transaction": {
+    "source_system": "city_of_joliet_public_records",
+    "source_record_id": "W1736698",
+    "purchase_order": "25000102",
+    "invoice_date": "2025-05-06",
+    "product_code": "DIESEL_2",
+    "unit_price_usd": "2.9660",
+    "unit_price_micros": 2966000,
+    "delivered_gallons": 7000.0,
+    "invoice_total_cents": 2076200
+  }
+}

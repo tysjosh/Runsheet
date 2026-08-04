@@ -4,11 +4,19 @@ Property-based tests for HMAC Signature Verification.
 **Validates: Requirements 1.2, 1.3**
 
 Property 1: For any random payload and secret, computing HMAC and passing
-            it to _verify_signature returns True.
+            it to the verifier returns True.
 Property 2: For any random payload, secret, and different_secret, computing
             HMAC with secret and verifying with different_secret returns False.
 Property 3: For any random payload and secret, modifying the payload after
             signing causes verification to fail.
+
+These properties used to be asserted against ``ops.webhooks.receiver.
+_verify_signature``, which was a three-line delegate to
+:func:`ops.webhooks.hmac_util.verify_hmac_sha256_hex`. The receiver was removed
+with the ``POST /webhooks/dinee`` route, so the properties now bind directly to
+the shared implementation — the one the order-intake pipeline and the Dinee
+voice bridge both call. That is a strictly better target: it is the code that
+actually guards inbound webhooks, rather than a wrapper around it.
 """
 
 import hashlib
@@ -25,7 +33,18 @@ from hypothesis.strategies import binary, text
 # ---------------------------------------------------------------------------
 sys.modules.setdefault("services.elasticsearch_service", MagicMock())
 
-from ops.webhooks.receiver import _verify_signature  # noqa: E402
+from ops.webhooks.hmac_util import verify_hmac_sha256_hex  # noqa: E402
+
+
+def _verify_signature(body: bytes, signature: str, secret: str) -> bool:
+    """Adapt the shared verifier to the argument order these properties use.
+
+    ``verify_hmac_sha256_hex`` takes ``(secret, body, signature)``; the removed
+    receiver helper took ``(body, signature, secret)``. Kept as a local shim so
+    the property bodies below are unchanged and remain diffable against the
+    versions that ran before the route was deleted.
+    """
+    return verify_hmac_sha256_hex(secret, body, signature)
 
 
 # ---------------------------------------------------------------------------
@@ -38,7 +57,7 @@ _payloads = binary(min_size=0, max_size=4096)
 
 
 def _compute_hmac(body: bytes, secret: str) -> str:
-    """Compute HMAC-SHA256 hex digest – mirrors the receiver implementation."""
+    """Compute HMAC-SHA256 hex digest independently of the code under test."""
     return hmac_mod.new(
         secret.encode("utf-8"),
         body,

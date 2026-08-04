@@ -56,6 +56,36 @@ ALLOWLISTED_PATH_PATTERNS: List[str] = [
     "scripts/",
     "bootstrap/",
     "test_order_tenant_filter_ceiling.py",
+    # Not queries: ``TIMESTAMP_SKIP_INDICES`` is a module-level frozenset of
+    # index NAMES used to decide auto-stamping of created_at/updated_at. No ES
+    # query is built here, so there is nothing to scope.
+    "services/elasticsearch_service.py",
+    # Not queries: a ``(index_name, seeder_fn)`` dispatch table for the local
+    # demo seeder. Seeding is deliberately tenant-agnostic (docs are stamped
+    # tenant_id="demo") and is gated behind settings.seed_demo_data.
+    "seed_all_data.py",
+    # Not queries: module-level ``_<NAME>_INDEX = "<name>"`` constants plus an
+    # ``(aggregate_type, es_index)`` table. The one place backfill.py builds a
+    # query, ``_scroll``, applies ``{"term": {"tenant_id": tenant_id}}`` when a
+    # tenant is given and scrolls everything when it is not — deliberately, the
+    # same way the ``alembic`` skip below is justified: an operator backfill
+    # populating the Postgres source-of-truth spans tenants by definition and is
+    # never a request-path read.
+    #
+    # It was passing this guard by accident until the duplicated typed-column
+    # tuples were removed. The heuristic falls back to a +/-10/20-line window for
+    # a match with no enclosing function, and a neighbouring tuple happened to
+    # contain the literal ``"tenant_id"`` as a pk field name. Deleting that
+    # duplication deleted the coincidence.
+    "persistence/backfill.py",
+    # Not queries: static ``SchemaTemplate`` declarations. Each template names
+    # the ``es_index`` an import writes into (``es_index="fuel_orders_current"``
+    # and the data_type -> index map) as catalogue metadata. The module performs
+    # no ES operation whatsoever — no search_documents, index_document, or query
+    # body — so there is no scope to add a tenant filter to. The import that
+    # consumes a template is tenant-scoped where the write happens, in
+    # services/import_service.py, which this ceiling still guards.
+    "services/schema_templates.py",
 ]
 
 #: Directories to skip entirely during scanning.
@@ -67,6 +97,11 @@ SKIP_DIRS: Set[str] = {
     "__pycache__",
     "node_modules",
     ".git",
+    # Alembic revisions are schema DDL and cross-tenant backfills: they operate
+    # on whole tables/indices by definition, so a per-tenant filter is not
+    # applicable (and adding one would break the migration). They are never a
+    # request-path read, which is what this ceiling protects.
+    "alembic",
 }
 
 

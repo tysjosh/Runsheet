@@ -13,6 +13,7 @@ Fuel notification rules wire each fuel template to its trigger event:
 - past_due_invoice → Invoice status → overdue (Email)
 - delivery_completed → POD confirmed (Email/SMS)
 - e_bol_delivery → Signed BOL generated (Email)
+- pod_otp → Order dispatched in a tenant requiring a POD code (SMS/Email)
 
 Requirements: 5.6, 7.4, 12.1, 12.2, 12.3, 12.4
 """
@@ -64,6 +65,22 @@ FUEL_NOTIFICATION_RULES: list[dict] = [
         "default_channels": ["email"],
         "enabled": True,
         "description": "Fires when a signed BOL PDF is generated; attaches the PDF",
+    },
+    # Dispatch-time proof-of-delivery code (driver-mobile-app R5.27). Without
+    # an enabled rule for this event type, ``notify_event`` resolves none and
+    # returns without delivering, so the rule ships with the template rather
+    # than after it. Only fires for tenants whose ``otp_required`` policy is
+    # true — PODOTPService returns before submitting anything otherwise.
+    {
+        "event_type": "pod_otp",
+        "template_key": "pod_otp",
+        "trigger_condition": "order_dispatched_otp_required",
+        "default_channels": ["sms", "email"],
+        "enabled": True,
+        "description": (
+            "Fires when an order is dispatched in a tenant requiring a POD "
+            "one-time code; delivers the code to the customer"
+        ),
     },
 ]
 

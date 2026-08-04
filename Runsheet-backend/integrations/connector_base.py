@@ -279,6 +279,13 @@ class SyncRun(BaseModel):
             "non-negative integers."
         ),
     )
+    result_metadata: Dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Non-secret provider results such as a created external record id. "
+            "Credentials and personal data must never be stored here."
+        ),
+    )
     error_details: Optional[str] = Field(default=None)
     duration_ms: Optional[int] = Field(
         default=None,

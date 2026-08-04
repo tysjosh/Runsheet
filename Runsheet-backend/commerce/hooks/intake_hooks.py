@@ -33,6 +33,11 @@ from typing import Any, Dict, Optional, Protocol
 import yaml
 
 from config.settings import get_settings
+from services.money import (
+    MICROS_PER_CENT,
+    legacy_unit_price_cents,
+    line_subtotal_cents,
+)
 from services.time_utils import utcnow
 
 logger = logging.getLogger(__name__)
@@ -246,9 +251,18 @@ class PricingHook:
             quantity_gallons=quantity_gallons,
         )
 
-        # Compute line totals (integer cents only — Constraint C1)
-        unit_price_cents = result.unit_price_cents
-        subtotal_cents = int(unit_price_cents * quantity_gallons)
+        # Totals remain integer cents, while the per-gallon price uses
+        # micro-dollars so four-decimal contract rates are not truncated.
+        unit_price_micros = (
+            result.unit_price_micros
+            if result.unit_price_micros is not None
+            else result.unit_price_cents * MICROS_PER_CENT
+        )
+        unit_price_cents = legacy_unit_price_cents(unit_price_micros)
+        subtotal_cents = line_subtotal_cents(
+            quantity_gallons,
+            unit_price_micros,
+        )
 
         # Tax calculation using flat-rate-per-state (Req 4.5)
         state = self._extract_state(order_draft)
@@ -256,6 +270,7 @@ class PricingHook:
         total_cents = subtotal_cents + tax_cents
 
         # Attach pricing fields to the order draft (Req 4.1)
+        order_draft["unit_price_micros"] = unit_price_micros
         order_draft["unit_price_cents"] = unit_price_cents
         order_draft["subtotal_cents"] = subtotal_cents
         order_draft["tax_cents"] = tax_cents
@@ -263,10 +278,10 @@ class PricingHook:
 
         logger.info(
             "PricingHook: priced order for tenant=%s product=%s "
-            "unit=%d subtotal=%d tax=%d total=%d (rule=%s)",
+            "unit_micros=%d subtotal=%d tax=%d total=%d (rule=%s)",
             tenant_id,
             product_code,
-            unit_price_cents,
+            unit_price_micros,
             subtotal_cents,
             tax_cents,
             total_cents,

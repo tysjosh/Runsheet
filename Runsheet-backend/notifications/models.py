@@ -39,6 +39,11 @@ class NotificationType(str, Enum):
     PAST_DUE_INVOICE = "past_due_invoice"
     DELIVERY_COMPLETED = "delivery_completed"
     E_BOL_DELIVERY = "e_bol_delivery"
+    # Dispatch-time proof-of-delivery one-time code (driver-mobile-app R5.27).
+    # A distinct type from DELIVERY_COMPLETED / DELIVERY_CONFIRMATION, which
+    # are completion-time bodies: this one is sent when the order is
+    # dispatched, so the customer holds the code before the driver arrives.
+    POD_OTP = "pod_otp"
 
 
 class DeliveryStatus(str, Enum):

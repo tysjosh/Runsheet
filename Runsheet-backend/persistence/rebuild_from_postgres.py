@@ -10,8 +10,18 @@ index mapping if it is missing, and indexes each projected document under its
 aggregate id.
 
 Because the projection is byte-identical to what the relay writes, a
-rebuild-from-PG produces the same index contents the live projection would —
-so dropping an index is safe: it can always be reconstructed here.
+rebuild-from-PG produces the same index contents the live projection would — so
+dropping any index **listed in** :data:`_REBUILD_SPECS` is safe.
+
+.. warning::
+
+   That guarantee does **not** extend to every index the platform uses. This
+   docstring used to end "so dropping an index is safe: it can always be
+   reconstructed here", full stop, and that sentence was false: several indices
+   hold authoritative state with no Postgres table behind them, so recreating
+   Elasticsearch destroys their contents permanently. See
+   :data:`ES_ONLY_INDICES` for the current list and check it before dropping
+   anything.
 
 Usage::
 
@@ -64,7 +74,7 @@ _REBUILD_SPECS: Dict[str, Tuple[str, str, str, Optional[str]]] = {
     # Orders / jobs current-state (hybrid)
     "fuel_order": ("FuelOrderCurrentORM", "order_id", "tenant_id", None),
     "job": ("JobCurrentORM", "job_id", "tenant_id", None),
-    "shipment": ("ShipmentCurrentORM", "shipment_id", "tenant_id", None),
+    # ``shipment`` was retired with the ``shipments_current`` table (rev 0007).
     "tenant_job_policy": ("TenantJobPolicyORM", "policy_id", "tenant_id", None),
     # Master data (hybrid)
     "driver": ("DriverMasterORM", "driver_id", "tenant_id", None),
@@ -75,6 +85,42 @@ _REBUILD_SPECS: Dict[str, Tuple[str, str, str, Optional[str]]] = {
     "truck": ("TruckORM", "truck_id", "tenant_id", None),
     "location": ("LocationORM", "location_id", "tenant_id", None),
 }
+
+
+#: Indices holding authoritative state that this tool CANNOT rebuild, because
+#: there is no Postgres table, no ORM model and no entry in
+#: :data:`persistence.projections.PROJECTORS` behind them. Recreating
+#: Elasticsearch loses their contents for good.
+#:
+#: Every entry was found the hard way: an end-to-end test of the MVP pipeline
+#: recreated the ES cluster on the strength of this module's old "dropping an
+#: index is safe" claim, and the fuel planning stages (A1 tank forecasting, A3
+#: compartment loading) then had no input at all — which is what
+#: ``POST /api/fuel/mvp/plan/generate`` was reporting as ``status: "complete"``.
+#:
+#: These are not seed data. They accumulate operational state written by live
+#: code paths, and the value in ES is the only copy:
+#:
+#:   * ``customer_tanks`` — ``k_factor`` written back by
+#:     ``KFactorCalibrationService`` after each calibration, and level/reading
+#:     fields updated by the Veeder-Root ATG connector.
+#:   * ``truck_compartments`` — ``last_loaded_product`` / ``state`` written by
+#:     ``CompartmentLoadingAgent._persist_loading_plan``. This is the history the
+#:     cross-contamination guard checks, so losing it does not merely lose data:
+#:     it silently removes the evidence a product-compatibility block depends on.
+#:   * ``fuel_stations`` — tank inventory for the legacy retail path, also
+#:     updated by the ATG connector.
+#:
+#: Giving them a Postgres source of truth means a migration plus ORM models,
+#: projectors and repository rewiring onto the outbox, which is a larger change
+#: than this registry. Until then the honest statement is that they are backed up
+#: by ES snapshots or not at all — hence this list, and the warning
+#: :func:`rebuild_all` prints.
+ES_ONLY_INDICES: Tuple[str, ...] = (
+    "customer_tanks",
+    "truck_compartments",
+    "fuel_stations",
+)
 
 
 def _ensure_index(es_client, index: str) -> None:
@@ -208,7 +254,20 @@ async def rebuild(
 async def rebuild_all(
     tenant_id: Optional[str] = None, *, dry_run: bool = False
 ) -> Dict[str, int]:
-    """Rebuild every migrated aggregate's ES index from Postgres."""
+    """Rebuild every migrated aggregate's ES index from Postgres.
+
+    "Every migrated aggregate" is not every index. The warning below names the
+    ones this cannot restore, because ``--all`` finishing cleanly is otherwise
+    easy to read as "the cluster is now whole" — which is the reading that cost
+    us the fuel planning master data.
+    """
+    logger.warning(
+        "rebuild_all does NOT cover %d ES-only index(es) with no Postgres "
+        "source of truth: %s. If Elasticsearch was recreated, their contents "
+        "are gone and must be restored from an ES snapshot or re-seeded.",
+        len(ES_ONLY_INDICES),
+        ", ".join(ES_ONLY_INDICES),
+    )
     counts: Dict[str, int] = {}
     for aggregate_type in _REBUILD_SPECS:
         try:

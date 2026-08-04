@@ -130,6 +130,16 @@ class CustomerTank(BaseModel):
         min_length=1,
         description="Owning tenant; repositories re-assert this on every read.",
     )
+    source_system: Optional[str] = Field(
+        None,
+        min_length=1,
+        description="ERP or monitor system that owns the external tank identity.",
+    )
+    external_tank_id: Optional[str] = Field(
+        None,
+        min_length=1,
+        description="Tank identifier in source_system; unique within a tenant/source.",
+    )
     customer_id: str = Field(..., min_length=1, description="Owning customer_id.")
     last_refill_order_id: Optional[str] = Field(
         None,
@@ -468,6 +478,39 @@ class CustomerTankRepository:
             )
             return None
         return _safe_model_load(source)
+
+    async def get_by_external_id(
+        self,
+        tenant_id: str,
+        source_system: str,
+        external_tank_id: str,
+    ) -> Optional[CustomerTank]:
+        """Resolve a tank by its tenant-scoped source-system identity."""
+
+        self._require_tenant(tenant_id)
+        if not source_system or not source_system.strip():
+            raise ValueError("source_system must be a non-empty string")
+        if not external_tank_id or not external_tank_id.strip():
+            raise ValueError("external_tank_id must be a non-empty string")
+
+        query = {
+            "query": {
+                "bool": {
+                    "must": [
+                        {"term": {"tenant_id": tenant_id}},
+                        {"term": {"source_system": source_system.strip()}},
+                        {"term": {"external_tank_id": external_tank_id.strip()}},
+                    ]
+                }
+            },
+            "size": 1,
+        }
+        resp = await self._es.search_documents(self._index, query, 1)
+        for source in _extract_sources(resp):
+            if source.get("tenant_id") != tenant_id:
+                continue
+            return _safe_model_load(source)
+        return None
 
     async def list_for_tenant(
         self,

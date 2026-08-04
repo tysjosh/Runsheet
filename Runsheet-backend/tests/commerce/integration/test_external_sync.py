@@ -131,12 +131,23 @@ def _make_stripe_event(
     }
 
 
-def _make_sync_run(*, status: str = "success", run_id: str = "run_001", error_details: str = None):
+def _make_sync_run(
+    *,
+    status: str = "success",
+    run_id: str = "run_001",
+    error_details: str = None,
+    record_counts: dict = None,
+    result_metadata: dict = None,
+):
     """Build a mock sync_run result object."""
     run = MagicMock()
     run.status = status
     run.run_id = run_id
     run.error_details = error_details
+    run.record_counts = record_counts or (
+        {"invoices_pushed": 1} if status in ("success", "partial") else {}
+    )
+    run.result_metadata = result_metadata or {}
     return run
 
 
@@ -236,11 +247,14 @@ class TestQBOPushFlow:
         await adapter.on_invoice_finalized(invoice)
 
     @pytest.mark.asyncio
-    async def test_successful_push_logs_without_error(self):
-        """A successful sync_push does not trigger dead-letter or retry."""
+    async def test_successful_push_marks_invoice_pushed(self):
+        """A successful sync_push persists its provider acknowledgement."""
         qbo_connector = AsyncMock()
         qbo_connector.sync_push = AsyncMock(
-            return_value=_make_sync_run(status="success")
+            return_value=_make_sync_run(
+                status="success",
+                result_metadata={"external_invoice_id": "9876"},
+            )
         )
         invoice_service = AsyncMock()
 
@@ -251,8 +265,35 @@ class TestQBOPushFlow:
 
         await adapter.on_invoice_finalized(invoice)
 
-        # _es.update_document should NOT be called on success
-        invoice_service._es.update_document.assert_not_called()
+        invoice_service._es.update_document.assert_called_once()
+        update_doc = invoice_service._es.update_document.call_args.args[2]
+        assert update_doc["qbo_push_state"] == "pushed"
+        assert update_doc["qbo_push_attempts"] == 1
+        assert update_doc["qbo_push_last_error"] is None
+        assert update_doc["external_refs"]["qbo"] == "inv:9876"
+
+    @pytest.mark.asyncio
+    async def test_disabled_push_does_not_consume_retry_attempts(self):
+        """Tenant-disabled export remains pending for a later enablement."""
+        qbo_connector = AsyncMock()
+        qbo_connector.sync_push = AsyncMock(
+            return_value=_make_sync_run(
+                status="success",
+                record_counts={
+                    "invoices_pushed": 0,
+                    "skipped_disabled": 1,
+                },
+            )
+        )
+        invoice_service = AsyncMock()
+        adapter = _build_adapter(
+            qbo_connector=qbo_connector,
+            invoice_service=invoice_service,
+        )
+
+        await adapter.on_invoice_finalized(_make_invoice())
+
+        invoice_service._es.update_document.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -508,6 +549,32 @@ class TestErrorIsolation:
 
         # Should NOT raise
         await adapter.on_invoice_finalized(invoice)
+
+    @pytest.mark.asyncio
+    async def test_connector_resolution_failure_records_retry(self):
+        """A repository outage is recoverable by the pending-export worker."""
+        integration_repository = AsyncMock()
+        integration_repository.list_for_tenant = AsyncMock(
+            side_effect=RuntimeError("integration repository unavailable")
+        )
+        invoice_service = AsyncMock()
+        adapter = CommerceExternalSync(
+            qbo_connector=None,
+            stripe_connector=None,
+            invoice_service=invoice_service,
+            payment_service=AsyncMock(),
+            integration_repository=integration_repository,
+            connector_factory=AsyncMock(),
+        )
+
+        await adapter.on_invoice_finalized(_make_invoice())
+
+        update = invoice_service._es.update_document.await_args.args[2]
+        assert update["qbo_push_state"] == "retry"
+        assert update["qbo_push_attempts"] == 1
+        assert "integration repository unavailable" in update[
+            "qbo_push_last_error"
+        ]
 
     @pytest.mark.asyncio
     async def test_qbo_payment_exception_does_not_propagate(self):

@@ -28,7 +28,6 @@ from bootstrap import ServiceContainer, initialize_all, shutdown_all
 from bootstrap.websockets import register_websocket_routes
 from errors.handlers import register_exception_handlers
 from data_endpoints import router as data_router
-from ops.webhooks.receiver import router as webhook_router
 from ops.api.endpoints import router as ops_router
 from fuel.api.endpoints import router as fuel_router
 from inventory.api.endpoints import router as inventory_router
@@ -48,8 +47,12 @@ from fuel.api.order_endpoints import router as order_router
 from fuel.api.feature_flag_admin_endpoints import router as feature_flag_admin_router
 from fuel.api.order_webhook_endpoints import router as order_webhook_router
 from fuel.api.driver_endpoints import router as driver_ops_router
+from fuel.voice.voice_submission_router import router as voice_submission_router
+from fuel.voice.voice_read_driver_router import router as voice_read_driver_router
+from fuel.voice.intake_vectors import run_intake_vector_self_check
 from auth.api.password_admin_endpoints import router as auth_admin_router
 from auth.api.account_endpoints import router as auth_account_router
+from auth.api.public_config_endpoints import router as auth_public_config_router
 from integrations.api.stripe_endpoints import (
     router as stripe_router,
     webhook_router as stripe_webhook_router,
@@ -78,30 +81,6 @@ from commerce.api.payment_endpoints import (
 from commerce.api.ar_aging_endpoints import (
     router as commerce_ar_aging_router,
     configure_ar_aging_api,
-)
-from compliance.api.tax_endpoints import (
-    router as compliance_tax_router,
-)
-from compliance.api.terminal_bol_endpoints import (
-    router as compliance_terminal_bol_router,
-)
-from compliance.api.ifta_endpoints import (
-    router as compliance_ifta_router,
-)
-from compliance.api.kfactor_endpoints import (
-    router as compliance_kfactor_router,
-)
-from compliance.api.driver_endpoints import (
-    router as compliance_driver_router,
-)
-from compliance.api.asset_certification_endpoints import (
-    router as compliance_asset_cert_router,
-)
-from compliance.api.meter_endpoints import (
-    router as compliance_meter_router,
-)
-from compliance.api.asset_compliance_endpoints import (
-    router as compliance_asset_compliance_router,
 )
 from commerce.api.price_protection_endpoints import (
     router as commerce_price_protection_router,
@@ -197,10 +176,18 @@ app.add_middleware(
         "X-RateLimit-Reset", "X-Idempotent-Replayed",
         # SuperTokens issues the new session via these response headers; the
         # browser SDK must be able to read them across origins (Req 2.3, 8.4).
-        "front-token", "anti-csrf",
+        # st-access-token / st-refresh-token carry the session in header-based
+        # transfer mode, which the Expo-web driver client uses.
+        "front-token", "anti-csrf", "st-access-token", "st-refresh-token",
     ],
     max_age=600,
 )
+
+# Dinee voice canonicalization self-check (Req 3.5/3.6): recompute the HMAC for
+# every vendored intake vector before mounting /voice-intake. A mismatch raises
+# here (fail-closed) so the submission endpoint is never served.
+run_intake_vector_self_check()
+logger.info("Voice intake vector self-check passed")
 
 # Routers (middleware is registered by bootstrap/middleware.py).
 # The Integration Marketplace and Stripe routers are configured by
@@ -208,7 +195,7 @@ app.add_middleware(
 # scheduler, and connector factory are wired; router inclusion lives
 # here so every top-level REST surface is discoverable in one place.
 for _router in (
-    data_router, webhook_router, ops_router, fuel_router, inventory_router,
+    data_router, ops_router, fuel_router, inventory_router,
     scheduling_router, driver_scheduling_router, message_router,
     exception_router, pod_router, agent_router, inline_router, import_router,
     notification_router, metrics_router, integrations_router,
@@ -216,21 +203,18 @@ for _router in (
     feature_flag_admin_router,
     driver_ops_router,
     stripe_router, stripe_webhook_router,
-    compliance_tax_router,
-    compliance_terminal_bol_router,
-    compliance_ifta_router,
-    compliance_kfactor_router,
-    compliance_driver_router,
-    compliance_asset_cert_router,
-    compliance_meter_router,
-    compliance_asset_compliance_router,
-    commerce_price_protection_router,
-    commerce_pricing_rules_router,
     mvp_fuel_router,
     fuel_ops_router,
     fuel_ops_mvp_router,
     auth_admin_router,
     auth_account_router,
+    # GET /api/auth/public-config — unauthenticated by an explicit
+    # Public_Route_Allowlist entry (middleware/auth_enforcement.py), NOT by the
+    # /auth prefix; its /api/auth/admin and /api/auth/account siblings above
+    # stay session-gated.
+    auth_public_config_router,
+    voice_submission_router,  # Dinee voice Surface A (gated by self-check above)
+    voice_read_driver_router,  # Dinee voice Surface B read/driver endpoints
 ):
     app.include_router(_router)
 
@@ -249,10 +233,23 @@ try:
         app.include_router(commerce_invoice_router)
         app.include_router(commerce_payment_router)
         app.include_router(commerce_ar_aging_router)
+        # These two were previously registered unconditionally, so both
+        # commerce pricing surfaces stayed reachable with the master flag
+        # off — the flag's own docstring says "all commerce endpoints
+        # return 404". They now honour it like the rest.
+        app.include_router(commerce_price_protection_router)
+        app.include_router(commerce_pricing_rules_router)
 except Exception:
     # Settings may not load cleanly at import time in test environments;
     # the router will be registered during lifespan if needed.
     pass
+
+# Compliance Backbone REST surface — gated by compliance_backbone_enabled.
+# Imports and the flag check live in bootstrap/compliance_routers.py; see
+# that module for why the pipeline's compliance SERVICES are not gated.
+from bootstrap.compliance_routers import register as _register_compliance
+
+_register_compliance(app)
 
 
 def _c(app: FastAPI) -> ServiceContainer:

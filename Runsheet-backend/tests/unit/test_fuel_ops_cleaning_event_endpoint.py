@@ -36,6 +36,8 @@ from fuel.compartment_state_models import (
     CompartmentStateRepository,
     CrossTenantCompartmentAccessError,
 )
+from errors.exceptions import AppException
+from errors.handlers import handle_app_exception
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 
 
@@ -183,6 +185,9 @@ def _build_app(
     app = FastAPI()
     app.include_router(router)
     app.include_router(mvp_router)
+    # Mirror main.py so AppException-based rejections render as the
+    # structured ``ErrorResponse`` envelope instead of propagating.
+    app.add_exception_handler(AppException, handle_app_exception)
     app.dependency_overrides[get_tenant_context] = _tenant_ctx_factory(
         tenant_id=tenant_id
     )
@@ -649,6 +654,11 @@ class TestCleaningEventDriverIdLinkage:
 
         # Unknown / cross-tenant driver is rejected before the event is written.
         assert resp.status_code == 400, resp.text
+        # Structured ErrorResponse envelope, ``driver_not_found`` preserved.
+        body = resp.json()
+        assert body["error_code"] == "driver_not_found"
+        assert body["details"]["field"] == "driver_id"
+        assert body["details"]["driver_id"] == "DRV-NOPE"
         assert svc.calls == []
 
     def test_driver_id_optional_without_resolver(self):

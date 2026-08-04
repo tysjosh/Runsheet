@@ -36,6 +36,7 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
+from compliance.api._authz import compliance_ops_dependency
 from compliance.services.meter_audit_service import MeterAuditService
 from errors.exceptions import AppException
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
@@ -49,7 +50,13 @@ logger = logging.getLogger(__name__)
 
 _meter_service: Optional[MeterAuditService] = None
 
-router = APIRouter(prefix="/api/compliance/meters", tags=["Compliance"])
+# DOT / IRS records, gated to the operations roles. Attached to the router
+# rather than to each handler so a route added later inherits it: every module
+# in this package previously had no role check at all.
+router = APIRouter(
+    prefix="/api/compliance/meters", tags=["Compliance"],
+    dependencies=[Depends(compliance_ops_dependency)],
+)
 
 
 def configure_meter_api(*, meter_service: MeterAuditService) -> None:

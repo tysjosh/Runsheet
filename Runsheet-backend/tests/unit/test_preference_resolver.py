@@ -214,12 +214,15 @@ class TestListPreferences:
 
         call_args = es.search_documents.call_args
         query = call_args[0][1]
-        must = query["query"]["bool"]["must"]
-        # Should have tenant_id term + customer_name match
-        assert len(must) == 2
-        match_clause = must[1]
+        bool_query = query["query"]["bool"]
+        # The search match is the sole ``must`` clause; the tenant term lives in
+        # the non-scoring ``filter`` slot (both are still mandatory to match).
+        must = bool_query["must"]
+        assert len(must) == 1
+        match_clause = must[0]
         assert "match" in match_clause
         assert "customer_name" in match_clause["match"]
+        assert {"term": {"tenant_id": "tenant-1"}} in bool_query["filter"]
 
     async def test_pagination_offset_calculation(self):
         """list_preferences calculates correct from offset for page > 1."""

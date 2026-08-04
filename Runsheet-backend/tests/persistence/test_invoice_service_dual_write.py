@@ -66,7 +66,8 @@ def _line_items(prefix="line"):
     from uuid import uuid4
     return [{
         "line_id": f"{prefix}_{uuid4()}", "product_code": "DSL",
-        "quantity_gallons": 100.0, "unit_price_cents": 350, "subtotal_cents": 35000,
+        "quantity_gallons": 100.0, "unit_price_cents": 350,
+        "unit_price_micros": 3_500_000, "subtotal_cents": 35000,
     }]
 
 
@@ -90,7 +91,76 @@ async def test_generate_from_order_mirrors_invoice(engine, dual_write_on):
         assert row.total_cents == 35500
         assert len(row.line_items) == 1
         assert row.line_items[0].product_code == "DSL"
+        assert row.line_items[0].unit_price_micros == 3_500_000
         assert row.invoice_number is None  # not numbered until finalize
+
+
+async def test_fractional_cent_price_survives_postgres_round_trip(
+    engine, dual_write_on
+):
+    from uuid import uuid4
+
+    await _seed_parents()
+    service = InvoiceService(_make_es())
+    doc = await service.generate_from_order(
+        tenant_id=TENANT,
+        order_id="W1736698",
+        customer_id="cust_1",
+        account_id="acct_1",
+        line_items=[
+            {
+                "line_id": f"line_{uuid4()}",
+                "product_code": "DIESEL_2",
+                "quantity_gallons": 7_000.0,
+                "unit_price_cents": 297,
+                "unit_price_micros": 2_966_000,
+                "subtotal_cents": 2_076_200,
+            }
+        ],
+    )
+
+    assert doc["subtotal_cents"] == 2_076_200
+    async with session_scope() as session:
+        row = await InvoiceRepository().get(
+            session, TENANT, doc["invoice_id"]
+        )
+        assert row.line_items[0].unit_price_cents == 297
+        assert row.line_items[0].unit_price_micros == 2_966_000
+        assert row.line_items[0].subtotal_cents == 2_076_200
+
+
+async def test_generate_mirrors_pod_actuals_to_authoritative_invoice(
+    engine, dual_write_on
+):
+    await _seed_parents()
+    service = InvoiceService(_make_es())
+    delivery_result = {
+        "pod_id": "pod-actual-1",
+        "actual_gallons": 100.0,
+        "actual_gallons_source": "manual",
+        "delivered_at": "2026-07-29T14:42:18-04:00",
+        "recipient_name": "Morgan Lee",
+        "geotag": {"lat": 40.4167, "lon": -86.8753},
+    }
+
+    doc = await service.generate_from_order(
+        tenant_id=TENANT,
+        order_id="ORD-POD-1",
+        customer_id="cust_1",
+        account_id="acct_1",
+        line_items=_line_items(),
+        delivery_result=delivery_result,
+    )
+
+    async with session_scope() as session:
+        row = await InvoiceRepository().get(
+            session, TENANT, doc["invoice_id"]
+        )
+        assert row is not None
+        assert row.pod_id == "pod-actual-1"
+        assert row.delivery_result["actual_gallons"] == 100.0
+        assert row.delivered_at is not None
+        assert row.delivered_at.isoformat().startswith("2026-07-29T14:42:18")
 
 
 async def test_generate_skips_when_parents_not_mirrored(engine, dual_write_on):

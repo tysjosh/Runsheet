@@ -57,7 +57,11 @@ from Agents.autonomous.fuel_calculations import (
     calculate_refill_priority,
     calculate_refill_quantity,
 )
-from Agents.overlay.base_overlay_agent import OverlayAgentBase
+from Agents.overlay.base_overlay_agent import (
+    DEGRADATION_KIND_NO_INPUT,
+    OverlayAgentBase,
+    build_degradation_reason,
+)
 from Agents.overlay.data_contracts import (
     InterventionProposal,
     RiskClass,
@@ -88,6 +92,21 @@ FUEL_EVENTS_INDEX = "fuel_events"
 # Default consumption rate (liters/hour) when no historical data exists.
 # Retained unchanged for the legacy retail-station path (Req 1.7).
 DEFAULT_CONSUMPTION_RATE = 50.0
+
+#: Risk floor applied when a forecast has NO consumption history and is therefore
+#: projected from a default rate rather than observed data (Req 1.7).
+#:
+#: A data-less tank must never advertise itself as risk-free: reporting 0.0 would
+#: rank it below tanks with real, low-risk telemetry and quietly starve it of
+#: dispatch attention. 0.5 encodes "unknown", so the tank sorts mid-pack until
+#: real consumption data arrives. It is a FLOOR, not a fixed value — when the
+#: default-rate projection still implies imminent runout the computed (higher)
+#: risk wins.
+DEFAULT_UNCERTAIN_RISK = 0.5
+
+#: Confidence reported alongside :data:`DEFAULT_UNCERTAIN_RISK`. Deliberately
+#: low so downstream consumers can discount the estimate (Req 1.7).
+DEFAULT_UNCERTAIN_CONFIDENCE = 0.1
 
 # Variance multiplier for p90 estimate (pessimistic)
 P90_VARIANCE_MULTIPLIER = 1.5
@@ -378,6 +397,19 @@ class TankForecastingAgent(OverlayAgentBase):
             rather than as InterventionProposals.
         """
         if not signals:
+            # A forecast stage that was handed no signal forecasts nothing.
+            # Returning quietly is what let the pipeline report a plan run as
+            # COMPLETE with zero forecasts in it.
+            self.report_degradation(
+                build_degradation_reason(
+                    reason_code="no_input_signals",
+                    kind=DEGRADATION_KIND_NO_INPUT,
+                    detail=(
+                        "no RiskSignal reached the forecasting stage, so no "
+                        "tank was forecast"
+                    ),
+                )
+            )
             return []
 
         tenant_id = signals[0].tenant_id
@@ -408,9 +440,27 @@ class TankForecastingAgent(OverlayAgentBase):
         customer_tanks = await self._query_customer_tanks(tenant_id)
 
         if not stations and not customer_tanks:
-            logger.info(
-                "TankForecastingAgent: no stations or customer_tanks for tenant %s",
+            # The comment above says absence is fine, and for a station-only
+            # tenant it is — that is the ``not stations`` half. Having *neither*
+            # is not fine: there is nothing to forecast, so every downstream
+            # stage receives nothing and the run produces no plan. Report it,
+            # or the caller is told COMPLETE for an empty plan.
+            logger.warning(
+                "TankForecastingAgent: no stations or customer_tanks for "
+                "tenant %s — nothing to forecast",
                 tenant_id,
+            )
+            self.report_degradation(
+                build_degradation_reason(
+                    reason_code="no_stations_or_customer_tanks",
+                    kind=DEGRADATION_KIND_NO_INPUT,
+                    detail=(
+                        "the tenant has neither fuel_stations nor "
+                        "customer_tanks, so no tank could be forecast"
+                    ),
+                    stations=0,
+                    customer_tanks=0,
+                )
             )
             return []
 
@@ -1283,8 +1333,19 @@ class TankForecastingAgent(OverlayAgentBase):
         """Compute a TankForecast for a single (station, grade) pair.
 
         Uses fuel_calculations.py logic for baseline consumption rate
-        estimation (Req 1.6). When no historical data exists, assigns
-        default risk of 0.5 with confidence 0.1 (Req 1.7).
+        estimation (Req 1.6).
+
+        Zero-history behavior (Req 1.7): hours-to-runout is still projected from
+        ``DEFAULT_CONSUMPTION_RATE`` (or the station's cached
+        ``daily_consumption_rate``) so the UI has something to show, but the
+        estimate is explicitly marked as not evidence-based:
+
+        * ``runout_risk_24h`` is floored at :data:`DEFAULT_UNCERTAIN_RISK` (0.5)
+          — "unknown", never "no risk". A higher computed risk still wins, so an
+          imminent-runout projection escalates normally.
+        * ``confidence`` is :data:`DEFAULT_UNCERTAIN_CONFIDENCE` (0.1).
+        * ``anomaly_flags`` carries ``insufficient_data`` and
+          ``using_default_rate``.
         """
         anomaly_flags = self._anomaly_cache.get(station_id, [])
 
@@ -1317,14 +1378,25 @@ class TankForecastingAgent(OverlayAgentBase):
                 runout_risk_24h = 0.0
             else:
                 runout_risk_24h = (RISK_HORIZON_HOURS - hours_p50) / (hours_p90 - hours_p50)
-            
+
+            # Req 1.7 — floor the risk at "unknown" because this projection came
+            # from a DEFAULT rate, not observed consumption. Without the floor a
+            # tank with no telemetry reports 0.0 ("no risk") and is ranked below
+            # tanks with real low-risk data, silently starving it of dispatch
+            # attention. Using max() keeps the escalation path intact: if the
+            # default-rate projection still implies imminent runout, that higher
+            # computed risk wins.
+            runout_risk_24h = max(runout_risk_24h, DEFAULT_UNCERTAIN_RISK)
+
             return TankForecast(
                 station_id=station_id,
                 fuel_grade=fuel_grade,
                 hours_to_runout_p50=round(hours_p50, 2),
                 hours_to_runout_p90=round(hours_p90, 2),
                 runout_risk_24h=round(min(1.0, max(0.0, runout_risk_24h)), 4),
-                confidence=0.5,  # Medium confidence when using defaults
+                # Low confidence so consumers can discount the estimate; the
+                # hours_to_runout figures remain useful for display.
+                confidence=DEFAULT_UNCERTAIN_CONFIDENCE,
                 feature_version="v1.0",
                 anomaly_flags=anomaly_flags + ["insufficient_data", "using_default_rate"],
                 tenant_id=tenant_id,

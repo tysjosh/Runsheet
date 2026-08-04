@@ -222,7 +222,7 @@ describe("IntegrationCard — status + controls", () => {
 });
 
 describe("IntegrationCard — connect flow", () => {
-  it("forwards trimmed credentials to onConnect when all fields are filled", async () => {
+  it("forwards trimmed Veeder-Root credentials and polling config", async () => {
     const h = handlers();
     render(
       <IntegrationCard
@@ -254,9 +254,9 @@ describe("IntegrationCard — connect flow", () => {
       },
     );
     fireEvent.change(
-      dialogQueries.getByLabelText("security_code") as HTMLInputElement,
+      dialogQueries.getByLabelText("API endpoint") as HTMLInputElement,
       {
-        target: { value: "secret-abc" },
+        target: { value: "  https://monitor.example.test  " },
       },
     );
     await act(async () => {
@@ -266,10 +266,17 @@ describe("IntegrationCard — connect flow", () => {
     await waitFor(() => expect(h.onConnect).toHaveBeenCalledTimes(1));
     // Surrounding whitespace is trimmed so leading/trailing spaces
     // from copy-paste don't propagate into the vault payload.
-    expect(h.onConnect).toHaveBeenCalledWith({
-      api_token: "tok-123",
-      security_code: "secret-abc",
-    });
+    expect(h.onConnect).toHaveBeenCalledWith(
+      { api_token: "tok-123" },
+      {
+        config: {
+          mode: "api_token",
+          tank_map: {},
+          endpoint_url: "https://monitor.example.test",
+        },
+        scheduleCron: "*/15 * * * *",
+      },
+    );
   });
 
   it("rejects whitespace-only credentials with an in-form error banner", async () => {

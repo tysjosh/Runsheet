@@ -33,6 +33,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
+from commerce.api._authz import commerce_staff_dependency
 from commerce.models.pricing_rule import PricingRule
 from commerce.services.sales_pricing_engine import (
     PricingNoRuleMatchedError,
@@ -55,9 +56,13 @@ logger = logging.getLogger(__name__)
 
 _es_service: Optional[Any] = None
 
+# Pricing rules are a Tier 4 / staff surface: the ERP prices. The gate is attached
+# to the router rather than to each handler so a route added later inherits it —
+# the defect being fixed here was a handler with no role check at all.
 router = APIRouter(
     prefix="/api/commerce",
     tags=["Commerce - Pricing"],
+    dependencies=[Depends(commerce_staff_dependency)],
 )
 
 

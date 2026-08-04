@@ -8,10 +8,10 @@ import { useEffect } from "react";
  * shell (Fleet / Dispatch / Fuel Ops / Analytics / Control tabs), so the
  * bare ``/ops`` landing route redirects back to the dashboard.
  *
- * Deeper ops routes — cargo manifests (`/ops/scheduling/:id/cargo`),
- * shipment tracking (`/ops/tracking/:id`), the command interface
- * (`/ops/command`), and the scheduling job board the cargo page links
- * back to — are real, deep-linkable pages and must render normally.
+ * Deeper ops routes — cargo manifests (`/ops/scheduling/:id/cargo`), the
+ * command interface (`/ops/command`), fuel tanks/depots, and the scheduling
+ * job board the cargo page links back to — are real, deep-linkable pages and
+ * must render normally.
  * Previously this layout redirected *every* ``/ops/*`` path, which broke
  * those links (e.g. the cargo link on the job board bounced users to the
  * dashboard).

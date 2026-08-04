@@ -213,6 +213,7 @@ def _index_setup_functions():
     from driver.services.driver_es_mappings import setup_driver_indices
     from fuel.services.fuel_es_mappings import setup_fuel_indices
     from fuel.services.fuel_ops_es_mappings import setup_fuel_ops_indices
+    from integrations.stripe_es_mappings import setup_stripe_indices
 
     # ``setup_fuel_indices`` takes (es_client, es_service); wrap it so every
     # entry in this list shares the uniform ``setup_fn(es_service)`` shape.
@@ -247,6 +248,10 @@ def _index_setup_functions():
         ("Driver indices", setup_driver_indices),
         ("Fuel monitoring indices", _setup_fuel),
         ("Fuel Ops indices", setup_fuel_ops_indices),
+        # Must run before the JSON fixtures load: stripe_payment_seeds.json
+        # bulk-writes into stripe_payment_intents, and a bulk write to a
+        # non-existent index creates it with a dynamic mapping.
+        ("Stripe demo indices", setup_stripe_indices),
     ]
 
 
@@ -353,6 +358,10 @@ def _managed_index_mappings() -> dict:
         JOB_AUDIT_TIMELINE_INDEX, JOB_AUDIT_TIMELINE_MAPPING,
     )
     mappings.update({JOB_AUDIT_TIMELINE_INDEX: JOB_AUDIT_TIMELINE_MAPPING})
+
+    # Stripe demo payment intents (fixture-populated, connector-read).
+    from integrations.stripe_es_mappings import STRIPE_INDEX_MAPPINGS
+    mappings.update(STRIPE_INDEX_MAPPINGS)
 
     # Legacy core indices (mappings are methods on the ES singleton).
     from services.elasticsearch_service import elasticsearch_service as _es
@@ -1846,56 +1855,28 @@ def seed_analytics_events(force: bool = False):
 
 # ---------------------------------------------------------------------------
 # 15c. shipments_current (Ops Monitoring → Shipment/SLA metrics + Failure
-#      Analytics). Authoritative store is Postgres (read-cutover is on), so
-#      this seeds the ``shipments_current`` hybrid table directly rather than
-#      the ES index.
+#      Analytics). Elasticsearch is the only store: rev 0007 dropped the
+#      ``shipments_current`` Postgres table, so ``shipment`` is no longer a
+#      registered hybrid aggregate and the ops read helpers report
+#      ``_NOT_CUT_OVER`` and serve these endpoints from ES.
 # ---------------------------------------------------------------------------
 def seed_shipments(force: bool = False):
-    """Seed ops shipment current-state rows in Postgres.
+    """Seed ops shipment current-state documents in Elasticsearch.
 
     The ops metrics endpoints (``/ops/metrics/shipments``, ``/ops/metrics/sla``,
     ``/ops/metrics/failures`` and ``/ops/shipments/failures``) aggregate over
-    the ``shipment`` hybrid aggregate when ``COMMERCE_READ_FROM_POSTGRES`` is
-    on. Without rows here the Ops Monitoring shipment/SLA sections and the
-    Failure Analytics tab render empty.
+    shipments. Without documents here the Ops Monitoring shipment/SLA sections
+    and the Failure Analytics tab render empty.
 
-    No-op (with a warning) when the persistence layer is not configured.
+    This previously wrote to the ``shipment`` hybrid aggregate, which rev 0007
+    retired along with the table — the seeder then failed the whole entity with
+    ``ValueError: Unknown hybrid aggregate_type: 'shipment'``.
     """
-    try:
-        from persistence.database import is_persistence_enabled
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("shipments_current: persistence import failed (%s) — skipping", exc)
-        return
+    from ops.services.ops_es_service import OpsElasticsearchService
 
-    if not is_persistence_enabled():
-        logger.warning(
-            "shipments_current: persistence layer not enabled (no DATABASE_URL) — "
-            "skipping shipment seed"
-        )
-        return
-
-    import asyncio
-
-    asyncio.run(_seed_shipments_async(force))
-
-
-async def _seed_shipments_async(force: bool):
-    from persistence.database import session_scope
-    from persistence.read_repositories import HybridReadRepository
-    from persistence.repositories import CurrentStateRepository
-
-    read_repo = HybridReadRepository("shipment")
-    write_repo = CurrentStateRepository("shipment")
-
-    # Idempotency: skip when rows already exist for the tenant unless forced.
-    async with session_scope() as session:
-        existing = await read_repo.fetch_for_aggregation(session, TENANT)
-    if not force and existing:
-        logger.info(
-            "⏭️  shipments_current already has %d rows for tenant=%s — skipping",
-            len(existing),
-            TENANT,
-        )
+    index = OpsElasticsearchService.SHIPMENTS_CURRENT
+    if not force and _index_count(index) > 0:
+        logger.info(f"⏭️  {index} already has data — skipping")
         return
 
     statuses = ["delivered", "in_transit", "pending", "failed", "returned"]
@@ -1909,35 +1890,35 @@ async def _seed_shipments_async(force: bool):
     riders = [f"rider-{i:03d}" for i in range(1, 6)]
     cities = CITY_NAMES
 
-    count = 0
-    async with session_scope() as session:
-        for i in range(1, 61):
-            status = random.choice(statuses)
-            created = _ago(days=random.uniform(1, 28))
-            updated = _ago(days=random.uniform(0, 1), hours=random.uniform(0, 23))
-            est = _ago(days=random.uniform(-2, 2))  # some past (breached), some future
-            origin = random.choice(cities)
-            dest = random.choice([c for c in cities if c != origin])
-            doc = {
-                "shipment_id": f"SHP-{i:04d}",
-                "tenant_id": TENANT,
-                "status": status,
-                "rider_id": random.choice(riders),
-                "origin": origin,
-                "destination": dest,
-                "created_at": created,
-                "updated_at": updated,
-                "estimated_delivery": est,
-                "last_event_timestamp": updated,
-                "source_schema_version": SCHEMA_VERSION,
-                "trace_id": _uid(),
-            }
-            if status == "failed":
-                doc["failure_reason"] = random.choice(failure_reasons)
-            await write_repo.upsert(session, doc=doc, doc_id=doc["shipment_id"])
-            count += 1
+    actions: list = []
+    for i in range(1, 61):
+        status = random.choice(statuses)
+        created = _ago(days=random.uniform(1, 28))
+        updated = _ago(days=random.uniform(0, 1), hours=random.uniform(0, 23))
+        est = _ago(days=random.uniform(-2, 2))  # some past (breached), some future
+        origin = random.choice(cities)
+        dest = random.choice([c for c in cities if c != origin])
+        doc = {
+            "shipment_id": f"SHP-{i:04d}",
+            "tenant_id": TENANT,
+            "status": status,
+            "rider_id": random.choice(riders),
+            "origin": origin,
+            "destination": dest,
+            "created_at": created,
+            "updated_at": updated,
+            "estimated_delivery": est,
+            "last_event_timestamp": updated,
+            "source_schema_version": SCHEMA_VERSION,
+            "trace_id": _uid(),
+        }
+        if status == "failed":
+            doc["failure_reason"] = random.choice(failure_reasons)
+        actions.append({"index": {"_index": index, "_id": doc["shipment_id"]}})
+        actions.append(doc)
 
-    logger.info("✅ Seeded %d shipment rows → shipments_current (Postgres)", count)
+    _bulk(actions)
+    logger.info(f"✅ Seeded {len(actions) // 2} shipment docs → {index}")
 
 
 # ---------------------------------------------------------------------------

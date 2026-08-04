@@ -415,3 +415,101 @@ class TestTenantDefaultsInContext:
         from ops.middleware.tenant_guard import get_tenant_settings_service
 
         assert get_tenant_settings_service() is service
+
+
+# ---------------------------------------------------------------------------
+# driver_id claim + request.state stamping
+# Validates: Requirements 1.2, 1.3, 1.4, 11.1, 15.13
+# ---------------------------------------------------------------------------
+
+
+def _build_driver_app() -> tuple[FastAPI, TestClient]:
+    """App whose endpoint echoes ``driver_id`` and the stamped request state."""
+    app = FastAPI()
+
+    @app.get("/driver-test")
+    async def driver_endpoint(
+        request: Request,
+        tenant: TenantContext = Depends(get_tenant_context),
+    ):
+        return {
+            "tenant_id": tenant.tenant_id,
+            "driver_id": tenant.driver_id,
+            "state_tenant_id": getattr(request.state, "tenant_id", "<unset>"),
+            "state_driver_id": getattr(request.state, "driver_id", "<unset>"),
+        }
+
+    @app.exception_handler(AppException)
+    async def app_exception_handler(request: Request, exc: AppException):
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse(status_code=exc.status_code, content=exc.to_dict())
+
+    return app, TestClient(app)
+
+
+class TestDriverIdOnContext:
+    """``driver_id`` is read from the signed claims and coerced safely."""
+
+    def test_driver_id_claim_populates_context(self):
+        """Req 1.2/1.3: a non-empty string driver_id claim becomes the value."""
+        _, client = _build_driver_app()
+        _install_verifier(
+            {"tenant_id": "t-1", "sub": "u-1", "driver_id": "drv-777"}
+        )
+
+        resp = client.get("/driver-test")
+
+        assert resp.status_code == 200
+        assert resp.json()["driver_id"] == "drv-777"
+
+    def test_absent_driver_id_claim_yields_none(self):
+        """Req 1.4: a non-driver caller still gets a context, with driver_id None."""
+        _, client = _build_driver_app()
+        _install_verifier({"tenant_id": "t-1", "sub": "u-1"})
+
+        resp = client.get("/driver-test")
+
+        assert resp.status_code == 200
+        assert resp.json()["driver_id"] is None
+
+    @pytest.mark.parametrize("raw", ["", None, 123, ["drv-1"], {"id": "drv-1"}, True])
+    def test_non_string_or_blank_driver_id_coerces_to_none(self, raw):
+        """Req 1.4: anything that is not a non-empty string coerces to None."""
+        _, client = _build_driver_app()
+        _install_verifier({"tenant_id": "t-1", "sub": "u-1", "driver_id": raw})
+
+        resp = client.get("/driver-test")
+
+        assert resp.status_code == 200
+        assert resp.json()["driver_id"] is None
+
+
+class TestRequestStateStamping:
+    """tenant_id / driver_id are stamped on ``request.state`` for middleware."""
+
+    def test_state_carries_tenant_and_driver(self):
+        """Req 11.1/15.13: both stamps are readable off request.state."""
+        _, client = _build_driver_app()
+        _install_verifier(
+            {"tenant_id": "t-42", "sub": "u-1", "driver_id": "drv-9"}
+        )
+
+        resp = client.get("/driver-test")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["state_tenant_id"] == "t-42"
+        assert body["state_driver_id"] == "drv-9"
+
+    def test_state_driver_id_is_none_for_non_driver(self):
+        """A non-driver caller stamps driver_id as None, not missing."""
+        _, client = _build_driver_app()
+        _install_verifier({"tenant_id": "t-42", "sub": "u-1"})
+
+        resp = client.get("/driver-test")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["state_tenant_id"] == "t-42"
+        assert body["state_driver_id"] is None

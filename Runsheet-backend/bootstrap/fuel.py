@@ -2,20 +2,19 @@
 Fuel domain bootstrap module.
 
 Initializes: FuelService, fuel Elasticsearch indices, order intake
-pipeline repositories, order/webhook endpoint routers, and the
-legacy mirror backfill worker (60-second cadence).
+pipeline repositories, and order/webhook endpoint routers.
+
+The legacy mirror backfill worker (60-second cadence) used to be started
+here; it drained the ``pending_legacy_mirrors`` retry queue for the
+legacy dual-write shim, and went out with that shim.
 
 Requirements: 1.1, 1.2, 2.4, 2.5
 """
-import asyncio
 import logging
 
 from bootstrap.container import ServiceContainer
 
 logger = logging.getLogger(__name__)
-
-# Module-level reference so shutdown can cancel the task.
-_legacy_mirror_backfill_task = None
 
 
 async def initialize(app, container: ServiceContainer) -> None:
@@ -35,8 +34,7 @@ async def initialize(app, container: ServiceContainer) -> None:
         logger.warning("Failed to set up fuel monitoring indices: %s", e)
 
     # Set up order intake pipeline indices (fuel_orders_current,
-    # fuel_order_events, drivers_current, intake_channels,
-    # pending_legacy_mirrors)
+    # fuel_order_events, drivers_current, intake_channels)
     try:
         from fuel.services.order_es_mappings import setup_order_intake_indices
 
@@ -153,13 +151,9 @@ async def initialize(app, container: ServiceContainer) -> None:
         except Exception as exc:
             logger.warning("Failed to register csv adapter: %s", exc)
 
-        try:
-            from fuel.intake.legacy_dinee_adapter import LegacyDineeShipmentAdapter
-            adapter_registry.register(
-                LegacyDineeShipmentAdapter(), channel_type="legacy", schema_version="1.0"
-            )
-        except Exception as exc:
-            logger.warning("Failed to register legacy dinee adapter: %s", exc)
+        # No ``legacy`` adapter is registered: the Dinee legacy shipment
+        # adapter was removed with the ``POST /webhooks/dinee`` route. Nothing
+        # can now produce an order with ``intake_channel="legacy"``.
 
         try:
             from fuel.intake.api_partner_adapter import ApiPartnerGenericAdapter
@@ -168,6 +162,19 @@ async def initialize(app, container: ServiceContainer) -> None:
             )
         except Exception as exc:
             logger.warning("Failed to register api_partner adapter: %s", exc)
+
+        # Dinee voice intake adapter (channel_type="voice"). Registered here
+        # alongside the other channel adapters so voice submissions dispatched
+        # through the bridge (Surface A) resolve to a real adapter. The bridge,
+        # ledger, and routers are wired in bootstrap/integrations.py once the
+        # IntakeChannelRepository + credentials_vault exist.
+        try:
+            from fuel.intake.voice_intake_adapter import VoiceIntakeAdapter
+            adapter_registry.register(
+                VoiceIntakeAdapter(), channel_type="voice", schema_version="1.0"
+            )
+        except Exception as exc:
+            logger.warning("Failed to register voice adapter: %s", exc)
 
         # Gather optional dependencies from the container
         idempotency_service = (
@@ -218,6 +225,16 @@ async def initialize(app, container: ServiceContainer) -> None:
         )
         container.order_intake_pipeline = order_intake_pipeline
         logger.info("OrderIntakePipeline registered")
+
+        # Register the VoiceReviewHoldHook so voice orders flagged for human
+        # review (hold_reason set by the VoiceIntakeAdapter) are promoted from
+        # status="placed" to status="on_hold" before persistence (Req 8.1).
+        try:
+            from fuel.voice.voice_review_hold_hook import VoiceReviewHoldHook
+            order_intake_pipeline.register_hook(VoiceReviewHoldHook())
+            logger.info("VoiceReviewHoldHook registered")
+        except Exception as exc:
+            logger.warning("Failed to register VoiceReviewHoldHook: %s", exc)
     except Exception as e:
         logger.warning("Failed to create OrderIntakePipeline: %s", e)
 
@@ -311,9 +328,19 @@ async def initialize(app, container: ServiceContainer) -> None:
                     "Failed to register cross-module reference loaders: %s", exc
                 )
 
+            # The App_Access_Service collaborators (driver-mobile-app Req
+            # 1.17-1.26). The PostgreSQL unit of work, the SuperTokens admin,
+            # and the session revoker all default to their production
+            # implementations inside the module; only the audit sink comes from
+            # the container.
             configure_driver_endpoints(
                 driver_repository=driver_repository,
                 ref_resolver=ref_resolver,
+                telemetry_service=(
+                    container.telemetry_service
+                    if container.has("telemetry_service")
+                    else None
+                ),
             )
             logger.info("Driver REST endpoints configured")
         else:
@@ -323,6 +350,191 @@ async def initialize(app, container: ServiceContainer) -> None:
             )
     except Exception as e:
         logger.warning("Failed to configure driver REST endpoints: %s", e)
+
+    # ---------------------------------------------------------------
+    # OrderService — driver-mobile-app Requirements 4.1, 4.5, 4.6,
+    # 4.8, 4.9.
+    #
+    # This is the first runtime construction of OrderService: until now
+    # the only call sites were in tests, so ``container.has(
+    # "order_service")`` was always false and no driver-initiated
+    # transition could run the state-machine guard, the delivery-window
+    # guard, or the driver counter side-effects.
+    #
+    # This is the earliest point at which every collaborator exists:
+    # order_repository and driver_counter_service are registered above,
+    # orders_ws_manager earlier in this module, ops_feature_flags by the
+    # ops module which precedes fuel in _BOOT_ORDER.
+    #
+    # A LegacyDualWriter used to be constructed here (hoisted out of the
+    # backfill block that followed, so one instance served both
+    # OrderService and the backfill worker). Both the writer and the
+    # worker are gone, so nothing mirrors transitions into
+    # ``shipments_current`` and ``container.legacy_dual_writer`` is no
+    # longer registered.
+    #
+    # configure_order_mutation_tools is deliberately NOT called —
+    # agent-initiated transitions stay dormant exactly as today.
+    # ---------------------------------------------------------------
+    try:
+        from fuel.services.order_service import OrderService
+
+        if order_repository is not None:
+            order_service = OrderService(
+                order_repo=order_repository,
+                # ws_manager is the one constructor parameter with no
+                # default, so it is always passed — None included.
+                ws_manager=(
+                    container.orders_ws_manager
+                    if container.has("orders_ws_manager")
+                    else None
+                ),
+                driver_counter_service=(
+                    container.driver_counter_service
+                    if container.has("driver_counter_service")
+                    else None
+                ),
+                feature_flag_service=(
+                    container.ops_feature_flags
+                    if container.has("ops_feature_flags")
+                    else None
+                ),
+            )
+            container.order_service = order_service
+            logger.info("OrderService registered")
+
+            # The router is first configured above before OrderService exists.
+            # Re-point it at this application-scoped instance so dispatcher
+            # transitions publish the same subscribers (notably
+            # ``order.dispatched`` push) as driver and internal transitions.
+            from fuel.api.order_endpoints import configure_order_endpoints
+
+            configure_order_endpoints(
+                order_intake_pipeline=order_intake_pipeline,
+                order_repository=order_repository,
+                driver_repository=driver_repository,
+                driver_counter_service=(
+                    container.driver_counter_service
+                    if container.has("driver_counter_service")
+                    else None
+                ),
+                order_service=order_service,
+            )
+            logger.info("Order REST endpoints re-wired to shared OrderService")
+
+            # Registering the service arms the previously dormant
+            # ``order.delivered`` subscribers (K-factor calibration at
+            # bootstrap/compliance.py and the delivery-completed
+            # notification subscriber, both of which run after fuel in
+            # _BOOT_ORDER). The delivery-completed subscriber has an
+            # outbound customer effect: a real ``delivery_completed``
+            # SMS or email on the first driver-marked delivery. No
+            # transition can fail as a result — subscriber exceptions are
+            # swallowed and logged inside _notify_event_subscribers —
+            # but the message is visible to a customer, so the state is
+            # surfaced here rather than armed silently. The operator
+            # mitigation is to disable the ``delivery_completed`` rule
+            # for a pilot tenant in the notification rule surface before
+            # that tenant's first driver-marked delivery.
+            logger.warning(
+                "OrderService registration ARMS the order.delivered "
+                "subscribers, including delivery-completed customer "
+                "notifications. Disable the 'delivery_completed' "
+                "notification rule for any pilot tenant before its first "
+                "driver-marked delivery if outbound customer messaging "
+                "has not gone live."
+            )
+            # ---------------------------------------------------------
+            # POD_OTP_Service — driver-mobile-app Requirements 5.25,
+            # 5.27, 5.31.
+            #
+            # Registered in the same block as OrderService because the
+            # subscription is what makes the service reachable: nothing
+            # else calls it. ``order.dispatched`` fires from
+            # apply_status_transition, so the subscriber has to exist
+            # before the first dispatch of the process.
+            #
+            # ``notification_service`` is deliberately absent here.
+            # ``bootstrap/notifications.py`` runs after ``fuel`` in
+            # _BOOT_ORDER, so Notification_Pipeline does not exist yet;
+            # ``bootstrap/driver.py`` injects it by setter once it does.
+            # Until then the code is generated and persisted but not
+            # delivered, which fails closed at POD submission rather
+            # than accepting an unverified delivery.
+            #
+            # This arms no outbound customer messaging on its own:
+            # ``otp_required`` defaults to false in every tenant
+            # (R5.31), so on_order_dispatched returns before generating
+            # anything unless a tenant has opted in.
+            # ---------------------------------------------------------
+            try:
+                from driver.services.pod_otp_service import PODOTPService
+
+                pod_otp_service = PODOTPService(es_service=es_service)
+                container.pod_otp_service = pod_otp_service
+                order_service.subscribe(
+                    "order.dispatched", pod_otp_service.on_order_dispatched
+                )
+                logger.info(
+                    "PODOTPService registered on order.dispatched "
+                    "(notification service injected later by "
+                    "bootstrap/driver)"
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to register PODOTPService on order.dispatched: "
+                    "%s",
+                    exc,
+                )
+        else:
+            logger.warning(
+                "OrderService not registered — order_repository unavailable"
+            )
+    except Exception as e:
+        logger.warning("Failed to register OrderService: %s", e)
+
+    # ---------------------------------------------------------------
+    # Commerce invoice subscriber — late binding
+    # driver-mobile-app Requirement 4.5.
+    #
+    # ``core`` precedes ``fuel`` in _BOOT_ORDER, so
+    # ``container.has("order_service")`` is still false when
+    # bootstrap/core.py reaches its own subscription attempt: that arm
+    # only logs its ``else`` warning and the invoice subscriber would
+    # stay dormant while the K-factor and delivery-completed subscribers
+    # (registered by bootstrap/compliance.py, which follows fuel) go
+    # live. Binding here — reading the InvoiceService ``core`` already
+    # put on the container — keeps the three order.delivered subscribers
+    # in step. The core branch is left untouched, so this is the only
+    # registration and there is no double subscription.
+    # ---------------------------------------------------------------
+    try:
+        if container.has("order_service") and container.has(
+            "commerce_invoice_service"
+        ):
+            from commerce.hooks.order_delivered_subscriber import (
+                OrderDeliveredInvoiceSubscriber,
+            )
+
+            container.order_service.subscribe(
+                "order.delivered",
+                OrderDeliveredInvoiceSubscriber(
+                    invoice_service=container.commerce_invoice_service,
+                ),
+            )
+            logger.info(
+                "Commerce invoice generation subscriber registered on "
+                "order.delivered (late-bound from bootstrap/fuel)"
+            )
+        else:
+            logger.warning(
+                "Commerce invoice generation subscriber not registered — "
+                "order_service or commerce_invoice_service unavailable"
+            )
+    except Exception as e:
+        logger.warning(
+            "Commerce invoice generation subscriber wiring failed: %s", e
+        )
 
     # ---------------------------------------------------------------
     # Cross-module reference loaders — depot (Req 10.1)
@@ -348,66 +560,12 @@ async def initialize(app, container: ServiceContainer) -> None:
         logger.warning("Failed to register depot reference loader: %s", e)
 
     # ---------------------------------------------------------------
-    # Legacy mirror backfill worker (60-second cadence)
-    # Validates: Requirements 1.3.2, 9.2
+    # The legacy mirror backfill worker (60-second cadence) was started
+    # here. It drained ``pending_legacy_mirrors`` by re-running
+    # LegacyDualWriter mirrors and poison-queued the exhausted entries.
+    # With the mirror retired there is nothing to drain, so neither the
+    # worker nor its periodic task is wired any more.
     # ---------------------------------------------------------------
-    global _legacy_mirror_backfill_task
-
-    try:
-        from fuel.services.legacy_mirror_backfill_worker import (
-            LegacyMirrorBackfillWorker,
-            run_backfill_cycle,
-            WORKER_CADENCE_SECONDS,
-        )
-        from fuel.services.legacy_dual_writer import LegacyDualWriter
-
-        # Build the LegacyDualWriter if not already on the container
-        ops_es_service = (
-            container.ops_es_service if container.has("ops_es_service") else None
-        )
-        poison_queue_service_for_worker = (
-            container.ops_poison_queue if container.has("ops_poison_queue") else None
-        )
-
-        if ops_es_service is not None and poison_queue_service_for_worker is not None:
-            legacy_dual_writer = LegacyDualWriter(
-                ops_es_service=ops_es_service,
-                es_service=es_service,
-            )
-
-            backfill_worker = LegacyMirrorBackfillWorker(
-                es_service=es_service,
-                legacy_dual_writer=legacy_dual_writer,
-                order_repository=order_repository,
-                driver_repository=driver_repository,
-                poison_queue_service=poison_queue_service_for_worker,
-            )
-            container.legacy_mirror_backfill_worker = backfill_worker
-
-            async def _periodic_legacy_mirror_backfill() -> None:
-                """Background task that drains pending_legacy_mirrors."""
-                try:
-                    while True:
-                        await asyncio.sleep(WORKER_CADENCE_SECONDS)
-                        await run_backfill_cycle(backfill_worker)
-                except asyncio.CancelledError:
-                    logger.info("Legacy mirror backfill task cancelled")
-
-            _legacy_mirror_backfill_task = asyncio.create_task(
-                _periodic_legacy_mirror_backfill()
-            )
-            logger.info(
-                "Legacy mirror backfill worker started "
-                "(cadence: %ds)",
-                WORKER_CADENCE_SECONDS,
-            )
-        else:
-            logger.warning(
-                "Legacy mirror backfill worker not started — "
-                "ops_es_service or poison_queue unavailable"
-            )
-    except Exception as e:
-        logger.warning("Failed to start legacy mirror backfill worker: %s", e)
 
     # ---------------------------------------------------------------
     # Driver daily reset cron — Requirement 3.2.4
@@ -417,20 +575,14 @@ async def initialize(app, container: ServiceContainer) -> None:
 
 
 async def shutdown(app, container: ServiceContainer) -> None:
-    """Cancel the legacy mirror backfill background task and shut down WS manager."""
-    global _legacy_mirror_backfill_task
+    """Shut down the orders WS manager.
 
-    if _legacy_mirror_backfill_task is not None and not _legacy_mirror_backfill_task.done():
-        _legacy_mirror_backfill_task.cancel()
-        try:
-            await _legacy_mirror_backfill_task
-        except asyncio.CancelledError:
-            pass
-        logger.info("Legacy mirror backfill task stopped")
-
+    This also used to cancel the legacy mirror backfill task; that task
+    was removed with the legacy dual-write shim, so there is nothing left
+    to cancel here.
+    """
     if container.has("orders_ws_manager"):
         try:
             await container.orders_ws_manager.shutdown()
         except Exception as exc:
             logger.exception("Orders WS manager shutdown failed: %s", exc)
-

@@ -262,6 +262,64 @@ class TestGenerateFromOrder:
         # Event must come before projection
         assert call_order == ["event", "projection"]
 
+    @pytest.mark.asyncio
+    @patch("commerce.services.invoice_service.utcnow", return_value=_FIXED_NOW)
+    async def test_generate_persists_delivery_snapshot_and_source_refs(
+        self, mock_utcnow
+    ):
+        es = _make_es_service()
+        es.search_documents = AsyncMock(
+            return_value=_es_agg_response({"max_seq": {"value": None}})
+        )
+        service = InvoiceService(es)
+        delivery_result = {
+            "pod_id": "pod-42",
+            "actual_gallons": 500.0,
+            "delivered_at": "2026-06-15T09:30:00Z",
+            "source_system": "legacy-erp",
+            "source_record_id": "SO-42",
+        }
+        line_items = [_SAMPLE_LINE_ITEMS[0]]
+
+        result = await service.generate_from_order(
+            tenant_id=_TENANT_ID,
+            order_id=_ORDER_ID,
+            customer_id=_CUSTOMER_ID,
+            account_id=_ACCOUNT_ID,
+            line_items=line_items,
+            delivery_result=delivery_result,
+        )
+
+        assert result["delivery_result"] == delivery_result
+        assert result["pod_id"] == "pod-42"
+        assert result["external_refs"] == {
+            "source_system": "legacy-erp",
+            "source_record_id": "SO-42",
+            "pod_id": "pod-42",
+        }
+        event = es.index_document.call_args_list[0].args[2]
+        assert event["payload"]["actual_gallons"] == 500.0
+
+    @pytest.mark.asyncio
+    async def test_generate_rejects_invoice_quantity_that_differs_from_pod(self):
+        service = InvoiceService(_make_es_service())
+
+        with pytest.raises(AppException) as exc:
+            await service.generate_from_order(
+                tenant_id=_TENANT_ID,
+                order_id=_ORDER_ID,
+                customer_id=_CUSTOMER_ID,
+                account_id=_ACCOUNT_ID,
+                line_items=[_SAMPLE_LINE_ITEMS[0]],
+                delivery_result={
+                    "pod_id": "pod-42",
+                    "actual_gallons": 475.0,
+                },
+            )
+
+        assert exc.value.error_code.value == "VALIDATION_ERROR"
+        assert exc.value.details["invoice_gallons"] == 500.0
+
 
 
 # ---------------------------------------------------------------------------
@@ -462,6 +520,60 @@ class TestFinalizeDraft:
 
         # Finalize still works
         assert result["status"] == InvoiceStatus.OPEN.value
+
+
+class TestRetryExternalSync:
+    @pytest.mark.asyncio
+    async def test_resets_dead_letter_and_executes_connector_retry(self):
+        es = _make_es_service()
+        external_sync = AsyncMock()
+        service = InvoiceService(es, external_sync=external_sync)
+        dead_letter = _make_invoice_doc(status=InvoiceStatus.OPEN.value)
+        dead_letter.update(
+            {
+                "qbo_push_state": "dead_letter",
+                "qbo_push_attempts": 3,
+                "qbo_push_last_error": "QBO unavailable",
+            }
+        )
+        refreshed = {
+            **dead_letter,
+            "qbo_push_state": "pushed",
+            "external_refs": {"qbo": "inv:9876"},
+        }
+        service.get = AsyncMock(side_effect=[dead_letter, refreshed])
+
+        with patch(
+            "commerce.services.commerce_persistence_bridge.mirror_invoice_fields",
+            new=AsyncMock(),
+        ):
+            result = await service.retry_external_sync(
+                tenant_id=_TENANT_ID,
+                invoice_id=_INVOICE_ID,
+            )
+
+        reset = es.update_document.call_args.args[2]
+        assert reset["qbo_push_state"] == "pending"
+        assert reset["qbo_push_attempts"] == 0
+        retried = external_sync.retry_invoice_push.call_args.args[0]
+        assert retried["qbo_push_state"] == "pending"
+        assert retried["qbo_push_attempts"] == 0
+        assert result["external_refs"]["qbo"] == "inv:9876"
+
+    @pytest.mark.asyncio
+    async def test_draft_cannot_be_exported(self):
+        service = InvoiceService(_make_es_service(), external_sync=AsyncMock())
+        service.get = AsyncMock(
+            return_value=_make_invoice_doc(status=InvoiceStatus.DRAFT.value)
+        )
+
+        with pytest.raises(AppException) as exc:
+            await service.retry_external_sync(
+                tenant_id=_TENANT_ID,
+                invoice_id=_INVOICE_ID,
+            )
+
+        assert exc.value.error_code.value == "COMMERCE_INVOICE_INVALID_STATE"
 
 
 

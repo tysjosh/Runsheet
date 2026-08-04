@@ -30,8 +30,11 @@ from fastapi.testclient import TestClient
 from driver.api.pod_endpoints import (
     router as pod_router,
     configure_pod_endpoints,
-    _validate_geotag,
 )
+
+# The geotag helper moved into the extracted PODSubmissionService module when
+# the POD rule left the handler (task 5.5).
+from driver.services.pod_service import validate_geotag as _validate_geotag
 from driver.services.geo_utils import haversine_distance_meters
 
 # ---------------------------------------------------------------------------
@@ -74,7 +77,16 @@ _SETTINGS_PATCH = nullcontext()
 
 
 def _auth_headers(tenant_id: str = TENANT_ID) -> dict:
-    return auth_headers(tenant_id, sub="driver-1")
+    """A driver-scoped Test_Auth_Path header set.
+
+    ``/api/driver`` resolution runs ``require_driver_identity``, so the context
+    must hold the exact ``driver`` role and a canonical ``driver_id`` (Req 1.5,
+    1.6). ``driver_id`` matches ``sub`` so job documents asserting either
+    ``asset_assigned`` or ``assigned_driver_id`` authorize the same caller.
+    """
+    return auth_headers(
+        tenant_id, sub="driver-1", roles=["driver"], driver_id="driver-1"
+    )
 
 
 def _make_es_service(tenant_policies: dict = None) -> MagicMock:
@@ -108,8 +120,15 @@ def _make_job_service(
     destination_location: dict = None,
     customer_id: Optional[str] = None,
     pod_otp: Optional[str] = None,
+    order_id: Optional[str] = "ORD_1",
 ) -> MagicMock:
-    """Create a mock JobService with _append_event and _get_job_doc."""
+    """Create a mock JobService with _append_event and _get_job_doc.
+
+    The job document carries an ``order_id`` by default: a POD that resolves no
+    order reference is now rejected with 422 ``POD_ORDER_REFERENCE_REQUIRED``
+    rather than chained under ``order_id: ""`` (R5.22). Pass ``order_id=None``
+    to exercise that rejection.
+    """
     svc = MagicMock()
     svc._append_event = AsyncMock(return_value="evt-123")
 
@@ -118,6 +137,8 @@ def _make_job_service(
         "status": "in_progress",
         "tenant_id": TENANT_ID,
     }
+    if order_id is not None:
+        job_doc["order_id"] = order_id
     if destination_location:
         job_doc["destination_location"] = destination_location
     if customer_id:
@@ -182,7 +203,7 @@ def _pod_payload(
     geotag: dict = None,
     timestamp: str = "2024-01-15T10:30:00Z",
     otp: str = None,
-    delivered_gallons: Optional[float] = None,
+    delivered_gallons: Optional[float] = 500.0,
     # Deprecated raw-URL fields kept for backward-compat coverage.
     signature_url: Optional[str] = None,
     photo_urls: Optional[list] = None,
@@ -196,6 +217,11 @@ def _pod_payload(
     When ``signature_ref``/``photo_refs`` are ``None`` (and the deprecated
     ``signature_url``/``photo_urls`` are not supplied) the corresponding
     keys are omitted so validators can run against partial payloads.
+
+    ``delivered_gallons`` carries a driver-entered value by default because a
+    non-refusal that resolves no gallon count is now rejected (R5.11, R5.12).
+    Pass ``delivered_gallons=None`` to omit the key and exercise the OCR /
+    rejection paths.
     """
     payload: dict = {
         "recipient_name": recipient_name,
@@ -386,6 +412,66 @@ class TestSubmitPod:
         call_kwargs = job_svc._append_event.call_args.kwargs
         assert call_kwargs["event_type"] == "delivery_refused"
         assert call_kwargs["payload"]["refusal_reason_code"] == "customer_refused"
+
+    def test_refusal_records_zero_gallons_from_the_refused_source(self):
+        """A refusal delivered nothing: the chain entry records ``0``.
+
+        ``delivered_gallons`` is optional on a refusal, and the literal ``0``
+        with ``delivered_gallons_source = "refused"`` is what is persisted and
+        hashed.
+
+        Validates: Requirements 5.14, 5.15
+        """
+        es = _make_es_service()
+        app = _make_app(es_service=es, job_service=_make_job_service())
+
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.post(
+                "/api/driver/jobs/JOB_1/pod",
+                json=_pod_payload(
+                    signature_ref=None,
+                    photo_refs=[],
+                    delivered_gallons=None,
+                    refused_delivery=True,
+                    refusal_reason_code="unsafe_site",
+                ),
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 200, resp.text
+        doc = resp.json()["data"]
+        assert doc["delivered_gallons"] == 0
+        assert doc["delivered_gallons_source"] == "refused"
+        # The hash chain accepted the document, so no null gallon count reached
+        # ``canonicalize_pod``.
+        assert len(doc["pod_hash"]) == 64
+
+    def test_blank_job_order_id_returns_422(self):
+        """A job carrying no ``order_id`` cannot attribute its POD.
+
+        Previously this produced a chain entry with ``order_id: ""``.
+
+        Validates: Requirement 5.22
+        """
+        es = _make_es_service()
+        app = _make_app(
+            es_service=es, job_service=_make_job_service(order_id=None)
+        )
+
+        with _SETTINGS_PATCH:
+            client = TestClient(app)
+            resp = client.post(
+                "/api/driver/jobs/JOB_1/pod",
+                json=_pod_payload(),
+                headers=_auth_headers(),
+            )
+
+        assert resp.status_code == 422, resp.text
+        body = resp.json()
+        assert body.get("error_code") == "POD_ORDER_REFERENCE_REQUIRED"
+        assert "order_id" in (body.get("details") or {}).get("missing", [])
+        es.index_document.assert_not_called()
 
     def test_refused_delivery_requires_reason_code(self):
         app = _make_app(es_service=_make_es_service(), job_service=_make_job_service())
@@ -857,10 +943,23 @@ class TestGeotagValidation:
 
 
 class TestOtpValidation:
-    """Tests for OTP validation in POD submission."""
+    """Tests for OTP validation in POD submission.
 
-    def test_otp_required_but_missing_returns_error(self):
-        """OTP required but not provided returns error. Validates: Req 8.5"""
+    The three OTP failures used to be HTTP **200** bodies carrying an
+    ``error_code``. They are now ``AppException`` raises with real status codes
+    (422 / 409 / 403): a 200 is not the structured error envelope R15.10
+    requires, and the offline queue's disposition matrix is status-code driven,
+    so a 200 would dequeue a failed POD as successful and lose the delivery
+    record.
+
+    Validates: Requirements 5.9, 15.10
+    """
+
+    def test_otp_required_but_missing_returns_422(self):
+        """OTP required but not provided is 422 OTP_REQUIRED.
+
+        Validates: Requirements 5.9, 15.10
+        """
         es = _make_es_service(
             tenant_policies={
                 "tenant_id": TENANT_ID,
@@ -879,9 +978,8 @@ class TestOtpValidation:
                 headers=_auth_headers(),
             )
 
-        assert resp.status_code == 200  # Returns error in body
-        body = resp.json()
-        assert body.get("error_code") == "OTP_REQUIRED"
+        assert resp.status_code == 422, resp.text
+        assert resp.json().get("error_code") == "OTP_REQUIRED"
 
     def test_otp_required_and_provided_succeeds(self):
         """OTP required and matching the provisioned code stores POD with otp_verified=True. Validates: Req 8.5"""
@@ -910,8 +1008,11 @@ class TestOtpValidation:
         data = resp.json()["data"]
         assert data["otp_verified"] is True
 
-    def test_otp_required_and_mismatched_returns_invalid(self):
-        """A non-matching OTP is rejected with OTP_INVALID. Validates: Req 8.5"""
+    def test_otp_required_and_mismatched_returns_403(self):
+        """A non-matching OTP is 403 OTP_VERIFICATION_FAILED.
+
+        Validates: Requirements 5.9, 15.10
+        """
         es = _make_es_service(
             tenant_policies={
                 "tenant_id": TENANT_ID,
@@ -933,11 +1034,21 @@ class TestOtpValidation:
                 headers=_auth_headers(),
             )
 
-        assert resp.status_code == 200  # Error returned in body
-        assert resp.json().get("error_code") == "OTP_INVALID"
+        assert resp.status_code == 403, resp.text
+        body = resp.json()
+        assert body.get("error_code") == "OTP_VERIFICATION_FAILED"
+        # Neither operand of the comparison may leak into the rejection.
+        assert "999999" not in resp.text
+        assert "123456" not in resp.text
 
-    def test_otp_required_but_not_provisioned_fails_closed(self):
-        """OTP required but none provisioned on the job fails closed. Validates: Req 8.5"""
+    def test_otp_required_but_not_provisioned_fails_closed_with_409(self):
+        """OTP required but none provisioned is 409 OTP_NOT_PROVISIONED.
+
+        The fail-closed posture is kept: the submission is rejected rather than
+        rubber-stamped, now with a real status code.
+
+        Validates: Requirements 5.9, 15.10
+        """
         es = _make_es_service(
             tenant_policies={
                 "tenant_id": TENANT_ID,
@@ -957,7 +1068,7 @@ class TestOtpValidation:
                 headers=_auth_headers(),
             )
 
-        assert resp.status_code == 200  # Error returned in body
+        assert resp.status_code == 409, resp.text
         assert resp.json().get("error_code") == "OTP_NOT_PROVISIONED"
 
     def test_otp_not_required_skips_validation(self):
@@ -1098,12 +1209,17 @@ class TestJobServiceResilience:
 
         assert resp.status_code == 200
 
-    def test_no_job_service_configured_still_succeeds(self):
-        """Endpoint works without a JobService configured. Validates: Req 8.1"""
-        app = _make_app(
-            es_service=_make_es_service(),
-            job_service=None,
-        )
+    def test_no_job_service_configured_cannot_attribute_the_order(self):
+        """With no JobService the job-keyed path resolves no ``order_id``.
+
+        The job-keyed path derives ``order_id`` from the job document, so an
+        unwired job service leaves the POD un-attributable. That is 422 rather
+        than a chain entry with ``order_id: ""``.
+
+        Validates: Requirement 5.22
+        """
+        es = _make_es_service()
+        app = _make_app(es_service=es, job_service=None)
 
         with _SETTINGS_PATCH:
             client = TestClient(app)
@@ -1113,10 +1229,19 @@ class TestJobServiceResilience:
                 headers=_auth_headers(),
             )
 
-        assert resp.status_code == 200
+        assert resp.status_code == 422, resp.text
+        assert resp.json().get("error_code") == "POD_ORDER_REFERENCE_REQUIRED"
+        es.index_document.assert_not_called()
 
-    def test_get_job_doc_failure_skips_geotag_validation(self):
-        """Job doc fetch failure skips geotag validation. Validates: Req 8.3"""
+    def test_get_job_doc_failure_returns_order_reference_required(self):
+        """An unreadable job document leaves the POD un-attributable.
+
+        Geotag validation stays non-blocking on a lookup failure (covered by
+        ``test_no_destination_skips_geotag_validation``), but the ``order_id``
+        the hash chain needs cannot be invented.
+
+        Validates: Requirement 5.22
+        """
         job_svc = _make_job_service()
         job_svc._get_job_doc = AsyncMock(side_effect=Exception("Not found"))
         es = _make_es_service()
@@ -1130,9 +1255,9 @@ class TestJobServiceResilience:
                 headers=_auth_headers(),
             )
 
-        assert resp.status_code == 200
-        doc = es.index_document.call_args.args[2]
-        assert doc["location_mismatch"] is False
+        assert resp.status_code == 422, resp.text
+        assert resp.json().get("error_code") == "POD_ORDER_REFERENCE_REQUIRED"
+        es.index_document.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -1197,7 +1322,10 @@ class TestSubmitPodOcrIntegration:
             client = TestClient(app)
             resp = client.post(
                 "/api/driver/jobs/JOB_1/pod",
-                json=_pod_payload(meter_ticket_ref=_METER_TICKET_REF),
+                json=_pod_payload(
+                    meter_ticket_ref=_METER_TICKET_REF,
+                    delivered_gallons=None,
+                ),
                 headers=_auth_headers(),
             )
 
@@ -1243,10 +1371,13 @@ class TestSubmitPodOcrIntegration:
         assert doc["delivered_gallons_source"] == "manual"
         assert doc["ocr_error"] is None
 
-    def test_requires_manual_review_falls_through_to_manual(self):
-        """``requires_manual_review=True`` forces manual confirmation.
+    def test_requires_manual_review_returns_409_confirmation_required(self):
+        """``requires_manual_review=True`` asks the driver to confirm.
 
-        Validates: Requirement 4.2.5.
+        The POD is not persisted with a null gallon count — the driver is asked
+        for the number and resubmits under the same idempotency key.
+
+        Validates: Requirements 4.2.5, 5.11
         """
         ocr = _make_ocr_service(
             extracted_gallons=500.0,
@@ -1264,22 +1395,23 @@ class TestSubmitPodOcrIntegration:
             client = TestClient(app)
             resp = client.post(
                 "/api/driver/jobs/JOB_1/pod",
-                json=_pod_payload(meter_ticket_ref=_METER_TICKET_REF),
+                json=_pod_payload(
+                    meter_ticket_ref=_METER_TICKET_REF,
+                    delivered_gallons=None,
+                ),
                 headers=_auth_headers(),
             )
 
-        assert resp.status_code == 200
-        doc = es.index_document.call_args.args[2]
-        assert doc["delivered_gallons"] is None
-        assert doc["delivered_gallons_source"] == "manual"
-        assert doc["ocr_requires_manual_review"] is True
-        assert doc["ocr_error"] == "requires_manual_review"
+        assert resp.status_code == 409, resp.text
+        body = resp.json()
+        assert body.get("error_code") == "POD_GALLONS_CONFIRMATION_REQUIRED"
+        assert (body.get("details") or {}).get("ocr_error") == "requires_manual_review"
+        es.index_document.assert_not_called()
 
-    def test_ocr_provider_error_records_error_and_falls_back(self):
-        """OCR service returning an ``error_details`` falls through to manual.
+    def test_ocr_provider_error_returns_409_with_diagnostic(self):
+        """An OCR ``error_details`` is surfaced as the 409 diagnostic.
 
-        Validates: Requirement 4.2.5 — any provider error must route the
-        POD through manual entry with the error recorded.
+        Validates: Requirements 4.2.5, 5.11
         """
         ocr = _make_ocr_service(
             extracted_gallons=None,
@@ -1298,20 +1430,25 @@ class TestSubmitPodOcrIntegration:
             client = TestClient(app)
             resp = client.post(
                 "/api/driver/jobs/JOB_1/pod",
-                json=_pod_payload(meter_ticket_ref=_METER_TICKET_REF),
+                json=_pod_payload(
+                    meter_ticket_ref=_METER_TICKET_REF,
+                    delivered_gallons=None,
+                ),
                 headers=_auth_headers(),
             )
 
-        assert resp.status_code == 200
-        doc = es.index_document.call_args.args[2]
-        assert doc["delivered_gallons"] is None
-        assert doc["delivered_gallons_source"] == "manual"
-        assert doc["ocr_error"] == "textract_error:ThrottlingException"
+        assert resp.status_code == 409, resp.text
+        body = resp.json()
+        assert body.get("error_code") == "POD_GALLONS_CONFIRMATION_REQUIRED"
+        assert (body.get("details") or {}).get("ocr_error") == (
+            "textract_error:ThrottlingException"
+        )
+        es.index_document.assert_not_called()
 
-    def test_ocr_timeout_records_timeout_error(self):
-        """An OCR timeout beyond 15s falls through to manual with a logged error.
+    def test_ocr_timeout_returns_409_with_timeout_diagnostic(self):
+        """An OCR timeout beyond the 15s budget asks for manual confirmation.
 
-        Validates: Requirement 4.2.6.
+        Validates: Requirements 4.2.6, 5.11
         """
         import asyncio
 
@@ -1327,21 +1464,22 @@ class TestSubmitPodOcrIntegration:
             client = TestClient(app)
             resp = client.post(
                 "/api/driver/jobs/JOB_1/pod",
-                json=_pod_payload(meter_ticket_ref=_METER_TICKET_REF),
+                json=_pod_payload(
+                    meter_ticket_ref=_METER_TICKET_REF,
+                    delivered_gallons=None,
+                ),
                 headers=_auth_headers(),
             )
 
-        assert resp.status_code == 200
-        doc = es.index_document.call_args.args[2]
-        assert doc["delivered_gallons"] is None
-        assert doc["delivered_gallons_source"] == "manual"
-        assert doc["ocr_error"] == "textract_timeout"
+        assert resp.status_code == 409, resp.text
+        body = resp.json()
+        assert body.get("error_code") == "POD_GALLONS_CONFIRMATION_REQUIRED"
+        assert (body.get("details") or {}).get("ocr_error") == "textract_timeout"
 
-    def test_ocr_raises_unexpected_exception_falls_back_to_manual(self):
-        """Unexpected OCR exceptions are caught and translated to manual entry.
+    def test_ocr_unexpected_exception_returns_409_with_diagnostic(self):
+        """A misbehaving OCR provider never hard-fails the POD flow.
 
-        Validates: Requirement 4.2.5 — the POD flow must never hard-fail
-        because of a misbehaving OCR provider.
+        Validates: Requirements 4.2.5, 5.11
         """
         ocr = _make_ocr_service(side_effect=RuntimeError("boom"))
         es = _make_es_service()
@@ -1355,15 +1493,19 @@ class TestSubmitPodOcrIntegration:
             client = TestClient(app)
             resp = client.post(
                 "/api/driver/jobs/JOB_1/pod",
-                json=_pod_payload(meter_ticket_ref=_METER_TICKET_REF),
+                json=_pod_payload(
+                    meter_ticket_ref=_METER_TICKET_REF,
+                    delivered_gallons=None,
+                ),
                 headers=_auth_headers(),
             )
 
-        assert resp.status_code == 200
-        doc = es.index_document.call_args.args[2]
-        assert doc["delivered_gallons"] is None
-        assert doc["delivered_gallons_source"] == "manual"
-        assert doc["ocr_error"] == "ocr_error:RuntimeError"
+        assert resp.status_code == 409, resp.text
+        body = resp.json()
+        assert body.get("error_code") == "POD_GALLONS_CONFIRMATION_REQUIRED"
+        assert (body.get("details") or {}).get("ocr_error") == "ocr_error:RuntimeError"
+
+
 
     def test_ocr_cross_tenant_permission_error_returns_403(self):
         """``PermissionError`` from the OCR service maps to HTTP 403.
@@ -1387,7 +1529,10 @@ class TestSubmitPodOcrIntegration:
             client = TestClient(app)
             resp = client.post(
                 "/api/driver/jobs/JOB_1/pod",
-                json=_pod_payload(meter_ticket_ref=_METER_TICKET_REF),
+                json=_pod_payload(
+                    meter_ticket_ref=_METER_TICKET_REF,
+                    delivered_gallons=None,
+                ),
                 headers=_auth_headers(),
             )
 
@@ -1397,11 +1542,13 @@ class TestSubmitPodOcrIntegration:
         assert details.get("reason") == "cross_tenant_file_ref"
         assert details.get("field") == "meter_ticket_ref"
 
-    def test_no_meter_ticket_ref_skips_ocr_entirely(self):
-        """POD with no meter_ticket_ref skips OCR and defaults to manual=None.
+    def test_no_meter_ticket_ref_and_no_gallons_returns_422(self):
+        """No meter ticket and no typed count is 422 DELIVERED_GALLONS_REQUIRED.
 
-        Validates: Requirement 4.2.4 — OCR is only invoked when a
-        meter_ticket_ref is supplied.
+        There was never anything to read, so there is no OCR diagnostic to
+        report and no confirmation to prompt for — the value is simply missing.
+
+        Validates: Requirements 4.2.4, 5.12
         """
         ocr = _make_ocr_service(extracted_gallons=999.0, confidence=0.99)
         es = _make_es_service()
@@ -1415,23 +1562,22 @@ class TestSubmitPodOcrIntegration:
             client = TestClient(app)
             resp = client.post(
                 "/api/driver/jobs/JOB_1/pod",
-                json=_pod_payload(),
+                json=_pod_payload(delivered_gallons=None),
                 headers=_auth_headers(),
             )
 
-        assert resp.status_code == 200
+        assert resp.status_code == 422, resp.text
+        assert resp.json().get("error_code") == "DELIVERED_GALLONS_REQUIRED"
         ocr.extract.assert_not_called()
-        doc = es.index_document.call_args.args[2]
-        assert doc["delivered_gallons"] is None
-        assert doc["delivered_gallons_source"] == "manual"
-        assert doc["ocr_error"] is None
-        assert doc["ocr_result_id"] is None
+        es.index_document.assert_not_called()
 
-    def test_no_ocr_service_configured_skips_extraction(self):
-        """When ocr_service is not wired the handler falls through gracefully.
+    def test_no_ocr_service_configured_returns_409_confirmation_required(self):
+        """An unwired OCR backend still asks the driver to confirm the count.
 
-        Validates: Requirement 4.2.5 — an unprovisioned OCR backend must
-        not break POD submission; the POD simply records manual entry.
+        The submission carried a meter ticket, so the app is told the count
+        needs confirming rather than that it was never supplied.
+
+        Validates: Requirements 4.2.5, 5.11
         """
         es = _make_es_service()
         app = _make_app(
@@ -1444,12 +1590,15 @@ class TestSubmitPodOcrIntegration:
             client = TestClient(app)
             resp = client.post(
                 "/api/driver/jobs/JOB_1/pod",
-                json=_pod_payload(meter_ticket_ref=_METER_TICKET_REF),
+                json=_pod_payload(
+                    meter_ticket_ref=_METER_TICKET_REF,
+                    delivered_gallons=None,
+                ),
                 headers=_auth_headers(),
             )
 
-        assert resp.status_code == 200
-        doc = es.index_document.call_args.args[2]
-        assert doc["delivered_gallons"] is None
-        assert doc["delivered_gallons_source"] == "manual"
-        assert doc["ocr_error"] is None
+        assert resp.status_code == 409, resp.text
+        body = resp.json()
+        assert body.get("error_code") == "POD_GALLONS_CONFIRMATION_REQUIRED"
+        assert (body.get("details") or {}).get("ocr_error") == "ocr_unavailable"
+        es.index_document.assert_not_called()

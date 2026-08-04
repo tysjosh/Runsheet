@@ -38,6 +38,7 @@ from commerce.services.commerce_es_mappings import INVOICE_EVENTS_INDEX
 from compliance.services.compliance_es_mappings import (
     PRICE_PROTECTION_CONTRACTS_INDEX,
 )
+from errors.handlers import register_exception_handlers
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 
 
@@ -135,13 +136,21 @@ class _FakeESService:
 # ---------------------------------------------------------------------------
 
 
-def _tenant_ctx_factory(tenant_id: str = "tenant-A"):
+def _tenant_ctx_factory(
+    tenant_id: str = "tenant-A",
+    roles: list[str] | None = None,
+):
+    # Price-protection contracts are a Tier 4 / staff surface, so the default
+    # caller holds `platform_admin` alongside an operations role — the shape real
+    # staff carry. These tests previously used a `roles=["operator"]` context,
+    # which is not a canonical role at all and passed only because the router had
+    # no role gate; see tests/unit/test_commerce_api_authz.py.
     def _factory() -> TenantContext:
         return TenantContext(
             tenant_id=tenant_id,
             user_id="user-1",
             has_pii_access=False,
-            roles=["operator"],
+            roles=list(roles) if roles is not None else ["admin", "platform_admin"],
             region="US",
             measurement_units={"volume": "gal", "distance": "mi"},
         )
@@ -151,14 +160,20 @@ def _tenant_ctx_factory(tenant_id: str = "tenant-A"):
 
 def _build_app(
     tenant_id: str = "tenant-A",
+    roles: list[str] | None = None,
 ) -> tuple[FastAPI, _FakeESService]:
     es = _FakeESService()
     configure_price_protection_api(es_service=es)
 
     app = FastAPI()
+    # The authorization gate raises AppException, which only becomes a 403 once
+    # the app's handlers are registered. Without this a rejected request would
+    # surface as a raised exception rather than an HTTP status, so the
+    # authorization assertions below would be testing the wrong thing.
+    register_exception_handlers(app)
     app.include_router(router)
     app.dependency_overrides[get_tenant_context] = _tenant_ctx_factory(
-        tenant_id=tenant_id
+        tenant_id=tenant_id, roles=roles
     )
     return app, es
 
@@ -665,3 +680,58 @@ class TestVarianceReport:
         data = resp.json()["data"]
         assert data["delivery_count"] == 1
         assert data["total_variance_cents"] == 5000
+
+
+class TestRouterLevelAuthorization:
+    """The staff gate is attached to the router, so prove it through HTTP.
+
+    ``tests/unit/test_commerce_api_authz.py`` covers the policy functions in
+    isolation. This class covers the wiring: that the dependency is actually
+    attached to this router and rejects before any handler logic runs. Without
+    it, deleting ``dependencies=[Depends(commerce_staff_dependency)]`` from the
+    ``APIRouter`` would leave every policy test green.
+    """
+
+    def test_dispatcher_is_refused(self) -> None:
+        app, es = _build_app(roles=["dispatcher"])
+        _seed_contract(es)
+        client = TestClient(app)
+
+        response = client.get("/api/commerce/price-protection-contracts")
+
+        assert response.status_code == 403, response.text
+
+    def test_driver_is_refused(self) -> None:
+        app, _ = _build_app(roles=["driver"])
+        client = TestClient(app)
+
+        response = client.get("/api/commerce/price-protection-contracts")
+
+        assert response.status_code == 403, response.text
+
+    def test_tenant_admin_alone_is_refused(self) -> None:
+        # The ERP owns the price, so a customer's own admin does not reach this.
+        app, _ = _build_app(roles=["admin"])
+        client = TestClient(app)
+
+        response = client.get("/api/commerce/price-protection-contracts")
+
+        assert response.status_code == 403, response.text
+
+    def test_staff_is_allowed(self) -> None:
+        app, es = _build_app(roles=["admin", "platform_admin"])
+        _seed_contract(es)
+        client = TestClient(app)
+
+        response = client.get("/api/commerce/price-protection-contracts")
+
+        assert response.status_code == 200, response.text
+
+    def test_rejection_does_not_echo_held_roles(self) -> None:
+        app, _ = _build_app(roles=["some-internal-role-name"])
+        client = TestClient(app)
+
+        response = client.get("/api/commerce/price-protection-contracts")
+
+        assert response.status_code == 403
+        assert "some-internal-role-name" not in response.text

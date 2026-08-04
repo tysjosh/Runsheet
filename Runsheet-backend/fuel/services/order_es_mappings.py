@@ -6,7 +6,10 @@ Defines strict mappings for:
 - fuel_order_events (§2)
 - drivers_current (§3)
 - intake_channels (§4)
-- pending_legacy_mirrors (§13 — dual-write retry queue)
+
+``pending_legacy_mirrors`` (§13) was the dual-write retry queue for the
+legacy mirror shim. Both are retired, so the index is no longer defined
+or created here.
 
 Every index sets ``"dynamic": "strict"`` so adapters cannot smuggle
 arbitrary fields. The ``intake_metadata`` sub-mapping on
@@ -29,7 +32,9 @@ FUEL_ORDERS_CURRENT_INDEX = "fuel_orders_current"
 FUEL_ORDER_EVENTS_INDEX = "fuel_order_events"
 DRIVERS_CURRENT_INDEX = "drivers_current"
 INTAKE_CHANNELS_INDEX = "intake_channels"
-PENDING_LEGACY_MIRRORS_INDEX = "pending_legacy_mirrors"
+# ``PENDING_LEGACY_MIRRORS_INDEX`` was removed with the legacy mirror
+# retry queue it named.
+DRIVER_REPORTS_INDEX = "driver_reports"
 
 # ---------------------------------------------------------------------------
 # Mappings
@@ -59,6 +64,11 @@ FUEL_ORDERS_CURRENT_MAPPING = {
             "customer_tank_id": {"type": "keyword"},
             "product_code": {"type": "keyword"},
             "gallons_requested": {"type": "double"},
+            "unit_price_micros": {"type": "long"},
+            "unit_price_cents": {"type": "long"},
+            "subtotal_cents": {"type": "long"},
+            "tax_cents": {"type": "long"},
+            "total_cents": {"type": "long"},
             "fill_to_full": {"type": "boolean"},
             "call_type": {"type": "keyword"},
             "delivery_window_start": {"type": "date"},
@@ -81,6 +91,9 @@ FUEL_ORDERS_CURRENT_MAPPING = {
                     "user_agent": {"type": "keyword"},
                     "import_batch_id": {"type": "keyword"},
                     "csv_row_number": {"type": "integer"},
+                    "source_system": {"type": "keyword"},
+                    "source_record_id": {"type": "keyword"},
+                    "source_updated_at": {"type": "date"},
                     "edi_interchange_id": {"type": "keyword"},
                     "partner_ref": {"type": "keyword"},
                     "legacy_shipment_id": {"type": "keyword"},
@@ -90,6 +103,46 @@ FUEL_ORDERS_CURRENT_MAPPING = {
             "assigned_driver_id": {"type": "keyword"},
             "assigned_asset_id": {"type": "keyword"},
             "assigned_run_id": {"type": "keyword"},
+            # POD one-time code, provisioned by PODOTPService when the order
+            # transitions to ``dispatched`` in a tenant with otp_required
+            # (driver-mobile-app R5.25). The mapping is ``dynamic: strict``, so
+            # the write fails outright until both fields are declared.
+            # ``pod_otp`` is ``"index": False``: it is only ever read back
+            # from the fetched document to compare against the submitted code,
+            # never searched, and an unindexed keyword keeps it out of the
+            # inverted index (R5.26).
+            "pod_otp": {"type": "keyword", "index": False},
+            "pod_otp_generated_at": {"type": "date"},
+            # Written by PODSubmissionService when a POD records a refusal and
+            # the order transitions to ``failed`` (driver-mobile-app R4.6), so
+            # the order carries its own failure reason without a POD join.
+            "refusal_reason_code": {"type": "keyword"},
+            # Immutable POD snapshot written immediately before the delivered
+            # transition. Commerce and outbound ERP integrations consume this
+            # object from the order.delivered event without a second index read.
+            "delivery_result": {
+                "type": "object",
+                "dynamic": "strict",
+                "properties": {
+                    "pod_id": {"type": "keyword"},
+                    "actual_gallons": {"type": "double"},
+                    "actual_gallons_source": {"type": "keyword"},
+                    "delivered_at": {"type": "date"},
+                    "recipient_name": {"type": "keyword"},
+                    "driver_id": {"type": "keyword"},
+                    "signature_ref": {"type": "keyword"},
+                    "photo_refs": {"type": "keyword"},
+                    "meter_ticket_ref": {"type": "keyword"},
+                    "bol_id": {"type": "keyword"},
+                    "bol_ref": {"type": "keyword"},
+                    "pod_hash": {"type": "keyword"},
+                    "geotag": {"type": "geo_point"},
+                    "otp_verified": {"type": "boolean"},
+                    "location_mismatch": {"type": "boolean"},
+                    "source_system": {"type": "keyword"},
+                    "source_record_id": {"type": "keyword"},
+                },
+            },
             "legacy_origin_snapshot": {"type": "text"},
             "source_schema_version": {"type": "keyword"},
             "trace_id": {"type": "keyword"},
@@ -163,7 +216,16 @@ DRIVERS_CURRENT_MAPPING = {
                 "fields": {"keyword": {"type": "keyword"}},
             },
             "phone": {"type": "keyword"},
+            # Current duty-status value. Stays a single keyword carrying one of
+            # the four DriverStatus values so every existing reader of
+            # drivers_current.status keeps working unchanged.
             "status": {"type": "keyword"},
+            # Duty-status projection bookkeeping. Both nullable: absent means
+            # the record predates the duty-status event log. duty_status_event_id
+            # is the id of the duty_status_events document this value projects
+            # and duty_status_updated_at is that event's server_received_at.
+            "duty_status_event_id": {"type": "keyword"},
+            "duty_status_updated_at": {"type": "date"},
             "availability": {"type": "keyword"},
             "assigned_truck_id": {"type": "keyword"},
             "cdl_class": {"type": "keyword"},
@@ -241,7 +303,12 @@ INTAKE_CHANNELS_MAPPING = {
     },
 }
 
-PENDING_LEGACY_MIRRORS_MAPPING = {
+# ``PENDING_LEGACY_MIRRORS_MAPPING`` sat here. It defined the retry queue
+# that held mirror failures for the LegacyDualWriter shim. Nothing writes
+# to that queue any more, so the mapping was dropped rather than left to
+# recreate an empty index on every boot.
+
+DRIVER_REPORTS_MAPPING = {
     "settings": {
         "number_of_shards": 1,
         "number_of_replicas": 1,
@@ -249,33 +316,14 @@ PENDING_LEGACY_MIRRORS_MAPPING = {
     "mappings": {
         "dynamic": "strict",
         "properties": {
-            "entry_id": {"type": "keyword"},
+            "report_id": {"type": "keyword"},
             "tenant_id": {"type": "keyword"},
-            "entity_type": {"type": "keyword"},
-            "entity_id": {"type": "keyword"},
-            "failure_reason": {"type": "text"},
-            "retry_count": {"type": "integer"},
-            "next_retry_at": {"type": "date"},
+            "driver_id": {"type": "keyword"},
+            "assignment_id": {"type": "keyword"},
+            "kind": {"type": "keyword"},
+            "detail": {"type": "text"},
+            "eta_minutes": {"type": "integer"},
             "created_at": {"type": "date"},
-            "updated_at": {"type": "date"},
-            "intake_metadata": {
-                "dynamic": "strict",
-                "properties": {
-                    "call_id": {"type": "keyword"},
-                    "recording_url": {"type": "keyword"},
-                    "transcript": {"type": "text"},
-                    "agent_confidence": {"type": "float"},
-                    "dispatcher_user_id": {"type": "keyword"},
-                    "session_id": {"type": "keyword"},
-                    "portal_session_id": {"type": "keyword"},
-                    "user_agent": {"type": "keyword"},
-                    "import_batch_id": {"type": "keyword"},
-                    "csv_row_number": {"type": "integer"},
-                    "edi_interchange_id": {"type": "keyword"},
-                    "partner_ref": {"type": "keyword"},
-                    "legacy_shipment_id": {"type": "keyword"},
-                },
-            },
         },
     },
 }
@@ -289,7 +337,7 @@ ORDER_INTAKE_INDEX_MAPPINGS: dict[str, dict] = {
     FUEL_ORDER_EVENTS_INDEX: FUEL_ORDER_EVENTS_MAPPING,
     DRIVERS_CURRENT_INDEX: DRIVERS_CURRENT_MAPPING,
     INTAKE_CHANNELS_INDEX: INTAKE_CHANNELS_MAPPING,
-    PENDING_LEGACY_MIRRORS_INDEX: PENDING_LEGACY_MIRRORS_MAPPING,
+    DRIVER_REPORTS_INDEX: DRIVER_REPORTS_MAPPING,
 }
 
 

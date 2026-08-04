@@ -1,0 +1,8 @@
+source_system,external_tank_id,source_reading_id,customer_tank_id,volume_gallons,water_level_in,temperature_f,reading_at
+VeederRoot,T-100,VR-T100-1300,tank-100,250,0.1,70.2,2026-07-29T13:00:00Z
+VeederRoot,T-100,VR-T100-1100,tank-100,300,0.1,68.7,2026-07-29T11:00:00Z
+VeederRoot,T-100,VR-T100-1300,tank-100,250,0.1,70.2,2026-07-29T13:00:00Z
+VeederRoot,T-200,VR-T200-1310,tank-200,100,0.0,71.0,2026-07-29T13:10:00Z
+VeederRoot,T-300,VR-T300-1320,tank-300,420,0.2,74.5,2026-07-29T13:20:00Z
+VeederRoot,T-400,VR-T400-1330,tank-400,75,0.0,67.9,2026-07-29T13:30:00Z
+VeederRoot,T-500,VR-T500-1340,tank-500,600,0.4,72.1,2026-07-29T13:40:00Z

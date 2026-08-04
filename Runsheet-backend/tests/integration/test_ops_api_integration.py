@@ -31,6 +31,18 @@ from ops.services.ops_es_service import OpsElasticsearchService
 
 pytestmark = pytest.mark.integration
 
+
+@pytest.fixture(autouse=True)
+def enable_legacy_ng_delivery(monkeypatch):
+    """The ops rider/shipment surface is gated behind ``legacy_ng_delivery``
+    (default OFF). Enable it for this module so the integration coverage of
+    the legacy surface is preserved.
+
+    Audit reference: product-owner-audit-2026-05-08 recommendation #1.
+    """
+    monkeypatch.setenv("LEGACY_NG_DELIVERY_ENABLED", "true")
+
+
 # ---------------------------------------------------------------------------
 # Sample data
 # ---------------------------------------------------------------------------

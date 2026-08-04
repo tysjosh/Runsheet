@@ -32,6 +32,17 @@ EXCLUDE_PATTERNS = {
     "__pycache__/",
     "conftest.py",
     "setup.py",
+    # Alembic revision modules are executed by `alembic upgrade`, never by
+    # pytest, so they never appear in a pytest coverage report and this gate
+    # reported them as "no coverage data (file not in coverage report)" — a
+    # failure no amount of testing could clear. That made the gate fail on every
+    # pull request that touched a migration, which is every schema change.
+    #
+    # Excluding them does not leave migrations unverified: the `migration-check`
+    # job applies the whole chain to a fresh database, asserts the schema is at
+    # the latest head, and asserts a single linear head. That is a stronger check
+    # than line coverage of a module whose body is two calls to `op.*`.
+    "alembic/versions/",
 }
 
 

@@ -16,7 +16,7 @@ exposes a cross-tenant query.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -47,7 +47,6 @@ from persistence.models import (
     PriceBookORM,
     PriceProtectionContractORM,
     PricingRuleORM,
-    ShipmentCurrentORM,
     SupplierContractORM,
     TaxExemptionORM,
     TaxJurisdictionORM,
@@ -61,7 +60,12 @@ logger = logging.getLogger(__name__)
 
 # Invoice columns whose values may arrive as ISO-8601 strings from the ES-shaped
 # service docs but must be native datetime/date for the Postgres column types.
-_INVOICE_DATETIME_FIELDS = {"issued_at", "finalized_at", "voided_at"}
+_INVOICE_DATETIME_FIELDS = {
+    "issued_at",
+    "finalized_at",
+    "voided_at",
+    "delivered_at",
+}
 _INVOICE_DATE_FIELDS = {"due_date"}
 
 
@@ -291,6 +295,9 @@ class InvoiceRepository:
                      customer_id: str, account_id: str,
                      line_items: List[Dict[str, Any]],
                      order_id: Optional[str] = None,
+                     pod_id: Optional[str] = None,
+                     delivered_at: Any = None,
+                     delivery_result: Optional[Dict[str, Any]] = None,
                      invoice_number: Optional[str] = None,
                      status: str = "draft", tax_cents: int = 0,
                      subtotal_cents: Optional[int] = None,
@@ -309,12 +316,22 @@ class InvoiceRepository:
         total = total_cents if total_cents is not None else subtotal + tax_cents
         remaining = remaining_cents if remaining_cents is not None else total - amount_paid_cents
         _due = _coerce_temporal_fields({"due_date": due_date}).get("due_date") if due_date else None
+        _delivered_at = (
+            _coerce_temporal_fields({"delivered_at": delivered_at}).get(
+                "delivered_at"
+            )
+            if delivered_at
+            else None
+        )
         row = InvoiceORM(
             invoice_id=invoice_id,
             tenant_id=tenant_id,
             customer_id=customer_id,
             account_id=account_id,
             order_id=order_id,
+            pod_id=pod_id,
+            delivered_at=_delivered_at,
+            delivery_result=delivery_result,
             invoice_number=invoice_number,
             status=status,
             subtotal_cents=subtotal,
@@ -333,6 +350,11 @@ class InvoiceRepository:
                     product_code=li["product_code"],
                     quantity_gallons=float(li["quantity_gallons"]),
                     unit_price_cents=int(li["unit_price_cents"]),
+                    unit_price_micros=(
+                        int(li["unit_price_micros"])
+                        if li.get("unit_price_micros") is not None
+                        else None
+                    ),
                     subtotal_cents=int(li["subtotal_cents"]),
                 )
             )
@@ -704,6 +726,11 @@ class PricingRuleRepository:
                 effective_to=vals.get("effective_to"),
                 min_quantity_gallons=vals.get("min_quantity_gallons"),
                 unit_price_cents=int(vals["unit_price_cents"]),
+                unit_price_micros=(
+                    int(vals["unit_price_micros"])
+                    if vals.get("unit_price_micros") is not None
+                    else None
+                ),
             )
             session.add(row)
         else:
@@ -714,6 +741,12 @@ class PricingRuleRepository:
                     setattr(row, key, vals[key])
             if "unit_price_cents" in vals:
                 row.unit_price_cents = int(vals["unit_price_cents"])
+            if "unit_price_micros" in vals:
+                row.unit_price_micros = (
+                    int(vals["unit_price_micros"])
+                    if vals["unit_price_micros"] is not None
+                    else None
+                )
         await session.flush()
         outbox.enqueue(session, aggregate_type="pricing_rule", aggregate_id=rule_id,
                        tenant_id=tenant_id, event_type="upserted", row=row)
@@ -991,17 +1024,28 @@ class CurrentStateRepository:
 
     Like :class:`ComplianceConfigRepository` but with an optional
     **stale-event guard**: aggregates that carry ``last_event_timestamp``
-    (orders, jobs, shipments) reject an upsert whose incoming timestamp is
+    (orders, jobs) reject an upsert whose incoming timestamp is
     older-or-equal to the stored one — mirroring the ES scripted-upsert
     out-of-order protection so the Postgres row and ES projection converge to
     the same final state regardless of event delivery order.
     """
 
     # aggregate_type -> (ORM model, pk field, typed columns, has_last_event_ts)
+    #
+    # The typed columns MUST cover every mirror column the ORM model declares
+    # (everything but the pk, tenant_id, document and the two timestamps).
+    # ``HybridReadRepository.list`` resolves a filter key to a typed column when
+    # the model has one, so a declared-but-never-written column turns that
+    # filter into a silent empty result rather than an error. Six aggregates
+    # here were missing one, and ``depot``'s missing ``status`` is what made
+    # every ``list_for_tenant(status="active")`` return nothing under
+    # COMMERCE_READ_FROM_POSTGRES — which is how route planning lost its depot.
+    # ``test_typed_mirror_columns_are_populated.py`` pins the invariant.
     _SPECS = {
         "fuel_order": (
             FuelOrderCurrentORM, "order_id",
-            ("customer_id", "assigned_driver_id", "status", "last_event_timestamp"),
+            ("customer_id", "assigned_driver_id", "assigned_asset_id", "status",
+             "last_event_timestamp"),
             True,
         ),
         "job": (
@@ -1009,24 +1053,20 @@ class CurrentStateRepository:
             ("asset_id", "status", "last_event_timestamp"),
             True,
         ),
-        "shipment": (
-            ShipmentCurrentORM, "shipment_id",
-            ("status", "last_event_timestamp"),
-            True,
-        ),
+        # ``shipment`` was retired with the ``shipments_current`` table (rev 0007).
         "tenant_job_policy": (
-            TenantJobPolicyORM, "policy_id", (), False,
+            TenantJobPolicyORM, "policy_id", ("status",), False,
         ),
         # Master data (no stale-event guard).
         "driver": (DriverMasterORM, "driver_id", ("cdl_number", "status"), False),
-        "depot": (DepotORM, "depot_id", ("is_default",), False),
+        "depot": (DepotORM, "depot_id", ("is_default", "status"), False),
         "terminal": (TerminalORM, "terminal_id", ("status",), False),
         "asset_certification": (
             AssetCertificationORM, "cert_id", ("asset_id", "status"), False,
         ),
-        "intake_channel": (IntakeChannelORM, "channel_id", (), False),
-        "truck": (TruckORM, "truck_id", (), False),
-        "location": (LocationORM, "location_id", (), False),
+        "intake_channel": (IntakeChannelORM, "channel_id", ("status",), False),
+        "truck": (TruckORM, "truck_id", ("status",), False),
+        "location": (LocationORM, "location_id", ("status",), False),
     }
 
     def __init__(self, aggregate_type: str) -> None:
@@ -1127,3 +1167,31 @@ class CurrentStateRepository:
         await session.delete(row)
         await session.flush()
         return True
+
+
+# ---------------------------------------------------------------------------
+# Shared spec lookup
+# ---------------------------------------------------------------------------
+
+
+def hybrid_spec_for(aggregate_type: str) -> Tuple[Any, str, Tuple[str, ...]]:
+    """Return ``(ORM model, pk field, typed columns)`` for a hybrid aggregate.
+
+    One lookup across both hybrid writers so callers outside the repositories
+    — notably :mod:`persistence.backfill` — cannot drift from the spec the live
+    write path uses. Backfill previously repeated the model name, pk field and
+    typed-column tuple for every aggregate, and depot's copy went stale in both
+    places at once: neither wrote the ``status`` mirror column that
+    ``HybridReadRepository.list`` filters on.
+
+    Raises:
+        ValueError: when ``aggregate_type`` belongs to neither writer.
+    """
+    if aggregate_type in CurrentStateRepository._SPECS:
+        model, pk_field, typed_cols, _has_event_ts = (
+            CurrentStateRepository._SPECS[aggregate_type]
+        )
+        return model, pk_field, typed_cols
+    if aggregate_type in ComplianceConfigRepository._SPECS:
+        return ComplianceConfigRepository._SPECS[aggregate_type]
+    raise ValueError(f"Unknown hybrid aggregate_type: {aggregate_type!r}")

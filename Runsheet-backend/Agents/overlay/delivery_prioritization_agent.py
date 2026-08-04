@@ -20,7 +20,11 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from uuid import uuid4
 
-from Agents.overlay.base_overlay_agent import OverlayAgentBase
+from Agents.overlay.base_overlay_agent import (
+    DEGRADATION_KIND_NO_INPUT,
+    OverlayAgentBase,
+    build_degradation_reason,
+)
 from Agents.overlay.data_contracts import (
     InterventionProposal,
     RiskClass,
@@ -131,7 +135,22 @@ class DeliveryPrioritizationAgent(OverlayAgentBase):
         super().__init__(
             agent_id="delivery_prioritization",
             signal_bus=signal_bus,
-            subscriptions=[],
+            # Subscribe to the forecasts published by TankForecastingAgent.
+            #
+            # This agent reads forecasts back out of ``mvp_tank_forecasts``
+            # rather than from the message body, so the subscription exists to
+            # *wake the cycle*, not to deliver a payload — which is why there is
+            # no typed buffer here and why ``_on_signal`` is not overridden.
+            #
+            # It was previously ``subscriptions=[]``. With nothing subscribed,
+            # ``_signal_buffer`` never filled, ``monitor_cycle`` returned before
+            # ``evaluate()``, and the agent's background decision loop was a
+            # permanent no-op: it ran on schedule and did nothing, silently. The
+            # pipeline path worked only because the coordinator seeds
+            # ``_signal_buffer`` directly.
+            subscriptions=[
+                {"message_type": TankForecast},
+            ],
             activity_log_service=activity_log_service,
             ws_manager=ws_manager,
             confirmation_protocol=confirmation_protocol,
@@ -165,27 +184,96 @@ class DeliveryPrioritizationAgent(OverlayAgentBase):
     async def evaluate(
         self, signals: List[RiskSignal]
     ) -> List[InterventionProposal]:
-        """Score and rank pending fuel orders for each tenant.
+        """Score and rank pending fuel orders for the tenants this cycle covers.
 
         Steps:
-        1. Discover tenants with pending orders.
+        1. Resolve which tenants to score (see below).
         2. For each tenant, fetch orders with status in
            {placed, confirmed, scheduled}.
         3. Score each order based on call_type.
         4. Publish a DeliveryPriorityList on the SignalBus.
         5. Return InterventionProposals.
+
+        ``OverlayAgentBase.monitor_cycle`` groups buffered signals by tenant and
+        calls this method once per tenant, so ``signals`` already names the
+        tenant this invocation is for. Honouring that matters on the pipeline
+        path: a run for one tenant used to publish priority lists for *every*
+        tenant with pending orders, and because the coordinator hands the
+        captured lists to the loading stage — which acts on the last one — a run
+        could build a load plan for a tenant it was never started for.
+
+        Cross-tenant discovery remains the behaviour when ``signals`` is empty,
+        which is how the periodic sweep and direct callers invoke this method.
         """
-        tenant_ids = await self._discover_tenants_with_pending_orders()
+        tenant_ids = self._tenants_from_signals(signals)
+        if not tenant_ids:
+            tenant_ids = await self._discover_tenants_with_pending_orders()
         proposals: List[InterventionProposal] = []
 
+        if not tenant_ids:
+            # Neither the signals nor discovery named a tenant to score, so
+            # nothing is published and the loading stage downstream receives an
+            # empty buffer. Report it rather than returning an empty list that
+            # the orchestrator cannot tell apart from a successful cycle.
+            self.report_degradation(
+                build_degradation_reason(
+                    reason_code="no_tenants_to_prioritize",
+                    kind=DEGRADATION_KIND_NO_INPUT,
+                    detail=(
+                        "no tenant was named by the incoming signals and none "
+                        "was discovered with pending orders"
+                    ),
+                )
+            )
+            return proposals
+
+        unscored: List[str] = []
         for tenant_id in tenant_ids:
             priority_list = await self._prioritize_tenant(tenant_id)
             if priority_list and priority_list.priorities:
                 await self._signal_bus.publish(priority_list)
                 proposal = self._build_proposal(priority_list, tenant_id)
                 proposals.append(proposal)
+            else:
+                unscored.append(tenant_id)
+
+        # A tenant that scored nothing publishes no priority list, so the
+        # loading stage gets no work for it. One unscored tenant out of several
+        # is a partial result; every tenant unscored means the stage produced
+        # nothing at all. Both are degradation — the run did not do the whole
+        # job — and the counts say which.
+        if unscored:
+            self.report_degradation(
+                build_degradation_reason(
+                    reason_code="no_priorities_scored",
+                    kind=DEGRADATION_KIND_NO_INPUT,
+                    detail=(
+                        "no pending order scored for "
+                        f"{len(unscored)} of {len(tenant_ids)} tenant(s), so "
+                        "no priority list was published for them"
+                    ),
+                    tenants_considered=len(tenant_ids),
+                    tenants_unscored=len(unscored),
+                )
+            )
 
         return proposals
+
+    @staticmethod
+    def _tenants_from_signals(signals: List[Any]) -> List[str]:
+        """Distinct tenant_ids carried by the signals that woke this cycle.
+
+        Preserves first-seen order so the scoring order is deterministic.
+        ``monitor_cycle`` already groups by tenant, so in practice this yields
+        at most one id; it is written as a list because direct callers may pass
+        a mixed batch.
+        """
+        tenants: List[str] = []
+        for signal in signals or []:
+            tenant_id = getattr(signal, "tenant_id", None)
+            if tenant_id and tenant_id not in tenants:
+                tenants.append(tenant_id)
+        return tenants
 
     async def _discover_tenants_with_pending_orders(self) -> List[str]:
         """Aggregate distinct tenant_ids from fuel_orders_current with

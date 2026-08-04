@@ -1,0 +1,12 @@
+{
+  "_todo": "TODO(A3): replace with vendored Dinee __tests__/fixtures/intakeVectors.json — JSON has no comments, so this marker is carried as a field.",
+  "_comment": "PLACEHOLDER cross-language HMAC/canonicalization test vectors. Each entry is self-consistent: signature == lowercase-hex HMAC-SHA256 of base64-decoded body_base64 under secret. Kept self-consistent so the startup self-check passes until the real Dinee vectors land.",
+  "vectors": [
+    {
+      "name": "placeholder-voice-intake-1",
+      "secret": "placeholder-voice-hmac-secret",
+      "body_base64": "eyJjYWxsSWQiOiJwbGFjZWhvbGRlci1jYWxsLTAwMSIsInNjaGVtYVZlcnNpb24iOiIxLjAifQ==",
+      "signature": "5fc9cc0f111fe55c5060456df97c041097f1da8305f778ee2b5a7e9566543095"
+    }
+  ]
+}

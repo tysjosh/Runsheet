@@ -28,11 +28,27 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Final,
+    List,
+    Mapping,
+    Optional,
+    Protocol,
+    Tuple,
+)
 
 import httpx
 
-from Agents.overlay.base_overlay_agent import OverlayAgentBase
+from Agents.overlay.base_overlay_agent import (
+    CYCLE_METRIC_DEGRADED,
+    DEGRADATION_KIND_NO_INPUT,
+    DEGRADATION_KIND_PRODUCED_NOTHING,
+    OverlayAgentBase,
+    build_degradation_reason,
+)
 from Agents.overlay.data_contracts import (
     InterventionProposal,
     RiskClass,
@@ -42,6 +58,7 @@ from Agents.overlay.signal_bus import SignalBus
 from Agents.support.fuel_distribution_models import (
     DeferredRouteStop,
     RoutePlan,
+    RouteSkipEntry,
     RouteStop,
     WindowMissEntry,
 )
@@ -49,6 +66,7 @@ from Agents.support.mvp_es_mappings import MVP_ROUTES_INDEX
 from Agents.support.route_solver import (
     build_distance_matrix,
     check_sla_windows,
+    compute_distance,
     optimize_route,
 )
 from fuel.services.fuel_product_catalog import (
@@ -79,6 +97,7 @@ from fuel.services.truck_start_position import (
     resolve_truck_start_position,
 )
 from fuel.terminal_models import SourcingRecommendation
+from services.unit_conversion import GAL_TO_L
 
 logger = logging.getLogger(__name__)
 
@@ -138,9 +157,10 @@ TRAFFIC_MATRIX_TIMEOUT_SECONDS = 10.0
 
 #: Exact liters-per-gallon factor used to convert Loading_Plan assignment
 #: volumes (stored in liters) into the gallons unit the
-#: :class:`SourcingRecommender` expects (Task 7.10). Keep in sync with
-#: :data:`services.unit_conversion.GAL_TO_L`.
-LITERS_PER_GALLON = 3.785411784
+#: :class:`SourcingRecommender` expects (Task 7.10). Bound to
+#: :data:`services.unit_conversion.GAL_TO_L` rather than redeclared, so it
+#: cannot drift from the platform factor.
+LITERS_PER_GALLON: Final[float] = GAL_TO_L
 
 
 # ---------------------------------------------------------------------------
@@ -593,9 +613,27 @@ class RoutePlanningAgent(OverlayAgentBase):
         # (graceful degradation).
         self._delivery_filter: Optional[Any] = None
 
+        # ---- Structured skip reasons for the most recent evaluate() ----
+        # Every early exit in the per-truck loop appends a
+        # :class:`RouteSkipEntry` here, and ``evaluate()`` mirrors the
+        # list onto ``cycle_metrics`` (the agent's existing per-run
+        # result surface) so a run that routes zero of N trucks reports
+        # why rather than coming back as an unqualified success.
+        self._last_route_skips: List[RouteSkipEntry] = []
+
     # ------------------------------------------------------------------
     # Public wiring hooks (bootstrap injects these after construction)
     # ------------------------------------------------------------------
+
+    @property
+    def last_route_skips(self) -> List[RouteSkipEntry]:
+        """Structured skip reasons recorded by the most recent ``evaluate()``.
+
+        Empty when the last evaluation routed every loading plan it was
+        handed. Also mirrored (as plain dicts) on
+        :attr:`cycle_metrics` under ``route_skips``.
+        """
+        return list(self._last_route_skips)
 
     def set_traffic_provider_factory(
         self, factory: Optional[TrafficProviderFactory]
@@ -770,6 +808,28 @@ class RoutePlanningAgent(OverlayAgentBase):
         else:
             await super()._on_signal(signal)
 
+    def _pending_work_tenants(self) -> List[str]:
+        """Tenants with a buffered loading proposal awaiting a route.
+
+        Required because :meth:`_on_signal` files every loading proposal in
+        ``_proposal_buffer`` and nothing in ``_signal_buffer``. Without this,
+        ``monitor_cycle`` saw an empty ``_signal_buffer`` and returned before
+        ``evaluate()``, so on the SignalBus path this agent buffered proposals
+        forever and never produced a route — silently.
+
+        ``evaluate`` drains the whole buffer in one pass and handles each
+        proposal under its own ``tenant_id``, so the extra tenants reported
+        here resolve to no-op cycles rather than duplicated routing work.
+
+        Validates: Requirement 4.1
+        """
+        tenants: List[str] = []
+        for proposal in self._proposal_buffer:
+            tenant_id = getattr(proposal, "tenant_id", None)
+            if tenant_id and tenant_id not in tenants:
+                tenants.append(tenant_id)
+        return tenants
+
     # ------------------------------------------------------------------
     # Core evaluation (Req 4.1–4.9)
     # ------------------------------------------------------------------
@@ -804,10 +864,43 @@ class RoutePlanningAgent(OverlayAgentBase):
         proposals = list(self._proposal_buffer)
         self._proposal_buffer.clear()
 
+        # Structured skip reasons for this evaluation. Reset here (not at
+        # the early return above) so ``last_route_skips`` from the previous
+        # cycle survives an empty-buffer no-op cycle.
+        skips: List[RouteSkipEntry] = []
+        self._last_route_skips = skips
+
         if not proposals:
+            # Handed no loading plan, so nothing is routed. The skip-reason
+            # reporting below never runs on this path, which meant the one
+            # stage that did implement the degradation convention still let
+            # "routed nothing because I was given nothing" look like success.
+            self.report_degradation(
+                build_degradation_reason(
+                    reason_code="no_loading_plans_buffered",
+                    kind=DEGRADATION_KIND_NO_INPUT,
+                    detail=(
+                        "the loading stage published no plan, so no route "
+                        "could be built"
+                    ),
+                )
+            )
             return []
 
         route_proposals: List[InterventionProposal] = []
+
+        # Per-tenant cache of the order-driven stop data. Populated lazily
+        # by :meth:`_order_stop_data` so a multi-proposal cycle for one
+        # tenant issues a single ``fuel_orders_current`` read, and the
+        # post-loop window_miss surfacing reuses the same result.
+        order_stop_cache: Dict[
+            str,
+            Tuple[
+                List[Dict[str, Any]],
+                Dict[str, Dict[str, float]],
+                List[WindowMissEntry],
+            ],
+        ] = {}
 
         for loading_proposal in proposals:
             tenant_id = loading_proposal.tenant_id
@@ -815,6 +908,16 @@ class RoutePlanningAgent(OverlayAgentBase):
             # Step 2: Extract loading plan details
             loading_plan = self._extract_loading_plan(loading_proposal)
             if not loading_plan:
+                self._record_route_skip(
+                    skips,
+                    truck_id="",
+                    plan_id=None,
+                    reason_code="no_loading_plan",
+                    detail=(
+                        "buffered proposal carried no apply_loading_plan "
+                        "action"
+                    ),
+                )
                 continue
 
             truck_id = loading_plan.get("truck_id", "")
@@ -830,6 +933,16 @@ class RoutePlanningAgent(OverlayAgentBase):
                 tenant_id, truck_id, assignments
             )
             if not driver_eligible:
+                self._record_route_skip(
+                    skips,
+                    truck_id=truck_id,
+                    plan_id=plan_id,
+                    reason_code="driver_ineligible",
+                    detail=(
+                        "assigned driver failed the dispatch-eligibility "
+                        "check (suspension or missing endorsement)"
+                    ),
+                )
                 continue
 
             # Step 2c: HOS compliance check (Task 7.8, Req 4.1–4.7)
@@ -841,6 +954,16 @@ class RoutePlanningAgent(OverlayAgentBase):
                 tenant_id, truck_id, assignments
             )
             if not hos_eligible:
+                self._record_route_skip(
+                    skips,
+                    truck_id=truck_id,
+                    plan_id=plan_id,
+                    reason_code="hos_blocked",
+                    detail=(
+                        "assigned driver has insufficient remaining "
+                        "Hours-of-Service for the proposed route"
+                    ),
+                )
                 continue
 
             # Step 2d: Asset certification check (Task 8.10, Req 13.5)
@@ -852,6 +975,16 @@ class RoutePlanningAgent(OverlayAgentBase):
                 tenant_id, truck_id
             )
             if not asset_eligible:
+                self._record_route_skip(
+                    skips,
+                    truck_id=truck_id,
+                    plan_id=plan_id,
+                    reason_code="asset_certification_expired",
+                    detail=(
+                        "truck has an expired DOT cargo tank certification "
+                        "(V/K/I/P/UT)"
+                    ),
+                )
                 continue
 
             # Collect unique station IDs from assignments
@@ -859,9 +992,40 @@ class RoutePlanningAgent(OverlayAgentBase):
                 {a.get("station_id", "") for a in assignments if a.get("station_id")}
             )
             if not station_ids:
+                self._record_route_skip(
+                    skips,
+                    truck_id=truck_id,
+                    plan_id=plan_id,
+                    reason_code="no_demand_identifiers",
+                    detail=(
+                        f"none of the {len(assignments)} compartment "
+                        "assignments carried a station_id"
+                    ),
+                    missing=["station_id"],
+                )
                 continue
 
-            # Step 3: Query station locations (Req 4.3)
+            # Step 3: Resolve stop coordinates.
+            #
+            # Order-first, station-fallback. The demand behind an
+            # assignment may live in ``customer_tanks`` (US market) rather
+            # than the legacy Nigerian retail ``fuel_stations`` index, in
+            # which case ``station_id`` actually carries the
+            # ``customer_id`` (see CompartmentLoadingAgent's
+            # ``_build_delivery_requests_from_orders``) and no
+            # ``fuel_stations`` document exists to geocode. The order the
+            # assignment came from always knows where it ships to, so we
+            # resolve from ``fuel_orders_current`` first — joining
+            # ``CompartmentAssignment.order_id`` to
+            # ``fuel_orders_current.order_id`` — and fall back to
+            # ``fuel_stations`` for legacy retail plans whose assignments
+            # carry no order reference (Req 4.3, 5.2.2).
+            (
+                _tenant_orders,
+                order_stop_locations,
+                _tenant_window_misses,
+            ) = await self._order_stop_data(tenant_id, order_stop_cache)
+
             station_locations = await self._query_station_locations(
                 tenant_id, station_ids
             )
@@ -871,13 +1035,52 @@ class RoutePlanningAgent(OverlayAgentBase):
                 tenant_id, station_ids
             )
 
+            order_ids_by_station = self._order_ids_by_station(assignments)
+
+            resolved_locations = self._resolve_stop_locations(
+                station_ids=station_ids,
+                station_locations=station_locations,
+                order_ids_by_station=order_ids_by_station,
+                order_stop_locations=order_stop_locations,
+            )
+
+            # An order's delivery_window_start/end is a concrete
+            # commitment; fuel_stations.sla_delivery_window_* is a static
+            # default. Where both exist the order wins (Req 5.2.3).
+            resolved_sla_windows = self._resolve_sla_windows(
+                station_ids=station_ids,
+                station_sla_windows=station_sla_windows,
+                order_ids_by_station=order_ids_by_station,
+                orders_by_id={
+                    str(o.get("order_id", "")): o
+                    for o in _tenant_orders
+                    if o.get("order_id")
+                },
+            )
+
             # Build locations list: depot first, then stations
             locations, station_order = self._build_location_list(
-                station_ids, station_locations
+                station_ids, resolved_locations
             )
 
             if len(locations) < 2:
-                # Need at least depot + 1 station
+                # Need at least depot + 1 stop
+                unresolved = [
+                    sid for sid in station_ids
+                    if sid not in resolved_locations
+                ]
+                self._record_route_skip(
+                    skips,
+                    truck_id=truck_id,
+                    plan_id=plan_id,
+                    reason_code="unresolvable_stop_locations",
+                    detail=(
+                        "no stop coordinate could be resolved from the "
+                        "assignments' orders (ship_to_lat/ship_to_lon or "
+                        "geocoded ship_to_address) or from fuel_stations"
+                    ),
+                    missing=unresolved,
+                )
                 continue
 
             # Task 9.7 / Req 5.4.6 — resolve the truck's start position
@@ -895,12 +1098,16 @@ class RoutePlanningAgent(OverlayAgentBase):
                 # Resolver configured but produced neither telemetry nor
                 # depot coordinates — skip this loading plan rather than
                 # routing from DEFAULT_DEPOT.
-                logger.warning(
-                    "RoutePlanningAgent: skipping loading plan for "
-                    "tenant=%s truck=%s — no_depot_configured and no "
-                    "fresh truck_telemetry",
-                    tenant_id,
-                    truck_id,
+                self._record_route_skip(
+                    skips,
+                    truck_id=truck_id,
+                    plan_id=plan_id,
+                    reason_code="no_depot_configured",
+                    detail=(
+                        "depot resolver yielded neither a fresh "
+                        "truck_telemetry reading nor depot coordinates"
+                    ),
+                    missing=["assigned_depot_id", "default_depot_id"],
                 )
                 continue
             if start_position is not None:
@@ -912,8 +1119,8 @@ class RoutePlanningAgent(OverlayAgentBase):
             # Build SLA windows indexed by location list position
             sla_windows_by_idx = {}
             for i, sid in enumerate(station_order):
-                if sid in station_sla_windows:
-                    sla_windows_by_idx[i + 1] = station_sla_windows[sid]  # +1 for depot offset
+                if sid in resolved_sla_windows:
+                    sla_windows_by_idx[i + 1] = resolved_sla_windows[sid]  # +1 for depot offset
 
             # Step 3b: Traffic-aware travel matrix (Req 2.1.3, 2.1.5, 2.1.6).
             # Returns a (distance_matrix, used_provider_name, traffic_fallback)
@@ -1008,12 +1215,70 @@ class RoutePlanningAgent(OverlayAgentBase):
                 route_plan=route_plan,
                 tenant_id=tenant_id,
                 truck_id=truck_id,
-                station_locations=station_locations,
+                station_locations=resolved_locations,
                 start_position=start_position,
             )
 
-            # Step 6: Persist route plan to ES (Req 4.7)
-            await self._persist_route_plan(route_plan)
+            # Step 5d: a route with no stops left is not a route.
+            #
+            # The guard-rails above can defer every stop — an evening run under a
+            # 08:00-16:00 storm window defers all of them — and the plan then
+            # carried ``stops: []`` while the run reported ``complete`` and
+            # ``degraded: false``. Four such plans were persisted and four
+            # HIGH-risk ``apply_route_plan_storm_mode`` approvals were queued
+            # against them, and approving one would dispatch a truck to visit
+            # nothing.
+            #
+            # The deferrals themselves are not lost: they are recorded on the
+            # skip below with their causes, and the individual stops carry their
+            # next eligible window. What changes is that the run stops claiming
+            # it produced something dispatchable. This is deliberately narrower
+            # than "any deferral degrades the run" — a partially deferred route
+            # is still a real route with real stops.
+            if not route_plan.stops:
+                causes = sorted(
+                    {d.deferral_cause for d in route_plan.deferred_stops}
+                )
+                self._record_route_skip(
+                    skips,
+                    truck_id=truck_id,
+                    plan_id=plan_id,
+                    reason_code="all_stops_deferred",
+                    detail=(
+                        f"storm_mode guard-rails deferred every stop "
+                        f"({', '.join(causes) or 'no cause recorded'}); "
+                        f"window="
+                        f"{route_plan.storm_mode_delivery_window_start_hour}"
+                        f"-{route_plan.storm_mode_delivery_window_end_hour}, "
+                        f"cap={route_plan.storm_mode_max_stops_per_truck}"
+                    ),
+                    missing=[d.station_id for d in route_plan.deferred_stops],
+                )
+                continue
+
+            # Step 6: Persist route plan to ES (Req 4.7).
+            #
+            # A failed write is a skip, not a warning to read later. The write
+            # used to be fire-and-forget: ``_persist_route_plan`` logged the
+            # error and returned, the proposal was still emitted, and the run
+            # reported ``complete``. A strict-mapping rejection on ``mvp_routes``
+            # therefore discarded every route in the run while the agent logged
+            # "produced 4 route plans" and the dispatcher got four approvals
+            # pointing at routes that were never stored — approving one would
+            # have applied nothing. An unstored route cannot be retrieved,
+            # dispatched or executed, so it does not count as produced.
+            if not await self._persist_route_plan(route_plan):
+                self._record_route_skip(
+                    skips,
+                    truck_id=truck_id,
+                    plan_id=plan_id,
+                    reason_code="route_persist_failed",
+                    detail=(
+                        f"route {route_plan.route_id} was built but could not "
+                        f"be written to {MVP_ROUTES_INDEX}"
+                    ),
+                )
+                continue
 
             # Step 7: Build InterventionProposal — the proposal's
             # action tool_name and risk_class switch to the HIGH-risk
@@ -1027,9 +1292,80 @@ class RoutePlanningAgent(OverlayAgentBase):
             route_proposals.append(proposal)
 
         logger.info(
-            "RoutePlanningAgent: produced %d route plans",
+            "RoutePlanningAgent: produced %d route plans, skipped %d "
+            "loading plans",
             len(route_proposals),
+            len(skips),
         )
+
+        # ------------------------------------------------------------------
+        # Surface skip reasons on the run result (Req 4.1)
+        # ------------------------------------------------------------------
+        # ``cycle_metrics`` is the agent's existing per-run result surface
+        # (the base class updates it at the end of every monitor_cycle), so
+        # the skip reasons ride the same channel rather than a parallel one.
+        #
+        # The flag is the agent-agnostic ``CYCLE_METRIC_DEGRADED`` rather than a
+        # ``routing_degraded`` of its own. Skipping every truck is not a
+        # route-specific failure shape — prioritization scoring nothing and
+        # loading building no plan are the same shape — and the orchestrator
+        # that has to notice must not need a per-agent key to look for.
+        # ``FuelDistributionPipeline`` imports these two names from
+        # ``base_overlay_agent``, so the writer here and the reader there
+        # cannot drift. ``route_skips``/``trucks_skipped`` remain for consumers
+        # that want the route-shaped detail.
+        skip_payload = [s.model_dump(mode="json") for s in skips]
+        self._cycle_metrics.update({
+            "loading_plans_considered": len(proposals),
+            "trucks_routed": len(route_proposals),
+            "trucks_skipped": len(skips),
+            "route_skips": skip_payload,
+        })
+        # Report through ``report_degradation`` rather than assigning
+        # ``CYCLE_METRIC_DEGRADED: bool(skips)`` here. ``monitor_cycle`` groups
+        # buffered signals by tenant and calls ``evaluate`` once per tenant, so
+        # a direct assignment let a clean second tenant reset the flag a first
+        # tenant had just set — erasing the report the orchestrator was about to
+        # read. The helper accumulates and never lowers the flag.
+        if skips:
+            self.report_degradation(*(
+                build_degradation_reason(
+                    reason_code=entry.get("reason_code", "route_skip"),
+                    kind=DEGRADATION_KIND_PRODUCED_NOTHING,
+                    **{
+                        k: v
+                        for k, v in entry.items()
+                        if k not in ("reason_code", "kind")
+                    },
+                )
+                for entry in skip_payload
+            ))
+        else:
+            # Keep the key present and False on a clean cycle. The consumer
+            # treats absent as False either way, but this has been part of the
+            # published ``cycle_metrics`` surface since the convention landed.
+            # ``setdefault`` rather than assignment so a report raised earlier in
+            # the same cycle (another tenant's group) is not lowered here.
+            self._cycle_metrics.setdefault(CYCLE_METRIC_DEGRADED, False)
+        if skips and not route_proposals:
+            logger.error(
+                "RoutePlanningAgent: routed 0 of %d loading plans — "
+                "skip reasons: %s",
+                len(proposals),
+                ", ".join(
+                    f"{s.truck_id or '<unknown truck>'}:{s.reason_code}"
+                    for s in skips
+                ),
+            )
+        if skips and route_proposals:
+            # Mirror the window_miss convention: annotate the most recent
+            # route plan action so the dispatcher UI sees the exclusions
+            # alongside the plans that did make it out.
+            last_plan_action = route_proposals[-1].actions[-1]
+            params = last_plan_action.setdefault("parameters", {})
+            params["route_skips"] = [
+                s.model_dump(mode="json") for s in skips
+            ]
 
         # ------------------------------------------------------------------
         # Fuel-order-based stop building (Task 11.2, Req 5.2.1–5.2.3)
@@ -1049,7 +1385,9 @@ class RoutePlanningAgent(OverlayAgentBase):
                 fuel_orders,
                 fuel_order_locations,
                 fuel_order_window_misses,
-            ) = await self.build_stops_from_fuel_orders(fuel_order_tenant_id)
+            ) = await self._order_stop_data(
+                fuel_order_tenant_id, order_stop_cache
+            )
 
             if fuel_order_window_misses:
                 # Surface window_miss entries on the most recent route plan
@@ -1941,6 +2279,199 @@ class RoutePlanningAgent(OverlayAgentBase):
         return dt
 
     # ------------------------------------------------------------------
+    # Order-driven stop resolution (Req 4.3, 5.2.2, 5.2.3)
+    # ------------------------------------------------------------------
+
+    async def _order_stop_data(
+        self,
+        tenant_id: str,
+        cache: Dict[
+            str,
+            Tuple[
+                List[Dict[str, Any]],
+                Dict[str, Dict[str, float]],
+                List[WindowMissEntry],
+            ],
+        ],
+    ) -> Tuple[
+        List[Dict[str, Any]],
+        Dict[str, Dict[str, float]],
+        List[WindowMissEntry],
+    ]:
+        """Memoized :meth:`build_stops_from_fuel_orders` for one evaluation.
+
+        The per-truck loop and the post-loop window_miss surfacing both
+        need the tenant's routable orders. Caching keeps a multi-proposal
+        cycle to one ``fuel_orders_current`` read per tenant.
+        """
+        cached = cache.get(tenant_id)
+        if cached is not None:
+            return cached
+        result = await self.build_stops_from_fuel_orders(tenant_id)
+        cache[tenant_id] = result
+        return result
+
+    @staticmethod
+    def _order_ids_by_station(
+        assignments: List[Dict[str, Any]],
+    ) -> Dict[str, List[str]]:
+        """Group each stop's order ids off the compartment assignments.
+
+        The join is ``CompartmentAssignment.order_id`` →
+        ``fuel_orders_current.order_id``. The loading agent stamps
+        ``order_id`` on every ``DeliveryRequest`` it builds from an order
+        and the compartment solver copies it onto each
+        ``CompartmentAssignment``, so an order-backed plan always carries
+        the reference. Legacy station-priority plans leave it unset and
+        yield an empty list, which sends the caller to the
+        ``fuel_stations`` fallback.
+        """
+        by_station: Dict[str, List[str]] = {}
+        for assignment in assignments:
+            station_id = assignment.get("station_id", "")
+            order_id = assignment.get("order_id")
+            if not station_id or not order_id:
+                continue
+            bucket = by_station.setdefault(station_id, [])
+            order_id_str = str(order_id)
+            if order_id_str not in bucket:
+                bucket.append(order_id_str)
+        return by_station
+
+    @staticmethod
+    def _resolve_stop_locations(
+        *,
+        station_ids: List[str],
+        station_locations: Dict[str, Dict[str, float]],
+        order_ids_by_station: Dict[str, List[str]],
+        order_stop_locations: Dict[str, Dict[str, float]],
+    ) -> Dict[str, Dict[str, float]]:
+        """Merge order-derived and station-derived stop coordinates.
+
+        Order coordinates win: they come from the order's own ship-to
+        (``ship_to_lat``/``ship_to_lon``, or a geocoded
+        ``ship_to_address``) and therefore work whether the demand behind
+        the stop is a retail ``fuel_stations`` document or a
+        ``customer_tanks`` row. ``fuel_stations`` remains the fallback so
+        legacy retail tenants — whose orders may carry no coordinates at
+        all — keep routing.
+        """
+        resolved: Dict[str, Dict[str, float]] = {}
+        for station_id in station_ids:
+            for order_id in order_ids_by_station.get(station_id, []):
+                order_location = order_stop_locations.get(order_id)
+                if order_location:
+                    resolved[station_id] = dict(order_location)
+                    break
+            if station_id in resolved:
+                continue
+            station_location = station_locations.get(station_id)
+            if station_location:
+                resolved[station_id] = dict(station_location)
+        return resolved
+
+    def _resolve_sla_windows(
+        self,
+        *,
+        station_ids: List[str],
+        station_sla_windows: Dict[str, Tuple[float, float]],
+        order_ids_by_station: Dict[str, List[str]],
+        orders_by_id: Dict[str, Dict[str, Any]],
+    ) -> Dict[str, Tuple[float, float]]:
+        """Merge order delivery windows over station SLA windows.
+
+        ``fuel_stations.sla_delivery_window_*`` is a static tenant default;
+        an order's ``delivery_window_start``/``delivery_window_end`` is a
+        concrete commitment for that specific drop, so where both exist
+        the order wins. The station value stays as the fallback.
+
+        Order windows are absolute ISO-8601 instants while
+        :func:`check_sla_windows` reasons in hours elapsed from route
+        start, so each bound is converted to hours from now (clamped at
+        zero) — consistent with ``_build_route_plan``, which stamps ETAs
+        as ``now + cumulative_hours``. When a stop carries several orders
+        the tightest window (earliest end) is used so no order's
+        commitment is silently widened.
+        """
+        resolved: Dict[str, Tuple[float, float]] = dict(station_sla_windows)
+        now = datetime.now(timezone.utc)
+
+        for station_id in station_ids:
+            tightest: Optional[Tuple[float, float]] = None
+            for order_id in order_ids_by_station.get(station_id, []):
+                order = orders_by_id.get(order_id)
+                if not order:
+                    continue
+                window = self._order_window_hours(order, now)
+                if window is None:
+                    continue
+                if tightest is None or window[1] < tightest[1]:
+                    tightest = window
+            if tightest is not None:
+                resolved[station_id] = tightest
+
+        return resolved
+
+    @classmethod
+    def _order_window_hours(
+        cls, order: Dict[str, Any], now: datetime
+    ) -> Optional[Tuple[float, float]]:
+        """Convert an order's delivery window to (start_h, end_h) from now."""
+        start_raw = order.get("delivery_window_start")
+        end_raw = order.get("delivery_window_end")
+        if not start_raw or not end_raw:
+            return None
+        start_dt = cls._parse_datetime(start_raw)
+        end_dt = cls._parse_datetime(end_raw)
+        if start_dt is None or end_dt is None:
+            return None
+        start_h = max(0.0, (start_dt - now).total_seconds() / 3600.0)
+        end_h = max(0.0, (end_dt - now).total_seconds() / 3600.0)
+        if end_h < start_h:
+            return None
+        return (round(start_h, 4), round(end_h, 4))
+
+    # ------------------------------------------------------------------
+    # Structured skip recording (Req 4.1)
+    # ------------------------------------------------------------------
+
+    def _record_route_skip(
+        self,
+        skips: List[RouteSkipEntry],
+        *,
+        truck_id: str,
+        plan_id: Optional[str],
+        reason_code: str,
+        detail: Optional[str] = None,
+        missing: Optional[List[str]] = None,
+    ) -> RouteSkipEntry:
+        """Record a structured reason a loading plan was not routed.
+
+        Replaces the bare ``continue`` statements in the per-truck loop.
+        Each of those exits produced no route and no log on the normal
+        (non-exception) path, so a run could route zero of N trucks and
+        still report ``complete``.
+        """
+        entry = RouteSkipEntry(
+            truck_id=truck_id,
+            plan_id=plan_id or None,
+            reason_code=reason_code,
+            detail=detail,
+            missing=list(missing or []),
+        )
+        skips.append(entry)
+        logger.warning(
+            "RoutePlanningAgent: skipped loading plan truck=%s plan=%s "
+            "reason=%s detail=%s missing=%s",
+            truck_id or "<unknown>",
+            plan_id or "<unknown>",
+            reason_code,
+            detail or "",
+            ",".join(entry.missing) or "-",
+        )
+        return entry
+
+    # ------------------------------------------------------------------
     # Build location list for route solver
     # ------------------------------------------------------------------
 
@@ -1987,6 +2518,7 @@ class RoutePlanningAgent(OverlayAgentBase):
         """Build a RoutePlan from optimized route order."""
         # Build drop quantities per station
         station_drops: Dict[str, Dict[str, float]] = {}
+        station_order_ids: Dict[str, set[str]] = {}
         for assignment in assignments:
             sid = assignment.get("station_id", "")
             grade = assignment.get("fuel_grade", "")
@@ -1996,6 +2528,9 @@ class RoutePlanningAgent(OverlayAgentBase):
                 station_drops[sid][grade] = (
                     station_drops[sid].get(grade, 0.0) + qty
                 )
+            order_id = assignment.get("order_id")
+            if sid and order_id:
+                station_order_ids.setdefault(sid, set()).add(str(order_id))
 
         # Build set of at-risk stop indices from SLA violations (Req 4.4)
         at_risk_indices = set()
@@ -2034,6 +2569,7 @@ class RoutePlanningAgent(OverlayAgentBase):
             stops.append(
                 RouteStop(
                     station_id=station_id,
+                    order_ids=sorted(station_order_ids.get(station_id, set())),
                     eta=eta.isoformat(),
                     drop=drop,
                     sequence=sequence,
@@ -2814,6 +3350,19 @@ class RoutePlanningAgent(OverlayAgentBase):
         route_plan.stops = kept
         route_plan.deferred_stops = deferred
 
+        # ``distance_km`` described the solve BEFORE any stop was deferred, and
+        # nothing updated it here — so a plan that lost stops kept claiming the
+        # mileage of a route it is no longer going to drive. The extreme case was
+        # visible in production data: every stop deferred, ``stops: []``, and
+        # ``distance_km: 1633.99``. Distance feeds ``objective_value`` and the
+        # cost-analysis endpoint, so a stale figure is not cosmetic.
+        if deferred:
+            self._recompute_distance_km(
+                route_plan=route_plan,
+                station_locations=station_locations,
+                start_position=start_position,
+            )
+
         if deferred:
             logger.info(
                 "RoutePlanningAgent: Storm_Mode deferred %d stop(s) for "
@@ -2833,6 +3382,88 @@ class RoutePlanningAgent(OverlayAgentBase):
                 truck_id,
                 len(kept),
             )
+
+    def _recompute_distance_km(
+        self,
+        *,
+        route_plan: RoutePlan,
+        station_locations: Optional[Mapping[str, Mapping[str, float]]],
+        start_position: Optional[TruckStartPosition],
+    ) -> None:
+        """Recompute ``route_plan.distance_km`` over its surviving stops.
+
+        Haversine path length ``start → stop_0 → … → stop_n``, matching the
+        Haversine matrix the solver used when no traffic provider is wired.
+        Where a traffic provider *was* used the recomputed figure is a
+        straight-line approximation rather than a road distance, which is still
+        strictly better than reporting the mileage of a route that lost stops.
+
+        Zero surviving stops means zero distance — the truck is not going
+        anywhere. That case is also refused as a route entirely by the caller
+        (``all_stops_deferred``), so this mostly matters for partial deferral.
+
+        Leaves the value untouched when coordinates are unavailable: inventing a
+        number would be worse than carrying a stale one, and the caller's log
+        records the deferral either way.
+        """
+        if not route_plan.stops:
+            route_plan.distance_km = 0.0
+            return
+        if not station_locations:
+            logger.warning(
+                "RoutePlanningAgent: cannot recompute distance for route=%s "
+                "after deferral — no station locations supplied; the persisted "
+                "distance_km=%.2f still describes the pre-deferral solve",
+                route_plan.route_id,
+                route_plan.distance_km,
+            )
+            return
+
+        points: List[Tuple[float, float]] = []
+        if start_position is not None:
+            points.append((float(start_position.lat), float(start_position.lon)))
+        missing: List[str] = []
+        for stop in route_plan.stops:
+            loc = station_locations.get(stop.station_id)
+            if not loc or loc.get("lat") is None or loc.get("lon") is None:
+                missing.append(stop.station_id)
+                continue
+            points.append((float(loc["lat"]), float(loc["lon"])))
+
+        if missing:
+            logger.warning(
+                "RoutePlanningAgent: cannot recompute distance for route=%s — "
+                "no coordinates for %s; leaving distance_km=%.2f",
+                route_plan.route_id,
+                ",".join(missing),
+                route_plan.distance_km,
+            )
+            return
+
+        total = 0.0
+        for (lat1, lon1), (lat2, lon2) in zip(points, points[1:]):
+            try:
+                total += compute_distance(lat1, lon1, lat2, lon2)
+            except ValueError:
+                logger.warning(
+                    "RoutePlanningAgent: out-of-range coordinates while "
+                    "recomputing distance for route=%s — leaving distance_km "
+                    "=%.2f",
+                    route_plan.route_id,
+                    route_plan.distance_km,
+                )
+                return
+
+        previous = route_plan.distance_km
+        route_plan.distance_km = round(total, 2)
+        logger.info(
+            "RoutePlanningAgent: route=%s distance_km %.2f -> %.2f after "
+            "deferring %d stop(s)",
+            route_plan.route_id,
+            previous,
+            route_plan.distance_km,
+            len(route_plan.deferred_stops),
+        )
 
     async def _apply_road_restriction_filter(
         self,
@@ -3338,7 +3969,7 @@ class RoutePlanningAgent(OverlayAgentBase):
     # Persistence (Req 4.7)
     # ------------------------------------------------------------------
 
-    async def _persist_route_plan(self, route_plan: RoutePlan) -> None:
+    async def _persist_route_plan(self, route_plan: RoutePlan) -> bool:
         """Persist a RoutePlan to the mvp_routes ES index.
 
         Canonicalizes every ``drop`` key (a fuel grade) on each stop
@@ -3347,6 +3978,11 @@ class RoutePlanningAgent(OverlayAgentBase):
         duplicate grade keys (e.g., both ``AGO`` and ``DIESEL_2`` on the
         same stop after canonicalization) are summed to preserve total
         drop volume. Unknown codes are preserved with a warning.
+
+        Returns:
+            ``True`` when the document was written, ``False`` when it was not.
+            The caller records a ``route_persist_failed`` skip on ``False`` so
+            the run degrades instead of reporting a route nobody can read.
         """
         try:
             doc = route_plan.model_dump(mode="json")
@@ -3375,9 +4011,11 @@ class RoutePlanningAgent(OverlayAgentBase):
                 route_plan.route_id,
                 doc,
             )
+            return True
         except Exception as e:
             logger.error(
                 "RoutePlanningAgent: failed to persist route plan %s: %s",
                 route_plan.route_id,
                 e,
             )
+            return False
