@@ -17,12 +17,17 @@ Validates: Requirements 6.1–6.6, 9.1–9.4
 import asyncio
 import logging
 import uuid
+from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from Agents.agent_ws_manager import AgentActivityWSManager
+from Agents.overlay.base_overlay_agent import (
+    CYCLE_METRIC_DEGRADATION_REASONS,
+    CYCLE_METRIC_DEGRADED,
+)
 from Agents.overlay.data_contracts import InterventionProposal
 from Agents.support.fuel_distribution_models import DeliveryPriorityList
 
@@ -137,14 +142,110 @@ async def broadcast_pipeline_event(
 
 
 class PipelineState(str, Enum):
-    """Pipeline run states (Req 6.4)."""
+    """Pipeline run states (Req 6.4).
+
+    ``COMPLETE`` means every stage ran *and* did its job. ``DEGRADED`` is the
+    third terminal state, distinct from both: no stage raised, so the run is
+    not ``FAILED``, but at least one stage finished having produced nothing —
+    the route stage skipping every truck it was handed, for instance. Folding
+    that into ``COMPLETE`` is what let a run that routed zero of N trucks
+    report success.
+
+    ``DEGRADED`` was added rather than a boolean beside ``COMPLETE`` because
+    the callers that read this value are few and all of them were migrated with
+    it: :func:`Agents.support.mvp_endpoints.generate_plan` (which forwards the
+    string verbatim and now forwards the reasons with it), the dispatcher UI's
+    ``handleGenerate``, and this module's own ``FAILED`` comparison. A boolean
+    flag would have left every one of those still reporting success by default,
+    which trades one silent failure for another.
+    """
     PENDING = "pending"
     FORECASTING = "forecasting"
     PRIORITIZING = "prioritizing"
     LOADING = "loading"
     ROUTING = "routing"
     COMPLETE = "complete"
+    DEGRADED = "degraded"
     FAILED = "failed"
+
+
+#: Per-stage outcome recorded in :attr:`PipelineRun.stage_results`. A stage that
+#: reported degradation must not record a bare ``"completed"`` — that string is
+#: the stage-level equivalent of the run-level lie.
+STAGE_RESULT_COMPLETED = "completed"
+STAGE_RESULT_DEGRADED = "degraded"
+
+
+def read_agent_degradation(agent: Any) -> Tuple[bool, List[Any]]:
+    """Read an agent's degradation report off its ``cycle_metrics``.
+
+    Implements the consumer half of the convention documented in
+    :mod:`Agents.overlay.base_overlay_agent`: an agent that completed a cycle
+    without doing its job sets ``degraded`` and ``degradation_reasons`` there.
+
+    **Fail-safe by construction.** Every unexpected shape reads as *not
+    degraded*, and nothing raises out of here. A monitoring signal must never
+    take down the run it is monitoring, so an agent with no ``cycle_metrics``,
+    one whose ``cycle_metrics`` is not a mapping, and one whose property raises
+    are all treated as healthy. The mapping check is load-bearing rather than
+    defensive padding: a ``MagicMock`` stage — which most of the pipeline's own
+    tests use — answers ``cycle_metrics.get("degraded")`` with a truthy
+    ``MagicMock``, so a naive ``.get()`` would mark every mocked run degraded.
+
+    Args:
+        agent: Any pipeline stage. Need not be an ``OverlayAgentBase``.
+
+    Returns:
+        ``(degraded, reasons)``. ``reasons`` is empty unless ``degraded``; a
+        degraded stage with no reasons is still degraded, because the flag —
+        not the list — is the signal.
+    """
+    try:
+        metrics = getattr(agent, "cycle_metrics", None)
+        if not isinstance(metrics, Mapping):
+            return False, []
+        if not bool(metrics.get(CYCLE_METRIC_DEGRADED, False)):
+            return False, []
+        raw_reasons = metrics.get(CYCLE_METRIC_DEGRADATION_REASONS, [])
+        if isinstance(raw_reasons, (list, tuple)):
+            return True, list(raw_reasons)
+        return True, []
+    except Exception as e:
+        # Includes a ``cycle_metrics`` property that raises.
+        logger.warning(
+            "FuelDistributionPipeline: could not read degradation report from "
+            "%s, treating the stage as not degraded: %s",
+            getattr(agent, "agent_id", type(agent).__name__),
+            e,
+        )
+        return False, []
+
+
+def reset_agent_degradation(agent: Any) -> None:
+    """Clear a stale degradation report before a stage runs.
+
+    ``OverlayAgentBase._cycle_metrics`` is never cleared between cycles, and
+    ``monitor_cycle`` can return before reaching ``evaluate()`` (an empty
+    ``_signal_buffer`` with no pending-work tenants, or a ``disabled`` mode).
+    Without this, one degraded run would mark every subsequent run degraded
+    too, on the same long-lived agent instance — a false positive that would
+    make the signal worth ignoring.
+
+    Fail-safe like :func:`read_agent_degradation`: a stage without a mutable
+    metrics mapping is left alone rather than treated as an error.
+    """
+    try:
+        metrics = getattr(agent, "_cycle_metrics", None)
+        if isinstance(metrics, MutableMapping):
+            metrics.pop(CYCLE_METRIC_DEGRADED, None)
+            metrics.pop(CYCLE_METRIC_DEGRADATION_REASONS, None)
+    except Exception as e:
+        logger.warning(
+            "FuelDistributionPipeline: could not reset the degradation report "
+            "on %s: %s",
+            getattr(agent, "agent_id", type(agent).__name__),
+            e,
+        )
 
 
 # Agent stage ordering (Req 6.1)
@@ -177,9 +278,28 @@ class PipelineRun:
         self.failed_agent: Optional[str] = None
         self.error_message: Optional[str] = None
         self.stage_results: Dict[str, Any] = {}
+        #: One entry per stage that reported degradation, in stage order:
+        #: ``{"agent_id": str, "reasons": list}``. Empty on a clean run, which
+        #: is what :attr:`degraded` keys off.
+        self.degradations: List[Dict[str, Any]] = []
+
+    @property
+    def degraded(self) -> bool:
+        """Whether any stage completed without doing its job."""
+        return bool(self.degradations)
+
+    def record_degradation(self, agent_id: str, reasons: List[Any]) -> None:
+        """Record that ``agent_id`` finished but produced nothing useful."""
+        self.degradations.append({"agent_id": agent_id, "reasons": list(reasons)})
 
     def to_dict(self) -> Dict[str, Any]:
-        """Serialize run status to a dict."""
+        """Serialize run status to a dict.
+
+        ``degraded`` and ``degradations`` are surfaced alongside ``state`` so a
+        caller that already reads the status dict gets the reasons without a
+        second call — this dict is what ``get_status`` returns and what the
+        generate endpoint forwards.
+        """
         return {
             "run_id": self.run_id,
             "tenant_id": self.tenant_id,
@@ -188,6 +308,9 @@ class PipelineRun:
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
             "failed_agent": self.failed_agent,
             "error_message": self.error_message,
+            "degraded": self.degraded,
+            "degradations": [dict(d) for d in self.degradations],
+            "stage_results": dict(self.stage_results),
         }
 
 
@@ -307,6 +430,11 @@ class FuelDistributionPipeline:
                 else:
                     agent._pipeline_mode_override = "active_auto"
 
+                # Drop any degradation report left over from a previous run on
+                # this same long-lived agent instance, so what is read back
+                # below belongs to this run and no other.
+                reset_agent_degradation(agent)
+
                 # Capture published messages during monitor_cycle (Req 1.1, 2.1)
                 captured_messages: List[Any] = []
                 if self._signal_bus is not None:
@@ -324,24 +452,63 @@ class FuelDistributionPipeline:
                     tenant_id=tenant_id,
                 )
 
-                pipeline_run.stage_results[agent_id] = "completed"
+                # ``monitor_cycle`` returning without raising is not the same
+                # as the stage having done its job. An agent that skipped
+                # everything it was handed says so on ``cycle_metrics``; a
+                # stage that reports that must not be recorded as a bare
+                # ``"completed"`` here, nor broadcast as one below, nor let the
+                # run finish as ``COMPLETE``.
+                degraded, degradation_reasons = read_agent_degradation(agent)
+                if degraded:
+                    pipeline_run.record_degradation(agent_id, degradation_reasons)
+                    pipeline_run.stage_results[agent_id] = {
+                        "state": STAGE_RESULT_DEGRADED,
+                        "reasons": list(degradation_reasons),
+                    }
+                    logger.error(
+                        "FuelDistributionPipeline: agent %s completed DEGRADED "
+                        "for run %s with %d reason(s): %s",
+                        agent_id,
+                        run_id,
+                        len(degradation_reasons),
+                        degradation_reasons,
+                    )
+                else:
+                    pipeline_run.stage_results[agent_id] = {
+                        "state": STAGE_RESULT_COMPLETED,
+                        "reasons": [],
+                    }
+                    logger.info(
+                        "FuelDistributionPipeline: agent %s completed for run %s",
+                        agent_id,
+                        run_id,
+                    )
+
                 # Clear pipeline mode override after stage completes
                 agent._pipeline_mode_override = None
-                logger.info(
-                    "FuelDistributionPipeline: agent %s completed for run %s",
-                    agent_id,
-                    run_id,
-                )
 
-                # Broadcast stage-specific WS event (Req 9.2)
+                # Broadcast stage-specific WS event (Req 9.2). The summary is
+                # what the dispatcher UI renders for the stage, so it carries
+                # the degraded state and its reasons rather than "completed".
                 ws_event = _STAGE_WS_EVENTS.get(agent_id)
                 if ws_event:
+                    summary: Dict[str, Any] = {
+                        "agent_id": agent_id,
+                        "state": (
+                            STAGE_RESULT_DEGRADED
+                            if degraded
+                            else STAGE_RESULT_COMPLETED
+                        ),
+                        "degraded": degraded,
+                    }
+                    if degraded:
+                        summary["degradation_reasons"] = list(degradation_reasons)
                     await broadcast_pipeline_event(
                         ws_manager=self._ws_manager,
                         event_type=ws_event,
                         run_id=run_id,
                         tenant_id=tenant_id,
-                        summary={"agent_id": agent_id, "state": "completed"},
+                        summary=summary,
                     )
             except Exception as e:
                 # Circuit-breaker: halt on agent failure (Req 6.5)
@@ -360,15 +527,31 @@ class FuelDistributionPipeline:
                 await self._broadcast_state_transition(pipeline_run, agent_id)
                 return run_id
 
-        # All stages completed successfully
-        pipeline_run.state = PipelineState.COMPLETE
+        # Every stage ran without raising. Whether that is success depends on
+        # whether any of them reported having produced nothing — a run that
+        # routed zero of N trucks reached this line just as a clean run does,
+        # and reporting COMPLETE for it is the silent skip this branch exists
+        # to prevent.
+        pipeline_run.state = (
+            PipelineState.DEGRADED
+            if pipeline_run.degraded
+            else PipelineState.COMPLETE
+        )
         pipeline_run.completed_at = datetime.now(timezone.utc)
         await self._broadcast_state_transition(pipeline_run, "pipeline")
 
-        logger.info(
-            "FuelDistributionPipeline: run %s completed successfully",
-            run_id,
-        )
+        if pipeline_run.degraded:
+            logger.error(
+                "FuelDistributionPipeline: run %s completed DEGRADED — "
+                "stage(s) %s finished without doing their job",
+                run_id,
+                ", ".join(d["agent_id"] for d in pipeline_run.degradations),
+            )
+        else:
+            logger.info(
+                "FuelDistributionPipeline: run %s completed successfully",
+                run_id,
+            )
 
         return run_id
 
@@ -696,6 +879,15 @@ class FuelDistributionPipeline:
         if pipeline_run.state == PipelineState.FAILED:
             event_data["error"] = pipeline_run.error_message
             event_data["failed_agent"] = pipeline_run.failed_agent
+
+        if pipeline_run.state == PipelineState.DEGRADED:
+            # A degraded terminal transition is the only chance the dispatcher
+            # UI has to learn *why* from this event, so the reasons travel with
+            # it rather than requiring a follow-up status fetch.
+            event_data["degraded"] = True
+            event_data["degradations"] = [
+                dict(d) for d in pipeline_run.degradations
+            ]
 
         try:
             await self._ws_manager.broadcast_event(

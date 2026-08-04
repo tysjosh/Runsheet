@@ -423,6 +423,49 @@ describe("FuelDistributionPage — Plans tab", () => {
     });
     expect(mockGeneratePlan).toHaveBeenCalledWith("dev-tenant");
     expect(mockListPlans).toHaveBeenCalledWith("dev-tenant", 1, 10, undefined);
+    expect(screen.getByText("Plan generated successfully")).toBeInTheDocument();
+  });
+
+  it("does not report success when the run came back degraded", async () => {
+    // A degraded run raised nothing — every pipeline stage returned normally —
+    // but the route stage produced no routes. This page is the last consumer of
+    // the completion signal, so an unconditional success toast here is where
+    // the silent skip would reach the dispatcher as "it worked".
+    mockListPlans.mockResolvedValue({
+      data: [],
+      pagination: { page: 1, size: 10, total: 0, total_pages: 1 },
+      request_id: "req-degraded",
+    });
+    mockGeneratePlan.mockResolvedValue({
+      run_id: "run-degraded",
+      status: "degraded",
+      degraded: true,
+      degradation_reasons: [
+        {
+          agent_id: "route_planning",
+          reasons: [{ reason_code: "unresolvable_stop_locations" }],
+        },
+      ],
+    });
+
+    render(<FuelDistributionPage />);
+
+    await waitFor(() => {
+      expect(mockListPlans).toHaveBeenCalled();
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Generate Plan/i }));
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(/Plan generated with problems: route_planning/),
+      ).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByText("Plan generated successfully"),
+    ).not.toBeInTheDocument();
   });
 });
 
