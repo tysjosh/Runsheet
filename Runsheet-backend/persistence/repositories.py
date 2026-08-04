@@ -16,7 +16,7 @@ exposes a cross-tenant query.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -1031,10 +1031,21 @@ class CurrentStateRepository:
     """
 
     # aggregate_type -> (ORM model, pk field, typed columns, has_last_event_ts)
+    #
+    # The typed columns MUST cover every mirror column the ORM model declares
+    # (everything but the pk, tenant_id, document and the two timestamps).
+    # ``HybridReadRepository.list`` resolves a filter key to a typed column when
+    # the model has one, so a declared-but-never-written column turns that
+    # filter into a silent empty result rather than an error. Six aggregates
+    # here were missing one, and ``depot``'s missing ``status`` is what made
+    # every ``list_for_tenant(status="active")`` return nothing under
+    # COMMERCE_READ_FROM_POSTGRES — which is how route planning lost its depot.
+    # ``test_typed_mirror_columns_are_populated.py`` pins the invariant.
     _SPECS = {
         "fuel_order": (
             FuelOrderCurrentORM, "order_id",
-            ("customer_id", "assigned_driver_id", "status", "last_event_timestamp"),
+            ("customer_id", "assigned_driver_id", "assigned_asset_id", "status",
+             "last_event_timestamp"),
             True,
         ),
         "job": (
@@ -1044,18 +1055,18 @@ class CurrentStateRepository:
         ),
         # ``shipment`` was retired with the ``shipments_current`` table (rev 0007).
         "tenant_job_policy": (
-            TenantJobPolicyORM, "policy_id", (), False,
+            TenantJobPolicyORM, "policy_id", ("status",), False,
         ),
         # Master data (no stale-event guard).
         "driver": (DriverMasterORM, "driver_id", ("cdl_number", "status"), False),
-        "depot": (DepotORM, "depot_id", ("is_default",), False),
+        "depot": (DepotORM, "depot_id", ("is_default", "status"), False),
         "terminal": (TerminalORM, "terminal_id", ("status",), False),
         "asset_certification": (
             AssetCertificationORM, "cert_id", ("asset_id", "status"), False,
         ),
-        "intake_channel": (IntakeChannelORM, "channel_id", (), False),
-        "truck": (TruckORM, "truck_id", (), False),
-        "location": (LocationORM, "location_id", (), False),
+        "intake_channel": (IntakeChannelORM, "channel_id", ("status",), False),
+        "truck": (TruckORM, "truck_id", ("status",), False),
+        "location": (LocationORM, "location_id", ("status",), False),
     }
 
     def __init__(self, aggregate_type: str) -> None:
@@ -1156,3 +1167,31 @@ class CurrentStateRepository:
         await session.delete(row)
         await session.flush()
         return True
+
+
+# ---------------------------------------------------------------------------
+# Shared spec lookup
+# ---------------------------------------------------------------------------
+
+
+def hybrid_spec_for(aggregate_type: str) -> Tuple[Any, str, Tuple[str, ...]]:
+    """Return ``(ORM model, pk field, typed columns)`` for a hybrid aggregate.
+
+    One lookup across both hybrid writers so callers outside the repositories
+    — notably :mod:`persistence.backfill` — cannot drift from the spec the live
+    write path uses. Backfill previously repeated the model name, pk field and
+    typed-column tuple for every aggregate, and depot's copy went stale in both
+    places at once: neither wrote the ``status`` mirror column that
+    ``HybridReadRepository.list`` filters on.
+
+    Raises:
+        ValueError: when ``aggregate_type`` belongs to neither writer.
+    """
+    if aggregate_type in CurrentStateRepository._SPECS:
+        model, pk_field, typed_cols, _has_event_ts = (
+            CurrentStateRepository._SPECS[aggregate_type]
+        )
+        return model, pk_field, typed_cols
+    if aggregate_type in ComplianceConfigRepository._SPECS:
+        return ComplianceConfigRepository._SPECS[aggregate_type]
+    raise ValueError(f"Unknown hybrid aggregate_type: {aggregate_type!r}")

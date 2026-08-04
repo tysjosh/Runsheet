@@ -64,6 +64,20 @@ ALLOWLISTED_PATH_PATTERNS: List[str] = [
     # demo seeder. Seeding is deliberately tenant-agnostic (docs are stamped
     # tenant_id="demo") and is gated behind settings.seed_demo_data.
     "seed_all_data.py",
+    # Not queries: module-level ``_<NAME>_INDEX = "<name>"`` constants plus an
+    # ``(aggregate_type, es_index)`` table. The one place backfill.py builds a
+    # query, ``_scroll``, applies ``{"term": {"tenant_id": tenant_id}}`` when a
+    # tenant is given and scrolls everything when it is not — deliberately, the
+    # same way the ``alembic`` skip below is justified: an operator backfill
+    # populating the Postgres source-of-truth spans tenants by definition and is
+    # never a request-path read.
+    #
+    # It was passing this guard by accident until the duplicated typed-column
+    # tuples were removed. The heuristic falls back to a +/-10/20-line window for
+    # a match with no enclosing function, and a neighbouring tuple happened to
+    # contain the literal ``"tenant_id"`` as a pk field name. Deleting that
+    # duplication deleted the coincidence.
+    "persistence/backfill.py",
     # Not queries: static ``SchemaTemplate`` declarations. Each template names
     # the ``es_index`` an import writes into (``es_index="fuel_orders_current"``
     # and the data_type -> index map) as catalogue metadata. The module performs
