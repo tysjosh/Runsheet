@@ -249,6 +249,27 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+    # Job-level so all three alembic steps share it. Every step here imports
+    # ``config.settings``, which validates the whole configuration before alembic
+    # gets a chance to run, and ``elastic_endpoint`` / ``elastic_api_key`` are
+    # required fields. Locally they come from ``.env.development``, which is
+    # gitignored and therefore absent on a runner, so without these the job died
+    # at "Missing required fields: elastic_endpoint, elastic_api_key" before
+    # touching a migration. Nobody saw it because this job declares
+    # ``needs: backend-tests``, which was failing earlier for an unrelated reason.
+    #
+    # The values are placeholders: nothing in this job reaches Elasticsearch.
+    # They exist only to satisfy settings validation, and match what the other
+    # jobs already pass.
+    env:
+      ENVIRONMENT: "development"
+      DATABASE_URL: "postgresql+psycopg://runsheet:runsheet@localhost:5432/runsheet"
+      ELASTIC_ENDPOINT: "http://localhost:9200"
+      ELASTIC_API_KEY: "mock-key-for-ci"
+      ELASTICSEARCH_URL: "http://localhost:9200"
+      ELASTICSEARCH_API_KEY: "mock-key-for-ci"
+      JWT_SECRET: "ci-test-jwt-secret"
+      JWT_ALGORITHM: "HS256"
     defaults:
       run:
         working-directory: Runsheet-backend
