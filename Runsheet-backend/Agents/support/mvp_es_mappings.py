@@ -233,6 +233,23 @@ MVP_ROUTES_MAPPING = {
                     "next_eligible_window_end":   {"type": "date"},
                 },
             },
+            # Req 5.2.3 — orders whose delivery window cannot be satisfied.
+            # ``RoutePlan.window_misses`` shipped without a mapping entry, and
+            # this index is dynamic:strict, so ES rejected the *whole document*:
+            # every route the agent built was discarded with a 400 while the
+            # agent logged "produced N route plans" and the run reported
+            # complete. Adding a field to a model is not free when the target
+            # mapping is strict.
+            "window_misses": {
+                "type": "nested",
+                "properties": {
+                    "order_id":               {"type": "keyword"},
+                    "reason":                 {"type": "keyword"},
+                    "delivery_window_start":  {"type": "date"},
+                    "delivery_window_end":    {"type": "date"},
+                    "detail":                 {"type": "text"},
+                },
+            },
         },
     },
     "settings": {
@@ -567,7 +584,21 @@ MVP_ADDITIVE_MAPPING_UPDATES = {
             "stops": {
                 "type": "nested",
                 "properties": {"order_ids": {"type": "keyword"}},
-            }
+            },
+            # Declaring ``window_misses`` in MVP_ROUTES_MAPPING alone reaches
+            # brand-new indices only; every existing cluster keeps the strict
+            # mapping it was created with and keeps rejecting the field. It has
+            # to be here too, which is the whole reason this dict exists.
+            "window_misses": {
+                "type": "nested",
+                "properties": {
+                    "order_id":              {"type": "keyword"},
+                    "reason":                {"type": "keyword"},
+                    "delivery_window_start": {"type": "date"},
+                    "delivery_window_end":   {"type": "date"},
+                    "detail":                {"type": "text"},
+                },
+            },
         }
     },
     TRUCK_COMPARTMENTS_INDEX: {

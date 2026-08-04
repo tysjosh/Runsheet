@@ -294,6 +294,11 @@ class RouteSkipEntry(BaseModel):
     * data gaps — ``no_loading_plan``, ``no_demand_identifiers``,
       ``unresolvable_stop_locations``, ``no_depot_configured``: the
       agent could not build a route from what it was given.
+    * write failures — ``route_persist_failed``: the route was solved but
+      could not be stored, so nothing can retrieve, dispatch or execute it.
+      Counting it as produced is how a strict-mapping rejection on
+      ``mvp_routes`` discarded a whole run's routes while the run reported
+      ``complete``.
 
     ``missing`` names the specific identifiers or fields that could not
     be resolved (station ids, order ids, field names) so the gap is

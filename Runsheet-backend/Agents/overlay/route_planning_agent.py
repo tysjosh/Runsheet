@@ -1218,8 +1218,29 @@ class RoutePlanningAgent(OverlayAgentBase):
                 start_position=start_position,
             )
 
-            # Step 6: Persist route plan to ES (Req 4.7)
-            await self._persist_route_plan(route_plan)
+            # Step 6: Persist route plan to ES (Req 4.7).
+            #
+            # A failed write is a skip, not a warning to read later. The write
+            # used to be fire-and-forget: ``_persist_route_plan`` logged the
+            # error and returned, the proposal was still emitted, and the run
+            # reported ``complete``. A strict-mapping rejection on ``mvp_routes``
+            # therefore discarded every route in the run while the agent logged
+            # "produced 4 route plans" and the dispatcher got four approvals
+            # pointing at routes that were never stored — approving one would
+            # have applied nothing. An unstored route cannot be retrieved,
+            # dispatched or executed, so it does not count as produced.
+            if not await self._persist_route_plan(route_plan):
+                self._record_route_skip(
+                    skips,
+                    truck_id=truck_id,
+                    plan_id=plan_id,
+                    reason_code="route_persist_failed",
+                    detail=(
+                        f"route {route_plan.route_id} was built but could not "
+                        f"be written to {MVP_ROUTES_INDEX}"
+                    ),
+                )
+                continue
 
             # Step 7: Build InterventionProposal — the proposal's
             # action tool_name and risk_class switch to the HIGH-risk
@@ -3815,7 +3836,7 @@ class RoutePlanningAgent(OverlayAgentBase):
     # Persistence (Req 4.7)
     # ------------------------------------------------------------------
 
-    async def _persist_route_plan(self, route_plan: RoutePlan) -> None:
+    async def _persist_route_plan(self, route_plan: RoutePlan) -> bool:
         """Persist a RoutePlan to the mvp_routes ES index.
 
         Canonicalizes every ``drop`` key (a fuel grade) on each stop
@@ -3824,6 +3845,11 @@ class RoutePlanningAgent(OverlayAgentBase):
         duplicate grade keys (e.g., both ``AGO`` and ``DIESEL_2`` on the
         same stop after canonicalization) are summed to preserve total
         drop volume. Unknown codes are preserved with a warning.
+
+        Returns:
+            ``True`` when the document was written, ``False`` when it was not.
+            The caller records a ``route_persist_failed`` skip on ``False`` so
+            the run degrades instead of reporting a route nobody can read.
         """
         try:
             doc = route_plan.model_dump(mode="json")
@@ -3852,9 +3878,11 @@ class RoutePlanningAgent(OverlayAgentBase):
                 route_plan.route_id,
                 doc,
             )
+            return True
         except Exception as e:
             logger.error(
                 "RoutePlanningAgent: failed to persist route plan %s: %s",
                 route_plan.route_id,
                 e,
             )
+            return False

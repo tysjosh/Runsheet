@@ -23,6 +23,16 @@ Two things are checked:
   reaches an index that already exists. A field added to the create-time
   mapping alone silently fails to deploy to every existing cluster, which is a
   distinct and easier mistake to make.
+
+Then it happened a third time, on an index this file did not name. ``mvp_routes``
+gained ``RoutePlan.window_misses`` (Req 5.2.3) with no mapping entry, so every
+route document was rejected 400 while the agent logged "produced 4 route plans"
+and the pipeline reported ``complete``; ``GET /plan/{run_id}`` returned
+``route_plan: null`` and four dispatcher approvals pointed at routes that were
+never stored. The guard existed and was correct — it just covered two indices out
+of four, and an enumerated list of indices is a list somebody has to remember to
+extend. :data:`_PERSISTED` below drives the same checks off every model/index pair
+so the next index is covered by default rather than by diligence.
 """
 from __future__ import annotations
 
@@ -35,14 +45,35 @@ from Agents.support.compartment_models import (
     CompartmentAssignment,
     LoadingPlan,
 )
+from Agents.support.fuel_distribution_models import (
+    DeliveryPriorityList,
+    RoutePlan,
+    TankForecast,
+)
 from Agents.support.mvp_es_mappings import (
     MVP_ADDITIVE_MAPPING_UPDATES,
+    MVP_DELIVERY_PRIORITIES_INDEX,
     MVP_INDEX_MAPPINGS,
     MVP_LOAD_PLANS_INDEX,
     MVP_LOAD_PLANS_MAPPING,
+    MVP_ROUTES_INDEX,
+    MVP_TANK_FORECASTS_INDEX,
     TRUCK_COMPARTMENTS_INDEX,
     TRUCK_COMPARTMENTS_MAPPING,
 )
+
+#: Every index an agent writes a whole ``model_dump()`` into, and the model it
+#: writes. Adding a persisted entity here is what puts it under the guard; the
+#: assertions below are all parametrised over it.
+_PERSISTED = {
+    MVP_TANK_FORECASTS_INDEX: TankForecast,
+    MVP_DELIVERY_PRIORITIES_INDEX: DeliveryPriorityList,
+    MVP_LOAD_PLANS_INDEX: LoadingPlan,
+    MVP_ROUTES_INDEX: RoutePlan,
+    TRUCK_COMPARTMENTS_INDEX: Compartment,
+}
+
+_PERSISTED_PARAMS = sorted(_PERSISTED.items(), key=lambda kv: kv[0])
 
 
 def _declared(index: str, mapping: Dict) -> Set[str]:
@@ -213,3 +244,95 @@ def test_every_strict_mvp_mapping_declares_its_nested_children() -> None:
         "Nested field(s) with no declared children under a dynamic:strict "
         f"index: {offenders}. Every write touching them will be rejected."
     )
+
+
+# ---------------------------------------------------------------------------
+# The same three checks, driven off _PERSISTED so no index is left out
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("index,model", _PERSISTED_PARAMS)
+def test_every_persisted_index_is_strict(index, model) -> None:
+    """Guard the premise for each index rather than for two of them.
+
+    A non-strict index tolerates undeclared fields, so the assertions below
+    would be enforcing a rule that no longer protects anything. If an index is
+    deliberately made dynamic, remove it from ``_PERSISTED`` and say why.
+    """
+    assert MVP_INDEX_MAPPINGS[index]["mappings"].get("dynamic") == "strict", (
+        f"{index} is no longer dynamic:strict — this file is not measuring "
+        f"anything for {model.__name__}"
+    )
+
+
+@pytest.mark.parametrize("index,model", _PERSISTED_PARAMS)
+def test_every_persisted_model_field_is_declared(index, model) -> None:
+    """Create-time or additive — the field must be declared somewhere."""
+    declared = _declared(index, MVP_INDEX_MAPPINGS[index])
+    missing = sorted(set(model.model_fields) - declared)
+    assert not missing, (
+        f"{model.__name__} persists {missing} but {index} does not declare "
+        f"them. {index} is dynamic:strict, so ES rejects the ENTIRE document: "
+        f"the whole entity stops being stored while the agent logs the error "
+        f"and the pipeline still reports success. Add them to the index "
+        f"mapping AND to MVP_ADDITIVE_MAPPING_UPDATES."
+    )
+
+
+@pytest.mark.parametrize("index,model", _PERSISTED_PARAMS)
+def test_every_persisted_model_field_reaches_a_brand_new_index(
+    index, model
+) -> None:
+    """Create-time specifically: additive updates never run on a fresh index."""
+    create_time = set(MVP_INDEX_MAPPINGS[index]["mappings"]["properties"])
+    missing = sorted(set(model.model_fields) - create_time)
+    assert not missing, (
+        f"{model.__name__} persists {missing} but the create-time mapping for "
+        f"{index} does not declare them, so a brand-new cluster gets an index "
+        f"without them. Being in MVP_ADDITIVE_MAPPING_UPDATES does not help: "
+        f"setup_mvp_indices applies those only on the already-exists branch."
+    )
+
+
+# The additive half cannot be checked generically: only fields absent from a
+# *deployed* mapping need an entry, and this file cannot know what a given
+# cluster has. It stays pinned by name, for the fields that actually broke —
+# below for mvp_routes, and above for mvp_load_plans and truck_compartments.
+
+
+def test_window_misses_reaches_existing_indices() -> None:
+    """The field that broke mvp_routes, pinned by name on the additive path.
+
+    Every cluster already has ``mvp_routes``, so the create-time mapping alone
+    would leave all of them rejecting every route write.
+    """
+    additive = MVP_ADDITIVE_MAPPING_UPDATES.get(MVP_ROUTES_INDEX, {}).get(
+        "properties", {}
+    )
+    assert "window_misses" in additive, (
+        f"window_misses is missing from MVP_ADDITIVE_MAPPING_UPDATES"
+        f"[{MVP_ROUTES_INDEX!r}]. Without it every deployed cluster keeps the "
+        f"strict mapping it was created with and keeps discarding whole route "
+        f"documents."
+    )
+
+
+def test_additive_updates_agree_with_the_create_time_types() -> None:
+    """Counterweight: a contradicting put-mapping turns a fix into a boot failure.
+
+    ES accepts new fields but rejects a type change on an existing one, so a
+    mismatch here would make ``setup_mvp_indices`` raise on startup for every
+    cluster that already has the index.
+    """
+    for index, update in MVP_ADDITIVE_MAPPING_UPDATES.items():
+        if index not in MVP_INDEX_MAPPINGS:
+            continue
+        created = MVP_INDEX_MAPPINGS[index]["mappings"]["properties"]
+        for field, spec in update.get("properties", {}).items():
+            if field not in created:
+                continue
+            assert created[field].get("type") == spec.get("type"), (
+                f"{index}.{field}: create-time mapping says "
+                f"{created[field].get('type')!r} but the additive update says "
+                f"{spec.get('type')!r} — put_mapping will be rejected"
+            )
