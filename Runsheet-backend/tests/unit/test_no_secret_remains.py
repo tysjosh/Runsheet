@@ -30,7 +30,13 @@ import pytest
 
 from config.settings import Settings, Environment
 
-pytestmark = pytest.mark.smoke
+# Moved out of tests/smoke/ and re-marked. Nothing here smoke-tests anything:
+# these are two SuperTokens cutover invariants — that the legacy HS256 signing
+# literal is absent from shipped source, and that production settings validate
+# with no ``jwt_secret`` field at all. It lived under tests/smoke/ only because
+# the cutover task that added it happened to put it there, and the ``smoke``
+# marker then implied a route check it never performed.
+pytestmark = pytest.mark.unit
 
 
 # ---------------------------------------------------------------------------

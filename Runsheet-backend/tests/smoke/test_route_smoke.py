@@ -15,8 +15,7 @@ Validates: Requirements 15.1, 15.3, 15.4, 15.5, 15.6
 """
 
 import sys
-import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -33,13 +32,7 @@ from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from starlette.routing import WebSocketRoute
 
-from tests.smoke.fixtures import (
-    ROUTE_FIXTURES,
-    WS_FIXTURES,
-    DEFAULT_PATH_PARAMS,
-    RouteFixture,
-    resolve_path,
-)
+from tests.smoke.fixtures import ROUTE_FIXTURES, WS_FIXTURES
 
 pytestmark = pytest.mark.smoke
 
@@ -97,12 +90,17 @@ class TestHTTPRouteRegistration:
     Validates: Requirements 15.1, 15.5
     """
 
-    def test_minimum_route_count(self, smoke_app):
-        """App has at least 20 HTTP routes registered."""
-        routes = _discover_http_routes(smoke_app)
-        assert len(routes) >= 20, (
-            f"Expected ≥20 HTTP routes, found {len(routes)}"
-        )
+    # ``test_minimum_route_count`` (>=20) and the five per-prefix floors
+    # (>=10 ops, >=5 fuel, >=10 scheduling, >=5 agent, >=3 data) stood here.
+    #
+    # The app registers 334 routes, so a floor of 20 only trips once 94% of them
+    # have vanished; the per-prefix floors are equally slack. They were the only
+    # route-count check that ran while the ``endpoint-registry`` job was broken
+    # by a generation timestamp in its own output, which made its
+    # ``git diff --exit-code`` guard unpassable. That job now works and pins all
+    # 334 entries exactly, so any route appearing or disappearing shows up as a
+    # diff. Keeping loose floors beside an exact check just invites someone to
+    # read a passing floor as evidence.
 
     def test_all_routes_have_callable_handlers(self, smoke_app):
         """Every registered route has a callable endpoint handler."""
@@ -127,21 +125,12 @@ class TestHTTPRouteRegistration:
             seen.add(key)
         assert not duplicates, f"Duplicate routes: {duplicates}"
 
-    def test_auto_discovery_matches_app_routes(self, smoke_app):
-        """Route discovery automatically includes all registered routes."""
-        discovered = set()
-        for method, path in _discover_http_routes(smoke_app):
-            discovered.add(f"{method} {path}")
-
-        actual = set()
-        for route in smoke_app.routes:
-            if isinstance(route, APIRoute):
-                for method in route.methods:
-                    actual.add(f"{method.upper()} {route.path}")
-
-        assert discovered == actual, (
-            f"Discovery mismatch. Missing: {actual - discovered}"
-        )
+    # ``test_auto_discovery_matches_app_routes`` stood here. It compared
+    # ``_discover_http_routes(app)`` against a copy of that helper's own loop,
+    # written out again in the test body. Both walked ``app.routes`` and filtered
+    # on ``APIRoute`` identically, so the two sides could not disagree — the
+    # assertion held for any app, including a broken one, and would only fail if
+    # ``sorted()`` or ``set()`` misbehaved.
 
     def test_health_routes_present(self, smoke_app):
         """Health check routes are registered."""
@@ -150,47 +139,6 @@ class TestHTTPRouteRegistration:
         assert "/" in route_paths, "Root route / not registered"
         assert "/api/health" in route_paths, "/api/health not registered"
         assert "/health" in route_paths, "/health not registered"
-
-    def test_ops_routes_present(self, smoke_app):
-        """Ops API routes are registered."""
-        routes = _discover_http_routes(smoke_app)
-        ops_routes = [(m, p) for m, p in routes if "/api/ops" in p]
-        assert len(ops_routes) >= 10, (
-            f"Expected ≥10 ops routes, found {len(ops_routes)}"
-        )
-
-    def test_fuel_routes_present(self, smoke_app):
-        """Fuel API routes are registered."""
-        routes = _discover_http_routes(smoke_app)
-        fuel_routes = [(m, p) for m, p in routes if "/api/fuel" in p]
-        assert len(fuel_routes) >= 5, (
-            f"Expected ≥5 fuel routes, found {len(fuel_routes)}"
-        )
-
-    def test_scheduling_routes_present(self, smoke_app):
-        """Scheduling API routes are registered."""
-        routes = _discover_http_routes(smoke_app)
-        sched_routes = [(m, p) for m, p in routes if "/api/scheduling" in p]
-        assert len(sched_routes) >= 10, (
-            f"Expected ≥10 scheduling routes, found {len(sched_routes)}"
-        )
-
-    def test_agent_routes_present(self, smoke_app):
-        """Agent API routes are registered."""
-        routes = _discover_http_routes(smoke_app)
-        agent_routes = [(m, p) for m, p in routes if "/api/agent" in p]
-        assert len(agent_routes) >= 5, (
-            f"Expected ≥5 agent routes, found {len(agent_routes)}"
-        )
-
-    def test_data_routes_present(self, smoke_app):
-        """Data/fleet API routes are registered."""
-        routes = _discover_http_routes(smoke_app)
-        data_routes = [(m, p) for m, p in routes
-                       if "/api/data" in p or "/api/fleet" in p]
-        assert len(data_routes) >= 3, (
-            f"Expected ≥3 data routes, found {len(data_routes)}"
-        )
 
 
 # ===========================================================================
@@ -269,55 +217,26 @@ class TestWebSocketRouteSmoke:
         for path in expected:
             assert path in ws_routes, f"WebSocket route {path} not registered"
 
-    def test_ws_route_count(self, smoke_app):
-        """At least 4 WebSocket routes are registered."""
-        ws_routes = _discover_ws_routes(smoke_app)
-        assert len(ws_routes) >= 4, (
-            f"Expected ≥4 WS routes, found {len(ws_routes)}"
-        )
+    # ``test_ws_route_count`` (>=4) stood here. ``test_ws_routes_registered``
+    # above already pins all four expected paths by name, which fails for the
+    # same reason and says which route went missing — so the count added a
+    # weaker assertion next to a stronger one.
 
-    def test_ws_ops_connection(self, smoke_client):
-        """Verify /ws/ops accepts WebSocket connections and sends confirmation."""
-        try:
-            with smoke_client.websocket_connect("/ws/ops") as ws:
-                data = ws.receive_json(mode="text")
-                assert data.get("type") == "connection"
-                assert data.get("status") == "connected"
-                assert data.get("manager") == "ops"
-        except Exception:
-            # Connection may fail due to uninitialized services
-            # Route registration is verified separately
-            pass
-
-    def test_ws_scheduling_connection(self, smoke_client):
-        """Verify /ws/scheduling accepts WebSocket connections and sends confirmation."""
-        try:
-            with smoke_client.websocket_connect("/ws/scheduling") as ws:
-                data = ws.receive_json(mode="text")
-                assert data.get("type") == "connection"
-                assert data.get("status") == "connected"
-        except Exception:
-            pass
-
-    def test_ws_agent_activity_connection(self, smoke_client):
-        """Verify /ws/agent-activity accepts WebSocket connections and sends confirmation."""
-        try:
-            with smoke_client.websocket_connect("/ws/agent-activity") as ws:
-                data = ws.receive_json(mode="text")
-                assert data.get("type") == "connection"
-                assert data.get("status") == "connected"
-        except Exception:
-            pass
-
-    def test_ws_fleet_live_connection(self, smoke_client):
-        """Verify /api/fleet/live accepts WebSocket connections and sends confirmation."""
-        try:
-            with smoke_client.websocket_connect("/api/fleet/live") as ws:
-                data = ws.receive_json(mode="text")
-                assert data.get("type") == "connection"
-                assert data.get("status") == "connected"
-        except Exception:
-            pass
+    # Four connection tests stood here, one per WebSocket route. Each wrapped its
+    # whole body in ``try: ... except Exception: pass``, so every assertion
+    # inside was optional and none of them could fail — a broken handshake, a
+    # missing confirmation frame or the wrong payload all passed silently. The
+    # class docstring above still described them as verifying "the upgrade
+    # succeeds" and a confirmation "within 2 seconds"; neither was true.
+    #
+    # They are deleted rather than repaired because the thing they suppressed is
+    # real: these routes need the bootstrap lifecycle, and ``smoke_app`` imports
+    # ``main.app`` with ``services.elasticsearch_service`` stubbed out, so the
+    # managers behind them are not initialised. Asserting on the handshake here
+    # would fail for the environment rather than for the product. A genuine
+    # check belongs where the app is bootstrapped — ``tests/integration`` already
+    # holds tests of that shape — and route registration is covered by
+    # ``test_ws_routes_registered`` below, which does fail if a route disappears.
 
     def test_ws_fixtures_cover_all_routes(self, smoke_app):
         """WS fixture registry covers all WebSocket routes."""
@@ -332,38 +251,18 @@ class TestWebSocketRouteSmoke:
 # Timing Tests (Req 15.7)
 # ===========================================================================
 
-class TestSmokeTestTiming:
-    """
-    Verify that smoke test infrastructure is fast enough to run
-    within the 30-second budget.
-
-    Validates: Requirement 15.7
-    """
-
-    def test_route_discovery_is_fast(self, smoke_app):
-        """Route discovery completes in under 1 second."""
-        start = time.time()
-        _discover_http_routes(smoke_app)
-        _discover_ws_routes(smoke_app)
-        elapsed = time.time() - start
-        assert elapsed < 1.0, f"Route discovery took {elapsed:.2f}s (limit: 1s)"
-
-    def test_fixture_lookup_is_fast(self):
-        """Fixture lookup for all routes completes in under 1 second."""
-        start = time.time()
-        for key in ROUTE_FIXTURES:
-            _ = ROUTE_FIXTURES[key]
-        for key in WS_FIXTURES:
-            _ = WS_FIXTURES[key]
-        elapsed = time.time() - start
-        assert elapsed < 1.0, f"Fixture lookup took {elapsed:.2f}s (limit: 1s)"
-
-    def test_path_resolution_is_fast(self):
-        """Path resolution for all fixtures completes in under 1 second."""
-        start = time.time()
-        for key, fixture in ROUTE_FIXTURES.items():
-            parts = key.split(" ", 1)
-            if len(parts) == 2:
-                resolve_path(parts[1], fixture)
-        elapsed = time.time() - start
-        assert elapsed < 1.0, f"Path resolution took {elapsed:.2f}s (limit: 1s)"
+# ===========================================================================
+# ``TestSmokeTestTiming`` stood here (Req 15.7)
+# ===========================================================================
+#
+# Three tests asserting that route discovery, fixture lookup and path resolution
+# each finish in under a second. They measured the test harness rather than the
+# product: a dict lookup over a few hundred keys and a walk of ``app.routes``.
+# Nothing a developer could break would make them fail, but a loaded CI runner
+# could, which makes them a source of flakes with no signal to trade for it.
+#
+# They existed to prove the suite fit a 30-second budget, which came from the
+# ``--timeout=30`` on the old ``smoke-tests`` CI job. That job is gone, and the
+# hang guard is now ``--timeout=120`` in ``pytest.ini`` covering every test — so
+# the budget is enforced by the thing that actually runs the tests instead of by
+# tests that time themselves.
