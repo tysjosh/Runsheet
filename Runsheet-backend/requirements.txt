@@ -77,6 +77,15 @@ scikit-learn>=1.5.0
 # PDF generation for BOL documents (Fuel Ops Hardening Req 4.3 — services/bol_service.py)
 reportlab>=4.0.0
 
+# pypdf reads the PDF that reportlab wrote, so tests/unit/test_bol_service.py can
+# assert the BOL's actual rendered text rather than only the canvas call order.
+# Test-only and imported lazily inside the test, but it belongs here because this
+# is the sole requirements file — pytest and hypothesis are declared here too.
+# It was previously undeclared: present in local venvs, absent in CI, so
+# `pytest -x` aborted the whole run on ModuleNotFoundError and the coverage gate
+# then failed against a partial run.
+pypdf==6.10.2
+
 # APScheduler for cron-driven integration sync runs (Fuel Ops Hardening
 # Req 5.1.5 — integrations/integration_scheduler.py). Used via the
 # AsyncIOScheduler + CronTrigger.from_crontab APIs to register per-
