@@ -163,6 +163,10 @@ class TestSettings:
         """Test that all environment enum values are accepted."""
         for env in ["development", "staging", "production"]:
             env_vars = {**valid_env_vars, "ENVIRONMENT": env}
+            if env != "development":
+                env_vars["DATABASE_URL"] = (
+                    "postgresql+psycopg://u:p@db.internal:5432/runsheet"
+                )
             # For non-development environments, redis_url is required
             if env != "development":
                 env_vars["REDIS_URL"] = "redis://localhost:6379"
@@ -249,6 +253,9 @@ class TestSuperTokensSettings:
         return {
             **valid_env_vars,
             "ENVIRONMENT": "staging",
+            # Required outside development: without it the persistence layer is
+            # dormant and invoices finalize with no invoice_number.
+            "DATABASE_URL": "postgresql+psycopg://u:p@db.internal:5432/runsheet",
             "REDIS_URL": "redis://localhost:6379",
         }
 
@@ -561,7 +568,7 @@ class TestEnvironmentSpecificConfiguration:
         """Test creating settings for staging environment."""
         from config.settings import create_settings_for_environment
         
-        env_vars = {**valid_env_vars, "REDIS_URL": "redis://localhost:6379", "SUPERTOKENS_CONNECTION_URI": "https://core.supertokens.example.com", "SUPERTOKENS_API_KEY": "st-managed-core-api-key"}
+        env_vars = {**valid_env_vars, "DATABASE_URL": "postgresql+psycopg://u:p@db.internal:5432/runsheet", "REDIS_URL": "redis://localhost:6379", "SUPERTOKENS_CONNECTION_URI": "https://core.supertokens.example.com", "SUPERTOKENS_API_KEY": "st-managed-core-api-key"}
         with patch.dict(os.environ, env_vars, clear=True):
             settings = create_settings_for_environment(Environment.STAGING)
             assert isinstance(settings, Settings)
@@ -570,7 +577,7 @@ class TestEnvironmentSpecificConfiguration:
         """Test creating settings for production environment."""
         from config.settings import create_settings_for_environment
         
-        env_vars = {**valid_env_vars, "REDIS_URL": "redis://localhost:6379", "CORS_ORIGINS": '["https://app.runsheet.com"]', "SUPERTOKENS_CONNECTION_URI": "https://core.supertokens.example.com", "SUPERTOKENS_API_KEY": "st-managed-core-api-key"}
+        env_vars = {**valid_env_vars, "DATABASE_URL": "postgresql+psycopg://u:p@db.internal:5432/runsheet", "REDIS_URL": "redis://localhost:6379", "CORS_ORIGINS": '["https://app.runsheet.com"]', "SUPERTOKENS_CONNECTION_URI": "https://core.supertokens.example.com", "SUPERTOKENS_API_KEY": "st-managed-core-api-key"}
         with patch.dict(os.environ, env_vars, clear=True):
             settings = create_settings_for_environment(Environment.PRODUCTION)
             assert isinstance(settings, Settings)
@@ -579,7 +586,7 @@ class TestEnvironmentSpecificConfiguration:
         """Test that create_settings_for_environment auto-detects environment."""
         from config.settings import create_settings_for_environment
         
-        env_vars = {**valid_env_vars, "ENVIRONMENT": "staging", "REDIS_URL": "redis://localhost:6379", "SUPERTOKENS_CONNECTION_URI": "https://core.supertokens.example.com", "SUPERTOKENS_API_KEY": "st-managed-core-api-key"}
+        env_vars = {**valid_env_vars, "ENVIRONMENT": "staging", "DATABASE_URL": "postgresql+psycopg://u:p@db.internal:5432/runsheet", "REDIS_URL": "redis://localhost:6379", "SUPERTOKENS_CONNECTION_URI": "https://core.supertokens.example.com", "SUPERTOKENS_API_KEY": "st-managed-core-api-key"}
         with patch.dict(os.environ, env_vars, clear=True):
             settings = create_settings_for_environment()
             assert settings.environment == Environment.STAGING
@@ -647,6 +654,8 @@ class TestSuperTokensMigrationValidators:
         return {
             **dev_env_vars,
             "ENVIRONMENT": "production",
+            # Required outside development — see the database_url validator.
+            "DATABASE_URL": "postgresql+psycopg://u:p@db.internal:5432/runsheet",
             "REDIS_URL": "redis://redis.internal:6379",
             "CORS_ORIGINS": '["https://app.runsheet.com"]',
         }

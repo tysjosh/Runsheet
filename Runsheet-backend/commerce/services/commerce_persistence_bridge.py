@@ -337,12 +337,33 @@ async def mirror_invoice_fields(
         )
 
 
+class InvoiceNumberingUnavailable(Exception):
+    """Numbering is configured but the counter could not be read.
+
+    Distinct from "numbering is off". When the persistence layer is dormant or
+    dual-write is disabled, :func:`allocate_invoice_number` returns ``None`` and
+    the caller keeps its legacy unnumbered behaviour — a deliberate posture for
+    an ES-only deployment. But once numbering IS configured, a failure to
+    allocate must not silently degrade to that posture: finalizing an invoice
+    without a number produces a legally defective record, and it does so while
+    reporting success.
+    """
+
+
 async def allocate_invoice_number(tenant_id: str) -> Optional[int]:
     """Allocate the next monotonic invoice number from the Postgres counter.
 
-    Returns the allocated integer, or ``None`` when the persistence layer is
-    dormant / dual-write is off (caller keeps its legacy behavior — today that
-    means ``invoice_number`` stays ``None``, exactly as before).
+    Returns:
+        The allocated integer, or ``None`` when the persistence layer is dormant
+        / dual-write is off (the caller keeps its legacy behavior — today that
+        means ``invoice_number`` stays ``None``).
+
+    Raises:
+        InvoiceNumberingUnavailable: when numbering is configured but the
+            counter could not be allocated. Previously this was logged and
+            ``None`` was returned, which is indistinguishable from "numbering is
+            switched off" — so a database blip finalized an unnumbered invoice
+            and the caller could not tell.
     """
     if not _enabled():
         return None
@@ -352,12 +373,21 @@ async def allocate_invoice_number(tenant_id: str) -> Optional[int]:
     repo = InvoiceRepository()
     try:
         async with session_scope() as session:
-            return await repo.allocate_number(session, tenant_id)
-    except Exception:  # noqa: BLE001
+            allocated = await repo.allocate_number(session, tenant_id)
+    except Exception as exc:  # noqa: BLE001
         logger.exception(
             "Postgres invoice-number allocation failed for tenant %s", tenant_id
         )
-        return None
+        raise InvoiceNumberingUnavailable(
+            f"invoice-number allocation failed for tenant {tenant_id!r}: {exc}"
+        ) from exc
+    if allocated is None:
+        # The repository allocates or raises; a None here would mean the counter
+        # silently produced nothing, which is the same defect by another route.
+        raise InvoiceNumberingUnavailable(
+            f"invoice-number counter returned no number for tenant {tenant_id!r}"
+        )
+    return allocated
 
 
 # ---------------------------------------------------------------------------

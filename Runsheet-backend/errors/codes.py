@@ -142,6 +142,15 @@ class ErrorCode(str, Enum):
     COMMERCE_INVOICE_ALREADY_VOIDED = "COMMERCE_INVOICE_ALREADY_VOIDED"
     """Attempted to void an invoice that is already voided (HTTP 409)"""
 
+    COMMERCE_INVOICE_NUMBERING_UNAVAILABLE = "COMMERCE_INVOICE_NUMBERING_UNAVAILABLE"
+    """The invoice-number counter is configured but could not be allocated (HTTP 503).
+
+    503 rather than 409: the caller did nothing wrong and the request is worth
+    retrying unchanged. The invoice stays in ``draft`` — finalizing it without a
+    number would produce an open invoice that no accounting system can reference,
+    and the previous behaviour did exactly that while returning 200.
+    """
+
     COMMERCE_PAYMENT_DUPLICATE = "COMMERCE_PAYMENT_DUPLICATE"
     """Duplicate payment detected via IdempotencyService (HTTP 409)"""
 
@@ -326,6 +335,7 @@ ERROR_CODE_STATUS_MAP: dict[ErrorCode, int] = {
     ErrorCode.COMMERCE_CREDIT_OVERRIDE_EXPIRED: 409,
     ErrorCode.COMMERCE_INVOICE_INVALID_STATE: 409,
     ErrorCode.COMMERCE_INVOICE_ALREADY_VOIDED: 409,
+    ErrorCode.COMMERCE_INVOICE_NUMBERING_UNAVAILABLE: 503,
     ErrorCode.COMMERCE_PAYMENT_DUPLICATE: 409,
     ErrorCode.COMMERCE_PAYMENT_AMOUNT_EXCEEDS_INVOICE: 422,
     # Order Intake Pipeline error codes

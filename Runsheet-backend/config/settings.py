@@ -917,6 +917,52 @@ class Settings(BaseSettings):
                     f"{self.environment.value} environment: "
                     f"{', '.join(missing_supertokens)}"
                 )
+
+            # The Postgres source-of-truth is NOT optional outside development.
+            #
+            # ``database_url`` is Optional because an ES-only deployment was the
+            # pre-migration posture, and the persistence layer degrades to it
+            # silently: ``is_persistence_enabled()`` returns False and every
+            # caller takes the legacy path. That is a defensible default on a
+            # laptop and indefensible in production, because three correctness
+            # guarantees exist only in Postgres:
+            #
+            #   * invoice numbering — ``allocate_invoice_number`` returns None
+            #     when dormant, and the invoice is finalized with NO number.
+            #   * idempotency keys — the ES index cannot prevent two concurrent
+            #     requests with the same key from both being processed.
+            #   * credit limits — the ``SELECT ... FOR UPDATE`` row lock behind
+            #     the credit check has no ES equivalent, so concurrent orders
+            #     can exceed a limit.
+            #
+            # None of those failures raises. Requiring the URL here converts a
+            # silent, per-request correctness loss into a startup error naming
+            # exactly what is missing.
+            if not self.database_url:
+                raise ValueError(
+                    "database_url is required in a "
+                    f"{self.environment.value} environment: without it the "
+                    "persistence layer is dormant, invoices finalize with no "
+                    "invoice_number, idempotency keys lose their uniqueness "
+                    "guarantee, and credit checks lose their row lock — all "
+                    "silently. Set the async SQLAlchemy URL, e.g. "
+                    "postgresql+psycopg://user:pass@host:5432/runsheet"
+                )
+
+            # Having the URL is not sufficient: invoice numbering is gated on
+            # BOTH database_url and commerce_dual_write_postgres
+            # (``commerce_persistence_bridge._enabled``). A deployment with
+            # commerce enabled but dual-write off still finalizes unnumbered
+            # invoices, so refuse that combination rather than discover it in
+            # the accounting export.
+            if self.commerce_backbone_enabled and not self.commerce_dual_write_postgres:
+                raise ValueError(
+                    "commerce_dual_write_postgres must be True in a "
+                    f"{self.environment.value} environment when "
+                    "commerce_backbone_enabled is True: invoice numbering, "
+                    "payment de-duplication and the credit-check row lock are "
+                    "all gated on it, and each degrades silently when it is off"
+                )
             # Validate CORS: reject any localhost origins in production
             if self.environment == Environment.PRODUCTION:
                 for origin in self.cors_origins:

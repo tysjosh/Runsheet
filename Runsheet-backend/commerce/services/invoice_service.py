@@ -29,7 +29,13 @@ from commerce.services.commerce_es_mappings import (
     INVOICES_CURRENT_INDEX,
     PAYMENTS_CURRENT_INDEX,
 )
-from errors.exceptions import conflict, resource_not_found, validation_error
+from errors.codes import ErrorCode
+from errors.exceptions import (
+    AppException,
+    conflict,
+    resource_not_found,
+    validation_error,
+)
 from ops.middleware.tenant_guard import inject_tenant_filter
 from services.elasticsearch_service import ElasticsearchService
 from services.money import (
@@ -906,11 +912,37 @@ class InvoiceService:
         # dual-write is on. This replaces the legacy Redis/ES numbering path;
         # when the persistence layer is dormant the helper returns None and the
         # invoice_number stays unset, exactly as before.
+        #
+        # When numbering IS configured, a failure to allocate must abort the
+        # finalize. Previously the helper logged the error and returned None,
+        # which is indistinguishable from "numbering is off" — so a database
+        # blip transitioned the invoice to OPEN with no invoice_number and
+        # reported success. An open invoice without a number is a defective
+        # financial record, and nothing downstream would notice: the event has
+        # already been written by the time anyone reads the projection.
         from commerce.services.commerce_persistence_bridge import (
+            InvoiceNumberingUnavailable,
             allocate_invoice_number,
             mirror_invoice_fields,
         )
-        allocated_number = await allocate_invoice_number(tenant_id)
+        try:
+            allocated_number = await allocate_invoice_number(tenant_id)
+        except InvoiceNumberingUnavailable as exc:
+            logger.error(
+                "InvoiceService.finalize_draft: refusing to finalize %s without "
+                "a number (tenant=%s): %s",
+                invoice_id,
+                tenant_id,
+                exc,
+            )
+            raise AppException(
+                error_code=ErrorCode.COMMERCE_INVOICE_NUMBERING_UNAVAILABLE,
+                message=(
+                    "Invoice numbering is unavailable; the invoice was left in "
+                    "draft rather than finalized without a number"
+                ),
+                details={"invoice_id": invoice_id},
+            ) from exc
         invoice_number_str: Optional[str] = None
         if allocated_number is not None and not invoice.get("invoice_number"):
             invoice_number_str = f"INV-{allocated_number:06d}"
