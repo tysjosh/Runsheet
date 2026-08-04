@@ -53,6 +53,7 @@ from fuel.voice.voice_read_driver_router import router as voice_read_driver_rout
 from fuel.voice.intake_vectors import run_intake_vector_self_check
 from auth.api.password_admin_endpoints import router as auth_admin_router
 from auth.api.account_endpoints import router as auth_account_router
+from auth.api.public_config_endpoints import router as auth_public_config_router
 from integrations.api.stripe_endpoints import (
     router as stripe_router,
     webhook_router as stripe_webhook_router,
@@ -208,6 +209,11 @@ for _router in (
     fuel_ops_mvp_router,
     auth_admin_router,
     auth_account_router,
+    # GET /api/auth/public-config — unauthenticated by an explicit
+    # Public_Route_Allowlist entry (middleware/auth_enforcement.py), NOT by the
+    # /auth prefix; its /api/auth/admin and /api/auth/account siblings above
+    # stay session-gated.
+    auth_public_config_router,
     voice_submission_router,  # Dinee voice Surface A (gated by self-check above)
     voice_read_driver_router,  # Dinee voice Surface B read/driver endpoints
 ):

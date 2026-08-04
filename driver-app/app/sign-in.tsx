@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { openURL } from 'expo-linking';
+import { useEffect, useState } from 'react';
 import { KeyboardAvoidingView, Platform, View } from 'react-native';
 
 import { Button } from '@/components/ui/button';
@@ -7,6 +8,7 @@ import { Text } from '@/components/ui/text';
 import { demoPreviewEnabled } from '@/lib/demo-preview';
 import { notificationManager } from '@/lib/notification-manager';
 import { signIn } from '@/lib/session';
+import { forgotPasswordUrl } from '@/lib/web-app';
 import { driverWebSocket } from '@/lib/websocket';
 
 export default function SignInScreen() {
@@ -18,6 +20,50 @@ export default function SignInScreen() {
   );
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+
+  // Demo preview prefills a fake credential against a local fetch stub, so
+  // there is no real account to recover; and with no known web origin there is
+  // nowhere to send the driver. Either way, render no affordance rather than a
+  // link that cannot work.
+  //
+  // The origin comes from the backend, so it is not known at first render.
+  // Starting at `null` keeps the link hidden until it resolves: revealing it
+  // optimistically would flash a link that then vanishes on a deployment with
+  // no configured web origin. Nothing here gates sign-in — a config call that
+  // fails or never answers just leaves the link hidden.
+  const [resetUrl, setResetUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (demoPreviewEnabled) {
+      return;
+    }
+    let active = true;
+    void forgotPasswordUrl().then((url) => {
+      if (active) {
+        setResetUrl(url);
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const openPasswordReset = async () => {
+    if (!resetUrl) {
+      return;
+    }
+    setMessage(null);
+    try {
+      // The system browser, not an in-app webview: the reset flow establishes a
+      // SuperTokens session on the web origin and must not share this app's
+      // webview state.
+      await openURL(resetUrl);
+    } catch {
+      setMessage(
+        'The password reset page could not be opened. Contact dispatch to have a reset link sent to you.',
+      );
+    }
+  };
 
   const submit = async () => {
     if (!email.trim() || !password) {
@@ -101,6 +147,16 @@ export default function SignInScreen() {
                   : 'Sign in'}
             </Text>
           </Button>
+          {resetUrl && (
+            <Button
+              variant="link"
+              size="sm"
+              disabled={submitting}
+              onPress={() => void openPasswordReset()}
+            >
+              <Text>Forgot your password?</Text>
+            </Button>
+          )}
         </View>
       </View>
     </KeyboardAvoidingView>

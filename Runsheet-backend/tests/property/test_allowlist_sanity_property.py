@@ -5,21 +5,25 @@ Property-based test for Public_Route_Allowlist sanity.
 
 Property 16: Allowlist contains only sanctioned categories — every entry that
 ``middleware.auth_enforcement.is_public_route`` accepts belongs to exactly one
-of the four sanctioned categories:
+of the sanctioned categories:
 
   1. a health-check route          (``HEALTH_ROUTES``),
   2. an API-documentation route    (``DOCS_ROUTES``),
   3. a self-verifying webhook HMAC route (``WEBHOOK_HMAC_ROUTES`` /
-     ``WEBHOOK_HMAC_PREFIXES``), or
-  4. a SuperTokens auth route       (the ``/auth`` ``PUBLIC_PREFIXES``).
+     ``WEBHOOK_HMAC_PREFIXES``),
+  4. a SuperTokens auth route       (the ``/auth`` ``PUBLIC_PREFIXES``),
+  5. a self-authenticating voice surface (``VOICE_SELF_AUTH_ROUTES`` /
+     ``VOICE_SELF_AUTH_PREFIXES``), or
+  6. the pre-auth client bootstrap route (``PUBLIC_CONFIG_ROUTES``), which
+     discloses only the non-secret web app origin.
 
 The allowlist is finite, so the concrete-sets portion of this test iterates the
 actual entries and asserts each one is categorizable and accepted by
 ``is_public_route``. The generated-path portion uses hypothesis to manufacture
 random paths that fall outside every sanctioned category and asserts they are
-NOT public — i.e. ``is_public_route`` never widens the allowlist beyond the four
-categories (fail-closed by default, Req 6.2/6.3). No network calls to the
-managed SaaS core are made; this exercises pure routing predicate logic.
+NOT public — i.e. ``is_public_route`` never widens the allowlist beyond the
+sanctioned categories (fail-closed by default, Req 6.2/6.3). No network calls to
+the managed SaaS core are made; this exercises pure routing predicate logic.
 """
 
 from hypothesis import assume, given, settings
@@ -28,8 +32,11 @@ from hypothesis import strategies as st
 from middleware.auth_enforcement import (
     DOCS_ROUTES,
     HEALTH_ROUTES,
+    PUBLIC_CONFIG_ROUTES,
     PUBLIC_PREFIXES,
     PUBLIC_ROUTE_ALLOWLIST,
+    VOICE_SELF_AUTH_PREFIXES,
+    VOICE_SELF_AUTH_ROUTES,
     WEBHOOK_HMAC_PREFIXES,
     WEBHOOK_HMAC_ROUTES,
     is_public_route,
@@ -53,6 +60,13 @@ def _category_of(path: str) -> str | None:
     for prefix in WEBHOOK_HMAC_PREFIXES:
         if path.startswith(prefix):
             return "webhook"
+    if path in VOICE_SELF_AUTH_ROUTES:
+        return "voice"
+    for prefix in VOICE_SELF_AUTH_PREFIXES:
+        if path.startswith(prefix):
+            return "voice"
+    if path in PUBLIC_CONFIG_ROUTES:
+        return "public_config"
     for prefix in PUBLIC_PREFIXES:
         if path == prefix or path.startswith(prefix + "/"):
             return "auth"
@@ -71,13 +85,20 @@ class TestAllowlistOnlySanctionedCategories:
         # Each sanctioned category is mutually exclusive (exactly one category).
         assert HEALTH_ROUTES.isdisjoint(DOCS_ROUTES)
         assert PUBLIC_ROUTE_ALLOWLIST.isdisjoint(WEBHOOK_HMAC_ROUTES)
+        assert PUBLIC_ROUTE_ALLOWLIST.isdisjoint(VOICE_SELF_AUTH_ROUTES)
+        assert PUBLIC_ROUTE_ALLOWLIST.isdisjoint(PUBLIC_CONFIG_ROUTES)
+        assert PUBLIC_CONFIG_ROUTES.isdisjoint(
+            WEBHOOK_HMAC_ROUTES | VOICE_SELF_AUTH_ROUTES
+        )
 
     def test_every_concrete_allowlist_entry_is_categorized_and_public(self):
-        """Every literal allowlist/webhook entry maps to one category and is public."""
+        """Every literal allowlist entry maps to one category and is public."""
         for path in (
             HEALTH_ROUTES
             | DOCS_ROUTES
             | WEBHOOK_HMAC_ROUTES
+            | VOICE_SELF_AUTH_ROUTES
+            | PUBLIC_CONFIG_ROUTES
         ):
             assert _category_of(path) is not None, (
                 f"allowlist entry {path!r} belongs to no sanctioned category"
@@ -123,6 +144,13 @@ class TestAllowlistOnlySanctionedCategories:
                     "/health-extended",  # superstring of /health, must NOT match
                     "/docs-internal",  # superstring of /docs, must NOT match
                     "/api/health/details",
+                    # The public-config entry is one exact path, not a prefix:
+                    # its /api/auth/* siblings must stay session-gated.
+                    "/api/auth",
+                    "/api/auth/account/me",
+                    "/api/auth/admin/password-reset-link",
+                    "/api/auth/public-config/extra",
+                    "/api/auth/public-configuration",
                 ]
             ),
         )
