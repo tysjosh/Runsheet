@@ -43,9 +43,11 @@ from typing import (
 import httpx
 
 from Agents.overlay.base_overlay_agent import (
-    CYCLE_METRIC_DEGRADATION_REASONS,
     CYCLE_METRIC_DEGRADED,
+    DEGRADATION_KIND_NO_INPUT,
+    DEGRADATION_KIND_PRODUCED_NOTHING,
     OverlayAgentBase,
+    build_degradation_reason,
 )
 from Agents.overlay.data_contracts import (
     InterventionProposal,
@@ -868,6 +870,20 @@ class RoutePlanningAgent(OverlayAgentBase):
         self._last_route_skips = skips
 
         if not proposals:
+            # Handed no loading plan, so nothing is routed. The skip-reason
+            # reporting below never runs on this path, which meant the one
+            # stage that did implement the degradation convention still let
+            # "routed nothing because I was given nothing" look like success.
+            self.report_degradation(
+                build_degradation_reason(
+                    reason_code="no_loading_plans_buffered",
+                    kind=DEGRADATION_KIND_NO_INPUT,
+                    detail=(
+                        "the loading stage published no plan, so no route "
+                        "could be built"
+                    ),
+                )
+            )
             return []
 
         route_proposals: List[InterventionProposal] = []
@@ -1245,9 +1261,33 @@ class RoutePlanningAgent(OverlayAgentBase):
             "trucks_routed": len(route_proposals),
             "trucks_skipped": len(skips),
             "route_skips": skip_payload,
-            CYCLE_METRIC_DEGRADED: bool(skips),
-            CYCLE_METRIC_DEGRADATION_REASONS: skip_payload,
         })
+        # Report through ``report_degradation`` rather than assigning
+        # ``CYCLE_METRIC_DEGRADED: bool(skips)`` here. ``monitor_cycle`` groups
+        # buffered signals by tenant and calls ``evaluate`` once per tenant, so
+        # a direct assignment let a clean second tenant reset the flag a first
+        # tenant had just set — erasing the report the orchestrator was about to
+        # read. The helper accumulates and never lowers the flag.
+        if skips:
+            self.report_degradation(*(
+                build_degradation_reason(
+                    reason_code=entry.get("reason_code", "route_skip"),
+                    kind=DEGRADATION_KIND_PRODUCED_NOTHING,
+                    **{
+                        k: v
+                        for k, v in entry.items()
+                        if k not in ("reason_code", "kind")
+                    },
+                )
+                for entry in skip_payload
+            ))
+        else:
+            # Keep the key present and False on a clean cycle. The consumer
+            # treats absent as False either way, but this has been part of the
+            # published ``cycle_metrics`` surface since the convention landed.
+            # ``setdefault`` rather than assignment so a report raised earlier in
+            # the same cycle (another tenant's group) is not lowered here.
+            self._cycle_metrics.setdefault(CYCLE_METRIC_DEGRADED, False)
         if skips and not route_proposals:
             logger.error(
                 "RoutePlanningAgent: routed 0 of %d loading plans — "

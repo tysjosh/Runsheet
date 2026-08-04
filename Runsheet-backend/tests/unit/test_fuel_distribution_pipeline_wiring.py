@@ -47,6 +47,7 @@ from Agents.support.fuel_distribution_models import (
 from Agents.overlay.base_overlay_agent import (
     CYCLE_METRIC_DEGRADATION_REASONS,
     CYCLE_METRIC_DEGRADED,
+    DEGRADATION_KIND_NO_INPUT,
 )
 from Agents.support.fuel_distribution_pipeline import (
     PIPELINE_STAGES,
@@ -220,7 +221,14 @@ class TestEveryStageIsEvaluated:
             "forecast → prioritization hop is broken again"
         )
         status = await pipeline.get_status(run_id)
-        assert status["state"] == PipelineState.COMPLETE.value
+        # The spied prioritization stage publishes nothing, so the two real
+        # stages after it are handed nothing and report it. Assert the run did
+        # not *fail*: this test is about the hop being reached, and a wiring
+        # fault surfaces as FAILED with a named agent.
+        assert status["state"] != PipelineState.FAILED.value, (
+            f"{status['failed_agent']} — {status['error_message']}"
+        )
+        assert status["failed_agent"] is None
 
     @pytest.mark.asyncio
     async def test_every_downstream_stage_is_evaluated(self):
@@ -540,7 +548,16 @@ class TestFullyRealRunCompletes:
     their own code and any latent error inside them was invisible. The run
     reported ``complete`` either way, which is precisely why the break went
     unnoticed. This test pins the honest outcome: with no data, a real run
-    completes rather than failing, and each stage is actually entered.
+    finishes rather than failing, and each stage is actually entered.
+
+    "Finishes" used to be asserted as ``COMPLETE``, which restated the bug it
+    was written beside. A run over an empty tenant produces no forecast, no
+    priority, no load plan and no route; calling that COMPLETE is what let
+    ``POST /api/fuel/mvp/plan/generate`` answer ``status: "complete",
+    degraded: false`` with an empty plan in it. The distinction this test
+    actually cares about is finished-versus-crashed, so it asserts DEGRADED with
+    no failed agent, plus that every reason is a ``no_input`` one — nothing was
+    wrong here except that there was nothing to plan.
     """
 
     def _real_pipeline(self):
@@ -563,19 +580,40 @@ class TestFullyRealRunCompletes:
         return pipeline, agents, deps
 
     @pytest.mark.asyncio
-    async def test_real_agents_with_no_data_complete_the_run(self):
+    async def test_real_agents_with_no_data_finish_the_run_as_degraded(self):
         """Validates: Requirements 6.1, 6.4, 6.5"""
         pipeline, _, _ = self._real_pipeline()
 
         run_id = await pipeline.run(tenant_id=TENANT_ID)
         status = await pipeline.get_status(run_id)
 
-        assert status["state"] == PipelineState.COMPLETE.value, (
+        # Finished, not crashed: nothing raised, so the circuit breaker never
+        # tripped and no stage is blamed.
+        assert status["state"] != PipelineState.FAILED.value, (
             "a real run over empty data failed: "
             f"{status['failed_agent']} — {status['error_message']}"
         )
         assert status["failed_agent"] is None
         assert status["error_message"] is None
+
+        # ...and not success either. An empty tenant yields no plan, and the
+        # endpoint that forwards this state must not call that complete.
+        assert status["state"] == PipelineState.DEGRADED.value
+        assert status["degraded"] is True
+        assert [d["agent_id"] for d in status["degradations"]] == [
+            "tank_forecasting",
+            "delivery_prioritization",
+            "compartment_loading",
+            "route_planning",
+        ], status["degradations"]
+        # Every reason is "there was nothing to work on" rather than "I had work
+        # and produced nothing" — so the orchestrator logs this at WARNING and
+        # an empty-tenant sweep does not page anyone.
+        assert all(
+            reason["kind"] == DEGRADATION_KIND_NO_INPUT
+            for entry in status["degradations"]
+            for reason in entry["reasons"]
+        ), status["degradations"]
 
     @pytest.mark.asyncio
     async def test_every_real_stage_is_entered(self):
@@ -704,7 +742,21 @@ class TestPrioritizationProducesOutputEndToEnd:
         run_id = await pipeline.run(tenant_id=TENANT_ID)
 
         status = await pipeline.get_status(run_id)
-        assert status["state"] == PipelineState.COMPLETE.value
+        # Not COMPLETE: the loading stage is replaced by a capture stub that
+        # publishes nothing, so the real route stage downstream is handed no
+        # plan and says so. That is honest, and it is not what this test is
+        # about — what matters here is that nothing raised and the hop under
+        # test happened.
+        assert status["state"] != PipelineState.FAILED.value, (
+            f"{status['failed_agent']} — {status['error_message']}"
+        )
+        assert status["failed_agent"] is None
+        assert [d["agent_id"] for d in status["degradations"]] == [
+            "route_planning"
+        ], (
+            "the prioritization stage scored the pending order, so it must not "
+            f"be among the degraded stages: {status['degradations']}"
+        )
 
         assert len(seen) == 1, (
             "the loading stage's _priority_buffer should hold exactly the one "
@@ -795,8 +847,17 @@ class TestDegradedStageIsNotSuccess:
     """
 
     def _degrading_pipeline(self):
-        """A real route stage handed one loading plan it cannot route."""
+        """A real route stage handed one loading plan it cannot route.
+
+        The prioritization stage is spied so the *route* stage is the only one
+        that reports degradation. Without that it degrades too, honestly — it is
+        a real agent over an empty ES, so it scores nothing — and these tests
+        would no longer be able to say which stage the reasons came from, nor
+        that degradation is per-stage rather than run-wide. A spied ``evaluate``
+        never touches ``cycle_metrics``, so the stage reads as not degraded.
+        """
         pipeline, agents, deps = _build_pipeline(first_stage_publishes=False)
+        _spy_evaluate(agents["delivery_prioritization"])
         # The loading stage publishes the proposal, so it travels the real
         # injection path into RoutePlanningAgent._proposal_buffer rather than
         # being planted there by the test.
@@ -915,11 +976,30 @@ class TestCleanRunStaysComplete:
     """The counterweight: "always degraded" must not pass either.
 
     Without this, marking every run degraded would satisfy every test above.
+
+    A clean run has to mean *every stage produced its output*. It used to be
+    built with ``first_stage_publishes=False``, which is the opposite: nothing
+    flowed, so all three downstream stages had nothing to work on. That read as
+    COMPLETE only because those stages returned an empty list silently — the
+    very defect that let a plan run with no plan in it report success. Now that
+    each stage says so, the fixture has to stop relying on the silence: the
+    downstream stages are spied, so each one runs and none reports degradation.
     """
+
+    @staticmethod
+    def _clean_pipeline():
+        pipeline, agents, deps = _build_pipeline(first_stage_publishes=True)
+        for agent_id in (
+            "delivery_prioritization",
+            "compartment_loading",
+            "route_planning",
+        ):
+            _spy_evaluate(agents[agent_id])
+        return pipeline, agents, deps
 
     @pytest.mark.asyncio
     async def test_a_run_with_nothing_to_skip_is_complete_and_not_degraded(self):
-        pipeline, agents, deps = _build_pipeline(first_stage_publishes=False)
+        pipeline, agents, deps = self._clean_pipeline()
 
         run_id = await pipeline.run(tenant_id=TENANT_ID)
         status = await pipeline.get_status(run_id)
@@ -935,7 +1015,7 @@ class TestCleanRunStaysComplete:
 
     @pytest.mark.asyncio
     async def test_every_ws_stage_summary_says_completed_on_a_clean_run(self):
-        pipeline, _, deps = _build_pipeline(first_stage_publishes=False)
+        pipeline, _, deps = self._clean_pipeline()
 
         await pipeline.run(tenant_id=TENANT_ID)
 
@@ -957,21 +1037,26 @@ class TestCleanRunStaysComplete:
         before each stage, one degraded run would mark every later run degraded
         — a false positive that would make the signal worth ignoring.
         """
-        pipeline, agents, _ = _build_pipeline(first_stage_publishes=False)
+        pipeline, agents, _ = self._clean_pipeline()
         loading_spy = _spy_evaluate(
             agents["compartment_loading"],
             publishes=_unroutable_loading_proposal(),
         )
+        # The route stage has to run for real to skip the unroutable plan.
+        del agents["route_planning"].evaluate
 
         degraded_run = await pipeline.run(tenant_id=TENANT_ID)
         assert (
             await pipeline.get_status(degraded_run)
         )["state"] == PipelineState.DEGRADED.value
 
-        # Second run: the loading stage publishes nothing, so the route stage
-        # has no plan to skip and nothing to be degraded about.
+        # Second run: the loading stage publishes nothing, and the route stage
+        # goes back to a spy so it neither skips nor reports being handed
+        # nothing. What is under test is whether the *previous* run's report
+        # leaks, so this run must be clean for an independent reason.
         loading_spy.side_effect = None
         loading_spy.return_value = []
+        _spy_evaluate(agents["route_planning"])
 
         clean_run = await pipeline.run(tenant_id=TENANT_ID)
         status = await pipeline.get_status(clean_run)

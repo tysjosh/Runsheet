@@ -262,19 +262,30 @@ class TestGetPlan:
         assert data["route_plan"] is None
 
     def test_returns_plan_without_route(self):
-        """Loading plan exists but no route yet."""
+        """Loading plan exists but no route yet.
+
+        Answers by index rather than by a fixed list of canned responses. The
+        route lookup tries ``plan_id`` and then falls back to ``run_id``, so a
+        two-element ``side_effect`` is exhausted by the third call and raises
+        ``StopIteration`` — which the endpoint used to swallow along with real
+        Elasticsearch errors, so this test passed on an exception the fake
+        invented. Now that a failed lookup is reported as 503 rather than
+        silently treated as "no route", the fake has to behave like the
+        collaborator it stands in for: an empty result, not a raise.
+        """
         es = _make_mock_es()
         loading_doc = {
             "plan_id": "plan-1",
             "truck_id": "truck-1",
             "tenant_id": "tenant-1",
         }
-        es.search_documents = AsyncMock(
-            side_effect=[
-                {"hits": {"hits": [{"_source": loading_doc}]}},
-                {"hits": {"hits": []}},
-            ]
-        )
+
+        async def _search(index, query, size=10, *args, **kwargs):
+            if index == "mvp_load_plans":
+                return {"hits": {"hits": [{"_source": loading_doc}]}}
+            return {"hits": {"hits": []}}
+
+        es.search_documents = AsyncMock(side_effect=_search)
 
         app, _, _ = _create_test_app(es_service=es)
         client = TestClient(app)

@@ -57,7 +57,11 @@ from Agents.autonomous.fuel_calculations import (
     calculate_refill_priority,
     calculate_refill_quantity,
 )
-from Agents.overlay.base_overlay_agent import OverlayAgentBase
+from Agents.overlay.base_overlay_agent import (
+    DEGRADATION_KIND_NO_INPUT,
+    OverlayAgentBase,
+    build_degradation_reason,
+)
 from Agents.overlay.data_contracts import (
     InterventionProposal,
     RiskClass,
@@ -393,6 +397,19 @@ class TankForecastingAgent(OverlayAgentBase):
             rather than as InterventionProposals.
         """
         if not signals:
+            # A forecast stage that was handed no signal forecasts nothing.
+            # Returning quietly is what let the pipeline report a plan run as
+            # COMPLETE with zero forecasts in it.
+            self.report_degradation(
+                build_degradation_reason(
+                    reason_code="no_input_signals",
+                    kind=DEGRADATION_KIND_NO_INPUT,
+                    detail=(
+                        "no RiskSignal reached the forecasting stage, so no "
+                        "tank was forecast"
+                    ),
+                )
+            )
             return []
 
         tenant_id = signals[0].tenant_id
@@ -423,9 +440,27 @@ class TankForecastingAgent(OverlayAgentBase):
         customer_tanks = await self._query_customer_tanks(tenant_id)
 
         if not stations and not customer_tanks:
-            logger.info(
-                "TankForecastingAgent: no stations or customer_tanks for tenant %s",
+            # The comment above says absence is fine, and for a station-only
+            # tenant it is — that is the ``not stations`` half. Having *neither*
+            # is not fine: there is nothing to forecast, so every downstream
+            # stage receives nothing and the run produces no plan. Report it,
+            # or the caller is told COMPLETE for an empty plan.
+            logger.warning(
+                "TankForecastingAgent: no stations or customer_tanks for "
+                "tenant %s — nothing to forecast",
                 tenant_id,
+            )
+            self.report_degradation(
+                build_degradation_reason(
+                    reason_code="no_stations_or_customer_tanks",
+                    kind=DEGRADATION_KIND_NO_INPUT,
+                    detail=(
+                        "the tenant has neither fuel_stations nor "
+                        "customer_tanks, so no tank could be forecast"
+                    ),
+                    stations=0,
+                    customer_tanks=0,
+                )
             )
             return []
 
