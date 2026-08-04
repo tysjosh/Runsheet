@@ -8,7 +8,7 @@ the four behaviors called out by the task:
 * sign-in establishes a session                 (Req 1.2)
 * session refresh rotates the session token      (Req 2.3)
 * anti-CSRF is enforced on state-changing requests (Req 2.5)
-* the four canonical UserRoles exist             (Req 4.4)
+* every canonical UserRole exists                (Req 4.4)
 
 Deployment is the SuperTokens **managed SaaS core** (design OQ1), which is not
 reachable from CI or a typical local checkout. So the file is split in two:
@@ -18,7 +18,7 @@ reachable from CI or a typical local checkout. So the file is split in two:
    behavior directly against the live SDK recipe configuration — the Session
    recipe enforces ``anti_csrf="VIA_TOKEN"`` and ``cookie_secure=True`` (Req
    2.5/2.2), the EmailPassword sign-in and Session refresh routes are wired
-   under ``/auth`` (Req 1.2/2.3), and the four canonical roles are declared
+   under ``/auth`` (Req 1.2/2.3), and the canonical roles are declared
    (Req 4.4).
 
 2. **Live-core examples** (skipped unless a core is reachable). When a real
@@ -240,19 +240,18 @@ def test_session_recipe_enforces_anti_csrf_and_secure_cookies(
 
 
 def test_canonical_user_roles_are_declared(initialized_supertokens):
-    """The four canonical UserRoles are declared and the recipe is live (Req 4.4).
+    """The canonical UserRoles are declared and the recipe is live (Req 4.4).
 
-    The platform represents ``admin`` / ``dispatcher`` / ``ops_manager`` /
-    ``driver`` / ``platform_admin`` as SuperTokens roles. Assert the canonical
-    set the provisioning script creates is exactly those and that the UserRoles
-    recipe is initialized to back them.
+    The platform represents ``admin`` / ``dispatcher`` / ``driver`` /
+    ``platform_admin`` as SuperTokens roles. Assert the canonical set the
+    provisioning script creates is exactly those and that the UserRoles recipe
+    is initialized to back them.
     """
     from supertokens_python.recipe.userroles.recipe import UserRolesRecipe
 
     assert set(CANONICAL_ROLES) == {
         "admin",
         "dispatcher",
-        "ops_manager",
         "driver",
         # Runsheet-staff role. Added because staff sign in through the same app
         # as customers, so "may act outside my own tenant" needed a role that
@@ -261,8 +260,10 @@ def test_canonical_user_roles_are_declared(initialized_supertokens):
         # administrator from support staff.
         "platform_admin",
     }
-    # No duplicates / no extras in the declared tuple.
-    assert len(CANONICAL_ROLES) == 5
+    # No duplicates / no extras in the declared tuple. ``ops_manager`` was
+    # removed: it was declared but gated nothing, so it advertised a permission
+    # tier that did not exist.
+    assert len(CANONICAL_ROLES) == 4
     # The UserRoles recipe is registered so the roles can exist in the core.
     assert UserRolesRecipe.get_instance().get_recipe_id() == "userroles"
 
@@ -397,7 +398,7 @@ def test_anti_csrf_enforced_on_state_changing_request(live_core):
 
 @pytest.mark.integration
 async def test_canonical_roles_exist_in_core(live_core):
-    """End-to-end: the four canonical UserRoles exist in the core (Req 4.4)."""
+    """End-to-end: every canonical UserRole exists in the core (Req 4.4)."""
     from supertokens_python.recipe.userroles.asyncio import (
         create_new_role_or_add_permissions,
         get_all_roles,
@@ -409,4 +410,7 @@ async def test_canonical_roles_exist_in_core(live_core):
         await create_new_role_or_add_permissions(role, [])
 
     all_roles = set((await get_all_roles()).roles)
-    assert {"admin", "dispatcher", "ops_manager", "driver"}.issubset(all_roles)
+    # Assert against CANONICAL_ROLES rather than a literal set: the loop above
+    # creates every canonical role, so a hardcoded subset silently stops
+    # covering whatever is added to the tuple next.
+    assert set(CANONICAL_ROLES).issubset(all_roles)

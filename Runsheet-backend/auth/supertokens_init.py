@@ -13,8 +13,10 @@ FastAPI app is created, wiring the three recipes the migration uses:
   and writes ``tenant_id`` / ``roles`` / ``has_pii_access`` into the
   access-token payload so those claims are signed by the managed core and can
   never be asserted by the client (Req 3.3).
-* **UserRoles** — represents the canonical roles ``admin`` / ``dispatcher`` /
-  ``ops_manager`` / ``driver`` (Req 4.4).
+* **UserRoles** — represents the canonical roles listed in
+  :data:`CANONICAL_ROLES`: ``admin`` / ``dispatcher`` / ``driver`` /
+  ``platform_admin`` (Req 4.4). That constant is the single source of truth;
+  enumerate from it rather than restating the list.
 
 Deployment is the SuperTokens **managed SaaS core**: the SDK reaches a remote
 core over HTTPS via ``connection_uri`` + ``api_key`` loaded from environment
@@ -66,10 +68,27 @@ logger = logging.getLogger(__name__)
 #: own tenant". Nothing grants it by default — it is provisioned deliberately,
 #: and :data:`CUSTOMER_ASSIGNABLE_ROLES` excludes it so a customer administrator
 #: cannot grant it to themselves.
+#:
+#: No role in this tuple implies another. In particular ``platform_admin`` does
+#: not imply ``admin``: :func:`auth.authorization.require_role` is exact-match
+#: with no implication graph, so a caller holding only ``platform_admin`` is
+#: correctly refused everywhere ``admin`` is required. That refusal is the
+#: intended semantics of an exact-match check, not a shortcoming of it. Staff
+#: accounts therefore carry both roles — see :data:`PLATFORM_STAFF_ROLES`. The
+#: rule is pinned by ``tests/unit/test_tenant_scope_authz.py::
+#: test_platform_admin_alone_does_not_satisfy_require_role``, which fails if
+#: anyone adds the implication.
+#:
+#: ``ops_manager`` was retired. It was declared here from the beginning but
+#: never gated anything: no ``require_role`` call site named it, no inline role
+#: check consulted it, and the frontend never referenced it. A role that grants
+#: nothing is worse than absent — it reads as a real permission tier to anyone
+#: provisioning a user, so an operator could hand it out believing it conferred
+#: access it did not. ``tests/unit/test_tenant_scope_authz.py::
+#: test_ops_manager_is_retired`` fails if it comes back.
 CANONICAL_ROLES: tuple[str, ...] = (
     "admin",
     "dispatcher",
-    "ops_manager",
     "driver",
     "platform_admin",
 )
@@ -80,12 +99,42 @@ PLATFORM_ADMIN_ROLE: str = "platform_admin"
 
 #: Roles a tenant's own administrator may assign. Deliberately excludes
 #: ``platform_admin`` so tenant-scoped admin cannot escalate to cross-tenant.
+#: Every other canonical role is assignable, so this is :data:`CANONICAL_ROLES`
+#: minus the staff role — but it stays an explicit tuple rather than a derived
+#: one, so adding a future privileged role does not silently make it
+#: customer-assignable by omission.
 CUSTOMER_ASSIGNABLE_ROLES: tuple[str, ...] = (
     "admin",
     "dispatcher",
-    "ops_manager",
     "driver",
 )
+
+#: The role set a Runsheet staff account is provisioned with.
+#:
+#: It is **two roles, not one**, and that is deliberate. ``platform_admin`` is a
+#: narrow *additive* capability: it answers "may I point this at a tenant that
+#: is not mine". It does not answer "may I do this at all".
+#: :func:`auth.authorization.require_role` is exact-match and has no
+#: role-implication graph — ``platform_admin`` no more satisfies a requirement
+#: for ``admin`` than ``admin_ops`` does. Teaching it an implication graph was
+#: considered and rejected: it would silently widen every existing and future
+#: ``require_role(tenant, "admin")`` call site, and an explicit role list in
+#: ``auth_users.roles`` is readable in a way an implication graph is not.
+#:
+#: So staff hold ``admin`` to reach the ordinary admin surface, and
+#: ``platform_admin`` to aim it at another tenant. A staff account granted only
+#: ``platform_admin`` gets 403 ``INSUFFICIENT_ROLE`` on every admin endpoint,
+#: which is the correct outcome: it holds the cross-tenant capability but not the
+#: admin role the endpoint asks for. This constant does not change that
+#: behaviour — it records which pair a staff account is meant to hold, a
+#: decision that had not been written down anywhere before.
+#:
+#: Nothing grants this bundle automatically. There is no staff-provisioning
+#: path: an operator inserts the roles into the ``auth_users`` row deliberately,
+#: and :func:`auth.provisioner.provision_all` pushes them to the core.
+#: :data:`CUSTOMER_ASSIGNABLE_ROLES` excludes ``platform_admin``, so a customer
+#: administrator cannot assemble this bundle for themselves.
+PLATFORM_STAFF_ROLES: tuple[str, ...] = ("admin", PLATFORM_ADMIN_ROLE)
 
 #: The form-field id EmailPassword uses for the password field.
 _PASSWORD_FIELD_ID = "password"
@@ -419,6 +468,7 @@ __all__ = [
     "CANONICAL_ROLES",
     "CUSTOMER_ASSIGNABLE_ROLES",
     "PLATFORM_ADMIN_ROLE",
+    "PLATFORM_STAFF_ROLES",
     "SuperTokensConfigError",
     "init_supertokens",
     "is_supertokens_initialized",

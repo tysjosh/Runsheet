@@ -26,6 +26,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from auth.provisioner import AuthUserRow, provision_user
+from auth.supertokens_init import CANONICAL_ROLES
 from tests.unit.test_provisioner import FakeAuthUserStore, FakeSuperTokensAdmin
 
 
@@ -48,10 +49,13 @@ _emails = st.builds(
     _non_blank_text,
 )
 
-# The four canonical roles plus some arbitrary role names, so the property holds
+# The canonical roles plus some arbitrary role names, so the property holds
 # beyond just the sanctioned set. ``provision_user`` de-duplicates while
-# preserving order, so the oracle compares as a set.
-_canonical_roles = st.sampled_from(["admin", "dispatcher", "ops_manager", "driver"])
+# preserving order, so the oracle compares as a set. The pool is read from
+# ``CANONICAL_ROLES`` rather than restated, so a role added there (such as
+# ``platform_admin``) is covered here without a second edit — provisioning must
+# round-trip every canonical role, staff roles included.
+_canonical_roles = st.sampled_from(CANONICAL_ROLES)
 _arbitrary_roles = st.text(
     alphabet=st.characters(blacklist_categories=("Cs", "Cc", "Zs")),
     min_size=1,

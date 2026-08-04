@@ -17,9 +17,11 @@ import {
   Users,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Session from "supertokens-auth-react/recipe/session";
+import { visibleByCanSee } from "../config/modules";
 import { apiService } from "../services/api";
+import { getCurrentUserRoles } from "../utils/auth";
 
 interface SidebarProps {
   activeItem?: string;
@@ -35,7 +37,7 @@ interface SidebarProps {
   onMobileClose?: () => void;
 }
 
-interface NavItem {
+export interface NavItem {
   id: string;
   label: string;
   icon: typeof LayoutDashboard;
@@ -44,7 +46,12 @@ interface NavItem {
 // Grouped navigation — sections keep the 13 destinations scannable and put the
 // three config-flavored destinations (Setup / Admin / Settings) together under
 // one "Workspace" heading so they're no longer guessed-at siblings of ops.
-const NAV_SECTIONS: { label: string; items: NavItem[] }[] = [
+//
+// Exported so `config/modules.test.ts` can drift-guard the real array rather
+// than a copy: every id here must have a registry entry, because `canSee`
+// returns false for an unknown id and an unnoticed typo would silently delete a
+// destination.
+export const NAV_SECTIONS: { label: string; items: NavItem[] }[] = [
   {
     label: "Operations",
     items: [
@@ -88,6 +95,32 @@ export default function Sidebar({
   const [email, setEmail] = useState<string>("");
   const [isMobile, setIsMobile] = useState(false);
   const asideRef = useRef<HTMLElement>(null);
+  // `null` means "not resolved yet", which `canSee` treats as no roles. Nothing
+  // role-gated appears until the session's claims are in hand, so a nav item the
+  // user may not have never flashes on screen.
+  const [roles, setRoles] = useState<readonly string[] | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const r = await getCurrentUserRoles();
+      if (!cancelled) setRoles(r);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Filter items, then drop any section whose items are all gone — an empty
+  // "Commerce" heading is worse than no heading.
+  const visibleSections = useMemo(
+    () =>
+      NAV_SECTIONS.map((section) => ({
+        ...section,
+        items: visibleByCanSee(section.items, { roles }),
+      })).filter((section) => section.items.length > 0),
+    [roles],
+  );
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -216,7 +249,7 @@ export default function Sidebar({
           aria-label="Primary"
           className="h-full overflow-y-auto p-4 pt-6 pb-28"
         >
-          {NAV_SECTIONS.map((section, i) => (
+          {visibleSections.map((section, i) => (
             <div key={section.label} className={i > 0 ? "mt-6" : ""}>
               {collapsed ? (
                 i > 0 && (

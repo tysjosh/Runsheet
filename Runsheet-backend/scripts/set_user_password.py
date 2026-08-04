@@ -78,7 +78,10 @@ async def _run(
 
     try:
         if make_link:
-            result = await create_password_set_link(email)
+            # tenant_id=None is the unscoped break-glass lookup. Legitimate
+            # here: this is the operator CLI, which already requires direct
+            # DATABASE_URL access, so a tenant scope would add no boundary.
+            result = await create_password_set_link(email, tenant_id=None)
             print(f"\n{'=' * 72}")
             print("Password-set link issued")
             print(f"{'=' * 72}")
@@ -98,7 +101,8 @@ async def _run(
                 logger.error("Passwords do not match")
                 return 1
 
-        await set_password_for_email(email, password)
+        # tenant_id=None: unscoped break-glass, as above.
+        await set_password_for_email(email, password, tenant_id=None)
         print(f"\nPassword set for {email}. They can now sign in.\n")
         return 0
     except PasswordAdminError as exc:

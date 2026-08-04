@@ -42,6 +42,7 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { hasAnyRole } from "../../config/modules";
 import { ApiError } from "../../services/api";
 import type {
   StormModeActiveOverride,
@@ -60,28 +61,29 @@ import { useInShellNav } from "../ui/InShellNav";
 // ─── Role gate (Req 9.4.4) ───────────────────────────────────────────────────
 
 /**
- * Roles permitted to submit Storm_Mode overrides. Mirrors the backend
- * ``_STORM_MODE_OVERRIDE_ROLES`` frozenset in
- * :mod:`fuel.api.fuel_ops_endpoints`. The UI gate is the first line of
- * defense; the backend re-checks the JWT context so a non-permitted
- * caller who bypasses the UI still gets HTTP 403 ``forbidden_role``.
+ * Roles permitted to submit Storm_Mode overrides.
+ *
+ * Mirrors ``require_role(tenant, "dispatcher", "admin")`` on
+ * ``POST /api/fuel/storm-mode/override``, which is an **exact** match. The
+ * docstring here used to point at a ``_STORM_MODE_OVERRIDE_ROLES`` frozenset
+ * that no longer exists, and the gate below used to be a substring match — so
+ * this UI enabled the override form for a tenant role lexicon like
+ * ``lead-dispatcher`` or ``ops-admin-eu``, which the backend then refused with
+ * 403. A permissive UI gate in front of a strict backend is not a lenient
+ * choice; it is a broken control.
  */
-const OVERRIDE_ROLE_MARKERS = ["dispatcher", "admin"] as const;
+const OVERRIDE_ROLES = ["dispatcher", "admin"] as const;
 
-/** Case-insensitive substring match on any role-token in the list. */
+/**
+ * Exact role match, case- and whitespace-insensitive.
+ *
+ * Routed through the same {@link hasAnyRole} helper `config/modules.ts` uses, so
+ * there is one definition of "holds this role" in the web app.
+ */
 export function canSubmitStormModeOverride(
   roles: readonly string[] | null | undefined,
 ): boolean {
-  if (!roles || roles.length === 0) return false;
-  for (const raw of roles) {
-    if (typeof raw !== "string") continue;
-    const normalized = raw.trim().toLowerCase();
-    if (!normalized) continue;
-    for (const marker of OVERRIDE_ROLE_MARKERS) {
-      if (normalized.includes(marker)) return true;
-    }
-  }
-  return false;
+  return hasAnyRole(roles, OVERRIDE_ROLES);
 }
 
 // ─── Poll interval ───────────────────────────────────────────────────────────

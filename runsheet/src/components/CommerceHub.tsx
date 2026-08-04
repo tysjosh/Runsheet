@@ -11,7 +11,9 @@ import {
   Sliders,
   TrendingUp,
 } from "lucide-react";
-import { lazy, Suspense, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
+import { canSee, visibleByCanSee } from "../config/modules";
+import { getCurrentUserRoles } from "../utils/auth";
 import AccountDetailPage from "./commerce/AccountDetailPage";
 import AccountsListPage from "./commerce/AccountsListPage";
 import InvoiceDetailPage from "./commerce/InvoiceDetailPage";
@@ -36,7 +38,8 @@ const PricingRulesPage = lazy(() => import("./compliance/PricingRulesPage"));
 // top-level sidebar destination.
 const ReconciliationPage = lazy(() => import("./ops/ReconciliationPage"));
 
-const TABS: Tab[] = [
+// Exported for the registry drift guard in `config/modules.test.ts`.
+export const TABS: Tab[] = [
   {
     id: "accounts",
     label: "Accounts",
@@ -85,6 +88,19 @@ export default function CommerceHub() {
   const [selectedInvoiceId, setSelectedInvoiceId] = useState<string | null>(
     null,
   );
+  // `null` until resolved; `canSee` treats that as no roles.
+  const [roles, setRoles] = useState<readonly string[] | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const r = await getCurrentUserRoles();
+      if (!cancelled) setRoles(r);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const handleSelectAccount = (accountId: string) => {
     setSelectedAccountId(accountId);
@@ -111,6 +127,16 @@ export default function CommerceHub() {
     setActiveTab("accounts");
   };
 
+  const visibleTabs = visibleByCanSee(TABS, { roles });
+  // Accounts is Tier 4, so it can be hidden while the hub itself stays visible
+  // for Invoices and Reconciliation. Fall back to the first visible tab rather
+  // than rendering an empty pane under a tab bar that no longer offers it.
+  const effectiveTab =
+    visibleTabs.some((t) => t.id === activeTab) || visibleTabs.length === 0
+      ? activeTab
+      : visibleTabs[0].id;
+  const shows = (id: string) => effectiveTab === id && canSee(id, { roles });
+
   return (
     <div className="flex flex-col h-full">
       <PageHeader
@@ -119,8 +145,8 @@ export default function CommerceHub() {
         icon={<DollarSign className="w-5 h-5" />}
       />
       <TabNavigation
-        tabs={TABS}
-        activeTab={activeTab}
+        tabs={visibleTabs}
+        activeTab={effectiveTab}
         onChange={(tabId) => {
           setActiveTab(tabId);
           setSelectedAccountId(null); // Reset account selection when changing tabs
@@ -128,7 +154,7 @@ export default function CommerceHub() {
         }}
       />
       <div className="flex-1 overflow-auto">
-        {activeTab === "accounts" &&
+        {shows("accounts") &&
           (selectedAccountId ? (
             <AccountDetailPage
               accountId={selectedAccountId}
@@ -137,7 +163,7 @@ export default function CommerceHub() {
           ) : (
             <AccountsListPage onSelectAccount={handleSelectAccount} />
           ))}
-        {activeTab === "invoices" &&
+        {shows("invoices") &&
           (selectedInvoiceId ? (
             <InvoiceDetailPage
               invoiceId={selectedInvoiceId}
@@ -147,28 +173,28 @@ export default function CommerceHub() {
           ) : (
             <InvoicesListPage onSelectInvoice={handleSelectInvoice} />
           ))}
-        {activeTab === "price-books" && <PriceBookEditor />}
-        {activeTab === "pricing-rules" && (
+        {shows("price-books") && <PriceBookEditor />}
+        {shows("pricing-rules") && (
           <Suspense
             fallback={<LoadingSpinner message="Loading pricing rules..." />}
           >
             <PricingRulesPage />
           </Suspense>
         )}
-        {activeTab === "contracts" && (
+        {shows("contracts") && (
           <Suspense
             fallback={<LoadingSpinner message="Loading contracts..." />}
           >
             <PriceProtectionContractsPage />
           </Suspense>
         )}
-        {activeTab === "payments" && <PaymentsListPage />}
-        {activeTab === "ar-aging" && (
+        {shows("payments") && <PaymentsListPage />}
+        {shows("ar-aging") && (
           <Suspense fallback={<LoadingSpinner message="Loading AR Aging..." />}>
             <ARAgingDashboard />
           </Suspense>
         )}
-        {activeTab === "reconciliation" && (
+        {shows("reconciliation") && (
           <Suspense
             fallback={<LoadingSpinner message="Loading reconciliation..." />}
           >
