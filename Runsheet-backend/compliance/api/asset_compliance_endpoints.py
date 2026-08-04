@@ -25,6 +25,7 @@ from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, Request
 
+from compliance.api._authz import compliance_ops_dependency
 from compliance.services.asset_compliance_status_service import (
     AssetComplianceStatusService,
 )
@@ -44,9 +45,13 @@ _asset_compliance_service: Optional[AssetComplianceStatusService] = None
 # assignment UI reaches the asset's compliance signal from the same namespace
 # it lists assets. The ``/{asset_id}/compliance`` path is distinct from the
 # ``/{asset_id}`` asset read in ``data_endpoints.py`` (no route collision).
+# DOT / IRS records, gated to the operations roles. Attached to the router
+# rather than to each handler so a route added later inherits it: every module
+# in this package previously had no role check at all.
 router = APIRouter(
     prefix="/api/fleet/assets",
     tags=["Compliance"],
+    dependencies=[Depends(compliance_ops_dependency)],
 )
 
 

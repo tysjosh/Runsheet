@@ -36,6 +36,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
+from compliance.api._authz import compliance_ops_dependency
 from compliance.services.kfactor_calibration_service import (
     KFactorCalibrationService,
 )
@@ -51,7 +52,13 @@ logger = logging.getLogger(__name__)
 
 _kfactor_service: Optional[KFactorCalibrationService] = None
 
-router = APIRouter(prefix="/api/compliance/kfactor", tags=["Compliance"])
+# DOT / IRS records, gated to the operations roles. Attached to the router
+# rather than to each handler so a route added later inherits it: every module
+# in this package previously had no role check at all.
+router = APIRouter(
+    prefix="/api/compliance/kfactor", tags=["Compliance"],
+    dependencies=[Depends(compliance_ops_dependency)],
+)
 
 
 def configure_kfactor_api(*, kfactor_service: KFactorCalibrationService) -> None:

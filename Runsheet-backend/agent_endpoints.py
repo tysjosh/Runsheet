@@ -21,12 +21,13 @@ from pydantic import BaseModel, Field
 from errors.codes import ErrorCode
 from errors.exceptions import (
     AppException,
-    forbidden,
     internal_error,
     resource_not_found,
     validation_error,
 )
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
+
+from Agents.api_authz import agent_admin_dependency, agent_ops_dependency
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +41,16 @@ _autonomy_config_service = None
 _memory_service = None
 _feedback_service = None
 
-router = APIRouter(prefix="/api/agent", tags=["agent"])
+# Role gate for the whole surface. Attached to the router (not per handler) so a
+# route added later inherits it: 13 of the 14 routes here were previously ungated
+# precisely because each handler had to remember its own check. Routes that change
+# tenant-wide agent policy layer `agent_admin_dependency` on top — see
+# `Agents/api_authz.py` for why the queue is the dispatcher's and policy is not.
+router = APIRouter(
+    prefix="/api/agent",
+    tags=["agent"],
+    dependencies=[Depends(agent_ops_dependency)],
+)
 
 # Auth policy declaration for this router (Req 5.2)
 # JWT_REQUIRED for every agent endpoint, including GET /api/agent/health.
@@ -375,7 +385,7 @@ async def get_autonomy_level(
     return {"level": level}
 
 
-@router.patch("/config/autonomy")
+@router.patch("/config/autonomy", dependencies=[Depends(agent_admin_dependency)])
 async def update_autonomy_level(
     body: AutonomyUpdateRequest,
     request: Request,
@@ -384,16 +394,17 @@ async def update_autonomy_level(
     """
     Update the tenant's autonomy level (admin-only).
 
-    Requires admin-level JWT claims. Logs the change to the activity log.
+    The admin requirement is enforced by ``agent_admin_dependency`` on the route
+    decorator, which raises ``insufficient_role`` (403) before this body runs.
+    It replaced an inline ``if "admin" not in tenant.roles`` check so this router
+    uses the same mechanism as commerce, compliance and inventory rather than a
+    second hand-rolled one; both answer 403, so ``AgentSettingsPage``'s
+    ``err.status === 403`` handling is unchanged (Req 3.5).
+
+    Logs the change to the activity log.
 
     Validates: Requirements 10.4, 10.5
     """
-    # Admin-only JWT check: verify admin role from JWT claims (Req 2.5)
-    if "admin" not in tenant.roles:
-        raise forbidden(
-            message="Only admin users can update the autonomy level",
-        )
-
     user_id = tenant.user_id
 
     svc = _get_autonomy_config()
@@ -495,7 +506,7 @@ async def list_memories(
         raise internal_error(message="Failed to list memories", details={"error": str(e)})
 
 
-@router.delete("/memory/{memory_id}")
+@router.delete("/memory/{memory_id}", dependencies=[Depends(agent_admin_dependency)])
 async def delete_memory(
     memory_id: str,
     request: Request,
@@ -647,7 +658,7 @@ async def get_agent_health(request: Request):
     return {"agents": health}
 
 
-@router.post("/{agent_id}/pause")
+@router.post("/{agent_id}/pause", dependencies=[Depends(agent_admin_dependency)])
 async def pause_agent(agent_id: str, request: Request):
     """
     Pause an autonomous agent.
@@ -691,7 +702,7 @@ async def pause_agent(agent_id: str, request: Request):
     return {"agent_id": agent_id, "status": "stopped"}
 
 
-@router.post("/{agent_id}/resume")
+@router.post("/{agent_id}/resume", dependencies=[Depends(agent_admin_dependency)])
 async def resume_agent(agent_id: str, request: Request):
     """
     Resume a paused autonomous agent.
