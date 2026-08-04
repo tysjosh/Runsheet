@@ -154,29 +154,59 @@ class TestWriteSideDoesNotMirrorARetiredAggregate:
         assert applied is True, "the ES write must still be reported"
         assert calls == [], f"mirrored into a retired aggregate: {calls}"
 
-    def test_the_seeder_never_opens_a_repository_over_the_retired_aggregate(self):
-        """``seed_all_data`` must not reach for the dropped table.
+    def test_the_seeder_writes_shipments_to_elasticsearch(self, monkeypatch):
+        """Run the seeder's shipment entity and see where the write lands.
 
-        Asserted on the source rather than by calling the seeder because
-        importing ``seed_all_data`` builds a live Elasticsearch client at module
-        scope. The two constructor calls below are verbatim what raised, and
-        they are scoped to the whole module so moving the code into a helper
-        does not slip past the check.
+        It used to open ``CurrentStateRepository("shipment")`` and write nothing
+        else, so the ``ValueError`` took out the whole entity: the Ops
+        Monitoring shipment/SLA sections and the Failure Analytics tab seeded
+        empty. Elasticsearch is the only surviving store, so every document must
+        arrive through the bulk helper — if the seeder went back to Postgres,
+        ``recorded`` stays empty and this fails.
         """
-        import pathlib
+        import seed_all_data
 
-        source = (
-            pathlib.Path(__file__).resolve().parents[2] / "seed_all_data.py"
-        ).read_text()
+        recorded: list = []
+        monkeypatch.setattr(seed_all_data, "_index_count", lambda index: 0)
+        monkeypatch.setattr(seed_all_data, "_bulk", recorded.extend)
 
-        for constructor in (
-            f'CurrentStateRepository("{RETIRED}")',
-            f'HybridReadRepository("{RETIRED}")',
-        ):
-            assert constructor not in source, (
-                f"seed_all_data.py still constructs {constructor} — rev 0007 "
-                "dropped that table"
-            )
-        assert "SHIPMENTS_CURRENT" in source, (
-            "the shipment seeder should target the surviving ES index"
+        seed_all_data.seed_shipments(force=True)
+
+        assert recorded, "the shipment seeder wrote nothing to Elasticsearch"
+        headers = [a for a in recorded if "index" in a]
+        docs = [a for a in recorded if "index" not in a]
+        assert {h["index"]["_index"] for h in headers} == {"shipments_current"}
+        assert len(docs) == len(headers) > 0
+        assert all(d["shipment_id"].startswith("SHP-") for d in docs)
+
+    def test_the_seeded_documents_fit_the_strict_shipments_mapping(
+        self, monkeypatch
+    ):
+        """Every seeded field must be mapped, or ES rejects the whole document.
+
+        ``shipments_current`` is ``dynamic: strict``. Pointing the seeder at ES
+        is only a fix if the documents it writes are acceptable there.
+        """
+        import seed_all_data
+        from ops.services.ops_es_service import OpsElasticsearchService
+
+        service = OpsElasticsearchService.__new__(OpsElasticsearchService)
+        mapped = set(
+            service._get_shipments_current_mapping()["mappings"]["properties"]
         )
+
+        recorded: list = []
+        monkeypatch.setattr(seed_all_data, "_index_count", lambda index: 0)
+        monkeypatch.setattr(seed_all_data, "_bulk", recorded.extend)
+
+        seed_all_data.seed_shipments(force=True)
+
+        docs = [a for a in recorded if "index" not in a]
+        assert docs
+        for doc in docs:
+            unmapped = sorted(set(doc) - mapped)
+            assert not unmapped, (
+                f"seeded shipment carries {unmapped}, which "
+                f"shipments_current does not map; a strict index rejects the "
+                f"entire document"
+            )
