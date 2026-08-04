@@ -30,7 +30,12 @@
  * Requirements: 11.16, 5.18, 15.5
  */
 
-import * as FileSystem from 'expo-file-system';
+// SDK 54 (expo-file-system 19) promoted the File/Directory API to the package
+// root and moved the URI-and-string API this module is built on to
+// `expo-file-system/legacy`. The legacy entry point is still fully supported;
+// the root re-exports deprecated stubs of the same names that throw at runtime,
+// so the specifier matters even where the types happen to line up.
+import * as FileSystem from 'expo-file-system/legacy';
 
 import { registerSessionPurgeHandler } from './session';
 

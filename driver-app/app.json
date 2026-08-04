@@ -78,7 +78,9 @@
           "isAndroidForegroundServiceEnabled": true
         }
       ],
-      "expo-task-manager"
+      "expo-task-manager",
+      "expo-font",
+      "expo-web-browser"
     ],
     "experiments": {
       "typedRoutes": true
