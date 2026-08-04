@@ -23,7 +23,6 @@ async def initialize(app, container: ServiceContainer) -> None:
     from ops.ingestion.poison_queue import PoisonQueueService
     from ops.ingestion.replay import configure_replay_service
     from ops.services.feature_flags import FeatureFlagService
-    from ops.webhooks.receiver import configure_webhook_receiver
     from ops.api.endpoints import configure_ops_api
     from ops.services.drift_detector import configure_drift_detector
     from ops.websocket.ops_ws import OpsWebSocketManager, bind_container as bind_ops_ws
@@ -81,19 +80,12 @@ async def initialize(app, container: ServiceContainer) -> None:
     await ops_idempotency.connect()
     await ops_feature_flags.connect()
 
-    # Wire webhook receiver
-    configure_webhook_receiver(
-        adapter=ops_adapter,
-        idempotency_service=ops_idempotency,
-        poison_queue_service=ops_poison_queue,
-        ops_es_service=ops_es_service,
-        ws_manager=ops_ws_manager,
-        feature_flag_service=ops_feature_flags,
-        webhook_secret=settings.dinee_webhook_secret,
-        webhook_tenant_id=settings.dinee_webhook_tenant_id,
-        idempotency_ttl_hours=settings.dinee_idempotency_ttl_hours,
-    )
-    logger.info("Webhook receiver configured")
+    # NB: there is no inbound webhook receiver to wire any more. The Dinee
+    # legacy route (``POST /webhooks/dinee``) was removed along with its
+    # module; ``ops_adapter`` and ``ops_poison_queue`` survive because the
+    # replay service below drives them. Order intake now arrives exclusively
+    # through the channel-registry surfaces (``POST /webhooks/orders/{channel_id}``,
+    # ``POST /voice-intake``, ``POST /api/orders``, and the CSV importer).
 
     # Wire ops API
     configure_ops_api(

@@ -352,18 +352,6 @@ export interface InventoryItem {
   lastUpdated: string;
 }
 
-export interface SupportTicket {
-  id: string;
-  customer: string;
-  issue: string;
-  description: string;
-  priority: "low" | "medium" | "high" | "urgent";
-  status: "open" | "in_progress" | "resolved" | "closed";
-  createdAt: string;
-  assignedTo?: string;
-  relatedOrder?: string;
-}
-
 export interface AnalyticsMetrics {
   delivery_performance: {
     title: string;
@@ -684,33 +672,11 @@ class ApiService {
     });
   }
 
-  // Support Management
-  async getSupportTickets(): Promise<ApiResponse<SupportTicket[]>> {
-    return this.request<SupportTicket[]>("/support/tickets");
-  }
-
-  async getSupportTicketById(id: string): Promise<ApiResponse<SupportTicket>> {
-    return this.request<SupportTicket>(`/support/tickets/${id}`);
-  }
-
-  async createSupportTicket(
-    ticket: Omit<SupportTicket, "id" | "createdAt">,
-  ): Promise<ApiResponse<SupportTicket>> {
-    return this.request<SupportTicket>("/support/tickets", {
-      method: "POST",
-      body: JSON.stringify(ticket),
-    });
-  }
-
-  async updateSupportTicket(
-    id: string,
-    data: Partial<SupportTicket>,
-  ): Promise<ApiResponse<SupportTicket>> {
-    return this.request<SupportTicket>(`/support/tickets/${id}`, {
-      method: "PATCH",
-      body: JSON.stringify(data),
-    });
-  }
+  // Support Management was removed with the Support component. Of the four
+  // methods that lived here, only the list had a backend route at all — and that
+  // one sits behind `LEGACY_NG_DELIVERY_ENABLED` (false in every environment,
+  // audit 2026-05-08 recommendation #1), so it answered 404. Create, detail and
+  // update were never implemented: `POST /api/support/tickets` returns 405.
 
   // Analytics
   async getAnalyticsMetrics(

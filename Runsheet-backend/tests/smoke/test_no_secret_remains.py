@@ -161,7 +161,6 @@ def prod_supertokens_env_vars():
         "GOOGLE_CLOUD_PROJECT": "test-project-id",
         "ENVIRONMENT": "production",
         "REDIS_URL": "redis://redis.internal:6379",
-        "DINEE_WEBHOOK_SECRET": "prod-webhook-secret",
         "CORS_ORIGINS": '["https://app.runsheet.com"]',
         "AUTH_PROVIDER": "supertokens",
         "SUPERTOKENS_CONNECTION_URI": "https://core.supertokens.example.com",

@@ -9,7 +9,6 @@ import {
   LayoutDashboard,
   LogOut,
   Radio,
-  Settings,
   Shield,
   SlidersHorizontal,
   Truck,
@@ -78,7 +77,8 @@ export const NAV_SECTIONS: { label: string; items: NavItem[] }[] = [
     items: [
       { id: "setup", label: "Setup", icon: SlidersHorizontal },
       { id: "admin", label: "Admin", icon: Shield },
-      { id: "settings", label: "Settings", icon: Settings },
+      // No "Settings" entry: it had emptied down to a single admin-policy tab
+      // (Agent Settings), which now lives in AdminHub beside Agent Monitoring.
     ],
   },
 ];

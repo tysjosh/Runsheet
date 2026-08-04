@@ -190,11 +190,7 @@ ROUTE_FIXTURES: Dict[str, RouteFixture] = {
     ),
 
     # ---- Webhook endpoints ----
-    "POST /webhooks/dinee": RouteFixture(
-        method="POST",
-        json={"event_type": "test"},
-        headers={"X-Dinee-Signature": "invalid-sig"},
-    ),
+    # POST /webhooks/dinee — removed with its module; the route no longer exists.
     # POST /webhooks/orders/{channel_id} — skip (HMAC required, no JWT)
 
     # ---- Order intake pipeline endpoints ----

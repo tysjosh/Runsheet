@@ -31,8 +31,10 @@ describe("entityHref — canonical owning-module route map", () => {
     ["invoice", "INV-1", "/commerce/invoices/INV-1"],
     ["order", "ORD-1", "/orders/ORD-1"],
     ["job", "JOB-1", "/ops/scheduling/JOB-1"],
-    ["asset", "ASSET-1", "/ops/tracking/ASSET-1"],
-    ["driver", "DRV-1", "/ops/drivers?driver=DRV-1"],
+    ["asset", "ASSET-1", "/dashboard/fleet?asset=ASSET-1"],
+    // `/dashboard/drivers`, not `/ops/drivers`: the latter is an empty
+    // directory with no `page.tsx`, so it never resolved to a route.
+    ["driver", "DRV-1", "/dashboard/drivers?driver=DRV-1"],
     ["tank", "TANK-1", "/ops/fuel/tanks/TANK-1"],
     ["depot", "DEP-1", "/ops/fuel/depots/DEP-1"],
     ["terminal", "TERM-1", "/compliance/terminals/TERM-1"],
@@ -127,13 +129,13 @@ describe("EntityLink — empty/absent reference", () => {
   it("links optimistically on a bare id when no expanded link is present", () => {
     render(<EntityLink type="asset" id="ASSET-9" />);
     const anchor = screen.getByRole("link", { name: /ASSET-9/ });
-    expect(anchor).toHaveAttribute("href", "/ops/tracking/ASSET-9");
+    expect(anchor).toHaveAttribute("href", "/dashboard/fleet?asset=ASSET-9");
   });
 
   it("uses the label as display text for an optimistic link", () => {
     render(<EntityLink type="driver" id="DRV-3" label="Jane Driver" />);
     const anchor = screen.getByRole("link", { name: /Jane Driver/ });
-    expect(anchor).toHaveAttribute("href", "/ops/drivers?driver=DRV-3");
+    expect(anchor).toHaveAttribute("href", "/dashboard/drivers?driver=DRV-3");
     expect(anchor).toHaveTextContent("Jane Driver (DRV-3)");
   });
 

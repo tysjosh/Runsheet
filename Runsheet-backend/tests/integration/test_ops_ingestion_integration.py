@@ -1,16 +1,33 @@
 """
 Integration tests for the Ops ingestion pipeline.
 
-Tests the full flow: Webhook → Adapter → ES upsert, verifying that
-documents land in all three indices (shipments_current, shipment_events,
-riders_current) with correct field mappings.
+Tests the full flow: Adapter → ES upsert, verifying that documents land in all
+three indices (shipments_current, shipment_events, riders_current) with correct
+field mappings.
 
-Validates: Requirements 24.1-24.3
+Previously this suite drove the pipeline through ``POST /webhooks/dinee``. That
+route and its module were removed, and with them the receiver's routing from a
+:class:`~ops.ingestion.adapter.TransformResult` to the three ES calls. The
+surviving implementation of that same routing is
+:meth:`ops.ingestion.replay.ReplayService._process_record`, whose own docstring
+describes it as processing records "through the same pipeline as live webhook
+events: idempotency check → transform → upsert". These tests now bind to it, so
+they exercise real production code rather than a reimplementation in the test
+harness.
+
+Two assertions did not survive the move, and are deliberately not faked here:
+
+* **HMAC rejection.** Signature verification was the route's job. It is now
+  covered directly against the shared verifier in
+  ``tests/property/test_hmac_property.py``.
+* **Poison-queue routing on an unsupported schema version.** The receiver
+  enqueued the payload; ``_process_record`` has no poison queue and instead
+  counts the record as failed. The test below asserts the behaviour that
+  actually exists rather than the behaviour that used to.
+
+Validates: Requirements 24.1-24.3, 3.3, 3.4
 """
 
-import hashlib
-import hmac
-import json
 import sys
 from unittest.mock import AsyncMock, MagicMock
 
@@ -24,48 +41,24 @@ _mock_es_module.ElasticsearchService = MagicMock
 _mock_es_module.elasticsearch_service = MagicMock()
 sys.modules.setdefault("services.elasticsearch_service", _mock_es_module)
 
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
-
-from ops.webhooks.receiver import configure_webhook_receiver, router as webhook_router
-from ops.ingestion.adapter import (
+from ops.ingestion.adapter import (  # noqa: E402
     AdapterTransformer,
     SHIPMENTS_CURRENT_FIELDS,
     SHIPMENT_EVENTS_FIELDS,
     RIDERS_CURRENT_FIELDS,
 )
-from ops.ingestion.handlers.v1_0 import V1SchemaHandler
-from tests.fixtures import load_fixture, load_all_webhook_fixtures
+from ops.ingestion.handlers.v1_0 import V1SchemaHandler  # noqa: E402
+from ops.ingestion.replay import ReplayJobStatus, ReplayService  # noqa: E402
+from tests.fixtures import load_fixture, load_all_webhook_fixtures  # noqa: E402
 
 pytestmark = pytest.mark.integration
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-WEBHOOK_SECRET = "integration-test-secret"
 TENANT_ID = "tenant-test-1"
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _sign(payload: dict, secret: str = WEBHOOK_SECRET) -> str:
-    body = json.dumps(payload).encode("utf-8")
-    return hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
-
-
-def _post(client: TestClient, payload: dict, secret: str = WEBHOOK_SECRET):
-    body = json.dumps(payload)
-    sig = _sign(payload, secret)
-    return client.post(
-        "/webhooks/dinee",
-        content=body,
-        headers={
-            "X-Dinee-Signature": sig,
-            "Content-Type": "application/json",
-        },
-    )
 
 
 class _InMemoryStore:
@@ -75,28 +68,22 @@ class _InMemoryStore:
         self.shipments: list[dict] = []
         self.events: list[dict] = []
         self.riders: list[dict] = []
-        self.poison_queue: list[dict] = []
 
     def reset(self):
         self.shipments.clear()
         self.events.clear()
         self.riders.clear()
-        self.poison_queue.clear()
 
 
-def _build_integration_app(store: _InMemoryStore, *, feature_flag_service=None):
+def _build_pipeline(store: _InMemoryStore):
+    """Wire a real adapter + V1 handler into ReplayService with a capturing ES.
+
+    Only Elasticsearch and Redis are faked. The adapter, the V1 schema handler,
+    and the transform-to-upsert routing are all the real implementations.
     """
-    Build a FastAPI test app with the real adapter pipeline but mocked
-    ES/Redis so we can capture what gets indexed.
-    """
-    app = FastAPI()
-    app.include_router(webhook_router)
-
-    # Real adapter with V1 handler
     adapter = AdapterTransformer()
     adapter.register_handler("1.0", V1SchemaHandler())
 
-    # Mock idempotency service
     _processed_ids: set[str] = set()
     idempotency = AsyncMock()
 
@@ -109,7 +96,6 @@ def _build_integration_app(store: _InMemoryStore, *, feature_flag_service=None):
     idempotency.is_duplicate = AsyncMock(side_effect=_is_dup)
     idempotency.mark_processed = AsyncMock(side_effect=_mark)
 
-    # Mock ES service — capture indexed documents
     ops_es = AsyncMock()
 
     async def _upsert_shipment(doc):
@@ -127,36 +113,17 @@ def _build_integration_app(store: _InMemoryStore, *, feature_flag_service=None):
     ops_es.upsert_rider_current = AsyncMock(side_effect=_upsert_rider)
     ops_es.append_shipment_event = AsyncMock(side_effect=_append_event)
 
-    # Mock poison queue
-    poison_queue = AsyncMock()
-
-    async def _store_failed(payload, error, error_type, tenant_id="", trace_id=""):
-        store.poison_queue.append({
-            "payload": payload,
-            "error": error,
-            "error_type": error_type,
-        })
-
-    poison_queue.store_failed_event = AsyncMock(side_effect=_store_failed)
-
-    configure_webhook_receiver(
+    service = ReplayService(
         adapter=adapter,
-        idempotency_service=idempotency,
-        poison_queue_service=poison_queue,
-        ops_es_service=ops_es,
-        ws_manager=None,
-        feature_flag_service=feature_flag_service,
-        webhook_secret=WEBHOOK_SECRET,
-        webhook_tenant_id="",
+        idempotency=idempotency,
+        ops_es=ops_es,
+        settings=MagicMock(),
     )
+    return service, {"idempotency": idempotency, "ops_es": ops_es}
 
-    client = TestClient(app)
-    return client, {
-        "idempotency": idempotency,
-        "ops_es": ops_es,
-        "poison_queue": poison_queue,
-        "_processed_ids": _processed_ids,
-    }
+
+def _new_job() -> ReplayJobStatus:
+    return ReplayJobStatus(job_id="job-test", tenant_id=TENANT_ID)
 
 
 # ===========================================================================
@@ -166,7 +133,7 @@ def _build_integration_app(store: _InMemoryStore, *, feature_flag_service=None):
 
 class TestIngestionPipelineIntegration:
     """
-    End-to-end ingestion: Webhook → Adapter → ES upsert.
+    End-to-end ingestion: Adapter → ES upsert.
     Verifies documents in all three indices.
 
     Validates: Requirements 24.1-24.3
@@ -175,77 +142,74 @@ class TestIngestionPipelineIntegration:
     @pytest.fixture(autouse=True)
     def setup(self):
         self.store = _InMemoryStore()
-        self.client, self.ctx = _build_integration_app(self.store)
+        self.service, self.ctx = _build_pipeline(self.store)
+        self.job = _new_job()
+
+    async def _ingest(self, payload: dict) -> None:
+        """Push one webhook-shaped record through the real pipeline."""
+        await self.service._process_record(self.job, payload, TENANT_ID)
 
     # --- Shipment events produce shipment + event docs ---
 
-    def test_shipment_created_indexes_shipment_and_event(self):
+    async def test_shipment_created_indexes_shipment_and_event(self):
         """shipment_created → shipments_current + shipment_events."""
-        payload = load_fixture("shipment_created")
-        resp = _post(self.client, payload)
+        await self._ingest(load_fixture("shipment_created"))
 
-        assert resp.status_code == 200
-        assert resp.json()["status"] == "processed"
+        assert self.job.failed_count == 0
         assert len(self.store.shipments) == 1
         assert len(self.store.events) == 1
         assert len(self.store.riders) == 0
 
-    def test_shipment_updated_indexes_shipment_and_event(self):
-        payload = load_fixture("shipment_updated")
-        resp = _post(self.client, payload)
+    async def test_shipment_updated_indexes_shipment_and_event(self):
+        await self._ingest(load_fixture("shipment_updated"))
 
-        assert resp.status_code == 200
+        assert self.job.failed_count == 0
         assert len(self.store.shipments) == 1
         assert self.store.shipments[0]["status"] == "in_transit"
         assert len(self.store.events) == 1
 
-    def test_shipment_delivered_indexes_shipment_and_event(self):
-        payload = load_fixture("shipment_delivered")
-        resp = _post(self.client, payload)
+    async def test_shipment_delivered_indexes_shipment_and_event(self):
+        await self._ingest(load_fixture("shipment_delivered"))
 
-        assert resp.status_code == 200
+        assert self.job.failed_count == 0
         assert self.store.shipments[0]["status"] == "delivered"
 
-    def test_shipment_failed_indexes_shipment_with_failure_reason(self):
-        payload = load_fixture("shipment_failed")
-        resp = _post(self.client, payload)
+    async def test_shipment_failed_indexes_shipment_with_failure_reason(self):
+        await self._ingest(load_fixture("shipment_failed"))
 
-        assert resp.status_code == 200
+        assert self.job.failed_count == 0
         ship = self.store.shipments[0]
         assert ship["status"] == "failed"
         assert "failure_reason" in ship
 
     # --- Rider events produce rider + event docs ---
 
-    def test_rider_assigned_indexes_rider_and_event(self):
+    async def test_rider_assigned_indexes_rider_and_event(self):
         """rider_assigned → riders_current + shipment_events."""
-        payload = load_fixture("rider_assigned")
-        resp = _post(self.client, payload)
+        await self._ingest(load_fixture("rider_assigned"))
 
-        assert resp.status_code == 200
+        assert self.job.failed_count == 0
         assert len(self.store.riders) == 1
         assert len(self.store.events) == 1
         assert len(self.store.shipments) == 0
 
-    def test_rider_status_changed_indexes_rider_and_event(self):
-        payload = load_fixture("rider_status_changed")
-        resp = _post(self.client, payload)
+    async def test_rider_status_changed_indexes_rider_and_event(self):
+        await self._ingest(load_fixture("rider_status_changed"))
 
-        assert resp.status_code == 200
+        assert self.job.failed_count == 0
         assert len(self.store.riders) == 1
-        rider = self.store.riders[0]
-        assert rider["status"] == "idle"
+        assert self.store.riders[0]["status"] == "idle"
 
     # --- All 6 event types produce correct index distribution ---
 
-    def test_all_six_events_produce_correct_index_distribution(self):
+    async def test_all_six_events_produce_correct_index_distribution(self):
         """4 shipment events → 4 shipment docs, 2 rider events → 2 rider docs, 6 event docs."""
         fixtures = load_all_webhook_fixtures()
         assert len(fixtures) == 6
 
         for name, payload in fixtures.items():
-            resp = _post(self.client, payload)
-            assert resp.status_code == 200, f"Fixture '{name}' failed: {resp.text}"
+            await self._ingest(payload)
+            assert self.job.failed_count == 0, f"Fixture '{name}' failed"
 
         assert len(self.store.shipments) == 4
         assert len(self.store.riders) == 2
@@ -253,11 +217,11 @@ class TestIngestionPipelineIntegration:
 
     # --- Field validation: documents conform to strict mappings ---
 
-    def test_shipment_docs_conform_to_strict_mapping(self):
-        fixtures = load_all_webhook_fixtures()
-        for payload in fixtures.values():
-            _post(self.client, payload)
+    async def test_shipment_docs_conform_to_strict_mapping(self):
+        for payload in load_all_webhook_fixtures().values():
+            await self._ingest(payload)
 
+        assert self.store.shipments, "no shipment docs produced"
         for ship in self.store.shipments:
             assert set(ship.keys()).issubset(SHIPMENTS_CURRENT_FIELDS), (
                 f"Unmapped fields: {set(ship.keys()) - SHIPMENTS_CURRENT_FIELDS}"
@@ -268,11 +232,11 @@ class TestIngestionPipelineIntegration:
             assert "ingested_at" in ship
             assert "source_schema_version" in ship
 
-    def test_event_docs_conform_to_strict_mapping(self):
-        fixtures = load_all_webhook_fixtures()
-        for payload in fixtures.values():
-            _post(self.client, payload)
+    async def test_event_docs_conform_to_strict_mapping(self):
+        for payload in load_all_webhook_fixtures().values():
+            await self._ingest(payload)
 
+        assert self.store.events, "no event docs produced"
         for evt in self.store.events:
             assert set(evt.keys()).issubset(SHIPMENT_EVENTS_FIELDS), (
                 f"Unmapped fields: {set(evt.keys()) - SHIPMENT_EVENTS_FIELDS}"
@@ -281,11 +245,11 @@ class TestIngestionPipelineIntegration:
             assert "event_type" in evt
             assert "tenant_id" in evt
 
-    def test_rider_docs_conform_to_strict_mapping(self):
-        fixtures = load_all_webhook_fixtures()
-        for payload in fixtures.values():
-            _post(self.client, payload)
+    async def test_rider_docs_conform_to_strict_mapping(self):
+        for payload in load_all_webhook_fixtures().values():
+            await self._ingest(payload)
 
+        assert self.store.riders, "no rider docs produced"
         for rider in self.store.riders:
             assert set(rider.keys()).issubset(RIDERS_CURRENT_FIELDS), (
                 f"Unmapped fields: {set(rider.keys()) - RIDERS_CURRENT_FIELDS}"
@@ -295,12 +259,11 @@ class TestIngestionPipelineIntegration:
 
     # --- Enrichment metadata ---
 
-    def test_all_docs_enriched_with_metadata(self):
+    async def test_all_docs_enriched_with_metadata(self):
         """Every doc has ingested_at, trace_id, source_schema_version."""
-        payload = load_fixture("shipment_created")
-        _post(self.client, payload)
+        await self._ingest(load_fixture("shipment_created"))
 
-        for doc in [self.store.shipments[0], self.store.events[0]]:
+        for doc in (self.store.shipments[0], self.store.events[0]):
             assert "ingested_at" in doc
             assert "trace_id" in doc
             assert "source_schema_version" in doc
@@ -308,34 +271,36 @@ class TestIngestionPipelineIntegration:
 
     # --- Idempotency within the pipeline ---
 
-    def test_duplicate_event_not_reindexed(self):
-        """Same event_id sent twice → only one set of ES documents."""
-        payload = load_fixture("shipment_created")
-        _post(self.client, payload)
-        resp2 = _post(self.client, payload)
+    async def test_duplicate_event_not_reindexed(self):
+        """Same event_id processed twice → only one set of ES documents.
 
-        assert resp2.json()["status"] == "duplicate"
+        The receiver answered a repeat delivery with ``status="duplicate"``;
+        ``_process_record`` records it as skipped. Either way the invariant that
+        matters is unchanged: the second pass writes nothing.
+        """
+        payload = load_fixture("shipment_created")
+        await self._ingest(payload)
+        await self._ingest(payload)
+
+        assert self.job.skipped_count == 1
         assert len(self.store.shipments) == 1
         assert len(self.store.events) == 1
 
-    # --- Unknown schema version routes to poison queue ---
+    # --- Unsupported schema version is refused, not written ---
 
-    def test_unknown_schema_version_routes_to_poison_queue(self):
+    async def test_unsupported_schema_version_writes_nothing(self):
+        """An unregistered schema_version must not reach any index.
+
+        NB: the deleted receiver additionally pushed the payload onto the
+        ``ops_poison_queue``. ``_process_record`` has no poison queue, so the
+        surviving guarantee is narrower — the record is counted as failed and
+        nothing is indexed. Asserted as-is rather than papered over.
+        """
         payload = load_fixture("shipment_created")
         payload["schema_version"] = "99.0"
-        resp = _post(self.client, payload)
+        await self._ingest(payload)
 
-        assert resp.status_code == 200
-        assert resp.json()["status"] == "queued_for_review"
-        assert len(self.store.shipments) == 0
-        assert len(self.store.poison_queue) == 1
-
-    # --- Invalid HMAC rejected ---
-
-    def test_invalid_hmac_rejects_with_401(self):
-        payload = load_fixture("shipment_created")
-        resp = _post(self.client, payload, secret="wrong-secret")
-
-        assert resp.status_code == 401
+        assert self.job.failed_count == 1
         assert len(self.store.shipments) == 0
         assert len(self.store.events) == 0
+        assert len(self.store.riders) == 0

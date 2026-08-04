@@ -1478,28 +1478,9 @@ async def test_job_sla_monitor_served_from_postgres(engine, read_from_pg):
     assert "j_ok" not in detections
 
 
-async def test_sla_guardian_served_from_postgres(engine, read_from_pg):
-    from datetime import datetime, timedelta, timezone
-
-    soon = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
-    await _seed("shipment", {
-        "shipment_id": "shp_g", "tenant_id": TENANT, "status": "in_transit",
-        "estimated_delivery": soon, "rider_id": None,
-        "created_at": "2026-01-01T00:00:00+00:00",
-        "updated_at": "2026-01-01T00:00:00+00:00",
-    })
-
-    from Agents.autonomous.sla_guardian_agent import SLAGuardianAgent
-    agent = SLAGuardianAgent(
-        es_service=_agent_es_guard(),
-        activity_log_service=_noop_activity_log(),
-        ws_manager=_noop_ws(),
-        confirmation_protocol=MagicMock(),
-        feature_flag_service=None,
-        sla_threshold_minutes=30,
-    )
-    detections, _actions = await agent.monitor_cycle()
-    assert "shp_g" in detections
+# ``test_sla_guardian_served_from_postgres`` stood here. The ``shipment``
+# aggregate was retired with the ``shipments_current`` table (rev 0007), so
+# ``SLAGuardianAgent`` has no Postgres read path left to cover.
 
 
 def _noop_activity_log():

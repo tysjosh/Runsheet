@@ -11,8 +11,6 @@ Tests that disabling a tenant's feature flag correctly gates:
 Validates: Requirements 27.1-27.4
 """
 
-import hashlib
-import hmac
 import json
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -39,11 +37,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from ops.webhooks.receiver import configure_webhook_receiver, router as webhook_router
 from ops.api.endpoints import router as ops_router, configure_ops_api
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
-from ops.ingestion.adapter import AdapterTransformer
-from ops.ingestion.handlers.v1_0 import V1SchemaHandler
 from ops.websocket.ops_ws import OpsWebSocketManager
 from ops.services.ops_es_service import OpsElasticsearchService
 from tests.fixtures import load_fixture
@@ -93,117 +88,18 @@ class FakeFeatureFlagService:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _sign(payload: dict, secret: str = WEBHOOK_SECRET) -> str:
-    body = json.dumps(payload).encode("utf-8")
-    return hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
-
-
-def _post_webhook(client: TestClient, payload: dict, secret: str = WEBHOOK_SECRET):
-    body = json.dumps(payload)
-    sig = _sign(payload, secret)
-    return client.post(
-        "/webhooks/dinee",
-        content=body,
-        headers={
-            "X-Dinee-Signature": sig,
-            "Content-Type": "application/json",
-        },
-    )
-
-
 # ===========================================================================
 # 23.4 — Feature flag integration tests
 # ===========================================================================
 
 
-class TestWebhookFeatureFlagGating:
-    """
-    Test webhook gating for disabled tenant.
-
-    When a tenant is disabled, the webhook should accept (200) but skip
-    processing — no ES documents should be created.
-
-    Validates: Requirement 27.2
-    """
-
-    @pytest.fixture(autouse=True)
-    def setup(self):
-        self.ff_service = FakeFeatureFlagService()
-        self.indexed_shipments: list[dict] = []
-        self.indexed_events: list[dict] = []
-
-        app = FastAPI()
-        app.include_router(webhook_router)
-
-        adapter = AdapterTransformer()
-        adapter.register_handler("1.0", V1SchemaHandler())
-
-        idempotency = AsyncMock()
-        idempotency.is_duplicate = AsyncMock(return_value=False)
-        idempotency.mark_processed = AsyncMock()
-
-        ops_es = AsyncMock()
-        ops_es.upsert_shipment_current = AsyncMock(
-            side_effect=lambda doc: self.indexed_shipments.append(doc) or True
-        )
-        ops_es.append_shipment_event = AsyncMock(
-            side_effect=lambda doc: self.indexed_events.append(doc)
-        )
-        ops_es.upsert_rider_current = AsyncMock()
-
-        configure_webhook_receiver(
-            adapter=adapter,
-            idempotency_service=idempotency,
-            poison_queue_service=AsyncMock(),
-            ops_es_service=ops_es,
-            ws_manager=None,
-            feature_flag_service=self.ff_service,
-            webhook_secret=WEBHOOK_SECRET,
-            webhook_tenant_id="",
-        )
-
-        self.client = TestClient(app)
-
-    def test_disabled_tenant_webhook_returns_200_but_no_indexing(self):
-        """Disabled tenant: webhook returns 200 but no ES documents created."""
-        # Tenant is disabled (not in flags → defaults to False)
-        payload = load_fixture("shipment_created")
-        resp = _post_webhook(self.client, payload)
-
-        assert resp.status_code == 200
-        # No documents indexed
-        assert len(self.indexed_shipments) == 0
-        assert len(self.indexed_events) == 0
-
-    def test_enabled_tenant_webhook_processes_normally(self):
-        """Enabled tenant: webhook processes and indexes documents."""
-        self.ff_service._flags[TENANT_ID] = True
-
-        payload = load_fixture("shipment_created")
-        resp = _post_webhook(self.client, payload)
-
-        assert resp.status_code == 200
-        assert resp.json()["status"] == "processed"
-        assert len(self.indexed_shipments) == 1
-        assert len(self.indexed_events) == 1
-
-    def test_re_enable_restores_webhook_processing(self):
-        """Disabling then re-enabling restores webhook processing."""
-        # Start disabled
-        payload = load_fixture("shipment_created")
-        resp1 = _post_webhook(self.client, payload)
-        assert resp1.status_code == 200
-        assert len(self.indexed_shipments) == 0
-
-        # Enable
-        self.ff_service._flags[TENANT_ID] = True
-
-        # Use a different event_id to avoid idempotency
-        payload2 = load_fixture("shipment_updated")
-        resp2 = _post_webhook(self.client, payload2)
-        assert resp2.status_code == 200
-        assert resp2.json()["status"] == "processed"
-        assert len(self.indexed_shipments) == 1
+# NB: TestWebhookFeatureFlagGating stood here. It asserted that a disabled
+# tenant's webhook was accepted but not processed. That gate lived inside the
+# ``POST /webhooks/dinee`` handler, which has been removed with its module; the
+# surviving ops ingestion entry point (``ReplayService._process_record``) does
+# not consult the feature flag service, so the behaviour no longer exists to
+# assert. Flag gating remains covered below for the API, WebSocket and AI-tool
+# surfaces, which do still enforce it.
 
 
 class TestApiFeatureFlagGating:

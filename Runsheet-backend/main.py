@@ -28,7 +28,6 @@ from bootstrap import ServiceContainer, initialize_all, shutdown_all
 from bootstrap.websockets import register_websocket_routes
 from errors.handlers import register_exception_handlers
 from data_endpoints import router as data_router
-from ops.webhooks.receiver import router as webhook_router
 from ops.api.endpoints import router as ops_router
 from fuel.api.endpoints import router as fuel_router
 from inventory.api.endpoints import router as inventory_router
@@ -185,7 +184,7 @@ app.add_middleware(
 )
 
 # Dinee voice canonicalization self-check (Req 3.5/3.6): recompute the HMAC for
-# every vendored intake vector before mounting /voice/orders. A mismatch raises
+# every vendored intake vector before mounting /voice-intake. A mismatch raises
 # here (fail-closed) so the submission endpoint is never served.
 run_intake_vector_self_check()
 logger.info("Voice intake vector self-check passed")
@@ -196,7 +195,7 @@ logger.info("Voice intake vector self-check passed")
 # scheduler, and connector factory are wired; router inclusion lives
 # here so every top-level REST surface is discoverable in one place.
 for _router in (
-    data_router, webhook_router, ops_router, fuel_router, inventory_router,
+    data_router, ops_router, fuel_router, inventory_router,
     scheduling_router, driver_scheduling_router, message_router,
     exception_router, pod_router, agent_router, inline_router, import_router,
     notification_router, metrics_router, integrations_router,

@@ -60,6 +60,7 @@ import type {
   SchedulingCargoItem,
 } from "../../types/api";
 import LoadingSpinner from "../LoadingSpinner";
+import { entityHref } from "../ui/EntityLink";
 import CargoManifestEditor from "./CargoManifestEditor";
 import JobActionButtons from "./JobActionButtons";
 
@@ -962,14 +963,14 @@ export default function JobDetailPage({
                 label="Asset"
                 link={links.asset}
                 fallbackId={job.asset_assigned}
-                href={(id) => `/ops/tracking/${encodeURIComponent(id)}`}
+                href={(id) => entityHref("asset", id)}
               />
               <LinkedRefField
                 icon={<User className="w-4 h-4" />}
                 label="Driver"
                 link={links.driver}
                 fallbackId={job.driver_id}
-                href={(id) => `/ops/drivers?driver=${encodeURIComponent(id)}`}
+                href={(id) => entityHref("driver", id)}
               />
             </div>
           </div>

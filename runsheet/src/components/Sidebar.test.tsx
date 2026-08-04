@@ -77,25 +77,37 @@ describe("Sidebar role filtering", () => {
     rolesMock.mockReturnValue(new Promise<string[]>(() => {}));
     renderSidebar();
 
-    // Settings is deliberately ungated (it holds password change), so it is the
-    // proof that "nothing rendered at all" is not why the rest is absent.
-    expect(navItem("Settings")).toBeInTheDocument();
+    // Every nav destination is now role-gated — the ungated "Settings" entry
+    // was removed when it emptied down to one admin-policy tab. So the proof
+    // that "nothing rendered at all" is not why the items are absent has to
+    // come from the nav landmark itself rather than from a visible item.
+    expect(
+      screen.getByRole("navigation", { name: "Primary" }),
+    ).toBeInTheDocument();
     for (const label of ["Admin", "Dispatch", "Today", "Billing", "Setup"]) {
       expect(navItem(label)).not.toBeInTheDocument();
     }
   });
 
-  it("drops a section heading when all of its items are filtered out", async () => {
-    // A driver-role account in the dispatcher/admin web app: every operational
-    // and commerce destination is gated, so only Workspace/Settings survives and
-    // the Operations and Commerce headings must not be left empty.
+  it("drops every section heading when all items are filtered out", async () => {
+    // A driver-role account in the dispatcher/admin web app. Since Settings was
+    // removed, a driver now matches NO nav item at all, so all three headings
+    // must drop rather than leaving an empty Workspace section behind. The
+    // dashboard shell turns this into the "for dispatchers and administrators"
+    // wall via `hasAnyNavAccess`.
     rolesMock.mockResolvedValue(["driver"]);
     renderSidebar();
 
-    await waitFor(() => expect(navItem("Settings")).toBeInTheDocument());
-    expect(screen.queryByText("Operations")).not.toBeInTheDocument();
+    await waitFor(() => expect(rolesMock).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(screen.queryByText("Operations")).not.toBeInTheDocument(),
+    );
     expect(screen.queryByText("Commerce")).not.toBeInTheDocument();
-    expect(screen.getByText("Workspace")).toBeInTheDocument();
+    expect(screen.queryByText("Workspace")).not.toBeInTheDocument();
+    // The nav itself still rendered; it is simply empty for this role.
+    expect(
+      screen.getByRole("navigation", { name: "Primary" }),
+    ).toBeInTheDocument();
   });
 
   it("does not treat platform_admin as admin", async () => {
@@ -104,7 +116,10 @@ describe("Sidebar role filtering", () => {
     rolesMock.mockResolvedValue(["platform_admin"]);
     renderSidebar();
 
-    await waitFor(() => expect(navItem("Settings")).toBeInTheDocument());
+    await waitFor(() => expect(rolesMock).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(screen.queryByText("Workspace")).not.toBeInTheDocument(),
+    );
     expect(navItem("Admin")).not.toBeInTheDocument();
     expect(navItem("Dispatch")).not.toBeInTheDocument();
   });

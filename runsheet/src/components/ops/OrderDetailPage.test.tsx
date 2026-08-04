@@ -392,11 +392,11 @@ describe("OrderDetailPage — cross-module resolved links", () => {
     ).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /tanker 9/i })).toHaveAttribute(
       "href",
-      "/ops/tracking/asset-123",
+      "/dashboard/fleet?asset=asset-123",
     );
     expect(screen.getByRole("link", { name: /jane driver/i })).toHaveAttribute(
       "href",
-      "/ops/drivers?driver=drv-007",
+      "/dashboard/drivers?driver=drv-007",
     );
   });
 
@@ -431,7 +431,10 @@ describe("OrderDetailPage — cross-module resolved links", () => {
     render(<OrderDetailPage />);
 
     const driverLink = await screen.findByRole("link", { name: /drv-007/i });
-    expect(driverLink).toHaveAttribute("href", "/ops/drivers?driver=drv-007");
+    expect(driverLink).toHaveAttribute(
+      "href",
+      "/dashboard/drivers?driver=drv-007",
+    );
   });
 });
 

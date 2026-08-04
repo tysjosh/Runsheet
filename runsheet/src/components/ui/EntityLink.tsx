@@ -62,8 +62,9 @@ const ENTITY_ROUTES: Record<EntityType, (id: string) => string> = {
   // Orders + scheduling
   order: (id) => `/orders/${encodeURIComponent(id)}`,
   job: (id) => `/ops/scheduling/${encodeURIComponent(id)}`,
-  // Fleet / ops
-  asset: (id) => `/ops/tracking/${encodeURIComponent(id)}`,
+  // Fleet / ops — the Fleet hub hosts asset tracking; `?asset=` focuses and
+  // selects the asset in the tracking table (and on the map).
+  asset: (id) => `/dashboard/fleet?asset=${encodeURIComponent(id)}`,
   driver: (id) => `/dashboard/drivers?driver=${encodeURIComponent(id)}`,
   // Fuel ops
   tank: (id) => `/ops/fuel/tanks/${encodeURIComponent(id)}`,

@@ -49,7 +49,6 @@ from scheduling.services.scheduling_es_mappings import (
     JOBS_CURRENT_INDEX,
     TENANT_JOB_POLICIES_INDEX,
 )
-from ops.services.ops_es_service import OpsElasticsearchService
 from persistence.models import (
     AccountEventORM,
     AccountORM,
@@ -70,7 +69,6 @@ from persistence.models import (
     PriceBookORM,
     PriceProtectionContractORM,
     PricingRuleORM,
-    ShipmentCurrentORM,
     SupplierContractORM,
     TaxExemptionORM,
     TaxJurisdictionORM,
@@ -368,7 +366,7 @@ PROJECTORS.update({
 PROJECTORS.update({
     "fuel_order": (FUEL_ORDERS_CURRENT_INDEX, _document_passthrough),
     "job": (JOBS_CURRENT_INDEX, _document_passthrough),
-    "shipment": (OpsElasticsearchService.SHIPMENTS_CURRENT, _document_passthrough),
+    # ``shipment`` was retired with the ``shipments_current`` table (rev 0007).
     "tenant_job_policy": (TENANT_JOB_POLICIES_INDEX, _document_passthrough),
 })
 

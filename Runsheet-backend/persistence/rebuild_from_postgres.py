@@ -64,7 +64,7 @@ _REBUILD_SPECS: Dict[str, Tuple[str, str, str, Optional[str]]] = {
     # Orders / jobs current-state (hybrid)
     "fuel_order": ("FuelOrderCurrentORM", "order_id", "tenant_id", None),
     "job": ("JobCurrentORM", "job_id", "tenant_id", None),
-    "shipment": ("ShipmentCurrentORM", "shipment_id", "tenant_id", None),
+    # ``shipment`` was retired with the ``shipments_current`` table (rev 0007).
     "tenant_job_policy": ("TenantJobPolicyORM", "policy_id", "tenant_id", None),
     # Master data (hybrid)
     "driver": ("DriverMasterORM", "driver_id", "tenant_id", None),

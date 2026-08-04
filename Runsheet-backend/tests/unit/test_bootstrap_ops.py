@@ -50,8 +50,6 @@ def container():
     c.settings = MagicMock(
         redis_url="redis://localhost:6379",
         dinee_idempotency_ttl_hours=72,
-        dinee_webhook_secret="test-secret",
-        dinee_webhook_tenant_id="test-tenant",
         drift_threshold_pct=1.0,
         drift_schedule_interval_hours=6,
     )
@@ -85,7 +83,6 @@ class TestOpsBootstrap:
              patch("ops.services.feature_flags.FeatureFlagService", return_value=mock_ff), \
              patch("ops.websocket.ops_ws.OpsWebSocketManager", return_value=mock_ws), \
              patch("ops.websocket.ops_ws.bind_container") as mock_bind, \
-             patch("ops.webhooks.receiver.configure_webhook_receiver") as mock_webhook, \
              patch("ops.api.endpoints.configure_ops_api") as mock_ops_api, \
              patch("ops.ingestion.replay.configure_replay_service"), \
              patch("ops.services.drift_detector.configure_drift_detector"):
@@ -99,8 +96,12 @@ class TestOpsBootstrap:
         assert container.ops_feature_flags is mock_ff
         assert container.ops_ws_manager is mock_ws
         mock_bind.assert_called_once_with(container)
-        mock_webhook.assert_called_once()
         mock_ops_api.assert_called_once()
+        # NB: this used to also assert ``configure_webhook_receiver`` was
+        # called. ``bootstrap/ops.py`` no longer wires an inbound webhook
+        # receiver — the ``POST /webhooks/dinee`` module was removed. The
+        # replay service, which shares the same adapter and poison queue, is
+        # still wired and patched above.
 
     @pytest.mark.asyncio
     async def test_shutdown_closes_services(self):

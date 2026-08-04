@@ -1,8 +1,12 @@
 """
 Unit tests for the Order Intake Pipeline feature flag behaviour.
 
-Covers each flag state's dual-write / dual-broadcast / legacy-response
-behaviour and the admin rollback endpoint.
+Covers each flag state's intake behaviour and the admin rollback endpoint.
+
+The dual-write / dual-broadcast coverage that used to live here went out
+with the legacy mirror: no flag state reaches the legacy surface any more,
+so the state tests now assert that the new path runs and the legacy
+surface stays untouched.
 
 Validates: Requirements 9.3, 10.2.1.
 """
@@ -166,12 +170,8 @@ class FakeOrderRepo:
         pass
 
 
-class FakeLegacyDualWriter:
-    def __init__(self):
-        self.mirrored_orders: list = []
-
-    async def mirror_order(self, order_doc):
-        self.mirrored_orders.append(order_doc)
+# ``FakeLegacyDualWriter`` lived here. It stood in for the retired
+# LegacyDualWriter shim; the pipeline no longer takes that dependency.
 
 
 # ---------------------------------------------------------------------------
@@ -192,11 +192,6 @@ def ws_manager():
 @pytest.fixture
 def legacy_ws_manager():
     return FakeOrdersWSManager()
-
-
-@pytest.fixture
-def legacy_dual_writer():
-    return FakeLegacyDualWriter()
 
 
 @pytest.fixture
@@ -345,8 +340,14 @@ class TestFeatureFlagStateBehaviour:
     """Tests for each flag state's effect on the intake pipeline."""
 
     @pytest.fixture
-    def pipeline_deps(self, ff_service, ws_manager, legacy_ws_manager, legacy_dual_writer):
-        """Common pipeline dependencies."""
+    def pipeline_deps(self, ff_service, ws_manager, legacy_ws_manager):
+        """Common pipeline dependencies.
+
+        ``legacy_dual_writer`` was dropped from this map with the pipeline
+        parameter of the same name. ``legacy_ws_manager`` is still accepted
+        by the constructor, so it stays here as the regression hook that
+        proves nothing broadcasts to the legacy surface any more.
+        """
         return {
             "es_service": FakeEsService(),
             "intake_channel_repo": MagicMock(),
@@ -357,7 +358,6 @@ class TestFeatureFlagStateBehaviour:
             "ws_manager": ws_manager,
             "credentials_vault": FakeCredentialsVault(),
             "customer_tank_repo": FakeCustomerTankRepo(),
-            "legacy_dual_writer": legacy_dual_writer,
             "legacy_ws_manager": legacy_ws_manager,
         }
 
@@ -379,189 +379,51 @@ class TestFeatureFlagStateBehaviour:
 
         assert result.status == "legacy_passthrough"
 
+    # The six tests that used to follow asserted the legacy dual-write and
+    # dual-broadcast behaviour per flag state:
+    # ``test_shadow_state_dual_writes_and_compares``,
+    # ``test_active_gated_writes_new_and_mirrors_legacy``,
+    # ``test_active_auto_writes_only_new_path``,
+    # ``test_active_auto_stops_legacy_broadcast``,
+    # ``test_shadow_state_still_broadcasts_to_legacy_ws``, and
+    # ``test_active_gated_still_broadcasts_to_legacy_ws``. With the mirror
+    # retired, every enabled state behaves the same, so they collapse into
+    # one parametrised check that the new path runs and the legacy surface
+    # is never touched.
+
     @pytest.mark.asyncio
-    async def test_shadow_state_dual_writes_and_compares(
-        self, pipeline_deps, ff_service, legacy_dual_writer
+    @pytest.mark.parametrize(
+        "state", ["shadow", "active_gated", "active_auto"]
+    )
+    async def test_enabled_states_write_new_path_only(
+        self, pipeline_deps, ff_service, legacy_ws_manager, state
     ):
-        """When flag is shadow, pipeline writes to new path AND dual-writes to legacy."""
+        """Every enabled state writes the new path and nothing else."""
         from fuel.services.order_intake_pipeline import OrderIntakePipeline
 
-        # Set state to shadow
         await ff_service.set_overlay_state(
-            "order_intake_pipeline", "tenant-test", "shadow", "admin"
+            "order_intake_pipeline", "tenant-test", state, "admin"
         )
 
         pipeline = OrderIntakePipeline(**pipeline_deps)
         channel = FakeChannel()
 
         with patch("fuel.order_repository.FuelOrderRepository") as MockRepo:
-            mock_repo = FakeOrderRepo()
-            MockRepo.return_value = mock_repo
-
-            with patch(
-                "fuel.services.order_intake_pipeline.OrderIntakePipeline._run_shadow_divergence_check",
-                new_callable=AsyncMock,
-            ) as mock_divergence:
-                result = await pipeline._ingest_common(
-                    channel=channel,
-                    payload={"schema_version": "1.0"},
-                    request_id="req-002",
-                    actor_user_id="user-1",
-                    client_event_id="evt-002",
-                )
-
-                assert result.status == "processed"
-                # Shadow divergence check should have been called
-                mock_divergence.assert_awaited_once()
-                # Legacy dual-writer should have been called
-                assert len(legacy_dual_writer.mirrored_orders) == 1
-
-    @pytest.mark.asyncio
-    async def test_active_gated_writes_new_and_mirrors_legacy(
-        self, pipeline_deps, ff_service, legacy_dual_writer
-    ):
-        """When flag is active_gated, writes to new path + dual-mirrors to legacy."""
-        from fuel.services.order_intake_pipeline import OrderIntakePipeline
-
-        await ff_service.set_overlay_state(
-            "order_intake_pipeline", "tenant-test", "active_gated", "admin"
-        )
-
-        pipeline = OrderIntakePipeline(**pipeline_deps)
-        channel = FakeChannel()
-
-        with patch("fuel.order_repository.FuelOrderRepository") as MockRepo:
-            mock_repo = FakeOrderRepo()
-            MockRepo.return_value = mock_repo
+            MockRepo.return_value = FakeOrderRepo()
 
             result = await pipeline._ingest_common(
                 channel=channel,
                 payload={"schema_version": "1.0"},
-                request_id="req-003",
+                request_id=f"req-{state}",
                 actor_user_id="user-1",
-                client_event_id="evt-003",
+                client_event_id=f"evt-{state}",
             )
 
-            assert result.status == "processed"
-            # Legacy dual-writer should have been called (active_gated mirrors)
-            assert len(legacy_dual_writer.mirrored_orders) == 1
-
-    @pytest.mark.asyncio
-    async def test_active_auto_writes_only_new_path(
-        self, pipeline_deps, ff_service, legacy_dual_writer
-    ):
-        """When flag is active_auto, writes only to new path — no legacy."""
-        from fuel.services.order_intake_pipeline import OrderIntakePipeline
-
-        await ff_service.set_overlay_state(
-            "order_intake_pipeline", "tenant-test", "active_auto", "admin"
-        )
-
-        pipeline = OrderIntakePipeline(**pipeline_deps)
-        channel = FakeChannel()
-
-        with patch("fuel.order_repository.FuelOrderRepository") as MockRepo:
-            mock_repo = FakeOrderRepo()
-            MockRepo.return_value = mock_repo
-
-            result = await pipeline._ingest_common(
-                channel=channel,
-                payload={"schema_version": "1.0"},
-                request_id="req-004",
-                actor_user_id="user-1",
-                client_event_id="evt-004",
-            )
-
-            assert result.status == "processed"
-            # Legacy dual-writer should NOT have been called
-            assert len(legacy_dual_writer.mirrored_orders) == 0
-
-    @pytest.mark.asyncio
-    async def test_active_auto_stops_legacy_broadcast(
-        self, pipeline_deps, ff_service, legacy_ws_manager
-    ):
-        """When flag is active_auto, legacy WS broadcast is suppressed."""
-        from fuel.services.order_intake_pipeline import OrderIntakePipeline
-
-        await ff_service.set_overlay_state(
-            "order_intake_pipeline", "tenant-test", "active_auto", "admin"
-        )
-
-        pipeline = OrderIntakePipeline(**pipeline_deps)
-        channel = FakeChannel()
-
-        with patch("fuel.order_repository.FuelOrderRepository") as MockRepo:
-            mock_repo = FakeOrderRepo()
-            MockRepo.return_value = mock_repo
-
-            await pipeline._ingest_common(
-                channel=channel,
-                payload={"schema_version": "1.0"},
-                request_id="req-005",
-                actor_user_id="user-1",
-                client_event_id="evt-005",
-            )
-
-            # Legacy WS manager should NOT have received any broadcasts
-            assert len(legacy_ws_manager.broadcasts) == 0
-
-    @pytest.mark.asyncio
-    async def test_shadow_state_still_broadcasts_to_legacy_ws(
-        self, pipeline_deps, ff_service, legacy_ws_manager
-    ):
-        """When flag is shadow, legacy WS broadcast still fires."""
-        from fuel.services.order_intake_pipeline import OrderIntakePipeline
-
-        await ff_service.set_overlay_state(
-            "order_intake_pipeline", "tenant-test", "shadow", "admin"
-        )
-
-        pipeline = OrderIntakePipeline(**pipeline_deps)
-        channel = FakeChannel()
-
-        with patch("fuel.order_repository.FuelOrderRepository") as MockRepo:
-            mock_repo = FakeOrderRepo()
-            MockRepo.return_value = mock_repo
-
-            await pipeline._ingest_common(
-                channel=channel,
-                payload={"schema_version": "1.0"},
-                request_id="req-006",
-                actor_user_id="user-1",
-                client_event_id="evt-006",
-            )
-
-            # Legacy WS manager should have received a shipment_update broadcast
-            assert len(legacy_ws_manager.shipment_updates) >= 1
-
-    @pytest.mark.asyncio
-    async def test_active_gated_still_broadcasts_to_legacy_ws(
-        self, pipeline_deps, ff_service, legacy_ws_manager
-    ):
-        """When flag is active_gated, legacy WS broadcast still fires."""
-        from fuel.services.order_intake_pipeline import OrderIntakePipeline
-
-        await ff_service.set_overlay_state(
-            "order_intake_pipeline", "tenant-test", "active_gated", "admin"
-        )
-
-        pipeline = OrderIntakePipeline(**pipeline_deps)
-        channel = FakeChannel()
-
-        with patch("fuel.order_repository.FuelOrderRepository") as MockRepo:
-            mock_repo = FakeOrderRepo()
-            MockRepo.return_value = mock_repo
-
-            await pipeline._ingest_common(
-                channel=channel,
-                payload={"schema_version": "1.0"},
-                request_id="req-007",
-                actor_user_id="user-1",
-                client_event_id="evt-007",
-            )
-
-            # Legacy WS manager should have received a shipment_update broadcast
-            assert len(legacy_ws_manager.shipment_updates) >= 1
+        assert result.status == "processed"
+        # No legacy shipment/rider broadcast in any state.
+        assert legacy_ws_manager.shipment_updates == []
+        assert legacy_ws_manager.rider_updates == []
+        assert legacy_ws_manager.broadcasts == []
 
 
 # ---------------------------------------------------------------------------

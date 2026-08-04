@@ -19,6 +19,24 @@ from Agents.autonomous.sla_guardian_agent import (
     DEFAULT_MAX_RIDER_SHIPMENTS,
 )
 from Agents.confirmation_protocol import MutationRequest, MutationResult
+from config.legacy_flags import LEGACY_NG_DELIVERY_ENV_VAR
+
+
+@pytest.fixture(autouse=True)
+def _legacy_ng_enabled(monkeypatch):
+    """Every test here exercises the legacy NG rider/shipment read model.
+
+    ``SLAGuardianAgent.monitor_cycle`` now returns immediately when
+    ``legacy_ng_delivery`` is off, which is the default. Without this fixture the
+    whole file would assert against a cycle that never ran — and it previously
+    passed only because the agent swept ``shipments_current`` unconditionally,
+    which is the defect being fixed (it filed escalations for shipments that no
+    longer exist).
+
+    Enabling the flag here states the dependency rather than hiding it.
+    ``test_sla_guardian_respects_legacy_flag.py`` covers the disabled path.
+    """
+    monkeypatch.setenv(LEGACY_NG_DELIVERY_ENV_VAR, "true")
 
 
 # ---------------------------------------------------------------------------
