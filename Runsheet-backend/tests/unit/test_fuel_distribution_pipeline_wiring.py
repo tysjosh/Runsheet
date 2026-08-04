@@ -44,10 +44,20 @@ from Agents.support.fuel_distribution_models import (
     PriorityBucket,
     TankForecast,
 )
+from Agents.overlay.base_overlay_agent import (
+    CYCLE_METRIC_DEGRADATION_REASONS,
+    CYCLE_METRIC_DEGRADED,
+)
 from Agents.support.fuel_distribution_pipeline import (
     PIPELINE_STAGES,
+    STAGE_RESULT_COMPLETED,
+    STAGE_RESULT_DEGRADED,
+    WS_EVENT_ROUTE_READY,
+    _STAGE_WS_EVENTS,
     FuelDistributionPipeline,
+    PipelineRun,
     PipelineState,
+    read_agent_degradation,
 )
 
 TENANT_ID = "tenant-pipeline-wiring"
@@ -715,3 +725,440 @@ class TestPrioritizationProducesOutputEndToEnd:
         )
         assert priority.priority_score > 0.6
         assert "scoring_input_missing" not in priority.reasons
+
+
+# ---------------------------------------------------------------------------
+# A stage that finishes without doing its job must not report success
+# ---------------------------------------------------------------------------
+
+
+def _unroutable_loading_proposal(
+    *, truck_id: str = "truck-degraded", plan_id: str = "plan-degraded"
+) -> InterventionProposal:
+    """An ``apply_loading_plan`` proposal the route stage cannot turn into a route.
+
+    The assignment names a customer id that resolves to no coordinates — every
+    ES read in ``_build_pipeline`` answers "nothing found" — so the real
+    ``RoutePlanningAgent`` per-truck loop takes an early exit and records a
+    :class:`RouteSkipEntry` rather than producing a route. That is the exact
+    shape of the silent skip: ``monitor_cycle`` returns normally having produced
+    nothing.
+    """
+    return InterventionProposal(
+        source_agent="compartment_loading",
+        actions=[
+            {
+                "tool_name": "apply_loading_plan",
+                "parameters": {
+                    "plan_id": plan_id,
+                    "truck_id": truck_id,
+                    "assignments": [
+                        {
+                            "compartment_id": "comp-0",
+                            "station_id": "customer-with-no-location",
+                            "order_id": "order-with-no-location",
+                            "fuel_grade": "AGO",
+                            "quantity_liters": 5000.0,
+                            "compartment_capacity_liters": 10000.0,
+                        }
+                    ],
+                    "total_utilization_pct": 50.0,
+                    "unserved_demand_liters": 0.0,
+                    "total_weight_kg": 4250.0,
+                },
+            }
+        ],
+        expected_kpi_delta={"truck_utilization_pct": 50.0},
+        risk_class=RiskClass.LOW,
+        confidence=0.85,
+        priority=1,
+        tenant_id=TENANT_ID,
+    )
+
+
+class TestDegradedStageIsNotSuccess:
+    """A stage can complete without raising and still have produced nothing.
+
+    ``RoutePlanningAgent`` reports that on ``cycle_metrics`` — ``degraded`` plus
+    ``degradation_reasons``, the agent-agnostic convention documented in
+    ``base_overlay_agent``. Before this, the pipeline never read it: the loop set
+    ``stage_results[agent_id] = "completed"`` unconditionally once
+    ``monitor_cycle`` returned, then set ``state = COMPLETE`` unconditionally
+    after the loop. A run that routed zero of N trucks therefore came back
+    ``state: "complete"`` with ``route_planning: "completed"`` — the agent knew
+    it had degraded and the pipeline reported success anyway.
+
+    These tests use the genuine ``RoutePlanningAgent``, so they pin the whole
+    path: the agent writing the convention keys and the pipeline reading them.
+
+    Validates: Requirements 4.1, 6.4
+    """
+
+    def _degrading_pipeline(self):
+        """A real route stage handed one loading plan it cannot route."""
+        pipeline, agents, deps = _build_pipeline(first_stage_publishes=False)
+        # The loading stage publishes the proposal, so it travels the real
+        # injection path into RoutePlanningAgent._proposal_buffer rather than
+        # being planted there by the test.
+        _spy_evaluate(
+            agents["compartment_loading"],
+            publishes=_unroutable_loading_proposal(),
+        )
+        return pipeline, agents, deps
+
+    @pytest.mark.asyncio
+    async def test_a_degraded_route_stage_does_not_report_complete(self):
+        pipeline, agents, _ = self._degrading_pipeline()
+
+        run_id = await pipeline.run(tenant_id=TENANT_ID)
+        status = await pipeline.get_status(run_id)
+
+        assert agents["route_planning"].last_route_skips, (
+            "the route stage routed the unroutable plan, so this test is no "
+            "longer exercising a degraded stage"
+        )
+        assert status["state"] != PipelineState.COMPLETE.value, (
+            "a run whose route stage routed zero of one loading plans reported "
+            "unqualified success"
+        )
+        assert status["state"] == PipelineState.DEGRADED.value
+        assert status["degraded"] is True
+        # Degraded is not failed: nothing raised, so the circuit breaker did
+        # not trip and no stage is blamed for an error.
+        assert status["failed_agent"] is None
+        assert status["error_message"] is None
+
+    @pytest.mark.asyncio
+    async def test_the_reasons_are_retrievable_from_get_status(self):
+        pipeline, _, _ = self._degrading_pipeline()
+
+        run_id = await pipeline.run(tenant_id=TENANT_ID)
+        status = await pipeline.get_status(run_id)
+
+        assert [d["agent_id"] for d in status["degradations"]] == [
+            "route_planning"
+        ]
+        (degradation,) = status["degradations"]
+        assert degradation["reasons"], (
+            "a degraded stage recorded no reasons, so the status says only "
+            "that something went wrong and not what"
+        )
+        assert all(
+            reason.get("reason_code") for reason in degradation["reasons"]
+        )
+        assert {
+            reason["truck_id"] for reason in degradation["reasons"]
+        } == {"truck-degraded"}
+
+    @pytest.mark.asyncio
+    async def test_stage_results_does_not_say_bare_completed(self):
+        pipeline, _, _ = self._degrading_pipeline()
+
+        run_id = await pipeline.run(tenant_id=TENANT_ID)
+        status = await pipeline.get_status(run_id)
+
+        route_result = status["stage_results"]["route_planning"]
+        assert route_result["state"] == STAGE_RESULT_DEGRADED
+        assert route_result["state"] != STAGE_RESULT_COMPLETED
+        assert route_result["reasons"], (
+            "the degraded stage result carries no reasons"
+        )
+        # The upstream stages did complete; degradation is per-stage.
+        assert (
+            status["stage_results"]["delivery_prioritization"]["state"]
+            == STAGE_RESULT_COMPLETED
+        )
+
+    @pytest.mark.asyncio
+    async def test_ws_summary_for_a_degraded_stage_is_not_completed(self):
+        """Req 9.2/9.3 — the summary is what the dispatcher UI renders."""
+        pipeline, _, deps = self._degrading_pipeline()
+
+        await pipeline.run(tenant_id=TENANT_ID)
+
+        route_events = [
+            call.args[1]
+            for call in deps["ws_manager"].broadcast_event.call_args_list
+            if call.args[0] == WS_EVENT_ROUTE_READY
+        ]
+        assert len(route_events) == 1
+        summary = route_events[0]["summary"]
+        assert summary["state"] != STAGE_RESULT_COMPLETED, (
+            "the route_ready summary told the dispatcher UI the stage "
+            "completed while the agent reported it had degraded"
+        )
+        assert summary["state"] == STAGE_RESULT_DEGRADED
+        assert summary["degraded"] is True
+        assert summary["degradation_reasons"]
+
+    @pytest.mark.asyncio
+    async def test_terminal_state_transition_carries_the_degradation(self):
+        """The last ``pipeline_state_change`` explains itself."""
+        pipeline, _, deps = self._degrading_pipeline()
+
+        await pipeline.run(tenant_id=TENANT_ID)
+
+        transitions = [
+            call.args[1]
+            for call in deps["ws_manager"].broadcast_event.call_args_list
+            if call.args[0] == "pipeline_state_change"
+        ]
+        terminal = transitions[-1]
+        assert terminal["state"] == PipelineState.DEGRADED.value
+        assert terminal["degraded"] is True
+        assert [d["agent_id"] for d in terminal["degradations"]] == [
+            "route_planning"
+        ]
+
+
+class TestCleanRunStaysComplete:
+    """The counterweight: "always degraded" must not pass either.
+
+    Without this, marking every run degraded would satisfy every test above.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_run_with_nothing_to_skip_is_complete_and_not_degraded(self):
+        pipeline, agents, deps = _build_pipeline(first_stage_publishes=False)
+
+        run_id = await pipeline.run(tenant_id=TENANT_ID)
+        status = await pipeline.get_status(run_id)
+
+        assert agents["route_planning"].last_route_skips == []
+        assert status["state"] == PipelineState.COMPLETE.value
+        assert status["degraded"] is False
+        assert status["degradations"] == []
+        assert all(
+            result["state"] == STAGE_RESULT_COMPLETED
+            for result in status["stage_results"].values()
+        ), status["stage_results"]
+
+    @pytest.mark.asyncio
+    async def test_every_ws_stage_summary_says_completed_on_a_clean_run(self):
+        pipeline, _, deps = _build_pipeline(first_stage_publishes=False)
+
+        await pipeline.run(tenant_id=TENANT_ID)
+
+        summaries = [
+            call.args[1]["summary"]
+            for call in deps["ws_manager"].broadcast_event.call_args_list
+            if call.args[0] in set(_STAGE_WS_EVENTS.values())
+        ]
+        assert summaries, "no stage WS events were broadcast at all"
+        assert all(s["state"] == STAGE_RESULT_COMPLETED for s in summaries)
+        assert all(s["degraded"] is False for s in summaries)
+
+    @pytest.mark.asyncio
+    async def test_degradation_does_not_leak_into_the_next_run(self):
+        """``_cycle_metrics`` is never cleared between cycles.
+
+        The agent instances outlive a run, and ``monitor_cycle`` can return
+        before reaching ``evaluate()`` at all. Without clearing the report
+        before each stage, one degraded run would mark every later run degraded
+        — a false positive that would make the signal worth ignoring.
+        """
+        pipeline, agents, _ = _build_pipeline(first_stage_publishes=False)
+        loading_spy = _spy_evaluate(
+            agents["compartment_loading"],
+            publishes=_unroutable_loading_proposal(),
+        )
+
+        degraded_run = await pipeline.run(tenant_id=TENANT_ID)
+        assert (
+            await pipeline.get_status(degraded_run)
+        )["state"] == PipelineState.DEGRADED.value
+
+        # Second run: the loading stage publishes nothing, so the route stage
+        # has no plan to skip and nothing to be degraded about.
+        loading_spy.side_effect = None
+        loading_spy.return_value = []
+
+        clean_run = await pipeline.run(tenant_id=TENANT_ID)
+        status = await pipeline.get_status(clean_run)
+
+        assert status["state"] == PipelineState.COMPLETE.value, (
+            "a stale degradation report from the previous run marked a clean "
+            f"run degraded: {status['degradations']}"
+        )
+        assert status["degraded"] is False
+
+
+class TestDegradationReadingIsFailSafe:
+    """A monitoring signal must never take down the run it is monitoring.
+
+    Every unexpected ``cycle_metrics`` shape reads as *not degraded*: the
+    pipeline's job is to report degradation, not to invent a new failure mode
+    while trying to.
+    """
+
+    @staticmethod
+    def _stage(agent_id: str):
+        """A minimal stage: triggerable, and with no ``cycle_metrics`` at all.
+
+        Deliberately not a ``MagicMock``. On a mock every attribute exists and
+        ``cycle_metrics.get("degraded")`` answers with a truthy mock, so a mock
+        cannot distinguish "no report" from "degraded".
+        """
+
+        class _Stage:
+            def __init__(self) -> None:
+                self.agent_id = agent_id
+                self._signal_buffer: List[Any] = []
+                self._priority_buffer: List[Any] = []
+                self._proposal_buffer: List[Any] = []
+                self._pipeline_mode_override: Optional[str] = None
+                self._current_run_id: Optional[str] = None
+                self.cycles = 0
+
+            async def monitor_cycle(self):
+                self.cycles += 1
+                self._signal_buffer.clear()
+                return [], []
+
+        return _Stage()
+
+    def _pipeline_of(self, agents):
+        deps = _make_deps()
+        pipeline = FuelDistributionPipeline(
+            agents=agents,
+            ws_manager=deps["ws_manager"],
+            signal_bus=deps["signal_bus"],
+        )
+        return pipeline, deps
+
+    @pytest.mark.asyncio
+    async def test_an_agent_without_cycle_metrics_completes_normally(self):
+        agents = {
+            agent_id: self._stage(agent_id) for agent_id, _ in PIPELINE_STAGES
+        }
+        for stage in agents.values():
+            assert not hasattr(stage, "cycle_metrics")
+        pipeline, _ = self._pipeline_of(agents)
+
+        run_id = await pipeline.run(tenant_id=TENANT_ID)
+        status = await pipeline.get_status(run_id)
+
+        assert status["state"] == PipelineState.COMPLETE.value
+        assert status["degraded"] is False
+        assert all(stage.cycles == 1 for stage in agents.values())
+
+    @pytest.mark.asyncio
+    async def test_a_cycle_metrics_property_that_raises_does_not_fail_the_run(
+        self,
+    ):
+        class _Exploding:
+            agent_id = "route_planning"
+
+            def __init__(self) -> None:
+                self._signal_buffer: List[Any] = []
+                self._proposal_buffer: List[Any] = []
+                self._pipeline_mode_override: Optional[str] = None
+                self._current_run_id: Optional[str] = None
+
+            @property
+            def cycle_metrics(self):
+                raise RuntimeError("metrics backend unavailable")
+
+            async def monitor_cycle(self):
+                self._signal_buffer.clear()
+                return [], []
+
+        agents = {
+            agent_id: self._stage(agent_id) for agent_id, _ in PIPELINE_STAGES
+        }
+        agents["route_planning"] = _Exploding()
+        pipeline, _ = self._pipeline_of(agents)
+
+        run_id = await pipeline.run(tenant_id=TENANT_ID)
+        status = await pipeline.get_status(run_id)
+
+        assert status["state"] == PipelineState.COMPLETE.value
+        assert status["degraded"] is False
+
+    @pytest.mark.asyncio
+    async def test_a_non_mapping_cycle_metrics_is_not_degraded(self):
+        """Guards the mock trap directly.
+
+        ``MagicMock().cycle_metrics.get("degraded")`` is a truthy ``MagicMock``,
+        so a reader that only called ``.get()`` would mark every mock-based run
+        degraded — including the ones in
+        ``tests/unit/test_fuel_distribution_pipeline.py``.
+        """
+        stage = self._stage("route_planning")
+        stage.cycle_metrics = MagicMock()
+
+        assert read_agent_degradation(stage) == (False, [])
+
+    def test_a_degraded_report_with_no_reasons_is_still_degraded(self):
+        """The flag is the signal; the reason list is the explanation."""
+        stage = self._stage("route_planning")
+        stage.cycle_metrics = {CYCLE_METRIC_DEGRADED: True}
+
+        assert read_agent_degradation(stage) == (True, [])
+
+    def test_reasons_that_are_not_a_list_are_dropped_not_raised(self):
+        stage = self._stage("route_planning")
+        stage.cycle_metrics = {
+            CYCLE_METRIC_DEGRADED: True,
+            CYCLE_METRIC_DEGRADATION_REASONS: "not a list",
+        }
+
+        assert read_agent_degradation(stage) == (True, [])
+
+
+class TestDegradedStateConsumers:
+    """Every consumer of the completion signal handles ``DEGRADED``.
+
+    ``DEGRADED`` was added to a state enum other code switches on, so a
+    half-migrated enum would trade one silent failure for another. The full
+    consumer set was enumerated before the change, and it is small enough to
+    pin here:
+
+    * this module's ``FAILED`` comparison in ``_broadcast_state_transition``
+    * ``PipelineState`` itself — the value the endpoint forwards
+    * ``Agents.support.mvp_endpoints.generate_plan``, covered by
+      ``tests/unit/test_mvp_endpoints.py::TestGeneratePlan``
+    * the dispatcher UI's ``handleGenerate`` in ``FuelDistributionPage.tsx``,
+      which reads ``degraded`` / ``status`` off ``GeneratePlanResponse``
+
+    Nothing else compares against ``PipelineState`` or the literal
+    ``"complete"``: ``stage_results`` has no reader outside this module, and the
+    UI's other ``=== "completed"`` comparisons are on plan and stop documents,
+    not on pipeline state.
+    """
+
+    def test_degraded_is_a_distinct_terminal_state(self):
+        assert PipelineState.DEGRADED.value == "degraded"
+        assert PipelineState.DEGRADED not in (
+            PipelineState.COMPLETE,
+            PipelineState.FAILED,
+        )
+
+    def test_terminal_states_are_exhaustive(self):
+        """A run ends in exactly one of these three."""
+        assert {
+            PipelineState.COMPLETE,
+            PipelineState.DEGRADED,
+            PipelineState.FAILED,
+        } == set(PipelineState) - {
+            PipelineState.PENDING,
+            *(state for _, state in PIPELINE_STAGES),
+        }
+
+    @pytest.mark.asyncio
+    async def test_a_degraded_run_is_not_broadcast_as_failed(self):
+        """The one place this module compares state is ``== FAILED``."""
+        run = PipelineRun(run_id="run-x", tenant_id=TENANT_ID)
+        run.state = PipelineState.DEGRADED
+        run.record_degradation("route_planning", [{"reason_code": "x"}])
+
+        deps = _make_deps()
+        pipeline = FuelDistributionPipeline(
+            agents={}, ws_manager=deps["ws_manager"]
+        )
+        await pipeline._broadcast_state_transition(run, "pipeline")
+
+        event = deps["ws_manager"].broadcast_event.call_args.args[1]
+        assert "error" not in event
+        assert "failed_agent" not in event
+        assert event["degraded"] is True

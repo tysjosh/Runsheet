@@ -280,6 +280,33 @@ class WindowMissEntry(BaseModel):
     detail: Optional[str] = None
 
 
+class RouteSkipEntry(BaseModel):
+    """A loading plan the Route_Planning_Agent declined to route.
+
+    Every early exit in the agent's per-truck loop records one of these
+    so a run that routes zero of N trucks reports *why* instead of
+    coming back as an unqualified success. Two families of reason exist
+    and both matter to a dispatcher:
+
+    * business exclusions — ``driver_ineligible``, ``hos_blocked``,
+      ``asset_certification_expired``: the truck was deliberately held
+      back, and the dispatcher needs to see which rule fired.
+    * data gaps — ``no_loading_plan``, ``no_demand_identifiers``,
+      ``unresolvable_stop_locations``, ``no_depot_configured``: the
+      agent could not build a route from what it was given.
+
+    ``missing`` names the specific identifiers or fields that could not
+    be resolved (station ids, order ids, field names) so the gap is
+    actionable without re-reading logs.
+    """
+
+    truck_id: str
+    plan_id: Optional[str] = None
+    reason_code: str
+    detail: Optional[str] = None
+    missing: List[str] = Field(default_factory=list)
+
+
 class RoutePlan(BaseModel):
     """An optimized delivery route.
     Validates: Requirement 4.1, 2.1.5, 2.1.6, 8.5.5, 9.2.4, 9.2.5, 9.3.1, 9.3.2

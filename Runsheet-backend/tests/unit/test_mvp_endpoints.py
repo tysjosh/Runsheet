@@ -134,6 +134,51 @@ class TestGeneratePlan:
         data = resp.json()
         assert data["run_id"] == "run_test_123"
         assert data["status"] == "complete"
+        assert data["degraded"] is False
+        assert data["degradation_reasons"] == []
+
+    def test_forwards_a_degraded_run_rather_than_reporting_complete(self):
+        """Req 6.4 — the endpoint is a consumer of the completion signal.
+
+        A run whose route stage skipped every truck it was handed reaches this
+        endpoint having raised nothing. Forwarding ``"complete"`` for it, or
+        dropping the reasons, would relaunder the silent skip into success at
+        the API boundary.
+        """
+        pipeline = _make_mock_pipeline()
+        degradations = [
+            {
+                "agent_id": "route_planning",
+                "reasons": [
+                    {
+                        "truck_id": "truck-9",
+                        "reason_code": "unresolvable_stop_locations",
+                    }
+                ],
+            }
+        ]
+        pipeline.get_status = AsyncMock(return_value={
+            "run_id": "run_test_123",
+            "tenant_id": TEST_TENANT_ID,
+            "state": "degraded",
+            "started_at": "2024-01-01T00:00:00+00:00",
+            "completed_at": "2024-01-01T00:01:00+00:00",
+            "failed_agent": None,
+            "error_message": None,
+            "degraded": True,
+            "degradations": degradations,
+            "stage_results": {},
+        })
+        app, _, _ = _create_test_app(pipeline=pipeline)
+        client = TestClient(app)
+
+        resp = client.post("/api/fuel/mvp/plan/generate")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "degraded"
+        assert data["degraded"] is True
+        assert data["degradation_reasons"] == degradations
 
     def test_calls_pipeline_run(self):
         app, pipeline, _ = _create_test_app()
