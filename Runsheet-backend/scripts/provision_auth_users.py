@@ -8,9 +8,11 @@ This is the operator entry point for the User_Provisioner (task 2.3). It:
    (``auth.supertokens_init.init_supertokens``), reaching the core over HTTPS
    via ``connection_uri`` + ``api_key`` from settings (Req 10.1, 10.2). Without
    a configured core the SDK refuses to initialize and the script fails closed.
-2. Creates the four canonical SuperTokens UserRoles — ``admin``, ``dispatcher``,
-   ``ops_manager``, ``driver`` — idempotently (Req 4.4). Re-running is safe:
-   a role that already exists is left untouched.
+2. Creates the canonical SuperTokens UserRoles — ``admin``, ``dispatcher``,
+   ``driver``, ``platform_admin`` — idempotently (Req 4.4).
+   Re-running is safe: a role that already exists is left untouched. The list is
+   read from :data:`auth.supertokens_init.CANONICAL_ROLES` rather than repeated
+   here, so it cannot drift; the names above are illustrative.
 3. Reads every ``auth_users`` row from PostgreSQL (the provisioning source of
    truth created by the ``0002_auth_users`` migration) and calls
    :func:`auth.provisioner.provision_all`, which creates/updates one SuperTokens
@@ -110,12 +112,25 @@ async def create_canonical_roles(
     matters for ``platform_admin``: the role must exist to be assignable, but no
     user receives it unless it is listed explicitly on their record.
 
+    A Runsheet staff record lists **both** ``admin`` and ``platform_admin`` —
+    :data:`auth.supertokens_init.PLATFORM_STAFF_ROLES`. ``platform_admin`` is
+    additive: it authorizes targeting another tenant, not the operation itself,
+    and :func:`auth.authorization.require_role` has no role-implication graph.
+    A record carrying only ``platform_admin`` is therefore refused on every
+    endpoint requiring ``admin``; provision the pair, not the staff role alone.
+
+    This function only ever *creates*. It has no delete path, so a role dropped
+    from :data:`~auth.supertokens_init.CANONICAL_ROLES` — ``ops_manager`` is the
+    first — lingers in the managed core as an unassigned role. That is inert:
+    nothing assigns it, and :func:`auth.authorization.require_role` is
+    exact-match, so no endpoint accepts it. Deleting it would mean mutating a
+    shared hosted system, which is not this script's business.
+
     Args:
         role_creator: Seam that creates one role and returns whether it was
             newly created; defaults to the SuperTokens SDK-backed creator.
         roles: The role names to ensure exist; defaults to the canonical roles
-            (``admin`` / ``dispatcher`` / ``ops_manager`` / ``driver`` /
-            ``platform_admin``).
+            (``admin`` / ``dispatcher`` / ``driver`` / ``platform_admin``).
 
     Returns:
         A mapping of ``role name -> created_new_role`` so the caller can report
@@ -293,7 +308,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Provision the auth_users source-of-truth into SuperTokens and "
-            "ensure the four canonical UserRoles exist."
+            "ensure the canonical UserRoles exist."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""

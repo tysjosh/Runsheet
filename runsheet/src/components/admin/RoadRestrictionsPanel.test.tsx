@@ -6,9 +6,13 @@
  *  1. **``parseGeoJsonPolygon`` pure helper** — malformed JSON is
  *     surfaced before hitting the network, and only Polygon /
  *     MultiPolygon shapes are accepted.
- *  2. **``canUploadRoadRestriction`` role gate** — mirrors
- *     :func:`canSubmitStormModeOverride` (case-insensitive substring
- *     match against ``dispatcher`` / ``admin``).
+ *  2. **``canUploadRoadRestriction`` role gate** — an **exact** match
+ *     against ``dispatcher`` / ``admin``, case- and whitespace-
+ *     insensitive, mirroring the backend's
+ *     ``require_role(tenant, "dispatcher", "admin")``. This used to be a
+ *     substring match, and the tests below used to assert that
+ *     permissive behaviour; both were wrong, because the UI enabled an
+ *     upload the API then refused with 403.
  *  3. **List rendering** — fetched restrictions render as cards with
  *     severity + GeoJSON preview.
  *  4. **Upload form role gating** — hidden when the caller is not a
@@ -167,11 +171,19 @@ describe("canUploadRoadRestriction", () => {
     expect(canUploadRoadRestriction(["viewer"])).toBe(false);
   });
 
-  it("matches dispatcher / admin substrings case-insensitively", () => {
+  it("matches dispatcher / admin exactly, ignoring case and padding", () => {
     expect(canUploadRoadRestriction(["Dispatcher"])).toBe(true);
     expect(canUploadRoadRestriction(["ADMIN"])).toBe(true);
-    expect(canUploadRoadRestriction(["lead-dispatcher"])).toBe(true);
-    expect(canUploadRoadRestriction(["ops-admin-eu"])).toBe(true);
+    expect(canUploadRoadRestriction([" admin "])).toBe(true);
+  });
+
+  it("refuses a role that merely contains dispatcher or admin", () => {
+    // These two assertions used to expect `true`. That was wrong, not merely
+    // lenient: the backend gate is `require_role(tenant, "dispatcher", "admin")`,
+    // an exact match, so a permissive UI enabled an upload form the API then
+    // refused with 403. A user cannot tell that apart from a broken feature.
+    expect(canUploadRoadRestriction(["lead-dispatcher"])).toBe(false);
+    expect(canUploadRoadRestriction(["ops-admin-eu"])).toBe(false);
   });
 });
 

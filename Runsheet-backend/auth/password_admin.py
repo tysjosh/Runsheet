@@ -67,12 +67,35 @@ class PasswordSetLink:
     link: str
 
 
-async def _require_provisioned_email(email: str) -> str:
-    """Return the normalized email iff it exists in ``auth_users``.
+async def _require_provisioned_email(
+    email: str, *, tenant_id: Optional[str]
+) -> str:
+    """Return the normalized email iff it exists in ``auth_users``, in scope.
 
     Provisioning is the gate: a password can only be set for a user that the
     User_Provisioner created from the source of truth. Raises
     :class:`PasswordAdminError` (``reason='not_provisioned'``) otherwise.
+
+    ``tenant_id`` is keyword-only and required — there is no default, so every
+    caller (present and future) has to decide which scope it is operating in:
+
+    * a tenant id restricts the lookup to that tenant's rows. This is what a
+      customer ``admin`` gets: they administer passwords for their own company
+      only. Without it a tenant-A admin could mint a working reset link for any
+      provisioned account on the platform, including Runsheet staff, and then
+      set its password — a straight escalation past the tenant boundary.
+    * ``None`` means *unscoped*, and is break-glass only: the operator CLI
+      (``scripts/set_user_password.py``), which already requires direct database
+      access, and ``platform_admin`` staff.
+
+    A scoped lookup that finds nothing raises the same ``not_provisioned``
+    error as a genuinely absent email. That is deliberate: an out-of-tenant
+    email must be **indistinguishable from a non-existent one**. Returning 403
+    would confirm to a tenant admin that an account exists somewhere on the
+    platform, turning this endpoint into a user-enumeration oracle over our
+    whole customer base. The distinction the client does not get is kept
+    server-side — the denial is logged at WARNING with the caller's tenant so
+    the audit trail can tell a probe from a typo.
     """
     normalized = (email or "").strip()
     if not normalized:
@@ -89,11 +112,28 @@ async def _require_provisioned_email(email: str) -> str:
 
     from sqlalchemy import text
 
-    query = text("SELECT email FROM auth_users WHERE email = :email")
+    params = {"email": normalized}
+    if tenant_id is None:
+        query = text("SELECT email FROM auth_users WHERE email = :email")
+    else:
+        query = text(
+            "SELECT email FROM auth_users "
+            "WHERE email = :email AND tenant_id = :tenant_id"
+        )
+        params["tenant_id"] = tenant_id
+
     async with session_scope() as db:
-        row = (await db.execute(query, {"email": normalized})).first()
+        row = (await db.execute(query, params)).first()
 
     if row is None:
+        if tenant_id is not None:
+            logger.warning(
+                "Password-admin lookup denied for %r: no auth_users row in "
+                "caller tenant %r (the client is told 'not provisioned' so an "
+                "out-of-tenant account cannot be enumerated)",
+                normalized,
+                tenant_id,
+            )
         raise PasswordAdminError(
             "not_provisioned",
             f"No provisioned auth_users record for {normalized!r}. Provision "
@@ -150,7 +190,9 @@ async def _recipe_user_id_for_email(email: str):
     )
 
 
-async def create_password_set_link(email: str) -> PasswordSetLink:
+async def create_password_set_link(
+    email: str, *, tenant_id: Optional[str]
+) -> PasswordSetLink:
     """Mint a SuperTokens password-reset link for a provisioned user.
 
     The user must already exist in ``auth_users`` (the provisioning gate) and in
@@ -158,11 +200,19 @@ async def create_password_set_link(email: str) -> PasswordSetLink:
     the link is returned to the caller to deliver out-of-band; the user opens it
     on the self-serve reset page and sets their own password.
 
+    Args:
+        email: Target user's email.
+        tenant_id: Required scope for the ``auth_users`` lookup — the caller's
+            tenant, or ``None`` for the unscoped break-glass / ``platform_admin``
+            path. See :func:`_require_provisioned_email`; minting a link is
+            equivalent to taking over the account, so the scope is what stops a
+            tenant admin reaching another tenant's (or staff's) credentials.
+
     Raises:
-        PasswordAdminError: when the email is not provisioned, has no SuperTokens
-            user, or the SDK reports an unknown user.
+        PasswordAdminError: when the email is not provisioned *within the given
+            scope*, has no SuperTokens user, or the SDK reports an unknown user.
     """
-    normalized = await _require_provisioned_email(email)
+    normalized = await _require_provisioned_email(email, tenant_id=tenant_id)
     st_user_id = await _st_user_id_for_email(normalized)
 
     from supertokens_python.recipe.emailpassword.asyncio import (
@@ -195,18 +245,31 @@ async def create_password_set_link(email: str) -> PasswordSetLink:
 
 
 async def set_password_for_email(
-    email: str, password: str, *, apply_password_policy: bool = True
+    email: str,
+    password: str,
+    *,
+    tenant_id: Optional[str],
+    apply_password_policy: bool = True,
 ) -> str:
     """Set ``password`` directly for a provisioned user (break-glass / dev).
 
     The user must already exist in ``auth_users`` and SuperTokens. Returns the
     SuperTokens user id on success.
 
+    Args:
+        email: Target user's email.
+        password: The new password.
+        tenant_id: Required scope for the ``auth_users`` lookup — the caller's
+            tenant, or ``None`` for the unscoped break-glass path. See
+            :func:`_require_provisioned_email`.
+        apply_password_policy: Whether SuperTokens enforces its password policy.
+
     Raises:
-        PasswordAdminError: when the email is not provisioned / has no
-            SuperTokens user, or the password violates the configured policy.
+        PasswordAdminError: when the email is not provisioned *within the given
+            scope* / has no SuperTokens user, or the password violates the
+            configured policy.
     """
-    normalized = await _require_provisioned_email(email)
+    normalized = await _require_provisioned_email(email, tenant_id=tenant_id)
     recipe_user_id = await _recipe_user_id_for_email(normalized)
 
     from supertokens_python.recipe.emailpassword.asyncio import (

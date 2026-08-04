@@ -34,6 +34,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ToastContainer, useToasts } from "@/components/ui";
+import { hasAnyRole } from "../../config/modules";
 import { ApiError } from "../../services/api";
 import type {
   StormRoadRestriction,
@@ -48,28 +49,28 @@ import {
 // ─── Role gate (mirrors StormModeBanner) ─────────────────────────────────────
 
 /**
- * Roles permitted to upload Storm_Mode road restrictions. Mirrors the
- * backend ``_STORM_MODE_OVERRIDE_ROLES`` frozenset in
- * :mod:`fuel.api.fuel_ops_endpoints`. The UI gate is the first line of
- * defense; the backend re-checks the JWT context so a caller who
- * bypasses the UI still gets HTTP 403 ``forbidden_role``.
+ * Roles permitted to upload Storm_Mode road restrictions.
+ *
+ * Mirrors ``require_role(tenant, "dispatcher", "admin")`` on
+ * ``POST /api/fuel/storm-mode/road-restrictions``, which is an **exact** match.
+ * The previous docstring referenced a ``_STORM_MODE_OVERRIDE_ROLES`` frozenset
+ * that no longer exists, and the gate was a substring match — so the upload form
+ * appeared for role names like ``ops-admin-eu`` that the backend then rejected
+ * with 403.
  */
-const UPLOAD_ROLE_MARKERS = ["dispatcher", "admin"] as const;
+const UPLOAD_ROLES = ["dispatcher", "admin"] as const;
 
-/** Case-insensitive substring match on any role-token in the list. */
+/**
+ * Exact role match, case- and whitespace-insensitive.
+ *
+ * Shares {@link hasAnyRole} with `config/modules.ts` and
+ * {@link canSubmitStormModeOverride} so all three agree on what holding a role
+ * means.
+ */
 export function canUploadRoadRestriction(
   roles: readonly string[] | null | undefined,
 ): boolean {
-  if (!roles || roles.length === 0) return false;
-  for (const raw of roles) {
-    if (typeof raw !== "string") continue;
-    const normalized = raw.trim().toLowerCase();
-    if (!normalized) continue;
-    for (const marker of UPLOAD_ROLE_MARKERS) {
-      if (normalized.includes(marker)) return true;
-    }
-  }
-  return false;
+  return hasAnyRole(roles, UPLOAD_ROLES);
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
