@@ -40,10 +40,10 @@ redis==5.2.0
 #   - aiosqlite is a TEST-ONLY async driver so the persistence-layer unit
 #     tests can run against an in-memory SQLite database with no external
 #     Postgres dependency (matches the mocked-services test policy).
-SQLAlchemy[asyncio]>=2.0.30
-alembic>=1.13.0
-psycopg[binary]>=3.1.0
-aiosqlite>=0.20.0
+SQLAlchemy[asyncio]==2.0.50
+alembic==1.18.4
+psycopg[binary]==3.3.4
+aiosqlite==0.22.1
 
 # Rate limiting (Requirements 14.1, 14.2)
 slowapi==0.1.9
@@ -52,9 +52,9 @@ slowapi==0.1.9
 prometheus-client==0.21.0
 
 # OpenTelemetry for distributed tracing (Requirement 5.3)
-opentelemetry-api>=1.28.0
-opentelemetry-sdk>=1.28.0
-opentelemetry-exporter-otlp>=1.28.0
+opentelemetry-api==1.39.1
+opentelemetry-sdk==1.39.1
+opentelemetry-exporter-otlp>=1.28.0,<2.0.0
 
 # Testing infrastructure (Requirement 11.6)
 #
@@ -88,17 +88,17 @@ supertokens-python==0.31.3
 # AWS SDK for KMS envelope encryption (Fuel Ops Hardening Req 5.1 — credentials vault)
 # boto3 + cryptography are brought in transitively today; pin them explicitly
 # because services/credentials_vault.py imports them directly.
-boto3>=1.35.0
-cryptography>=43.0.0
+boto3==1.42.39
+cryptography==46.0.4
 
 # scikit-learn for solver clustering pre-pass (Fuel Ops Hardening Req 2.3.2)
 # used by Agents/support/route_solver.optimize_route_large to run a KMeans
 # pre-pass on stop coordinates before per-cluster 2-opt, and by the
 # prioritization DBSCAN helper (Req 3.4.1).
-scikit-learn>=1.5.0
+scikit-learn==1.8.0
 
 # PDF generation for BOL documents (Fuel Ops Hardening Req 4.3 — services/bol_service.py)
-reportlab>=4.0.0
+reportlab==4.5.0
 
 # pypdf reads the PDF that reportlab wrote, so tests/unit/test_bol_service.py can
 # assert the BOL's actual rendered text rather than only the canvas call order.
@@ -113,7 +113,7 @@ pypdf==6.10.2
 # Req 5.1.5 — integrations/integration_scheduler.py). Used via the
 # AsyncIOScheduler + CronTrigger.from_crontab APIs to register per-
 # Integration_Instance cron jobs that invoke connector.sync_pull.
-APScheduler>=3.10.0
+APScheduler==3.11.3
 
 # intuit-oauth (intuitlib) for QuickBooks Online Connector OAuth 2.0
 # refresh-token rotation (Fuel Ops Hardening Req 5.2.2, 5.2.5; Task 9.4 —
@@ -135,17 +135,17 @@ mygeotab==0.9.1
 # but production deployments should pip-install this pin so the
 # connector's PaymentIntent + Webhook.construct_event calls use the
 # vendor-maintained client.
-stripe>=10.0.0
+stripe>=10.0.0,<13.0.0
 
 # Shapely for GeoJSON polygon validation on storm road restrictions
 # (Fuel Ops Hardening Req 9.3.3; Task 10.8 — fuel/storm_mode_models.py).
 # Imported lazily where used so unit tests can mock polygon validation
 # without requiring the dep; production deployments should pin this so
 # the StormRoadRestriction model validates WGS84 geometry robustly.
-shapely>=2.0.0
+shapely>=2.0.0,<3.0.0
 
 # pyshp for reading US Census TIGER shapefiles (state boundary detection
 # in IFTA Reporter — Fuel Compliance Backbone Req 7.1, Task 12.1).
 # Used by compliance/services/state_boundary_detector.py for lat/lon → state
 # lookups. Imported lazily so tests can mock without requiring the dep.
-pyshp>=2.3.0
+pyshp>=2.3.0,<3.0.0

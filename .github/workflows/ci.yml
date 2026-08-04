@@ -354,3 +354,120 @@ jobs:
 
       - name: Tests
         run: npm test -- --ci
+
+  # -----------------------------------------------------------------
+  # Job 9: Backend image — build it, then prove it starts
+  # A Dockerfile that is never built rots quietly: the first time anyone needs
+  # it is a deploy, which is the worst moment to discover a dependency has no
+  # wheel for linux/amd64. Building on every PR keeps the deploy artifact
+  # honest. No `needs:` — this is independent of the test jobs.
+  # -----------------------------------------------------------------
+  docker-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build the runtime image
+        uses: docker/build-push-action@v6
+        with:
+          context: Runsheet-backend
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: runsheet-backend:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Refuse to ship credentials or a host virtualenv
+        run: |
+          # .dockerignore excludes every .env.* except the placeholder template.
+          # A real env file in a layer is readable by anyone who can pull the
+          # image, and a copied-in venv would both bloat the image and shadow
+          # /opt/venv with host-platform binaries.
+          leaked=$(docker run --rm --entrypoint sh runsheet-backend:ci -c \
+            'ls -a /app | grep "^\.env" | grep -v "^\.env\.example$" || true')
+          if [ -n "$leaked" ]; then
+            echo "❌ Environment files present in the image:"
+            echo "$leaked"
+            exit 1
+          fi
+          for path in venv .venv .git tests; do
+            if docker run --rm --entrypoint sh runsheet-backend:ci -c "[ -e /app/$path ]"; then
+              echo "❌ /app/$path was copied into the image"
+              exit 1
+            fi
+          done
+          echo "✅ No credentials, virtualenv, git history or tests in the image."
+
+      - name: Refuse to run as root
+        run: |
+          uid=$(docker run --rm --entrypoint id runsheet-backend:ci -u)
+          if [ "$uid" = "0" ]; then
+            echo "❌ Image runs as root (uid 0)"
+            exit 1
+          fi
+          echo "✅ Image runs as uid $uid."
+
+      - name: Start the image and wait for readiness
+        run: |
+          # Elasticsearch is the only dependency /health/ready checks, so that is
+          # the only one this job stands up. Postgres and Redis are exercised by
+          # backend-tests; what is being proved here is that the IMAGE boots —
+          # imports resolve, the venv is intact, uvicorn binds.
+          docker network create ci-net
+          docker run -d --name es --network ci-net \
+            -e discovery.type=single-node \
+            -e xpack.security.enabled=false \
+            -e ES_JAVA_OPTS="-Xms512m -Xmx512m" \
+            docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+
+          for i in $(seq 1 60); do
+            if docker run --rm --network ci-net curlimages/curl:latest \
+                 -fsS http://es:9200 >/dev/null 2>&1; then break; fi
+            sleep 2
+          done
+
+          docker run -d --name app --network ci-net -p 8080:8080 \
+            -e ENVIRONMENT=development \
+            -e ELASTIC_ENDPOINT=http://es:9200 \
+            -e ELASTIC_API_KEY=ci-placeholder \
+            -e GEMINI_API_KEY=ci-placeholder \
+            -e SESSION_STORE_TYPE=redis \
+            -e REDIS_URL=redis://localhost:6379 \
+            -e SUPERTOKENS_CONNECTION_URI=http://supertokens.invalid:3567 \
+            -e SUPERTOKENS_API_KEY=ci-placeholder \
+            -e LOG_LEVEL=WARNING \
+            runsheet-backend:ci
+
+          ready=0
+          for i in $(seq 1 60); do
+            code=$(curl -s -o /dev/null -m 5 -w '%{http_code}' \
+              http://127.0.0.1:8080/health/ready || true)
+            if [ "$code" = "200" ]; then ready=1; echo "ready after ${i}s"; break; fi
+            sleep 1
+          done
+          if [ "$ready" != "1" ]; then
+            echo "❌ Image did not become ready. Container logs:"
+            docker logs app 2>&1 | tail -60
+            exit 1
+          fi
+
+      - name: Verify auth is enforced
+        run: |
+          # A 200 here would mean the tenant guard is not enforcing — the single
+          # most consequential thing that can be wrong about a running image.
+          code=$(curl -s -o /dev/null -m 10 -w '%{http_code}' \
+            http://127.0.0.1:8080/api/orders || true)
+          echo "/api/orders -> $code"
+          if [ "$code" != "401" ] && [ "$code" != "403" ]; then
+            echo "❌ Expected 401/403 without a session, got $code"
+            docker logs app 2>&1 | tail -40
+            exit 1
+          fi
+          echo "✅ Unauthenticated reads are rejected."
+
+      - name: Container logs
+        if: always()
+        run: docker logs app 2>&1 | tail -60 || true
