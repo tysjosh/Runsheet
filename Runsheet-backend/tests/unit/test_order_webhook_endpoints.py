@@ -1,6 +1,5 @@
 """
-Unit tests for :mod:`fuel.api.order_webhook_endpoints` and the legacy
-``/webhooks/dinee`` deprecation-header emission.
+Unit tests for :mod:`fuel.api.order_webhook_endpoints`.
 
 Task 7.5 of the order-intake-pipeline spec. Exercises the webhook
 intake surface with a mocked OrderIntakePipeline.
@@ -10,7 +9,6 @@ Covers:
 * HMAC signature header required (422 when missing)
 * Pipeline receives channel_id, raw body, and signature
 * Pipeline error propagation (structured errors)
-* Legacy /webhooks/dinee deprecation-header emission (Deprecation, Sunset, Link)
 
 Validates: Requirements 2.2.1, 2.2.2, 2.2.5, 10.1, 10.2.1
 """
@@ -242,208 +240,12 @@ class TestOrderWebhookEndpoint:
         assert body["status"] == "duplicate"
         assert body["order_id"] is None
 
-
 # ---------------------------------------------------------------------------
-# Tests — Legacy /webhooks/dinee deprecation headers (Req 1.3.3)
+# Removed: TestLegacyDineeDeprecationHeaders
 # ---------------------------------------------------------------------------
-
-
-WEBHOOK_SECRET = "test-secret-key"
-
-
-def _sign_dinee(payload: dict, secret: str = WEBHOOK_SECRET) -> str:
-    body = json.dumps(payload).encode("utf-8")
-    return hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
-
-
-def _make_dinee_payload(
-    event_id: str = "evt-dinee-001",
-    tenant_id: str = "tenant-1",
-) -> dict:
-    return {
-        "event_id": event_id,
-        "event_type": "shipment_created",
-        "schema_version": "1.0",
-        "tenant_id": tenant_id,
-        "timestamp": "2025-01-01T12:00:00Z",
-        "shipment_id": "SHP-001",
-        "data": {"shipment_id": "SHP-001", "status": "created"},
-    }
-
-
-def _build_dinee_app_with_pipeline():
-    """Build a test app with the legacy dinee webhook router + pipeline."""
-    # Patch ES service before importing
-    _mock_es_module = MagicMock()
-    _mock_es_module.ElasticsearchService = MagicMock
-    _mock_es_module.elasticsearch_service = MagicMock()
-    sys.modules.setdefault("services.elasticsearch_service", _mock_es_module)
-
-    from ops.webhooks.receiver import (
-        DINEE_LEGACY_CHANNEL_ID,
-        _dinee_legacy_seeded,
-        configure_webhook_receiver,
-        router as dinee_router,
-    )
-    from ops.ingestion.adapter import AdapterTransformer, TransformResult
-
-    app = FastAPI()
-    app.include_router(dinee_router)
-
-    adapter = MagicMock(spec=AdapterTransformer)
-    adapter.is_version_supported.return_value = True
-    adapter.transform.return_value = TransformResult(
-        shipment_current_doc={"shipment_id": "SHP-001"},
-        rider_current_doc=None,
-        event_doc={"event_id": "evt-dinee-001"},
-    )
-
-    idempotency_service = AsyncMock()
-    idempotency_service.is_duplicate = AsyncMock(return_value=False)
-    idempotency_service.mark_processed = AsyncMock()
-
-    ops_es_service = AsyncMock()
-    ops_es_service.append_shipment_event = AsyncMock()
-    ops_es_service.upsert_shipment_current = AsyncMock()
-    ops_es_service.upsert_rider_current = AsyncMock()
-    ops_es_service._es = AsyncMock()
-    ops_es_service._es.index_document = AsyncMock()
-
-    pipeline = AsyncMock()
-    pipeline.ingest_webhook = AsyncMock(
-        return_value=FakeIntakeResponse(
-            event_id="evt-dinee-001",
-            status="processed",
-            order_id="ord_dinee001",
-        )
-    )
-
-    intake_channel_repo = AsyncMock()
-    intake_channel_repo.get_by_channel_id = AsyncMock(return_value=None)
-
-    credentials_vault = AsyncMock()
-    credentials_vault.put = AsyncMock(return_value="vault-ref-dinee")
-
-    _dinee_legacy_seeded.clear()
-
-    configure_webhook_receiver(
-        adapter=adapter,
-        idempotency_service=idempotency_service,
-        poison_queue_service=AsyncMock(),
-        ops_es_service=ops_es_service,
-        ws_manager=None,
-        feature_flag_service=None,
-        webhook_secret=WEBHOOK_SECRET,
-        webhook_tenant_id="",
-        order_intake_pipeline=pipeline,
-        intake_channel_repo=intake_channel_repo,
-        credentials_vault=credentials_vault,
-    )
-
-    client = TestClient(app)
-    return client, pipeline
-
-
-class TestLegacyDineeDeprecationHeaders:
-    """Legacy /webhooks/dinee emits deprecation headers. Validates: Req 1.3.3"""
-
-    @patch("ops.webhooks.receiver.get_settings")
-    def test_deprecation_header_present(self, mock_get_settings):
-        """Every response includes Deprecation: true."""
-        mock_settings = MagicMock()
-        mock_settings.ops_webhook_rate_limit = 500
-        mock_settings.orders_legacy_sunset_date = "2026-07-01"
-        mock_get_settings.return_value = mock_settings
-
-        client, pipeline = _build_dinee_app_with_pipeline()
-        payload = _make_dinee_payload()
-        body = json.dumps(payload)
-        sig = _sign_dinee(payload)
-
-        resp = client.post(
-            "/webhooks/dinee",
-            content=body,
-            headers={
-                "X-Dinee-Signature": sig,
-                "Content-Type": "application/json",
-            },
-        )
-        assert resp.status_code == 200
-        assert resp.headers.get("deprecation") == "true"
-
-    @patch("ops.webhooks.receiver.get_settings")
-    def test_sunset_header_present(self, mock_get_settings):
-        """Sunset header contains the configured date."""
-        mock_settings = MagicMock()
-        mock_settings.ops_webhook_rate_limit = 500
-        mock_settings.orders_legacy_sunset_date = "2026-09-01"
-        mock_get_settings.return_value = mock_settings
-
-        client, pipeline = _build_dinee_app_with_pipeline()
-        payload = _make_dinee_payload()
-        body = json.dumps(payload)
-        sig = _sign_dinee(payload)
-
-        resp = client.post(
-            "/webhooks/dinee",
-            content=body,
-            headers={
-                "X-Dinee-Signature": sig,
-                "Content-Type": "application/json",
-            },
-        )
-        assert resp.status_code == 200
-        assert resp.headers.get("sunset") == "2026-09-01"
-
-    @patch("ops.webhooks.receiver.get_settings")
-    def test_link_header_points_to_successor(self, mock_get_settings):
-        """Link header points to /webhooks/orders/dinee-legacy with rel=successor-version."""
-        mock_settings = MagicMock()
-        mock_settings.ops_webhook_rate_limit = 500
-        mock_settings.orders_legacy_sunset_date = "2026-07-01"
-        mock_get_settings.return_value = mock_settings
-
-        client, pipeline = _build_dinee_app_with_pipeline()
-        payload = _make_dinee_payload()
-        body = json.dumps(payload)
-        sig = _sign_dinee(payload)
-
-        resp = client.post(
-            "/webhooks/dinee",
-            content=body,
-            headers={
-                "X-Dinee-Signature": sig,
-                "Content-Type": "application/json",
-            },
-        )
-        assert resp.status_code == 200
-        link = resp.headers.get("link")
-        assert link is not None
-        assert "/webhooks/orders/dinee-legacy" in link
-        assert 'rel="successor-version"' in link
-
-    @patch("ops.webhooks.receiver.get_settings")
-    def test_pipeline_routes_with_dinee_legacy_channel_id(self, mock_get_settings):
-        """The pipeline is called with channel_id='dinee-legacy'."""
-        mock_settings = MagicMock()
-        mock_settings.ops_webhook_rate_limit = 500
-        mock_settings.orders_legacy_sunset_date = "2026-07-01"
-        mock_get_settings.return_value = mock_settings
-
-        client, pipeline = _build_dinee_app_with_pipeline()
-        payload = _make_dinee_payload()
-        body = json.dumps(payload)
-        sig = _sign_dinee(payload)
-
-        resp = client.post(
-            "/webhooks/dinee",
-            content=body,
-            headers={
-                "X-Dinee-Signature": sig,
-                "Content-Type": "application/json",
-            },
-        )
-        assert resp.status_code == 200
-        pipeline.ingest_webhook.assert_called_once()
-        call_kwargs = pipeline.ingest_webhook.call_args.kwargs
-        assert call_kwargs["channel_id"] == "dinee-legacy"
+#
+# The legacy ``POST /webhooks/dinee`` route emitted ``Deprecation``, ``Sunset``
+# and ``Link: rel="successor-version"`` headers pointing at this module's
+# ``POST /webhooks/orders/{channel_id}``. The route has now been deleted, so
+# there are no deprecation headers to assert and no successor to point at — this
+# module *is* the surviving surface. Its own tests are above.

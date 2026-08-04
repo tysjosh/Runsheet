@@ -94,11 +94,15 @@ class OrderService:
         ws_manager: OrdersWSManager (or compatible) for broadcasting.
         driver_counter_service: Optional DriverCounterService for
             incrementing/decrementing driver counters.
-        legacy_dual_writer: Optional LegacyDualWriter for mirroring
-            to the legacy shipment surface.
-        feature_flag_service: FeatureFlagService for checking overlay
-            state (controls whether legacy dual-write is active).
+        feature_flag_service: FeatureFlagService for overlay-state
+            checks.
         clock: Optional clock override for testing (defaults to utcnow).
+
+    NB: the ``legacy_dual_writer`` dependency was removed with the
+    legacy dual-write shim — nothing mirrors transitions into
+    ``shipments_current`` any more. ``feature_flag_service`` is kept
+    because callers still inject it and it stays the hook for overlay
+    gating, even though the mirror was its last in-service consumer.
     """
 
     def __init__(
@@ -107,14 +111,12 @@ class OrderService:
         order_repo: Any,
         ws_manager: Any,
         driver_counter_service: Optional[Any] = None,
-        legacy_dual_writer: Optional[Any] = None,
         feature_flag_service: Optional[Any] = None,
         clock: Optional[Callable] = None,
     ) -> None:
         self._order_repo = order_repo
         self._ws_manager = ws_manager
         self._driver_counter_service = driver_counter_service
-        self._legacy_dual_writer = legacy_dual_writer
         self._feature_flag_service = feature_flag_service
         self._clock = clock or utcnow
 
@@ -310,10 +312,10 @@ class OrderService:
         # 8. Broadcast via WebSocket
         await self._broadcast_status_change(order, old_status, new_status)
 
-        # 9. Legacy dual-write (when enabled)
-        await self._mirror_legacy_if_enabled(order)
-
-        # 10. Notify event subscribers (e.g. commerce invoice generation)
+        # 9. Notify event subscribers (e.g. commerce invoice generation)
+        # NB: the former step 9 mirrored the transition into the legacy
+        # shipment surface via LegacyDualWriter. The shim is gone, so
+        # the subscriber notification moved up a slot.
         await self._notify_event_subscribers(order, new_status)
 
         return order
@@ -540,43 +542,10 @@ class OrderService:
                 exc,
             )
 
-    async def _mirror_legacy_if_enabled(
-        self, order: Dict[str, Any]
-    ) -> None:
-        """Mirror the order to the legacy shipment surface when the
-        overlay flag is in shadow or active_gated state."""
-        if not self._legacy_dual_writer:
-            return
-        if not self._feature_flag_service:
-            return
-
-        try:
-            overlay_state = await self._feature_flag_service.get_overlay_state(
-                "order_intake_pipeline", order["tenant_id"]
-            )
-        except Exception as exc:
-            logger.warning(
-                "Failed to read overlay state for tenant=%s: %s — "
-                "skipping legacy mirror",
-                order.get("tenant_id"),
-                exc,
-            )
-            return
-
-        if overlay_state in ("shadow", "active_gated"):
-            try:
-                # mirror_order never raises by contract, but we guard
-                # defensively so the main path is never blocked.
-                await self._legacy_dual_writer.mirror_order(
-                    order, tenant_id=order["tenant_id"]
-                )
-            except Exception as exc:
-                logger.warning(
-                    "LegacyDualWriter.mirror_order raised unexpectedly "
-                    "for order=%s: %s",
-                    order.get("order_id"),
-                    exc,
-                )
+    # NB: ``_mirror_legacy_if_enabled`` was removed here. It read the
+    # overlay flag and mirrored each transition into ``shipments_current``
+    # through LegacyDualWriter. The legacy surface is being dropped, so
+    # the mirror and its overlay gate went with it.
 
     async def _notify_event_subscribers(
         self,

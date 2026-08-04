@@ -27,8 +27,10 @@ Covers:
 * ``customer_tank_id = None`` bypasses the tank check.
 * ``_complete_order_doc`` overwrites adapter-set ``order_id`` /
   ``tenant_id`` / ``status`` / timestamps.
-* Legacy dual-write failure logs a warning AND enqueues the order in
-  ``pending_legacy_mirrors`` — does NOT fail the main path.
+
+The legacy dual-write and legacy ``/ws/ops`` dual-broadcast coverage was
+removed with the mirror itself — no flag state reaches the legacy surface
+any more.
 
 Validates: Requirements 1.1.6, 2.2.2, 2.2.3, 2.2.5, 2.2.6, 2.2.7, 10.2.1.
 """
@@ -278,11 +280,8 @@ def customer_tank_repo():
     return repo
 
 
-@pytest.fixture
-def legacy_dual_writer():
-    writer = AsyncMock()
-    writer.mirror_order = AsyncMock()
-    return writer
+# The ``legacy_dual_writer`` fixture lived here. The pipeline no longer
+# accepts that dependency, so there is nothing left to fake.
 
 
 @pytest.fixture
@@ -309,7 +308,6 @@ def pipeline(
     ws_manager,
     credentials_vault,
     customer_tank_repo,
-    legacy_dual_writer,
     legacy_ws_manager,
     clock,
 ):
@@ -323,7 +321,6 @@ def pipeline(
         ws_manager=ws_manager,
         credentials_vault=credentials_vault,
         customer_tank_repo=customer_tank_repo,
-        legacy_dual_writer=legacy_dual_writer,
         legacy_ws_manager=legacy_ws_manager,
         clock=clock,
     )
@@ -494,7 +491,6 @@ class TestTenantScopedIdempotency:
         ws_manager,
         credentials_vault,
         customer_tank_repo,
-        legacy_dual_writer,
         clock,
     ):
         """Tenant-scoped idempotency: same event_id under different tenants
@@ -531,7 +527,6 @@ class TestTenantScopedIdempotency:
             ws_manager=ws_manager,
             credentials_vault=credentials_vault,
             customer_tank_repo=customer_tank_repo,
-            legacy_dual_writer=legacy_dual_writer,
             clock=clock,
         )
 
@@ -556,7 +551,6 @@ class TestTenantScopedIdempotency:
             ws_manager=ws_manager,
             credentials_vault=credentials_vault,
             customer_tank_repo=customer_tank_repo,
-            legacy_dual_writer=legacy_dual_writer,
             clock=clock,
         )
 
@@ -672,7 +666,6 @@ class TestAdapterValidationFailure:
         ws_manager,
         credentials_vault,
         customer_tank_repo,
-        legacy_dual_writer,
         clock,
     ):
         """An adapter that raises AdapterError routes to poison queue."""
@@ -697,7 +690,6 @@ class TestAdapterValidationFailure:
             ws_manager=ws_manager,
             credentials_vault=credentials_vault,
             customer_tank_repo=customer_tank_repo,
-            legacy_dual_writer=legacy_dual_writer,
             clock=clock,
         )
 
@@ -990,375 +982,17 @@ class TestCsvSourceUpdates:
 
 
 # ---------------------------------------------------------------------------
-# Tests — Legacy dual-write failure does NOT fail the main path
+# Tests — Legacy dual-write / dual-broadcast (removed)
 # ---------------------------------------------------------------------------
-
-
-class TestLegacyDualWriteFailure:
-    """Legacy dual-write failure logs a warning AND enqueues the order in
-    ``pending_legacy_mirrors`` — does NOT fail the main path."""
-
-    @pytest.mark.asyncio
-    async def test_dual_write_failure_does_not_fail_main_path(
-        self,
-        pipeline,
-        legacy_dual_writer,
-        feature_flag_service,
-        es_service,
-        idempotency_service,
-        caplog,
-    ):
-        """When legacy dual-write fails, the main path still succeeds."""
-        # Enable dual-write by setting overlay state to active_gated
-        feature_flag_service.get_overlay_state = AsyncMock(
-            return_value="active_gated"
-        )
-        # Make the dual-writer fail
-        legacy_dual_writer.mirror_order = AsyncMock(
-            side_effect=RuntimeError("Legacy ES is down")
-        )
-
-        payload = _valid_order_payload()
-        body = json.dumps(payload).encode()
-        signature = _sign_body(body)
-
-        with caplog.at_level(logging.WARNING):
-            result = await pipeline.ingest_webhook(
-                channel_id=CHANNEL_ID,
-                body=body,
-                signature=signature,
-                request_id="req-016",
-            )
-
-        # Main path still succeeds
-        assert result.status == "processed"
-        assert result.order_id is not None
-
-        # Idempotency was still marked processed
-        idempotency_service.mark_processed.assert_called_once()
-
-        # A warning was logged
-        assert any(
-            "legacy dual-write failed" in record.message
-            for record in caplog.records
-        )
-
-    @pytest.mark.asyncio
-    async def test_dual_write_failure_enqueues_pending_mirror(
-        self,
-        pipeline,
-        legacy_dual_writer,
-        feature_flag_service,
-        es_service,
-    ):
-        """When legacy dual-write fails, the order is enqueued in
-        pending_legacy_mirrors for background retry."""
-        feature_flag_service.get_overlay_state = AsyncMock(
-            return_value="shadow"
-        )
-        legacy_dual_writer.mirror_order = AsyncMock(
-            side_effect=RuntimeError("Connection refused")
-        )
-
-        payload = _valid_order_payload()
-        body = json.dumps(payload).encode()
-        signature = _sign_body(body)
-
-        result = await pipeline.ingest_webhook(
-            channel_id=CHANNEL_ID,
-            body=body,
-            signature=signature,
-            request_id="req-017",
-        )
-
-        assert result.status == "processed"
-
-        # Verify that es_service.index_document was called for the
-        # pending_legacy_mirrors enqueue
-        mirror_calls = [
-            call
-            for call in es_service.index_document.call_args_list
-            if call[0][0] == "pending_legacy_mirrors"
-        ]
-        assert len(mirror_calls) == 1
-        mirror_doc = mirror_calls[0][0][2]
-        assert mirror_doc["entity_type"] == "order"
-        assert mirror_doc["status"] == "pending"
-        assert mirror_doc["retry_count"] == 0
-
-
-# ---------------------------------------------------------------------------
-# Tests — Legacy /ws/ops dual-broadcast (Req 4.1.3, 9.3)
-# ---------------------------------------------------------------------------
-
-
-class TestLegacyDualBroadcast:
-    """During the deprecation window, OrderIntakePipeline MUST also call
-    OpsWebSocketManager.broadcast_shipment_update and broadcast_rider_update
-    via the existing manager so legacy /ws/ops subscribers continue
-    receiving shipment/rider events.
-
-    Gate on overlay.order_intake_pipeline state:
-    - disabled, shadow, active_gated → dual-broadcast
-    - active_auto → stop the legacy broadcast
-
-    Validates: Requirements 4.1.3, 9.3.
-    """
-
-    @pytest.mark.asyncio
-    async def test_dual_broadcast_fires_in_disabled_state(
-        self,
-        pipeline,
-        legacy_ws_manager,
-        feature_flag_service,
-    ):
-        """When overlay state is 'disabled', pipeline short-circuits to legacy_passthrough."""
-        feature_flag_service.get_overlay_state = AsyncMock(
-            return_value="disabled"
-        )
-
-        payload = _valid_order_payload()
-        body = json.dumps(payload).encode()
-        signature = _sign_body(body)
-
-        result = await pipeline.ingest_webhook(
-            channel_id=CHANNEL_ID,
-            body=body,
-            signature=signature,
-            request_id="req-dual-001",
-        )
-
-        # disabled state short-circuits — no processing, no broadcast
-        assert result.status == "legacy_passthrough"
-        legacy_ws_manager.broadcast_shipment_update.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_dual_broadcast_fires_in_shadow_state(
-        self,
-        pipeline,
-        legacy_ws_manager,
-        feature_flag_service,
-    ):
-        """When overlay state is 'shadow', legacy broadcast fires."""
-        feature_flag_service.get_overlay_state = AsyncMock(
-            return_value="shadow"
-        )
-
-        payload = _valid_order_payload()
-        body = json.dumps(payload).encode()
-        signature = _sign_body(body)
-
-        result = await pipeline.ingest_webhook(
-            channel_id=CHANNEL_ID,
-            body=body,
-            signature=signature,
-            request_id="req-dual-002",
-        )
-
-        assert result.status == "processed"
-        legacy_ws_manager.broadcast_shipment_update.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_dual_broadcast_fires_in_active_gated_state(
-        self,
-        pipeline,
-        legacy_ws_manager,
-        feature_flag_service,
-    ):
-        """When overlay state is 'active_gated', legacy broadcast fires."""
-        feature_flag_service.get_overlay_state = AsyncMock(
-            return_value="active_gated"
-        )
-
-        payload = _valid_order_payload()
-        body = json.dumps(payload).encode()
-        signature = _sign_body(body)
-
-        result = await pipeline.ingest_webhook(
-            channel_id=CHANNEL_ID,
-            body=body,
-            signature=signature,
-            request_id="req-dual-003",
-        )
-
-        assert result.status == "processed"
-        legacy_ws_manager.broadcast_shipment_update.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_dual_broadcast_stops_in_active_auto_state(
-        self,
-        pipeline,
-        legacy_ws_manager,
-        feature_flag_service,
-    ):
-        """When overlay state is 'active_auto', legacy broadcast does NOT fire."""
-        feature_flag_service.get_overlay_state = AsyncMock(
-            return_value="active_auto"
-        )
-
-        payload = _valid_order_payload()
-        body = json.dumps(payload).encode()
-        signature = _sign_body(body)
-
-        result = await pipeline.ingest_webhook(
-            channel_id=CHANNEL_ID,
-            body=body,
-            signature=signature,
-            request_id="req-dual-004",
-        )
-
-        assert result.status == "processed"
-        legacy_ws_manager.broadcast_shipment_update.assert_not_called()
-        legacy_ws_manager.broadcast_rider_update.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_dual_broadcast_does_not_send_rider_update_without_driver(
-        self,
-        pipeline,
-        legacy_ws_manager,
-        feature_flag_service,
-    ):
-        """When no driver is assigned, rider_update is NOT broadcast."""
-        feature_flag_service.get_overlay_state = AsyncMock(
-            return_value="active_gated"
-        )
-
-        # Default payload has no assigned_driver_id
-        payload = _valid_order_payload()
-        body = json.dumps(payload).encode()
-        signature = _sign_body(body)
-
-        await pipeline.ingest_webhook(
-            channel_id=CHANNEL_ID,
-            body=body,
-            signature=signature,
-            request_id="req-dual-005",
-        )
-
-        legacy_ws_manager.broadcast_shipment_update.assert_called_once()
-        legacy_ws_manager.broadcast_rider_update.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_dual_broadcast_failure_does_not_block_main_path(
-        self,
-        pipeline,
-        legacy_ws_manager,
-        feature_flag_service,
-        caplog,
-    ):
-        """Legacy broadcast failure MUST NOT block the main intake path."""
-        feature_flag_service.get_overlay_state = AsyncMock(
-            return_value="active_gated"
-        )
-        legacy_ws_manager.broadcast_shipment_update = AsyncMock(
-            side_effect=RuntimeError("WS broadcast exploded")
-        )
-
-        payload = _valid_order_payload()
-        body = json.dumps(payload).encode()
-        signature = _sign_body(body)
-
-        with caplog.at_level(logging.WARNING):
-            result = await pipeline.ingest_webhook(
-                channel_id=CHANNEL_ID,
-                body=body,
-                signature=signature,
-                request_id="req-dual-006",
-            )
-
-        # Main path still succeeds
-        assert result.status == "processed"
-        assert result.order_id is not None
-
-        # A warning was logged
-        assert any(
-            "legacy /ws/ops dual-broadcast failed" in record.message
-            for record in caplog.records
-        )
-
-    @pytest.mark.asyncio
-    async def test_dual_broadcast_skipped_when_no_legacy_ws_manager(
-        self,
-        es_service,
-        intake_channel_repo,
-        adapter_registry,
-        idempotency_service,
-        feature_flag_service,
-        poison_queue_service,
-        ws_manager,
-        credentials_vault,
-        customer_tank_repo,
-        legacy_dual_writer,
-        clock,
-    ):
-        """When legacy_ws_manager is None, dual-broadcast is skipped."""
-        feature_flag_service.get_overlay_state = AsyncMock(
-            return_value="active_gated"
-        )
-
-        pipeline_no_legacy_ws = OrderIntakePipeline(
-            es_service=es_service,
-            intake_channel_repo=intake_channel_repo,
-            adapter_registry=adapter_registry,
-            idempotency_service=idempotency_service,
-            feature_flag_service=feature_flag_service,
-            poison_queue_service=poison_queue_service,
-            ws_manager=ws_manager,
-            credentials_vault=credentials_vault,
-            customer_tank_repo=customer_tank_repo,
-            legacy_dual_writer=legacy_dual_writer,
-            legacy_ws_manager=None,
-            clock=clock,
-        )
-
-        payload = _valid_order_payload()
-        body = json.dumps(payload).encode()
-        signature = _sign_body(body)
-
-        result = await pipeline_no_legacy_ws.ingest_webhook(
-            channel_id=CHANNEL_ID,
-            body=body,
-            signature=signature,
-            request_id="req-dual-007",
-        )
-
-        # Main path still succeeds — no error from missing legacy manager
-        assert result.status == "processed"
-
-    @pytest.mark.asyncio
-    async def test_dual_broadcast_shipment_shape_projection(
-        self,
-        pipeline,
-        legacy_ws_manager,
-        feature_flag_service,
-    ):
-        """The shipment broadcast data is correctly projected from the order."""
-        feature_flag_service.get_overlay_state = AsyncMock(
-            return_value="active_gated"
-        )
-
-        payload = _valid_order_payload()
-        body = json.dumps(payload).encode()
-        signature = _sign_body(body)
-
-        result = await pipeline.ingest_webhook(
-            channel_id=CHANNEL_ID,
-            body=body,
-            signature=signature,
-            request_id="req-dual-008",
-        )
-
-        assert result.status == "processed"
-        shipment_data = legacy_ws_manager.broadcast_shipment_update.call_args[0][0]
-
-        # Verify the projected shipment shape
-        assert shipment_data["shipment_id"] == result.order_id
-        assert shipment_data["status"] == "placed"
-        assert shipment_data["tenant_id"] == TENANT_A
-        assert shipment_data["origin"] == "depot"  # fallback when no legacy_origin_snapshot
-        assert shipment_data["destination"] == "123 Main St, Houston TX"
-        assert shipment_data["current_location"] == {"lat": 29.76, "lon": -95.37}
-        assert "trace_id" in shipment_data
+# Two classes lived here. ``TestLegacyDualWriteFailure`` proved a failed
+# mirror logged a warning, enqueued the order in ``pending_legacy_mirrors``,
+# and never failed intake. ``TestLegacyDualBroadcast`` proved the overlay
+# gating on the legacy ``/ws/ops`` shipment_update / rider_update broadcast,
+# its projection shape, and its failure isolation. Both surfaces are gone.
+#
+# The ``disabled`` short-circuit that the first dual-broadcast test also
+# covered is still asserted by TestFeatureFlagStateBehaviour in
+# tests/unit/test_order_intake_feature_flag.py.
 
 
 # ---------------------------------------------------------------------------

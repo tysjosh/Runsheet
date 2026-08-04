@@ -2,10 +2,12 @@
 Shared HMAC-SHA256 helpers for webhook / voice-intake signature handling.
 
 This module is the single implementation of HMAC-SHA256 signing and
-verification used across the codebase. Both the legacy Dinee webhook
-receiver (``ops/webhooks/receiver.py``) and the order-intake pipeline
-(``fuel/services/order_intake_pipeline.py``) delegate here so there is
-exactly one behavior for computing and comparing signatures.
+verification used across the codebase. The order-intake pipeline
+(``fuel/services/order_intake_pipeline.py``) and the Dinee voice bridge
+delegate here so there is exactly one behavior for computing and comparing
+signatures. The legacy Dinee webhook receiver used to be the other caller; it
+was removed with the ``POST /webhooks/dinee`` route, which is why this module
+now sits alone under ``ops/webhooks/``.
 
 Design notes:
     - The signature is computed as HMAC-SHA256 over the *raw* body bytes

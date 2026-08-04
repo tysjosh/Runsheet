@@ -692,17 +692,13 @@ class JobCurrentORM(_ComplianceConfigBase, Base):
     )
 
 
-class ShipmentCurrentORM(_ComplianceConfigBase, Base):
-    """Authoritative ops shipment current-state (projects to ``shipments_current``)."""
-
-    __tablename__ = "shipments_current"
-
-    shipment_id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    last_event_timestamp: Mapped[Optional[str]] = mapped_column(String(40))
-
-    __table_args__ = (
-        Index("ix_shipment_tenant_status", "tenant_id", "status"),
-    )
+# ``ShipmentCurrentORM`` (table ``shipments_current``) stood here. It was the
+# authoritative current-state row for the pre-pivot Nigerian last-mile model,
+# written only by the ``LegacyDualWriter`` mirror. The mirror is retired, the
+# ``POST /webhooks/dinee`` route that originated the data is deleted, and the
+# table is dropped by revision ``0007_drop_shipments_current``. There was never
+# a ``RiderCurrentORM``: ``riders_current`` only ever existed as an
+# Elasticsearch index, which is why only one table needed dropping.
 
 
 class TenantJobPolicyORM(_ComplianceConfigBase, Base):

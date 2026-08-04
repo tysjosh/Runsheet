@@ -1004,7 +1004,8 @@ async def mirror_current_state_upsert(
 ) -> None:
     """Best-effort: upsert an orders/jobs current-state record into Postgres.
 
-    ``aggregate_type`` is one of: fuel_order, job, shipment, tenant_job_policy.
+    ``aggregate_type`` is one of: fuel_order, job, tenant_job_policy.
+    (``shipment`` was retired with the ``shipments_current`` table, rev 0007.)
     The full ES ``doc`` is stored verbatim (hybrid document table) so the ES
     projection stays byte-identical. The stale-event guard in the repository
     discards out-of-order writes the same way the ES scripted upsert does.
@@ -1233,8 +1234,8 @@ async def read_hybrid_fetch_for_aggregation(
 
     Returns a list of verbatim documents, or ``_NOT_CUT_OVER`` when reads
     should still be served from Elasticsearch. Powers the analytics/metrics
-    endpoints (job counts, completion, asset utilization, delays; shipment
-    status/SLA/failure metrics) and the tax-engine FIPS/exemption lookups,
+    endpoints (job counts, completion, asset utilization, delays) and the
+    tax-engine FIPS/exemption lookups,
     which compute their rollups / filtering in Python — so the Postgres path
     reuses the identical post-processing and stays byte-identical to the ES
     query output.

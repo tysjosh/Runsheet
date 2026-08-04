@@ -39,6 +39,12 @@ import { WebSocketStatusBadge } from "./WebSocketStatus";
 // than living as a separate top-level tab. Lazy-loaded into a slide-over.
 const TruckCompartmentsPage = lazy(() => import("./ops/TruckCompartmentsPage"));
 
+/** Rows per page in the tracking table. */
+const PAGE_SIZE = 20;
+
+/** Statuses kept by the default "In transit only" filter. */
+const IN_TRANSIT_STATUSES = ["on_time", "delayed"];
+
 /** Filter options for the asset type dropdown */
 const ASSET_TYPE_OPTIONS: { label: string; value: AssetType | "all" }[] = [
   { label: "All", value: "all" },
@@ -377,9 +383,21 @@ function AddAssetModal({
 
 interface FleetTrackingProps {
   onTruckSelect?: (truck: Truck) => void;
+  /**
+   * Asset id deep-linked via `?asset=` on /dashboard/fleet (the canonical
+   * destination produced by `entityHref("asset", id)`). When it matches a
+   * loaded asset the row is selected, the map is focused, and the default
+   * filters/pagination are adjusted so the row is actually visible. When it
+   * matches nothing a dismissible notice is shown rather than silently doing
+   * nothing.
+   */
+  focusAssetId?: string | null;
 }
 
-export default function FleetTracking({ onTruckSelect }: FleetTrackingProps) {
+export default function FleetTracking({
+  onTruckSelect,
+  focusAssetId,
+}: FleetTrackingProps) {
   const [trucks, setTrucks] = useState<Truck[]>([]);
   const [fleetSummary, setFleetSummary] = useState<AssetSummary | null>(null);
   const [loading, setLoading] = useState(true);
@@ -402,6 +420,12 @@ export default function FleetTracking({ onTruckSelect }: FleetTrackingProps) {
   );
   const [page, setPage] = useState(1);
   const [showAddAsset, setShowAddAsset] = useState(false);
+  /**
+   * Deep-link focus bookkeeping (`?asset=<id>`): the id whose focus has already
+   * been applied, and the id we could not find in the loaded set.
+   */
+  const appliedFocusRef = useRef<string | null>(null);
+  const [focusNotFound, setFocusNotFound] = useState<string | null>(null);
 
   /**
    * Per-asset compliance signal keyed by asset id, lazily fetched for the
@@ -541,6 +565,52 @@ export default function FleetTracking({ onTruckSelect }: FleetTrackingProps) {
     };
   }, [loadFleetData]);
 
+  /**
+   * Deep-link focus (`/dashboard/fleet?asset=<id>`). Applied exactly once per
+   * `focusAssetId` value: the ref guard keeps re-renders, websocket location
+   * updates and the operator's own subsequent row clicks from being hijacked.
+   * Because the default filters ("In transit only") and pagination can hide the
+   * referenced row, the filter is relaxed and the page moved so the selection
+   * is visible; an id that matches nothing raises a dismissible notice instead
+   * of silently doing nothing.
+   */
+  useEffect(() => {
+    if (!focusAssetId) {
+      setFocusNotFound(null);
+      return;
+    }
+    // Wait for the first load to settle before deciding "not found".
+    if (loading) return;
+    if (appliedFocusRef.current === focusAssetId) return;
+
+    appliedFocusRef.current = focusAssetId;
+
+    const truck = trucks.find((candidate) => candidate.id === focusAssetId);
+    if (!truck) {
+      setFocusNotFound(focusAssetId);
+      return;
+    }
+    setFocusNotFound(null);
+
+    const inTransit = IN_TRANSIT_STATUSES.includes(truck.status);
+    if (!inTransit) setShowInTransit(false);
+
+    // The list the row will live in once the filter above is applied.
+    const visible =
+      showInTransit && inTransit
+        ? trucks.filter((candidate) =>
+            IN_TRANSIT_STATUSES.includes(candidate.status),
+          )
+        : trucks;
+    const index = visible.findIndex(
+      (candidate) => candidate.id === focusAssetId,
+    );
+    setPage(index >= 0 ? Math.floor(index / PAGE_SIZE) + 1 : 1);
+
+    setSelectedTruck(truck.id);
+    onTruckSelect?.(truck);
+  }, [focusAssetId, loading, trucks, showInTransit, onTruckSelect]);
+
   const handleTruckClick = (truck: Truck) => {
     setSelectedTruck(truck.id);
     onTruckSelect?.(truck);
@@ -594,10 +664,9 @@ export default function FleetTracking({ onTruckSelect }: FleetTrackingProps) {
   };
 
   const filteredTrucks = showInTransit
-    ? trucks.filter((truck) => ["on_time", "delayed"].includes(truck.status))
+    ? trucks.filter((truck) => IN_TRANSIT_STATUSES.includes(truck.status))
     : trucks;
 
-  const PAGE_SIZE = 20;
   const totalPages = Math.max(1, Math.ceil(filteredTrucks.length / PAGE_SIZE));
   const paginatedTrucks = filteredTrucks.slice(
     (page - 1) * PAGE_SIZE,
@@ -870,6 +939,30 @@ export default function FleetTracking({ onTruckSelect }: FleetTrackingProps) {
               : []),
           ]}
         />
+      )}
+
+      {/* Deep-link (`?asset=`) that matched no loaded asset — say so rather
+          than leaving the operator on an unchanged table. */}
+      {focusNotFound && (
+        <div
+          role="status"
+          data-testid="focus-asset-not-found"
+          className="mx-4 mb-2 flex items-start justify-between gap-3 rounded-lg border border-warning-light bg-warning-light px-3 py-2 text-xs text-warning-dark"
+        >
+          <span>
+            Asset <span className="font-medium">{focusNotFound}</span> was not
+            found in this view. It may be a different asset type — try the Asset
+            type filter — or it may no longer be tracked.
+          </span>
+          <button
+            type="button"
+            onClick={() => setFocusNotFound(null)}
+            className="rounded p-0.5 text-warning-dark hover:text-gray-700"
+            aria-label="Dismiss asset not found notice"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
       )}
 
       <div className="flex-1 overflow-y-auto min-h-0">

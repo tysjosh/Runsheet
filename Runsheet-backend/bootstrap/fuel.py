@@ -2,20 +2,19 @@
 Fuel domain bootstrap module.
 
 Initializes: FuelService, fuel Elasticsearch indices, order intake
-pipeline repositories, order/webhook endpoint routers, and the
-legacy mirror backfill worker (60-second cadence).
+pipeline repositories, and order/webhook endpoint routers.
+
+The legacy mirror backfill worker (60-second cadence) used to be started
+here; it drained the ``pending_legacy_mirrors`` retry queue for the
+legacy dual-write shim, and went out with that shim.
 
 Requirements: 1.1, 1.2, 2.4, 2.5
 """
-import asyncio
 import logging
 
 from bootstrap.container import ServiceContainer
 
 logger = logging.getLogger(__name__)
-
-# Module-level reference so shutdown can cancel the task.
-_legacy_mirror_backfill_task = None
 
 
 async def initialize(app, container: ServiceContainer) -> None:
@@ -35,8 +34,7 @@ async def initialize(app, container: ServiceContainer) -> None:
         logger.warning("Failed to set up fuel monitoring indices: %s", e)
 
     # Set up order intake pipeline indices (fuel_orders_current,
-    # fuel_order_events, drivers_current, intake_channels,
-    # pending_legacy_mirrors)
+    # fuel_order_events, drivers_current, intake_channels)
     try:
         from fuel.services.order_es_mappings import setup_order_intake_indices
 
@@ -153,13 +151,9 @@ async def initialize(app, container: ServiceContainer) -> None:
         except Exception as exc:
             logger.warning("Failed to register csv adapter: %s", exc)
 
-        try:
-            from fuel.intake.legacy_dinee_adapter import LegacyDineeShipmentAdapter
-            adapter_registry.register(
-                LegacyDineeShipmentAdapter(), channel_type="legacy", schema_version="1.0"
-            )
-        except Exception as exc:
-            logger.warning("Failed to register legacy dinee adapter: %s", exc)
+        # No ``legacy`` adapter is registered: the Dinee legacy shipment
+        # adapter was removed with the ``POST /webhooks/dinee`` route. Nothing
+        # can now produce an order with ``intake_channel="legacy"``.
 
         try:
             from fuel.intake.api_partner_adapter import ApiPartnerGenericAdapter
@@ -372,25 +366,18 @@ async def initialize(app, container: ServiceContainer) -> None:
     # orders_ws_manager earlier in this module, ops_feature_flags by the
     # ops module which precedes fuel in _BOOT_ORDER.
     #
-    # LegacyDualWriter is hoisted here, out of the backfill block below,
-    # so one instance serves both OrderService and the
-    # LegacyMirrorBackfillWorker rather than two writers racing the same
-    # mirror.
+    # A LegacyDualWriter used to be constructed here (hoisted out of the
+    # backfill block that followed, so one instance served both
+    # OrderService and the backfill worker). Both the writer and the
+    # worker are gone, so nothing mirrors transitions into
+    # ``shipments_current`` and ``container.legacy_dual_writer`` is no
+    # longer registered.
     #
     # configure_order_mutation_tools is deliberately NOT called —
     # agent-initiated transitions stay dormant exactly as today.
     # ---------------------------------------------------------------
     try:
         from fuel.services.order_service import OrderService
-        from fuel.services.legacy_dual_writer import LegacyDualWriter
-
-        legacy_dual_writer = None
-        if container.has("ops_es_service"):
-            legacy_dual_writer = LegacyDualWriter(
-                ops_es_service=container.ops_es_service,
-                es_service=es_service,
-            )
-            container.legacy_dual_writer = legacy_dual_writer
 
         if order_repository is not None:
             order_service = OrderService(
@@ -407,7 +394,6 @@ async def initialize(app, container: ServiceContainer) -> None:
                     if container.has("driver_counter_service")
                     else None
                 ),
-                legacy_dual_writer=legacy_dual_writer,
                 feature_flag_service=(
                     container.ops_feature_flags
                     if container.has("ops_feature_flags")
@@ -574,72 +560,12 @@ async def initialize(app, container: ServiceContainer) -> None:
         logger.warning("Failed to register depot reference loader: %s", e)
 
     # ---------------------------------------------------------------
-    # Legacy mirror backfill worker (60-second cadence)
-    # Validates: Requirements 1.3.2, 9.2
+    # The legacy mirror backfill worker (60-second cadence) was started
+    # here. It drained ``pending_legacy_mirrors`` by re-running
+    # LegacyDualWriter mirrors and poison-queued the exhausted entries.
+    # With the mirror retired there is nothing to drain, so neither the
+    # worker nor its periodic task is wired any more.
     # ---------------------------------------------------------------
-    global _legacy_mirror_backfill_task
-
-    try:
-        from fuel.services.legacy_mirror_backfill_worker import (
-            LegacyMirrorBackfillWorker,
-            run_backfill_cycle,
-            WORKER_CADENCE_SECONDS,
-        )
-        from fuel.services.legacy_dual_writer import LegacyDualWriter
-
-        # Reuse the LegacyDualWriter hoisted into the OrderService block
-        # above so one instance serves both the service and this worker;
-        # fall back to constructing one only if that registration failed.
-        ops_es_service = (
-            container.ops_es_service if container.has("ops_es_service") else None
-        )
-        poison_queue_service_for_worker = (
-            container.ops_poison_queue if container.has("ops_poison_queue") else None
-        )
-
-        if ops_es_service is not None and poison_queue_service_for_worker is not None:
-            if container.has("legacy_dual_writer"):
-                legacy_dual_writer = container.legacy_dual_writer
-            else:
-                legacy_dual_writer = LegacyDualWriter(
-                    ops_es_service=ops_es_service,
-                    es_service=es_service,
-                )
-                container.legacy_dual_writer = legacy_dual_writer
-
-            backfill_worker = LegacyMirrorBackfillWorker(
-                es_service=es_service,
-                legacy_dual_writer=legacy_dual_writer,
-                order_repository=order_repository,
-                driver_repository=driver_repository,
-                poison_queue_service=poison_queue_service_for_worker,
-            )
-            container.legacy_mirror_backfill_worker = backfill_worker
-
-            async def _periodic_legacy_mirror_backfill() -> None:
-                """Background task that drains pending_legacy_mirrors."""
-                try:
-                    while True:
-                        await asyncio.sleep(WORKER_CADENCE_SECONDS)
-                        await run_backfill_cycle(backfill_worker)
-                except asyncio.CancelledError:
-                    logger.info("Legacy mirror backfill task cancelled")
-
-            _legacy_mirror_backfill_task = asyncio.create_task(
-                _periodic_legacy_mirror_backfill()
-            )
-            logger.info(
-                "Legacy mirror backfill worker started "
-                "(cadence: %ds)",
-                WORKER_CADENCE_SECONDS,
-            )
-        else:
-            logger.warning(
-                "Legacy mirror backfill worker not started — "
-                "ops_es_service or poison_queue unavailable"
-            )
-    except Exception as e:
-        logger.warning("Failed to start legacy mirror backfill worker: %s", e)
 
     # ---------------------------------------------------------------
     # Driver daily reset cron — Requirement 3.2.4
@@ -649,17 +575,12 @@ async def initialize(app, container: ServiceContainer) -> None:
 
 
 async def shutdown(app, container: ServiceContainer) -> None:
-    """Cancel the legacy mirror backfill background task and shut down WS manager."""
-    global _legacy_mirror_backfill_task
+    """Shut down the orders WS manager.
 
-    if _legacy_mirror_backfill_task is not None and not _legacy_mirror_backfill_task.done():
-        _legacy_mirror_backfill_task.cancel()
-        try:
-            await _legacy_mirror_backfill_task
-        except asyncio.CancelledError:
-            pass
-        logger.info("Legacy mirror backfill task stopped")
-
+    This also used to cancel the legacy mirror backfill task; that task
+    was removed with the legacy dual-write shim, so there is nothing left
+    to cancel here.
+    """
     if container.has("orders_ws_manager"):
         try:
             await container.orders_ws_manager.shutdown()

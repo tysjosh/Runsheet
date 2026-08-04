@@ -6,7 +6,10 @@ Defines strict mappings for:
 - fuel_order_events (§2)
 - drivers_current (§3)
 - intake_channels (§4)
-- pending_legacy_mirrors (§13 — dual-write retry queue)
+
+``pending_legacy_mirrors`` (§13) was the dual-write retry queue for the
+legacy mirror shim. Both are retired, so the index is no longer defined
+or created here.
 
 Every index sets ``"dynamic": "strict"`` so adapters cannot smuggle
 arbitrary fields. The ``intake_metadata`` sub-mapping on
@@ -29,7 +32,8 @@ FUEL_ORDERS_CURRENT_INDEX = "fuel_orders_current"
 FUEL_ORDER_EVENTS_INDEX = "fuel_order_events"
 DRIVERS_CURRENT_INDEX = "drivers_current"
 INTAKE_CHANNELS_INDEX = "intake_channels"
-PENDING_LEGACY_MIRRORS_INDEX = "pending_legacy_mirrors"
+# ``PENDING_LEGACY_MIRRORS_INDEX`` was removed with the legacy mirror
+# retry queue it named.
 DRIVER_REPORTS_INDEX = "driver_reports"
 
 # ---------------------------------------------------------------------------
@@ -299,44 +303,10 @@ INTAKE_CHANNELS_MAPPING = {
     },
 }
 
-PENDING_LEGACY_MIRRORS_MAPPING = {
-    "settings": {
-        "number_of_shards": 1,
-        "number_of_replicas": 1,
-    },
-    "mappings": {
-        "dynamic": "strict",
-        "properties": {
-            "entry_id": {"type": "keyword"},
-            "tenant_id": {"type": "keyword"},
-            "entity_type": {"type": "keyword"},
-            "entity_id": {"type": "keyword"},
-            "failure_reason": {"type": "text"},
-            "retry_count": {"type": "integer"},
-            "next_retry_at": {"type": "date"},
-            "created_at": {"type": "date"},
-            "updated_at": {"type": "date"},
-            "intake_metadata": {
-                "dynamic": "strict",
-                "properties": {
-                    "call_id": {"type": "keyword"},
-                    "recording_url": {"type": "keyword"},
-                    "transcript": {"type": "text"},
-                    "agent_confidence": {"type": "float"},
-                    "dispatcher_user_id": {"type": "keyword"},
-                    "session_id": {"type": "keyword"},
-                    "portal_session_id": {"type": "keyword"},
-                    "user_agent": {"type": "keyword"},
-                    "import_batch_id": {"type": "keyword"},
-                    "csv_row_number": {"type": "integer"},
-                    "edi_interchange_id": {"type": "keyword"},
-                    "partner_ref": {"type": "keyword"},
-                    "legacy_shipment_id": {"type": "keyword"},
-                },
-            },
-        },
-    },
-}
+# ``PENDING_LEGACY_MIRRORS_MAPPING`` sat here. It defined the retry queue
+# that held mirror failures for the LegacyDualWriter shim. Nothing writes
+# to that queue any more, so the mapping was dropped rather than left to
+# recreate an empty index on every boot.
 
 DRIVER_REPORTS_MAPPING = {
     "settings": {
@@ -367,7 +337,6 @@ ORDER_INTAKE_INDEX_MAPPINGS: dict[str, dict] = {
     FUEL_ORDER_EVENTS_INDEX: FUEL_ORDER_EVENTS_MAPPING,
     DRIVERS_CURRENT_INDEX: DRIVERS_CURRENT_MAPPING,
     INTAKE_CHANNELS_INDEX: INTAKE_CHANNELS_MAPPING,
-    PENDING_LEGACY_MIRRORS_INDEX: PENDING_LEGACY_MIRRORS_MAPPING,
     DRIVER_REPORTS_INDEX: DRIVER_REPORTS_MAPPING,
 }
 

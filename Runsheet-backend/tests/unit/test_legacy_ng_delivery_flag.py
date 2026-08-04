@@ -8,8 +8,11 @@ Covers:
   so a disabled surface can still be observed and re-enabled.
 - The legacy support-ticket surface 404s when the flag is off.
 - The Dinee **voice** integration (Surface A ``POST /voice-intake`` and the
-  ``/voice/*`` prefix) is untouched by the flag — the audit's "Dinee webhook"
-  is the legacy NG webhook (``POST /webhooks/dinee``), not the voice bridge.
+  ``/voice/*`` prefix) is untouched by the flag. The audit's "Dinee webhook"
+  meant the legacy NG webhook ``POST /webhooks/dinee``, never the voice bridge.
+  That route has since been deleted outright, so the distinction the audit drew
+  now holds by construction: the only Dinee surface left is the voice one, and
+  it is not gated.
 
 Audit reference: product-owner-audit-2026-05-08 recommendation #1.
 """
@@ -252,9 +255,9 @@ class TestSupportTicketsGated:
 
 
 class TestVoiceSurfaceNotGated:
-    """The audit's "Dinee webhook" is the legacy NG webhook (POST /webhooks/dinee),
-    not the shipped Dinee voice integration. The voice surface must stay live
-    regardless of the flag."""
+    """The audit's "Dinee webhook" meant the legacy NG webhook, which has since
+    been deleted — not the shipped Dinee voice integration. The voice surface
+    must stay live regardless of the flag."""
 
     def test_voice_modules_do_not_import_the_legacy_gate(self):
         import importlib

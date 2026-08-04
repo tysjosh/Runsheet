@@ -7,7 +7,7 @@ export { default as Inventory } from "./Inventory";
 export { default as LoadingSpinner, InlineSpinner } from "./LoadingSpinner";
 export { default as MapView } from "./MapView";
 export { default as Sidebar } from "./Sidebar";
-export { default as Support } from "./Support";
+
 export {
   default as WebSocketStatus,
   WebSocketStatusBadge,

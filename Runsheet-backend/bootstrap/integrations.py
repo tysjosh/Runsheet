@@ -87,19 +87,14 @@ async def initialize(app, container: ServiceContainer) -> None:
             "Failed to late-inject intake_channel_repo into pipeline: %s", exc
         )
 
-    # The order webhook receiver (ops/webhooks/receiver.py) is configured in
-    # bootstrap/fuel.py too; re-point it at the now-available repo/vault so
-    # webhook-based intake resolves channels correctly.
-    try:
-        from ops.webhooks import receiver as _webhook_receiver
-
-        if getattr(_webhook_receiver, "_order_intake_pipeline", None) is not None:
-            _webhook_receiver._intake_channel_repo = intake_channel_repo
-            if container.has("credentials_vault"):
-                _webhook_receiver._credentials_vault = container.credentials_vault
-            logger.info("Webhook receiver: intake_channel_repo re-pointed (boot-order fix)")
-    except Exception as exc:
-        logger.debug("Webhook receiver re-point skipped: %s", exc)
+    # NB: a block here used to late-inject ``intake_channel_repo`` and
+    # ``credentials_vault`` into ``ops/webhooks/receiver.py``. It was guarded on
+    # that module's ``_order_intake_pipeline`` being non-None, which
+    # ``bootstrap/ops.py`` never supplied — so the body never ran, and its
+    # failure was logged at debug. Both the guard and the module are gone.
+    # Webhook intake now reaches the pipeline only through
+    # ``fuel/api/order_webhook_endpoints.py``, which is wired directly in
+    # ``bootstrap/fuel.py``.
 
     # Canonical CSV / Sheets imports are wired last because they need the
     # fully-injected OrderIntakePipeline plus the customer-tank repository.

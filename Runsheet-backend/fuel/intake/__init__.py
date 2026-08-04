@@ -2,8 +2,8 @@
 fuel.intake — Intake adapter framework for the Order Intake Pipeline.
 
 This package defines the adapter contract that every intake channel
-(voice, web portal, dispatcher, CSV, EDI, API partner, legacy) must
-implement to produce canonical FuelOrder documents.
+(voice, dispatcher, CSV, API partner) must implement to produce canonical
+FuelOrder documents.
 
 Public API:
     - IntakeContext: dataclass carrying per-request context for adapters
@@ -13,8 +13,16 @@ Public API:
     - AdapterError: exception raised by adapters or the registry
     - DispatcherIntakeAdapter: adapter for dispatcher keyboard channel
     - CsvIntakeAdapter: adapter for CSV bulk-upload channel
-    - LegacyDineeShipmentAdapter: adapter for legacy Dinee shipment channel
     - ApiPartnerGenericAdapter: reference adapter for API partner channels
+    - VoiceIntakeAdapter: adapter for the Dinee voice channel
+      (in ``voice_intake_adapter``; not re-exported here, mirroring how it is
+      imported directly at bootstrap)
+
+``LegacyDineeShipmentAdapter`` was removed with the ``POST /webhooks/dinee``
+route it served. It was already unreachable: it registered under
+``channel_type="legacy"``, while the only writer of the ``dinee-legacy``
+channel record set ``channel_type="api_partner"``, so adapter resolution never
+selected it.
 """
 
 from fuel.intake.adapter_base import (
@@ -27,7 +35,6 @@ from fuel.intake.adapter_base import (
 from fuel.intake.api_partner_adapter import ApiPartnerGenericAdapter
 from fuel.intake.csv_adapter import CsvIntakeAdapter
 from fuel.intake.dispatcher_adapter import DispatcherIntakeAdapter
-from fuel.intake.legacy_dinee_adapter import LegacyDineeShipmentAdapter
 
 __all__ = [
     "AdapterError",
@@ -38,5 +45,4 @@ __all__ = [
     "IntakeAdapterRegistry",
     "IntakeContext",
     "IntakeResult",
-    "LegacyDineeShipmentAdapter",
 ]

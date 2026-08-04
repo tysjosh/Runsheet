@@ -54,7 +54,6 @@ def _make_order(
 def _build_service(
     *,
     driver_counter_service: Optional[Any] = None,
-    legacy_dual_writer: Optional[Any] = None,
     overlay_state: str = "disabled",
 ) -> tuple:
     """Build an OrderService with mocked dependencies."""
@@ -72,7 +71,6 @@ def _build_service(
         order_repo=order_repo,
         ws_manager=ws_manager,
         driver_counter_service=driver_counter_service,
-        legacy_dual_writer=legacy_dual_writer,
         feature_flag_service=feature_flag_service,
         clock=_fixed_clock,
     )
@@ -358,92 +356,13 @@ class TestDriverCounterUpdates:
 
 
 # ---------------------------------------------------------------------------
-# Tests: Legacy dual-write
+# Tests: Legacy dual-write (removed)
 # ---------------------------------------------------------------------------
-
-
-class TestLegacyDualWrite:
-    """Tests for legacy mirror behavior."""
-
-    @pytest.mark.asyncio
-    async def test_mirrors_when_overlay_active_gated(self):
-        """Legacy mirror is called when overlay is active_gated."""
-        dual_writer = AsyncMock()
-        dual_writer.mirror_order = AsyncMock()
-        service, repo, ws, ff = _build_service(
-            legacy_dual_writer=dual_writer,
-            overlay_state="active_gated",
-        )
-        order = _make_order(status="placed")
-
-        await service.apply_status_transition(order, "confirmed")
-
-        dual_writer.mirror_order.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_mirrors_when_overlay_shadow(self):
-        """Legacy mirror is called when overlay is shadow."""
-        dual_writer = AsyncMock()
-        dual_writer.mirror_order = AsyncMock()
-        service, repo, ws, ff = _build_service(
-            legacy_dual_writer=dual_writer,
-            overlay_state="shadow",
-        )
-        order = _make_order(status="placed")
-
-        await service.apply_status_transition(order, "confirmed")
-
-        dual_writer.mirror_order.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_no_mirror_when_overlay_active_auto(self):
-        """Legacy mirror is NOT called when overlay is active_auto."""
-        dual_writer = AsyncMock()
-        dual_writer.mirror_order = AsyncMock()
-        service, repo, ws, ff = _build_service(
-            legacy_dual_writer=dual_writer,
-            overlay_state="active_auto",
-        )
-        order = _make_order(status="placed")
-
-        await service.apply_status_transition(order, "confirmed")
-
-        dual_writer.mirror_order.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_no_mirror_when_overlay_disabled(self):
-        """Legacy mirror is NOT called when overlay is disabled."""
-        dual_writer = AsyncMock()
-        dual_writer.mirror_order = AsyncMock()
-        service, repo, ws, ff = _build_service(
-            legacy_dual_writer=dual_writer,
-            overlay_state="disabled",
-        )
-        order = _make_order(status="placed")
-
-        await service.apply_status_transition(order, "confirmed")
-
-        dual_writer.mirror_order.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_mirror_failure_does_not_block_main_path(self):
-        """Legacy mirror failure does not block the transition."""
-        dual_writer = AsyncMock()
-        # mirror_order should never raise by contract, but test resilience
-        dual_writer.mirror_order = AsyncMock(side_effect=RuntimeError("boom"))
-        service, repo, ws, ff = _build_service(
-            legacy_dual_writer=dual_writer,
-            overlay_state="active_gated",
-        )
-        order = _make_order(status="placed")
-
-        # The mirror_order is called inside _mirror_legacy_if_enabled
-        # which doesn't catch exceptions from mirror_order itself
-        # (because mirror_order's contract says it never raises).
-        # But since we're testing resilience, let's verify the
-        # broadcast still happened before the mirror call.
-        result = await service.apply_status_transition(order, "confirmed")
-        assert result["status"] == "confirmed"
+# ``TestLegacyDualWrite`` asserted that a transition mirrored into the
+# legacy shipment surface in ``shadow`` / ``active_gated``, stayed silent in
+# ``active_auto`` / ``disabled``, and never blocked the transition when the
+# mirror failed. ``_mirror_legacy_if_enabled`` and the LegacyDualWriter it
+# called are both gone, so the class went with them.
 
 
 # ---------------------------------------------------------------------------

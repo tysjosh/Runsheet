@@ -1,12 +1,21 @@
 "use client";
 
 /**
- * Ops Monitoring Dashboard — Ingestion, Indexing & Poison Queue health,
- * Shipment Metrics, and SLA Compliance.
+ * Ops Monitoring Dashboard — Ingestion, Indexing & Poison Queue health.
  *
  * Three-card grid layout displaying pipeline health metrics with color-coded
  * values (green/yellow/red) and auto-refresh every 30 seconds.
- * Below the pipeline cards: shipment volume time-series table and SLA summary cards.
+ *
+ * Scope note: this dashboard deliberately survives the legacy-NG teardown.
+ * `require_ops_enabled` in `ops/api/endpoints.py` gates the rider/shipment
+ * read model, but `/ops/monitoring/*` and `/ops/metrics/prometheus` are
+ * exempt by design so operators can still observe a disabled surface
+ * (audit reference: product-owner-audit-2026-05-08 recommendation #1).
+ *
+ * The former "Shipment Metrics" and "SLA Compliance" sections were removed:
+ * they read `/ops/metrics/shipments` and `/ops/metrics/sla`, which ARE behind
+ * that gate, so with `LEGACY_NG_DELIVERY_ENABLED=false` they could only ever
+ * render an error panel.
  *
  * Validates:
  * - Requirement 6.1: Display ingestion metrics via getIngestionMonitoring
@@ -15,46 +24,28 @@
  * - Requirement 6.4: Color-code metric values green/yellow/red based on thresholds
  * - Requirement 6.5: Visual alert indicator next to metrics exceeding critical thresholds
  * - Requirement 6.6: Auto-refresh every 30 seconds with polling interval
- * - Requirement 8.1: Shipment metrics time-series display
- * - Requirement 8.2: Configurable bucket and date range for shipment metrics
- * - Requirement 8.3: SLA compliance summary cards
- * - Requirement 8.4: Fetch SLA metrics from getSlaMetrics()
- * - Requirement 8.5: Re-fetch shipment metrics on filter changes
- * - Requirement 8.6: Per-section error handling
  * - Requirement 8.7: Retain existing pipeline health monitoring
  */
 
 import {
   Activity,
   AlertTriangle,
-  BarChart3,
-  CheckCircle,
   Database,
   Loader2,
   RefreshCw,
-  Shield,
   Skull,
-  TrendingUp,
-  XCircle,
   Zap,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { type Column, Table } from "@/components/ui";
 import type {
   IndexingMetrics,
   IngestionMetrics,
-  MetricsBucket,
-  MetricsBucketEntry,
-  MetricsFilters,
-  MetricsResponse,
   PoisonQueueMetrics,
 } from "../../services/opsApi";
 import {
   getIndexingMonitoring,
   getIngestionMonitoring,
   getPoisonQueueMonitoring,
-  getShipmentMetrics,
-  getSlaMetrics,
 } from "../../services/opsApi";
 
 // ─── Metric Status Types & Helper ────────────────────────────────────────────
@@ -181,400 +172,6 @@ function MetricCard({ title, icon, children, loading }: MetricCardProps) {
   );
 }
 
-// ─── Shipment Metrics Section ────────────────────────────────────────────────
-
-interface ShipmentMetricsSectionProps {
-  data: MetricsResponse | null;
-  loading: boolean;
-  error: string;
-  filters: MetricsFilters;
-  onFiltersChange: (filters: MetricsFilters) => void;
-}
-
-function ShipmentMetricsSection({
-  data,
-  loading,
-  error,
-  filters,
-  onFiltersChange,
-}: ShipmentMetricsSectionProps) {
-  const handleBucketChange = (bucket: MetricsBucket) => {
-    onFiltersChange({ ...filters, bucket });
-  };
-
-  const handleStartDateChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    onFiltersChange({ ...filters, start_date: e.target.value || undefined });
-  };
-
-  const handleEndDateChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    onFiltersChange({ ...filters, end_date: e.target.value || undefined });
-  };
-
-  // Collect all unique status keys from values data (excluding 'total')
-  const statusKeys: string[] = [];
-  if (data?.data) {
-    const keySet = new Set<string>();
-    for (const entry of data.data) {
-      if (entry.values) {
-        for (const key of Object.keys(entry.values)) {
-          if (key !== "total") keySet.add(key);
-        }
-      }
-    }
-    statusKeys.push(...Array.from(keySet).sort());
-  }
-
-  const shipmentColumns: Column<MetricsBucketEntry>[] = [
-    {
-      key: "timestamp",
-      label: "Timestamp",
-      className: "text-xs text-gray-700",
-      render: (entry) => new Date(entry.timestamp).toLocaleString(),
-    },
-    {
-      key: "total",
-      label: "Total",
-      align: "right",
-      className: "text-xs font-medium text-gray-900",
-      render: (entry) => (entry.values?.total ?? 0).toLocaleString(),
-    },
-    ...statusKeys.map(
-      (key): Column<MetricsBucketEntry> => ({
-        key,
-        label: key.replace(/_/g, " "),
-        align: "right",
-        headerClassName: "capitalize",
-        className: "text-xs text-gray-600",
-        render: (entry) => (entry.values?.[key] ?? 0).toLocaleString(),
-      }),
-    ),
-  ];
-
-  return (
-    <div className="bg-white border border-gray-200 rounded-lg">
-      <div className="flex items-center gap-2 px-5 py-4 border-b border-gray-100">
-        <div className="w-8 h-8 bg-primary rounded-lg flex items-center justify-center">
-          <BarChart3 className="w-4 h-4 text-white" />
-        </div>
-        <h3 className="text-sm font-semibold text-primary">Shipment Metrics</h3>
-      </div>
-
-      {/* Filter Controls */}
-      <div className="px-5 py-3 border-b border-gray-100 flex flex-wrap items-center gap-4">
-        {/* Bucket Toggle */}
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-gray-500">Bucket:</span>
-          <div className="flex rounded-lg border border-gray-200 overflow-hidden">
-            <button
-              onClick={() => handleBucketChange("hourly")}
-              className={`px-3 py-1 text-xs font-medium transition-colors ${
-                (filters.bucket ?? "daily") === "hourly"
-                  ? "bg-primary text-white"
-                  : "bg-white text-gray-600 hover:bg-gray-50"
-              }`}
-            >
-              Hourly
-            </button>
-            <button
-              onClick={() => handleBucketChange("daily")}
-              className={`px-3 py-1 text-xs font-medium transition-colors ${
-                (filters.bucket ?? "daily") === "daily"
-                  ? "bg-primary text-white"
-                  : "bg-white text-gray-600 hover:bg-gray-50"
-              }`}
-            >
-              Daily
-            </button>
-          </div>
-        </div>
-
-        {/* Date Range */}
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-gray-500">From:</span>
-          <input
-            type="date"
-            value={filters.start_date ?? ""}
-            onChange={handleStartDateChange}
-            className="text-xs border border-gray-200 rounded-lg px-2 py-1 text-gray-700 focus:outline-none focus:ring-1 focus:ring-primary"
-          />
-        </div>
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-gray-500">To:</span>
-          <input
-            type="date"
-            value={filters.end_date ?? ""}
-            onChange={handleEndDateChange}
-            className="text-xs border border-gray-200 rounded-lg px-2 py-1 text-gray-700 focus:outline-none focus:ring-1 focus:ring-primary"
-          />
-        </div>
-      </div>
-
-      {/* Content */}
-      <div className="px-5 py-4">
-        {loading ? (
-          <div className="flex items-center justify-center py-8">
-            <Loader2 className="w-5 h-5 text-gray-500 animate-spin" />
-          </div>
-        ) : error ? (
-          <div className="text-sm text-error bg-error-light px-4 py-3 rounded-lg">
-            {error}
-          </div>
-        ) : (
-          <Table<MetricsBucketEntry>
-            ariaLabel="Shipment metrics"
-            variant="compact"
-            columns={shipmentColumns}
-            data={data?.data ?? []}
-            getRowId={(entry) => entry.timestamp}
-            emptyState={
-              <div className="flex flex-col items-center justify-center py-8 text-gray-500">
-                <TrendingUp className="w-8 h-8 mb-2" />
-                <p className="text-sm">No shipment metrics available</p>
-              </div>
-            }
-          />
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ─── SLA Metrics Section ─────────────────────────────────────────────────────
-
-interface SlaMetricsSectionProps {
-  data: MetricsResponse | null;
-  loading: boolean;
-  error: string;
-  filters: MetricsFilters;
-  onFiltersChange: (filters: MetricsFilters) => void;
-}
-
-function SlaMetricsSection({
-  data,
-  loading,
-  error,
-  filters,
-  onFiltersChange,
-}: SlaMetricsSectionProps) {
-  const handleBucketChange = (bucket: MetricsBucket) => {
-    onFiltersChange({ ...filters, bucket });
-  };
-
-  const handleStartDateChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    onFiltersChange({ ...filters, start_date: e.target.value || undefined });
-  };
-
-  const handleEndDateChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    onFiltersChange({ ...filters, end_date: e.target.value || undefined });
-  };
-
-  // Compute aggregate totals from all time buckets
-  let totalShipments = 0;
-  let totalBreached = 0;
-  let totalCompliant = 0;
-
-  if (data?.data) {
-    for (const entry of data.data) {
-      totalShipments += entry.values?.total ?? 0;
-      totalBreached += entry.values?.breached ?? 0;
-      totalCompliant += entry.values?.compliant ?? 0;
-    }
-  }
-
-  const compliancePct =
-    totalShipments > 0
-      ? ((totalCompliant / totalShipments) * 100).toFixed(1)
-      : "100.0";
-  const complianceNum =
-    totalShipments > 0 ? totalCompliant / totalShipments : 1;
-  const isHealthy = complianceNum >= 0.95;
-  const isDegraded = complianceNum >= 0.85 && complianceNum < 0.95;
-
-  const slaColumns: Column<MetricsBucketEntry>[] = [
-    {
-      key: "timestamp",
-      label: "Timestamp",
-      className: "text-xs text-gray-700",
-      render: (entry) => new Date(entry.timestamp).toLocaleString(),
-    },
-    {
-      key: "total",
-      label: "Total",
-      align: "right",
-      className: "text-xs font-medium text-gray-900",
-      render: (entry) => (entry.values?.total ?? 0).toLocaleString(),
-    },
-    {
-      key: "compliant",
-      label: "Compliant",
-      align: "right",
-      className: "text-xs text-success",
-      render: (entry) => (entry.values?.compliant ?? 0).toLocaleString(),
-    },
-    {
-      key: "breached",
-      label: "Breached",
-      align: "right",
-      className: "text-xs text-error",
-      render: (entry) => (entry.values?.breached ?? 0).toLocaleString(),
-    },
-    {
-      key: "compliance_pct",
-      label: "Compliance %",
-      align: "right",
-      render: (entry) => {
-        const pct = entry.values?.compliance_pct ?? 0;
-        const pctHealthy = pct >= 95;
-        const pctDegraded = pct >= 85 && pct < 95;
-        return (
-          <span
-            className={`px-2 py-0.5 rounded text-xs font-medium ${
-              pctHealthy
-                ? "text-success bg-success-light"
-                : pctDegraded
-                  ? "text-warning bg-warning-light"
-                  : "text-error bg-error-light"
-            }`}
-          >
-            {pct.toFixed(1)}%
-          </span>
-        );
-      },
-    },
-  ];
-
-  return (
-    <div className="bg-white border border-gray-200 rounded-lg">
-      <div className="flex items-center gap-2 px-5 py-4 border-b border-gray-100">
-        <div className="w-8 h-8 bg-primary rounded-lg flex items-center justify-center">
-          <Shield className="w-4 h-4 text-white" />
-        </div>
-        <h3 className="text-sm font-semibold text-primary">SLA Compliance</h3>
-      </div>
-
-      {/* Filter Controls */}
-      <div className="px-5 py-3 border-b border-gray-100 flex flex-wrap items-center gap-4">
-        {/* Bucket Toggle */}
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-gray-500">Bucket:</span>
-          <div className="flex rounded-lg border border-gray-200 overflow-hidden">
-            <button
-              onClick={() => handleBucketChange("hourly")}
-              className={`px-3 py-1 text-xs font-medium transition-colors ${
-                (filters.bucket ?? "daily") === "hourly"
-                  ? "bg-primary text-white"
-                  : "bg-white text-gray-600 hover:bg-gray-50"
-              }`}
-            >
-              Hourly
-            </button>
-            <button
-              onClick={() => handleBucketChange("daily")}
-              className={`px-3 py-1 text-xs font-medium transition-colors ${
-                (filters.bucket ?? "daily") === "daily"
-                  ? "bg-primary text-white"
-                  : "bg-white text-gray-600 hover:bg-gray-50"
-              }`}
-            >
-              Daily
-            </button>
-          </div>
-        </div>
-
-        {/* Date Range */}
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-gray-500">From:</span>
-          <input
-            type="date"
-            value={filters.start_date ?? ""}
-            onChange={handleStartDateChange}
-            className="text-xs border border-gray-200 rounded-lg px-2 py-1 text-gray-700 focus:outline-none focus:ring-1 focus:ring-primary"
-          />
-        </div>
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-gray-500">To:</span>
-          <input
-            type="date"
-            value={filters.end_date ?? ""}
-            onChange={handleEndDateChange}
-            className="text-xs border border-gray-200 rounded-lg px-2 py-1 text-gray-700 focus:outline-none focus:ring-1 focus:ring-primary"
-          />
-        </div>
-      </div>
-
-      <div className="px-5 py-4">
-        {loading ? (
-          <div className="flex items-center justify-center py-8">
-            <Loader2 className="w-5 h-5 text-gray-500 animate-spin" />
-          </div>
-        ) : error ? (
-          <div className="text-sm text-error bg-error-light px-4 py-3 rounded-lg">
-            {error}
-          </div>
-        ) : data && data.data.length > 0 ? (
-          <div className="space-y-6">
-            {/* Aggregate Summary Cards */}
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-              <div className="border border-gray-100 rounded-lg p-4 text-center">
-                <p className="text-xs text-gray-500 mb-1">Total Shipments</p>
-                <p className="text-xl font-semibold text-gray-900">
-                  {totalShipments.toLocaleString()}
-                </p>
-              </div>
-              <div className="border border-gray-100 rounded-lg p-4 text-center">
-                <p className="text-xs text-gray-500 mb-1 flex items-center justify-center gap-1">
-                  <CheckCircle className="w-3 h-3 text-success" />
-                  Compliant
-                </p>
-                <p className="text-xl font-semibold text-success">
-                  {totalCompliant.toLocaleString()}
-                </p>
-              </div>
-              <div className="border border-gray-100 rounded-lg p-4 text-center">
-                <p className="text-xs text-gray-500 mb-1 flex items-center justify-center gap-1">
-                  <XCircle className="w-3 h-3 text-error" />
-                  Breached
-                </p>
-                <p className="text-xl font-semibold text-error">
-                  {totalBreached.toLocaleString()}
-                </p>
-              </div>
-              <div className="border border-gray-100 rounded-lg p-4 text-center">
-                <p className="text-xs text-gray-500 mb-1">Compliance Rate</p>
-                <p
-                  className={`text-xl font-bold ${
-                    isHealthy
-                      ? "text-success"
-                      : isDegraded
-                        ? "text-warning"
-                        : "text-error"
-                  }`}
-                >
-                  {compliancePct}%
-                </p>
-              </div>
-            </div>
-
-            {/* Time-bucketed breakdown table */}
-            <Table<MetricsBucketEntry>
-              ariaLabel="SLA compliance breakdown"
-              variant="compact"
-              columns={slaColumns}
-              data={data.data}
-              getRowId={(entry) => entry.timestamp}
-            />
-          </div>
-        ) : (
-          <div className="flex flex-col items-center justify-center py-8 text-gray-500">
-            <Shield className="w-8 h-8 mb-2" />
-            <p className="text-sm">No SLA metrics available</p>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
 // ─── Main Dashboard Component ────────────────────────────────────────────────
 
 export default function OpsMonitoringDashboard() {
@@ -588,23 +185,6 @@ export default function OpsMonitoringDashboard() {
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [secondsAgo, setSecondsAgo] = useState(0);
   const lastUpdatedRef = useRef<Date | null>(null);
-
-  // ─── Shipment Metrics State ────────────────────────────────────────────
-  const [shipmentMetrics, setShipmentMetrics] =
-    useState<MetricsResponse | null>(null);
-  const [shipmentLoading, setShipmentLoading] = useState(true);
-  const [shipmentError, setShipmentError] = useState("");
-  const [shipmentFilters, setShipmentFilters] = useState<MetricsFilters>({
-    bucket: "daily",
-  });
-
-  // ─── SLA Metrics State ─────────────────────────────────────────────────
-  const [slaMetrics, setSlaMetrics] = useState<MetricsResponse | null>(null);
-  const [slaLoading, setSlaLoading] = useState(true);
-  const [slaError, setSlaError] = useState("");
-  const [slaFilters, setSlaFilters] = useState<MetricsFilters>({
-    bucket: "daily",
-  });
 
   // ─── Pipeline Health Fetch ─────────────────────────────────────────────
 
@@ -633,40 +213,6 @@ export default function OpsMonitoringDashboard() {
     }
   }, []);
 
-  // ─── Shipment Metrics Fetch ────────────────────────────────────────────
-
-  const fetchShipmentMetrics = useCallback(async (filters: MetricsFilters) => {
-    setShipmentLoading(true);
-    try {
-      const data = await getShipmentMetrics(filters);
-      setShipmentMetrics(data);
-      setShipmentError("");
-    } catch (err) {
-      setShipmentError(
-        err instanceof Error ? err.message : "Failed to fetch shipment metrics",
-      );
-    } finally {
-      setShipmentLoading(false);
-    }
-  }, []);
-
-  // ─── SLA Metrics Fetch ─────────────────────────────────────────────────
-
-  const fetchSlaMetrics = useCallback(async (filters: MetricsFilters) => {
-    setSlaLoading(true);
-    try {
-      const response = await getSlaMetrics(filters);
-      setSlaMetrics(response);
-      setSlaError("");
-    } catch (err) {
-      setSlaError(
-        err instanceof Error ? err.message : "Failed to fetch SLA metrics",
-      );
-    } finally {
-      setSlaLoading(false);
-    }
-  }, []);
-
   // ─── Initial fetch + auto-refresh every 30 seconds ─────────────────────
 
   useEffect(() => {
@@ -674,16 +220,6 @@ export default function OpsMonitoringDashboard() {
     const interval = setInterval(fetchMetrics, REFRESH_INTERVAL_MS);
     return () => clearInterval(interval);
   }, [fetchMetrics]);
-
-  // Fetch shipment metrics on mount and when filters change
-  useEffect(() => {
-    fetchShipmentMetrics(shipmentFilters);
-  }, [shipmentFilters, fetchShipmentMetrics]);
-
-  // Fetch SLA metrics on mount and when filters change
-  useEffect(() => {
-    fetchSlaMetrics(slaFilters);
-  }, [slaFilters, fetchSlaMetrics]);
 
   // Update "seconds ago" counter every second when there's an error
   useEffect(() => {
@@ -921,28 +457,6 @@ export default function OpsMonitoringDashboard() {
               </>
             )}
           </MetricCard>
-        </div>
-
-        {/* Shipment Metrics Section */}
-        <div className="mt-6">
-          <ShipmentMetricsSection
-            data={shipmentMetrics}
-            loading={shipmentLoading}
-            error={shipmentError}
-            filters={shipmentFilters}
-            onFiltersChange={setShipmentFilters}
-          />
-        </div>
-
-        {/* SLA Metrics Section */}
-        <div className="mt-6">
-          <SlaMetricsSection
-            data={slaMetrics}
-            loading={slaLoading}
-            error={slaError}
-            filters={slaFilters}
-            onFiltersChange={setSlaFilters}
-          />
         </div>
       </div>
     </div>

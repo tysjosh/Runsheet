@@ -11,10 +11,10 @@ Covers:
     - Events are appended via append_event.
     - WebSocket broadcast is called with order_placed.
     - Broadcast failure does NOT block the main path.
-    - Legacy dual-write is called when overlay state is shadow/active_gated.
-    - Legacy dual-write is skipped when overlay state is active_auto/disabled.
-    - Legacy dual-write failure does NOT block the main path.
-    - Missing legacy_dual_writer or feature_flag_service skips dual-write.
+
+The legacy dual-write coverage (overlay-gated mirror into
+``shipments_current``, its failure isolation, and the missing-dependency
+skips) was removed with the LegacyDualWriter shim itself.
 """
 from __future__ import annotations
 
@@ -82,7 +82,6 @@ def _build_service(
     *,
     order_repo: Optional[Any] = None,
     ws_manager: Optional[Any] = None,
-    legacy_dual_writer: Optional[Any] = None,
     feature_flag_service: Optional[Any] = None,
     clock=None,
 ) -> OrderCreationService:
@@ -90,7 +89,6 @@ def _build_service(
     return OrderCreationService(
         order_repo=order_repo or AsyncMock(),
         ws_manager=ws_manager or AsyncMock(),
-        legacy_dual_writer=legacy_dual_writer,
         feature_flag_service=feature_flag_service,
         clock=clock or _fixed_clock,
     )
@@ -404,206 +402,10 @@ class TestBroadcast:
 
 
 # ---------------------------------------------------------------------------
-# Tests — Legacy dual-write
+# Tests — Legacy dual-write (removed)
 # ---------------------------------------------------------------------------
-
-
-class TestLegacyDualWrite:
-    """Verify legacy dual-write behavior."""
-
-    @pytest.mark.asyncio
-    async def test_dual_write_called_when_shadow(self):
-        """mirror_order is called when overlay state is 'shadow'."""
-        dual_writer = AsyncMock()
-        ff_service = AsyncMock()
-        ff_service.get_overlay_state.return_value = "shadow"
-        svc = _build_service(
-            legacy_dual_writer=dual_writer,
-            feature_flag_service=ff_service,
-        )
-        adapter_result = FakeAdapterResult(
-            order_doc=_sample_order_doc(),
-            event_docs=[_sample_event_doc()],
-        )
-
-        result = await svc.create_order(
-            tenant_id="tenant_A",
-            channel="dispatcher",
-            adapter_result=adapter_result,
-            request_id="req_1",
-        )
-
-        dual_writer.mirror_order.assert_called_once_with(
-            result, tenant_id="tenant_A"
-        )
-
-    @pytest.mark.asyncio
-    async def test_dual_write_called_when_active_gated(self):
-        """mirror_order is called when overlay state is 'active_gated'."""
-        dual_writer = AsyncMock()
-        ff_service = AsyncMock()
-        ff_service.get_overlay_state.return_value = "active_gated"
-        svc = _build_service(
-            legacy_dual_writer=dual_writer,
-            feature_flag_service=ff_service,
-        )
-        adapter_result = FakeAdapterResult(
-            order_doc=_sample_order_doc(),
-            event_docs=[_sample_event_doc()],
-        )
-
-        result = await svc.create_order(
-            tenant_id="tenant_A",
-            channel="dispatcher",
-            adapter_result=adapter_result,
-            request_id="req_1",
-        )
-
-        dual_writer.mirror_order.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_dual_write_skipped_when_active_auto(self):
-        """mirror_order is NOT called when overlay state is 'active_auto'."""
-        dual_writer = AsyncMock()
-        ff_service = AsyncMock()
-        ff_service.get_overlay_state.return_value = "active_auto"
-        svc = _build_service(
-            legacy_dual_writer=dual_writer,
-            feature_flag_service=ff_service,
-        )
-        adapter_result = FakeAdapterResult(
-            order_doc=_sample_order_doc(),
-            event_docs=[_sample_event_doc()],
-        )
-
-        await svc.create_order(
-            tenant_id="tenant_A",
-            channel="dispatcher",
-            adapter_result=adapter_result,
-            request_id="req_1",
-        )
-
-        dual_writer.mirror_order.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_dual_write_skipped_when_disabled(self):
-        """mirror_order is NOT called when overlay state is 'disabled'."""
-        dual_writer = AsyncMock()
-        ff_service = AsyncMock()
-        ff_service.get_overlay_state.return_value = "disabled"
-        svc = _build_service(
-            legacy_dual_writer=dual_writer,
-            feature_flag_service=ff_service,
-        )
-        adapter_result = FakeAdapterResult(
-            order_doc=_sample_order_doc(),
-            event_docs=[_sample_event_doc()],
-        )
-
-        await svc.create_order(
-            tenant_id="tenant_A",
-            channel="dispatcher",
-            adapter_result=adapter_result,
-            request_id="req_1",
-        )
-
-        dual_writer.mirror_order.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_dual_write_skipped_when_no_writer(self):
-        """No error when legacy_dual_writer is None."""
-        ff_service = AsyncMock()
-        ff_service.get_overlay_state.return_value = "shadow"
-        svc = _build_service(
-            legacy_dual_writer=None,
-            feature_flag_service=ff_service,
-        )
-        adapter_result = FakeAdapterResult(
-            order_doc=_sample_order_doc(),
-            event_docs=[_sample_event_doc()],
-        )
-
-        # Should not raise
-        result = await svc.create_order(
-            tenant_id="tenant_A",
-            channel="dispatcher",
-            adapter_result=adapter_result,
-            request_id="req_1",
-        )
-
-        assert result["order_id"] is not None
-
-    @pytest.mark.asyncio
-    async def test_dual_write_skipped_when_no_feature_flag_service(self):
-        """No error when feature_flag_service is None."""
-        dual_writer = AsyncMock()
-        svc = _build_service(
-            legacy_dual_writer=dual_writer,
-            feature_flag_service=None,
-        )
-        adapter_result = FakeAdapterResult(
-            order_doc=_sample_order_doc(),
-            event_docs=[_sample_event_doc()],
-        )
-
-        result = await svc.create_order(
-            tenant_id="tenant_A",
-            channel="dispatcher",
-            adapter_result=adapter_result,
-            request_id="req_1",
-        )
-
-        dual_writer.mirror_order.assert_not_called()
-        assert result["order_id"] is not None
-
-    @pytest.mark.asyncio
-    async def test_dual_write_failure_does_not_block(self):
-        """A mirror_order exception does not prevent create_order from returning."""
-        dual_writer = AsyncMock()
-        dual_writer.mirror_order.side_effect = RuntimeError("ES down")
-        ff_service = AsyncMock()
-        ff_service.get_overlay_state.return_value = "shadow"
-        svc = _build_service(
-            legacy_dual_writer=dual_writer,
-            feature_flag_service=ff_service,
-        )
-        adapter_result = FakeAdapterResult(
-            order_doc=_sample_order_doc(),
-            event_docs=[_sample_event_doc()],
-        )
-
-        # Should not raise
-        result = await svc.create_order(
-            tenant_id="tenant_A",
-            channel="dispatcher",
-            adapter_result=adapter_result,
-            request_id="req_1",
-        )
-
-        assert result["order_id"] is not None
-
-    @pytest.mark.asyncio
-    async def test_overlay_state_read_failure_does_not_block(self):
-        """A feature_flag_service exception does not block creation."""
-        dual_writer = AsyncMock()
-        ff_service = AsyncMock()
-        ff_service.get_overlay_state.side_effect = RuntimeError("Redis down")
-        svc = _build_service(
-            legacy_dual_writer=dual_writer,
-            feature_flag_service=ff_service,
-        )
-        adapter_result = FakeAdapterResult(
-            order_doc=_sample_order_doc(),
-            event_docs=[_sample_event_doc()],
-        )
-
-        # Should not raise
-        result = await svc.create_order(
-            tenant_id="tenant_A",
-            channel="dispatcher",
-            adapter_result=adapter_result,
-            request_id="req_1",
-        )
-
-        dual_writer.mirror_order.assert_not_called()
-        assert result["order_id"] is not None
+# ``TestLegacyDualWrite`` covered the overlay-gated mirror into the legacy
+# shipment surface: called in ``shadow`` / ``active_gated``, skipped in
+# ``active_auto`` / ``disabled``, skipped when either dependency was
+# missing, and never blocking creation when the mirror or the flag read
+# failed. The mirror is gone, so there is no behaviour left to assert.

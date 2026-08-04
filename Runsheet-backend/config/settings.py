@@ -6,7 +6,9 @@ All secrets are loaded from environment variables or .env files.
 
 Requirements:
 - 1.1: Load all secrets from environment variables or secrets manager
-- 1.2: HMAC-SHA256 shared secret for Dinee webhook verification
+- 1.2: (retired) a single HMAC-SHA256 shared secret for Dinee webhook
+  verification. Inbound webhooks now carry a per-channel secret held in the
+  credentials vault, so no global webhook secret is configured here.
 - 1.3: Fail startup with descriptive error message listing missing values
 - 1.4: Support environment-specific configuration files for development, staging, and production
 - 1.5: Validate all required fields and their formats before accepting requests
@@ -440,15 +442,14 @@ class Settings(BaseSettings):
     )
 
     # Dinee / Ops Intelligence Configuration
-    dinee_webhook_secret: str = Field(
-        default="",
-        description="HMAC-SHA256 shared secret for verifying inbound Dinee webhooks (sole webhook auth credential)"
-    )
-    dinee_webhook_tenant_id: str = Field(
-        default="",
-        description="Tenant ID associated with the webhook signing secret. "
-        "When set, the receiver rejects payloads whose tenant_id does not match (Req 9.7)."
-    )
+    #
+    # ``dinee_webhook_secret`` and ``dinee_webhook_tenant_id`` were removed with
+    # the ``POST /webhooks/dinee`` receiver they authenticated. Inbound webhooks
+    # now authenticate against a per-channel HMAC secret held in the credentials
+    # vault and resolved from the ``intake_channels`` registry, so there is no
+    # single global webhook credential to configure. ``dinee_api_key`` /
+    # ``dinee_api_base_url`` remain: they are for *outbound* calls to Dinee from
+    # the replay service, which is a different direction.
     dinee_idempotency_ttl_hours: int = Field(
         default=72,
         ge=1,
@@ -842,13 +843,6 @@ class Settings(BaseSettings):
             validated_origins.append(origin)
         return validated_origins
     
-    @field_validator("dinee_webhook_secret")
-    @classmethod
-    def validate_dinee_webhook_secret(cls, v: str) -> str:
-        """Validate that dinee_webhook_secret is provided in non-development environments."""
-        # Allow empty in development; production validation is handled by model_validator
-        return v.strip() if v else v
-    
     @field_validator("dinee_api_base_url")
     @classmethod
     def validate_dinee_api_base_url(cls, v: Optional[str]) -> Optional[str]:
@@ -898,12 +892,11 @@ class Settings(BaseSettings):
                     "in non-development environments"
                 )
         
-        # Validate dinee_webhook_secret is set in non-development/non-test environments
+        # NB: the former ``dinee_webhook_secret is required`` check was dropped
+        # here along with the field. Nothing reads a global webhook secret any
+        # more; a channel that cannot resolve its per-channel secret from the
+        # vault already fails closed inside the intake pipeline.
         if self.environment not in (Environment.DEVELOPMENT, Environment.TEST):
-            if not self.dinee_webhook_secret:
-                raise ValueError(
-                    "dinee_webhook_secret is required in non-development environments"
-                )
             # Migration_Controller fail-closed: SuperTokens is the sole auth
             # provider after the hard cutover, so in a non-development/test
             # environment the managed core connection settings MUST be present,

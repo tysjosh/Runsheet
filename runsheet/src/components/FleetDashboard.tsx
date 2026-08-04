@@ -17,6 +17,13 @@ interface FleetDashboardProps {
   onTruckSelect: (truck: TruckType) => void;
   mapView: React.ReactNode;
   /**
+   * Asset id from `?asset=` on /dashboard/fleet (the canonical asset
+   * destination). Forwarded to the tracking table so the referenced asset is
+   * actually selected. The "assets" tab is already the initial tab, so no tab
+   * switch is needed for the focus to be visible.
+   */
+  focusAssetId?: string | null;
+  /**
    * Navigate to a top-level dashboard module (e.g. "drivers"). Wired from
    * the dashboard shell so in-page affordances like the expiry-alert
    * widget's "Driver Qualifications" row can jump to the Drivers hub.
@@ -44,6 +51,7 @@ export default function FleetDashboard({
   selectedTruck,
   onTruckSelect,
   mapView,
+  focusAssetId,
   onNavigate,
 }: FleetDashboardProps) {
   const [activeTab, setActiveTab] = useState<TabId>("assets");
@@ -77,7 +85,10 @@ export default function FleetDashboard({
               <div className="w-full lg:w-1/2 min-h-[360px] lg:min-h-0 bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
                 <ErrorBoundary componentName="Fleet Tracking">
                   <Suspense fallback={<LoadingSpinner message="Loading..." />}>
-                    <FleetTracking onTruckSelect={onTruckSelect} />
+                    <FleetTracking
+                      onTruckSelect={onTruckSelect}
+                      focusAssetId={focusAssetId}
+                    />
                   </Suspense>
                 </ErrorBoundary>
               </div>

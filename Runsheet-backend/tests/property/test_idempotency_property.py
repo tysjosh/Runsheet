@@ -1,44 +1,45 @@
 """
 Property-based tests for Idempotent Processing Guarantee.
 
-**Validates: Requirements 1.4, 1.5, 1.11**
+**Validates: Requirements 1.4, 1.5, 1.11, 3.4**
 
-Property 2: For any event_id delivered N times (N >= 1) to the Webhook_Receiver,
-the resulting Elasticsearch state SHALL be identical to processing the event
-exactly once. The first delivery produces a state change; all subsequent
-deliveries return 200 without side effects.
+Property: For any event_id processed N times (N >= 1) by the ops ingestion
+pipeline, the resulting Elasticsearch state SHALL be identical to processing the
+event exactly once. The first pass produces a state change; all subsequent
+passes are short-circuited with no side effects.
 
 Sub-properties tested:
-1. For any event_id delivered N times, adapter.transform is called exactly once.
-2. For any event_id delivered N times, ES upsert operations happen exactly once.
-3. After the first delivery, subsequent deliveries return status "duplicate".
+1. For any event_id processed N times, adapter.transform is called exactly once.
+2. For any event_id processed N times, ES upsert operations happen exactly once.
+3. After the first pass, subsequent passes are counted as skipped, not processed.
+
+These properties used to be driven through ``POST /webhooks/dinee``. That route
+was removed; the surviving implementation of the same
+idempotency-check → transform → upsert sequence is
+:meth:`ops.ingestion.replay.ReplayService._process_record`, so the properties
+bind there now. Sub-property 3 changed shape with the target: the route answered
+a repeat delivery with an HTTP body of ``status="duplicate"``, whereas
+``_process_record`` increments ``skipped_count``. The invariant being asserted —
+"a repeat does not re-enter the pipeline" — is the same.
 """
 
-import hashlib
-import hmac as hmac_mod
-import json
 import sys
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-from hypothesis import given, settings, assume
-from hypothesis.strategies import text, integers, composite
+from hypothesis import given, settings
+from hypothesis.strategies import text, integers
 
 # ---------------------------------------------------------------------------
 # Mock the elasticsearch_service module before importing ops modules
 # ---------------------------------------------------------------------------
 sys.modules.setdefault("services.elasticsearch_service", MagicMock())
 
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
-
-from ops.webhooks.receiver import configure_webhook_receiver, router
-from ops.ingestion.adapter import AdapterTransformer, TransformResult
+from ops.ingestion.adapter import AdapterTransformer, TransformResult  # noqa: E402
+from ops.ingestion.replay import ReplayJobStatus, ReplayService  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-WEBHOOK_SECRET = "test-secret-for-idempotency"
 TENANT_ID = "tenant-idem"
 
 
@@ -53,7 +54,7 @@ _event_ids = text(
     max_size=64,
 )
 
-# Delivery counts: at least 1, up to 10 (enough to exercise idempotency)
+# Processing counts: at least 1, up to 10 (enough to exercise idempotency)
 _delivery_counts = integers(min_value=1, max_value=10)
 
 
@@ -63,7 +64,7 @@ _delivery_counts = integers(min_value=1, max_value=10)
 
 
 def _make_payload(event_id: str) -> dict:
-    """Build a valid Dinee webhook payload with the given event_id."""
+    """Build a valid webhook-shaped record with the given event_id."""
     return {
         "event_id": event_id,
         "event_type": "shipment_created",
@@ -74,42 +75,16 @@ def _make_payload(event_id: str) -> dict:
     }
 
 
-def _sign(payload: dict) -> str:
-    """Compute HMAC-SHA256 hex digest for the payload."""
-    body = json.dumps(payload).encode("utf-8")
-    return hmac_mod.new(
-        WEBHOOK_SECRET.encode("utf-8"), body, hashlib.sha256
-    ).hexdigest()
-
-
-def _post_webhook(client: TestClient, payload: dict) -> "Response":
-    """POST a signed webhook payload to the receiver."""
-    body = json.dumps(payload)
-    sig = _sign(payload)
-    return client.post(
-        "/webhooks/dinee",
-        content=body,
-        headers={
-            "X-Dinee-Signature": sig,
-            "Content-Type": "application/json",
-        },
-    )
-
-
-def _build_test_app():
+def _build_pipeline():
     """
-    Build a minimal FastAPI app with the webhook receiver wired up.
+    Build a ReplayService with a mocked adapter and ES.
 
     The IdempotencyService mock simulates real behaviour: it tracks seen
     event_ids in a set so that the first call to is_duplicate returns False
     and subsequent calls return True.
 
-    Returns (client, adapter_mock, idempotency_seen_set, ops_es_mock).
+    Returns (service, adapter_mock, seen_set, ops_es_mock).
     """
-    app = FastAPI()
-    app.include_router(router)
-
-    # --- Adapter mock ---
     adapter = MagicMock(spec=AdapterTransformer)
     adapter.is_version_supported.return_value = True
     adapter.transform.return_value = TransformResult(
@@ -118,7 +93,6 @@ def _build_test_app():
         event_doc={"event_id": "placeholder"},
     )
 
-    # --- Idempotency mock with real set-based tracking ---
     seen: set[str] = set()
     idempotency_service = AsyncMock()
 
@@ -131,28 +105,18 @@ def _build_test_app():
     idempotency_service.is_duplicate = AsyncMock(side_effect=_is_duplicate)
     idempotency_service.mark_processed = AsyncMock(side_effect=_mark_processed)
 
-    # --- ES mock ---
     ops_es = AsyncMock()
     ops_es.append_shipment_event = AsyncMock()
     ops_es.upsert_shipment_current = AsyncMock()
     ops_es.upsert_rider_current = AsyncMock()
 
-    # --- Poison queue mock ---
-    poison_queue = AsyncMock()
-
-    configure_webhook_receiver(
+    service = ReplayService(
         adapter=adapter,
-        idempotency_service=idempotency_service,
-        poison_queue_service=poison_queue,
-        ops_es_service=ops_es,
-        ws_manager=None,
-        feature_flag_service=None,
-        webhook_secret=WEBHOOK_SECRET,
-        webhook_tenant_id="",
+        idempotency=idempotency_service,
+        ops_es=ops_es,
+        settings=MagicMock(),
     )
-
-    client = TestClient(app)
-    return client, adapter, seen, ops_es
+    return service, adapter, seen, ops_es
 
 
 # ---------------------------------------------------------------------------
@@ -163,20 +127,23 @@ class TestIdempotentTransformCallCount:
 
     @given(event_id=_event_ids, n_deliveries=_delivery_counts)
     @settings(max_examples=200)
-    def test_transform_called_exactly_once(self, event_id: str, n_deliveries: int):
+    async def test_transform_called_exactly_once(
+        self, event_id: str, n_deliveries: int
+    ):
         """
-        For any event_id delivered N times (N >= 1), the adapter.transform
-        is called exactly once — the first delivery triggers transformation,
-        all subsequent deliveries are short-circuited by idempotency.
+        For any event_id processed N times (N >= 1), adapter.transform is
+        called exactly once — the first pass triggers transformation, all
+        subsequent passes are short-circuited by idempotency.
         """
-        client, adapter, seen, ops_es = _build_test_app()
+        service, adapter, _seen, _ops_es = _build_pipeline()
+        job = ReplayJobStatus(job_id="job-idem", tenant_id=TENANT_ID)
 
         payload = _make_payload(event_id)
         for _ in range(n_deliveries):
-            resp = _post_webhook(client, payload)
-            assert resp.status_code == 200
+            await service._process_record(job, payload, TENANT_ID)
 
         assert adapter.transform.call_count == 1
+        assert job.failed_count == 0
 
 
 # ---------------------------------------------------------------------------
@@ -187,49 +154,46 @@ class TestIdempotentESUpsertCount:
 
     @given(event_id=_event_ids, n_deliveries=_delivery_counts)
     @settings(max_examples=200)
-    def test_es_upsert_called_exactly_once(self, event_id: str, n_deliveries: int):
+    async def test_es_upsert_called_exactly_once(
+        self, event_id: str, n_deliveries: int
+    ):
         """
-        For any event_id delivered N times, ES upsert (shipment current)
+        For any event_id processed N times, ES upsert (shipment current)
         and append (event) operations each happen exactly once.
         """
-        client, adapter, seen, ops_es = _build_test_app()
+        service, _adapter, _seen, ops_es = _build_pipeline()
+        job = ReplayJobStatus(job_id="job-idem", tenant_id=TENANT_ID)
 
         payload = _make_payload(event_id)
         for _ in range(n_deliveries):
-            resp = _post_webhook(client, payload)
-            assert resp.status_code == 200
+            await service._process_record(job, payload, TENANT_ID)
 
         assert ops_es.upsert_shipment_current.call_count == 1
         assert ops_es.append_shipment_event.call_count == 1
 
 
 # ---------------------------------------------------------------------------
-# Property 3 – subsequent deliveries return status "duplicate"
+# Property 3 – repeats are skipped, not reprocessed
 # ---------------------------------------------------------------------------
 class TestIdempotentDuplicateStatus:
-    """**Validates: Requirements 1.4, 1.5, 1.11**"""
+    """**Validates: Requirements 1.4, 1.5, 1.11, 3.4**"""
 
     @given(event_id=_event_ids, n_deliveries=_delivery_counts)
     @settings(max_examples=200)
-    def test_subsequent_deliveries_return_duplicate(
+    async def test_repeats_are_skipped_not_reprocessed(
         self, event_id: str, n_deliveries: int
     ):
         """
-        The first delivery returns status "processed"; all subsequent
-        deliveries for the same event_id return status "duplicate".
+        The first pass is processed; every subsequent pass for the same
+        event_id is counted as skipped and never reaches the adapter.
         """
-        client, adapter, seen, ops_es = _build_test_app()
+        service, adapter, seen, _ops_es = _build_pipeline()
+        job = ReplayJobStatus(job_id="job-idem", tenant_id=TENANT_ID)
 
         payload = _make_payload(event_id)
-        statuses = []
         for _ in range(n_deliveries):
-            resp = _post_webhook(client, payload)
-            assert resp.status_code == 200
-            statuses.append(resp.json()["status"])
+            await service._process_record(job, payload, TENANT_ID)
 
-        # First delivery must be "processed"
-        assert statuses[0] == "processed"
-
-        # All subsequent deliveries must be "duplicate"
-        for status in statuses[1:]:
-            assert status == "duplicate"
+        assert job.skipped_count == n_deliveries - 1
+        assert adapter.transform.call_count == 1
+        assert event_id in seen

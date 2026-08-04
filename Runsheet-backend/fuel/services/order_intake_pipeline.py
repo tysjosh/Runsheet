@@ -14,10 +14,12 @@ integration lands here. The pipeline enforces:
        schema before ES upsert.
     6. Atomic upsert of fuel_orders_current + fuel_order_events.
     7. /ws/orders broadcast.
-    8. Deprecation dual-write to shipments_current / shipment_events /
-       riders_current when the feature flag is in ``shadow`` or
-       ``active_gated``.
-    9. Idempotency mark_processed on success.
+    8. Idempotency mark_processed on success.
+
+Step 8 used to be the deprecation dual-write into shipments_current /
+riders_current (plus the legacy /ws/ops dual-broadcast and the
+shadow-mode divergence comparison). The legacy surface is being dropped,
+so that whole step is gone and mark_processed moved up.
 
 Adapter exceptions are caught and routed to the ``ops_poison_queue`` via
 the existing :class:`PoisonQueueService` — they never propagate to the
@@ -26,7 +28,7 @@ caller.
 Constructor deps:
     es_service, intake_channel_repo, adapter_registry, idempotency_service,
     feature_flag_service, poison_queue_service, ws_manager, credentials_vault,
-    customer_tank_repo, optional legacy_dual_writer, optional clock.
+    customer_tank_repo, optional clock.
 
 Validates: Requirements 1.1.6, 2.1, 2.2, 2.3, 9.1.3.
 """
@@ -129,7 +131,7 @@ class OrderIntakePipeline:
     Every webhook, dispatcher POST, bulk upload, CSV import, and future
     partner integration lands here. The pipeline enforces channel
     resolution, authentication, idempotency, schema validation, adapter
-    dispatch, model validation, persistence, broadcast, and dual-write.
+    dispatch, model validation, persistence, and broadcast.
     """
 
     def __init__(
@@ -144,7 +146,10 @@ class OrderIntakePipeline:
         ws_manager: Any,
         credentials_vault: Any,
         customer_tank_repo: Any,
-        legacy_dual_writer: Optional[Any] = None,
+        # ``legacy_dual_writer`` was removed with the legacy mirror shim.
+        # ``legacy_ws_manager`` is retained only because bootstrap and
+        # several callers still pass it; the dual-broadcast that consumed
+        # it went out with the mirror.
         legacy_ws_manager: Optional[Any] = None,
         clock: Optional[Callable] = None,
     ) -> None:
@@ -157,7 +162,6 @@ class OrderIntakePipeline:
         self._ws_manager = ws_manager
         self._credentials_vault = credentials_vault
         self._customer_tank_repo = customer_tank_repo
-        self._legacy_dual_writer = legacy_dual_writer
         self._legacy_ws_manager = legacy_ws_manager
         self._clock = clock or utcnow
 
@@ -415,10 +419,11 @@ class OrderIntakePipeline:
 
         Steps:
             (0) Check ``overlay.order_intake_pipeline`` feature flag state:
-                - ``disabled``: short-circuit to the legacy path.
-                - ``shadow``: dual-write and compare (divergence checker).
-                - ``active_gated``: write to new path + dual-mirror to legacy.
-                - ``active_auto``: write only to the new path.
+                - ``disabled``: short-circuit (no legacy path remains).
+                - every other state: write to the new path.
+                NB: ``shadow`` / ``active_gated`` used to additionally
+                dual-write and compare against the legacy surface. With
+                the legacy mirror retired they behave like ``active_auto``.
             (d) Check tenant-scoped idempotency.
             (e) Validate schema version against channel whitelist.
             (f) Dispatch to the matching adapter.
@@ -429,8 +434,11 @@ class OrderIntakePipeline:
             (k) Call ``FuelOrderRepository.upsert_with_last_event_timestamp``.
             (l) Append each event via ``append_event``.
             (m) Broadcast through ``OrdersWSManager``.
-            (n) Dual-write through ``LegacyDualWriter`` (if enabled).
-            (o) Mark processed via idempotency service.
+            (n) Mark processed via idempotency service.
+
+        Step (n) was the ``LegacyDualWriter`` dual-write; it has been
+        removed along with the legacy mirror, so mark_processed took
+        over the letter.
         """
         tenant_id = channel.tenant_id
         ingest_start = time.monotonic()
@@ -438,10 +446,14 @@ class OrderIntakePipeline:
         # (0) Check overlay.order_intake_pipeline feature flag state
         overlay_state = await self._get_overlay_state(tenant_id)
 
-        # ``disabled`` → short-circuit to the legacy path entirely.
-        # The caller (webhook receiver / dispatcher endpoint) is
-        # responsible for routing to the legacy handler when this
-        # response is returned.
+        # ``disabled`` → short-circuit. The caller is responsible for deciding
+        # what to do with a ``legacy_passthrough`` response.
+        #
+        # NB: the only caller that ever had a legacy handler to fall back to was
+        # the ``POST /webhooks/dinee`` receiver, which has been removed. Every
+        # remaining caller treats this as "not processed", so with the flag
+        # ``disabled`` an order is simply not ingested rather than being written
+        # by an older path.
         if overlay_state == "disabled":
             return IntakeResponse(
                 event_id=client_event_id or "",
@@ -596,11 +608,8 @@ class OrderIntakePipeline:
         # (m) Broadcast through OrdersWSManager
         await self._broadcast(order_doc, event_docs)
 
-        # (m2) Dual-broadcast to legacy /ws/ops subscribers during
-        # the deprecation window (Req 4.1.3, 9.3). Gate on overlay
-        # state: disabled/shadow/active_gated → dual-broadcast;
-        # active_auto → stop legacy broadcast.
-        await self._dual_broadcast_legacy_if_enabled(order_doc, tenant_id)
+        # (m2) used to dual-broadcast shipment_update / rider_update to
+        # legacy /ws/ops subscribers. Removed with the legacy mirror.
 
         # (m3) Run registered IntakeHook.after_accept hooks.
         # Side-effects only — failures are logged but do not block intake.
@@ -616,18 +625,12 @@ class OrderIntakePipeline:
                     hook_exc,
                 )
 
-        # (n) Dual-write through LegacyDualWriter (if enabled)
-        await self._dual_write_legacy_if_enabled(order_doc, tenant_id)
+        # The former step (n) mirrored the order into the legacy surface
+        # through LegacyDualWriter, and (n2) ran the shadow-mode
+        # divergence comparison against the legacy adapter output. Both
+        # depended on the legacy surface and were removed with it.
 
-        # (n2) Shadow-mode divergence comparison (Req 9.3.2).
-        # When in ``shadow`` state, run the divergence checker to compare
-        # the new adapter output against the legacy adapter output.
-        if overlay_state == "shadow":
-            await self._run_shadow_divergence_check(
-                order_doc, payload, channel, tenant_id
-            )
-
-        # (o) Mark processed in idempotency store
+        # (n) Mark processed in idempotency store
         await self._idempotency_service.mark_processed(
             event_id, tenant_id=tenant_id
         )
@@ -946,224 +949,23 @@ class OrderIntakePipeline:
             )
 
     # ------------------------------------------------------------------
-    # Shadow-mode divergence check
+    # Legacy mirror surface — removed
     # ------------------------------------------------------------------
-
-    async def _run_shadow_divergence_check(
-        self,
-        order_doc: Dict[str, Any],
-        original_payload: Dict[str, Any],
-        channel: Any,
-        tenant_id: str,
-    ) -> None:
-        """Run the shadow divergence checker when in shadow mode.
-
-        Compares the new adapter output against the legacy adapter output
-        on a sampled basis. Failures are logged but MUST NOT block the
-        main intake path.
-        """
-        try:
-            from fuel.services.shadow_divergence_checker import (
-                ShadowDivergenceChecker,
-            )
-
-            checker = ShadowDivergenceChecker()
-            await checker.compare(
-                new_output=order_doc,
-                original_payload=original_payload,
-                channel=channel,
-                tenant_id=tenant_id,
-            )
-        except Exception as exc:
-            logger.warning(
-                "OrderIntakePipeline: shadow divergence check failed for "
-                "order=%s, tenant=%s: %s",
-                order_doc.get("order_id"),
-                tenant_id,
-                exc,
-            )
-
-    # ------------------------------------------------------------------
-    # Legacy dual-broadcast (deprecation window — Req 4.1.3, 9.3)
-    # ------------------------------------------------------------------
-
-    async def _dual_broadcast_legacy_if_enabled(
-        self,
-        order_doc: Dict[str, Any],
-        tenant_id: str,
-    ) -> None:
-        """Broadcast shipment/rider events to legacy ``/ws/ops`` subscribers.
-
-        During the deprecation window, legacy subscribers on ``/ws/ops``
-        still expect ``shipment_update`` and ``rider_update`` events.
-        This method projects the order into the legacy shipment shape
-        and broadcasts via ``OpsWebSocketManager.broadcast_shipment_update``.
-
-        If the order has an ``assigned_driver_id``, it also broadcasts a
-        ``rider_update`` event so legacy driver-tracking UIs stay current.
-
-        Gating:
-            - ``disabled``, ``shadow``, ``active_gated`` → dual-broadcast
-            - ``active_auto`` → stop legacy broadcast (deprecation ended)
-
-        Failures are logged but MUST NOT block the main intake path.
-        """
-        if self._legacy_ws_manager is None:
-            return
-
-        try:
-            # Check the overlay state for this tenant
-            state = await self._feature_flag_service.get_overlay_state(
-                "order_intake_pipeline", tenant_id
-            )
-            # active_auto means the deprecation window has ended for
-            # this tenant — stop legacy broadcast.
-            if state == "active_auto":
-                return
-
-            # Project the order into the legacy shipment shape
-            shipment_data = self._project_order_to_shipment_broadcast(
-                order_doc
-            )
-            await self._legacy_ws_manager.broadcast_shipment_update(
-                shipment_data
-            )
-
-            # If the order has an assigned driver, also broadcast a
-            # rider_update so legacy driver-tracking UIs stay current.
-            if order_doc.get("assigned_driver_id"):
-                rider_data = self._project_order_to_rider_broadcast(order_doc)
-                await self._legacy_ws_manager.broadcast_rider_update(rider_data)
-
-        except Exception as exc:
-            # Legacy broadcast failures MUST NOT block the main path
-            logger.warning(
-                "OrderIntakePipeline: legacy /ws/ops dual-broadcast failed "
-                "for order=%s, tenant=%s: %s",
-                order_doc.get("order_id"),
-                tenant_id,
-                exc,
-            )
-
-    @staticmethod
-    def _project_order_to_shipment_broadcast(
-        order_doc: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """Project a FuelOrder dict into the legacy shipment broadcast shape.
-
-        Mirrors the projection in ``LegacyDualWriter._project_order_to_shipment``
-        but tailored for the WebSocket broadcast envelope.
-        """
-        origin = order_doc.get("legacy_origin_snapshot") or "depot"
-        return {
-            "shipment_id": order_doc["order_id"],
-            "status": order_doc["status"],
-            "tenant_id": order_doc["tenant_id"],
-            "rider_id": order_doc.get("assigned_driver_id"),
-            "origin": origin,
-            "destination": order_doc.get("ship_to_address", ""),
-            "estimated_delivery": order_doc.get("delivery_window_end"),
-            "last_event_timestamp": order_doc.get("last_event_timestamp"),
-            "current_location": (
-                {"lat": order_doc["ship_to_lat"], "lon": order_doc["ship_to_lon"]}
-                if order_doc.get("ship_to_lat") is not None
-                and order_doc.get("ship_to_lon") is not None
-                else None
-            ),
-            "trace_id": order_doc.get("trace_id", ""),
-            "updated_at": order_doc.get("updated_at"),
-        }
-
-    @staticmethod
-    def _project_order_to_rider_broadcast(
-        order_doc: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """Project a FuelOrder's driver assignment into the legacy rider
-        broadcast shape for ``/ws/ops`` subscribers.
-        """
-        return {
-            "rider_id": order_doc.get("assigned_driver_id"),
-            "tenant_id": order_doc["tenant_id"],
-            "status": "active",
-            "current_location": (
-                {"lat": order_doc["ship_to_lat"], "lon": order_doc["ship_to_lon"]}
-                if order_doc.get("ship_to_lat") is not None
-                and order_doc.get("ship_to_lon") is not None
-                else None
-            ),
-            "last_event_timestamp": order_doc.get("last_event_timestamp"),
-            "trace_id": order_doc.get("trace_id", ""),
-        }
-
-    # ------------------------------------------------------------------
-    # Legacy dual-write
-    # ------------------------------------------------------------------
-
-    async def _dual_write_legacy_if_enabled(
-        self,
-        order_doc: Dict[str, Any],
-        tenant_id: str,
-    ) -> None:
-        """Dual-write to the legacy surface if the feature flag allows.
-
-        Failures are logged and enqueued in ``pending_legacy_mirrors``
-        for background retry — they MUST NOT fail the main intake path.
-        """
-        if self._legacy_dual_writer is None:
-            return
-
-        try:
-            # Check the overlay state for this tenant
-            state = await self._feature_flag_service.get_overlay_state(
-                "order_intake_pipeline", tenant_id
-            )
-            # Dual-write when in shadow or active_gated
-            if state in ("shadow", "active_gated"):
-                await self._legacy_dual_writer.mirror_order(order_doc)
-        except Exception as exc:
-            # Legacy dual-write failures go to pending_legacy_mirrors
-            # retry queue — never fail the main path
-            logger.warning(
-                "OrderIntakePipeline: legacy dual-write failed for "
-                "order=%s, tenant=%s: %s — enqueueing for retry",
-                order_doc.get("order_id"),
-                tenant_id,
-                exc,
-            )
-            try:
-                await self._enqueue_pending_legacy_mirror(order_doc, tenant_id)
-            except Exception as enqueue_exc:
-                logger.error(
-                    "OrderIntakePipeline: failed to enqueue pending legacy "
-                    "mirror for order=%s: %s",
-                    order_doc.get("order_id"),
-                    enqueue_exc,
-                )
-
-    async def _enqueue_pending_legacy_mirror(
-        self,
-        order_doc: Dict[str, Any],
-        tenant_id: str,
-    ) -> None:
-        """Enqueue a failed legacy mirror write for background retry."""
-        from fuel.services.order_es_mappings import PENDING_LEGACY_MIRRORS_INDEX
-
-        now = self._clock()
-        doc = {
-            "order_id": order_doc.get("order_id"),
-            "tenant_id": tenant_id,
-            "entity_type": "order",
-            "payload": order_doc,
-            "retry_count": 0,
-            "next_retry_at": now.isoformat(),
-            "created_at": now.isoformat(),
-            "status": "pending",
-        }
-        await self._es.index_document(
-            PENDING_LEGACY_MIRRORS_INDEX,
-            f"mirror_{order_doc.get('order_id')}",
-            doc,
-        )
+    # Six methods lived below this line and all six went out with the
+    # legacy dual-write shim:
+    #
+    #   _run_shadow_divergence_check      compared new vs legacy adapter
+    #                                     output on a sampled basis
+    #   _dual_broadcast_legacy_if_enabled pushed shipment_update /
+    #                                     rider_update to legacy /ws/ops
+    #   _project_order_to_shipment_broadcast
+    #   _project_order_to_rider_broadcast the two legacy projections that
+    #                                     fed that broadcast
+    #   _dual_write_legacy_if_enabled     mirrored into shipments_current
+    #   _enqueue_pending_legacy_mirror    retry queue for mirror failures
+    #
+    # Nothing reads the legacy surface any more, so keeping inert copies
+    # would only invite them back.
 
 
 # ---------------------------------------------------------------------------

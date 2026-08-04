@@ -1,11 +1,5 @@
 "use client";
-import {
-  Activity,
-  AlertTriangle,
-  BarChart3,
-  Gauge,
-  TrendingUp,
-} from "lucide-react";
+import { Activity, BarChart3, Gauge, TrendingUp } from "lucide-react";
 import { lazy, Suspense, useState } from "react";
 import ErrorBoundary from "./ErrorBoundary";
 import LoadingSpinner from "./LoadingSpinner";
@@ -13,7 +7,12 @@ import { PageHeader, type Tab, TabNavigation } from "./ui";
 
 const Analytics = lazy(() => import("./Analytics"));
 const SchedulingMetricsPage = lazy(() => import("./ops/SchedulingMetricsPage"));
-const FailureAnalytics = lazy(() => import("../app/ops/failures/page"));
+// NOTE: a "Failure Analytics" tab used to live here, rendering
+// `app/ops/failures/page`. It read `/ops/metrics/failures` and
+// `/ops/shipments/failures`, both of which sit behind
+// `require_ops_enabled` -> `LEGACY_NG_DELIVERY_DISABLED`. With that flag off
+// everywhere the tab could only ever throw, so the tab and the page were
+// removed rather than left as a guaranteed error surface.
 const OpsMonitoringDashboard = lazy(
   () => import("./ops/OpsMonitoringDashboard"),
 );
@@ -34,11 +33,6 @@ const TABS: Tab[] = [
     id: "fleet-efficiency",
     label: "Fleet Efficiency",
     icon: <Gauge className="w-4 h-4" />,
-  },
-  {
-    id: "failures",
-    label: "Failure Analytics",
-    icon: <AlertTriangle className="w-4 h-4" />,
   },
   {
     id: "ops-monitoring",
@@ -86,11 +80,6 @@ export default function AnalyticsHub() {
                 </div>
                 <FuelEfficiencyChart />
               </div>
-            </ErrorBoundary>
-          )}
-          {activeTab === "failures" && (
-            <ErrorBoundary componentName="Failure Analytics">
-              <FailureAnalytics />
             </ErrorBoundary>
           )}
           {activeTab === "ops-monitoring" && (
