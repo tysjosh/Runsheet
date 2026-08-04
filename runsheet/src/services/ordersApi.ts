@@ -106,8 +106,14 @@ export interface FuelOrder {
   customer_phone?: string | null;
   customer_email?: string | null;
   ship_to_address: string;
-  ship_to_lat: number;
-  ship_to_lon: number;
+  /**
+   * Null for `voice` and `legacy` intake, which capture only a free-text
+   * `ship_to_address`; a human reconciles the coordinates during review-hold.
+   * Every other channel geocodes at intake, so these are populated. Mirrors
+   * `OrderResponse` in `fuel/api/order_endpoints.py`.
+   */
+  ship_to_lat: number | null;
+  ship_to_lon: number | null;
   customer_tank_id?: string | null;
   product_code?: string | null;
   gallons_requested?: number | null;

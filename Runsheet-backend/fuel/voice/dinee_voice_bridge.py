@@ -1,5 +1,14 @@
 """
-Dinee Voice Bridge — Surface A submission bridge (``POST /voice/orders``).
+Dinee Voice Bridge — Surface A submission bridge (``POST /voice-intake``).
+
+NB the path: submission is the bare ``/voice-intake``.
+``voice_submission_router`` carries no prefix precisely so Surface A stays
+distinct from the Surface B ``/voice`` prefix, under which ``/voice/orders/…``
+routes exist but are all **reads** (``lookup``, ``{id}/status``, ``{id}/eta``).
+Earlier revisions of this docstring pointed submitters at a path under that read
+prefix, which the app has never served for submission;
+``tests/unit/test_voice_submission_path_documented.py`` now pins the two
+together.
 
 The bridge maps the fixed Dinee voice submission header contract onto the
 **existing** :class:`~fuel.services.order_intake_pipeline.OrderIntakePipeline`.
