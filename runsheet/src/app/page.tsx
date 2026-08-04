@@ -477,6 +477,16 @@ function LoadGfx({ theme }: { theme: GfxTheme }) {
     { grade: "PROPANE", color: GRADE.PROPANE, fill: 0.95 },
     { grade: "DEF", color: GRADE.DEF, fill: 0.7 },
   ];
+  // Derived from the compartments actually drawn, not asserted. The readout
+  // previously read a hardcoded "92%" while these four bars average 84 — the
+  // label contradicted its own illustration. Deriving it also keeps this from
+  // reading as a customer outcome, which is why "85–95% utilization" was
+  // removed from the surrounding copy: with no production customers there is
+  // nothing to measure. This is a diagram annotation, and it stays true to the
+  // diagram.
+  const utilPct = Math.round(
+    (comps.reduce((sum, c) => sum + c.fill, 0) / comps.length) * 100,
+  );
   const x0 = 70;
   const w = 70;
   const top = 40;
@@ -616,7 +626,7 @@ function LoadGfx({ theme }: { theme: GfxTheme }) {
         fill={ACCENT}
         textAnchor="end"
       >
-        92%
+        {utilPct}%
       </text>
     </svg>
   );
@@ -967,11 +977,28 @@ function LandingStyles() {
   );
 }
 
+/**
+ * Every figure here traces to a specified, tested bound in
+ * `.kiro/specs/fuel-distribution-mvp/requirements.md` — not to a projection.
+ *
+ * Removed deliberately:
+ * - "85–95% truck utilization" — an outcome number with no source. There are no
+ *   production customers to measure, and the solver's requirement (3.4) is to
+ *   *maximize* utilization, not to hit a band. Utilization now appears as the
+ *   capability it is, without a fabricated percentage.
+ * - "< 2 min disruption replan" — unlike loading (Req 3.4, 500ms) and routing
+ *   (Req 4.5, 2s), no replan latency is specified or measured anywhere, so the
+ *   number had nothing behind it.
+ */
 const HERO_STATS = [
+  // Req 1: forecasts cover a 24–72 hour horizon.
   { value: "24–72h", label: "Runout forecast horizon" },
-  { value: "< 2 min", label: "Disruption replan time" },
-  { value: "85–95%", label: "Truck utilization" },
+  // Req 3.4: ≤6 compartments, ≤10 deliveries.
   { value: "< 500ms", label: "Load constraint solve" },
+  // Req 4.5: nearest-neighbour + 2-opt, ≤15 stops.
+  { value: "< 2s", label: "Route solve, 15 stops" },
+  // fuel/services/fuel_product_catalog.py — the shipped US catalog.
+  { value: "9", label: "US fuel products" },
 ];
 
 const NAV_LINKS = [
@@ -1007,7 +1034,7 @@ const COMPLIANCE = [
   {
     icon: FileText,
     title: "Reporting",
-    body: "IFTA quarterly · Form 720 · Audit-ready",
+    body: "IFTA quarterly · Jurisdiction tax detail · Audit trail",
   },
 ];
 
@@ -1023,12 +1050,15 @@ const PILLAR_ACCENT = {
 
 // Real regulatory standards Runsheet implements — used in place of fabricated
 // customer logos (there are none to show yet).
+// "Form 720" was dropped: the only backend reference is a comment noting that
+// TaxEngine output is shaped so the return *could* be produced. Everything
+// listed here has implementing services behind it.
 const STANDARDS = [
   "API 2540 VCF",
   "DOT / FMCSA",
   "IFTA",
   "IRS 637M",
-  "Form 720",
+  "ASTM D1250",
 ];
 
 // Architecture-true trust claims (not marketing fluff, not fake certifications).
@@ -1105,7 +1135,7 @@ export default function LandingPage() {
             <span className="text-lg font-black uppercase tracking-tight">
               RUN<span className="text-[#16b88c]">/</span>SHEET
             </span>
-            <span className="ml-1.5 font-mono text-[9px] uppercase tracking-[0.3em] text-[#f5f4ef]/40">
+            <span className="ml-1.5 font-mono text-[9px] uppercase tracking-[0.3em] text-[#f5f4ef]/60">
               beta
             </span>
           </Link>
@@ -1262,7 +1292,7 @@ export default function LandingPage() {
                 </div>
               ))}
             </div>
-            <p className="mt-3 font-mono text-[10px] uppercase tracking-[0.15em] text-[#f5f4ef]/45">
+            <p className="mt-3 font-mono text-[10px] uppercase tracking-[0.15em] text-[#f5f4ef]/55">
               * Design targets from in-development pilots — not guaranteed
               results.
             </p>
@@ -1407,7 +1437,12 @@ export default function LandingPage() {
             <span className="text-[#16b88c]">seconds.</span>
           </>
         }
-        body="Truck breakdown. Station outage. Demand spike. The replanning agent patches your plan in real time — finding replacement trucks with compatible compartments, reoptimizing stops, and adjusting quantities. Disruption response drops from 45+ minutes to under 2."
+        // The old copy claimed "from 45+ minutes to under 2". Both halves were
+        // invented: there is no measured baseline for a customer's current
+        // process, and no replan latency is specified or instrumented (contrast
+        // Req 3.4 and 4.5, which do bound loading and routing). Describing what
+        // the agent does needs no benchmark.
+        body="Truck breakdown. Station outage. Demand spike. The replanning agent patches your plan as it happens — finding replacement trucks with compatible compartments, reoptimizing stops, and adjusting quantities, then routing the change to a dispatcher for approval."
         tags={[
           "Disruption Response",
           "Route Reoptimization",
@@ -1434,8 +1469,15 @@ export default function LandingPage() {
             right.
           </>
         }
-        body="Auto-generate optimal loading plans for multi-compartment tankers — enforcing absolute AGO · PMS · ATK · LPG grade segregation, pushing utilization to 85–95%, and enabling multi-drop routes in a single trip. Constraint solving completes in under 500ms."
-        tags={["Grade Segregation", "Multi-Drop Routing", "85–95% Utilization"]}
+        // Products named from the shipped catalog
+        // (`fuel/services/fuel_product_catalog.py`). This previously read
+        // "AGO · PMS · ATK · LPG" — the pre-pivot Nigerian grades — which told a
+        // US heating-oil or commercial-diesel buyer the product was not built
+        // for them. Road diesel and dyed off-road fuel carry different tax
+        // classes, and DEF is isolated outright, so segregation is a tax and
+        // contamination control rather than a convenience.
+        body="Auto-generate optimal loading plans for multi-compartment tankers — enforcing absolute product segregation across Diesel #2, Heating Oil, Off-Road Diesel, Gasoline, Propane, Kerosene and DEF, maximizing compartment utilization, and enabling multi-drop routes in a single trip. Constraint solving completes in under 500ms."
+        tags={["Product Segregation", "Multi-Drop Routing", "Tax-Class Aware"]}
         graphic={
           <Console file="load.solver" theme={CREAM_GFX}>
             <LoadGfx theme={CREAM_GFX} />
@@ -1487,13 +1529,18 @@ export default function LandingPage() {
       <div className="border-y border-[#f5f4ef]/10 bg-[#0a0a0b] py-3 text-[#f5f4ef]">
         <Marquee
           direction="right"
+          // Dropped: the two fabricated figures repeated from the pillars, and
+          // "Form 720 Ready" — the only Form 720 reference in the backend is a
+          // comment in an ES mapping noting that TaxEngine output is shaped so
+          // reporting *could* be built. IFTA is genuinely implemented, so it
+          // takes the slot instead.
           items={[
             "Autonomous Fuel Ops",
-            "85–95% Truck Utilization",
-            "2-Min Disruption Response",
+            "Net Gallons at 60°F",
+            "IFTA Quarterly",
             "Human-in-Loop",
             "Dyed-Diesel Enforcement",
-            "Form 720 Ready",
+            "Multi-Compartment Loading",
             "Explainable AI",
             "Regional Distributors",
           ]}
@@ -1576,8 +1623,8 @@ export default function LandingPage() {
           </Reveal>
           <Reveal delay={140}>
             <p className="mx-auto mt-8 max-w-xl text-lg text-[#f5f4ef]/65">
-              From forecast to delivery to Form 720 — one autonomous operations
-              layer for regional fuel distributors.
+              From runout forecast to loaded tanker to net-gallon invoice — one
+              autonomous operations layer for regional fuel distributors.
             </p>
           </Reveal>
           <Reveal delay={220}>
@@ -1617,7 +1664,7 @@ export default function LandingPage() {
             </div>
 
             <div>
-              <h4 className="mb-4 font-mono text-[10px] uppercase tracking-[0.25em] text-[#f5f4ef]/45">
+              <h4 className="mb-4 font-mono text-[10px] uppercase tracking-[0.25em] text-[#f5f4ef]/55">
                 Platform
               </h4>
               <ul className="space-y-2.5">
@@ -1635,7 +1682,7 @@ export default function LandingPage() {
             </div>
 
             <div>
-              <h4 className="mb-4 font-mono text-[10px] uppercase tracking-[0.25em] text-[#f5f4ef]/45">
+              <h4 className="mb-4 font-mono text-[10px] uppercase tracking-[0.25em] text-[#f5f4ef]/55">
                 Get started
               </h4>
               <ul className="space-y-2.5">
@@ -1659,7 +1706,7 @@ export default function LandingPage() {
             </div>
 
             <div>
-              <h4 className="mb-4 font-mono text-[10px] uppercase tracking-[0.25em] text-[#f5f4ef]/45">
+              <h4 className="mb-4 font-mono text-[10px] uppercase tracking-[0.25em] text-[#f5f4ef]/55">
                 Contact
               </h4>
               <ul className="space-y-2.5">

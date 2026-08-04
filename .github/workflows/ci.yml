@@ -24,12 +24,17 @@ env:
   # still aborted with the same "Missing: prettier@3.9.6" plus three @emnapi
   # conflicts.
   #
-  # The actual cause is platform, not npm major. `@emnapi/*` arrive through a
-  # Linux-only optional dependency subtree. macOS npm never evaluates that
-  # subtree, so `npm install --package-lock-only` reports "up to date" and writes
-  # nothing locally, while `npm ci` on a Linux runner finds the entries absent.
-  # The durable fix is a lockfile generated on Linux; until then the driver-app
-  # job stays red and no amount of NODE_VERSION tuning changes that.
+  # The actual cause was platform, not npm major. `@unrs/resolver-binding-
+  # wasm32-wasi` needs `@emnapi` nested at 1.10.0 while the top level needs
+  # 2.0.0-alpha.3, and `prettier` (a peer of prettier-plugin-tailwindcss) needs a
+  # top-level entry. macOS npm never evaluates that wasm32-wasi binding, so it
+  # wrote a single flat `@emnapi` copy and no prettier entry, and answered "up to
+  # date" every time it was asked to check — which is why this was invisible
+  # locally and reproducible only on a runner.
+  #
+  # Fixed by regenerating driver-app/package-lock.json inside a linux/amd64
+  # container so the resolution includes that subtree. Keep it that way: a lock
+  # regenerated on macOS will drop those entries again and break `npm ci`.
   NODE_VERSION: "24"
   COVERAGE_THRESHOLD: 70
 
