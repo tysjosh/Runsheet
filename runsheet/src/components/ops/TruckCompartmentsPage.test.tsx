@@ -31,6 +31,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 
 jest.mock("../../services/fuelApi", () => {
@@ -41,6 +42,7 @@ jest.mock("../../services/fuelApi", () => {
     listCompartmentTrucks: jest.fn(),
     recordCleaningEvent: jest.fn(),
     checkCompartmentLoadEligibility: jest.fn(),
+    configureCompartments: jest.fn(),
   };
 });
 
@@ -58,6 +60,7 @@ import type {
 } from "../../services/fuelApi";
 import {
   checkCompartmentLoadEligibility,
+  configureCompartments,
   listCompartmentTrucks,
   listTruckCompartments,
   litersToGallons,
@@ -89,6 +92,9 @@ const mockPresign = presignPodUpload as jest.MockedFunction<
 >;
 const mockPut = putPresignedFile as jest.MockedFunction<
   typeof putPresignedFile
+>;
+const mockConfigure = configureCompartments as jest.MockedFunction<
+  typeof configureCompartments
 >;
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
@@ -254,6 +260,7 @@ describe("TruckCompartmentsPage", () => {
     mockCheckEligibility.mockReset();
     mockPresign.mockReset();
     mockPut.mockReset();
+    mockConfigure.mockReset();
   });
 
   async function lookupTruck(truckId = "TRUCK-1") {
@@ -617,5 +624,80 @@ describe("ELIGIBILITY_DECISION_CONFIG", () => {
     expect(Object.keys(ELIGIBILITY_DECISION_CONFIG).sort()).toEqual(
       ["allowed", "blocked", "requires_cleaning"].sort(),
     );
+  });
+});
+
+// ─── Configure-compartments modal ────────────────────────────────────────────
+
+describe("ConfigureCompartmentsModal", () => {
+  beforeEach(() => {
+    mockList.mockReset();
+    mockListTrucks.mockReset();
+    mockListTrucks.mockResolvedValue({ items: [], total: 0 });
+    mockConfigure.mockReset();
+  });
+
+  async function openModal() {
+    render(<TruckCompartmentsPage />);
+    await screen.findByText(/No trucks have compartments configured yet/i);
+    fireEvent.click(screen.getByTestId("configure-compartments-btn"));
+    return screen.getByRole("dialog", { name: /Configure compartments/i });
+  }
+
+  it("offers canonical US product codes and no legacy NG aliases", async () => {
+    const dialog = await openModal();
+
+    // Canonical catalog codes are offered as quick-add chips.
+    for (const code of ["DIESEL_2", "GASOLINE_REG", "HEATING_OIL", "PROPANE"]) {
+      expect(
+        within(dialog).getByRole("button", { name: `+ ${code}` }),
+      ).toBeInTheDocument();
+    }
+    // The retired Nigerian grades are gone from the UI.
+    for (const alias of ["AGO", "PMS", "ATK", "LPG"]) {
+      expect(
+        within(dialog).queryByRole("button", { name: `+ ${alias}` }),
+      ).not.toBeInTheDocument();
+    }
+    // ...including the free-text hint.
+    expect(
+      within(dialog).getByPlaceholderText("DIESEL_2, GASOLINE_REG"),
+    ).toBeInTheDocument();
+  });
+
+  it("submits capacity in gallons — liters conversion stays at the API boundary", async () => {
+    mockConfigure.mockResolvedValue({
+      truck_id: "TNK-009",
+      compartments_configured: 1,
+      status: "ok",
+    });
+    mockList.mockResolvedValue(listResponseFixture([], "TNK-009"));
+
+    const dialog = await openModal();
+    fireEvent.change(within(dialog).getByLabelText(/Truck ID/i), {
+      target: { value: "TNK-009" },
+    });
+    fireEvent.change(within(dialog).getByPlaceholderText("C1"), {
+      target: { value: "C1" },
+    });
+    fireEvent.change(within(dialog).getByPlaceholderText("3000"), {
+      target: { value: "3000" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "+ DIESEL_2" }));
+
+    await act(async () => {
+      fireEvent.click(
+        within(dialog).getByRole("button", { name: /Save compartments/i }),
+      );
+    });
+
+    expect(mockConfigure).toHaveBeenCalledWith("TNK-009", [
+      {
+        compartment_id: "C1",
+        capacity_gallons: 3000,
+        allowed_grades: ["DIESEL_2"],
+        position_index: 0,
+      },
+    ]);
   });
 });

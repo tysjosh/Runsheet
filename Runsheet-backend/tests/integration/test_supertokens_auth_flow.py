@@ -239,13 +239,13 @@ def test_session_recipe_enforces_anti_csrf_and_secure_cookies(
     assert config.cookie_secure is True
 
 
-def test_four_canonical_user_roles_are_declared(initialized_supertokens):
+def test_canonical_user_roles_are_declared(initialized_supertokens):
     """The four canonical UserRoles are declared and the recipe is live (Req 4.4).
 
-    The platform represents exactly ``admin`` / ``dispatcher`` / ``ops_manager``
-    / ``driver`` as SuperTokens roles. Assert the canonical set the provisioning
-    script creates is exactly those four and that the UserRoles recipe is
-    initialized to back them.
+    The platform represents ``admin`` / ``dispatcher`` / ``ops_manager`` /
+    ``driver`` / ``platform_admin`` as SuperTokens roles. Assert the canonical
+    set the provisioning script creates is exactly those and that the UserRoles
+    recipe is initialized to back them.
     """
     from supertokens_python.recipe.userroles.recipe import UserRolesRecipe
 
@@ -254,9 +254,15 @@ def test_four_canonical_user_roles_are_declared(initialized_supertokens):
         "dispatcher",
         "ops_manager",
         "driver",
+        # Runsheet-staff role. Added because staff sign in through the same app
+        # as customers, so "may act outside my own tenant" needed a role that
+        # ``admin`` (which is tenant-scoped) could not express. Without it the
+        # feature-flag endpoints had no way to distinguish a customer
+        # administrator from support staff.
+        "platform_admin",
     }
     # No duplicates / no extras in the declared tuple.
-    assert len(CANONICAL_ROLES) == 4
+    assert len(CANONICAL_ROLES) == 5
     # The UserRoles recipe is registered so the roles can exist in the core.
     assert UserRolesRecipe.get_instance().get_recipe_id() == "userroles"
 
@@ -390,7 +396,7 @@ def test_anti_csrf_enforced_on_state_changing_request(live_core):
 
 
 @pytest.mark.integration
-async def test_four_canonical_roles_exist_in_core(live_core):
+async def test_canonical_roles_exist_in_core(live_core):
     """End-to-end: the four canonical UserRoles exist in the core (Req 4.4)."""
     from supertokens_python.recipe.userroles.asyncio import (
         create_new_role_or_add_permissions,

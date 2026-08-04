@@ -23,7 +23,9 @@
 import { AlertTriangle, Link2, Loader2, RefreshCw, Search } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ToastContainer, useToasts } from "@/components/ui";
-import IntegrationCard from "../../../components/admin/IntegrationCard";
+import IntegrationCard, {
+  type IntegrationConnectOptions,
+} from "../../../components/admin/IntegrationCard";
 import { ApiError } from "../../../services/api";
 import {
   createIntegrationInstance,
@@ -252,6 +254,7 @@ export default function IntegrationMarketplacePage() {
     async (
       provider: ProviderCatalogEntry,
       credentials: Record<string, string>,
+      options?: IntegrationConnectOptions,
     ) => {
       const existing = instancesByProvider.get(provider.provider_name) ?? null;
       await runMutation(
@@ -268,6 +271,10 @@ export default function IntegrationMarketplacePage() {
             );
             await updateIntegrationInstance(existing.instance_id, {
               credentials,
+              ...(options?.config ? { config: options.config } : {}),
+              ...(options?.scheduleCron
+                ? { schedule_cron: options.scheduleCron }
+                : {}),
             });
           } else {
             await createIntegrationInstance({
@@ -275,6 +282,8 @@ export default function IntegrationMarketplacePage() {
               category: provider.category as IntegrationCategory,
               enabled: true,
               credentials,
+              config: options?.config,
+              schedule_cron: options?.scheduleCron,
             });
           }
           await loadCatalogAndInstances();
@@ -615,7 +624,9 @@ export default function IntegrationMarketplacePage() {
                               : false
                           }
                           working={workingProvider === provider.provider_name}
-                          onConnect={(creds) => handleConnect(provider, creds)}
+                          onConnect={(creds, options) =>
+                            handleConnect(provider, creds, options)
+                          }
                           onEnable={async () => {
                             if (instance)
                               await handleEnable(provider, instance);

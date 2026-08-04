@@ -327,3 +327,42 @@ jobs:
             exit 1
           fi
           echo "✅ main.py is within the 200-line limit."
+  # -----------------------------------------------------------------
+  # Job 8: Driver app (/driver-app) — donor-value guard, types, lint, tests
+  # The repository's first frontend job. No `needs:`, so it runs alongside
+  # the seven Python jobs above rather than behind them.
+  # -----------------------------------------------------------------
+  driver-app:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: driver-app
+    steps:
+      - uses: actions/checkout@v4
+
+      # Runs before any install or build step: none of the four donor build
+      # credentials may survive into /driver-app, and the iOS bundle identifier
+      # and Android application id are immutable once published to a store.
+      - name: Guard against donor build credentials
+        working-directory: .
+        run: |
+          chmod +x scripts/check-donor-values.sh
+          bash scripts/check-donor-values.sh driver-app
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: driver-app/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript compilation check
+        run: npm run check-types
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Tests
+        run: npm test -- --ci

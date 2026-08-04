@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from datetime import date, timedelta
 from typing import Any, Callable, Dict, List, Optional
 from uuid import uuid4
@@ -31,6 +32,12 @@ from commerce.services.commerce_es_mappings import (
 from errors.exceptions import conflict, resource_not_found, validation_error
 from ops.middleware.tenant_guard import inject_tenant_filter
 from services.elasticsearch_service import ElasticsearchService
+from services.money import (
+    MICROS_PER_CENT,
+    legacy_unit_price_cents,
+    line_subtotal_cents,
+    unit_price_micros_from_record,
+)
 from services.time_utils import utcnow
 
 logger = logging.getLogger(__name__)
@@ -424,6 +431,7 @@ class InvoiceService:
         actor: str = "system",
         destination_fips: Optional[str] = None,
         effective_date: Optional[date] = None,
+        delivery_result: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Generate an Invoice from a delivered order.
 
@@ -466,6 +474,9 @@ class InvoiceService:
             effective_date: Invoice / delivery date used by the
                 TaxEngine for jurisdiction + exemption lookups.
                 Defaults to today when not provided.
+            delivery_result: Canonical POD snapshot from the delivered order.
+                When supplied, actual gallons in this snapshot must already
+                match the invoice line quantities.
 
         Raises:
             TaxJurisdictionNotFoundError: Propagated from
@@ -496,6 +507,26 @@ class InvoiceService:
         now = utcnow()
         invoice_id = f"inv_{uuid4()}"
 
+        # Canonicalize every incoming line before optional repricing. This
+        # upgrades legacy whole/fractional-cent payloads and guarantees the
+        # invoice subtotal is calculated from the precise per-gallon rate.
+        for item in line_items:
+            unit_price_micros = unit_price_micros_from_record(item)
+            if unit_price_micros is None:
+                continue
+            quantity = item.get(
+                "quantity_gallons",
+                item.get("quantity", 0),
+            )
+            item["unit_price_micros"] = unit_price_micros
+            item["unit_price_cents"] = legacy_unit_price_cents(
+                unit_price_micros
+            )
+            item["subtotal_cents"] = line_subtotal_cents(
+                quantity,
+                unit_price_micros,
+            )
+
         # --- Pricing resolution (optional, via injected SalesPricingEngine) ---
         # When a SalesPricingEngine factory is wired (task 5.11),
         # resolve the sell price for each line item before tax
@@ -521,7 +552,9 @@ class InvoiceService:
                         resolution = await pricing_engine.resolve_price(
                             customer_id=customer_id,
                             product_code=item.get("product_code", ""),
-                            gallons=item.get("quantity", 0),
+                            gallons=item.get(
+                                "quantity_gallons", item.get("quantity", 0)
+                            ),
                             terminal_id=item.get("terminal_id", ""),
                             route_miles=item.get("route_miles", 0.0),
                             effective_date=_eff_date,
@@ -530,13 +563,29 @@ class InvoiceService:
                             ),
                             account_id=account_id,
                         )
+                        effective_price_micros = getattr(
+                            resolution,
+                            "effective_price_micros",
+                            None,
+                        )
+                        if effective_price_micros is None:
+                            effective_price_micros = (
+                                resolution.effective_price_cents
+                                * MICROS_PER_CENT
+                            )
+                        item["unit_price_micros"] = int(
+                            effective_price_micros
+                        )
                         item["unit_price_cents"] = (
-                            resolution.effective_price_cents
+                            legacy_unit_price_cents(
+                                int(effective_price_micros)
+                            )
                         )
                         # Recompute subtotal for the line
-                        qty = item.get("quantity", 0)
-                        item["subtotal_cents"] = round(
-                            resolution.effective_price_cents * qty
+                        qty = item.get("quantity_gallons", item.get("quantity", 0))
+                        item["subtotal_cents"] = line_subtotal_cents(
+                            qty,
+                            int(effective_price_micros),
                         )
                     except Exception as exc:
                         # Pricing failure for a single line item should
@@ -560,9 +609,16 @@ class InvoiceService:
                             and item.get("market_price_cents")
                         ):
                             item["unit_price_cents"] = item["market_price_cents"]
-                            qty = item.get("quantity", 0)
-                            item["subtotal_cents"] = round(
-                                item["market_price_cents"] * qty
+                            item["unit_price_micros"] = (
+                                int(item["market_price_cents"])
+                                * MICROS_PER_CENT
+                            )
+                            qty = item.get(
+                                "quantity_gallons", item.get("quantity", 0)
+                            )
+                            item["subtotal_cents"] = line_subtotal_cents(
+                                qty,
+                                item["unit_price_micros"],
                             )
 
         # Compute totals from line items (integer cents only, C1)
@@ -630,6 +686,53 @@ class InvoiceService:
         # Compute due_date from net_terms_days
         due_date_val = (now + timedelta(days=net_terms_days)).date().isoformat()
 
+        delivery_snapshot = dict(delivery_result or {})
+        if delivery_snapshot:
+            actual_gallons = delivery_snapshot.get("actual_gallons")
+            try:
+                actual_gallons_value = float(actual_gallons)
+                billed_gallons = sum(
+                    float(
+                        item.get(
+                            "quantity_gallons", item.get("quantity", 0)
+                        )
+                        or 0
+                    )
+                    for item in line_items
+                )
+            except (TypeError, ValueError) as exc:
+                raise validation_error(
+                    "Delivery and invoice gallons must be numeric",
+                    details={
+                        "actual_gallons": actual_gallons,
+                        "order_id": order_id,
+                    },
+                ) from exc
+            if (
+                not math.isfinite(actual_gallons_value)
+                or actual_gallons_value <= 0
+                or not math.isfinite(billed_gallons)
+                or abs(billed_gallons - actual_gallons_value) > 0.001
+            ):
+                raise validation_error(
+                    "Invoice gallons must match the POD actual gallons",
+                    details={
+                        "order_id": order_id,
+                        "pod_id": delivery_snapshot.get("pod_id"),
+                        "actual_gallons": actual_gallons_value,
+                        "invoice_gallons": billed_gallons,
+                    },
+                )
+        source_system = delivery_snapshot.get("source_system")
+        source_record_id = delivery_snapshot.get("source_record_id")
+        external_refs: Dict[str, Any] = {}
+        if source_system:
+            external_refs["source_system"] = source_system
+        if source_record_id:
+            external_refs["source_record_id"] = source_record_id
+        if delivery_snapshot.get("pod_id"):
+            external_refs["pod_id"] = delivery_snapshot["pod_id"]
+
         # Build the invoice document
         doc: Dict[str, Any] = {
             "invoice_id": invoice_id,
@@ -653,11 +756,15 @@ class InvoiceService:
             "qbo_push_state": QBOPushState.PENDING.value,
             "qbo_push_attempts": 0,
             "qbo_push_last_error": None,
-            "external_refs": {},
+            "external_refs": external_refs,
             "created_at": now.isoformat(),
             "updated_at": now.isoformat(),
             "_last_applied_seq": 1,
         }
+        if delivery_snapshot:
+            doc["delivery_result"] = delivery_snapshot
+            doc["pod_id"] = delivery_snapshot.get("pod_id")
+            doc["delivered_at"] = delivery_snapshot.get("delivered_at")
         # Only attach tax_breakdown / exemptions_applied when the
         # TaxEngine actually produced a breakdown — otherwise omit the
         # fields so the legacy invoice shape is preserved for callers
@@ -676,6 +783,16 @@ class InvoiceService:
             "tax_cents": effective_tax_cents,
             "line_item_count": len(line_items),
         }
+        if delivery_snapshot:
+            event_payload.update(
+                {
+                    "pod_id": delivery_snapshot.get("pod_id"),
+                    "actual_gallons": delivery_snapshot.get("actual_gallons"),
+                    "delivered_at": delivery_snapshot.get("delivered_at"),
+                    "source_system": source_system,
+                    "source_record_id": source_record_id,
+                }
+            )
         if tax_breakdown_doc is not None:
             # Record the tax-engine computation on the event so the
             # event log captures the breakdown at the moment of
@@ -870,6 +987,58 @@ class InvoiceService:
                 exc,
                 exc_info=True,
             )
+
+    async def retry_external_sync(
+        self, *, tenant_id: str, invoice_id: str
+    ) -> Dict[str, Any]:
+        """Synchronously retry ERP/QBO export and return the refreshed invoice."""
+        invoice = await self.get(tenant_id=tenant_id, invoice_id=invoice_id)
+        if invoice.get("status") == InvoiceStatus.DRAFT.value:
+            raise conflict(
+                "Draft invoices must be finalized before ERP export",
+                error_code="COMMERCE_INVOICE_INVALID_STATE",
+                details={"invoice_id": invoice_id, "status": "draft"},
+            )
+        if self._external_sync is None:
+            raise conflict(
+                "No external accounting integration is configured",
+                error_code="COMMERCE_INVOICE_INVALID_STATE",
+                details={"invoice_id": invoice_id},
+            )
+        retry_fields = {
+            "qbo_push_state": QBOPushState.PENDING.value,
+            "qbo_push_attempts": 0,
+            "qbo_push_last_error": None,
+            "updated_at": utcnow().isoformat(),
+        }
+        await self._es.update_document(
+            INVOICES_CURRENT_INDEX,
+            invoice_id,
+            retry_fields,
+        )
+        try:
+            from commerce.services.commerce_persistence_bridge import (
+                mirror_invoice_fields,
+            )
+
+            await mirror_invoice_fields(
+                tenant_id,
+                invoice_id,
+                {
+                    key: value
+                    for key, value in retry_fields.items()
+                    if key != "updated_at"
+                },
+                event_type="qbo_retry_requested",
+            )
+        except Exception:
+            logger.exception(
+                "InvoiceService: failed to mirror QBO retry reset for invoice=%s",
+                invoice_id,
+            )
+        retry_invoice = {**invoice, **retry_fields}
+        await self._external_sync.retry_invoice_push(retry_invoice)
+        return await self.get(tenant_id=tenant_id, invoice_id=invoice_id)
 
     # ------------------------------------------------------------------
     # Apply payment (Req 5.3)

@@ -242,19 +242,30 @@ class TestConfigureCompartmentsCanonicalization:
 
     def _make_app(self, es):
         from Agents.support import mvp_endpoints
+        from tests.support.auth_seam import install_test_auth
 
         app = FastAPI()
         app.include_router(mvp_endpoints.router)
         mvp_endpoints._es_service = es
         mvp_endpoints._fleet_registration_service = None
+        # These routes depend on ``get_tenant_context``; without the
+        # Test_Auth_Path override the dependency reaches the real SuperTokens
+        # verifier and raises "Initialisation not done".
+        install_test_auth(app)
         return app
+
+    def _client(self, app):
+        """A TestClient carrying an authenticated tenant scope."""
+        from tests.support.auth_seam import auth_headers
+
+        return TestClient(app, headers=auth_headers(TENANT_ID))
 
     def test_canonicalizes_every_allowed_grade(self):
         es = MagicMock()
         es.index_document = AsyncMock()
 
         app = self._make_app(es)
-        client = TestClient(app)
+        client = self._client(app)
 
         resp = client.put(
             "/api/fuel/mvp/compartments/TRUCK-1",
@@ -287,7 +298,7 @@ class TestConfigureCompartmentsCanonicalization:
         es.index_document = AsyncMock()
 
         app = self._make_app(es)
-        client = TestClient(app)
+        client = self._client(app)
 
         with pytest.raises(AppException) as exc_info:
             client.put(

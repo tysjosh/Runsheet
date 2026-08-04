@@ -14,8 +14,9 @@ authenticating the connection (``_authenticate_tenant`` /
 
 This holds regardless of:
 
-* where the credential is carried — the ``sAccessToken`` cookie on the
-  handshake, or the short-lived ``token`` query parameter fallback (Req 7.5);
+* where the credential is carried — the ``Authorization: Bearer`` handshake
+  header, the ``sAccessToken`` cookie on the handshake, or the short-lived
+  ``token`` query parameter fallback (Req 7.5);
 * the active ``auth_provider`` (``supertokens`` / ``dual`` / ``legacy``);
 * whether verification succeeds, returns no session, or raises (so the
   failure-logging branch in the default SDK verifier is exercised) (Req 7.4).
@@ -96,9 +97,12 @@ def _make_settings(auth_provider="supertokens"):
 
 
 def _make_ws(token: str, transport: str):
-    """Build a fake WebSocket carrying ``token`` via cookie or query param."""
+    """Build a fake WebSocket carrying ``token`` via header, cookie, or query."""
     websocket = MagicMock()
-    if transport == "cookie":
+    if transport == "header":
+        websocket.query_params = {}
+        websocket.headers = {"authorization": f"Bearer {token}"}
+    elif transport == "cookie":
         websocket.query_params = {}
         websocket.headers = {"cookie": f"foo=bar; sAccessToken={token}; baz=qux"}
     else:  # "query"
@@ -121,7 +125,7 @@ _tokens = st.text(
     min_size=8,
     max_size=64,
 )
-_transports = st.sampled_from(["cookie", "query"])
+_transports = st.sampled_from(["header", "cookie", "query"])
 _providers = st.sampled_from(["supertokens"])
 _verify_behaviors = st.sampled_from(["valid", "none", "raise_default"])
 

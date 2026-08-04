@@ -19,13 +19,21 @@
 
 import {
   checkCompartmentLoadEligibility,
+  checkinStop,
+  configureCompartments,
+  createStation,
   getPodHashProof,
+  LITERS_PER_GALLON,
   listCombinableGroups,
   listDeliveryDestinations,
   listFuelProducts,
   listPriorityClusters,
   listStormRoadRestrictions,
+  litersToGallons,
+  recordConsumption,
+  recordRefill,
   submitTerminalWaitReport,
+  updateStation,
   uploadStormRoadRestriction,
   verifyPodHashChain,
 } from "./fuelApi";
@@ -352,5 +360,228 @@ describe("listStormRoadRestrictions", () => {
     const [url, options] = (global.fetch as jest.Mock).mock.calls[0];
     expect(url).toBe(`${API_BASE_URL}/fuel/storm-mode/road-restrictions`);
     expect(options.method).toBeUndefined();
+  });
+});
+
+// ─── Volume unit boundary: gallons in the UI, liters on the wire ─────────────
+//
+// The station-CRUD, fuel-event, and compartment-config endpoints still declare
+// their volumes in liters (``fuel.models.CreateFuelStation.capacity_liters``,
+// ``fuel.models.ConsumptionEvent.quantity_liters``,
+// ``Agents.support.mvp_endpoints.CompartmentConfig.capacity_liters``). These
+// tests pin the conversion to the service layer so components stay gallons-only
+// and the wire field names keep matching what the backend accepts.
+
+describe("volume unit boundary", () => {
+  it("createStation converts gallons to the liters fields the endpoint requires", async () => {
+    mockFetchOnce({ ok: true, body: { station_id: "FS-1" } });
+
+    await createStation(
+      {
+        station_id: "FS-1",
+        name: "Houston Main",
+        fuel_type: "DIESEL_2",
+        capacity_gallons: 1000,
+        initial_stock_gallons: 500,
+        alert_threshold_pct: 20,
+      },
+      "tenant-a",
+    );
+
+    const [, options] = (global.fetch as jest.Mock).mock.calls[0];
+    const body = JSON.parse(options.body);
+    expect(body.capacity_liters).toBeCloseTo(1000 * LITERS_PER_GALLON, 6);
+    expect(body.initial_stock_liters).toBeCloseTo(500 * LITERS_PER_GALLON, 6);
+    // No gallons keys leak onto the wire; the backend would ignore them.
+    expect(body).not.toHaveProperty("capacity_gallons");
+    expect(body).not.toHaveProperty("initial_stock_gallons");
+    expect(body.fuel_type).toBe("DIESEL_2");
+  });
+
+  it("updateStation omits capacity entirely when the caller did not change it", async () => {
+    mockFetchOnce({ ok: true, body: { station_id: "FS-1" } });
+
+    await updateStation("FS-1", { name: "Renamed" }, "tenant-a");
+
+    const [, options] = (global.fetch as jest.Mock).mock.calls[0];
+    const body = JSON.parse(options.body);
+    expect(body).toEqual({ name: "Renamed" });
+  });
+
+  it("updateStation converts a changed capacity to capacity_liters", async () => {
+    mockFetchOnce({ ok: true, body: { station_id: "FS-1" } });
+
+    await updateStation("FS-1", { capacity_gallons: 250 }, "tenant-a");
+
+    const [, options] = (global.fetch as jest.Mock).mock.calls[0];
+    const body = JSON.parse(options.body);
+    expect(body.capacity_liters).toBeCloseTo(250 * LITERS_PER_GALLON, 6);
+    expect(body).not.toHaveProperty("capacity_gallons");
+  });
+
+  it("recordConsumption sends quantity_liters", async () => {
+    mockFetchOnce({ ok: true, body: { data: {}, request_id: "r1" } });
+
+    await recordConsumption({
+      station_id: "FS-1",
+      fuel_type: "DIESEL_2",
+      quantity_gallons: 40,
+      asset_id: "TRK-1",
+      operator_id: "op-1",
+    });
+
+    const [, options] = (global.fetch as jest.Mock).mock.calls[0];
+    const body = JSON.parse(options.body);
+    expect(body.quantity_liters).toBeCloseTo(40 * LITERS_PER_GALLON, 6);
+    expect(body).not.toHaveProperty("quantity_gallons");
+  });
+
+  it("recordRefill sends quantity_liters", async () => {
+    mockFetchOnce({ ok: true, body: { data: {}, request_id: "r1" } });
+
+    await recordRefill({
+      station_id: "FS-1",
+      fuel_type: "GASOLINE_REG",
+      quantity_gallons: 8000,
+      supplier: "Global Fuels",
+      operator_id: "op-1",
+    });
+
+    const [, options] = (global.fetch as jest.Mock).mock.calls[0];
+    const body = JSON.parse(options.body);
+    expect(body.quantity_liters).toBeCloseTo(8000 * LITERS_PER_GALLON, 6);
+    expect(body).not.toHaveProperty("quantity_gallons");
+  });
+
+  it("configureCompartments maps capacity_gallons to capacity_liters per row", async () => {
+    mockFetchOnce({
+      ok: true,
+      body: { truck_id: "TNK-1", compartments_configured: 2, status: "ok" },
+    });
+
+    await configureCompartments("TNK-1", [
+      {
+        compartment_id: "C1",
+        capacity_gallons: 3000,
+        allowed_grades: ["DIESEL_2"],
+        position_index: 0,
+      },
+      {
+        compartment_id: "C2",
+        capacity_gallons: 1500,
+        allowed_grades: ["GASOLINE_REG", "GASOLINE_PREM"],
+        position_index: 1,
+      },
+    ]);
+
+    const [url, options] = (global.fetch as jest.Mock).mock.calls[0];
+    expect(url).toBe(`${API_BASE_URL}/fuel/mvp/compartments/TNK-1`);
+    expect(options.method).toBe("PUT");
+    const body = JSON.parse(options.body);
+    expect(body.compartments).toHaveLength(2);
+    expect(body.compartments[0].capacity_liters).toBeCloseTo(
+      3000 * LITERS_PER_GALLON,
+      6,
+    );
+    expect(body.compartments[1].capacity_liters).toBeCloseTo(
+      1500 * LITERS_PER_GALLON,
+      6,
+    );
+    for (const row of body.compartments) {
+      expect(row).not.toHaveProperty("capacity_gallons");
+    }
+    // Canonical US product codes are passed through untouched.
+    expect(body.compartments[1].allowed_grades).toEqual([
+      "GASOLINE_REG",
+      "GASOLINE_PREM",
+    ]);
+  });
+
+  it("litersToGallons round-trips the values the read boundary sees", () => {
+    expect(litersToGallons(3785.411784)).toBeCloseTo(1000, 6);
+    expect(litersToGallons(null)).toBe(0);
+  });
+});
+
+// ─── Stop check-in on the gallons contract (driver-mobile-app Req 6.24) ──────
+//
+// ``POST /fuel/mvp/plan/{plan_id}/checkin`` takes gallons and converts once,
+// server-side. These tests pin that the client sends the gallons field verbatim
+// (a client-side conversion here would double-convert) and forwards the two
+// now-required driver-context fields.
+
+describe("checkinStop", () => {
+  const body = {
+    route_id: "R-1",
+    station_id: "FS-1",
+    sequence: 0,
+    actual_quantities_gallons: { DIESEL_2: 1000 },
+    quantity_unit: "us_gallon" as const,
+    geotag: { lat: 29.7604, lng: -95.3698 },
+    event_timestamp: "2026-05-08T14:32:00Z",
+  };
+
+  it("POSTs actual_quantities_gallons unconverted with the unit and driver context", async () => {
+    mockFetchOnce({
+      ok: true,
+      body: {
+        plan_id: "PLAN-1",
+        route_id: "R-1",
+        station_id: "FS-1",
+        sequence: 0,
+        quantity_unit: "us_gallon",
+        actual_quantities_gallons: { DIESEL_2: 1000 },
+        planned_quantities_gallons: { DIESEL_2: 1000 },
+        variance_gallons: { DIESEL_2: 0 },
+        completed_stops: 1,
+        total_stops: 3,
+        all_complete: false,
+        updated_at: "2026-05-08T14:32:01Z",
+      },
+    });
+
+    const result = await checkinStop("PLAN-1", "tenant-a", body);
+
+    const [url, options] = (global.fetch as jest.Mock).mock.calls[0];
+    expect(url).toBe(
+      `${API_BASE_URL}/fuel/mvp/plan/PLAN-1/checkin?tenant_id=tenant-a`,
+    );
+    expect(options.method).toBe("POST");
+    const sent = JSON.parse(options.body);
+    // Gallons go out as entered — no LITERS_PER_GALLON factor anywhere.
+    expect(sent.actual_quantities_gallons).toEqual({ DIESEL_2: 1000 });
+    expect(sent.quantity_unit).toBe("us_gallon");
+    expect(sent.geotag).toEqual({ lat: 29.7604, lng: -95.3698 });
+    expect(sent.event_timestamp).toBe("2026-05-08T14:32:00Z");
+    // The deprecated litres field is never sent by this client.
+    expect(sent).not.toHaveProperty("actual_quantities");
+    expect(result.completed_stops).toBe(1);
+    expect(result.variance_gallons).toEqual({ DIESEL_2: 0 });
+  });
+
+  it("forwards an optional order_id so the stop can be linked to its POD", async () => {
+    mockFetchOnce({
+      ok: true,
+      body: {
+        plan_id: "PLAN-1",
+        route_id: "R-1",
+        station_id: "FS-1",
+        sequence: 1,
+        quantity_unit: "us_gallon",
+        actual_quantities_gallons: { DIESEL_2: 500 },
+        planned_quantities_gallons: { DIESEL_2: 500 },
+        variance_gallons: { DIESEL_2: 0 },
+        order_id: "ORD-9",
+        completed_stops: 2,
+        total_stops: 3,
+        all_complete: false,
+        updated_at: "2026-05-08T15:02:01Z",
+      },
+    });
+
+    await checkinStop("PLAN-1", "tenant-a", { ...body, order_id: "ORD-9" });
+
+    const [, options] = (global.fetch as jest.Mock).mock.calls[0];
+    expect(JSON.parse(options.body).order_id).toBe("ORD-9");
   });
 });

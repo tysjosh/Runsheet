@@ -74,6 +74,7 @@ Validates: Requirements 5.2.1, 5.2.2, 5.2.3, 5.2.4, 5.2.5, 5.2.6.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
@@ -93,6 +94,7 @@ from integrations.provider_catalog import (
     ProviderCatalogEntry,
     register_provider,
 )
+from services.money import unit_price_micros_from_record, unit_price_usd
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +154,21 @@ CREDENTIALS_EXPIRED_REASON: str = "credentials_expired"
 #: QBO API minor_version pinned so schema drifts don't silently break
 #: the connector. 65 is the current LTS at spec time; bump deliberately.
 _QBO_MINOR_VERSION: int = 65
+
+
+def _invoice_request_id(payload: Mapping[str, Any]) -> str:
+    """Return a stable, realm-safe QBO idempotency key (max 50 chars)."""
+    logical_id = (
+        payload.get("invoice_id")
+        or payload.get("pod_id")
+        or payload.get("reconciliation_id")
+    )
+    if not logical_id:
+        raise ValueError(
+            "sync_push payload requires invoice_id, pod_id, or reconciliation_id"
+        )
+    material = f"{payload.get('tenant_id') or ''}:{logical_id}".encode("utf-8")
+    return f"runsheet-inv-{hashlib.sha256(material).hexdigest()[:32]}"
 
 
 # ---------------------------------------------------------------------------
@@ -684,10 +701,15 @@ class QuickBooksOnlineConnector(IntegrationConnector):
             created = await self._http_request_with_retry(
                 method="POST",
                 path=f"/v3/company/{{realm_id}}/invoice",
+                params={"requestid": _invoice_request_id(payload)},
                 json_body=body,
             )
             invoice_node = (created or {}).get("Invoice") or {}
             qbo_invoice_id = invoice_node.get("Id") or ""
+            if not qbo_invoice_id:
+                raise ValueError(
+                    "QuickBooks invoice create returned no provider invoice ID"
+                )
             counts["invoices_pushed"] = 1
             finished_at = _utcnow()
             logger.info(
@@ -709,6 +731,7 @@ class QuickBooksOnlineConnector(IntegrationConnector):
                 finished_at=finished_at,
                 status="success",
                 record_counts=counts,
+                result_metadata={"external_invoice_id": str(qbo_invoice_id)},
                 duration_ms=max(
                     0, int((finished_at - started_at).total_seconds() * 1000)
                 ),
@@ -1626,9 +1649,10 @@ def _build_invoice_body_from_canonical(payload: Mapping[str, Any]) -> Dict[str, 
     ``commerce.qbo_pushes_canonical`` is ON (default once commerce
     backbone is live).
 
-    The canonical payload carries structured line_items with integer-cent
-    pricing, which this function converts to the QBO decimal-dollar
-    format. Falls back to the legacy fields (``delivered_gallons``,
+    The canonical payload carries structured line_items with integer
+    micro-dollar unit pricing and integer-cent totals, which this function
+    converts to the QBO decimal-dollar format. Falls back to the legacy fields
+    (``delivered_gallons``,
     ``unit_price_usd``) when ``line_items`` is empty so the transition
     is graceful.
 
@@ -1646,12 +1670,17 @@ def _build_invoice_body_from_canonical(payload: Mapping[str, Any]) -> Dict[str, 
     qbo_lines: list = []
     if line_items:
         # Build QBO line items from the canonical line_items array.
-        # Each line item has product_code, quantity_gallons,
-        # unit_price_cents, subtotal_cents.
+        # Each line item has product_code, quantity_gallons, subtotal_cents,
+        # and preferably unit_price_micros. Legacy unit_price_cents records
+        # are upgraded by unit_price_micros_from_record.
         for item in line_items:
             qty = float(item.get("quantity_gallons", 0))
-            unit_price_cents = int(item.get("unit_price_cents", 0))
-            unit_price_usd = unit_price_cents / 100.0
+            price_micros = unit_price_micros_from_record(item)
+            if price_micros is None:
+                raise ValueError(
+                    "sync_push invoice line missing a unit price"
+                )
+            price_usd = float(unit_price_usd(price_micros))
             subtotal_cents = int(item.get("subtotal_cents", 0))
             amount_usd = subtotal_cents / 100.0
             product_code = item.get("product_code", "FUEL")
@@ -1668,7 +1697,7 @@ def _build_invoice_body_from_canonical(payload: Mapping[str, Any]) -> Dict[str, 
                 "Description": description,
                 "SalesItemLineDetail": {
                     "Qty": qty,
-                    "UnitPrice": round(unit_price_usd, 4),
+                    "UnitPrice": round(price_usd, 6),
                 },
             })
     else:

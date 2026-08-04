@@ -70,7 +70,6 @@ import type {
 import {
   checkCompartmentLoadEligibility,
   configureCompartments,
-  gallonsToLiters,
   getTruckCompartmentCapacityGallons,
   listCompartmentTrucks,
   listTruckCompartments,
@@ -868,10 +867,21 @@ function LoadEligibilityModal({
 
 // ─── Configure compartments modal ────────────────────────────────────────────
 
-/** Common fuel grades offered as quick-add chips. The backend also accepts
- * canonical US codes (DIESEL_2, GASOLINE_REG, KEROSENE, PROPANE) and
- * canonicalizes on write, rejecting unknown codes with a 400. */
-const COMMON_GRADES = ["AGO", "PMS", "ATK", "LPG"];
+/** Canonical US fuel product codes offered as quick-add chips. Mirrors
+ * ``fuel.services.fuel_product_catalog.FUEL_PRODUCT_CATALOG`` — the backend
+ * canonicalizes every allowed_grade on write and rejects unknown codes with a
+ * 400, so picking from this list avoids typos and legacy aliases. */
+const COMMON_GRADES = [
+  "DIESEL_2",
+  "OFF_ROAD_DIESEL",
+  "HEATING_OIL",
+  "GASOLINE_REG",
+  "GASOLINE_PREM",
+  "PROPANE",
+  "KEROSENE",
+  "DEF",
+  "ETHANOL_E85",
+];
 
 interface CompartmentRow {
   compartment_id: string;
@@ -891,9 +901,10 @@ function emptyRow(position: number): CompartmentRow {
 
 /**
  * Form to define (or replace) a tanker's compartments via
- * ``PUT /api/fuel/mvp/compartments/{truck_id}``. Capacity is entered in
- * gallons for UI consistency and converted to liters before submit. On
- * success the truck is also registered in the fleet index server-side.
+ * ``PUT /api/fuel/mvp/compartments/{truck_id}``. Capacity is entered, held,
+ * and submitted in gallons; ``configureCompartments`` performs the
+ * liters conversion the legacy endpoint still requires at the wire boundary.
+ * On success the truck is also registered in the fleet index server-side.
  */
 function ConfigureCompartmentsModal({
   initialTruckId,
@@ -963,7 +974,7 @@ function ConfigureCompartmentsModal({
       }
       compartments.push({
         compartment_id: id,
-        capacity_liters: gallonsToLiters(gallons),
+        capacity_gallons: gallons,
         allowed_grades: grades,
         position_index: r.position_index,
       });
@@ -979,7 +990,7 @@ function ConfigureCompartmentsModal({
         // Backend rejects unknown fuel grades with a 400; its message names
         // the offending value. Add a hint about accepted codes.
         setError(
-          `${err.message}. Use codes like AGO, PMS, ATK, LPG (or DIESEL_2, GASOLINE_REG, KEROSENE, PROPANE).`,
+          `${err.message}. Use canonical product codes such as DIESEL_2, GASOLINE_REG, HEATING_OIL, PROPANE, or KEROSENE.`,
         );
       } else {
         setError(
@@ -1122,7 +1133,7 @@ function ConfigureCompartmentsModal({
                     onChange={(e) =>
                       updateRow(idx, { allowed_grades: e.target.value })
                     }
-                    placeholder="AGO, PMS"
+                    placeholder="DIESEL_2, GASOLINE_REG"
                     className="w-full px-2.5 py-1.5 text-sm border border-gray-200 rounded-md bg-white"
                     required
                   />

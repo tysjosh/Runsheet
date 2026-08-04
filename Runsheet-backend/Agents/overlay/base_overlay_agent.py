@@ -118,6 +118,33 @@ class OverlayAgentBase(AutonomousAgentBase):
         async with self._buffer_lock:
             self._signal_buffer.append(signal)
 
+    def _pending_work_tenants(self) -> List[str]:
+        """Tenants with buffered work that does **not** live in ``_signal_buffer``.
+
+        Subclasses that override :meth:`_on_signal` to route typed messages
+        into their own buffer must override this too, because
+        :meth:`monitor_cycle` otherwise has no way to know they have work: it
+        reads ``_signal_buffer`` alone, and an agent that files every message it
+        cares about elsewhere leaves that buffer empty forever.
+
+        That was a live defect. ``CompartmentLoadingAgent`` put every
+        ``DeliveryPriorityList`` in ``_priority_buffer`` and
+        ``RoutePlanningAgent`` put every loading proposal in
+        ``_proposal_buffer``, so on the SignalBus path both agents accumulated
+        work indefinitely while ``monitor_cycle`` returned ``([], [])`` before
+        reaching ``evaluate()``. Nothing failed and nothing was logged.
+
+        Returning a tenant here makes ``monitor_cycle`` evaluate for it even
+        with an empty ``_signal_buffer``. ``evaluate()`` receives an empty
+        signal list for such a tenant, which is correct: these agents read
+        their typed buffer rather than the signals argument.
+
+        Returns:
+            Tenant ids to evaluate for. The default is empty — an agent whose
+            messages all land in ``_signal_buffer`` needs nothing here.
+        """
+        return []
+
     # ------------------------------------------------------------------
     # Decision cycle (replaces monitor_cycle)
     # ------------------------------------------------------------------
@@ -140,12 +167,21 @@ class OverlayAgentBase(AutonomousAgentBase):
             signals = list(self._signal_buffer)
             self._signal_buffer.clear()
 
-        if not signals:
+        # Work reaches an overlay agent through two doors: ``_signal_buffer``,
+        # and a subclass's own typed buffer filled by an overridden
+        # ``_on_signal``. Gating the cycle on ``signals`` alone ignored the
+        # second door, so agents that route everything they consume into a
+        # typed buffer were never evaluated at all. Evaluate for the union.
+        tenant_groups = self._group_by_tenant(signals)
+        for tenant_id in self._pending_work_tenants():
+            tenant_groups.setdefault(tenant_id, [])
+
+        if not tenant_groups:
             return [], []
 
         # Process per-tenant
         proposals_generated: List[Any] = []
-        for tenant_id, tenant_signals in self._group_by_tenant(signals).items():
+        for tenant_id, tenant_signals in tenant_groups.items():
             mode = await self._get_mode(tenant_id)
             self._cycle_metrics["mode"] = mode
 
@@ -206,6 +242,34 @@ class OverlayAgentBase(AutonomousAgentBase):
                 return "shadow" if enabled else "disabled"
             except Exception:
                 return "shadow"
+
+    async def _is_active_commit_mode(self, tenant_id: str) -> bool:
+        """Whether this tenant's mode represents a real commit path.
+
+        Shadow-mode evaluation must run the full decision logic so the
+        proposal can be logged for retrospective analysis, but it must not
+        mutate live state. Anything that is neither ``shadow`` nor
+        ``disabled`` is a commit path: ``active_gated`` and ``active_auto``
+        both flow through the ConfirmationProtocol.
+
+        Fails closed. A mode that cannot be resolved returns ``False``, so a
+        misconfigured environment never writes live state while an operator
+        believes the overlay is in shadow.
+        """
+        try:
+            mode = await self._get_mode(tenant_id)
+        except Exception as exc:  # pragma: no cover - defensive
+            self.logger.warning(
+                "%s: failed to resolve overlay mode for tenant %s, "
+                "defaulting to shadow (no state write): %s",
+                self.agent_id,
+                tenant_id,
+                exc,
+            )
+            return False
+        if mode is None:
+            return False
+        return mode not in ("shadow", "disabled")
 
     # ------------------------------------------------------------------
     # Proposal routing

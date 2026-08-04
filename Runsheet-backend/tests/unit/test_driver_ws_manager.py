@@ -9,15 +9,20 @@ Validates: Requirements 9.1, 9.2, 9.3, 9.4, 9.5, 9.6
 """
 import json
 import pytest
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime, timezone, timedelta
 
+import driver.ws.driver_ws_manager as driver_ws_module
 from driver.ws.driver_ws_manager import (
     DriverWSManager,
     get_driver_ws_manager,
+    presence_doc_id,
     HEARTBEAT_TIMEOUT_SECONDS,
     SERVER_TO_DRIVER_EVENTS,
     DRIVER_TO_SERVER_EVENTS,
+    REST_REDIRECTS,
+    WS_OPERATION_NOT_SUPPORTED,
 )
 
 
@@ -41,12 +46,22 @@ def _make_websocket(*, fail_send: bool = False):
 
 
 def _make_es_service():
-    """Create a mock ES service."""
-    es = MagicMock()
-    es.client = MagicMock()
-    es.client.index = MagicMock()
-    es.client.update = MagicMock()
+    """Create a mock ES service exposing only the async write surface.
+
+    The presence writes go through ``index_document`` / ``update_document``
+    (R10.14).  The synchronous ``client`` is deliberately absent: a fake that
+    does not offer it fails loudly if a blocking call ever comes back.
+    """
+    es = MagicMock(spec=["index_document", "update_document"])
+    es.index_document = AsyncMock(return_value={"result": "created"})
+    es.update_document = AsyncMock(return_value={"result": "updated"})
     return es
+
+
+def _index_call(es, position: int = 0):
+    """Return ``(index, doc_id, document)`` for one ``index_document`` call."""
+    args = es.index_document.await_args_list[position].args
+    return args[0], args[1], args[2]
 
 
 # ---------------------------------------------------------------------------
@@ -132,11 +147,10 @@ class TestConnectDriver:
 
         await manager.connect_driver(ws, "driver-1", "tenant-1")
 
-        es.client.index.assert_called_once()
-        call_kwargs = es.client.index.call_args
-        assert call_kwargs[1]["index"] == "driver_presence"
-        assert call_kwargs[1]["id"] == "driver-1"
-        body = call_kwargs[1]["body"]
+        es.index_document.assert_awaited_once()
+        index, doc_id, body = _index_call(es)
+        assert index == "driver_presence"
+        assert doc_id == "tenant-1:driver-1"
         assert body["status"] == "online"
         assert body["driver_id"] == "driver-1"
 
@@ -178,12 +192,13 @@ class TestDisconnect:
         ws = _make_websocket()
 
         await manager.connect_driver(ws, "driver-1", "tenant-1")
-        es.client.index.reset_mock()
+        es.index_document.reset_mock()
 
         await manager.disconnect(ws)
 
-        es.client.index.assert_called_once()
-        body = es.client.index.call_args[1]["body"]
+        es.index_document.assert_awaited_once()
+        _, doc_id, body = _index_call(es)
+        assert doc_id == "tenant-1:driver-1"
         assert body["status"] == "offline"
 
     @pytest.mark.asyncio
@@ -369,10 +384,25 @@ class TestServerToDriverEvents:
         expected = {"assignment", "new_route", "escalation", "message", "assignment_revoked"}
         assert SERVER_TO_DRIVER_EVENTS == expected
 
-    def test_driver_event_types_defined(self):
-        """Verify all required driver-to-server event types are defined."""
-        expected = {"ack", "status_update", "exception", "heartbeat", "location_update"}
-        assert DRIVER_TO_SERVER_EVENTS == expected
+    def test_driver_event_types_are_the_narrowed_vocabulary(self):
+        """The channel accepts only the three non-state-changing types.
+
+        Validates: Requirements 14.10, 14.11
+        """
+        assert DRIVER_TO_SERVER_EVENTS == {"heartbeat", "location_update", "ping"}
+
+    def test_retired_types_map_to_their_rest_endpoints(self):
+        """The three retired types each name the endpoint that performs them.
+
+        Validates: Requirements 14.10, 14.11
+        """
+        assert REST_REDIRECTS == {
+            "ack": "POST /api/driver/orders/{order_id}/status",
+            "status_update": "POST /api/driver/orders/{order_id}/status",
+            "exception": "POST /api/driver/orders/{order_id}/exceptions",
+        }
+        # The accepted vocabulary and the retired map are disjoint.
+        assert not (DRIVER_TO_SERVER_EVENTS & set(REST_REDIRECTS))
 
 
 # ---------------------------------------------------------------------------
@@ -463,47 +493,8 @@ class TestHandleDriverMessage:
 
         msg = ws.send_json.call_args_list[1][0][0]
         assert msg["type"] == "error"
+        assert msg["error_code"] == WS_OPERATION_NOT_SUPPORTED
         assert "Unknown event type" in msg["message"]
-
-    @pytest.mark.asyncio
-    async def test_ack_event_handled(self):
-        """ack events should be handled without error."""
-        manager = DriverWSManager()
-        ws = _make_websocket()
-        await manager.connect_driver(ws, "driver-1", "tenant-1")
-
-        raw = json.dumps({"type": "ack", "data": {"job_id": "JOB-1"}})
-        await manager.handle_driver_message(ws, raw)
-
-        # Only the connection confirmation should have been sent (no error)
-        assert ws.send_json.await_count == 1
-
-    @pytest.mark.asyncio
-    async def test_status_update_event_handled(self):
-        """status_update events should be handled without error."""
-        manager = DriverWSManager()
-        ws = _make_websocket()
-        await manager.connect_driver(ws, "driver-1", "tenant-1")
-
-        raw = json.dumps({"type": "status_update", "data": {"status": "en_route"}})
-        await manager.handle_driver_message(ws, raw)
-
-        assert ws.send_json.await_count == 1
-
-    @pytest.mark.asyncio
-    async def test_exception_event_handled(self):
-        """exception events should be handled without error."""
-        manager = DriverWSManager()
-        ws = _make_websocket()
-        await manager.connect_driver(ws, "driver-1", "tenant-1")
-
-        raw = json.dumps({
-            "type": "exception",
-            "data": {"exception_type": "road_closure"},
-        })
-        await manager.handle_driver_message(ws, raw)
-
-        assert ws.send_json.await_count == 1
 
     @pytest.mark.asyncio
     async def test_unregistered_websocket_ignored(self):
@@ -517,12 +508,157 @@ class TestHandleDriverMessage:
 
 
 # ---------------------------------------------------------------------------
+# Tests: the narrowed inbound vocabulary and the REST redirect frames
+# ---------------------------------------------------------------------------
+
+
+class TestInboundRejection:
+    """Rejection is total, and the retired types name their REST endpoint.
+
+    Validates: Requirements 14.10, 14.11
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "msg_type,payload,rest_endpoint",
+        [
+            (
+                "ack",
+                {"job_id": "JOB-1"},
+                "POST /api/driver/orders/{order_id}/status",
+            ),
+            (
+                "status_update",
+                {"status": "en_route"},
+                "POST /api/driver/orders/{order_id}/status",
+            ),
+            (
+                "exception",
+                {"exception_type": "road_closure"},
+                "POST /api/driver/orders/{order_id}/exceptions",
+            ),
+        ],
+    )
+    async def test_retired_type_draws_a_rest_redirect_frame(
+        self, msg_type, payload, rest_endpoint
+    ):
+        """Each retired type is answered with a directive, not a silent drop."""
+        es = _make_es_service()
+        manager = DriverWSManager(es_service=es)
+        ws = _make_websocket()
+        await manager.connect_driver(ws, "driver-1", "tenant-1")
+        es.index_document.reset_mock()
+
+        await manager.handle_driver_message(
+            ws, json.dumps({"type": msg_type, "data": payload})
+        )
+
+        # Connection confirmation + the rejection frame.
+        assert ws.send_json.await_count == 2
+        frame = ws.send_json.call_args_list[1][0][0]
+        assert frame["type"] == "error"
+        assert frame["error_code"] == "WS_OPERATION_NOT_SUPPORTED"
+        assert frame["rest_endpoint"] == rest_endpoint
+        assert rest_endpoint in frame["message"]
+        assert msg_type in frame["message"]
+        assert "timestamp" in frame
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("msg_type", ["ack", "status_update", "exception"])
+    async def test_retired_type_changes_no_state(self, msg_type):
+        """No presence write, and no heartbeat credit, on a retired type."""
+        es = _make_es_service()
+        manager = DriverWSManager(es_service=es)
+        ws = _make_websocket()
+        await manager.connect_driver(ws, "driver-1", "tenant-1")
+        es.index_document.reset_mock()
+        before = manager.get_client_metadata(ws)["last_heartbeat"]
+
+        await manager.handle_driver_message(
+            ws, json.dumps({"type": msg_type, "data": {"status": "en_route"}})
+        )
+
+        es.index_document.assert_not_awaited()
+        es.update_document.assert_not_awaited()
+        assert manager.get_client_metadata(ws)["last_heartbeat"] == before
+
+    @pytest.mark.asyncio
+    async def test_unknown_type_changes_no_state(self):
+        """Rejection is total: an unrecognised type writes nothing either."""
+        es = _make_es_service()
+        manager = DriverWSManager(es_service=es)
+        ws = _make_websocket()
+        await manager.connect_driver(ws, "driver-1", "tenant-1")
+        es.index_document.reset_mock()
+
+        await manager.handle_driver_message(ws, json.dumps({"type": "wallet_topup"}))
+
+        es.index_document.assert_not_awaited()
+        es.update_document.assert_not_awaited()
+        frame = ws.send_json.call_args_list[1][0][0]
+        assert frame["type"] == "error"
+        assert frame["error_code"] == "WS_OPERATION_NOT_SUPPORTED"
+        # No REST endpoint performs an operation nobody named.
+        assert frame["rest_endpoint"] is None
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_still_writes_presence_and_acks(self):
+        """The accepted types keep their behaviour, on the async client."""
+        es = _make_es_service()
+        manager = DriverWSManager(es_service=es)
+        ws = _make_websocket()
+        await manager.connect_driver(ws, "driver-1", "tenant-1")
+        es.index_document.reset_mock()
+
+        await manager.handle_driver_message(ws, json.dumps({"type": "heartbeat"}))
+
+        es.index_document.assert_awaited_once()
+        _, doc_id, body = _index_call(es)
+        assert doc_id == "tenant-1:driver-1"
+        assert body["status"] == "online"
+        assert ws.send_json.call_args_list[1][0][0]["type"] == "heartbeat_ack"
+
+    @pytest.mark.asyncio
+    async def test_location_update_still_merges_and_credits_heartbeat(self):
+        es = _make_es_service()
+        manager = DriverWSManager(es_service=es)
+        ws = _make_websocket()
+        await manager.connect_driver(ws, "driver-1", "tenant-1")
+        before = manager.get_client_metadata(ws)["last_heartbeat"]
+
+        await manager.handle_driver_message(
+            ws,
+            json.dumps({
+                "type": "location_update",
+                "data": {"location": {"lat": 1.0, "lon": 2.0}},
+            }),
+        )
+
+        es.update_document.assert_awaited_once()
+        assert manager.get_client_metadata(ws)["last_heartbeat"] >= before
+
+    @pytest.mark.asyncio
+    async def test_ping_still_answers_pong_without_writing(self):
+        es = _make_es_service()
+        manager = DriverWSManager(es_service=es)
+        ws = _make_websocket()
+        await manager.connect_driver(ws, "driver-1", "tenant-1")
+        es.index_document.reset_mock()
+
+        await manager.handle_driver_message(ws, json.dumps({"type": "ping"}))
+
+        assert ws.send_json.call_args_list[1][0][0]["type"] == "pong"
+        es.index_document.assert_not_awaited()
+        es.update_document.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
 # Tests: update_presence
 # ---------------------------------------------------------------------------
 
 
 class TestUpdatePresence:
-    """Tests for the update_presence method. Validates: Req 9.5"""
+    """Tests for the update_presence method. Validates: Req 9.5, 10.14, 10.19"""
 
     @pytest.mark.asyncio
     async def test_update_presence_online(self):
@@ -531,11 +667,10 @@ class TestUpdatePresence:
 
         await manager.update_presence("driver-1", "online", tenant_id="tenant-1")
 
-        es.client.index.assert_called_once()
-        call_kwargs = es.client.index.call_args[1]
-        assert call_kwargs["index"] == "driver_presence"
-        assert call_kwargs["id"] == "driver-1"
-        body = call_kwargs["body"]
+        es.index_document.assert_awaited_once()
+        index, doc_id, body = _index_call(es)
+        assert index == "driver_presence"
+        assert doc_id == "tenant-1:driver-1"
         assert body["status"] == "online"
         assert body["driver_id"] == "driver-1"
         assert body["tenant_id"] == "tenant-1"
@@ -548,7 +683,7 @@ class TestUpdatePresence:
 
         await manager.update_presence("driver-1", "offline", tenant_id="tenant-1")
 
-        body = es.client.index.call_args[1]["body"]
+        _, _, body = _index_call(es)
         assert body["status"] == "offline"
         assert "connected_at" not in body
 
@@ -562,7 +697,7 @@ class TestUpdatePresence:
             "driver-1", "online", tenant_id="tenant-1", location=location
         )
 
-        body = es.client.index.call_args[1]["body"]
+        _, _, body = _index_call(es)
         assert body["last_location"] == location
 
     @pytest.mark.asyncio
@@ -575,11 +710,123 @@ class TestUpdatePresence:
     @pytest.mark.asyncio
     async def test_update_presence_es_error_handled(self):
         es = _make_es_service()
-        es.client.index.side_effect = Exception("ES down")
+        es.index_document.side_effect = Exception("ES down")
         manager = DriverWSManager(es_service=es)
 
         # Should not raise
         await manager.update_presence("driver-1", "online")
+
+
+# ---------------------------------------------------------------------------
+# Tests: the presence document id and the async client (R10.14, R10.19)
+# ---------------------------------------------------------------------------
+
+
+class TestPresenceIsAsyncAndTenantScoped:
+    """The presence writes are awaited, and keyed per tenant-driver pair.
+
+    Validates: Requirements 10.14, 10.19
+    """
+
+    def test_presence_doc_id_is_the_composite_pair(self):
+        """R10.19: the id names both halves of the pair, tenant first."""
+        assert presence_doc_id("tenant-1", "driver-1") == "tenant-1:driver-1"
+
+    @pytest.mark.asyncio
+    async def test_two_tenants_sharing_a_driver_id_get_two_records(self):
+        """R10.19: the same ``driver_id`` string in two tenants cannot collide.
+
+        A real store keyed on the document id, so "two records" is observed as
+        two surviving documents rather than as two calls.
+        """
+        store: dict[tuple[str, str], dict] = {}
+
+        class _Store:
+            async def index_document(self, index, doc_id, document):
+                store[(index, doc_id)] = dict(document)
+                return {"result": "created"}
+
+            async def update_document(self, index, doc_id, partial_doc):
+                existing = store.get((index, doc_id))
+                if existing is None:
+                    raise KeyError(doc_id)
+                existing.update(dict(partial_doc))
+                return {"result": "updated"}
+
+        manager = DriverWSManager(es_service=_Store())
+
+        await manager.update_presence("driver-1", "online", tenant_id="tenant-a")
+        await manager.update_presence("driver-1", "offline", tenant_id="tenant-b")
+
+        assert set(store) == {
+            ("driver_presence", "tenant-a:driver-1"),
+            ("driver_presence", "tenant-b:driver-1"),
+        }
+        assert store[("driver_presence", "tenant-a:driver-1")]["status"] == "online"
+        assert store[("driver_presence", "tenant-b:driver-1")]["status"] == "offline"
+        # One record per pair, not one per write: a re-heartbeat replaces.
+        await manager.update_presence("driver-1", "online", tenant_id="tenant-b")
+        assert len(store) == 2
+
+    @pytest.mark.asyncio
+    async def test_location_update_merges_on_the_composite_id(self):
+        """R10.14: ``location_update`` awaits a partial merge, not a blocking call."""
+        es = _make_es_service()
+        manager = DriverWSManager(es_service=es)
+        ws = _make_websocket()
+        await manager.connect_driver(ws, "driver-1", "tenant-1")
+
+        location = {"lat": 1.5, "lon": 2.5}
+        await manager.handle_driver_message(
+            ws, json.dumps({"type": "location_update", "data": {"location": location}})
+        )
+
+        es.update_document.assert_awaited_once()
+        index, doc_id, partial = es.update_document.await_args.args
+        assert index == "driver_presence"
+        assert doc_id == "tenant-1:driver-1"
+        assert partial["last_location"] == location
+        assert "last_seen" in partial
+
+    @pytest.mark.asyncio
+    async def test_location_update_recreates_a_missing_presence_record(self):
+        """A merge against no record falls back to a full write, not a loss."""
+        es = _make_es_service()
+        es.update_document.side_effect = Exception("document_missing_exception")
+        manager = DriverWSManager(es_service=es)
+
+        location = {"lat": 1.5, "lon": 2.5}
+        await manager._update_driver_location("driver-1", location, "tenant-1")
+
+        index, doc_id, body = _index_call(es)
+        assert (index, doc_id) == ("driver_presence", "tenant-1:driver-1")
+        assert body["last_location"] == location
+        assert body["driver_id"] == "driver-1"
+        assert body["tenant_id"] == "tenant-1"
+
+    @pytest.mark.asyncio
+    async def test_location_update_error_handled(self):
+        """Both write attempts failing is logged, not raised at the socket."""
+        es = _make_es_service()
+        es.update_document.side_effect = Exception("ES down")
+        es.index_document.side_effect = Exception("ES down")
+        manager = DriverWSManager(es_service=es)
+
+        # Should not raise
+        await manager._update_driver_location("driver-1", {"lat": 1.0}, "tenant-1")
+
+    def test_no_synchronous_client_call_remains_in_the_presence_paths(self):
+        """R10.14: no ``self._es.client.*`` write survives in the module.
+
+        A source scan, because the property is "no blocking call remains
+        anywhere on this path" — a statement about the module, not about one
+        call. Every presence write must be an awaited async-client call.
+        """
+        source = Path(driver_ws_module.__file__).read_text(encoding="utf-8")
+
+        assert "self._es.client" not in source
+        assert "await self._es.index_document(" in source
+        assert "await self._es.update_document(" in source
 
 
 # ---------------------------------------------------------------------------

@@ -17,7 +17,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from config.settings import get_settings
 from commerce.services.price_book_service import PriceBookService
@@ -149,7 +149,27 @@ class PricingRuleRequest(BaseModel):
     min_quantity_gallons: Optional[float] = Field(
         default=None, description="Minimum quantity in gallons for this break"
     )
-    unit_price_cents: int = Field(..., description="Unit price in cents (integer)")
+    unit_price_cents: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="Rounded unit price in whole cents",
+    )
+    unit_price_micros: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="Exact price per gallon in micro-dollars",
+    )
+
+    @model_validator(mode="after")
+    def unit_price_is_present(self) -> "PricingRuleRequest":
+        if (
+            self.unit_price_cents is None
+            and self.unit_price_micros is None
+        ):
+            raise ValueError(
+                "unit_price_cents or unit_price_micros is required"
+            )
+        return self
 
 
 class CreatePriceBookRequest(BaseModel):

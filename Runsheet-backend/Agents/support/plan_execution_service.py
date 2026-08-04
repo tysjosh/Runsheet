@@ -7,13 +7,26 @@ and calculating estimated/actual costs.
 
 Uses the same ES service pattern as other services in the project.
 
-Validates: Requirements 3.1–3.7, 4.1–4.7, 5.1–5.6
+**Units.** This module is litres-only and performs *no* volume-unit conversion
+(driver-mobile-app R6.19). It deliberately imports neither
+``Agents.support.volume_units.us_gallons_to_liters`` nor
+``liters_to_us_gallons``, so the storage layer cannot convert even by accident.
+Every value reaching ``planned_quantities``, ``actual_quantities``, and
+``quantity_variance`` on an ``mvp_plan_executions`` stop record is litres; the
+single gallons boundary is the check-in request handler in
+``Agents/support/mvp_endpoints.py``. Each stop record this module writes carries
+``actual_quantities_unit: "liter"``, and a stop record carrying *no*
+``actual_quantities_unit`` is read as litres (R6.21), which is what pre-feature
+documents already mean — so no backfill runs.
+
+Validates: Requirements 3.1–3.7, 4.1–4.7, 5.1–5.6, and driver-mobile-app
+Requirements 6.1, 6.2, 6.3, 6.5, 6.6, 6.7, 6.8, 6.9, 6.19, 6.20, 6.21
 """
 
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from Agents.support.mvp_es_mappings import (
     MVP_COST_CONFIGS_INDEX,
@@ -22,8 +35,16 @@ from Agents.support.mvp_es_mappings import (
     MVP_PLAN_OUTCOMES_INDEX,
     MVP_ROUTES_INDEX,
 )
+from driver.services.driver_es_mappings import PROOF_OF_DELIVERY_INDEX
+from errors.exceptions import forbidden, resource_not_found, stop_already_completed
+from fuel.services.order_es_mappings import DRIVERS_CURRENT_INDEX
 
 logger = logging.getLogger(__name__)
+
+#: Unit discriminator written on every stop record and every variance entry.
+#: Litres are canonical inside ``mvp_plan_executions`` because the planned side
+#: of the variance is litres-typed on both plan models (R6.20, R6.21).
+STORAGE_VOLUME_UNIT = "liter"
 
 
 class PlanExecutionService:
@@ -80,6 +101,11 @@ class PlanExecutionService:
                 "actual_arrival": None,
                 "planned_quantities": stop.get("drop", {}),
                 "actual_quantities": {},
+                # ``RouteStop.drop`` is litres-typed, so the copy above is
+                # litres and the discriminator is declared from creation
+                # (R6.21). Every other driver-context field is filled in at
+                # check-in time.
+                "actual_quantities_unit": STORAGE_VOLUME_UNIT,
             })
 
         execution_doc = {
@@ -121,26 +147,54 @@ class PlanExecutionService:
         sequence: int,
         actual_quantities: Dict[str, float],
         tenant_id: str,
+        *,
+        driver_id: Optional[str] = None,
+        geotag: Optional[Mapping[str, float]] = None,
+        event_timestamp: Optional[str] = None,
+        order_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Record a driver check-in at a stop.
 
-        Validates that the plan is in 'dispatched' status and that the
-        stop has not already been completed. Records the arrival time
-        and actual quantities, then increments completed_stops.
+        Validates that the plan is in 'dispatched' status, that the caller is
+        the driver assigned to the plan's truck, and that the stop has not
+        already been completed. Records the driver context, the arrival time,
+        the actual quantities, and the per-grade variance, then increments
+        completed_stops.
+
+        ``actual_quantities`` is **litres** and is written verbatim. No
+        conversion happens here (R6.19) — the check-in request handler in
+        ``Agents/support/mvp_endpoints.py`` has already converted the driver's
+        US gallons through the single named boundary.
 
         Args:
             plan_id: The plan identifier.
             route_id: The route identifier.
             station_id: The station being checked into.
             sequence: The stop sequence number.
-            actual_quantities: Dict of fuel_grade -> liters delivered.
+            actual_quantities: Dict of fuel_grade -> **litres** delivered.
             tenant_id: The tenant identifier.
+            driver_id: The acting driver from the verified context (R6.1).
+                ``None`` for a dispatcher-originated check-in, which skips the
+                truck-assignment check because there is no driver to compare.
+            geotag: ``{"lat": float, "lon": float}`` for the check-in (R6.2).
+            event_timestamp: Client-asserted ISO 8601 timestamp, persisted
+                alongside ``server_received_at`` (R6.3).
+            order_id: The fuel order this stop delivers, when the check-in
+                names one. Its POD ``pod_id`` is resolved and recorded (R6.8).
 
         Returns:
-            Dict with updated execution state and all_complete flag.
+            Dict with updated execution state, the ``all_complete`` flag, the
+            persisted litre quantities, and the per-grade litre variance. The
+            caller converts to gallons at the response boundary.
 
         Raises:
-            ValueError: If plan is not dispatched or stop already completed.
+            AppException: 403 ``FORBIDDEN`` when the acting driver is not
+                assigned to the plan's truck (R6.7); 404 ``RESOURCE_NOT_FOUND``
+                when ``sequence`` names no stop on the plan (R6.5); 409
+                ``STOP_ALREADY_COMPLETED`` when the stop is already completed
+                (R6.6).
+            ValueError: If the plan is missing, not dispatched, or has no
+                execution record.
         """
         # Validate plan status is "dispatched"
         plan_doc = await self._fetch_plan(plan_id, tenant_id)
@@ -151,6 +205,14 @@ class PlanExecutionService:
         if plan_status != "dispatched":
             raise ValueError(
                 f"Plan {plan_id} is not in 'dispatched' status (current: {plan_status})"
+            )
+
+        # R6.7 — only the driver assigned to the plan's truck may check in.
+        # Checked before the execution read so an unassigned driver learns
+        # nothing about the plan's stops.
+        if driver_id:
+            await self._assert_driver_assigned_to_plan(
+                plan_doc, driver_id, tenant_id
             )
 
         # Fetch execution record
@@ -176,20 +238,61 @@ class PlanExecutionService:
                 break
 
         if target_stop is None:
-            raise ValueError(
-                f"Stop not found: station_id={station_id}, sequence={sequence}"
+            # R6.5 — a sequence naming no stop on this plan is a missing
+            # resource, not a malformed request.
+            raise resource_not_found(
+                message=(
+                    f"Stop not found: station_id={station_id}, "
+                    f"sequence={sequence}"
+                ),
+                details={
+                    "plan_id": plan_id,
+                    "route_id": route_id,
+                    "station_id": station_id,
+                    "sequence": sequence,
+                },
             )
 
         if target_stop.get("status") == "completed":
-            raise ValueError(
-                f"Stop already completed: station_id={station_id}, sequence={sequence}"
+            # R6.6 — a named code, so a replayed check-in is distinguishable
+            # from a plan-level status conflict.
+            raise stop_already_completed(
+                message=(
+                    f"Stop already completed: station_id={station_id}, "
+                    f"sequence={sequence}"
+                ),
+                details={
+                    "plan_id": plan_id,
+                    "route_id": route_id,
+                    "station_id": station_id,
+                    "sequence": sequence,
+                },
             )
 
-        # Record arrival time and quantities
+        # R6.8 — the POD already submitted for the referenced order.
+        pod_id = await self._fetch_pod_id(order_id, tenant_id) if order_id else None
+
+        # Both operands are litres, so the variance is litres (R6.9, R6.20).
+        planned_quantities = target_stop.get("planned_quantities", {}) or {}
+        quantity_variance = self._compute_per_grade_variance(
+            planned_quantities, actual_quantities
+        )
+
+        # Record arrival time, quantities, and the driver context
         now = datetime.now(timezone.utc).isoformat()
         stops[target_idx]["status"] = "completed"
         stops[target_idx]["actual_arrival"] = now
         stops[target_idx]["actual_quantities"] = actual_quantities
+        # R6.21 / R6.22 — the discriminator is written on every stop record.
+        stops[target_idx]["actual_quantities_unit"] = STORAGE_VOLUME_UNIT
+        stops[target_idx]["driver_id"] = driver_id                      # R6.1
+        stops[target_idx]["geotag"] = dict(geotag) if geotag else None   # R6.2
+        stops[target_idx]["event_timestamp"] = event_timestamp          # R6.3
+        stops[target_idx]["server_received_at"] = now                   # R6.3
+        stops[target_idx]["order_id"] = order_id
+        stops[target_idx]["pod_id"] = pod_id                            # R6.8
+        stops[target_idx]["quantity_variance"] = quantity_variance      # R6.9
+        stops[target_idx]["variance_unit"] = STORAGE_VOLUME_UNIT        # R6.20
 
         completed_stops = execution.get("completed_stops", 0) + 1
         total_stops = execution.get("total_stops", len(stops))
@@ -230,6 +333,19 @@ class PlanExecutionService:
             "total_stops": total_stops,
             "all_complete": all_complete,
             "updated_at": now,
+            # Litres, for the caller to convert at the response boundary
+            # (R6.23). This service never returns gallons.
+            "planned_quantities": planned_quantities,
+            "actual_quantities": actual_quantities,
+            "actual_quantities_unit": STORAGE_VOLUME_UNIT,
+            "quantity_variance": quantity_variance,
+            "variance_unit": STORAGE_VOLUME_UNIT,
+            "driver_id": driver_id,
+            "geotag": dict(geotag) if geotag else None,
+            "event_timestamp": event_timestamp,
+            "server_received_at": now,
+            "order_id": order_id,
+            "pod_id": pod_id,
         }
 
     # ------------------------------------------------------------------
@@ -293,10 +409,14 @@ class PlanExecutionService:
                         "quantity_variance_pct": None,
                         "time_variance_minutes": None,
                         "status": "missed",
+                        "variance_unit": self._stop_volume_unit(stop),
                     })
                     continue
 
-                # Compute quantity variance
+                # Compute quantity variance. Both operands come off the same
+                # stop record, which is litres by construction — a record with
+                # no discriminator is read as litres (R6.21), so the unit below
+                # is "liter" for pre-feature and post-feature documents alike.
                 planned_quantities = stop.get("planned_quantities", {})
                 actual_quantities = stop.get("actual_quantities", {})
                 qty_variance_pct = self._compute_quantity_variance(
@@ -316,6 +436,7 @@ class PlanExecutionService:
                     "quantity_variance_pct": qty_variance_pct,
                     "time_variance_minutes": time_variance_min,
                     "status": "completed",
+                    "variance_unit": self._stop_volume_unit(stop),  # R6.20
                 })
 
                 if qty_variance_pct is not None:
@@ -344,6 +465,9 @@ class PlanExecutionService:
             "aggregate_quantity_variance_pct": round(aggregate_qty_variance, 2),
             "aggregate_time_variance_minutes": round(aggregate_time_variance, 2),
             "missed_stops_count": missed_stops_count,
+            # Document-level counterpart of the per-stop discriminator: every
+            # variance above was computed with both operands in litres (R6.20).
+            "variance_unit": STORAGE_VOLUME_UNIT,
             "tenant_id": tenant_id,
             "timestamp": now,
             "status": "computed",
@@ -717,6 +841,141 @@ class PlanExecutionService:
             )
             return []
 
+    async def _assert_driver_assigned_to_plan(
+        self,
+        plan_doc: Mapping[str, Any],
+        driver_id: str,
+        tenant_id: str,
+    ) -> None:
+        """Fail closed unless ``driver_id`` is assigned to the plan's truck.
+
+        The link is ``mvp_load_plans.truck_id`` against
+        ``drivers_current.assigned_truck_id`` — the only join between a
+        truck-keyed plan and a driver identity. A plan with no truck, a driver
+        with no record, and a driver assigned elsewhere are all indistinguishable
+        403s: none of them establishes the assignment the requirement demands.
+
+        Validates: Requirement 6.7
+        """
+        plan_truck_id = plan_doc.get("truck_id") or ""
+        driver_doc = await self._fetch_driver(driver_id, tenant_id)
+        assigned_truck_id = (driver_doc or {}).get("assigned_truck_id") or ""
+
+        if not plan_truck_id or not assigned_truck_id or (
+            plan_truck_id != assigned_truck_id
+        ):
+            logger.warning(
+                "Rejecting check-in: driver %s is not assigned to plan %s "
+                "truck (tenant %s)",
+                driver_id,
+                plan_doc.get("plan_id"),
+                tenant_id,
+            )
+            raise forbidden(
+                message="Driver is not assigned to the truck for this plan",
+                details={"plan_id": plan_doc.get("plan_id")},
+            )
+
+    async def _fetch_driver(
+        self, driver_id: str, tenant_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch the ``drivers_current`` record for a driver in a tenant."""
+        query = {
+            "query": {
+                "bool": {
+                    "must": [
+                        {"term": {"tenant_id": tenant_id}},
+                        {"term": {"driver_id": driver_id}},
+                    ],
+                },
+            },
+            "size": 1,
+        }
+        try:
+            resp = await self._es.search_documents(
+                DRIVERS_CURRENT_INDEX, query, 1
+            )
+            hits = resp.get("hits", {}).get("hits", [])
+            for hit in hits:
+                source = hit.get("_source") or {}
+                # Per-document tenant re-validation: a mis-labelled document is
+                # treated as absent rather than trusted.
+                if source.get("tenant_id") == tenant_id:
+                    return source
+        except Exception as e:
+            logger.error("Failed to fetch driver %s: %s", driver_id, e)
+        return None
+
+    async def _fetch_pod_id(
+        self, order_id: str, tenant_id: str
+    ) -> Optional[str]:
+        """Return the ``pod_id`` of the POD submitted for ``order_id``.
+
+        The most recent POD wins when an order carries more than one. A missing
+        POD is not an error — the driver may check in before the POD lands, and
+        the field stays ``None``.
+
+        Validates: Requirement 6.8
+        """
+        query = {
+            "query": {
+                "bool": {
+                    "must": [
+                        {"term": {"tenant_id": tenant_id}},
+                        {"term": {"order_id": order_id}},
+                    ],
+                },
+            },
+            "sort": [{"timestamp": {"order": "desc"}}],
+            "size": 1,
+        }
+        try:
+            resp = await self._es.search_documents(
+                PROOF_OF_DELIVERY_INDEX, query, 1
+            )
+            hits = resp.get("hits", {}).get("hits", [])
+            if hits:
+                return (hits[0].get("_source") or {}).get("pod_id")
+        except Exception as e:
+            logger.error(
+                "Failed to fetch POD for order %s: %s", order_id, e
+            )
+        return None
+
+    def _compute_per_grade_variance(
+        self,
+        planned: Mapping[str, Any],
+        actual: Mapping[str, Any],
+    ) -> Dict[str, float]:
+        """Per-grade ``actual - planned``, both operands in litres.
+
+        A grade present on only one side is treated as zero on the other, so a
+        delivered grade that was not planned and a planned grade that was not
+        delivered both surface rather than disappearing. The result is litres,
+        recorded with ``variance_unit: "liter"``.
+
+        Validates: Requirements 6.9, 6.20
+        """
+        grades = set(planned or {}) | set(actual or {})
+        variance: Dict[str, float] = {}
+        for grade in grades:
+            planned_value = float((planned or {}).get(grade) or 0.0)
+            actual_value = float((actual or {}).get(grade) or 0.0)
+            variance[grade] = actual_value - planned_value
+        return variance
+
+    @staticmethod
+    def _stop_volume_unit(stop: Mapping[str, Any]) -> str:
+        """Return the unit a stop record's quantities are expressed in.
+
+        A stop record carrying no ``actual_quantities_unit`` is read as litres,
+        which is what every document written before this feature means — so the
+        mapping declaration is the whole migration and no backfill runs.
+
+        Validates: Requirement 6.21
+        """
+        return stop.get("actual_quantities_unit") or STORAGE_VOLUME_UNIT
+
     def _compute_quantity_variance(
         self,
         planned: Dict[str, Any],
@@ -725,6 +984,9 @@ class PlanExecutionService:
         """Compute quantity variance percentage across all fuel grades.
 
         Formula: ((actual - planned) / planned) * 100
+
+        Both operands are litres (R6.20), so the ratio is unit-free and no
+        conversion is involved.
 
         Returns None if no planned quantities exist.
         """

@@ -607,7 +607,8 @@ class ElasticsearchService:
             "inventory": self._get_inventory_mapping(),
             "support_tickets": self._get_support_tickets_mapping(),
             "analytics_events": self._get_analytics_mapping(),
-            "import_sessions": self._get_import_sessions_mapping()
+            "import_sessions": self._get_import_sessions_mapping(),
+            "import_sessions_active": self._get_active_import_sessions_mapping(),
         }
 
         for index_name, mapping in indices.items():
@@ -1028,6 +1029,12 @@ class ElasticsearchService:
                         }
                     },
                     "status": {"type": "keyword"},
+                    # Operational state, distinct from the movement ``status``
+                    # above: ``out_of_service`` is written by
+                    # Inspection_Service when a driver reports a defect of that
+                    # severity (driver-mobile-app R8.5), and tracking updates
+                    # that move ``status`` must not clear it.
+                    "operational_state": {"type": "keyword"},
                     "estimated_arrival": {"type": "date"},
                     "last_update": {"type": "date"},
                     "cargo": {
@@ -1195,6 +1202,7 @@ class ElasticsearchService:
             "mappings": {
                 "properties": {
                     "session_id": {"type": "keyword"},
+                    "tenant_id": {"type": "keyword"},
                     "data_type": {"type": "keyword"},
                     "source_type": {"type": "keyword"},
                     "source_name": {
@@ -1213,6 +1221,30 @@ class ElasticsearchService:
                     "created_at": {"type": "date"},
                     "completed_at": {"type": "date"},
                     "duration_seconds": {"type": "float"}
+                }
+            }
+        }
+
+    def _get_active_import_sessions_mapping(self):
+        """Get mapping for durable in-progress import sessions."""
+        return {
+            "mappings": {
+                "properties": {
+                    "session_id": {"type": "keyword"},
+                    "tenant_id": {"type": "keyword"},
+                    "data_type": {"type": "keyword"},
+                    "source_type": {"type": "keyword"},
+                    "source_name": {"type": "text"},
+                    "rows_json": {"type": "text", "index": False},
+                    "columns": {"type": "keyword"},
+                    "sample_rows": {"type": "object", "enabled": False},
+                    "total_rows": {"type": "integer"},
+                    "suggested_mapping": {"type": "object", "enabled": False},
+                    "field_mapping": {"type": "object", "enabled": False},
+                    "validation_result": {"type": "object", "enabled": False},
+                    "status": {"type": "keyword"},
+                    "created_at": {"type": "date"},
+                    "updated_at": {"type": "date"},
                 }
             }
         }
@@ -1525,6 +1557,61 @@ class ElasticsearchService:
         except Exception as e:
             self._handle_elasticsearch_error(f"search_documents({index})", e)
     
+    async def multi_search(
+        self,
+        searches: List[Dict[str, Any]],
+        request_timeout: int = 10,
+    ) -> Dict[str, Any]:
+        """Run several search bodies in ONE round trip via the `_msearch` API.
+
+        The point of this method is the round-trip count: N independent
+        `terms`-filtered lookups cost one network hop instead of N. It is what
+        lets a read model collapse an N+1 fan-out into a fixed budget (see
+        `DriverWorkService`, which resolves compartment prior grades and stop
+        coordinates in a single call).
+
+        Args:
+            searches: One entry per search body, each
+                ``{"index": <index name>, "query": <query body>}``. A missing
+                index is tolerated per body (``ignore_unavailable``), so a
+                deployment that has not created an optional index gets an empty
+                result rather than a failed request.
+            request_timeout: Per-call timeout in seconds.
+
+        Returns:
+            The raw `_msearch` response, ``{"responses": [<search response>, ...]}``
+            in request order. An empty ``searches`` list returns
+            ``{"responses": []}`` without touching the cluster.
+
+        Validates:
+        - Requirement 3.5: Implement circuit breakers for Elasticsearch
+        - Requirement 2.4: Return specific error code indicating database unavailability
+        """
+        if not searches:
+            return {"responses": []}
+
+        try:
+            async def _do_multi_search():
+                body: List[Dict[str, Any]] = []
+                for entry in searches:
+                    header = {
+                        "index": entry["index"],
+                        "ignore_unavailable": True,
+                    }
+                    body.append(header)
+                    body.append(dict(entry.get("query") or {}))
+                return self.client.msearch(
+                    body=body,
+                    request_timeout=request_timeout,
+                )
+
+            return await self._read_circuit_breaker.execute(_do_multi_search)
+        except CircuitOpenException as e:
+            self._handle_circuit_breaker_exception(e)
+        except Exception as e:
+            indices = ",".join(str(entry.get("index")) for entry in searches)
+            self._handle_elasticsearch_error(f"multi_search({indices})", e)
+
     async def get_document(self, index: str, doc_id: str):
         """
         Get a single document by ID with circuit breaker protection.

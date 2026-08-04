@@ -1,6 +1,13 @@
 // Data Import / Migration Types
 
-export type DataType = "fleet" | "fuel_stations" | "inventory" | "jobs";
+export type DataType =
+  | "orders"
+  | "customer_tanks"
+  | "tank_readings"
+  | "fleet"
+  | "fuel_stations"
+  | "inventory"
+  | "jobs";
 
 export type ImportStatus =
   | "parsing"
@@ -67,6 +74,7 @@ export interface ImportResult {
 
 export interface ImportSessionRecord {
   session_id: string;
+  tenant_id?: string | null;
   data_type: string;
   source_type: "csv" | "google_sheets";
   source_name: string;

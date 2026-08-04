@@ -17,7 +17,7 @@ type StatusPhase = "processing" | "indexing" | "completing";
 
 const STATUS_LABELS: Record<StatusPhase, string> = {
   processing: "Processing records…",
-  indexing: "Indexing into Elasticsearch…",
+  indexing: "Writing validated records…",
   completing: "Completing import…",
 };
 

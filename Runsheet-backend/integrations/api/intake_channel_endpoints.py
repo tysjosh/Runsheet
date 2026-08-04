@@ -54,6 +54,7 @@ from fuel.intake_channel_repository import (
     IntakeChannelRepository,
 )
 from fuel.services.order_intake_metrics import orders_intake_channel_rotations_total
+from fuel.voice.voice_auth import VoiceApiKeyRepository
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 
 logger = logging.getLogger(__name__)
@@ -74,11 +75,13 @@ router = APIRouter(
 # ---------------------------------------------------------------------------
 
 _repository: Optional[IntakeChannelRepository] = None
+_voice_api_key_repository: Optional[VoiceApiKeyRepository] = None
 
 
 def configure_intake_channel_endpoints(
     *,
     repository: IntakeChannelRepository,
+    voice_api_key_repository: Optional[VoiceApiKeyRepository] = None,
 ) -> None:
     """Wire service dependencies into the intake channel REST module.
 
@@ -89,11 +92,17 @@ def configure_intake_channel_endpoints(
     Args:
         repository: Tenant-scoped :class:`IntakeChannelRepository`
             responsible for CRUD against the ``intake_channels`` ES index.
+        voice_api_key_repository: Optional :class:`VoiceApiKeyRepository`
+            used to mint a Surface B voice API key when a ``voice`` channel is
+            created. When ``None``, creating a voice channel still succeeds but
+            returns no ``voice_api_key`` (a warning is logged); non-voice
+            channels are unaffected.
     """
-    global _repository
+    global _repository, _voice_api_key_repository
     if repository is None:
         raise ValueError("repository must not be None")
     _repository = repository
+    _voice_api_key_repository = voice_api_key_repository
 
 
 def _get_repository() -> IntakeChannelRepository:
@@ -158,6 +167,9 @@ class CreateIntakeChannelResponse(BaseModel):
     enabled: bool
     created_at: str
     updated_at: str
+    #: Surface B voice API key — minted ONCE for ``channel_type == "voice"``
+    #: (like ``hmac_secret``), omitted/``None`` for every other channel type.
+    voice_api_key: Optional[str] = None
 
 
 class IntakeChannelView(BaseModel):
@@ -268,6 +280,32 @@ async def create_intake_channel(
         channel.channel_type,
     )
 
+    # For a voice channel, mint the Surface B per-tenant API key so the Dinee
+    # ws-server can authenticate against ``/voice/*``. Returned ONCE (like the
+    # HMAC secret); never retrievable again. If the voice repository isn't wired
+    # we log a warning and return the channel without a key rather than failing
+    # the create.
+    voice_api_key: Optional[str] = None
+    if channel.channel_type == "voice":
+        if _voice_api_key_repository is not None:
+            voice_api_key = await _voice_api_key_repository.provision(
+                channel.tenant_id, channel.channel_id
+            )
+            logger.info(
+                "intake_channel_endpoints.create: minted voice API key for "
+                "tenant=%s channel=%s",
+                tenant.tenant_id,
+                channel.channel_id,
+            )
+        else:
+            logger.warning(
+                "intake_channel_endpoints.create: voice channel created for "
+                "tenant=%s channel=%s but VoiceApiKeyRepository is not wired — "
+                "returning channel without a voice_api_key",
+                tenant.tenant_id,
+                channel.channel_id,
+            )
+
     return CreateIntakeChannelResponse(
         channel_id=channel.channel_id,
         tenant_id=channel.tenant_id,
@@ -281,6 +319,7 @@ async def create_intake_channel(
         enabled=channel.enabled,
         created_at=channel.created_at.isoformat(),
         updated_at=channel.updated_at.isoformat(),
+        voice_api_key=voice_api_key,
     )
 
 

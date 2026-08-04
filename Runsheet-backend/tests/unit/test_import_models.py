@@ -20,7 +20,7 @@ class TestDataTypeEnum:
 
     def test_supported_data_types_present(self):
         expected = {
-            "fleet", "orders", "fuel_stations",
+            "fleet", "orders", "customer_tanks", "tank_readings", "fuel_stations",
             "inventory", "jobs",
         }
         assert {dt.value for dt in DataTypeEnum} == expected

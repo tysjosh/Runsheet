@@ -19,6 +19,11 @@ import logging
 from typing import Any, Dict
 
 from config.settings import get_settings
+from services.money import (
+    legacy_unit_price_cents,
+    line_subtotal_cents,
+    unit_price_micros_from_record,
+)
 from services.time_utils import utcnow
 
 logger = logging.getLogger(__name__)
@@ -88,9 +93,23 @@ class OrderDeliveredInvoiceSubscriber:
             )
             return
 
+        # Invoicing must be based on measured delivery, not the planned order
+        # quantity. A dispatcher may mark an order delivered before an offline
+        # driver's POD syncs; OrderService.reconcile_delivery_result replays
+        # this subscriber after the snapshot arrives.
+        delivery_result = order.get("delivery_result")
+        if not delivery_result:
+            logger.info(
+                "OrderDeliveredInvoiceSubscriber: no POD delivery_result on "
+                "order=%s tenant=%s; invoice deferred until POD reconciliation",
+                order_id,
+                tenant_id,
+            )
+            return
+
         # Build line items from the order's pricing fields
         line_items = self._extract_line_items(order)
-        tax_cents = order.get("tax_cents") or 0
+        tax_cents = self._extract_tax_cents(order)
 
         # If no line items could be extracted (no pricing attached),
         # skip invoice generation
@@ -106,14 +125,19 @@ class OrderDeliveredInvoiceSubscriber:
 
         # Call InvoiceService.generate_from_order (idempotent)
         try:
+            invoice_args = {
+                "tenant_id": tenant_id,
+                "order_id": order_id,
+                "customer_id": customer_id,
+                "account_id": account_id,
+                "line_items": line_items,
+                "tax_cents": tax_cents,
+                "actor": "system",
+            }
+            invoice_args["delivery_result"] = delivery_result
+
             invoice = await self._invoice_service.generate_from_order(
-                tenant_id=tenant_id,
-                order_id=order_id,
-                customer_id=customer_id,
-                account_id=account_id,
-                line_items=line_items,
-                tax_cents=tax_cents,
-                actor="system",
+                **invoice_args,
             )
             logger.info(
                 "OrderDeliveredInvoiceSubscriber: generated invoice %s "
@@ -137,9 +161,9 @@ class OrderDeliveredInvoiceSubscriber:
     def _extract_line_items(order: Dict[str, Any]) -> list:
         """Extract invoice line items from the order's pricing fields.
 
-        Builds a single line item from the order's product_code,
-        gallons_requested, unit_price_cents, and subtotal_cents fields.
-        Returns an empty list if pricing fields are not present.
+        A canonical ``delivery_result.actual_gallons`` is authoritative. The
+        fallback remains useful for pure extraction callers, but the event
+        handler defers invoice creation until a delivery snapshot exists.
 
         Args:
             order: The order document dict.
@@ -148,19 +172,45 @@ class OrderDeliveredInvoiceSubscriber:
             A list of line item dicts suitable for InvoiceService.
         """
         product_code = order.get("product_code")
-        unit_price_cents = order.get("unit_price_cents")
-        subtotal_cents = order.get("subtotal_cents")
-        quantity_gallons = order.get("gallons_requested")
+        unit_price_micros = unit_price_micros_from_record(order)
+        delivery_result = order.get("delivery_result") or {}
+        quantity_gallons = delivery_result.get("actual_gallons")
+        if quantity_gallons is None:
+            quantity_gallons = order.get("gallons_requested")
 
-        # All pricing fields must be present to build a line item
-        if unit_price_cents is None or subtotal_cents is None:
+        # A precise unit price and delivered quantity are sufficient. The
+        # original order subtotal is intentionally not reused because it is
+        # based on planned rather than measured gallons.
+        if (
+            unit_price_micros is None
+            or quantity_gallons is None
+            or float(quantity_gallons) <= 0
+        ):
             return []
 
+        subtotal_cents = line_subtotal_cents(
+            quantity_gallons,
+            unit_price_micros,
+        )
         line_item = {
             "product_code": product_code or "unknown",
-            "quantity_gallons": quantity_gallons or 0.0,
-            "unit_price_cents": int(unit_price_cents),
+            "quantity_gallons": float(quantity_gallons),
+            # Retain whole cents for old readers, but never use it for
+            # quantity multiplication when the micro price is present.
+            "unit_price_cents": legacy_unit_price_cents(unit_price_micros),
+            "unit_price_micros": unit_price_micros,
             "subtotal_cents": int(subtotal_cents),
         }
 
         return [line_item]
+
+    @staticmethod
+    def _extract_tax_cents(order: Dict[str, Any]) -> int:
+        """Scale legacy order tax to actual gallons when no TaxEngine reruns it."""
+        tax_cents = int(order.get("tax_cents") or 0)
+        delivery_result = order.get("delivery_result") or {}
+        actual = delivery_result.get("actual_gallons")
+        requested = order.get("gallons_requested")
+        if actual is None or not requested or tax_cents == 0:
+            return tax_cents
+        return round(tax_cents * float(actual) / float(requested))

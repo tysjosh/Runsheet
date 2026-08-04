@@ -43,6 +43,11 @@ TENANT_HEADER = "X-Test-Tenant-Id"
 USER_HEADER = "X-Test-User-Id"
 ROLES_HEADER = "X-Test-Roles"
 PII_HEADER = "X-Test-Pii-Access"
+#: Canonical ``drivers_current.driver_id`` for driver-surface tests. Emitted
+#: only when the caller asks for one, so omitting it reproduces a session with
+#: no ``driver_id`` claim and keeps the 403 ``DRIVER_IDENTITY_MISSING`` path
+#: exercised (Req 1.6).
+DRIVER_HEADER = "X-Test-Driver-Id"
 
 #: Default scope mirrors the old demo token: an admin user. ``has_pii_access``
 #: defaults to ``False`` to match the legacy ``_make_token`` payloads, which
@@ -56,6 +61,7 @@ def auth_headers(
     sub: str = "test-user",
     roles: Optional[Sequence[str]] = None,
     has_pii_access: bool = False,
+    driver_id: Optional[str] = None,
 ) -> dict:
     """Build request headers carrying a Test_Auth_Path scope.
 
@@ -63,6 +69,14 @@ def auth_headers(
     headers make ``install_test_auth``'s overridden ``get_tenant_context``
     yield a :class:`TenantContext` scoped to ``tenant_id`` with the given user
     id, roles, and PII flag.
+
+    ``driver_id`` is the canonical ``drivers_current.driver_id`` a driver
+    surface authorizes against. A driver-scoped request is therefore
+    ``auth_headers("t1", roles=["driver"], driver_id="drv_1")``. When it is
+    omitted no :data:`DRIVER_HEADER` is emitted at all, so the resulting
+    context carries ``driver_id=None`` and ``/api/driver`` handlers reject the
+    request with 403 ``DRIVER_IDENTITY_MISSING`` (Req 1.6) — exactly what a
+    session with no ``driver_id`` claim does in production.
     """
     headers = {
         TENANT_HEADER: tenant_id,
@@ -71,6 +85,8 @@ def auth_headers(
     }
     role_list = list(roles) if roles is not None else list(_DEFAULT_ROLES)
     headers[ROLES_HEADER] = json.dumps(role_list)
+    if driver_id:
+        headers[DRIVER_HEADER] = driver_id
     return headers
 
 
@@ -112,12 +128,20 @@ def install_test_auth(app) -> None:
         roles = _parse_roles(request.headers.get(ROLES_HEADER))
         has_pii = (request.headers.get(PII_HEADER) or "").strip().lower() == "true"
         user_id = request.headers.get(USER_HEADER) or None
-        return issue_test_context(
+        driver_id = request.headers.get(DRIVER_HEADER) or None
+        ctx = issue_test_context(
             tenant_id,
             roles=roles,
             has_pii_access=has_pii,
             user_id=user_id,
+            driver_id=driver_id,
         )
+        # Middleware that cannot depend on get_tenant_context (idempotency
+        # replay, per-driver rate limiting) reads these off request.state, so
+        # the seam stamps them exactly as the real verifier does.
+        request.state.tenant_id = ctx.tenant_id
+        request.state.driver_id = ctx.driver_id
+        return ctx
 
     # Installing this app-level override also activates the Test_Auth_Path
     # bypass for the global AuthEnforcementMiddleware (active under

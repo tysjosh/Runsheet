@@ -146,7 +146,15 @@ export function isOAuthProvider(provider: ProviderCatalogEntry): boolean {
 interface ConnectModalProps {
   provider: ProviderCatalogEntry;
   onCancel: () => void;
-  onSubmit: (credentials: Record<string, string>) => Promise<void>;
+  onSubmit: (
+    credentials: Record<string, string>,
+    options?: IntegrationConnectOptions,
+  ) => Promise<void>;
+}
+
+export interface IntegrationConnectOptions {
+  config?: Record<string, unknown>;
+  scheduleCron?: string;
 }
 
 /**
@@ -171,6 +179,15 @@ function ConnectModal({ provider, onCancel, onSubmit }: ConnectModalProps) {
   });
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const isVeederRoot = provider.provider_name === "veeder_root";
+  const [veederMode, setVeederMode] = useState<"api_token" | "tls_401_tcp">(
+    "api_token",
+  );
+  const [endpointUrl, setEndpointUrl] = useState("");
+  const [host, setHost] = useState("");
+  const [port, setPort] = useState("10001");
+  const [scheduleCron, setScheduleCron] = useState("*/15 * * * *");
+  const [tankMapJson, setTankMapJson] = useState("{}");
 
   const inputClass =
     "w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white font-mono";
@@ -179,19 +196,67 @@ function ConnectModal({ provider, onCancel, onSubmit }: ConnectModalProps) {
     e.preventDefault();
     setError("");
     // Refuse blank required fields. Trim prevents accidental whitespace.
-    for (const field of provider.required_credential_fields) {
+    const requiredCredentialFields = isVeederRoot
+      ? veederMode === "api_token"
+        ? ["api_token"]
+        : []
+      : provider.required_credential_fields;
+    for (const field of requiredCredentialFields) {
       if (!values[field] || !values[field].trim()) {
         setError(`${field} is required.`);
         return;
       }
     }
+    if (isVeederRoot && veederMode === "api_token" && !endpointUrl.trim()) {
+      setError("endpoint_url is required for cloud API mode.");
+      return;
+    }
+    if (isVeederRoot && veederMode === "tls_401_tcp" && !host.trim()) {
+      setError("host is required for TLS-401 mode.");
+      return;
+    }
     setSubmitting(true);
     try {
       const trimmed: Record<string, string> = {};
       for (const [key, value] of Object.entries(values)) {
-        trimmed[key] = value.trim();
+        if (value.trim()) trimmed[key] = value.trim();
       }
-      await onSubmit(trimmed);
+      let options: IntegrationConnectOptions | undefined;
+      if (isVeederRoot) {
+        let tankMap: Record<string, unknown>;
+        try {
+          const parsed = JSON.parse(tankMapJson || "{}");
+          if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
+            throw new Error("Tank map must be a JSON object.");
+          }
+          tankMap = parsed as Record<string, unknown>;
+        } catch (parseError) {
+          setError(
+            parseError instanceof Error
+              ? parseError.message
+              : "Tank map must be valid JSON.",
+          );
+          return;
+        }
+        options = {
+          scheduleCron: scheduleCron.trim() || "*/15 * * * *",
+          config: {
+            mode: veederMode,
+            tank_map: tankMap,
+            ...(veederMode === "api_token"
+              ? { endpoint_url: endpointUrl.trim() }
+              : {
+                  host: host.trim(),
+                  port: Number.parseInt(port, 10) || 10001,
+                }),
+          },
+        };
+      }
+      if (options) {
+        await onSubmit(trimmed, options);
+      } else {
+        await onSubmit(trimmed);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Connect failed.");
     } finally {
@@ -250,33 +315,118 @@ function ConnectModal({ provider, onCancel, onSubmit }: ConnectModalProps) {
           )}
 
           <div className="space-y-3">
-            {provider.required_credential_fields.map((field) => (
-              <div key={field}>
-                <label
-                  htmlFor={`ic-cred-${provider.provider_name}-${field}`}
-                  className="block text-xs font-medium text-gray-600 mb-1"
-                >
-                  {field}
-                </label>
-                <input
-                  id={`ic-cred-${provider.provider_name}-${field}`}
-                  type={
-                    /secret|password|token|key/i.test(field)
-                      ? "password"
-                      : "text"
+            {provider.required_credential_fields
+              .filter(
+                (field) =>
+                  !isVeederRoot ||
+                  (veederMode === "api_token"
+                    ? field === "api_token"
+                    : field === "security_code"),
+              )
+              .map((field) => (
+                <div key={field}>
+                  <label
+                    htmlFor={`ic-cred-${provider.provider_name}-${field}`}
+                    className="block text-xs font-medium text-gray-600 mb-1"
+                  >
+                    {field}
+                  </label>
+                  <input
+                    id={`ic-cred-${provider.provider_name}-${field}`}
+                    type={
+                      /secret|password|token|key/i.test(field)
+                        ? "password"
+                        : "text"
+                    }
+                    className={inputClass}
+                    value={values[field] ?? ""}
+                    onChange={(e) =>
+                      setValues((prev) => ({
+                        ...prev,
+                        [field]: e.target.value,
+                      }))
+                    }
+                    autoComplete="off"
+                    spellCheck={false}
+                    required={
+                      !isVeederRoot ||
+                      (veederMode === "api_token" && field === "api_token")
+                    }
+                  />
+                </div>
+              ))}
+          </div>
+
+          {isVeederRoot && (
+            <div className="space-y-3 rounded-lg border border-gray-200 p-3">
+              <p className="text-xs font-semibold text-gray-700">
+                Veeder-Root connection
+              </p>
+              <label className="block text-xs font-medium text-gray-600">
+                Connection mode
+                <select
+                  value={veederMode}
+                  onChange={(event) =>
+                    setVeederMode(
+                      event.target.value as "api_token" | "tls_401_tcp",
+                    )
                   }
                   className={inputClass}
-                  value={values[field] ?? ""}
-                  onChange={(e) =>
-                    setValues((prev) => ({ ...prev, [field]: e.target.value }))
-                  }
-                  autoComplete="off"
-                  spellCheck={false}
-                  required
+                >
+                  <option value="api_token">Cloud API</option>
+                  <option value="tls_401_tcp">TLS-401 TCP</option>
+                </select>
+              </label>
+              {veederMode === "api_token" ? (
+                <label className="block text-xs font-medium text-gray-600">
+                  API endpoint
+                  <input
+                    value={endpointUrl}
+                    onChange={(event) => setEndpointUrl(event.target.value)}
+                    placeholder="https://insite360.veeder-root.com"
+                    className={inputClass}
+                  />
+                </label>
+              ) : (
+                <div className="grid grid-cols-3 gap-2">
+                  <label className="col-span-2 text-xs font-medium text-gray-600">
+                    Host
+                    <input
+                      value={host}
+                      onChange={(event) => setHost(event.target.value)}
+                      className={inputClass}
+                    />
+                  </label>
+                  <label className="text-xs font-medium text-gray-600">
+                    Port
+                    <input
+                      value={port}
+                      onChange={(event) => setPort(event.target.value)}
+                      className={inputClass}
+                    />
+                  </label>
+                </div>
+              )}
+              <label className="block text-xs font-medium text-gray-600">
+                Polling schedule (cron)
+                <input
+                  value={scheduleCron}
+                  onChange={(event) => setScheduleCron(event.target.value)}
+                  className={inputClass}
                 />
-              </div>
-            ))}
-          </div>
+              </label>
+              <label className="block text-xs font-medium text-gray-600">
+                Tank map (JSON)
+                <textarea
+                  value={tankMapJson}
+                  onChange={(event) => setTankMapJson(event.target.value)}
+                  rows={4}
+                  className={inputClass}
+                  placeholder='{"1":{"target":"customer_tank","id":"tank-100","product_code":"DIESEL_2"}}'
+                />
+              </label>
+            </div>
+          )}
 
           <p className="text-[11px] text-gray-500 bg-gray-50 border border-gray-100 rounded-lg px-3 py-2">
             Credentials are wrapped by the tenant credentials vault on save. The
@@ -502,7 +652,10 @@ export interface IntegrationCardProps {
    * providers see the same callback — the modal just labels the
    * fields appropriately.
    */
-  onConnect: (credentials: Record<string, string>) => Promise<void>;
+  onConnect: (
+    credentials: Record<string, string>,
+    options?: IntegrationConnectOptions,
+  ) => Promise<void>;
   onEnable: () => Promise<void>;
   onDisable: () => Promise<void>;
   onSyncNow: () => Promise<void>;
@@ -549,8 +702,11 @@ export default function IntegrationCard({
   const lastSyncAt = instance?.last_sync_at ?? latestRun?.started_at ?? null;
 
   const handleConnectSubmit = useCallback(
-    async (creds: Record<string, string>) => {
-      await onConnect(creds);
+    async (
+      creds: Record<string, string>,
+      options?: IntegrationConnectOptions,
+    ) => {
+      await onConnect(creds, options);
       setShowConnect(false);
     },
     [onConnect],

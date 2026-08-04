@@ -61,6 +61,10 @@ def container():
     c.inventory_service = MagicMock()
     c.tenant_inventory_config = MagicMock()
     c.job_service = MagicMock()
+    c.order_repository = MagicMock()
+    c.order_service = MagicMock()
+    c.driver_repository = MagicMock()
+    c.driver_ws_manager = MagicMock()
     return c
 
 
@@ -125,6 +129,7 @@ class TestAgentsBootstrap:
             assert container.has("feedback_service")
             assert container.has("agent_orchestrator")
             assert container.has("redis_client")
+            assert container.has("plan_dispatch_service")
         finally:
             for p in patches:
                 p.stop()

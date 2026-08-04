@@ -68,6 +68,11 @@ CUSTOMERS_CURRENT_MAPPING = {
             "primary_email":  {"type": "keyword"},
             "tax_id":         {"type": "keyword"},
             "status":         {"type": "keyword"},
+            # Optional projected lookup fields (Dinee voice integration, Req 13).
+            # Sourced from external_refs/metadata at write time so they are
+            # queryable; external_refs subfields are not indexed on their own.
+            "phone":          {"type": "keyword"},
+            "account_id":     {"type": "keyword"},
             "created_at":     {"type": "date"},
             "updated_at":     {"type": "date"},
             "external_refs":  {"type": "object"},
@@ -150,6 +155,7 @@ PRICING_RULES_CURRENT_MAPPING = {
             "effective_to":        {"type": "date"},
             "min_quantity_gallons": {"type": "double"},
             "unit_price_cents":    {"type": "long"},
+            "unit_price_micros":   {"type": "long"},
             "created_at":          {"type": "date"},
             "updated_at":          {"type": "date"},
         },
@@ -171,6 +177,11 @@ INVOICES_CURRENT_MAPPING = {
             "customer_id":        {"type": "keyword"},
             "account_id":          {"type": "keyword"},
             "order_id":            {"type": "keyword"},
+            "pod_id":              {"type": "keyword"},
+            "delivered_at":        {"type": "date"},
+            # Canonical POD snapshot. It is rendered and exported as a whole;
+            # individual evidence fields are not queried from invoice search.
+            "delivery_result":     {"type": "object", "enabled": False},
             "invoice_number":      {"type": "keyword"},
             "status":              {"type": "keyword"},
             "total_cents":         {"type": "long"},
@@ -185,6 +196,7 @@ INVOICES_CURRENT_MAPPING = {
                     "product_code":     {"type": "keyword"},
                     "quantity_gallons": {"type": "double"},
                     "unit_price_cents": {"type": "long"},
+                    "unit_price_micros": {"type": "long"},
                     "subtotal_cents":   {"type": "long"},
                 },
             },

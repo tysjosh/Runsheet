@@ -16,6 +16,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, Query, Request
 
+from auth.authorization import require_role
 from config.settings import get_settings
 from middleware.rate_limiter import limiter
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
@@ -242,8 +243,15 @@ async def list_jobs(
     """
     List jobs with filters, pagination, and sorting.
 
-    Validates: Requirements 5.1, 5.2, 5.6, 5.7
+    This is a dispatcher surface: it lists every job in the tenant and scopes
+    nothing to the caller. A session holding only the ``driver`` role therefore
+    receives HTTP 403 ``INSUFFICIENT_ROLE`` and must use the driver work read
+    surface instead, which is scoped to the caller's own canonical
+    ``driver_id`` (Req 3.13).
+
+    Validates: Requirements 5.1, 5.2, 5.6, 5.7, driver-mobile-app 3.13
     """
+    require_role(tenant, "dispatcher", "admin")
     svc = _get_job_service()
     result = await svc.list_jobs(
         tenant_id=tenant.tenant_id,

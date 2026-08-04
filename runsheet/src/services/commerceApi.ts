@@ -212,12 +212,29 @@ export interface InvoiceLineItem {
   subtotal_cents: number;
 }
 
+export interface InvoiceDeliveryResult {
+  pod_id: string;
+  actual_gallons: number;
+  actual_gallons_source: string;
+  delivered_at: string;
+  recipient_name: string;
+  driver_id?: string | null;
+  bol_id?: string | null;
+  bol_ref?: string | null;
+  meter_ticket_ref?: string | null;
+  source_system?: string | null;
+  source_record_id?: string | null;
+}
+
 export interface Invoice {
   invoice_id: string;
   tenant_id: string;
   customer_id: string;
   account_id: string;
   order_id: string | null;
+  pod_id?: string | null;
+  delivered_at?: string | null;
+  delivery_result?: InvoiceDeliveryResult | null;
   invoice_number: string;
   status: InvoiceStatus;
   total_cents: number;
@@ -647,6 +664,18 @@ export async function voidInvoice(
     {
       method: "POST",
       body: JSON.stringify(payload),
+    },
+  );
+}
+
+/** POST /commerce/invoices/:id/finalize — approve draft and schedule ERP export */
+export async function finalizeInvoice(
+  invoiceId: string,
+): Promise<SingleResponse<Invoice>> {
+  return commerceRequest<SingleResponse<Invoice>>(
+    `/commerce/invoices/${encodeURIComponent(invoiceId)}/finalize`,
+    {
+      method: "POST",
     },
   );
 }

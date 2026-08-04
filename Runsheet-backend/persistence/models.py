@@ -161,6 +161,11 @@ class InvoiceORM(TimestampMixin, Base):
         String(64), ForeignKey("accounts.account_id", ondelete="RESTRICT"), nullable=False
     )
     order_id: Mapped[Optional[str]] = mapped_column(String(64))
+    pod_id: Mapped[Optional[str]] = mapped_column(String(64))
+    delivered_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True)
+    )
+    delivery_result: Mapped[Optional[Dict[str, Any]]] = mapped_column(_JSON)
     invoice_number: Mapped[Optional[str]] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(32), default="draft", nullable=False)
     total_cents: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
@@ -197,6 +202,7 @@ class InvoiceORM(TimestampMixin, Base):
         Index("ix_invoice_tenant_customer", "tenant_id", "customer_id"),
         Index("ix_invoice_tenant_account", "tenant_id", "account_id"),
         Index("ix_invoice_order", "order_id"),
+        Index("ix_invoice_pod", "pod_id"),
     )
 
 
@@ -213,6 +219,7 @@ class InvoiceLineItemORM(Base):
     product_code: Mapped[str] = mapped_column(String(64), nullable=False)
     quantity_gallons: Mapped[float] = mapped_column(nullable=False)
     unit_price_cents: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    unit_price_micros: Mapped[Optional[int]] = mapped_column(BigInteger)
     subtotal_cents: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
     invoice: Mapped["InvoiceORM"] = relationship(back_populates="line_items")
@@ -412,6 +419,7 @@ class PricingRuleORM(Base):
     effective_to: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     min_quantity_gallons: Mapped[Optional[float]] = mapped_column()
     unit_price_cents: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    unit_price_micros: Mapped[Optional[int]] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, nullable=False
     )

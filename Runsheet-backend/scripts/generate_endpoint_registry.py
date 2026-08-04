@@ -284,9 +284,32 @@ def generate_registry() -> str:
     return "\n".join(lines)
 
 
-def main() -> None:
-    """Generate the endpoint registry and write to docs/endpoint-registry.md."""
-    output_path = _BACKEND_DIR.parent / "docs" / "endpoint-registry.md"
+#: Committed location of the generated registry.
+DEFAULT_OUTPUT_PATH = _BACKEND_DIR.parent / "docs" / "endpoint-registry.md"
+
+
+def main(argv: Optional[List[str]] = None) -> None:
+    """Generate the endpoint registry and write it to ``--output``.
+
+    ``--output`` defaults to the committed ``docs/endpoint-registry.md``. The
+    freshness test uses it to generate into a throwaway file from a fresh
+    interpreter, which is the only way to introspect a statically-imported app
+    that no test has booted.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Generate docs/endpoint-registry.md from the FastAPI app."
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=DEFAULT_OUTPUT_PATH,
+        help="Where to write the registry (default: docs/endpoint-registry.md).",
+    )
+    args = parser.parse_args(argv)
+
+    output_path = args.output
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     registry = generate_registry()

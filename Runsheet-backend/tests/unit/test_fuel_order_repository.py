@@ -450,3 +450,233 @@ class TestInputValidation:
     def test_constructor_rejects_none_es_service(self):
         with pytest.raises(ValueError, match="es_service"):
             FuelOrderRepository(None)
+
+
+# ---------------------------------------------------------------------------
+# Tests: search_for_driver (the driver "my work" read)
+# ---------------------------------------------------------------------------
+
+
+class _LeakyESService(_FakeESService):
+    """ES stub that ignores every filter and returns all seeded documents.
+
+    Stands in for an Elasticsearch filter regression: whatever the query
+    asked for, every document comes back. The repository's own
+    re-validation is the only thing left protecting the caller.
+    """
+
+    async def search_documents(
+        self, index: str, query: Dict[str, Any], size: int
+    ) -> Dict[str, Any]:
+        self.recorded_queries.append(dict(query))
+        matches = [{"_source": dict(d)} for d in self.docs.values()][:size]
+        return {"hits": {"hits": matches, "total": {"value": len(matches)}}}
+
+
+def _driver_order(
+    order_id: str,
+    *,
+    tenant_id: str = "tenant-1",
+    driver_id: Optional[str] = "drv-1",
+    status: str = "dispatched",
+    window_start: Optional[str] = None,
+) -> Dict[str, Any]:
+    return _valid_order_dict(
+        order_id=order_id,
+        tenant_id=tenant_id,
+        assigned_driver_id=driver_id,
+        status=status,
+        delivery_window_start=window_start or _NOW.isoformat(),
+    )
+
+
+def _must_clauses(query: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return the inner must clauses the repository built, tenant-wrapped."""
+    outer_must = query["query"]["bool"]["must"]
+    assert len(outer_must) == 1
+    return outer_must[0]["bool"]["must"]
+
+
+class TestSearchForDriverQuery:
+    """Query shape: tenant filter + driver term + status terms + window range."""
+
+    @pytest.mark.asyncio
+    async def test_defaults_to_dispatched_and_in_transit_window_sorted(self):
+        es = _FakeESService()
+        es.docs["ord_a"] = _driver_order("ord_a")
+        repo = FuelOrderRepository(es)
+
+        result = await repo.search_for_driver("tenant-1", "drv-1")
+
+        assert len(es.recorded_queries) == 1
+        query = es.recorded_queries[0]
+        _assert_tenant_filter_present(query, "tenant-1")
+
+        clauses = _must_clauses(query)
+        assert {"term": {"assigned_driver_id": "drv-1"}} in clauses
+        assert {
+            "terms": {"status": ["dispatched", "in_transit"]}
+        } in clauses
+        assert not any("range" in c for c in clauses)
+
+        assert query["sort"] == [
+            {"delivery_window_start": {"order": "asc"}}
+        ]
+        assert query["from"] == 0
+        assert query["size"] == 50
+        assert result["page"] == 1
+        assert result["size"] == 50
+
+    @pytest.mark.asyncio
+    async def test_supplied_statuses_replace_the_default(self):
+        es = _FakeESService()
+        repo = FuelOrderRepository(es)
+
+        await repo.search_for_driver(
+            "tenant-1", "drv-1", statuses=["delivered", "failed"]
+        )
+
+        clauses = _must_clauses(es.recorded_queries[0])
+        assert {"terms": {"status": ["delivered", "failed"]}} in clauses
+
+    @pytest.mark.asyncio
+    async def test_blank_statuses_fall_back_to_the_default(self):
+        es = _FakeESService()
+        repo = FuelOrderRepository(es)
+
+        await repo.search_for_driver("tenant-1", "drv-1", statuses=["", "  "])
+
+        clauses = _must_clauses(es.recorded_queries[0])
+        assert {
+            "terms": {"status": ["dispatched", "in_transit"]}
+        } in clauses
+
+    @pytest.mark.asyncio
+    async def test_window_range_is_applied_to_delivery_window_start(self):
+        es = _FakeESService()
+        repo = FuelOrderRepository(es)
+
+        await repo.search_for_driver(
+            "tenant-1",
+            "drv-1",
+            window_start="2025-05-01T00:00:00+00:00",
+            window_end="2025-05-02T00:00:00+00:00",
+        )
+
+        clauses = _must_clauses(es.recorded_queries[0])
+        assert {
+            "range": {
+                "delivery_window_start": {
+                    "gte": "2025-05-01T00:00:00+00:00",
+                    "lte": "2025-05-02T00:00:00+00:00",
+                }
+            }
+        } in clauses
+
+    @pytest.mark.asyncio
+    async def test_open_ended_window_sends_only_the_supplied_bound(self):
+        es = _FakeESService()
+        repo = FuelOrderRepository(es)
+
+        await repo.search_for_driver(
+            "tenant-1", "drv-1", window_end="2025-05-02T00:00:00+00:00"
+        )
+
+        clauses = _must_clauses(es.recorded_queries[0])
+        assert {
+            "range": {
+                "delivery_window_start": {"lte": "2025-05-02T00:00:00+00:00"}
+            }
+        } in clauses
+
+    @pytest.mark.asyncio
+    async def test_paging_uses_from_and_size(self):
+        es = _FakeESService()
+        repo = FuelOrderRepository(es)
+
+        await repo.search_for_driver("tenant-1", "drv-1", page=3, size=20)
+
+        query = es.recorded_queries[0]
+        assert query["from"] == 40
+        assert query["size"] == 20
+
+    @pytest.mark.asyncio
+    async def test_non_positive_page_and_size_are_normalized(self):
+        es = _FakeESService()
+        repo = FuelOrderRepository(es)
+
+        result = await repo.search_for_driver(
+            "tenant-1", "drv-1", page=0, size=0
+        )
+
+        query = es.recorded_queries[0]
+        assert query["from"] == 0
+        assert query["size"] == 50
+        assert result["page"] == 1
+        assert result["size"] == 50
+
+
+class TestSearchForDriverRevalidation:
+    """A source that does not match the requested tenant AND driver is dropped."""
+
+    @pytest.mark.asyncio
+    async def test_returns_the_drivers_own_orders(self):
+        es = _LeakyESService()
+        es.docs["ord_mine"] = _driver_order("ord_mine")
+        repo = FuelOrderRepository(es)
+
+        result = await repo.search_for_driver("tenant-1", "drv-1")
+
+        assert [o.order_id for o in result["orders"]] == ["ord_mine"]
+
+    @pytest.mark.asyncio
+    async def test_drops_another_drivers_order_in_the_same_tenant(self):
+        es = _LeakyESService()
+        es.docs["ord_mine"] = _driver_order("ord_mine", driver_id="drv-1")
+        es.docs["ord_theirs"] = _driver_order("ord_theirs", driver_id="drv-2")
+        repo = FuelOrderRepository(es)
+
+        result = await repo.search_for_driver("tenant-1", "drv-1")
+
+        assert [o.order_id for o in result["orders"]] == ["ord_mine"]
+
+    @pytest.mark.asyncio
+    async def test_drops_another_tenants_order_for_the_same_driver_id(self):
+        es = _LeakyESService()
+        es.docs["ord_mine"] = _driver_order("ord_mine")
+        es.docs["ord_other"] = _driver_order(
+            "ord_other", tenant_id="tenant-2"
+        )
+        repo = FuelOrderRepository(es)
+
+        result = await repo.search_for_driver("tenant-1", "drv-1")
+
+        assert [o.order_id for o in result["orders"]] == ["ord_mine"]
+
+    @pytest.mark.asyncio
+    async def test_drops_an_unassigned_order(self):
+        es = _LeakyESService()
+        es.docs["ord_free"] = _driver_order("ord_free", driver_id=None)
+        repo = FuelOrderRepository(es)
+
+        result = await repo.search_for_driver("tenant-1", "drv-1")
+
+        assert result["orders"] == []
+
+
+class TestSearchForDriverValidation:
+    """Identity inputs are required."""
+
+    @pytest.mark.asyncio
+    async def test_rejects_empty_tenant_id(self):
+        repo = FuelOrderRepository(_FakeESService())
+
+        with pytest.raises(ValueError, match="tenant_id"):
+            await repo.search_for_driver("", "drv-1")
+
+    @pytest.mark.asyncio
+    async def test_rejects_empty_driver_id(self):
+        repo = FuelOrderRepository(_FakeESService())
+
+        with pytest.raises(ValueError, match="driver_id"):
+            await repo.search_for_driver("tenant-1", "  ")

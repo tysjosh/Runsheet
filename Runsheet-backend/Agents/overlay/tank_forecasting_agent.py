@@ -89,6 +89,21 @@ FUEL_EVENTS_INDEX = "fuel_events"
 # Retained unchanged for the legacy retail-station path (Req 1.7).
 DEFAULT_CONSUMPTION_RATE = 50.0
 
+#: Risk floor applied when a forecast has NO consumption history and is therefore
+#: projected from a default rate rather than observed data (Req 1.7).
+#:
+#: A data-less tank must never advertise itself as risk-free: reporting 0.0 would
+#: rank it below tanks with real, low-risk telemetry and quietly starve it of
+#: dispatch attention. 0.5 encodes "unknown", so the tank sorts mid-pack until
+#: real consumption data arrives. It is a FLOOR, not a fixed value — when the
+#: default-rate projection still implies imminent runout the computed (higher)
+#: risk wins.
+DEFAULT_UNCERTAIN_RISK = 0.5
+
+#: Confidence reported alongside :data:`DEFAULT_UNCERTAIN_RISK`. Deliberately
+#: low so downstream consumers can discount the estimate (Req 1.7).
+DEFAULT_UNCERTAIN_CONFIDENCE = 0.1
+
 # Variance multiplier for p90 estimate (pessimistic)
 P90_VARIANCE_MULTIPLIER = 1.5
 
@@ -1283,8 +1298,19 @@ class TankForecastingAgent(OverlayAgentBase):
         """Compute a TankForecast for a single (station, grade) pair.
 
         Uses fuel_calculations.py logic for baseline consumption rate
-        estimation (Req 1.6). When no historical data exists, assigns
-        default risk of 0.5 with confidence 0.1 (Req 1.7).
+        estimation (Req 1.6).
+
+        Zero-history behavior (Req 1.7): hours-to-runout is still projected from
+        ``DEFAULT_CONSUMPTION_RATE`` (or the station's cached
+        ``daily_consumption_rate``) so the UI has something to show, but the
+        estimate is explicitly marked as not evidence-based:
+
+        * ``runout_risk_24h`` is floored at :data:`DEFAULT_UNCERTAIN_RISK` (0.5)
+          — "unknown", never "no risk". A higher computed risk still wins, so an
+          imminent-runout projection escalates normally.
+        * ``confidence`` is :data:`DEFAULT_UNCERTAIN_CONFIDENCE` (0.1).
+        * ``anomaly_flags`` carries ``insufficient_data`` and
+          ``using_default_rate``.
         """
         anomaly_flags = self._anomaly_cache.get(station_id, [])
 
@@ -1317,14 +1343,25 @@ class TankForecastingAgent(OverlayAgentBase):
                 runout_risk_24h = 0.0
             else:
                 runout_risk_24h = (RISK_HORIZON_HOURS - hours_p50) / (hours_p90 - hours_p50)
-            
+
+            # Req 1.7 — floor the risk at "unknown" because this projection came
+            # from a DEFAULT rate, not observed consumption. Without the floor a
+            # tank with no telemetry reports 0.0 ("no risk") and is ranked below
+            # tanks with real low-risk data, silently starving it of dispatch
+            # attention. Using max() keeps the escalation path intact: if the
+            # default-rate projection still implies imminent runout, that higher
+            # computed risk wins.
+            runout_risk_24h = max(runout_risk_24h, DEFAULT_UNCERTAIN_RISK)
+
             return TankForecast(
                 station_id=station_id,
                 fuel_grade=fuel_grade,
                 hours_to_runout_p50=round(hours_p50, 2),
                 hours_to_runout_p90=round(hours_p90, 2),
                 runout_risk_24h=round(min(1.0, max(0.0, runout_risk_24h)), 4),
-                confidence=0.5,  # Medium confidence when using defaults
+                # Low confidence so consumers can discount the estimate; the
+                # hours_to_runout figures remain useful for display.
+                confidence=DEFAULT_UNCERTAIN_CONFIDENCE,
                 feature_version="v1.0",
                 anomaly_flags=anomaly_flags + ["insufficient_data", "using_default_rate"],
                 tenant_id=tenant_id,

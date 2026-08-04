@@ -53,7 +53,12 @@ def _make_ops_es(shipment_hits=None, rider_hits=None, order_hits=None):
     mock_es = MagicMock(spec=OpsElasticsearchService)
     mock_client = MagicMock()
 
-    def _search_side_effect(index, body, scroll="2m"):
+    # ``**kwargs`` absorbs transport options the production scroll passes
+    # (``request_timeout=ES_SEARCH_TIMEOUT_SECONDS``, added after this mock was
+    # written). Without it the call raised TypeError, drift_detector swallowed
+    # it as an "ES scroll error", every entity looked missing, and the tests saw
+    # bogus drift_alert / divergence counts.
+    def _search_side_effect(index, body, scroll="2m", **kwargs):
         if index == OpsElasticsearchService.SHIPMENTS_CURRENT:
             hits = shipment_hits or []
         elif index == OpsElasticsearchService.RIDERS_CURRENT:

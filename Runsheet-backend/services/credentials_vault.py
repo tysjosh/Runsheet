@@ -143,6 +143,7 @@ class TenantCredentialsVault:
         plaintext: Dict[str, Any],
         kms_key_id: Optional[str] = None,
         provider_name: Optional[str] = None,
+        ref: Optional[str] = None,
     ) -> str:
         """Encrypt and persist ``plaintext`` for ``tenant_id`` under ``key``.
 
@@ -159,6 +160,13 @@ class TenantCredentialsVault:
             kms_key_id: Optional override of the default CMK.
             provider_name: Optional tag recording which integration provider
                 owns this credential (surfaced to admins as metadata).
+            ref: Optional caller-supplied deterministic ref. When omitted a
+                globally-unique random ref is generated (default, preserving
+                existing behavior). Callers that need to retrieve a credential
+                by a stable logical identity — with no external place to store
+                the returned ref — may pass a deterministic ref (e.g.
+                ``driver_pin:{tenant_id}:{driver_id}``); re-``put`` under the
+                same ref upserts the credential in place.
 
         Returns:
             The ``ref`` string of the persisted credential.
@@ -181,7 +189,7 @@ class TenantCredentialsVault:
             plaintext, effective_key_id, tenant_id, key
         )
 
-        ref = self._build_ref(tenant_id, key)
+        ref = ref or self._build_ref(tenant_id, key)
         now = _utcnow_iso()
         doc = {
             "ref": ref,

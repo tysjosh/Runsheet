@@ -66,7 +66,15 @@ _SETTINGS_PATCH = nullcontext()
 
 
 def _auth_headers(tenant_id: str = TENANT_ID, sub: str = "driver-1") -> dict:
-    return auth_headers(tenant_id, sub=sub)
+    """A driver-scoped Test_Auth_Path header set.
+
+    The ``/api/driver`` handlers resolve through ``require_driver_identity``, so
+    the context must hold the exact ``driver`` role and a canonical
+    ``driver_id``; it matches ``sub`` so a job document keyed on either
+    ``asset_assigned`` or ``assigned_driver_id`` authorizes the same caller
+    (Req 1.5, 1.6, 1.12).
+    """
+    return auth_headers(tenant_id, sub=sub, roles=["driver"], driver_id=sub)
 
 
 def _job_doc(
@@ -76,12 +84,18 @@ def _job_doc(
     asset_assigned="driver-1",
     job_type="cargo_transport",
     scheduled_time="2026-03-12T10:00:00Z",
+    order_id="ORD_1",
 ) -> dict:
-    """Return a minimal job document with configurable fields."""
+    """Return a minimal job document with configurable fields.
+
+    The ``order_id`` is present because a POD that resolves no order reference
+    is rejected with 422 ``POD_ORDER_REFERENCE_REQUIRED`` (R5.22).
+    """
     return {
         "job_id": job_id,
         "status": status,
         "tenant_id": tenant_id,
+        "order_id": order_id,
         "asset_assigned": asset_assigned,
         "job_type": job_type,
         "origin": "Port A",
@@ -380,8 +394,17 @@ class TestMessageEndpointsAccessControl:
 
         assert resp.status_code == 200
 
-    def test_message_from_dispatcher_always_succeeds(self):
-        """Dispatcher messages are not affected by reassignment. Validates: Req 11.2"""
+    def test_claiming_dispatcher_role_in_body_does_not_bypass_assignment(self):
+        """A body ``sender_role`` cannot buy access to another driver's thread.
+
+        ``_validate_sender_access`` used to treat ``sender_role: "dispatcher"``
+        in the request body as blanket authorization for every job in the
+        tenant, so any caller could post to a thread they were not assigned to
+        simply by naming that role. Both the role and the identity are now
+        derived from the verified context.
+
+        Validates: Req 11.2, 7.7
+        """
         es = _make_es_service()
         svc = _make_job_service()
         svc._get_job_doc.return_value = _job_doc(
@@ -395,13 +418,14 @@ class TestMessageEndpointsAccessControl:
                 "/api/driver/jobs/JOB_1/messages",
                 json={
                     "body": "Status update?",
-                    "sender_id": "dispatcher-1",
+                    "sender_id": "driver-1",
                     "sender_role": "dispatcher",
                 },
-                headers=_auth_headers(sub="dispatcher-1"),
+                headers=_auth_headers(sub="driver-1"),
             )
 
-        assert resp.status_code == 200
+        assert resp.status_code == 403
+        es.index_document.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -515,13 +539,14 @@ class TestPodEndpointsAccessControl:
                     "recipient_name": "John Doe",
                     "signature_url": "https://example.com/sig.png",
                     "photo_urls": ["https://example.com/photo1.jpg"],
+                    "delivered_gallons": 500.0,
                     "geotag": {"lat": 40.7128, "lng": -74.0060},
                     "timestamp": "2026-03-12T12:00:00Z",
                 },
                 headers=_auth_headers(sub="driver-1"),
             )
 
-        assert resp.status_code == 200
+        assert resp.status_code == 200, resp.text
 
 
 # ---------------------------------------------------------------------------

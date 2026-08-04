@@ -12,15 +12,84 @@ from Agents.support.compartment_models import (
     DeliveryRequest, FeasibilityResult, FuelGrade, LoadingPlan,
 )
 
-# Fuel density in kg/liter (approximate)
-FUEL_DENSITY: Dict[str, float] = {
+#: Fuel density in kg/litre, keyed on canonical US product code, with the
+#: legacy Nigerian grade codes retained as aliases.
+#:
+#: This is the ONE density table used for axle weight. It previously did not
+#: exist: weight was computed from a four-entry table keyed on ``FuelGrade``
+#: (AGO/PMS/ATK/LPG), and ``fuel_product_mapping`` collapses nine catalog
+#: products onto those four. For diesel, gasoline, kerosene and propane the
+#: collapse is harmless — the members of each family are within ~2% of each
+#: other. For DEF it is not: DEF is urea in de-ionised water at 1.09 kg/L, it
+#: maps to AGO, and AGO is 0.85, so a DEF load was weighed 22% light. The
+#: weight check compares directly against ``max_weight_kg``, so the
+#: feasibility gate could pass a truck that is actually overweight.
+#:
+#: The gasoline/diesel/kerosene/propane values deliberately match the old
+#: table so plans keep reporting the same ``total_weight_kg`` for the same
+#: assignments; only products the old table could not express are new.
+#: ``test_fuel_density_matches_product_catalog`` pins every value against
+#: ``FUEL_PRODUCT_CATALOG.density_lbs_per_gallon`` so a future divergence of
+#: DEF's magnitude fails rather than ships.
+FUEL_DENSITY_KG_PER_LITER: Dict[str, float] = {
+    # Canonical US product codes (fuel_product_catalog)
+    "DIESEL_2": 0.85,
+    "OFF_ROAD_DIESEL": 0.85,
+    "HEATING_OIL": 0.85,
+    "GASOLINE_REG": 0.74,
+    "GASOLINE_PREM": 0.74,
+    "ETHANOL_E85": 0.78,
+    "KEROSENE": 0.80,
+    "PROPANE": 0.51,
+    "DEF": 1.09,
+    # Legacy Nigerian grade codes. Retained so plans persisted before
+    # canonicalization, and requests that carry no product_code, still weigh
+    # something sensible.
     "AGO": 0.85,
     "PMS": 0.74,
     "ATK": 0.80,
     "LPG": 0.51,
 }
 
+#: Density applied when neither the product code nor the grade is recognised.
+#: Diesel, the most common product — matching the previous behaviour.
+DEFAULT_FUEL_DENSITY_KG_PER_LITER = 0.85
+
+#: Deprecated alias. Kept because ``Agents.support.__init__`` re-exports it.
+#: Use :func:`fuel_density_kg_per_liter`, which understands product codes.
+FUEL_DENSITY: Dict[str, float] = {
+    "AGO": FUEL_DENSITY_KG_PER_LITER["AGO"],
+    "PMS": FUEL_DENSITY_KG_PER_LITER["PMS"],
+    "ATK": FUEL_DENSITY_KG_PER_LITER["ATK"],
+    "LPG": FUEL_DENSITY_KG_PER_LITER["LPG"],
+}
+
 DEFAULT_UNCERTAINTY_BUFFER_PCT = 10.0
+
+
+def fuel_density_kg_per_liter(
+    product_code: Optional[str] = None,
+    fuel_grade: Optional[str] = None,
+) -> float:
+    """Density for a delivery, preferring the canonical product code.
+
+    ``product_code`` is checked first because it is the only identifier that
+    distinguishes DEF from diesel — by the time a delivery reaches the solver
+    as a :class:`FuelGrade`, ``us_to_fuel_grade`` has already mapped both to
+    ``AGO``. ``fuel_grade`` is the fallback for legacy requests and for plans
+    persisted before ``product_code`` was carried through.
+
+    Unknown codes fall back to diesel rather than raising: an unrecognised
+    product must not stop a plan from being weighed at all, and a wrong-by-2%
+    diesel assumption is safer than no weight check.
+    """
+    for candidate in (product_code, fuel_grade):
+        if not isinstance(candidate, str):
+            continue
+        key = candidate.strip().upper()
+        if key in FUEL_DENSITY_KG_PER_LITER:
+            return FUEL_DENSITY_KG_PER_LITER[key]
+    return DEFAULT_FUEL_DENSITY_KG_PER_LITER
 
 
 def check_feasibility(
@@ -80,7 +149,10 @@ def check_feasibility(
     if max_weight_kg is not None and not violations:
         total_weight = tare_weight_kg
         for req in buffered_requests:
-            density = FUEL_DENSITY.get(req.fuel_grade.value, 0.85)
+            density = fuel_density_kg_per_liter(
+                product_code=req.product_code,
+                fuel_grade=req.fuel_grade.value,
+            )
             total_weight += req.quantity_liters * density
         if total_weight > max_weight_kg:
             violations.append(ConstraintViolation(
@@ -143,7 +215,9 @@ def optimize_loading_plan(
                 assignments.append(CompartmentAssignment(
                     compartment_id=cid,
                     station_id=req.station_id,
+                    order_id=req.order_id,
                     fuel_grade=grade.value,
+                    product_code=req.product_code,
                     quantity_liters=round(assign_qty, 2),
                     compartment_capacity_liters=comp.capacity_liters,
                 ))
@@ -162,7 +236,10 @@ def optimize_loading_plan(
     # Compute weight
     total_weight = 0.0
     for a in assignments:
-        density = FUEL_DENSITY.get(a.fuel_grade, 0.85)
+        density = fuel_density_kg_per_liter(
+            product_code=a.product_code,
+            fuel_grade=a.fuel_grade,
+        )
         total_weight += a.quantity_liters * density
 
     return LoadingPlan(

@@ -102,13 +102,20 @@ async def create_canonical_roles(
     role_creator: Optional[RoleCreator] = None,
     roles: Sequence[str] = CANONICAL_ROLES,
 ) -> dict[str, bool]:
-    """Create the four canonical SuperTokens UserRoles, idempotently (Req 4.4).
+    """Create the canonical SuperTokens UserRoles, idempotently (Req 4.4).
+
+    This only makes the roles *exist* in the core so they can be assigned. It
+    does not grant anything to anyone — per-user grants come from
+    ``auth_users.roles`` via ``Provisioner.set_user_roles``. That distinction
+    matters for ``platform_admin``: the role must exist to be assignable, but no
+    user receives it unless it is listed explicitly on their record.
 
     Args:
         role_creator: Seam that creates one role and returns whether it was
             newly created; defaults to the SuperTokens SDK-backed creator.
-        roles: The role names to ensure exist; defaults to the four canonical
-            roles (``admin`` / ``dispatcher`` / ``ops_manager`` / ``driver``).
+        roles: The role names to ensure exist; defaults to the canonical roles
+            (``admin`` / ``dispatcher`` / ``ops_manager`` / ``driver`` /
+            ``platform_admin``).
 
     Returns:
         A mapping of ``role name -> created_new_role`` so the caller can report

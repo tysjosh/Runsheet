@@ -719,6 +719,89 @@ class IntakeChannelRepository:
 
         return _safe_channel_load(source)
 
+    async def get_voice_channel(
+        self, tenant_id: str
+    ) -> Optional[IntakeChannel]:
+        """Look up the tenant's registered, enabled voice intake channel.
+
+        Used by the Dinee voice submission bridge (Surface A) to resolve the
+        ``channel_type="voice"`` channel for a tenant. The channel is always
+        derived from the authenticated tenant — never from a client-supplied
+        channel id (Req 2.4). Returns the first **enabled** voice channel for
+        the tenant, or ``None`` when the tenant has no enabled voice channel
+        (the bridge maps ``None`` to a uniform HTTP 404 that does not leak
+        whether the tenant exists).
+        """
+        self._require_tenant(tenant_id)
+
+        # Fetch ALL of the tenant's voice channels and pick the enabled one
+        # deterministically, rather than trusting an arbitrary single hit.
+        # Two reasons:
+        #   * A ``find_one`` could return a *disabled* channel while an enabled
+        #     one exists, yielding a false 404.
+        #   * With more than one voice channel, selection must be stable.
+        # Only ``channel_type`` is pushed down as a term filter: the Postgres
+        # hybrid-read builder extracts JSON fields as text (``document ->>
+        # 'enabled'``) and comparing that to a Python bool emits invalid SQL
+        # (``CAST(... AS VARCHAR) = true`` → "operator does not exist:
+        # character varying = boolean"), so the ``enabled`` gate is applied in
+        # Python below — as ``get_dispatcher_channel`` also filters on
+        # ``channel_type`` alone.
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_hybrid_search,
+        )
+        pg = await read_hybrid_search(
+            "intake_channel", tenant_id,
+            term_filters={"channel_type": "voice"},
+            sort_field="created_at", sort_order="asc",
+            page=1, size=100,
+        )
+        if pg is not _NOT_CUT_OVER:
+            return self._select_enabled_voice(pg.get("items", []), tenant_id)
+
+        query = inject_tenant_filter(
+            {"query": {"bool": {"must": [{"term": {"channel_type": "voice"}}]}}},
+            tenant_id,
+        )
+        query["size"] = 100
+        query["sort"] = [{"created_at": {"order": "asc"}}]
+
+        try:
+            resp = await self._es.search_documents(
+                self._channels_index, query, 100
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "IntakeChannelRepository.get_voice_channel: search failed "
+                "for tenant=%s: %s",
+                tenant_id,
+                exc,
+            )
+            return None
+
+        return self._select_enabled_voice(_extract_sources(resp), tenant_id)
+
+    def _select_enabled_voice(
+        self, sources: List[Dict[str, Any]], tenant_id: str
+    ) -> Optional[IntakeChannel]:
+        """Pick the tenant's first enabled voice channel from ``sources``.
+
+        Applies defense-in-depth tenant re-validation and the ``enabled`` gate
+        in Python (see :meth:`get_voice_channel`). ``sources`` is assumed to be
+        in a stable order (sorted by ``created_at`` ascending) so selection is
+        deterministic when a tenant has more than one voice channel.
+        """
+        for source in sources or []:
+            if source.get("tenant_id") != tenant_id:
+                continue
+            if source.get("enabled") is False:
+                continue
+            channel = _safe_channel_load(source)
+            if channel is not None and channel.enabled:
+                return channel
+        return None
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------

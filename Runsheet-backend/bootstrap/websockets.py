@@ -24,12 +24,14 @@ verified, server-signed access-token payload (Req 7.1, 7.3). The homegrown
 HS256 legacy/dual paths were removed once the SuperTokens hard cutover
 completed.
 
-The SuperTokens session credential is taken **cookie-first** from the handshake
-(``sAccessToken``); where a browser cannot attach the cookie to a WS handshake,
-a short-lived session token may be supplied via the ``token`` query parameter
-(Req 7.5). Missing, malformed, expired, or incomplete credentials are rejected
-for every environment with the existing ``4001 Authentication required`` close
-code (Req 7.2).
+The SuperTokens session credential is read from the handshake in the order
+``Authorization: Bearer`` header → ``sAccessToken`` cookie → ``token`` query
+parameter. Native mobile clients that can set handshake headers keep the
+credential out of the URL (driver-mobile-app Req 14.1, 15.1); browsers use the
+cookie; the short-lived ``token`` query parameter remains for clients that can
+do neither (Req 7.5). Missing, malformed, expired, or incomplete credentials are
+rejected for every environment with the existing ``4001 Authentication
+required`` close code (Req 7.2, 14.2).
 
 The session-token value is **never** written to application logs: log lines emit
 only ``tenant_id`` and the endpoint path, never the credential (Req 7.4, 7.5).
@@ -78,10 +80,10 @@ def _logger() -> logging.Logger:
 #
 # WebSocket connections are authenticated against a verified SuperTokens
 # session whose ``tenant_id`` / ``roles`` / ``has_pii_access`` (and ``driver_id``
-# for driver users) claims are signed by the managed core. The credential is
-# taken cookie-first from the handshake (``sAccessToken``); where a browser
-# cannot attach the cookie a short-lived session token may be supplied via the
-# ``token`` query parameter (Req 7.5). The token value is never logged (Req 7.4).
+# for driver users) claims are signed by the managed core. The credential is read
+# from the handshake in the order ``Authorization: Bearer`` header →
+# ``sAccessToken`` cookie → ``token`` query parameter (Req 7.5, 14.1). The token
+# value is never logged (Req 7.4, 15.1).
 #
 # A ``WSSessionVerifier`` seam mirrors the HTTP Session_Verifier seam in
 # ``ops.middleware.tenant_guard`` so tests can inject a fake verifier without a
@@ -112,19 +114,34 @@ def _extract_session_credential(
 ) -> Tuple[str, Optional[str]]:
     """Return ``(access_token, anti_csrf_token)`` from the WS handshake.
 
-    Cookie-first (``sAccessToken`` on the handshake); falls back to the ``token``
-    query parameter where the browser cannot attach the cookie (Req 7.5). The
-    anti-CSRF token, when present, is read from the ``anti-csrf`` header. The
-    credential value is intentionally never logged here (Req 7.4).
+    Transport order is header → cookie → query parameter (Req 14.1, 14.2, 15.1):
+
+    1. ``Authorization: Bearer <access token>`` on the handshake — the mobile
+       transport, where a native client can set handshake headers and keep the
+       credential out of the URL.
+    2. ``sAccessToken`` handshake cookie — the browser transport.
+    3. the short-lived ``token`` query parameter, for clients that can do
+       neither (Req 7.5).
+
+    The addition of the header read is additive: both pre-existing transports
+    keep working unchanged. The anti-CSRF token, when present, is read from the
+    ``anti-csrf`` header. The credential value is intentionally never logged
+    here (Req 7.4, 15.1).
     """
     access_token = ""
-    cookie_header = websocket.headers.get("cookie", "") or ""
-    if cookie_header:
-        for part in cookie_header.split(";"):
-            name, _, value = part.strip().partition("=")
-            if name == "sAccessToken" and value:
-                access_token = value
-                break
+    auth_header = websocket.headers.get("authorization", "") or ""
+    if auth_header:
+        scheme, _, credential = auth_header.strip().partition(" ")
+        if scheme.lower() == "bearer":
+            access_token = credential.strip()
+    if not access_token:
+        cookie_header = websocket.headers.get("cookie", "") or ""
+        if cookie_header:
+            for part in cookie_header.split(";"):
+                name, _, value = part.strip().partition("=")
+                if name == "sAccessToken" and value:
+                    access_token = value
+                    break
     if not access_token:
         # Fallback transport: short-lived session token on the query string.
         access_token = websocket.query_params.get("token", "") or ""
@@ -168,9 +185,10 @@ async def _default_ws_verify(
 async def _resolve_ws_claims(websocket: WebSocket) -> Optional[Dict[str, Any]]:
     """Resolve verified SuperTokens session claims for a WS handshake.
 
-    Always verifies a SuperTokens session only: the credential is taken
-    cookie-first (``sAccessToken``) with a short-lived ``token`` query-param
-    fallback (Req 7.5). Returns the verified claims mapping, or ``None`` when
+    Always verifies a SuperTokens session only: the credential is read in the
+    order ``Authorization: Bearer`` header → ``sAccessToken`` cookie →
+    short-lived ``token`` query parameter (Req 7.5, 14.1). Returns the verified
+    claims mapping, or ``None`` when
     the connection cannot be associated with a verified session (Req 7.1, 7.2).
     """
     verifier = _ws_session_verifier or _default_ws_verify

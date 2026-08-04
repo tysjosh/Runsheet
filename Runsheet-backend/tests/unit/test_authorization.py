@@ -9,26 +9,33 @@ Covers:
 - multiple allowed roles: holding any one grants access
 - non-string / empty / None role lists are handled safely
 - ``require_pii_access`` permits iff ``has_pii_access`` is true
+- ``require_driver_identity`` requires the exact ``driver`` role, then a
+  non-empty ``driver_id``, and returns that identifier
 - raised exceptions carry HTTP 403 status and do not leak the held role list
 
-Validates: Requirements 4.1, 4.2, 4.3, 4.5
+Validates: Requirements 4.1, 4.2, 4.3, 4.5, 1.5, 1.6, 15.14
 """
 
 import pytest
 
-from auth.authorization import require_pii_access, require_role
+from auth.authorization import (
+    require_driver_identity,
+    require_pii_access,
+    require_role,
+)
 from errors.codes import ErrorCode
 from errors.exceptions import AppException
 from ops.middleware.tenant_guard import TenantContext
 
 
-def _ctx(roles=None, has_pii_access=False) -> TenantContext:
+def _ctx(roles=None, has_pii_access=False, driver_id=None) -> TenantContext:
     """Build a minimal TenantContext for authorization tests."""
     return TenantContext(
         tenant_id="tenant-a",
         user_id="user-1",
         has_pii_access=has_pii_access,
         roles=list(roles) if roles is not None else [],
+        driver_id=driver_id,
     )
 
 
@@ -133,3 +140,53 @@ def test_require_pii_access_rejects_when_flag_false():
         require_pii_access(_ctx(has_pii_access=False))
     assert exc_info.value.status_code == 403
     assert exc_info.value.error_code == ErrorCode.FORBIDDEN
+
+
+# ---------------------------------------------------------------------------
+# require_driver_identity (Req 1.5, 1.6, 15.14)
+# ---------------------------------------------------------------------------
+
+
+def test_require_driver_identity_returns_canonical_driver_id():
+    """A driver-role context with a driver_id yields that identifier."""
+    ctx = _ctx(roles=["driver"], driver_id="drv-001")
+    assert require_driver_identity(ctx) == "drv-001"
+
+
+def test_require_driver_identity_rejects_when_driver_role_absent():
+    """The driver role is required by exact match, with 403 INSUFFICIENT_ROLE."""
+    ctx = _ctx(roles=["dispatcher"], driver_id="drv-001")
+    with pytest.raises(AppException) as exc_info:
+        require_driver_identity(ctx)
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.error_code == ErrorCode.INSUFFICIENT_ROLE
+
+
+def test_require_driver_identity_role_check_is_exact_match():
+    """A held 'driver_admin' does not satisfy the 'driver' requirement."""
+    ctx = _ctx(roles=["driver_admin"], driver_id="drv-001")
+    with pytest.raises(AppException) as exc_info:
+        require_driver_identity(ctx)
+    assert exc_info.value.error_code == ErrorCode.INSUFFICIENT_ROLE
+
+
+@pytest.mark.parametrize("missing", [None, ""])
+def test_require_driver_identity_rejects_missing_driver_id(missing):
+    """A driver-role context with no driver_id is rejected with 403."""
+    ctx = _ctx(roles=["driver"], driver_id=missing)
+    with pytest.raises(AppException) as exc_info:
+        require_driver_identity(ctx)
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.error_code == ErrorCode.DRIVER_IDENTITY_MISSING
+
+
+def test_require_driver_identity_rejection_leaks_no_identities():
+    """Rejections expose only the requirement, never held roles or identities."""
+    ctx = _ctx(roles=["secret_internal_role"], driver_id="drv-secret")
+    with pytest.raises(AppException) as exc_info:
+        require_driver_identity(ctx)
+    details = exc_info.value.details or {}
+    assert details.get("required_roles") == ["driver"]
+    payload = f"{exc_info.value.message}{details}"
+    assert "secret_internal_role" not in payload
+    assert "drv-secret" not in payload

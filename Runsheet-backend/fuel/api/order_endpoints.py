@@ -6,7 +6,8 @@ driver assignment, hold/release-hold, cancel, and bulk intake:
 
 * ``POST /api/orders`` — dispatcher keyboard create (JWT, dispatcher|admin).
 * ``POST /api/orders/bulk`` — batch upload ≤ 1000 rows (JWT, dispatcher|admin).
-* ``GET /api/orders`` — tenant-scoped list with filters (JWT, any role).
+* ``GET /api/orders`` — tenant-scoped list with filters
+  (JWT, dispatcher|admin — Req 3.13).
 * ``GET /api/orders/{order_id}`` — single order (JWT, any role).
 * ``GET /api/orders/{order_id}/events`` — event timeline (JWT, any role).
 * ``PATCH /api/orders/{order_id}/status`` — state-machine-guarded transition
@@ -35,6 +36,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, Query, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 
+from auth.authorization import require_role
 from errors.exceptions import (
     insufficient_role,
     missing_client_event_id,
@@ -45,7 +47,6 @@ from errors.exceptions import (
 from fuel.order_models import FuelOrder, FuelOrderEvent, OrderStatus
 from fuel.order_state_machine import (
     assert_transition,
-    assert_window_present_for_transition,
     is_terminal_status,
 )
 from fuel.services.order_id_generator import mint_event_id
@@ -74,6 +75,7 @@ _order_intake_pipeline: Any = None
 _order_repository: Any = None
 _driver_repository: Any = None
 _driver_counter_service: Any = None
+_order_service: Any = None
 #: Resolver used to expand cross-module references on reads. Defaults to the
 #: process-wide resolver; tests may inject one pre-loaded with fake loaders.
 _ref_resolver: Any = None
@@ -85,6 +87,7 @@ def configure_order_endpoints(
     order_repository: Any,
     driver_repository: Any = None,
     driver_counter_service: Any = None,
+    order_service: Any = None,
     ref_resolver: Any = None,
 ) -> None:
     """Wire service dependencies into the order endpoints module.
@@ -95,12 +98,26 @@ def configure_order_endpoints(
     ``ref_resolver`` overrides the process-wide resolver used to expand
     ``?expand=...`` links; when omitted the shared resolver is used.
     """
-    global _order_intake_pipeline, _order_repository, _driver_repository, _driver_counter_service
+    global _order_intake_pipeline, _order_repository, _driver_repository
+    global _driver_counter_service, _order_service
     global _ref_resolver
     _order_intake_pipeline = order_intake_pipeline
     _order_repository = order_repository
     _driver_repository = driver_repository
     _driver_counter_service = driver_counter_service
+    if order_service is not None:
+        _order_service = order_service
+    elif order_repository is not None:
+        # Narrow test apps configure this router without bootstrapping the
+        # application container. Give them the same canonical writer; the
+        # production bootstrap re-wires the shared subscriber-bearing service.
+        from fuel.services.order_service import OrderService
+
+        _order_service = OrderService(
+            order_repo=order_repository,
+            ws_manager=None,
+            driver_counter_service=driver_counter_service,
+        )
     _ref_resolver = ref_resolver
 
 
@@ -139,6 +156,15 @@ def _get_driver_repository():
 def _get_driver_counter_service():
     """Return the configured DriverCounterService or None (optional dep)."""
     return _driver_counter_service
+
+
+def _get_order_service():
+    if _order_service is None:
+        raise RuntimeError(
+            "Order endpoints not configured (order_service missing). "
+            "Call configure_order_endpoints() during startup."
+        )
+    return _order_service
 
 
 async def _apply_order_update(
@@ -667,9 +693,17 @@ async def list_orders(
     sort: Optional[str] = Query(default=None),
 ) -> OrderListResponse:
     """List fuel orders for the tenant with optional filters.
-    Any authenticated role can read orders.
-    Validates: Requirement 2.5.
+
+    This is a dispatcher surface: it accepts a ``driver_id`` filter but scopes
+    nothing to the caller, so a session holding only the ``driver`` role could
+    previously read every order in the tenant. The gate below closes that hole
+    — a ``driver``-only session now receives HTTP 403 ``INSUFFICIENT_ROLE`` and
+    must use ``GET /api/driver/work``, which is scoped to the caller's own
+    canonical ``driver_id`` (Req 3.13).
+
+    Validates: Requirements 2.5, 3.13.
     """
+    require_role(tenant, "dispatcher", "admin")
     repo = _get_repository()
     result = await repo.search(
         tenant_id=tenant.tenant_id,
@@ -801,86 +835,14 @@ async def update_order_status(
             details={"order_id": order_id},
         )
 
-    assert_transition(order.status, body.new_status)
-    order_dict = order.model_dump(mode="json")
-    assert_window_present_for_transition(order_dict, body.new_status)
-
-    now = utcnow()
-    update_fields: Dict[str, Any] = {
-        "status": body.new_status,
-        "updated_at": now.isoformat(),
-        "last_event_timestamp": now.isoformat(),
-    }
-    if order.status == "on_hold" and body.new_status != "on_hold":
-        update_fields["hold_reason"] = None
-
-    await _apply_order_update(repo, order, order_id, tenant.tenant_id, update_fields)
-
-    event_doc = {
-        "event_id": mint_event_id(),
-        "order_id": order_id,
-        "tenant_id": tenant.tenant_id,
-        "event_type": f"order_{body.new_status}",
-        "event_payload": {
-            "old_status": order.status,
-            "new_status": body.new_status,
-            "reason": body.reason,
-            "notes": body.notes,
-            "actor_user_id": tenant.user_id,
-        },
-        "event_timestamp": now.isoformat(),
-        "ingested_at": now.isoformat(),
-        "source_schema_version": "1.0",
-        "trace_id": str(uuid.uuid4()),
-    }
-    await repo.append_event(tenant.tenant_id, event_doc)
-
-    # Update driver counters on transitions that affect workload
-    # (dispatched|in_transit → delivered|failed|cancelled)
-    counter_svc = _get_driver_counter_service()
-    if counter_svc is not None and order.assigned_driver_id:
-        old_status = order.status
-        new_status = body.new_status
-        _DECREMENT_ACTIVE = {
-            ("dispatched", "delivered"),
-            ("dispatched", "failed"),
-            ("dispatched", "cancelled"),
-            ("in_transit", "delivered"),
-            ("in_transit", "failed"),
-        }
-        _INCREMENT_COMPLETED = {
-            ("dispatched", "delivered"),
-            ("in_transit", "delivered"),
-        }
-        transition = (old_status, new_status)
-        delta_active = -1 if transition in _DECREMENT_ACTIVE else 0
-        delta_completed = 1 if transition in _INCREMENT_COMPLETED else 0
-
-        if delta_active != 0 or delta_completed != 0:
-            try:
-                await counter_svc.increment_counters(
-                    driver_id=order.assigned_driver_id,
-                    tenant_id=tenant.tenant_id,
-                    delta_active=delta_active,
-                    delta_completed=delta_completed,
-                )
-            except Exception as exc:
-                # Counter failures MUST NOT block the main path
-                logger.warning(
-                    "order_endpoints.status: counter update failed for "
-                    "driver=%s, order=%s: %s",
-                    order.assigned_driver_id,
-                    order_id,
-                    exc,
-                )
-
-    updated_order = await repo.get(tenant.tenant_id, order_id)
-    if updated_order is None:
-        raise resource_not_found(
-            message=f"Order '{order_id}' not found after update",
-            details={"order_id": order_id},
-        )
-    return OrderResponse.from_model(updated_order)
+    updated = await _get_order_service().apply_status_transition(
+        order=order.model_dump(mode="python"),
+        new_status=body.new_status,
+        reason=body.reason,
+        notes=body.notes,
+        actor_user_id=tenant.user_id,
+    )
+    return OrderResponse.from_model(FuelOrder(**updated))
 
 
 # ---------------------------------------------------------------------------
@@ -955,25 +917,6 @@ async def assign_driver(
         "trace_id": str(uuid.uuid4()),
     }
     await repo.append_event(tenant.tenant_id, event_doc)
-
-    # Increment driver's active_order_count on successful assignment
-    counter_svc = _get_driver_counter_service()
-    if counter_svc is not None:
-        try:
-            await counter_svc.increment_counters(
-                driver_id=body.driver_id,
-                tenant_id=tenant.tenant_id,
-                delta_active=1,
-            )
-        except Exception as exc:
-            # Counter failures MUST NOT block the main path
-            logger.warning(
-                "order_endpoints.assign: counter increment failed for "
-                "driver=%s, order=%s: %s",
-                body.driver_id,
-                order_id,
-                exc,
-            )
 
     updated_order = await repo.get(tenant.tenant_id, order_id)
     if updated_order is None:

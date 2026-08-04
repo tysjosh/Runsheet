@@ -12,6 +12,10 @@ Implements :class:`FuelOrderRepository` with:
 * ``search`` — full filter set from Req 2.5.1 (status, customer_id,
   driver_id, call_type, product_code, start_date, end_date,
   intake_channel, pagination, sort).
+* ``search_for_driver`` — the driver "my work" read: one tenant-filtered
+  search scoped to a single ``assigned_driver_id``, a ``terms`` filter over
+  statuses, an optional ``delivery_window_start`` range, sorted by
+  ``delivery_window_start`` ascending.
 * ``append_event`` — append an immutable event to ``fuel_order_events``.
 * ``get_events_for_order`` — retrieve the event timeline for an order.
 
@@ -27,7 +31,7 @@ Validates: Requirements 1.1.6, 9.1.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from fuel.order_models import FuelOrder, FuelOrderEvent
 from fuel.services.order_es_mappings import (
@@ -226,6 +230,10 @@ class FuelOrderRepository:
 
     DEFAULT_LIST_SIZE: int = 500
     DEFAULT_PAGE_SIZE: int = 20
+    #: Page size for the driver "my work" read (Req 3.15 budgets 50 orders).
+    DEFAULT_DRIVER_PAGE_SIZE: int = 50
+    #: Statuses a driver's work list carries when the caller supplies none.
+    DEFAULT_DRIVER_STATUSES: tuple = ("dispatched", "in_transit")
 
     def __init__(
         self,
@@ -529,6 +537,7 @@ class FuelOrderRepository:
         *,
         status: Optional[str] = None,
         customer_id: Optional[str] = None,
+        customer_phone: Optional[str] = None,
         driver_id: Optional[str] = None,
         call_type: Optional[str] = None,
         product_code: Optional[str] = None,
@@ -546,6 +555,7 @@ class FuelOrderRepository:
             tenant_id: The caller's tenant.
             status: Filter by order status.
             customer_id: Filter by customer_id.
+            customer_phone: Filter by customer_phone (exact match).
             driver_id: Filter by assigned_driver_id.
             call_type: Filter by call_type.
             product_code: Filter by product_code.
@@ -581,6 +591,7 @@ class FuelOrderRepository:
         term_filters = {
             "status": status,
             "customer_id": customer_id,
+            "customer_phone": customer_phone,
             "assigned_driver_id": driver_id,
             "call_type": call_type,
             "product_code": product_code,
@@ -625,6 +636,8 @@ class FuelOrderRepository:
             filters.append({"term": {"status": status}})
         if customer_id:
             filters.append({"term": {"customer_id": customer_id}})
+        if customer_phone:
+            filters.append({"term": {"customer_phone": customer_phone}})
         if driver_id:
             filters.append({"term": {"assigned_driver_id": driver_id}})
         if call_type:
@@ -705,6 +718,161 @@ class FuelOrderRepository:
             "page": page,
             "size": size,
         }
+
+    # ------------------------------------------------------------------
+    # Search for a single driver (Req 3.1, 3.3, 3.4, 3.5)
+    # ------------------------------------------------------------------
+
+    async def search_for_driver(
+        self,
+        tenant_id: str,
+        driver_id: str,
+        *,
+        statuses: Sequence[str] = DEFAULT_DRIVER_STATUSES,
+        window_start: Optional[str] = None,
+        window_end: Optional[str] = None,
+        page: int = 1,
+        size: int = DEFAULT_DRIVER_PAGE_SIZE,
+    ) -> Dict[str, Any]:
+        """Return the orders assigned to one driver, window-ordered.
+
+        One tenant-filtered search: ``term assigned_driver_id`` +
+        ``terms status`` + an optional ``range`` on
+        ``delivery_window_start``, sorted ``delivery_window_start``
+        ascending with ``from`` / ``size`` paging. ``search()`` cannot serve
+        this because it takes a single ``status`` string and ranges only on
+        ``created_at``.
+
+        Parameters:
+            tenant_id: The caller's tenant.
+            driver_id: The canonical driver identity to scope to. Never
+                accepted from a client — derived from the session.
+            statuses: Statuses to include. Falls back to
+                ``("dispatched", "in_transit")`` when empty or blank.
+            window_start: Include orders whose ``delivery_window_start`` is
+                on or after this ISO-8601 timestamp.
+            window_end: Include orders whose ``delivery_window_start`` is on
+                or before this ISO-8601 timestamp.
+            page: 1-based page number.
+            size: Page size.
+
+        Returns:
+            A dict with ``orders`` (list of FuelOrder), ``total`` (int),
+            ``page`` (int), ``size`` (int).
+
+        Every returned source is re-validated on ``tenant_id`` **and**
+        ``assigned_driver_id`` before inclusion, so a filter regression on
+        either axis drops the document instead of leaking another tenant's
+        or another driver's work (Req 15.11).
+        """
+        self._require_tenant(tenant_id)
+        if not isinstance(driver_id, str) or not driver_id.strip():
+            raise ValueError("driver_id must be a non-empty string")
+        if page < 1:
+            page = 1
+        if size <= 0:
+            size = self.DEFAULT_DRIVER_PAGE_SIZE
+
+        status_values = [
+            s for s in (statuses or ()) if isinstance(s, str) and s.strip()
+        ]
+        if not status_values:
+            status_values = list(self.DEFAULT_DRIVER_STATUSES)
+
+        # Read-cutover: serve from Postgres when enabled. ``in_filters`` is
+        # the Postgres analogue of the ES ``terms`` filter, and the range is
+        # a lexical comparison on the same ISO-8601 window field.
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_hybrid_search,
+        )
+        pg = await read_hybrid_search(
+            "fuel_order", tenant_id,
+            term_filters={"assigned_driver_id": driver_id},
+            in_filters={"status": status_values},
+            range_field="delivery_window_start",
+            range_gte=window_start, range_lte=window_end,
+            sort_field="delivery_window_start", sort_order="asc",
+            page=page, size=size,
+        )
+        if pg is not _NOT_CUT_OVER:
+            return {
+                "orders": self._validated_driver_orders(
+                    pg["items"], tenant_id, driver_id
+                ),
+                "total": pg["total"],
+                "page": pg["page"],
+                "size": pg["size"],
+            }
+
+        filters: List[Dict[str, Any]] = [
+            {"term": {"assigned_driver_id": driver_id}},
+            {"terms": {"status": status_values}},
+        ]
+        if window_start or window_end:
+            window_range: Dict[str, Any] = {}
+            if window_start:
+                window_range["gte"] = window_start
+            if window_end:
+                window_range["lte"] = window_end
+            filters.append(
+                {"range": {"delivery_window_start": window_range}}
+            )
+
+        query = inject_tenant_filter(
+            {"query": {"bool": {"must": filters}}},
+            tenant_id,
+        )
+        query["from"] = (page - 1) * size
+        query["size"] = size
+        query["sort"] = [{"delivery_window_start": {"order": "asc"}}]
+
+        resp = await self._es.search_documents(
+            self._orders_index, query, size
+        )
+
+        return {
+            "orders": self._validated_driver_orders(
+                _extract_sources(resp), tenant_id, driver_id
+            ),
+            "total": _extract_total(resp),
+            "page": page,
+            "size": size,
+        }
+
+    @staticmethod
+    def _validated_driver_orders(
+        sources: List[Dict[str, Any]],
+        tenant_id: str,
+        driver_id: str,
+    ) -> List[FuelOrder]:
+        """Re-validate tenant and driver ownership on every source.
+
+        Defense-in-depth for :meth:`search_for_driver`: a document whose
+        ``tenant_id`` or ``assigned_driver_id`` does not match what was asked
+        for is dropped rather than returned (Req 15.11).
+        """
+        out: List[FuelOrder] = []
+        for source in sources:
+            if source.get("tenant_id") != tenant_id:
+                logger.warning(
+                    "FuelOrderRepository.search_for_driver: dropping doc "
+                    "with mismatched tenant_id %s (expected %s)",
+                    source.get("tenant_id"),
+                    tenant_id,
+                )
+                continue
+            if source.get("assigned_driver_id") != driver_id:
+                logger.warning(
+                    "FuelOrderRepository.search_for_driver: dropping "
+                    "order %s assigned to a different driver",
+                    source.get("order_id"),
+                )
+                continue
+            model = _safe_order_load(source)
+            if model is not None:
+                out.append(model)
+        return out
 
     # ------------------------------------------------------------------
     # Append event

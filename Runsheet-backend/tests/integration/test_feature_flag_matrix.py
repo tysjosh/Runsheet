@@ -38,6 +38,18 @@ from ops.services.ops_es_service import OpsElasticsearchService
 
 pytestmark = pytest.mark.integration
 
+
+@pytest.fixture(autouse=True)
+def enable_legacy_ng_delivery(monkeypatch):
+    """The matrix asserts *per-tenant* ops flag behaviour; the deployment-wide
+    ``legacy_ng_delivery`` gate (default OFF) is enabled explicitly so the
+    matrix still exercises the per-tenant path.
+
+    Audit reference: product-owner-audit-2026-05-08 recommendation #1.
+    """
+    monkeypatch.setenv("LEGACY_NG_DELIVERY_ENABLED", "true")
+
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
