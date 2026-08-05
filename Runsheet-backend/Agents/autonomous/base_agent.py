@@ -102,7 +102,18 @@ class AutonomousAgentBase(ABC):
         Exceptions inside ``monitor_cycle`` are caught and logged so the
         loop never dies unexpectedly.
         """
+        from persistence.leader_election import is_sweep_leader
+
         while self._running:
+            # Only the sweep leader acts. Two processes running the same agent
+            # is not merely duplicated work: ``_cooldown_tracker`` is
+            # per-process memory, so each copy has its own idea of what it has
+            # already handled and both re-escalate the same entity. Standing
+            # down keeps the loop alive so leadership can move here later.
+            if not is_sweep_leader():
+                await asyncio.sleep(self.poll_interval)
+                continue
+
             cycle_start = datetime.now(timezone.utc)
             try:
                 detections, actions = await self.monitor_cycle()

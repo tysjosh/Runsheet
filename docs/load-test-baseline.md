@@ -42,12 +42,15 @@ These numbers characterise *that* setup. They are a baseline to regress against
 and a way to see the shape of a limit — not a capacity plan. Treat the absolute
 values as meaningless for production sizing and the *shape* as informative.
 
-## What this surfaced: the app was single-instance only
+## What this surfaced: the app was single-instance only — now fixed
 
 The obvious answer to a saturated worker is more workers or more replicas. That
-would have been unsafe, and this is the more consequential finding.
+was unsafe when this baseline was taken, and it was the more consequential
+finding. **It has since been fixed** — see the leader-election section below and
+`persistence/leader_election.py`. The throughput numbers above still stand as a
+per-process figure; the remedy for them is now available.
 
-Every background job starts unconditionally in every process, with no
+Every background job started unconditionally in every process, with no
 leader election and no guard:
 
 - the outbox relay (`bootstrap/persistence.py`)
@@ -77,13 +80,33 @@ re-contends when it changes. Verified by terminating the lock backend while a
 second connection held the lock: the relay drained 0 times in the following 1.5 s
 and logged the loss at WARNING.
 
-**Not fixed: the periodic sweeps.** Each still runs in every process. Two
-instances means two AR-aging snapshots for the same day and two overdue sweeps
-racing the same invoices — and `invoice_events` has a unique
-`(invoice_id, sequence_number)`, so a race there raises rather than
-double-writing. They need the same advisory-lock treatment, or extraction into a
-single worker process. **Until then this backend runs as exactly one instance,**
-and a rolling deploy that briefly overlaps two is outside what has been verified.
+**Now fixed: the periodic sweeps and the agents.** All 13 sweeps and every
+autonomous agent are gated on an elected leader
+(`persistence/leader_election.py`). One Postgres advisory lock represents the
+"run the periodic jobs" role; `run_periodic` skips the cycle on a follower and
+keeps the loop alive so leadership can move there later.
+
+One role lock rather than one per job, forced by the connection budget: a
+session-scoped lock needs a connection that lives as long as the loop, and ~34
+singleton jobs against `database_pool_size` 10 + `database_max_overflow` 5 would
+exhaust the pool and block the request path. The cost is that background work is
+not spread across replicas — one replica runs all of it.
+
+The lock uses the two-argument `pg_try_advisory_lock(classid, objid)` form, which
+Postgres keeps in a separate key space from the relay's one-argument bigint key;
+verified against a real server by granting both at once with deliberately
+colliding bytes.
+
+Verified with two real backend processes against one Postgres: both derived the
+same lock objid, one logged `This process is now the sweep leader`, the other
+`Sweep leader held elsewhere — standing by`, both answered `/health/live` 200 and
+`/api/orders` 401, and killing the leader moved leadership to the standby within
+one verify interval while it kept serving traffic.
+
+**So a rolling deploy is now the supported path** and `desiredCount` may exceed 1.
+The remaining caveat is not about the sweeps: a rolling deploy runs old and new
+code simultaneously against a migrated schema, so a destructive migration still
+wants a serialised deploy.
 
 ## Suggested gate
 

@@ -16,6 +16,7 @@ from typing import Optional
 
 from bootstrap.container import ServiceContainer
 from bootstrap.routing import mount_router
+from persistence.leader_election import run_periodic
 
 logger = logging.getLogger(__name__)
 
@@ -580,24 +581,22 @@ async def initialize(app, container: ServiceContainer) -> None:
     # scheduled it, so expired-but-still-pending approvals piled up in the
     # queue (and inflated the operator alert badge). Mirrors the
     # asyncio.create_task periodic-job pattern used in bootstrap/core.py.
-    async def _periodic_approval_expiry() -> None:
-        """Background task that expires stale pending approvals."""
-        try:
-            while True:
-                await asyncio.sleep(APPROVAL_EXPIRY_INTERVAL_SECONDS)
-                try:
-                    expired = await approval_queue_service.expire_stale()
-                    if expired:
-                        logger.info(
-                            "Approval expiry sweep: %d approval(s) expired",
-                            expired,
-                        )
-                except Exception as exc:
-                    logger.error("Approval expiry sweep failed: %s", exc)
-        except asyncio.CancelledError:
-            logger.info("Approval expiry task cancelled")
+    async def _approval_expiry_cycle() -> None:
+        """One pass expiring stale pending approvals."""
+        expired = await approval_queue_service.expire_stale()
+        if expired:
+            logger.info(
+                "Approval expiry sweep: %d approval(s) expired",
+                expired,
+            )
 
-    _approval_expiry_task = asyncio.create_task(_periodic_approval_expiry())
+    _approval_expiry_task = asyncio.create_task(
+        run_periodic(
+            "agents.approval-expiry",
+            APPROVAL_EXPIRY_INTERVAL_SECONDS,
+            _approval_expiry_cycle,
+        )
+    )
     logger.info(
         "Approval expiry sweep started (interval: %ds)",
         APPROVAL_EXPIRY_INTERVAL_SECONDS,
@@ -1669,31 +1668,24 @@ async def initialize(app, container: ServiceContainer) -> None:
             )
             container.invoice_erp_export_worker = invoice_erp_export_worker
 
-            async def _periodic_invoice_erp_export() -> None:
-                try:
-                    while True:
-                        try:
-                            counts = (
-                                await invoice_erp_export_worker.export_pending()
-                            )
-                            if counts["examined"]:
-                                logger.info(
-                                    "Invoice ERP export recovery cycle: %s",
-                                    counts,
-                                )
-                        except Exception as exc:
-                            logger.exception(
-                                "Invoice ERP export recovery cycle failed: %s",
-                                exc,
-                            )
-                        await asyncio.sleep(ERP_EXPORT_INTERVAL_SECONDS)
-                except asyncio.CancelledError:
+            async def _invoice_erp_export_cycle() -> None:
+                """One recovery pass exporting pending invoices to the ERP."""
+                counts = await invoice_erp_export_worker.export_pending()
+                if counts["examined"]:
                     logger.info(
-                        "Invoice ERP export recovery task cancelled"
+                        "Invoice ERP export recovery cycle: %s",
+                        counts,
                     )
 
+            # The original loop worked before its first sleep, so the recovery
+            # pass ran at boot. ``run_immediately`` preserves that.
             _erp_invoice_export_task = asyncio.create_task(
-                _periodic_invoice_erp_export()
+                run_periodic(
+                    "commerce.invoice-erp-export",
+                    ERP_EXPORT_INTERVAL_SECONDS,
+                    _invoice_erp_export_cycle,
+                    run_immediately=True,
+                )
             )
             logger.info(
                 "Invoice ERP export recovery started (interval: %ds)",

@@ -12,22 +12,36 @@ procedure, and this document is what that procedure runs on.
 
 Everything else follows from these.
 
-1. **The API runs as exactly one process.** Every background job starts
-   unconditionally in every process. The outbox relay now holds a Postgres
-   advisory lock and stands down if it cannot get it, but the **~15 periodic
-   sweeps have no leader election** — see
-   [docs/load-test-baseline.md](load-test-baseline.md). Two processes means two
-   AR-aging snapshots for the same day and two overdue sweeps racing the same
-   invoices, where `invoice_events` has a unique `(invoice_id, sequence_number)`
-   and a race raises rather than double-writes.
-2. **Scaling up does not help much either.** The Elasticsearch client is the
-   *synchronous* `elasticsearch.Elasticsearch`, and `index_document` /
-   `search_documents` call it directly inside `async def` with no
-   `asyncio.to_thread`. Every ES round trip blocks the event loop. That is the
-   mechanism behind the measured ceiling (8× concurrency bought 1.8×
-   throughput), and it means extra vCPU on a single-process task buys almost
-   nothing. `uvicorn --workers N` would give real parallelism — and is blocked
-   by fact 1, since each worker is a process with its own sweeps.
+1. **The API can now run more than one process — this changed.** Every
+   background job still *starts* in every process, but leadership is now
+   elected: `persistence/leader_election.py` holds one Postgres advisory lock
+   for the "run the periodic jobs" role, and `run_periodic` skips the cycle on a
+   follower. All 13 periodic sweeps and every autonomous agent (via
+   `AutonomousAgentBase._run_loop`) are gated on it, and the outbox relay keeps
+   its own separate lock.
+
+   Verified with two real backend processes against one Postgres: both derived
+   the same lock objid, one logged `This process is now the sweep leader`, the
+   other `Sweep leader held elsewhere — standing by`, both served `/health/live`
+   200 and `/api/orders` 401, and killing the leader moved leadership to the
+   standby within one verify interval while it kept serving.
+
+   Leadership is a single *role*, not one lock per job, and that is forced by
+   arithmetic: a session-scoped lock needs a connection that lives as long as
+   the loop, and ~34 singleton jobs against `database_pool_size` 10 +
+   `database_max_overflow` 5 would exhaust the pool. So background work is not
+   spread across replicas — one replica runs all of it. Spreading it needs
+   transaction-scoped locks per job, which is a larger change and is not
+   required for safe deploys.
+2. **Scale out, not up.** The Elasticsearch client is the *synchronous*
+   `elasticsearch.Elasticsearch`, and `index_document` / `search_documents` call
+   it directly inside `async def` with no `asyncio.to_thread`. Every ES round
+   trip blocks the event loop. That is the mechanism behind the measured ceiling
+   (8× concurrency bought 1.8× throughput), and it means extra vCPU on one
+   process buys almost nothing — a second process buys a second event loop.
+   `uvicorn --workers N` is also viable now that fact 1 is fixed: each worker is
+   a process, and only one of them wins the sweep lock. More tasks is still
+   preferable to more workers per task, because it also buys AZ redundancy.
 3. **Postgres holds three guarantees nothing else can.** Invoice numbering,
    idempotency-key uniqueness, and the credit-check `SELECT ... FOR UPDATE`.
    Startup refuses staging/production without `DATABASE_URL` for exactly this
@@ -47,7 +61,7 @@ Internet
   └── ALB (public subnets, ACM cert)
         │  HTTP :443 → target group :8080, health check /health/live
         ▼
-      ECS Fargate service "runsheet-api"   desiredCount = 1   (private subnets)
+      ECS Fargate service "runsheet-api"   desiredCount >= 2  (private subnets)
         │
         ├──► Aurora PostgreSQL (writer endpoint only)      private subnets
         ├──► ElastiCache Redis (cluster mode DISABLED)     private subnets
@@ -60,42 +74,43 @@ Internet
         · scripts.es_only_backup export   (scheduled, EventBridge Scheduler)
 ```
 
-Two AZs minimum for the ALB and the Aurora subnet group. The API task itself
-lives in one AZ at a time because there is one of it; AZ redundancy here buys
-recovery speed, not concurrency.
+Two AZs minimum for the ALB, the Aurora subnet group, and now the API service
+itself.
 
-### Why `desiredCount = 1`, and what that costs
+### Deployment: a normal rolling update
 
-The default ECS rolling deployment (`minimumHealthyPercent: 100`,
-`maximumPercent: 200`) starts the new task **before** stopping the old one. For
-this application that overlap is the unsafe state, briefly — two sets of periodic
-sweeps.
+Leader election removed the stop-then-start requirement. Use the ECS defaults —
+`minimumHealthyPercent: 100`, `maximumPercent: 200` — so the new task starts and
+passes its health check before the old one drains. **No downtime window.**
 
-Set `minimumHealthyPercent: 0` and `maximumPercent: 100`. ECS then drains and
-stops the old task before starting the new one, which means a **real
-downtime window** of roughly the readiness time (~20 s locally, plus image pull
-and ALB registration). That is the honest price of fact 1. Do not paper over it
-with a rolling deploy that "only overlaps for a few seconds" — nothing has been
-verified about that overlap.
+The overlap that used to be the unsafe state is now safe by construction: during
+a rolling deploy the old and new tasks both run, exactly one of them holds the
+sweep lock, and the other skips every cycle. When the old task stops, its lock
+connection closes and the new task picks up leadership within one verify interval
+(5 s default).
 
-**The way out, when someone wants it:** split the process. Give the periodic
-sweeps the same advisory-lock treatment the relay got, or extract them into a
-second Fargate service (`runsheet-worker`, `desiredCount: 1`) that runs only
-the schedulers while the API service runs with sweeps disabled and scales
-normally. That is a code change, not a deployment choice, and it is the single
-highest-value piece of work for AWS readiness.
+Two consequences worth stating plainly:
+
+- **A deploy briefly stops the periodic jobs**, for up to one verify interval
+  while leadership moves. Every sweep is idempotent and interval-driven, and the
+  shortest interval is 60 s, so a 5 s gap is not observable. It is not a missed
+  run, just a later one.
+- **Autoscaling the API service is now safe.** It was not before. Scale on ALB
+  request count or target-response-time rather than CPU, because ES calls block
+  the event loop (fact 2) and CPU under-reports load.
 
 ### ALB health check: `/health/live`, not `/health/ready`
 
-This differs from the deploy runbook on purpose, and the reason is specific to
-running one task.
+This differs from the deploy runbook on purpose, and it matters more with several
+tasks, not less.
 
 `/health/ready` returns **503 when Elasticsearch is unreachable**. Wired into the
-target group, an Elastic Cloud blip marks the only task unhealthy, ECS kills it,
-the replacement checks the same unreachable dependency and is also killed — a
-dependency wobble becomes a task crash loop and a total outage. `/health/live`
-returns 200 with every datastore down, which is the correct signal for "should
-this process be restarted".
+target group, an Elastic Cloud blip marks *every* task unhealthy at once, because
+they all share the same dependency. ECS kills them, each replacement checks the
+same unreachable cluster and is also killed — a dependency wobble becomes a
+fleet-wide crash loop. Replicas do not help here; they all fail together.
+`/health/live` returns 200 with every datastore down, which is the correct signal
+for "should this process be restarted".
 
 So: **target group → `/health/live`**. Keep `/health/ready` as the deploy gate,
 checked by the deploy script after the task is running and before it is declared
@@ -115,16 +130,23 @@ URL anywhere in the code, so a reader endpoint cannot be used without a code
 change. Provisioning replicas is still worth it for failover speed — just do not
 expect read offload.
 
-Aurora Serverless v2 fits the measured load well (one task, ≤16 connections,
-bursty). Provisioned instances are equally fine; the choice is cost shape, not
+Aurora Serverless v2 fits the measured load well (bursty, modest connection
+count). Provisioned instances are equally fine; the choice is cost shape, not
 correctness.
 
 ### Connections
 
-`database_pool_size` 10 + `database_max_overflow` 5 = **15 per process**, plus
-the migration job's own short-lived pool. One of those 15 is held permanently by
-the outbox relay's lock session (below). Nothing here needs connection pooling
-infrastructure.
+`database_pool_size` 10 + `database_max_overflow` 5 = **15 per process**, plus the
+migration job's own short-lived pool. **Two of those 15 are held permanently**:
+one by the outbox relay's lock session and one by the sweep leader's, both for
+the same reason — a session-scoped advisory lock has to be held by a connection
+that lives as long as the loop. Both are idle-in-transaction by design.
+
+Budget `15 × task count` and check it against the instance's `max_connections`
+before scaling out. At 4 tasks that is 60, which is comfortable; it is the number
+to watch if the service is autoscaled aggressively. This is also the constraint
+that forced one role lock instead of one lock per job — see
+`persistence/leader_election.py`.
 
 ### Do not put RDS Proxy in front of this
 
@@ -330,20 +352,28 @@ Deploy order, all of it from the runbook, mapped onto AWS primitives:
    One task, waited on to completion, exit code checked. Not in the app
    entrypoint — the runbook and the Dockerfile both say why.
 3. **Verify the chain.** `ecs run-task … python -m scripts.check_migrations`.
-4. **Deploy.** Update the service to the new task-definition revision with
-   `minimumHealthyPercent: 0` / `maximumPercent: 100`.
+4. **Deploy.** Update the service to the new task-definition revision. Default
+   rolling update — no special percentages needed.
 5. **Gate.** `curl /health/ready` → 200 and `curl /api/orders` → 401. A 200 on
    `/api/orders` without a session means the tenant guard is not enforcing:
-   roll back.
+   roll back. Also confirm exactly one task logged `is now the sweep leader`.
 6. **Rollback.** Update the service back to the previous task-definition
    revision. Sufficient whenever the schema did not change. If a migration must
    be undone, restore the snapshot — and note that Aurora PITR/snapshot restore
    produces a new endpoint.
 
-Migrations and the running app are **not** decoupled here: no expand/contract
-convention is in place and the chain already contains a destructive revision, so
-the schema change and the code that expects it must land together. With the
-stop-then-start deployment above, that is consistent.
+Migrations and the running app are **not** decoupled: no expand/contract
+convention is in place and the chain already contains a destructive revision.
+With a rolling deploy the old and new code now run **simultaneously** against the
+migrated schema, which the stop-then-start ordering used to avoid. So the
+migration must be backward-compatible with the outgoing revision for the length
+of the rollout, or the rollout has to be serialised — set
+`minimumHealthyPercent: 0` / `maximumPercent: 100` for that one deploy and accept
+the downtime window deliberately.
+
+**This is the one thing leader election did not fix.** It made the *sweeps* safe
+to overlap; it says nothing about schema compatibility. Treat a destructive
+migration as a scheduled, serialised deploy.
 
 ## Observability
 
@@ -362,10 +392,11 @@ codebase can actually produce silently:
 | Alarm | Why it matters here |
 |---|---|
 | Outbox backlog (`published_at IS NULL` count) rising | The ES projection is falling behind Postgres. The relay standing down wrongly, or ES rejecting writes, both look like this and neither is otherwise visible |
-| Log filter on `standing down` when `desiredCount = 1` | Nothing should be contending for the relay lock. If something is, there are two processes and the sweeps are racing |
+| Count of tasks logging `is now the sweep leader` > 1 at once | Two leaders means the sweeps are racing. Should be impossible via the advisory lock, so this fires only if the lock key stopped being stable or two deployments share one Aurora cluster |
+| No task logging `is now the sweep leader` for > 1 min | Nobody is running the periodic jobs. A wedged lock session, or every task failing election |
 | Log filter on `lost the connection holding the relay lock` | Correlates with Aurora failovers and with an accidental `idle_in_transaction_session_timeout` |
 | HTTP 503 with `COMMERCE_INVOICE_NUMBERING_UNAVAILABLE` | Postgres is reachable but the invoice counter is not. Invoices stay in `draft`, which is safe, but finalization is broken |
-| ALB 5xx, target-group unhealthy-host count, ECS task restart count | With one task, a restart is an outage |
+| ALB 5xx, target-group unhealthy-host count, ECS task restart count | A single restart is now survivable, but a rising restart count across tasks is the crash-loop signal |
 | Aurora CPU, `DatabaseConnections`, `FreeableMemory`, failover events | — |
 | ElastiCache evictions and `CurrConnections` | Evictions mean conversation memory is being dropped early |
 
@@ -377,15 +408,17 @@ The shape says: one process saturates around 150 rps mixed read/write, writes
 cost ~10× reads, and throughput stops responding to concurrency well before
 latency does.
 
-Start at **1 vCPU / 2 GB** for the API task and watch p95 rather than CPU.
-Because ES calls block the event loop (fact 2), CPU will look under-used while
-latency climbs — CPU is the wrong signal here. Going to 2 vCPU will not help a
-single-process, single-event-loop server much; what helps is fixing fact 1 and
-then running more tasks.
+Start at **1 vCPU / 2 GB** per API task, `desiredCount: 2` across two AZs, and
+watch p95 rather than CPU. Because ES calls block the event loop (fact 2), CPU
+will look under-used while latency climbs — CPU is the wrong signal here. Going to
+2 vCPU will not help one event loop much; more tasks will.
 
-Do **not** attach an autoscaling policy to the API service while
-`desiredCount = 1` is a correctness requirement. An autoscaling group that scales
-to 2 is the exact failure the load test surfaced.
+Autoscaling is now safe and was not before. Target **ALB request count per
+target** or **target response time**, not CPU. Two bounds to set deliberately:
+
+- `maxCapacity` against Aurora `max_connections` — 15 connections per task, so
+  price the ceiling rather than discovering it.
+- `minCapacity: 2`, so a single task failure is never a full outage.
 
 ## Not covered, and decisions that are yours
 
@@ -396,9 +429,15 @@ to 2 is the exact failure the load test surfaced.
   pipeline. The UI is a standard `next build` — CloudFront + S3, Amplify Hosting,
   or its own Fargate service — and its origin must appear in `CORS_ORIGINS` and
   `SUPERTOKENS_WEBSITE_DOMAIN`.
-- **Whether the downtime window is acceptable.** Stop-then-start is the only
-  deployment verified safe today. If it is not acceptable, the fix is leader
-  election for the periodic sweeps, and that is a scheduling decision.
+- **Whether to spread background work across replicas.** Today one replica runs
+  all of it, because a session-scoped lock per job would exhaust the connection
+  pool. If the sweeps ever become a bottleneck, the answer is transaction-scoped
+  locks (`pg_try_advisory_xact_lock`) taken per cycle, which holds no permanent
+  connection and lets different jobs land on different replicas. Not needed for
+  safe deploys, which is why it was not built.
+- **Whether a destructive migration gets a serialised deploy.** A rolling deploy
+  now runs old and new code together against the migrated schema. That is a
+  per-migration judgement, not a standing setting.
 - **Whether to stay on Elastic Cloud long term.** Staying is the low-risk choice
   and the one this document assumes. Moving to OpenSearch is a real project;
   price it before agreeing to it.

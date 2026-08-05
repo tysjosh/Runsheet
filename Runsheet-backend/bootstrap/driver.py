@@ -34,6 +34,7 @@ from typing import Any, Optional
 
 from bootstrap.container import ServiceContainer
 from bootstrap.routing import mount_router
+from persistence.leader_election import run_periodic
 
 logger = logging.getLogger(__name__)
 
@@ -912,29 +913,21 @@ async def initialize(app, container: ServiceContainer) -> None:
             )
             container.pod_transition_reconciler = pod_transition_reconciler
 
-            async def _periodic_pod_transition_repair() -> None:
-                try:
-                    while True:
-                        try:
-                            counts = (
-                                await pod_transition_reconciler.repair_pending()
-                            )
-                            if counts["examined"]:
-                                logger.info(
-                                    "POD transition repair cycle: %s", counts
-                                )
-                        except Exception as exc:
-                            logger.exception(
-                                "POD transition repair cycle failed: %s", exc
-                            )
-                        await asyncio.sleep(
-                            POD_TRANSITION_REPAIR_INTERVAL_SECONDS
-                        )
-                except asyncio.CancelledError:
-                    logger.info("POD transition repair task cancelled")
+            async def _pod_transition_repair_cycle() -> None:
+                """One pass repairing PODs whose order transition never landed."""
+                counts = await pod_transition_reconciler.repair_pending()
+                if counts["examined"]:
+                    logger.info("POD transition repair cycle: %s", counts)
 
+            # The original loop repaired before its first sleep, so a repair
+            # pass ran at boot. ``run_immediately`` preserves that.
             _pod_transition_repair_task = asyncio.create_task(
-                _periodic_pod_transition_repair()
+                run_periodic(
+                    "driver.pod-transition-repair",
+                    POD_TRANSITION_REPAIR_INTERVAL_SECONDS,
+                    _pod_transition_repair_cycle,
+                    run_immediately=True,
+                )
             )
             logger.info(
                 "POD transition repair started (interval: %ds)",
@@ -956,10 +949,10 @@ async def initialize(app, container: ServiceContainer) -> None:
     #
     # The loop shape follows ``DriverDailyResetJob``
     # (``bootstrap/scheduling.py``) verbatim: a module-global task handle, one
-    # ``asyncio.create_task`` around a ``while True`` / ``await asyncio.sleep``
-    # loop, the per-cycle exception caught *inside* the loop so a failed sweep
-    # never kills the task, and cancellation in this module's ``shutdown``.
-    # Sleep-then-sweep, so boot is never delayed by a retention pass.
+    # ``asyncio.create_task`` around ``run_periodic``, which keeps a failed
+    # sweep from killing the task and runs only on the sweep leader, and
+    # cancellation in this module's ``shutdown``. Sleep-then-sweep, so boot is
+    # never delayed by a retention pass.
     # ------------------------------------------------------------------
     global _retention_task
 
@@ -973,21 +966,17 @@ async def initialize(app, container: ServiceContainer) -> None:
         retention_job = DriverRetentionJob(es_service=es_service)
         container.driver_retention_job = retention_job
 
-        async def _periodic_driver_retention() -> None:
-            """Background task that sweeps each driver data class every 24 h."""
-            try:
-                while True:
-                    await asyncio.sleep(RETENTION_INTERVAL_SECONDS)
-                    try:
-                        await run_retention_cycle(retention_job)
-                    except Exception as exc:
-                        logger.exception(
-                            "Driver retention cycle failed: %s", exc
-                        )
-            except asyncio.CancelledError:
-                logger.info("Driver retention task cancelled")
+        async def _driver_retention_cycle() -> None:
+            """One sweep of each driver data class."""
+            await run_retention_cycle(retention_job)
 
-        _retention_task = asyncio.create_task(_periodic_driver_retention())
+        _retention_task = asyncio.create_task(
+            run_periodic(
+                "driver.retention",
+                RETENTION_INTERVAL_SECONDS,
+                _driver_retention_cycle,
+            )
+        )
         logger.info(
             "Driver retention job started (interval: %ds)",
             RETENTION_INTERVAL_SECONDS,

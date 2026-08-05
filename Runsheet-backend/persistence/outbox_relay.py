@@ -18,13 +18,17 @@ calling :meth:`run_forever`, or drive a single drain with :meth:`drain_once`
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 from typing import Optional
 
-from sqlalchemy import select, text
+from sqlalchemy import select
 
 from persistence.database import session_scope
+from persistence.leader_election import (
+    LOCK_UNSUPPORTED as _shared_lock_unsupported,
+    backend_pid as _shared_backend_pid,
+    try_advisory_lock as _shared_try_advisory_lock,
+)
 from persistence.models import OutboxEventORM
 
 logger = logging.getLogger(__name__)
@@ -52,7 +56,7 @@ _RELAY_ADVISORY_LOCK_KEY = 0x52554E53_4845544F  # "RUNS" "HETO"
 #: Sentinel for ``_lock_pid`` meaning "this backend has no advisory locks"
 #: (SQLite in tests). Distinct from ``None``, which means "not currently known
 #: to hold the lock" and triggers a re-contend.
-_LOCK_UNSUPPORTED = -1
+_LOCK_UNSUPPORTED = _shared_lock_unsupported
 
 
 async def _backend_pid(session) -> Optional[int]:
@@ -62,17 +66,11 @@ async def _backend_pid(session) -> Optional[int]:
     backend. If the pid changes, the connection this loop believed it held the
     lock on is gone and the lock went with it. ``None`` means the query itself
     failed — the connection is unusable, which is the same conclusion.
+
+    Delegates to :mod:`persistence.leader_election`, which owns the one
+    implementation of this shared with the sweep leader.
     """
-    try:
-        result = await session.execute(text("SELECT pg_backend_pid()"))
-        value = result.scalar()
-        return int(value) if value is not None else None
-    except Exception:  # noqa: BLE001 — a broken connection answers the question
-        # Roll back so the session can check out a fresh connection instead of
-        # staying wedged in a failed transaction.
-        with contextlib.suppress(Exception):
-            await session.rollback()
-        return None
+    return await _shared_backend_pid(session)
 
 
 async def _acquire_relay_lock(session) -> tuple[bool, bool]:
@@ -87,17 +85,12 @@ async def _acquire_relay_lock(session) -> tuple[bool, bool]:
     to contend with there, and failing closed would disable the relay for the
     whole unit suite. The caller needs the distinction because it cannot verify
     a lock that does not exist.
+
+    Note the *one-argument* form. The sweep leader uses the two-argument
+    ``pg_try_advisory_lock(classid, objid)``, which Postgres keeps in a separate
+    key space, so the relay lock and a role lock cannot collide.
     """
-    try:
-        result = await session.execute(
-            text("SELECT pg_try_advisory_lock(:key)"),
-            {"key": _RELAY_ADVISORY_LOCK_KEY},
-        )
-        return bool(result.scalar()), True
-    except Exception:
-        with contextlib.suppress(Exception):
-            await session.rollback()
-        return True, False
+    return await _shared_try_advisory_lock(session, _RELAY_ADVISORY_LOCK_KEY)
 
 
 async def _try_acquire_relay_lock(session) -> bool:
