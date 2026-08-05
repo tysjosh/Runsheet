@@ -18,6 +18,7 @@ calling :meth:`run_forever`, or drive a single drain with :meth:`drain_once`
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from typing import Optional
 
@@ -48,26 +49,61 @@ _MAX_ATTEMPTS = 10
 #: deployment note.
 _RELAY_ADVISORY_LOCK_KEY = 0x52554E53_4845544F  # "RUNS" "HETO"
 
+#: Sentinel for ``_lock_pid`` meaning "this backend has no advisory locks"
+#: (SQLite in tests). Distinct from ``None``, which means "not currently known
+#: to hold the lock" and triggers a re-contend.
+_LOCK_UNSUPPORTED = -1
 
-async def _try_acquire_relay_lock(session) -> bool:
-    """Take the session-scoped advisory lock, or report that another holds it.
+
+async def _backend_pid(session) -> Optional[int]:
+    """Return the server-side pid of ``session``'s current connection.
+
+    The advisory lock is *session*-scoped, so it belongs to one specific
+    backend. If the pid changes, the connection this loop believed it held the
+    lock on is gone and the lock went with it. ``None`` means the query itself
+    failed — the connection is unusable, which is the same conclusion.
+    """
+    try:
+        result = await session.execute(text("SELECT pg_backend_pid()"))
+        value = result.scalar()
+        return int(value) if value is not None else None
+    except Exception:  # noqa: BLE001 — a broken connection answers the question
+        # Roll back so the session can check out a fresh connection instead of
+        # staying wedged in a failed transaction.
+        with contextlib.suppress(Exception):
+            await session.rollback()
+        return None
+
+
+async def _acquire_relay_lock(session) -> tuple[bool, bool]:
+    """Take the session-scoped advisory lock. Returns ``(granted, supported)``.
 
     ``pg_try_advisory_lock`` is session-scoped and released automatically when
     the connection drops, so a relay that is killed does not leave the lock held
     — no lease renewal and no stale-lock cleanup to get wrong.
 
-    Returns True on databases that do not implement advisory locks (SQLite in
-    tests): there is no second process to contend with there, and failing closed
-    would disable the relay for the whole unit suite.
+    ``supported`` is False on databases that do not implement advisory locks
+    (SQLite in tests). Those report ``granted`` too: there is no second process
+    to contend with there, and failing closed would disable the relay for the
+    whole unit suite. The caller needs the distinction because it cannot verify
+    a lock that does not exist.
     """
     try:
         result = await session.execute(
             text("SELECT pg_try_advisory_lock(:key)"),
             {"key": _RELAY_ADVISORY_LOCK_KEY},
         )
-        return bool(result.scalar())
+        return bool(result.scalar()), True
     except Exception:
-        return True
+        with contextlib.suppress(Exception):
+            await session.rollback()
+        return True, False
+
+
+async def _try_acquire_relay_lock(session) -> bool:
+    """Boolean form of :func:`_acquire_relay_lock` for one-shot callers."""
+    granted, _supported = await _acquire_relay_lock(session)
+    return granted
 
 
 class OutboxRelay:
@@ -83,6 +119,9 @@ class OutboxRelay:
         self._es = es_service
         self._batch_size = batch_size
         self._stopped = asyncio.Event()
+        # Backend pid the advisory lock was granted on. None = not held;
+        # _LOCK_UNSUPPORTED = backend has no advisory locks (see the sentinel).
+        self._lock_pid: Optional[int] = None
 
     async def drain_once(self) -> int:
         """Project up to ``batch_size`` unpublished events. Returns the count published."""
@@ -134,47 +173,103 @@ class OutboxRelay:
         relays racing the same rows; see the note on
         ``_RELAY_ADVISORY_LOCK_KEY`` for why that corrupts the projection rather
         than merely duplicating work.
+
+        Holding the lock is re-verified before every drain, because the lock is
+        session-scoped and ``drain_once`` runs on a *different* session. If the
+        lock-holding connection dies — a managed-Postgres failover, or an
+        ``idle_in_transaction_session_timeout`` reaping this deliberately idle
+        session — Postgres releases the lock, another instance can take it, and a
+        loop that only checked once at startup would keep draining alongside it.
+        That is the exact two-relay hazard the lock exists to prevent, arriving
+        by a different route.
         """
         logger.info("Outbox relay started (poll every %.1fs)", poll_interval_seconds)
         # The lock is session-scoped, so it has to be held by a connection that
         # lives as long as the loop — not taken and released per drain.
         async with session_scope() as lock_session:
+            holding = False
             while not self._stopped.is_set():
-                if await _try_acquire_relay_lock(lock_session):
-                    break
-                logger.info(
-                    "Outbox relay standing down — another instance holds the "
-                    "relay lock. Re-checking in %.1fs.",
-                    poll_interval_seconds,
-                )
-                try:
-                    await asyncio.wait_for(
-                        self._stopped.wait(), timeout=poll_interval_seconds
-                    )
-                except asyncio.TimeoutError:
-                    continue
-                logger.info("Outbox relay stopped while standing down")
-                return
+                if holding:
+                    holding = await self._still_holds_lock(lock_session)
+                    if not holding:
+                        continue  # re-enter the standby path below
+                else:
+                    holding = await self._take_lock(lock_session)
+                    if not holding:
+                        logger.info(
+                            "Outbox relay standing down — another instance holds "
+                            "the relay lock. Re-checking in %.1fs.",
+                            poll_interval_seconds,
+                        )
+                        if await self._sleep_unless_stopped(poll_interval_seconds):
+                            logger.info("Outbox relay stopped while standing down")
+                            return
+                        continue
+                    logger.info("Outbox relay holds the relay lock — draining")
 
-            logger.info("Outbox relay holds the relay lock — draining")
-            await self._drain_loop(poll_interval_seconds)
-
-    async def _drain_loop(self, poll_interval_seconds: float) -> None:
-        while not self._stopped.is_set():
-            try:
-                drained = await self.drain_once()
-            except Exception:  # noqa: BLE001 — never let the loop die
-                logger.exception("Outbox relay drain cycle failed; backing off")
-                drained = 0
-            # When idle, sleep the poll interval; when busy, loop tight to clear backlog.
-            if drained == 0:
                 try:
-                    await asyncio.wait_for(
-                        self._stopped.wait(), timeout=poll_interval_seconds
-                    )
-                except asyncio.TimeoutError:
-                    pass
+                    drained = await self.drain_once()
+                except Exception:  # noqa: BLE001 — never let the loop die
+                    logger.exception("Outbox relay drain cycle failed; backing off")
+                    drained = 0
+                # Idle: sleep the poll interval. Busy: loop tight to clear backlog.
+                if drained == 0:
+                    await self._sleep_unless_stopped(poll_interval_seconds)
         logger.info("Outbox relay stopped")
+
+    async def _take_lock(self, session) -> bool:
+        """Contend for the relay lock, remembering which connection holds it."""
+        granted, supported = await _acquire_relay_lock(session)
+        if not supported:
+            self._lock_pid = _LOCK_UNSUPPORTED
+            return True
+        if not granted:
+            self._lock_pid = None
+            return False
+
+        pid = await _backend_pid(session)
+        if pid is None:
+            # The advisory-lock call succeeded but the pid probe did not, so the
+            # connection died in between. Treat the lock as not held rather than
+            # disabling verification for the rest of the process's life.
+            self._lock_pid = None
+            return False
+        self._lock_pid = pid
+        return True
+
+    async def _still_holds_lock(self, session) -> bool:
+        """True while the lock is still held on the connection it was granted on.
+
+        A pid probe is enough: advisory locks live until released or until the
+        backend goes away, so an unchanged pid means the grant stands. A changed
+        pid means SQLAlchemy handed this session a replacement connection, which
+        can only have happened after the original one was closed or killed — and
+        the lock died with it.
+        """
+        if self._lock_pid == _LOCK_UNSUPPORTED:
+            return True  # no advisory locks, hence no second holder to fear
+
+        pid = await _backend_pid(session)
+        if pid is not None and pid == self._lock_pid:
+            return True
+
+        logger.warning(
+            "Outbox relay lost the connection holding the relay lock "
+            "(pid %s -> %s); the lock was released with it. Re-contending "
+            "before draining again.",
+            self._lock_pid,
+            pid,
+        )
+        self._lock_pid = None
+        return False
+
+    async def _sleep_unless_stopped(self, seconds: float) -> bool:
+        """Sleep ``seconds``; return True if :meth:`stop` was called instead."""
+        try:
+            await asyncio.wait_for(self._stopped.wait(), timeout=seconds)
+        except asyncio.TimeoutError:
+            return False
+        return True
 
     def stop(self) -> None:
         """Signal :meth:`run_forever` to exit after the current cycle."""

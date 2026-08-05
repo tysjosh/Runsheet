@@ -147,7 +147,11 @@ downgrade recreates an empty table and the data is only in the dump.
 
 - **Infrastructure provisioning.** There is no Terraform/CDK/Kubernetes in this
   repo; the compute, managed Postgres, Elasticsearch and Redis are provisioned
-  out of band.
+  out of band. [docs/aws-deployment-strategy.md](aws-deployment-strategy.md) is
+  the target architecture for AWS (ECS Fargate, Aurora PostgreSQL, ElastiCache
+  Redis) and maps each step above onto an AWS primitive — including why the ALB
+  target group should check `/health/live` while `/health/ready` stays the deploy
+  gate.
 - **The Next.js dispatcher UI and the Expo driver app.** Both build from their
   own directories; the driver app has `eas.json` for EAS builds. Neither has a
   release pipeline in CI.

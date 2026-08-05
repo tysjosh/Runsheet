@@ -67,6 +67,16 @@ the Elasticsearch projection permanently behind the row it mirrors, silently.
 but not the inversion. Verified with two relays against real Postgres — one
 drained 11 cycles, the other stood down throughout.
 
+Ownership is re-verified before **every** drain, not just at startup. The lock is
+session-scoped while `drain_once` runs on a different session, so anything that
+kills the lock-holding connection — a managed-Postgres failover, a
+`pg_terminate_backend`, an `idle_in_transaction_session_timeout` reaping this
+deliberately idle session — releases the lock while the loop keeps draining. The
+loop compares `pg_backend_pid()` against the pid the lock was granted on and
+re-contends when it changes. Verified by terminating the lock backend while a
+second connection held the lock: the relay drained 0 times in the following 1.5 s
+and logged the loss at WARNING.
+
 **Not fixed: the periodic sweeps.** Each still runs in every process. Two
 instances means two AR-aging snapshots for the same day and two overdue sweeps
 racing the same invoices — and `invoice_events` has a unique

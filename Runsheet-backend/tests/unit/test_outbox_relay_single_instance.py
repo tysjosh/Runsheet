@@ -34,20 +34,31 @@ from persistence.outbox_relay import (
 
 
 class _Session:
-    """Minimal session whose advisory-lock call returns a scripted answer."""
+    """Minimal session whose advisory-lock call returns a scripted answer.
 
-    def __init__(self, granted=True, raises=False):
+    ``pg_backend_pid()`` answers ``pid``, so a test can simulate the
+    lock-holding connection being replaced by changing that attribute.
+    """
+
+    def __init__(self, granted=True, raises=False, pid=4242):
         self._granted = granted
         self._raises = raises
+        self.pid = pid
         self.statements = []
 
     async def execute(self, statement, params=None):
         if self._raises:
             raise RuntimeError("advisory locks not implemented")
-        self.statements.append((str(statement), params))
+        sql = str(statement)
+        self.statements.append((sql, params))
         result = MagicMock()
-        result.scalar.return_value = self._granted
+        result.scalar.return_value = (
+            self.pid if "pg_backend_pid" in sql else self._granted
+        )
         return result
+
+    async def rollback(self):
+        return None
 
 
 @contextlib.asynccontextmanager
@@ -192,3 +203,117 @@ class TestDrainOnceIsUnchanged:
             "persistence.outbox_relay.session_scope", lambda: _scope(session)
         ):
             assert await relay.drain_once() == 0
+
+
+class _FailoverSession(_Session):
+    """Hands the relay a replacement connection once it has drained.
+
+    This is what a managed-Postgres failover looks like from inside the process:
+    the connection the advisory lock was granted on is gone, SQLAlchemy checks
+    out a new one, and Postgres has already released the lock.
+    """
+
+    def __init__(self, *, regranted: bool):
+        super().__init__(granted=True, pid=100)
+        self._regranted = regranted
+
+    def replace_connection(self) -> None:
+        self.pid = 200
+        self._granted = self._regranted
+
+
+class TestLockOwnershipIsRevalidated:
+    """The lock is on ``lock_session``; ``drain_once`` uses a different session.
+
+    So holding the lock at startup does not mean holding it now. Postgres
+    releases a session-scoped advisory lock the moment the backend goes away —
+    a failover, a `pg_terminate_backend`, or an
+    ``idle_in_transaction_session_timeout`` reaping this deliberately idle
+    session. Checking only once meant a relay could drain for the rest of its
+    life holding nothing, while a second instance legitimately took the lock:
+    the two-relay hazard restored by the back door.
+    """
+
+    async def _run(self, relay, session, *, seconds=0.1):
+        with patch(
+            "persistence.outbox_relay.session_scope", lambda: _scope(session)
+        ):
+            task = asyncio.create_task(relay.run_forever(poll_interval_seconds=0.005))
+            await asyncio.sleep(seconds)
+            relay.stop()
+            await asyncio.wait_for(task, timeout=2)
+
+    def _counting_relay(self, session, drains):
+        relay = OutboxRelay(MagicMock())
+
+        async def _drain():
+            drains.append(1)
+            session.replace_connection()
+            return 0
+
+        relay.drain_once = _drain  # type: ignore[method-assign]
+        return relay
+
+    @pytest.mark.asyncio
+    async def test_it_stops_draining_when_another_instance_took_the_lock(self):
+        session = _FailoverSession(regranted=False)
+        drains: list[int] = []
+        relay = self._counting_relay(session, drains)
+
+        await self._run(relay, session)
+
+        # 0.1s at a 5ms poll is ~20 cycles if ownership is never re-checked.
+        assert len(drains) == 1, (
+            f"drained {len(drains)} times after losing the lock connection — a "
+            "second relay now holds the lock and both are projecting, which can "
+            "land an older payload last and leave ES permanently stale"
+        )
+
+    @pytest.mark.asyncio
+    async def test_it_resumes_when_it_can_retake_the_lock(self):
+        """Losing the connection is not a reason to stop relaying for good.
+
+        If nothing else claimed the lock, the relay is still the right instance
+        to drain — it just needs the grant on its new connection.
+        """
+        session = _FailoverSession(regranted=True)
+        drains: list[int] = []
+        relay = self._counting_relay(session, drains)
+
+        await self._run(relay, session)
+
+        assert len(drains) > 1, "the relay never resumed after re-taking the lock"
+
+    @pytest.mark.asyncio
+    async def test_losing_the_lock_connection_is_logged_at_warning(self, caplog):
+        """Unlike standing down, this is not routine — it means a lock was lost.
+
+        INFO would bury it; ERROR would be wrong for a condition the relay
+        recovers from on its own. The message carries both pids so the
+        correlation with a failover event is checkable.
+        """
+        session = _FailoverSession(regranted=True)
+        drains: list[int] = []
+        relay = self._counting_relay(session, drains)
+
+        with caplog.at_level("INFO", logger="persistence.outbox_relay"):
+            await self._run(relay, session)
+
+        lost = [r for r in caplog.records if "lost the connection" in r.getMessage()]
+        assert lost, "a lost relay lock must be visible in the logs"
+        assert all(r.levelname == "WARNING" for r in lost), [r.levelname for r in lost]
+        assert "100" in lost[0].getMessage() and "200" in lost[0].getMessage()
+
+    @pytest.mark.asyncio
+    async def test_a_backend_without_advisory_locks_is_not_revalidated(self):
+        """SQLite answers no ``pg_backend_pid``, so there is nothing to compare.
+
+        Revalidating there would make every cycle look like a lost lock and the
+        relay would never drain in the unit suite.
+        """
+        relay = OutboxRelay(MagicMock())
+        relay.drain_once = AsyncMock(return_value=0)
+
+        await self._run(relay, _Session(raises=True))
+
+        assert relay.drain_once.await_count > 0
