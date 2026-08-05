@@ -143,6 +143,22 @@ class Settings(BaseSettings):
         default="gemini-2.5-flash",
         description="Model name (without provider prefix) the agents run on",
     )
+
+    # ── Overlay agent default mode ────────────────────────────────────
+    #
+    # Mode a tenant gets when it has no ``overlay_ff:overlay.{agent_id}``
+    # value. Kept at "disabled" so this setting's introduction changes no
+    # behaviour, but it is now a one-line switch instead of an unreachable
+    # default buried in _get_mode. "shadow" runs the full decision logic and
+    # writes proposals to the shadow index without touching live state, which
+    # is the intended way to observe an overlay before activating it.
+    overlay_default_mode: str = Field(
+        default="disabled",
+        description=(
+            "Overlay mode for tenants with no per-tenant flag: 'disabled', "
+            "'shadow', 'active_gated' or 'active_auto'"
+        ),
+    )
     
     # ── PostgreSQL source-of-truth (persistence/) ─────────────────────
     #
@@ -818,6 +834,23 @@ class Settings(BaseSettings):
         v = v.strip()
         return v
     
+    @field_validator("overlay_default_mode")
+    @classmethod
+    def validate_overlay_default_mode(cls, v: str) -> str:
+        """Reject a mode the overlay agents cannot interpret.
+
+        An unrecognised value would reach ``monitor_cycle``, fail the
+        ``== "disabled"`` check, and be treated as a commit path — activating
+        every overlay agent because of a typo.
+        """
+        v = (v or "").strip().lower()
+        valid = {"disabled", "shadow", "active_gated", "active_auto"}
+        if v not in valid:
+            raise ValueError(
+                f"overlay_default_mode must be one of: {', '.join(sorted(valid))}"
+            )
+        return v
+
     @field_validator("agent_llm_provider")
     @classmethod
     def validate_agent_llm_provider(cls, v: str) -> str:

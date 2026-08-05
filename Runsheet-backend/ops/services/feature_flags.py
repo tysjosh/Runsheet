@@ -230,7 +230,26 @@ class FeatureFlagService:
         Logs a warning and returns ``"disabled"`` on any Redis error
         (fail-closed behaviour).
 
+        Callers that need to tell "no flag configured" apart from "explicitly
+        disabled" must use :meth:`get_overlay_state_or_none`. Collapsing both
+        into ``"disabled"`` here is what made the overlay agents' documented
+        ``shadow`` default unreachable: a missing key produced the truthy
+        string ``"disabled"``, so ``state or "shadow"`` never fell through.
+
         Validates: Req 12.1, 12.4, 12.7
+        """
+        state = await self.get_overlay_state_or_none(flag_key, tenant_id)
+        return state if state is not None else "disabled"
+
+    async def get_overlay_state_or_none(
+        self, flag_key: str, tenant_id: str
+    ) -> Optional[str]:
+        """Return the configured overlay state, or ``None`` when unset.
+
+        ``None`` means "this tenant has no value for this flag" and lets the
+        caller apply its own default. A Redis failure returns ``"disabled"``
+        rather than ``None``, because an unreachable Redis is not the same as
+        an unconfigured flag and must still fail closed.
         """
         if not self.client:
             raise RuntimeError("Redis client not connected. Call connect() first.")
@@ -238,7 +257,9 @@ class FeatureFlagService:
             key = f"{OVERLAY_PREFIX}{flag_key}:{tenant_id}"
             value = await self.client.get(key)
             if value is None:
-                return "disabled"
+                return None
+            if isinstance(value, (bytes, bytearray)):
+                value = value.decode("utf-8")
             return value
         except Exception as exc:
             logger.warning(

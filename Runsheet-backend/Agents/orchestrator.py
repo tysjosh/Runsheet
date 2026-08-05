@@ -21,7 +21,7 @@ Requirements: 7.6, 7.7, 7.8
 
 import logging
 import time
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +89,36 @@ class AgentOrchestrator:
         self._specialists = specialists
         self._planner = execution_planner
         self._activity_log = activity_log_service
+
+        # Let the planner answer read-only steps through the specialists.
+        # Without this a plan's read steps went through the mutation path,
+        # where the risk registry classifies their invented tool names
+        # (``fleet_query`` and friends) as HIGH — so every step of every
+        # complex request became a dispatcher approval for a read.
+        setter = getattr(execution_planner, "set_read_step_executor", None)
+        if callable(setter):
+            setter(self._execute_read_step)
+
+    async def _execute_read_step(
+        self,
+        step,
+        resolved_params: Dict[str, Any],
+        tenant_id: str,
+    ) -> str:
+        """Answer one read-only plan step with its specialist.
+
+        Raises when the step names a domain this orchestrator has no
+        specialist for, so ``execute_plan`` records a step failure and
+        ``_execute_complex_request`` falls back to simple execution instead of
+        reporting a success that never happened.
+        """
+        agent = self._specialists.get(step.agent)
+        if agent is None:
+            raise RuntimeError(
+                f"No specialist registered for domain '{step.agent}'"
+            )
+        request = resolved_params.get("request") or step.description
+        return await agent.handle(request, {"tenant_id": tenant_id})
 
     async def route(
         self,

@@ -67,6 +67,30 @@ _FUEL_OPS_FEATURE_FLAG_DEFAULTS = (
     "overlay.integration.stripe",
 )
 
+#: Agent-level overlay gates — ``overlay.{agent_id}`` for every overlay agent.
+#:
+#: These are NOT the capability flags above and the two sets do not overlap.
+#: ``OverlayAgentBase._get_mode`` reads ``overlay.{agent_id}``, and
+#: ``monitor_cycle`` skips a tenant outright when that resolves to
+#: ``disabled``. Seeding only the capability names left every agent-level gate
+#: unset, undocumented and invisible to the feature-flag admin API, so all
+#: twelve overlay agents skipped every tenant with nothing to point at.
+#:
+#: Derived from the live agent instances at boot rather than restated here, so a
+#: new overlay agent cannot ship without its gate being seeded
+#: (tests/unit/test_overlay_flag_gating.py pins the derivation).
+def _overlay_agent_flag_keys(agents) -> list:
+    """Return ``overlay.{agent_id}`` for every agent that exposes the gate."""
+    keys = []
+    for agent in agents:
+        getter = getattr(agent, "overlay_flag_key", None)
+        if callable(getter):
+            try:
+                keys.append(getter())
+            except Exception:  # pragma: no cover - defensive
+                continue
+    return keys
+
 
 def _resolve_fuel_ops_settings(settings) -> dict:
     """Resolve the fuel-ops hardening platform settings.
@@ -93,18 +117,30 @@ def _resolve_fuel_ops_settings(settings) -> dict:
 async def _seed_fuel_ops_feature_flag_defaults(
     container,
     redis_client,
+    flag_keys=None,
+    *,
+    label: str = "fuel-ops overlay",
 ) -> None:
-    """Seed every fuel-ops overlay feature flag to ``disabled`` by default.
+    """Seed overlay feature flags to ``disabled`` by default.
 
     Uses the shared :class:`ops.services.feature_flags.FeatureFlagService`
     Redis key layout (``overlay_ff:{flag_key}:{tenant_id}``). We only
     set the key when it is absent so existing tenant overrides are
     preserved across redeploys. Missing Redis simply logs a warning.
 
+    ``flag_keys`` defaults to the fuel-ops *capability* flags. Bootstrap calls
+    this a second time with the agent-level gates
+    (``overlay.{agent_id}``), which are a disjoint set and were previously
+    seeded nowhere — see ``_overlay_agent_flag_keys``.
+
     Validates: Requirement 10.2.2.
     """
 
     if redis_client is None:
+        return
+    if flag_keys is None:
+        flag_keys = _FUEL_OPS_FEATURE_FLAG_DEFAULTS
+    if not flag_keys:
         return
 
     # Feature flag defaults are keyed per tenant. Without a tenant
@@ -116,7 +152,7 @@ async def _seed_fuel_ops_feature_flag_defaults(
     from ops.services.feature_flags import OVERLAY_PREFIX
 
     seeded = []
-    for flag_key in _FUEL_OPS_FEATURE_FLAG_DEFAULTS:
+    for flag_key in flag_keys:
         redis_key = f"{OVERLAY_PREFIX}{flag_key}:{placeholder_tenant}"
         try:
             # SET NX so we never clobber an existing default.
@@ -126,19 +162,21 @@ async def _seed_fuel_ops_feature_flag_defaults(
                 seeded.append(flag_key)
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning(
-                "Failed to seed fuel-ops feature flag %s: %s",
+                "Failed to seed %s feature flag %s: %s",
+                label,
                 flag_key,
                 exc,
             )
 
     if seeded:
         logger.info(
-            "Seeded fuel-ops overlay feature flags (defaults=OFF): %s",
+            "Seeded %s feature flags (defaults=OFF): %s",
+            label,
             ", ".join(seeded),
         )
     else:
         logger.debug(
-            "Fuel-ops overlay feature flags already seeded; no changes made"
+            "%s feature flags already seeded; no changes made", label
         )
 
 
@@ -792,6 +830,46 @@ async def initialize(app, container: ServiceContainer) -> None:
         "route_planning": route_planning_agent,
         "exception_replanning": exception_replanning_agent,
     }
+
+    # Seed the agent-level overlay gates — ``overlay.{agent_id}`` — now that
+    # every overlay and MVP agent exists to derive its own key.
+    #
+    # Without this the flags that decide whether an agent runs at all were set
+    # nowhere and were invisible to the feature-flag admin API, so an operator
+    # had no surface to enable an overlay and no way to see why nothing was
+    # happening. The capability flags seeded earlier are a different, disjoint
+    # set. Both are seeded to ``disabled`` for the ``__default__`` placeholder
+    # tenant; a real tenant with no value falls back to
+    # ``settings.overlay_default_mode``.
+    _overlay_gate_agents = list(app.state.overlay_agents.values()) + list(
+        app.state.mvp_agents.values()
+    )
+    await _seed_fuel_ops_feature_flag_defaults(
+        container,
+        _agent_redis_client,
+        _overlay_agent_flag_keys(_overlay_gate_agents),
+        label="overlay agent gate",
+    )
+    try:
+        _default_mode = settings.overlay_default_mode
+    except AttributeError:  # pragma: no cover - MagicMock settings in tests
+        _default_mode = "disabled"
+    if _default_mode == "disabled":
+        logger.warning(
+            "Overlay agents default to mode 'disabled' — %d agent(s) will skip "
+            "every tenant that has no overlay_ff:overlay.{agent_id} value. Set "
+            "OVERLAY_DEFAULT_MODE=shadow to run their decision logic in "
+            "observe-only mode, or enable per tenant via the feature-flag admin "
+            "API.",
+            len(_overlay_gate_agents),
+        )
+    else:
+        logger.info(
+            "Overlay agents default to mode '%s' for tenants with no explicit "
+            "flag (%d agent(s))",
+            _default_mode,
+            len(_overlay_gate_agents),
+        )
 
     # Create FuelDistributionPipeline instance (Req 6.1–6.6)
     mvp_pipeline = FuelDistributionPipeline(
