@@ -265,6 +265,50 @@ jobs:
           fi
           echo "✅ Single linear migration head."
 
+      # The only reason to have a backup is a restore, and a restore procedure
+      # nobody executes is a guess. This runs the real dump → restore → compare
+      # cycle against the freshly migrated schema, so the procedure in
+      # docs/deploy-runbook.md stays executable rather than aspirational.
+      #
+      # It reuses this job's database because the schema here is the one that
+      # matters: it has been through the whole chain including
+      # 0007_drop_shipments_current, the destructive revision the pre-migration
+      # snapshot exists to protect against.
+      - name: Restore drill — dump, restore to a scratch DB, compare row counts
+        env:
+          PGPASSWORD: runsheet
+        run: |
+          # The runner's default client may be older than the server; pg_restore
+          # refuses an archive produced by a newer pg_dump, so use the client
+          # that matches the postgres:16 service.
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client-16 || \
+            sudo apt-get install -y -qq postgresql-client
+          pg_dump --version
+
+          # The migrated database is empty, and a drill over an empty database
+          # compares zeros to zeros — it would pass just as happily if
+          # pg_restore copied no rows at all. The script refuses that case, so
+          # seed rows first. Plain SQL, no app code: the point is to exercise
+          # dump/restore fidelity, not the ORM.
+          psql "postgresql://runsheet:runsheet@localhost:5432/runsheet" -v ON_ERROR_STOP=1 <<'SQL'
+          INSERT INTO tax_jurisdictions (jurisdiction_id, tenant_id, status, document, created_at, updated_at)
+          SELECT 'ci-juris-' || g, 'ci-tenant', 'active',
+                 json_build_object('jurisdiction_id', 'ci-juris-' || g, 'tenant_id', 'ci-tenant'),
+                 now(), now()
+          FROM generate_series(1, 5) AS g;
+
+          INSERT INTO customers (customer_id, tenant_id, display_name, status, external_refs, metadata, created_at, updated_at)
+          SELECT 'ci-cust-' || g, 'ci-tenant', 'CI Customer ' || g, 'active',
+                 '{}'::json, '{}'::json, now(), now()
+          FROM generate_series(1, 3) AS g;
+          SQL
+
+          chmod +x scripts/backup_restore.sh
+          bash scripts/backup_restore.sh drill \
+            "postgresql://runsheet:runsheet@localhost:5432/runsheet" \
+            runsheet_ci_drill
+
   # -----------------------------------------------------------------
   # Job 7: Git hygiene — no ignored files tracked, ADR index exists
   # -----------------------------------------------------------------

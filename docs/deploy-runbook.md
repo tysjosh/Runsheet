@@ -52,15 +52,15 @@ tree. Two stages, so no compiler ships. Runs as uid 10001.
 ## 2. Snapshot the database — **required before any migration**
 
 ```sh
-pg_dump --format=custom --no-owner --file "runsheet-$(date -u +%Y%m%dT%H%M%SZ).dump" "$DATABASE_URL"
+cd Runsheet-backend
+scripts/backup_restore.sh dump "$DATABASE_URL" "runsheet-$(date -u +%Y%m%dT%H%M%SZ).dump"
 ```
 
-Verify the dump is readable before continuing. A dump you have not listed is a
-hope, not a backup:
-
-```sh
-pg_restore --list runsheet-*.dump | head
-```
+The script verifies the archive is readable before reporting success — a dump
+nobody has read back is a hope, not a backup. See
+[docs/backup-and-restore.md](backup-and-restore.md) for the restore path, the
+`drill` subcommand that proves it works, and the three Elasticsearch indices a
+Postgres dump does **not** cover.
 
 > ⚠️ **The migration chain contains a destructive revision.**
 > `0007_drop_shipments_current` **drops the `shipments_current` table**. It is
@@ -130,10 +130,11 @@ the deploy is not healthy.
 docker run ... runsheet-backend:"$PREVIOUS_SHA"
 ```
 
-If a migration must be undone, restore the step-2 dump. Do **not** rely on
-`alembic downgrade` past `0007_drop_shipments_current`: the table is dropped and
-the rows are gone, so the downgrade recreates an empty table and the data is only
-in the dump.
+If a migration must be undone, restore the step-2 dump — full procedure in
+[docs/backup-and-restore.md](backup-and-restore.md), including the Elasticsearch
+re-projection that has to follow it. Do **not** rely on `alembic downgrade` past
+`0007_drop_shipments_current`: the table is dropped and the rows are gone, so the
+downgrade recreates an empty table and the data is only in the dump.
 
 ## Not covered here
 
@@ -143,7 +144,11 @@ in the dump.
 - **The Next.js dispatcher UI and the Expo driver app.** Both build from their
   own directories; the driver app has `eas.json` for EAS builds. Neither has a
   release pipeline in CI.
-- **Backup schedule and restore drills.** Step 2 is a pre-migration snapshot,
-  not a backup policy. Nobody has yet restored this database from a dump.
+- **Backup schedule, retention and off-host storage.** Step 2 is a
+  pre-migration snapshot, not a backup policy. The restore path itself is
+  executable and drilled on every pull request — see
+  [docs/backup-and-restore.md](backup-and-restore.md) — but nothing is
+  scheduled, and the three non-projected Elasticsearch indices have no backup
+  at all.
 - **Load characteristics.** No load test has been run against this stack, so the
   replica count and the outbox relay's drain rate under load are unmeasured.
