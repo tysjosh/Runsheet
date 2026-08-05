@@ -96,6 +96,7 @@ class TestToolsDoNotReferenceUnknownIndices:
             "Agents.overlay.overlay_es_mappings",
             "Agents.support.mvp_es_mappings",
             "fuel.voice.voice_es_mappings",
+            "commerce.services.commerce_es_mappings",
         ]
         for name in modules:
             try:
@@ -235,3 +236,79 @@ class TestRunoutRiskToolIsReachable:
         doc = inspect.getdoc(inner) or ""
         # The model routes on the docstring, so it must name the question.
         assert "run out" in doc.lower() or "runout" in doc.lower()
+
+
+class TestCommerceToolsStayReadOnly:
+    """A product position, not a phase-one compromise.
+
+    These marketers keep their books in an established ERP and the controller
+    has veto power in a deal. An agent that can move a credit limit or void an
+    invoice is a deal blocker, and `COMMERCE_STAFF_ROLES` already restricts
+    those surfaces to `platform_admin` — agent tools must not become the way
+    around that. Credit enforcement stays where it is: deterministic, row-locked
+    and audited behind `COMMERCE_CREDIT_HOLDS_ENABLED`.
+    """
+
+    #: Verbs that would mean the model is writing to the ledger.
+    WRITE_VERBS = ("create", "update", "set", "adjust", "void", "apply", "release",
+                   "delete", "cancel", "override", "post", "waive")
+
+    def test_no_commerce_write_tool_is_presented_to_the_model(self):
+        names = [_tool_name(t) for t in ALL_TOOLS]
+        commerce_words = ("credit", "invoice", "account", "payment", "price_book",
+                          "pricing", "dunning", "ar_aging")
+
+        offenders = [
+            name
+            for name in names
+            if any(word in name for word in commerce_words)
+            and any(name.startswith(verb) or f"_{verb}_" in name for verb in self.WRITE_VERBS)
+        ]
+        assert not offenders, (
+            "these tools would let the model write to the commerce ledger: "
+            f"{offenders}. The ERP is the book of record; commerce tools are "
+            "read-only and credit enforcement stays in the row-locked, audited "
+            "intake hook."
+        )
+
+    def test_the_eligibility_tool_is_reachable_from_the_ops_specialist(self):
+        from Agents.specialists.ops_intelligence_agent import OpsIntelligenceAgent
+
+        names = sorted(_tool_name(t) for t in OpsIntelligenceAgent.TOOLS)
+        assert "get_customer_delivery_eligibility" in names, (
+            "the ops specialist cannot read credit context, so the agent will "
+            "again answer 'I cannot identify accounts over their credit limit. "
+            "My tools do not have access to credit limit information' while "
+            f"accounts_current holds the limits. Its tools are: {names}"
+        )
+
+    def test_the_ops_prompt_names_the_tool_and_its_read_only_boundary(self):
+        from Agents.specialists.ops_intelligence_agent import OpsIntelligenceAgent
+
+        prompt = OpsIntelligenceAgent.SYSTEM_PROMPT
+        assert "get_customer_delivery_eligibility" in prompt, (
+            "the ops specialist's prompt enumerates its tools and omits the "
+            "eligibility tool, so the model is unlikely to call it"
+        )
+        assert "READ-ONLY" in prompt, (
+            "the prompt must tell the model it cannot change a credit limit, or "
+            "it will offer to — which is exactly the deal blocker this design "
+            "avoids"
+        )
+        assert "credit_holds_enforced" in prompt, (
+            "'on credit hold' means nothing when the enforcement flag is off; "
+            "the prompt must require passing that state on"
+        )
+
+    def test_the_specialist_tool_budget_stays_routable(self):
+        """~10 tools per specialist. Past that the model composes and disagrees."""
+        from Agents.specialists.fuel_agent import FuelAgent
+        from Agents.specialists.ops_intelligence_agent import OpsIntelligenceAgent
+
+        for agent in (FuelAgent, OpsIntelligenceAgent):
+            assert len(agent.TOOLS) <= 10, (
+                f"{agent.__name__} carries {len(agent.TOOLS)} tools. Giving the "
+                "model a large CRUD-style set to compose is how two steps end up "
+                "answering one question differently — split the specialist "
+                "instead of growing it."
+            )

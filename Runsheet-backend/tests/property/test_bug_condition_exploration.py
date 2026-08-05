@@ -272,16 +272,21 @@ class TestTenantSpoofingAgentEndpoints:
 
         assert mock_svc.list_pending.called, "list_pending was not called"
 
-        call_kwargs = mock_svc.list_pending.call_args
-        all_args_str = str(call_kwargs)
+        call_args = mock_svc.list_pending.call_args
 
-        assert attacker_tid in all_args_str, (
-            f"Service was not called with the verified tenant_id '{attacker_tid}'. "
-            f"Call args: {all_args_str}"
-        )
-        assert victim_tid not in all_args_str, (
-            f"Service was called with spoofed query param tenant_id '{victim_tid}' "
-            f"instead of the verified tenant_id '{attacker_tid}'. Call args: {all_args_str}"
+        # Compare the resolved tenant_id by value, not by substring of the call
+        # repr. A substring check reports a false breach whenever hypothesis
+        # generates one id inside the other: with the verified tenant 'A000' and
+        # the spoofed param 'A00', the call was correctly made with 'A000' and
+        # the old assertion still failed because 'A00' occurs in that string.
+        passed_tid = call_args.kwargs.get("tenant_id")
+        if passed_tid is None and call_args.args:
+            passed_tid = call_args.args[0]
+
+        assert passed_tid == attacker_tid, (
+            f"Service received tenant_id={passed_tid!r}. It must receive the "
+            f"verified-context tenant {attacker_tid!r}, not the query param "
+            f"{victim_tid!r}. Call args: {call_args}"
         )
 
 

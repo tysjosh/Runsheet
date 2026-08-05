@@ -614,6 +614,40 @@ async def initialize(app, container: ServiceContainer) -> None:
     configure_mutation_tools(confirmation_protocol, es_service)
     logger.info("Mutation tools configured")
 
+    # Wire the commerce read tool to the SAME services the order intake path
+    # uses. Building fresh instances here would let the agent's credit verdict
+    # drift from the one that actually gates an order; reusing the container's
+    # instances makes that impossible. Read-only by design — no commerce
+    # mutation tool is exposed to any specialist.
+    from Agents.tools.commerce_read_tools import configure_commerce_read_tools
+
+    _credit_svc = (
+        container.commerce_credit_service
+        if container.has("commerce_credit_service")
+        else None
+    )
+    _aging_svc = (
+        container.commerce_ar_aging_service
+        if container.has("commerce_ar_aging_service")
+        else None
+    )
+    configure_commerce_read_tools(
+        credit_service=_credit_svc,
+        ar_aging_service=_aging_svc,
+        es_service=es_service,
+    )
+    if _credit_svc is None:
+        # Commerce is flag-gated, so this is a legitimate state. Logged at
+        # WARNING because the tool will decline rather than answer, and a silent
+        # decline reads to a user like the feature is broken.
+        logger.warning(
+            "Commerce read tool has no CreditService (commerce backbone "
+            "disabled or wiring failed) — delivery-eligibility questions will "
+            "report the tool as unconfigured"
+        )
+    else:
+        logger.info("Commerce read tools configured (credit eligibility)")
+
     # Wire agent REST endpoints
     configure_agent_endpoints(
         approval_queue_service=approval_queue_service,

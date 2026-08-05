@@ -77,6 +77,11 @@ from .tank_forecast_tools import (
     get_runout_risk_list,
 )
 
+from .commerce_read_tools import (
+    get_customer_delivery_eligibility,
+    configure_commerce_read_tools,
+)
+
 from .scheduling_tools import (
     search_jobs,
     get_job_details,
@@ -144,6 +149,11 @@ ALL_TOOLS = [
 
     # Tank run-out risk — the core planning question for propane / heating oil
     get_runout_risk_list,
+
+    # Credit / hold / AR context for the dispatch decision. Read-only by
+    # design: the ERP is the book of record and no commerce mutation tool is
+    # exposed to the model.
+    get_customer_delivery_eligibility,
 
     # Scheduling tools
     search_jobs,
