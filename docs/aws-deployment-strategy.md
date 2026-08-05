@@ -252,6 +252,7 @@ Startup refuses staging/production without these, so they are not optional:
 | `ELASTIC_API_KEY` | Elastic Cloud credential |
 | `SUPERTOKENS_API_KEY` | Managed-core credential |
 | `VOICE_API_KEY_SALT` | Not enforced at startup; defaults to `""` and silently derives every stored key hash from an empty salt |
+| `GEMINI_API_KEY` | The agent stack's LLM credential. Startup refuses staging/production without it unless `AGENT_LLM_PROVIDER=vertex_ai`, which needs Google ADC — on Fargate that means mounting a GCP service-account key, so the API key is the simpler path here |
 
 | Plain task-definition environment | Value |
 |---|---|
@@ -286,6 +287,26 @@ If any of these surfaces is meant to be live, set the variables **and** grant th
 task role the matching permissions. This is also the one place where moving to
 AWS simplifies things: on Fargate the task role replaces static AWS keys
 entirely.
+
+### External data providers the agents read
+
+Each of these has a finished adapter. Without its credential the consuming agent
+still runs — on no external data — and says so only through a fallback
+annotation on its output, so they are worth setting deliberately rather than
+discovering later:
+
+| Variable | Consumer, and what it falls back to |
+|---|---|
+| `OPENWEATHER_API_KEY` or `NOAA_CDO_TOKEN` | Degree-days for the propane / heating-oil consumption models. Absent, forecasts compute without HDD and carry `weather_fallback: true`. Also populates `weather_observations`, which is what the compliance K-factor service calibrates against |
+| `OPIS_API_KEY` / `OPIS_API_SECRET` | Live terminal rack prices. Absent, sourcing falls to a tenant-uploaded CSV whose upload path is not built, so every candidate returns `no_price_available` |
+| `MAPBOX_ACCESS_TOKEN` / `HERE_API_KEY` / `GOOGLE_MAPS_API_KEY` | Traffic-aware routing — and the credential alone is not enough: the per-tenant `overlay.traffic_aware_routing` flag is seeded **disabled** and `overlay.traffic_provider:{tenant}` must be set. Absent, Haversine at 40 km/h with `traffic_fallback: true` |
+
+Veeder-Root tank telemetry, Geotab GPS, QuickBooks and Stripe are different:
+they are polled per tenant by the `IntegrationScheduler` from registered
+integration instances, with credentials in the KMS-backed vault. That vault needs
+`FUEL_OPS_KMS_KEY_ID` in production. Geotab is the only writer of
+`truck_telemetry`, so without a registered instance that index stays empty and
+route planning starts every truck from its depot.
 
 **Task role** (least privilege): `kms:GenerateDataKey` + `kms:Decrypt` on the one
 CMK with an encryption-context condition on `tenant_id`; `s3:GetObject` /
