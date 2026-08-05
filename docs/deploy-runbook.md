@@ -57,10 +57,17 @@ scripts/backup_restore.sh dump "$DATABASE_URL" "runsheet-$(date -u +%Y%m%dT%H%M%
 ```
 
 The script verifies the archive is readable before reporting success — a dump
-nobody has read back is a hope, not a backup. See
-[docs/backup-and-restore.md](backup-and-restore.md) for the restore path, the
-`drill` subcommand that proves it works, and the three Elasticsearch indices a
-Postgres dump does **not** cover.
+nobody has read back is a hope, not a backup.
+
+Postgres is not the whole picture. Three Elasticsearch indices have no Postgres
+source and cannot be rebuilt from it, so export them too:
+
+```sh
+python -m scripts.es_only_backup export --out-dir ./es-backup
+```
+
+See [docs/backup-and-restore.md](backup-and-restore.md) for the restore path and
+the drills that prove both work.
 
 > ⚠️ **The migration chain contains a destructive revision.**
 > `0007_drop_shipments_current` **drops the `shipments_current` table**. It is
