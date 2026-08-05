@@ -219,8 +219,18 @@ class AgentOrchestrator:
 
         # Step 2: LLM-based classification when keywords fail
         try:
-            import os
             from litellm import acompletion
+
+            from Agents.model_provider import try_resolve_agent_model_spec
+
+            # Optional path: this classification already has a keyword-matching
+            # fallback, so a missing credential should degrade routing rather
+            # than raise into a user request. It previously passed an empty
+            # api_key, which made every classification a silent 401 that the
+            # except-block below logged as "LLM classification failed".
+            model_id, model_kwargs = try_resolve_agent_model_spec()
+            if model_id is None:
+                return matched
 
             domains = list(self.ROUTING_TABLE.keys())
             classification_prompt = (
@@ -231,11 +241,11 @@ class AgentOrchestrator:
             )
 
             response = await acompletion(
-                model="gemini/gemini-2.5-flash",
+                model=model_id,
                 messages=[{"role": "user", "content": classification_prompt}],
-                api_key=os.environ.get("GEMINI_API_KEY", ""),
                 max_tokens=50,
                 temperature=0.0,
+                **model_kwargs,
             )
 
             result_text = response.choices[0].message.content.strip().lower()

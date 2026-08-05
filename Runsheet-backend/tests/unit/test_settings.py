@@ -176,6 +176,10 @@ class TestSettings:
                 # (Req 10.3).
                 env_vars["SUPERTOKENS_CONNECTION_URI"] = "https://core.supertokens.example.com"
                 env_vars["SUPERTOKENS_API_KEY"] = "st-managed-core-api-key"
+                # The agent stack needs a real LLM credential outside
+                # development; GOOGLE_CLOUD_PROJECT does not satisfy the
+                # default 'gemini' provider.
+                env_vars["GEMINI_API_KEY"] = "test-gemini-key"
             if env == "production":
                 env_vars["CORS_ORIGINS"] = '["https://app.runsheet.com"]'
             with patch.dict(os.environ, env_vars, clear=True):
@@ -257,6 +261,10 @@ class TestSuperTokensSettings:
             # dormant and invoices finalize with no invoice_number.
             "DATABASE_URL": "postgresql+psycopg://u:p@db.internal:5432/runsheet",
             "REDIS_URL": "redis://localhost:6379",
+            # Required outside development: the agents authenticate to Google AI
+            # Studio by API key, and an unset value became an empty key that
+            # failed on every request instead of at startup.
+            "GEMINI_API_KEY": "test-gemini-key",
         }
 
     def test_supertokens_defaults(self, valid_env_vars):
@@ -568,7 +576,7 @@ class TestEnvironmentSpecificConfiguration:
         """Test creating settings for staging environment."""
         from config.settings import create_settings_for_environment
         
-        env_vars = {**valid_env_vars, "DATABASE_URL": "postgresql+psycopg://u:p@db.internal:5432/runsheet", "REDIS_URL": "redis://localhost:6379", "SUPERTOKENS_CONNECTION_URI": "https://core.supertokens.example.com", "SUPERTOKENS_API_KEY": "st-managed-core-api-key"}
+        env_vars = {**valid_env_vars, "DATABASE_URL": "postgresql+psycopg://u:p@db.internal:5432/runsheet", "REDIS_URL": "redis://localhost:6379", "SUPERTOKENS_CONNECTION_URI": "https://core.supertokens.example.com", "SUPERTOKENS_API_KEY": "st-managed-core-api-key", "GEMINI_API_KEY": "test-gemini-key"}
         with patch.dict(os.environ, env_vars, clear=True):
             settings = create_settings_for_environment(Environment.STAGING)
             assert isinstance(settings, Settings)
@@ -577,7 +585,7 @@ class TestEnvironmentSpecificConfiguration:
         """Test creating settings for production environment."""
         from config.settings import create_settings_for_environment
         
-        env_vars = {**valid_env_vars, "DATABASE_URL": "postgresql+psycopg://u:p@db.internal:5432/runsheet", "REDIS_URL": "redis://localhost:6379", "CORS_ORIGINS": '["https://app.runsheet.com"]', "SUPERTOKENS_CONNECTION_URI": "https://core.supertokens.example.com", "SUPERTOKENS_API_KEY": "st-managed-core-api-key"}
+        env_vars = {**valid_env_vars, "DATABASE_URL": "postgresql+psycopg://u:p@db.internal:5432/runsheet", "REDIS_URL": "redis://localhost:6379", "CORS_ORIGINS": '["https://app.runsheet.com"]', "SUPERTOKENS_CONNECTION_URI": "https://core.supertokens.example.com", "SUPERTOKENS_API_KEY": "st-managed-core-api-key", "GEMINI_API_KEY": "test-gemini-key"}
         with patch.dict(os.environ, env_vars, clear=True):
             settings = create_settings_for_environment(Environment.PRODUCTION)
             assert isinstance(settings, Settings)
@@ -586,7 +594,7 @@ class TestEnvironmentSpecificConfiguration:
         """Test that create_settings_for_environment auto-detects environment."""
         from config.settings import create_settings_for_environment
         
-        env_vars = {**valid_env_vars, "ENVIRONMENT": "staging", "DATABASE_URL": "postgresql+psycopg://u:p@db.internal:5432/runsheet", "REDIS_URL": "redis://localhost:6379", "SUPERTOKENS_CONNECTION_URI": "https://core.supertokens.example.com", "SUPERTOKENS_API_KEY": "st-managed-core-api-key"}
+        env_vars = {**valid_env_vars, "ENVIRONMENT": "staging", "DATABASE_URL": "postgresql+psycopg://u:p@db.internal:5432/runsheet", "REDIS_URL": "redis://localhost:6379", "SUPERTOKENS_CONNECTION_URI": "https://core.supertokens.example.com", "SUPERTOKENS_API_KEY": "st-managed-core-api-key", "GEMINI_API_KEY": "test-gemini-key"}
         with patch.dict(os.environ, env_vars, clear=True):
             settings = create_settings_for_environment()
             assert settings.environment == Environment.STAGING
@@ -657,6 +665,7 @@ class TestSuperTokensMigrationValidators:
             # Required outside development — see the database_url validator.
             "DATABASE_URL": "postgresql+psycopg://u:p@db.internal:5432/runsheet",
             "REDIS_URL": "redis://redis.internal:6379",
+            "GEMINI_API_KEY": "test-gemini-key",
             "CORS_ORIGINS": '["https://app.runsheet.com"]',
         }
 

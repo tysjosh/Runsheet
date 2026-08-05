@@ -175,6 +175,8 @@ def prod_supertokens_env_vars():
         # supplied here so this test isolates the SuperTokens validator rather
         # than failing on the database_url check.
         "DATABASE_URL": "postgresql+psycopg://u:p@db.internal:5432/runsheet",
+        # Same isolation reason: the agent-LLM validator would otherwise fire.
+        "GEMINI_API_KEY": "test-gemini-key",
     }
 
 

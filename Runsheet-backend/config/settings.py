@@ -123,6 +123,26 @@ class Settings(BaseSettings):
         default=None,
         description="Path to Google Cloud service account credentials file"
     )
+
+    # ── Agent LLM routing ─────────────────────────────────────────────
+    #
+    # The provider is explicit because LiteLLM routes on the model-id prefix
+    # and the two providers authenticate differently: "gemini/" is Google AI
+    # Studio (API key) and "vertex_ai/" is Google Cloud (ADC). The model id
+    # used to be a literal in three modules, so a fully populated GCP config
+    # still produced 401s against AI Studio. See Agents/model_provider.py.
+    agent_llm_provider: str = Field(
+        default="gemini",
+        description=(
+            "LLM provider for the agent stack: 'gemini' (Google AI Studio, "
+            "authenticates with GEMINI_API_KEY) or 'vertex_ai' (Google Cloud, "
+            "authenticates with Application Default Credentials)"
+        ),
+    )
+    agent_llm_model: str = Field(
+        default="gemini-2.5-flash",
+        description="Model name (without provider prefix) the agents run on",
+    )
     
     # ── PostgreSQL source-of-truth (persistence/) ─────────────────────
     #
@@ -798,6 +818,40 @@ class Settings(BaseSettings):
         v = v.strip()
         return v
     
+    @field_validator("agent_llm_provider")
+    @classmethod
+    def validate_agent_llm_provider(cls, v: str) -> str:
+        """Reject an unknown provider rather than building an unroutable model id.
+
+        A typo here would otherwise reach LiteLLM as a model-id prefix it does
+        not recognise, and surface as a per-request routing error.
+        """
+        v = (v or "").strip().lower()
+        if v not in {"gemini", "vertex_ai"}:
+            raise ValueError(
+                "agent_llm_provider must be 'gemini' or 'vertex_ai'"
+            )
+        return v
+
+    @field_validator("agent_llm_model")
+    @classmethod
+    def validate_agent_llm_model(cls, v: str) -> str:
+        """The model name must not carry a provider prefix.
+
+        ``AGENT_LLM_MODEL=gemini/gemini-2.5-flash`` would compose to
+        ``gemini/gemini/gemini-2.5-flash``. The prefix comes from
+        ``agent_llm_provider``, which is the whole point of splitting them.
+        """
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("agent_llm_model cannot be empty")
+        if "/" in v:
+            raise ValueError(
+                "agent_llm_model must not include a provider prefix "
+                f"(got {v!r}); set agent_llm_provider instead"
+            )
+        return v
+
     @field_validator("log_level")
     @classmethod
     def validate_log_level(cls, v: str) -> str:
@@ -962,6 +1016,37 @@ class Settings(BaseSettings):
                     "commerce_backbone_enabled is True: invoice numbering, "
                     "payment de-duplication and the credit-check row lock are "
                     "all gated on it, and each degrades silently when it is off"
+                )
+            # The agent stack has no credential unless one is configured, and
+            # the failure mode was invisible: every call site passed
+            # ``os.environ.get("GEMINI_API_KEY", "")``, so an unset variable
+            # became an EMPTY key rather than an error. The model constructed
+            # fine, boot succeeded, and each agent request failed on
+            # authentication instead — the specialists, the orchestrator's
+            # intent classification and the conversational surface all of them.
+            #
+            # GOOGLE_CLOUD_PROJECT is not a substitute and looked like one: the
+            # hardcoded ``gemini/`` model-id prefix routes to Google AI Studio,
+            # which authenticates by API key, so a fully populated GCP config
+            # still 401s. Choosing Vertex is now explicit
+            # (AGENT_LLM_PROVIDER=vertex_ai) and checked against the setting it
+            # actually needs. See Agents/model_provider.py.
+            if self.agent_llm_provider == "gemini" and not self.gemini_api_key:
+                raise ValueError(
+                    "gemini_api_key is required in a "
+                    f"{self.environment.value} environment when "
+                    "agent_llm_provider is 'gemini': the agents authenticate to "
+                    "Google AI Studio by API key, and an unset value silently "
+                    "becomes an empty key that fails on every request. Set "
+                    "GEMINI_API_KEY, or set AGENT_LLM_PROVIDER=vertex_ai to "
+                    "authenticate to Google Cloud with Application Default "
+                    "Credentials instead."
+                )
+            if self.agent_llm_provider == "vertex_ai" and not self.google_cloud_project:
+                raise ValueError(
+                    "google_cloud_project is required in a "
+                    f"{self.environment.value} environment when "
+                    "agent_llm_provider is 'vertex_ai'"
                 )
             # Validate CORS: reject any localhost origins in production
             if self.environment == Environment.PRODUCTION:

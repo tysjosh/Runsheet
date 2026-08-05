@@ -55,6 +55,12 @@ def container():
         redis_url="redis://localhost:6379",
         google_cloud_project="test-project-123456",
         google_cloud_location="us-central1",
+        # The agent model is resolved from settings now, not from a hardcoded
+        # model id plus os.environ. A MagicMock attribute would compose into a
+        # nonsense provider prefix, so state these explicitly.
+        agent_llm_provider="gemini",
+        agent_llm_model="gemini-2.5-flash",
+        gemini_api_key="test-gemini-key",
     )
     c.es_service = MagicMock()
     c.ops_feature_flags = MagicMock()

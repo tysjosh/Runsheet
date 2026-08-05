@@ -371,6 +371,66 @@ async def initialize(app, container: ServiceContainer) -> None:
     except Exception as exc:
         logger.warning("PodHashChainWriter wiring failed: %s", exc)
 
+    # 8b. Weather_Provider — HDD input to the propane / heating-oil
+    #    consumption models (Req 1.2.1–1.2.6).
+    #
+    #    Both adapters were fully implemented and neither was ever
+    #    constructed: nothing called ``build_weather_provider`` outside its own
+    #    module, and ``TankForecastingAgent.set_weather_provider`` was never
+    #    called, so ``_weather_provider`` stayed ``None`` and EVERY propane and
+    #    heating-oil forecast ran weather-blind with ``weather_fallback: true``.
+    #    Degree-days are the dominant term in those models, so the annotation
+    #    was the only sign that the forecast was running without its main input.
+    #
+    #    Built only when a credential is present. Both adapters return ``[]``
+    #    with a warning when their token is missing, so wiring one
+    #    unconditionally would swap a visible "not registered" for a provider
+    #    that fails on every call — the same silence, one layer deeper.
+    weather_provider = None
+    try:
+        from fuel.services.weather_provider import (
+            NOAA_TOKEN_ENV,
+            OPENWEATHER_KEY_ENV,
+            build_weather_provider,
+        )
+
+        _weather_name = (os.environ.get("FUEL_OPS_WEATHER_PROVIDER") or "").strip().lower()
+        if not _weather_name:
+            # Auto-select from whichever credential exists. OpenWeather first:
+            # its One Call history endpoint covers the [-14, +7] window the
+            # forecaster asks for, whereas NOAA CDO is observations-only.
+            if os.environ.get(OPENWEATHER_KEY_ENV):
+                _weather_name = "openweather"
+            elif os.environ.get(NOAA_TOKEN_ENV):
+                _weather_name = "noaa"
+
+        if _weather_name:
+            weather_provider = build_weather_provider(
+                _weather_name,
+                # ES persists daily observations to weather_observations, which
+                # also gives the compliance K-factor service real HDD to read
+                # instead of its empty-index fallback. Redis gives the 1h cache.
+                es_service=es_service,
+                redis_client=_agent_redis_client,
+            )
+            container.weather_provider = weather_provider
+            logger.info(
+                "Weather_Provider registered (%s) — HDD available to the "
+                "propane / heating-oil consumption models",
+                _weather_name,
+            )
+        else:
+            logger.info(
+                "Weather_Provider not registered — set FUEL_OPS_WEATHER_PROVIDER "
+                "with %s or %s. Propane / heating-oil forecasts will run without "
+                "degree-days and annotate weather_fallback: true",
+                OPENWEATHER_KEY_ENV,
+                NOAA_TOKEN_ENV,
+            )
+    except Exception as exc:  # noqa: BLE001 — forecasting degrades, not fails
+        weather_provider = None
+        logger.warning("Weather_Provider wiring failed: %s", exc)
+
     # 9. DeliveryDestinationService — unified reader over fuel_stations
     #    and customer_tanks.
     try:
@@ -505,23 +565,18 @@ async def initialize(app, container: ServiceContainer) -> None:
     )
     logger.info("Agent endpoints configured")
 
-    # Specialist agents
-    from strands.models.litellm import LiteLLMModel
+    # Specialist agents.
+    #
+    # The model + credential come from Agents/model_provider.py rather than a
+    # literal model id and an ``os.environ.get(..., "")`` default. An unset key
+    # used to build a model with an EMPTY api_key: boot succeeded and every
+    # agent request failed on authentication. Settings now refuses to start
+    # staging/production without a credential, so reaching here means one is
+    # configured; a development stack without one raises and is logged loudly
+    # instead of pretending the agents work.
+    from Agents.model_provider import build_agent_model
 
-    # Set the env var litellm reads for Gemini API key auth
-    gemini_key = os.environ.get("GEMINI_API_KEY", "")
-    if gemini_key:
-        os.environ["GEMINI_API_KEY"] = gemini_key
-    specialist_model = LiteLLMModel(
-        model_id="gemini/gemini-2.5-flash",
-        client_args={
-            "api_key": gemini_key,
-        },
-        params={
-            "max_tokens": 8000,
-            "temperature": 0.7,
-        },
-    )
+    specialist_model = build_agent_model(settings)
 
     specialists = {
         "fleet": FleetAgent(model=specialist_model),
@@ -704,7 +759,12 @@ async def initialize(app, container: ServiceContainer) -> None:
     logger.info("MVP ES indices ready")
 
     # Instantiate MVP agents with shared dependencies (Req 11.1–11.6)
-    tank_forecasting_agent = TankForecastingAgent(**overlay_common_args)
+    # ``weather_provider`` may be None (no credential configured), which is the
+    # pre-existing behaviour: the agent annotates ``weather_fallback: true``.
+    tank_forecasting_agent = TankForecastingAgent(
+        **overlay_common_args,
+        weather_provider=weather_provider,
+    )
     delivery_prioritization_agent = DeliveryPrioritizationAgent(
         **overlay_common_args,
         redis_client=_agent_redis_client,
@@ -903,26 +963,64 @@ async def initialize(app, container: ServiceContainer) -> None:
             wait_report_repository=sourcing_wait_report_repo,
         )
 
-        # Rack-price provider: default to the CSV-backed fallback
-        # adapter. The CSV loader is a no-op async callable until a
-        # tenant uploads a rack sheet via the admin UI; the provider
-        # safely degrades to an empty candidate set when no CSV is
-        # present, which the recommender surfaces as
-        # ``no_price_available``. Swap in ``OPISRackPriceProvider`` here
-        # once the tenant has subscribed.
+        # Rack-price provider.
+        #
+        # This used to hardcode ``CSVFallbackRackPriceProvider`` with a loader
+        # that raised ``FileNotFoundError`` on every call, so terminal sourcing
+        # had NO price data for any tenant and every recommendation came back
+        # ``no_price_available``. The finished ``OPISRackPriceProvider`` was
+        # never constructed.
+        #
+        # OPIS is now used whenever its credential is present. It resolves
+        # OPIS_API_KEY / OPIS_API_SECRET / OPIS_BASE_URL itself, so bootstrap
+        # only has to decide which adapter to build.
         from integrations.rack_price_provider_base import (
-            CSVFallbackRackPriceProvider,
+            OPIS_API_KEY_ENV,
+            build_rack_price_provider,
         )
 
-        async def _noop_csv_loader(tenant_id: str) -> bytes:
+        async def _uploaded_csv_loader(tenant_id: str) -> bytes:
+            """Load the tenant's uploaded rack sheet.
+
+            Still unimplemented, and now says so once at wiring time rather
+            than only per call. Completing it needs two things this backend
+            does not have yet: an upload endpoint for the ``rack_csv``
+            category, and somewhere to record the resulting ``file_ref``.
+            A deterministic key cannot substitute — ``_assert_tenant_prefix``
+            validates the dated/uuid key shape that ``_build_key`` produces,
+            and ``FileStorageService`` exposes no list operation, so "the
+            latest sheet for this tenant" is not resolvable from the ref alone.
+            """
             raise FileNotFoundError(
                 f"no rack-price CSV configured for tenant {tenant_id!r}"
             )
 
-        sourcing_rack_provider = CSVFallbackRackPriceProvider(
-            csv_loader=_noop_csv_loader,
-            redis_client=_agent_redis_client,
-        )
+        _rack_name = (
+            os.environ.get("FUEL_OPS_RACK_PRICE_PROVIDER") or ""
+        ).strip().lower()
+        if not _rack_name:
+            _rack_name = "opis" if os.environ.get(OPIS_API_KEY_ENV) else "csv_fallback"
+
+        if _rack_name == "opis":
+            sourcing_rack_provider = build_rack_price_provider(
+                _rack_name, redis_client=_agent_redis_client
+            )
+            logger.info(
+                "Rack-price provider: OPIS (live rack feed) — terminal sourcing "
+                "will score candidates on real prices"
+            )
+        else:
+            sourcing_rack_provider = build_rack_price_provider(
+                _rack_name,
+                csv_loader=_uploaded_csv_loader,
+                redis_client=_agent_redis_client,
+            )
+            logger.warning(
+                "Rack-price provider: csv_fallback with NO uploaded sheet "
+                "(set %s for the live OPIS feed). Terminal sourcing has no "
+                "price data and will return no_price_available",
+                OPIS_API_KEY_ENV,
+            )
         sourcing_rack_sync = RackPriceSyncService(es_service=es_service)
 
         # Tenant-config handle — the recommender uses the same minimal
