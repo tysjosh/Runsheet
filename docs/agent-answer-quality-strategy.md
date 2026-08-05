@@ -209,17 +209,108 @@ calls per persona and records every reply. Extend it with a **capability probe**
 That turns both of these defects into a check that fails loudly, and gives the
 Phase 3 work a definition of done beyond "the answer reads better".
 
-## Decisions this needs
+## Recommended resolutions, given the market
 
-- **Read-only or not.** Whether commerce agent tools may write at all, given the
-  ERP is authoritative and the pricing surfaces are deliberately staff-only.
-- **Tool-count budget.** Every tool added enters the prompt. Going from ~9 tools
-  per specialist to ~20 will affect routing accuracy and cost, and at some point
-  the specialists need splitting rather than growing. Worth a ceiling.
-- **Driver chat at all.** A3 is only worth building if drivers are meant to have
-  a conversational surface; if the mobile app is task-driven, the cheaper answer
-  is for the driver persona to have no chat rather than a chat that cannot see
-  their own work.
+The buyer is a **US fuel marketer — propane, heating oil, diesel, generator and
+farm fuel** (`fuel-ops-hardening` introduction), pivoted from Nigerian petroleum
+retail. That market decides three of the four open questions, and it decides them
+more narrowly than a general-purpose answer would.
+
+Four facts about it drive everything below:
+
+- **The ERP is the book of record.** These marketers run billing and customer
+  accounts on established industry systems. They will not move their books, and
+  their controller has veto power in a deal.
+- **Run-out is the business.** For keep-full and auto-fill customers a stockout
+  is a contract breach and, in winter, a no-heat call. Degree-day and K-factor
+  forecasting is the domain's standard language, and the platform already
+  computes it (`mvp_tank_forecasts`, 1,983 documents).
+- **Drivers are not desk users.** Gloves, cold, rural dead zones, high turnover,
+  and DOT distracted-driving exposure.
+- **It is an audited industry.** DOT hours-of-service, IFTA, BOLs, and
+  cross-contamination rules are inspected. A confidently wrong number costs more
+  than an honest "I don't know".
+
+### 1. Commerce tools: read-only, permanently
+
+Not a phase-one compromise — a product position. `COMMERCE_STAFF_ROLES` already
+restricts pricing and AR to `platform_admin` precisely because the ERP owns the
+authoritative copy; agent tools must not become the way around that.
+
+An agent that can move a credit limit or void an invoice is a deal blocker in
+this market. Read-only credit context answers the question the dispatcher
+actually has — *can I deliver to this customer today?* — without touching the
+ledger. Credit enforcement already exists deterministically and audited
+(`COMMERCE_CREDIT_HOLDS_ENABLED`, the credit-check row lock); leave it there
+rather than routing it through a model.
+
+So build one read tool, `get_customer_delivery_eligibility`, returning credit
+status, hold state and AR age together. Wire no commerce mutation tool to any
+specialist.
+
+### 2. Tool budget: task-shaped, not entity-shaped — cap ~10 per specialist
+
+A dispatcher at a heating-oil marketer asks a small, highly repetitive set of
+questions, and asks them hardest in a cold snap. Giving the model twenty
+CRUD-style search tools to compose is both more prompt and more risk; it is
+exactly how two steps end up disagreeing.
+
+Prefer a few composite tools that each return **one authoritative answer**:
+
+| Tool | The question it settles |
+|---|---|
+| `get_runout_risk_list(hours)` | who is about to run dry — the single most valuable question in propane and heating oil |
+| `get_customer_delivery_eligibility(customer_id)` | credit + hold + AR in one answer |
+| `get_todays_dispatch_status()` | late, unassigned, unstarted — one number each |
+| `get_driver_day(driver_id)` | stops remaining and HOS margin |
+| `get_best_terminal(product, volume)` | rack sourcing, once OPIS is configured |
+| `get_storm_posture()` | during a cold snap this is the whole business |
+
+This structurally prevents the contradiction class: one tool, one number, nothing
+to reconcile. Add a `fuel_planning` specialist to own the tank/forecast/sourcing
+tools rather than growing `fuel_agent` past a routable size.
+
+### 3. Driver chat: do not build it
+
+The platform already ships the right driver channel — a **voice surface**
+(`/voice/drivers/verify`, `/voice/drivers/{id}/active-assignment`,
+`POST /voice/drivers/{id}/assignments/{id}/reports`). Hands-free is the correct
+interface for someone in a truck in January, and a chat box there is a support
+burden and a distracted-driving liability.
+
+So: drop the driver from the conversational surface, or restrict it to
+procedure and safety questions with no data access. Spend the effort instead on
+the actor context (A3) — which is still required, because the voice and REST
+driver endpoints need to answer "my stops" safely — plus three or four fixed
+buttons in the app. A3 stays ordered before any driver-facing data tool, for the
+leak reason already given.
+
+### 4. Sequence: correctness before coverage
+
+In an audited industry, "I cannot identify that" is survivable and a wrong gallon
+figure is not. So Phase 1 and Phase 2 ship first even though Phase 3 is the
+visible win, and the capability probe should assert **numeric agreement with a
+direct API count**, not merely the absence of a disclaimer.
+
+### 5. Keep the disclaimers, but make them informative
+
+Removing "I cannot" wholesale would be the wrong lesson. A tool that finds no
+data should say which data is missing — "no tank-monitor readings for that
+customer" is, in this market, a monitoring upsell (Veeder-Root, and the
+integration framework already exists for it) rather than a failure. Tools should
+therefore return an explicit no-data signal the agent can pass through, distinct
+from "I have no tool for this".
+
+## Decisions still genuinely open
+
+- **Whether the conversational surface is a selling feature at all**, or a
+  convenience over a dispatch board that is already the product. The recommended
+  tools above are useful either way, but the answer changes how much to invest in
+  the plan/synthesis path versus the deterministic UI.
+- **Which tank-monitor integration to lead with.** `get_runout_risk_list` is only
+  as good as the readings behind it, and forecast confidence collapses to 0.1
+  with no history (Requirement 1.7). Veeder-Root has a reference connector;
+  whether that is the right first partner for propane is a commercial call.
 - **How much history to trust.** `search_tools` was written against an order
   schema that no longer exists. I checked the rest of that module and the damage
   is contained: `orders` is the **only** dead index in it — `trucks`,
