@@ -283,14 +283,22 @@ async def initialize(app, container: ServiceContainer) -> None:
     #    AES-GCM envelope encryption under a process-local master key. This
     #    keeps credential-dependent flows (intake-channel registration,
     #    integration credential storage) working end-to-end off-AWS without
-    #    silently calling the real KMS API. Never used in production.
+    #    silently calling the real KMS API.
+    #
+    #    The fallback is restricted to development and test. It used to apply to
+    #    any environment that was not production, which included STAGING — so a
+    #    staging deployment without FUEL_OPS_KMS_KEY_ID encrypted real tenant
+    #    QuickBooks / Stripe / Geotab tokens under ``LocalKMSClient``'s master
+    #    key, which is derived from a literal default committed to this repo.
+    #    Staging holds real credentials, so it gets the same requirement as
+    #    production: a real CMK, or no vault.
     try:
         from services.credentials_vault import TenantCredentialsVault
 
         kms_key_id = fuel_ops_settings.get("kms_key_id")
         kms_client = None
         _env = getattr(settings.environment, "value", settings.environment)
-        if not kms_key_id and _env != "production":
+        if not kms_key_id and _env in ("development", "test"):
             from services.local_kms import LOCAL_KMS_DEFAULT_KEY_ID, LocalKMSClient
 
             kms_key_id = LOCAL_KMS_DEFAULT_KEY_ID
@@ -298,6 +306,19 @@ async def initialize(app, container: ServiceContainer) -> None:
             logger.info(
                 "No FUEL_OPS_KMS_KEY_ID configured in %s; using LocalKMSClient "
                 "for the credentials vault (dev/CI envelope encryption)",
+                _env,
+            )
+        elif not kms_key_id:
+            # Registering a vault that cannot encrypt is not itself wrong — it
+            # still serves reads of previously stored credentials — but the
+            # failure surfaced only when someone tried to store one, as a 500
+            # from a ValueError deep in ``put``. Say it at boot instead.
+            logger.warning(
+                "No FUEL_OPS_KMS_KEY_ID configured in %s: the credentials vault "
+                "cannot encrypt, so storing any tenant integration credential "
+                "will fail. Set a real KMS CMK. The dev-only LocalKMSClient "
+                "fallback is deliberately NOT used here because its master key "
+                "is a literal committed to this repository.",
                 _env,
             )
 
