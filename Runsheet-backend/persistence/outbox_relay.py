@@ -21,7 +21,7 @@ import asyncio
 import logging
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from persistence.database import session_scope
 from persistence.models import OutboxEventORM
@@ -29,6 +29,45 @@ from persistence.models import OutboxEventORM
 logger = logging.getLogger(__name__)
 
 _MAX_ATTEMPTS = 10
+
+#: Postgres advisory-lock key identifying "the outbox relay". Arbitrary but
+#: fixed: any two processes using this constant contend for the same lock.
+#:
+#: Why a lock at all. ``drain_once`` selects ``published_at IS NULL`` ordered by
+#: id with no row claiming, so two relays select the SAME rows and both index
+#: them. Re-indexing one event is harmless (same ES id, idempotent upsert), but
+#: two relays running concurrently can also interleave: relay A takes event 3
+#: and relay B takes event 5 for the same aggregate, B commits first, and the
+#: OLDER payload lands last — leaving the Elasticsearch projection permanently
+#: behind the Postgres row it is supposed to mirror, with nothing logged.
+#:
+#: ``FOR UPDATE SKIP LOCKED`` would stop the duplicate work but not the
+#: inversion, which is the part that corrupts the projection. Ordering across
+#: concurrent relays needs per-aggregate partitioning; until then exactly one
+#: relay may be active, and this lock enforces that rather than trusting a
+#: deployment note.
+_RELAY_ADVISORY_LOCK_KEY = 0x52554E53_4845544F  # "RUNS" "HETO"
+
+
+async def _try_acquire_relay_lock(session) -> bool:
+    """Take the session-scoped advisory lock, or report that another holds it.
+
+    ``pg_try_advisory_lock`` is session-scoped and released automatically when
+    the connection drops, so a relay that is killed does not leave the lock held
+    — no lease renewal and no stale-lock cleanup to get wrong.
+
+    Returns True on databases that do not implement advisory locks (SQLite in
+    tests): there is no second process to contend with there, and failing closed
+    would disable the relay for the whole unit suite.
+    """
+    try:
+        result = await session.execute(
+            text("SELECT pg_try_advisory_lock(:key)"),
+            {"key": _RELAY_ADVISORY_LOCK_KEY},
+        )
+        return bool(result.scalar())
+    except Exception:
+        return True
 
 
 class OutboxRelay:
@@ -83,8 +122,44 @@ class OutboxRelay:
         return published
 
     async def run_forever(self, *, poll_interval_seconds: float = 1.0) -> None:
-        """Continuously drain the outbox until :meth:`stop` is called."""
+        """Continuously drain the outbox until :meth:`stop` is called.
+
+        Only one relay across the whole deployment actually drains: the loop
+        holds a Postgres advisory lock for as long as it runs, and an instance
+        that cannot take the lock stands down and re-checks. Standing down is
+        correct follower behaviour, not an error, so it is logged at INFO.
+
+        This is what makes replicas safe. Every background job in this
+        application starts unconditionally per process, so N replicas meant N
+        relays racing the same rows; see the note on
+        ``_RELAY_ADVISORY_LOCK_KEY`` for why that corrupts the projection rather
+        than merely duplicating work.
+        """
         logger.info("Outbox relay started (poll every %.1fs)", poll_interval_seconds)
+        # The lock is session-scoped, so it has to be held by a connection that
+        # lives as long as the loop — not taken and released per drain.
+        async with session_scope() as lock_session:
+            while not self._stopped.is_set():
+                if await _try_acquire_relay_lock(lock_session):
+                    break
+                logger.info(
+                    "Outbox relay standing down — another instance holds the "
+                    "relay lock. Re-checking in %.1fs.",
+                    poll_interval_seconds,
+                )
+                try:
+                    await asyncio.wait_for(
+                        self._stopped.wait(), timeout=poll_interval_seconds
+                    )
+                except asyncio.TimeoutError:
+                    continue
+                logger.info("Outbox relay stopped while standing down")
+                return
+
+            logger.info("Outbox relay holds the relay lock — draining")
+            await self._drain_loop(poll_interval_seconds)
+
+    async def _drain_loop(self, poll_interval_seconds: float) -> None:
         while not self._stopped.is_set():
             try:
                 drained = await self.drain_once()
