@@ -219,3 +219,13 @@ Runsheet-backend/_tmp_*
 
 # Soak-run output (scripts/soak_personas.py): local run artefacts, never committed.
 soak-out/
+
+# Elasticsearch exports (scripts/es_only_backup.py). These are raw tenant
+# documents — customer names, addresses, tank readings, driver records — so they
+# must never reach the repository. The pattern is deliberately broad: the
+# migration takes whole-cluster exports under several directory names.
+es-backup/
+es-full-backup/
+**/es-backup/
+**/es-full-backup/
+*.ndjson

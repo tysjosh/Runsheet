@@ -462,18 +462,77 @@ _JSON_ID_FIELDS = [
 ]
 
 
+#: Indices whose document id neither follows the ``<index>_id`` convention nor
+#: appears in :data:`_JSON_ID_FIELDS`. Each entry mirrors the id the PRODUCTION
+#: writer uses, so a seeded document and a live one are the same document rather
+#: than two copies of the same fact.
+#:
+#: Both entries were found by the fixture-collapse property test:
+#:
+#: * ``atg_readings`` carries ``reading_id``, but ``instance_id`` precedes it in
+#:   the generic list, so the 2-row fixture loaded as 1 document.
+#:   ``TankImportService`` keys on ``reading_id``.
+#: * ``weather_observations`` has no ``*_id`` field at all, so every row was
+#:   skipped with a warning and the index stayed EMPTY — while
+#:   ``EsHddProvider`` reads it for the compliance K-factor service's
+#:   accumulated degree-days. ``WeatherProvider._persist_observations`` keys on
+#:   ``wxobs:{tenant_id}:{provider}:{zip_code}:{date}``.
+_INDEX_ID_OVERRIDES = {
+    "atg_readings": lambda d: d.get("reading_id"),
+    "weather_observations": lambda d: (
+        "wxobs:{}:{}:{}:{}".format(
+            d.get("tenant_id"), d.get("provider"), d.get("zip_code"), d.get("date")
+        )
+        if all(d.get(k) for k in ("tenant_id", "provider", "zip_code", "date"))
+        else None
+    ),
+}
+
+
+def _natural_id_fields(index_name: str) -> tuple:
+    """The id field names that belong to ``index_name`` itself.
+
+    ``rack_prices`` -> ``rack_prices_id``, ``rack_price_id``;
+    ``fuel_orders_current`` -> ``fuel_orders_id``, ``fuel_order_id``.
+    """
+    base = index_name.replace("_current", "")
+    singular = base[:-1] if base.endswith("s") else base
+    return (f"{base}_id", f"{singular}_id")
+
+
 def _resolve_json_doc_id(index_name: str, doc: dict):
-    """Pick a document _id for a JSON seed record."""
+    """Pick a document _id for a JSON seed record.
+
+    The index's **own** key wins over :data:`_JSON_ID_FIELDS`. That ordering is
+    the whole point: the generic list is ordered, and a record carrying both its
+    own key and a foreign key used to get whichever appeared earlier in the
+    list. Two seeded indices did:
+
+    * ``rack_prices`` was keyed by ``terminal_id`` (earlier in the list than
+      ``rack_price_id``), so the 5-row fixture loaded as **3 documents** —
+      RACK-002 overwrote RACK-001 and RACK-004 overwrote RACK-003, both sharing
+      a terminal. Rack prices are per (terminal, product) and the sourcing
+      recommender scores candidates on them, so each terminal kept only its last
+      product's price and the rest silently did not exist.
+    * ``customer_tanks`` was keyed by ``customer_id``. Latent today because no
+      fixture gives one customer two tanks, but the domain supports it — the
+      production repository keys on ``customer_tank_id`` — so the next
+      multi-tank customer would have lost every tank but one.
+
+    Nothing was logged in either case: a bulk index with a duplicate id is an
+    ordinary overwrite. The generic list stays as the fallback for indices whose
+    key does not follow the naming convention (``fuel_orders_current`` ->
+    ``order_id``).
+    """
+    override = _INDEX_ID_OVERRIDES.get(index_name)
+    if override is not None:
+        return override(doc)
+    for candidate in _natural_id_fields(index_name):
+        if candidate in doc:
+            return doc[candidate]
     for field in _JSON_ID_FIELDS:
         if field in doc:
             return doc[field]
-    # Fallback: singular form of the index name (e.g. depots -> depot_id).
-    for candidate in (
-        f"{index_name.rstrip('s')}_id",
-        f"{index_name.replace('_current', '').rstrip('s')}_id",
-    ):
-        if candidate in doc:
-            return doc[candidate]
     return None
 
 

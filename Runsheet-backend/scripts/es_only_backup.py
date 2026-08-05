@@ -23,12 +23,22 @@ covered while that decision is made.
 The index list is imported, never restated, so adding a fourth ES-only index
 extends this backup automatically.
 
+``--all`` widens the scope from the three ES-only indices to **every** index in
+the cluster. That is the mode the Postgres migration needs: once ES stops being
+written to, everything in it is irreplaceable, not just the three that lack a
+projector today. The default is unchanged, so the runbook's routine backup keeps
+exporting exactly the indices Postgres cannot rebuild.
+
 Usage
 -----
     ENVIRONMENT=production python -m scripts.es_only_backup export --out-dir ./es-backup
     ENVIRONMENT=production python -m scripts.es_only_backup verify --out-dir ./es-backup
     ENVIRONMENT=production python -m scripts.es_only_backup restore --out-dir ./es-backup
     ENVIRONMENT=development python -m scripts.es_only_backup drill
+
+    # Whole-cluster export, for the Elasticsearch -> Postgres migration:
+    ENVIRONMENT=development python -m scripts.es_only_backup export --all --out-dir ./es-full
+    ENVIRONMENT=development python -m scripts.es_only_backup verify --out-dir ./es-full
 """
 from __future__ import annotations
 
@@ -60,6 +70,26 @@ def _indices() -> Tuple[str, ...]:
     return ES_ONLY_INDICES
 
 
+def _all_indices(client) -> Tuple[str, ...]:
+    """Every non-system index in the cluster, sorted.
+
+    Discovered from the live cluster rather than from the app's mapping
+    registries on purpose: an index created dynamically, or left behind by a
+    retired feature, still holds documents that a whole-cluster backup must
+    capture. Names beginning with ``.`` are Elasticsearch's own.
+    """
+    names = sorted(
+        name
+        for name in client.indices.get(index="*").keys()
+        if not name.startswith(".")
+    )
+    return tuple(names)
+
+
+def _scope(client, all_indices: bool) -> Tuple[str, ...]:
+    return _all_indices(client) if all_indices else _indices()
+
+
 def _scroll(client, index: str) -> Iterator[Tuple[str, dict]]:
     """Yield ``(_id, _source)`` for every document in ``index``."""
     resp = client.search(
@@ -83,12 +113,12 @@ def _scroll(client, index: str) -> Iterator[Tuple[str, dict]]:
                 pass
 
 
-def cmd_export(out_dir: pathlib.Path) -> int:
+def cmd_export(out_dir: pathlib.Path, all_indices: bool = False) -> int:
     client = _client()
     out_dir.mkdir(parents=True, exist_ok=True)
     manifest: Dict[str, int] = {}
 
-    for index in _indices():
+    for index in _scope(client, all_indices):
         path = out_dir / f"{index}.ndjson"
         if not client.indices.exists(index=index):
             print(f"  {index}: absent — nothing to export")
@@ -110,10 +140,13 @@ def cmd_export(out_dir: pathlib.Path) -> int:
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     total = sum(manifest.values())
-    print(f"wrote {out_dir}/manifest.json ({total} document(s) total)")
+    print(
+        f"wrote {out_dir}/manifest.json "
+        f"({len(manifest)} index(es), {total} document(s) total)"
+    )
     if total == 0:
         print(
-            "⚠️  every ES-only index was empty. That is either a fresh "
+            "⚠️  every exported index was empty. That is either a fresh "
             "environment or a sign the data is already gone — check before "
             "treating this as a backup."
         )
@@ -121,7 +154,14 @@ def cmd_export(out_dir: pathlib.Path) -> int:
 
 
 def cmd_verify(out_dir: pathlib.Path) -> int:
-    """Check the export is internally consistent before trusting it."""
+    """Check the export is internally consistent before trusting it.
+
+    Verification is driven by the **manifest**, not by ``_indices()``. Checking
+    only the three ES-only names would pass a whole-cluster ``--all`` export
+    while leaving 100 of its files unread — a verify that says yes about data it
+    never looked at. The ES-only three are additionally required to be present,
+    because that is the guarantee the deploy runbook leans on.
+    """
     manifest_path = out_dir / "manifest.json"
     if not manifest_path.is_file():
         print(f"❌ {manifest_path} missing — this is not an export directory")
@@ -131,9 +171,13 @@ def cmd_verify(out_dir: pathlib.Path) -> int:
     failed = False
     for index in _indices():
         if index not in manifest:
-            print(f"❌ {index} is not in the manifest — the export predates it")
+            print(
+                f"❌ {index} is an ES-only index and is not in the manifest — "
+                "this export cannot stand in for the irreplaceable data"
+            )
             failed = True
-            continue
+
+    for index in sorted(manifest):
         path = out_dir / f"{index}.ndjson"
         if not path.is_file():
             print(f"❌ {path.name} missing")
@@ -165,7 +209,11 @@ def cmd_verify(out_dir: pathlib.Path) -> int:
                 print(f"  {index}: {lines} document(s) match the manifest")
     if failed:
         return 1
-    print("✅ export is internally consistent")
+    total = sum(manifest.values())
+    print(
+        f"✅ export is internally consistent "
+        f"({len(manifest)} index(es), {total} document(s))"
+    )
     return 0
 
 
@@ -208,12 +256,16 @@ def _read(out_dir: pathlib.Path, index: str) -> List[dict]:
     ]
 
 
-def cmd_restore(out_dir: pathlib.Path) -> int:
+def cmd_restore(out_dir: pathlib.Path, all_indices: bool = False) -> int:
     if cmd_verify(out_dir) != 0:
         print("refusing to restore an export that does not verify")
         return 1
     client = _client()
-    for index in _indices():
+    manifest = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
+    # Restore what the export actually contains when --all, so a whole-cluster
+    # export is not silently narrowed to three indices on the way back in.
+    scope = sorted(manifest) if all_indices else _indices()
+    for index in scope:
         records = _read(out_dir, index)
         n = _restore_into(client, index, records, index)
         print(f"  {index}: restored {n} document(s)")
@@ -323,15 +375,25 @@ def main() -> int:
     for name in ("export", "verify", "restore"):
         p = sub.add_parser(name)
         p.add_argument("--out-dir", type=pathlib.Path, required=True)
+        if name != "verify":
+            p.add_argument(
+                "--all",
+                action="store_true",
+                dest="all_indices",
+                help=(
+                    "every index in the cluster, not just the ES-only three. "
+                    "Required for the Elasticsearch -> Postgres migration."
+                ),
+            )
     sub.add_parser("drill")
     args = ap.parse_args()
 
     if args.command == "export":
-        return cmd_export(args.out_dir)
+        return cmd_export(args.out_dir, args.all_indices)
     if args.command == "verify":
         return cmd_verify(args.out_dir)
     if args.command == "restore":
-        return cmd_restore(args.out_dir)
+        return cmd_restore(args.out_dir, args.all_indices)
     return cmd_drill()
 
 
