@@ -216,3 +216,6 @@ ipython_config.py
 # =============================================================================
 Runsheet-backend/scripts/_tmp_*
 Runsheet-backend/_tmp_*
+
+# Soak-run output (scripts/soak_personas.py): local run artefacts, never committed.
+soak-out/
