@@ -471,3 +471,53 @@ jobs:
       - name: Container logs
         if: always()
         run: docker logs app 2>&1 | tail -60 || true
+
+  # -----------------------------------------------------------------
+  # Job 10: Dispatcher UI (/runsheet) — types, lint, tests, production build
+  # This is the primary operator surface and had NO CI at all: no typecheck,
+  # no build, no tests, no lint. All four passed when first run by hand, so
+  # this is not about a broken app — it is about an unguarded one. A regression
+  # in the UI shipped silently.
+  #
+  # `next build` is included and not just `tsc`: the build runs type checking
+  # across the app router, resolves server/client component boundaries, and
+  # prerenders 39 static pages. tsc alone catches none of those failures.
+  # -----------------------------------------------------------------
+  dispatcher-ui:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: runsheet
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: runsheet/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript compilation check
+        run: npx tsc --noEmit
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Tests
+        run: npm test -- --ci
+
+      - name: Production build
+        env:
+          # Every value the build reads is NEXT_PUBLIC_* and therefore baked
+          # into the bundle. These are build-time placeholders so the build is
+          # self-contained: it must not need a reachable backend, and a real
+          # key must never be committed to a workflow file.
+          NEXT_PUBLIC_API_URL: http://localhost:8080/api
+          NEXT_PUBLIC_WS_URL: ws://localhost:8080
+          NEXT_PUBLIC_SITE_URL: http://localhost:3000
+          NEXT_PUBLIC_ST_API_DOMAIN: http://localhost:8080
+          NEXT_PUBLIC_ST_WEBSITE_DOMAIN: http://localhost:3000
+        run: npm run build

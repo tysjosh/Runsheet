@@ -80,7 +80,9 @@ export default async function Image() {
             maxWidth: 880,
           }}
         >
-          {"Runout forecasting · compliant load planning · route optimization — for US regional fuel distributors."}
+          {
+            "Runout forecasting · compliant load planning · route optimization — for US regional fuel distributors."
+          }
         </div>
       </div>
 
