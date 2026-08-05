@@ -46,7 +46,12 @@ _INDEX_BY_AGG = {
     "supplier_contract": ("supplier_contracts", "contract_id"),
     "fuel_order": ("fuel_orders_current", "order_id"),
     "job": ("jobs_current", "job_id"),
-    "shipment": ("shipments_current", "shipment_id"),
+    # ``shipment`` was retired with the ``shipments_current`` table (rev 0007).
+    # It stayed listed here after the drop, and because ``_fetch_pg_all`` has no
+    # entry for it the tool raised ``KeyError: 'shipment'`` and abandoned the run
+    # — taking the seven aggregates after it, including all three fuel assets,
+    # down with it. Only reachable when ``shipments_current`` is absent from
+    # ``retired_es_indices``, which is why it went unnoticed.
     "tenant_job_policy": ("tenant_job_policies", "tenant_id"),
     "driver": ("drivers", "driver_id"),
     "depot": ("depots", "depot_id"),
@@ -55,6 +60,23 @@ _INDEX_BY_AGG = {
     "intake_channel": ("intake_channels", "channel_id"),
     "truck": ("trucks", "truck_id"),
     "location": ("locations", "location_id"),
+    "customer_tank": ("customer_tanks", "customer_tank_id"),
+    "truck_compartment": ("truck_compartments", "compartment_key"),
+    "fuel_station": ("fuel_stations", "station_key"),
+}
+
+#: Aggregates whose Elasticsearch ``_id`` is not the Postgres primary key, with
+#: the function that maps an ES ``_id`` + ``_source`` onto the PG key.
+#:
+#: Without this, parity reports every row twice — once "only in ES" and once
+#: "only in Postgres" — for a migration that is actually correct.
+#: ``customer_tanks`` is the case that matters: the ES documents are keyed by
+#: ``customer_id`` because the seeder's id resolver preferred the foreign key,
+#: and the Postgres table is deliberately keyed by ``customer_tank_id`` so the
+#: collision cannot recur. The remap makes parity compare the same tank on both
+#: sides instead of flagging the fix as a divergence.
+_ES_ID_REMAP = {
+    "customer_tank": lambda es_id, src: src.get("customer_tank_id") or es_id,
 }
 
 # Fields excluded from the diff per aggregate. These are either recomputed on
@@ -93,7 +115,6 @@ _IGNORED_FIELDS = {
     # Orders/jobs current-state: verbatim document — compare all.
     "fuel_order": set(),
     "job": set(),
-    "shipment": set(),
     "tenant_job_policy": set(),
     # Master data: verbatim document — compare all.
     "driver": set(),
@@ -103,6 +124,10 @@ _IGNORED_FIELDS = {
     "intake_channel": set(),
     "truck": set(),
     "location": set(),
+    # Fuel assets: verbatim document — compare all.
+    "customer_tank": set(),
+    "truck_compartment": set(),
+    "fuel_station": set(),
 }
 
 
@@ -249,6 +274,9 @@ async def _fetch_pg_all(agg: str, tenant_id: Optional[str]) -> Dict[str, Dict[st
         "intake_channel": ("IntakeChannelORM", "channel_id"),
         "truck": ("TruckORM", "truck_id"),
         "location": ("LocationORM", "location_id"),
+        "customer_tank": ("CustomerTankORM", "customer_tank_id"),
+        "truck_compartment": ("TruckCompartmentORM", "compartment_key"),
+        "fuel_station": ("FuelStationORM", "station_key"),
     }
     if agg in _CONFIG:
         import persistence.models as _m
@@ -331,6 +359,9 @@ async def parity_check(tenant_id: Optional[str] = None) -> Tuple[int, int]:
             logger.info("[%s] index %s retired (Postgres-only) — skipping parity", agg, index)
             continue
         es_docs = await _fetch_es_all(es_client, index, tenant_id)
+        remap = _ES_ID_REMAP.get(agg)
+        if remap is not None:
+            es_docs = {remap(doc_id, src): src for doc_id, src in es_docs.items()}
         pg_docs = await _fetch_pg_all(agg, tenant_id)
 
         only_es = set(es_docs) - set(pg_docs)

@@ -31,10 +31,12 @@ from persistence.models import (
     AssetCertificationORM,
     CompliancePricingRuleORM,
     CustomerORM,
+    CustomerTankORM,
     DepotORM,
     DriverMasterORM,
     DunningEventORM,
     FuelOrderCurrentORM,
+    FuelStationORM,
     IdempotencyKeyORM,
     IntakeChannelORM,
     InvoiceCounterORM,
@@ -52,6 +54,7 @@ from persistence.models import (
     TaxJurisdictionORM,
     TenantJobPolicyORM,
     TerminalORM,
+    TruckCompartmentORM,
     TruckORM,
 )
 
@@ -1067,6 +1070,51 @@ class CurrentStateRepository:
         "intake_channel": (IntakeChannelORM, "channel_id", ("status",), False),
         "truck": (TruckORM, "truck_id", ("status",), False),
         "location": (LocationORM, "location_id", ("status",), False),
+        # Fuel assets. These three were Elasticsearch-only until now: see the
+        # note above ``CustomerTankORM`` in ``persistence.models``. No
+        # stale-event guard — the writers are level/state updates from the ATG
+        # connector and the loading agent, not an event stream carrying
+        # ``last_event_timestamp``.
+        "customer_tank": (
+            CustomerTankORM, "customer_tank_id",
+            ("customer_id", "status", "fuel_type", "customer_type", "zip_code",
+             "external_tank_id", "source_system"),
+            False,
+        ),
+        "truck_compartment": (
+            TruckCompartmentORM, "compartment_key",
+            ("truck_id", "compartment_id", "state", "last_loaded_product"),
+            False,
+        ),
+        "fuel_station": (
+            FuelStationORM, "station_key",
+            ("station_id", "status", "fuel_type", "fuel_grade"),
+            False,
+        ),
+    }
+
+    #: Aggregates whose primary key is a composite the document does not carry.
+    #: ``truck_compartments`` is keyed in Elasticsearch by
+    #: ``f"{truck_id}_{compartment_id}"``, and callers look compartments up by
+    #: that id rather than by query, so the key is preserved verbatim rather
+    #: than recomputed on read. Deriving it here as well as accepting an
+    #: explicit ``doc_id`` means a writer that forgets to pass one still lands
+    #: under the id every reader uses, instead of raising on a NULL pk.
+    _COMPOSITE_KEYS = {
+        "truck_compartment": ("truck_id", "compartment_id"),
+    }
+
+    #: Aggregates whose pk column name does not appear in the document, with the
+    #: document field to fall back to.
+    #:
+    #: ``fuel_stations`` is keyed by ``station_key`` — the verbatim Elasticsearch
+    #: ``_id`` — because the index carries two conventions: bare ``station_id``
+    #: for seeded documents and the ATG connector, ``station_id::fuel_type`` for
+    #: anything ``FuelService.create_station`` wrote. Callers that know which one
+    #: they mean pass ``doc_id``; the bare ``station_id`` is the safer default for
+    #: one that does not, because it is what the majority of live documents use.
+    _PK_FALLBACK_FIELDS = {
+        "fuel_station": ("station_id",),
     }
 
     def __init__(self, aggregate_type: str) -> None:
@@ -1094,6 +1142,29 @@ class CurrentStateRepository:
         if resolved_id is None and self.aggregate_type == "tenant_job_policy":
             # tenant_job_policies is keyed by tenant_id (one per tenant).
             resolved_id = doc["tenant_id"]
+        if resolved_id is None:
+            parts = self._COMPOSITE_KEYS.get(self.aggregate_type)
+            if parts and all(doc.get(p) for p in parts):
+                resolved_id = "_".join(str(doc[p]) for p in parts)
+        if resolved_id is None:
+            for field in self._PK_FALLBACK_FIELDS.get(self.aggregate_type, ()):
+                if doc.get(field):
+                    resolved_id = str(doc[field])
+                    break
+        if resolved_id is None and (
+            self.aggregate_type in self._COMPOSITE_KEYS
+            or self.aggregate_type in self._PK_FALLBACK_FIELDS
+        ):
+            # Raise here rather than letting a NULL primary key reach the
+            # database. These aggregates' pk column names do not appear in the
+            # document, so the NOT NULL violation surfaces at COMMIT — by which
+            # point the failing write has already been attributed to whatever
+            # else the transaction touched, and the actual cause (a writer that
+            # forgot ``doc_id``) is invisible.
+            raise ValueError(
+                f"{self.aggregate_type}: cannot derive primary key "
+                f"{self.pk_field!r} from the document; pass doc_id explicitly"
+            )
         # Legacy trucks/locations docs may omit tenant_id; default it so the
         # NOT NULL column is satisfied and tenant-scoped reads still work.
         tenant_id = doc.get("tenant_id") or "unknown"

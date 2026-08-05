@@ -109,6 +109,19 @@ FUEL_STATIONS_INDEX = "fuel_stations"
 FUEL_EVENTS_INDEX = "fuel_events"
 FUEL_EVENTS_ILM_POLICY_NAME = "fuel-events-policy"
 
+# Module-level registry: index_name -> mapping. Every other mappings module
+# exposes one; this module did not, so callers that look a mapping up by index
+# name could not find ``fuel_stations`` at all.
+# ``persistence.rebuild_from_postgres._ensure_index`` is the one that matters: it
+# recreates a dropped index and, finding no mapping, let Elasticsearch infer one
+# dynamically — which types ``tenant_id`` as ``text`` and makes every
+# ``term: {tenant_id}`` query match nothing. The rebuild reports success and the
+# index is silently unqueryable.
+FUEL_INDEX_MAPPINGS = {
+    FUEL_STATIONS_INDEX: FUEL_STATIONS_MAPPING,
+    FUEL_EVENTS_INDEX: FUEL_EVENTS_MAPPING,
+}
+
 
 def _reconcile_fuel_index_mapping(es_client, index_name: str, mapping: dict) -> None:
     """Additively put any mapping fields missing from the live fuel index.

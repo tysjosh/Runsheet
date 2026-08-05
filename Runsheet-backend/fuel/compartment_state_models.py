@@ -55,6 +55,9 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from Agents.support.mvp_es_mappings import TRUCK_COMPARTMENTS_INDEX
+from commerce.services.commerce_persistence_bridge import (
+    mirror_current_state_upsert,
+)
 from fuel.services.fuel_ops_es_mappings import COMPARTMENT_CLEANING_EVENTS_INDEX
 from fuel.services.fuel_product_catalog import (
     UnknownFuelProductError,
@@ -562,6 +565,20 @@ class CompartmentStateRepository:
                 # source plus the patch rather than raising NotFound,
                 # since the caller's write did succeed.
                 refreshed_source = {**source, **patch}
+
+            # Postgres source of truth. ``truck_compartments`` was
+            # Elasticsearch-only until the fuel-asset migration, so a recreated
+            # cluster silently erased ``last_loaded_product`` — the history the
+            # cross-contamination guard reads before allowing a product into a
+            # compartment. The FULL refreshed source is mirrored, not the patch:
+            # a partial merge would leave Postgres missing whatever the ES
+            # scripted update recomputed server-side, and this path already has
+            # the authoritative post-update document in hand.
+            await mirror_current_state_upsert(
+                "truck_compartment",
+                dict(refreshed_source),
+                doc_id=compartment_doc_id,
+            )
 
             state = _safe_state_load(refreshed_source)
             if state is None:

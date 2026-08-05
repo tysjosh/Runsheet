@@ -33,6 +33,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
+from sqlalchemy.dialects.postgresql import JSONB as _PG_JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
 
@@ -44,9 +45,22 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-# Portable JSON type: works on both PostgreSQL (JSONB under the hood via the
-# dialect) and SQLite (TEXT) so the same models run in tests and production.
+# Portable JSON type: works on both PostgreSQL and SQLite (TEXT) so the same
+# models run in tests and production.
+#
+# NB: this resolves to PostgreSQL ``json``, NOT ``jsonb`` — the generic
+# SQLAlchemy ``JSON`` type does not upgrade itself, and ``\d
+# fuel_orders_current`` confirms ``document | json``. The comment here used to
+# claim "JSONB under the hood via the dialect", which is wrong and matters: a
+# ``json`` column cannot carry a GIN index, so containment and key lookups
+# against it are sequential scans.
 _JSON = JSON().with_variant(JSON(), "sqlite")
+
+# Real ``jsonb`` on PostgreSQL, plain JSON on SQLite. Used by tables whose
+# document column is *queried* rather than merely stored, because jsonb is what
+# supports GIN indexing and the ``@>`` / ``->>`` operators the Elasticsearch
+# query adapter needs. New hybrid tables should prefer this.
+_JSONB = JSON().with_variant(_PG_JSONB(), "postgresql")
 
 
 class TimestampMixin:
@@ -819,4 +833,148 @@ class LocationORM(_ComplianceConfigBase, Base):
 
     __table_args__ = (
         Index("ix_location_tenant", "tenant_id"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fuel assets: the three indices Elasticsearch was the ONLY home for
+# ---------------------------------------------------------------------------
+#
+# ``customer_tanks``, ``truck_compartments`` and ``fuel_stations`` were listed in
+# ``persistence.rebuild_from_postgres.ES_ONLY_INDICES``: authoritative state with
+# no Postgres table, no projector and no rebuild spec, so recreating the
+# Elasticsearch cluster destroyed them permanently. They are not seed data —
+# live code paths write them:
+#
+#   * ``customer_tanks.k_factor`` is written back by ``KFactorCalibrationService``
+#     after each calibration, and level/reading fields by the Veeder-Root ATG
+#     connector.
+#   * ``truck_compartments.last_loaded_product`` is written by
+#     ``CompartmentLoadingAgent._persist_loading_plan`` and is what the
+#     cross-contamination guard reads before assigning a product to a
+#     compartment. Losing it does not merely lose data: it silently removes the
+#     evidence a product-compatibility block depends on.
+#   * ``fuel_stations`` holds tank inventory for the legacy retail path, also
+#     updated by the ATG connector.
+#
+# Shape follows the established hybrid pattern — typed identity / tenant /
+# filter columns for indexing, plus the full ES document verbatim — so the read
+# path can return byte-identical documents and no caller changes. The filter
+# columns are not guesswork: they are the fields the codebase actually issues
+# ``term`` clauses on (status 91, customer_id 21, truck_id 19, station_id 13,
+# fuel_type 8, customer_tank_id 8, zip_code 3).
+#
+# Unlike the older hybrid tables these use ``_JSONB``, because the Elasticsearch
+# query adapter that replaces ``search_documents`` needs GIN indexing and the
+# jsonb operators. A ``json`` column would force a sequential scan per query.
+
+
+class _FuelAssetBase:
+    """Shared columns for the hybrid fuel-asset tables."""
+
+    tenant_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    document: Mapped[Dict[str, Any]] = mapped_column(_JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+
+class CustomerTankORM(_FuelAssetBase, Base):
+    """Authoritative customer tank (projects to ``customer_tanks``).
+
+    Keyed on ``customer_tank_id``, which is what
+    ``CustomerTankRepository.upsert`` passes to ``index_document``. The live
+    Elasticsearch documents are keyed by ``customer_id`` instead — a seeder bug
+    (``_resolve_json_doc_id`` preferred the foreign key) that was latent only
+    because no fixture gave one customer two tanks. Keying correctly here fixes
+    it rather than carrying it into Postgres, and the primary key makes the
+    collision impossible to reintroduce.
+    """
+
+    __tablename__ = "customer_tanks"
+
+    customer_tank_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    customer_id: Mapped[Optional[str]] = mapped_column(String(64))
+    status: Mapped[Optional[str]] = mapped_column(String(32))
+    fuel_type: Mapped[Optional[str]] = mapped_column(String(32))
+    customer_type: Mapped[Optional[str]] = mapped_column(String(32))
+    zip_code: Mapped[Optional[str]] = mapped_column(String(16))
+    external_tank_id: Mapped[Optional[str]] = mapped_column(String(128))
+    source_system: Mapped[Optional[str]] = mapped_column(String(64))
+
+    __table_args__ = (
+        Index("ix_customer_tank_tenant", "tenant_id"),
+        Index("ix_customer_tank_tenant_customer", "tenant_id", "customer_id"),
+        Index("ix_customer_tank_tenant_status", "tenant_id", "status"),
+        Index("ix_customer_tank_tenant_zip", "tenant_id", "zip_code"),
+        # The ATG connector resolves a tank by the vendor's own id.
+        Index("ix_customer_tank_tenant_external", "tenant_id", "external_tank_id"),
+    )
+
+
+class TruckCompartmentORM(_FuelAssetBase, Base):
+    """Authoritative truck compartment (projects to ``truck_compartments``).
+
+    The Elasticsearch ``_id`` is ``f"{truck_id}_{compartment_id}"`` (e.g.
+    ``TNK-002_C1``) and the application looks compartments up by that id rather
+    than by query, so it is preserved verbatim as ``compartment_key`` instead of
+    being recomputed on read.
+
+    ``last_loaded_product`` is promoted to a column despite being queried rarely:
+    it is the input to the cross-contamination guard, and a column makes it
+    visible to a plain SQL audit rather than buried in a JSON blob.
+    """
+
+    __tablename__ = "truck_compartments"
+
+    compartment_key: Mapped[str] = mapped_column(String(160), primary_key=True)
+    truck_id: Mapped[Optional[str]] = mapped_column(String(64))
+    compartment_id: Mapped[Optional[str]] = mapped_column(String(32))
+    state: Mapped[Optional[str]] = mapped_column(String(32))
+    last_loaded_product: Mapped[Optional[str]] = mapped_column(String(32))
+
+    __table_args__ = (
+        Index("ix_truck_compartment_tenant", "tenant_id"),
+        Index("ix_truck_compartment_tenant_truck", "tenant_id", "truck_id"),
+        Index("ix_truck_compartment_tenant_state", "tenant_id", "state"),
+    )
+
+
+class FuelStationORM(_FuelAssetBase, Base):
+    """Authoritative fuel station (projects to ``fuel_stations``).
+
+    Keyed on ``station_key``, the verbatim Elasticsearch ``_id``, NOT on
+    ``station_id`` — because the index carries two id conventions at once:
+
+      * ``FuelService.create_station`` writes ``f"{station_id}::{fuel_type}"``
+        (``_make_doc_id``), so one station with two products is two documents;
+      * every seeded document, and the Veeder-Root ATG connector's
+        ``_apply_to_fuel_station`` update, uses the bare ``station_id``.
+
+    Those two disagree in the live cluster today (all 14 documents are bare ids,
+    so an ATG reading for an API-created station updates nothing). That is a
+    pre-existing bug in the Elasticsearch write path and is not fixed here.
+    What matters for this table is that ``station_id`` cannot be the primary key:
+    a second product for the same station would collide and one document would
+    silently vanish. Preserving the ``_id`` keeps both conventions round-tripping
+    byte-identically, and ``station_id`` stays an indexed non-unique column so
+    "every document for this station" is still one index scan.
+    """
+
+    __tablename__ = "fuel_stations"
+
+    station_key: Mapped[str] = mapped_column(String(160), primary_key=True)
+    station_id: Mapped[Optional[str]] = mapped_column(String(64))
+    status: Mapped[Optional[str]] = mapped_column(String(32))
+    fuel_type: Mapped[Optional[str]] = mapped_column(String(32))
+    fuel_grade: Mapped[Optional[str]] = mapped_column(String(32))
+
+    __table_args__ = (
+        Index("ix_fuel_station_tenant", "tenant_id"),
+        Index("ix_fuel_station_tenant_station", "tenant_id", "station_id"),
+        Index("ix_fuel_station_tenant_status", "tenant_id", "status"),
+        Index("ix_fuel_station_tenant_fuel_type", "tenant_id", "fuel_type"),
     )

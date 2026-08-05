@@ -59,19 +59,26 @@ scripts/backup_restore.sh dump "$DATABASE_URL" "runsheet-$(date -u +%Y%m%dT%H%M%
 The script verifies the archive is readable before reporting success — a dump
 nobody has read back is a hope, not a backup.
 
-Postgres is not the whole picture. Three Elasticsearch indices have no Postgres
-source and cannot be rebuilt from it, so export them too:
+Every Elasticsearch index is now rebuildable from Postgres with
+`python -m persistence.rebuild_from_postgres --all`. `customer_tanks`,
+`truck_compartments` and `fuel_stations` were the three that were not, until
+migration `0008_fuel_asset_tables` gave them Postgres tables; the ES-only list is
+empty and `scripts.es_only_backup` refuses its default scope rather than writing an
+empty manifest. Whole-cluster export, if you want one:
 
 ```sh
-python -m scripts.es_only_backup export --out-dir ./es-backup
+python -m scripts.es_only_backup export --all --out-dir ./es-full-backup
 ```
 
 See [docs/backup-and-restore.md](backup-and-restore.md) for the restore path and
 the drills that prove both work.
 
-> ⚠️ **The migration chain contains a destructive revision.**
+> ⚠️ **The migration chain contains destructive revisions.**
 > `0007_drop_shipments_current` **drops the `shipments_current` table**. It is
 > irreversible without this dump. Shipments now live only in Elasticsearch.
+> `0008_fuel_asset_tables` is additive on the way up, but its `downgrade()` drops
+> the three fuel-asset tables — and once Elasticsearch is retired those are the
+> only copy.
 
 ## 3. Apply migrations — once, from one place
 

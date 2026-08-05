@@ -35,6 +35,7 @@ import persistence.models as models
 from persistence.backfill import (
     _CONFIG_BACKFILL,
     _CURRENT_STATE_BACKFILL,
+    _FUEL_ASSET_BACKFILL,
     _MASTER_DATA_BACKFILL,
 )
 from persistence.read_repositories import HybridReadRepository
@@ -99,7 +100,8 @@ class TestBackfillSharesTheSpec:
         "entry",
         [e for e in _CONFIG_BACKFILL]
         + [e[:2] for e in _CURRENT_STATE_BACKFILL]
-        + [e for e in _MASTER_DATA_BACKFILL],
+        + [e for e in _MASTER_DATA_BACKFILL]
+        + [e for e in _FUEL_ASSET_BACKFILL],
     )
     def test_each_entry_names_a_registered_aggregate(self, entry):
         aggregate_type = entry[0]
@@ -110,7 +112,7 @@ class TestBackfillSharesTheSpec:
 
     def test_the_backfill_lists_carry_no_typed_column_tuples(self):
         """The shape itself is the guard: no room left for a divergent copy."""
-        for entry in _CONFIG_BACKFILL + _MASTER_DATA_BACKFILL:
+        for entry in _CONFIG_BACKFILL + _MASTER_DATA_BACKFILL + _FUEL_ASSET_BACKFILL:
             assert len(entry) == 2, (
                 f"{entry!r} should be (aggregate_type, es_index) only — a third "
                 "element is how the duplicated typed columns crept back in"
@@ -130,6 +132,7 @@ class TestBackfillSharesTheSpec:
         covered = {e[0] for e in _CONFIG_BACKFILL}
         covered |= {e[0] for e in _CURRENT_STATE_BACKFILL}
         covered |= {e[0] for e in _MASTER_DATA_BACKFILL}
+        covered |= {e[0] for e in _FUEL_ASSET_BACKFILL}
         writable = set(CurrentStateRepository._SPECS) | set(
             ComplianceConfigRepository._SPECS
         )

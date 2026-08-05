@@ -256,12 +256,19 @@ OpenSearch is a project — client swap, ILM→ISM rewrite, SigV4 auth, and
 re-validating every strict mapping — and it should be a deliberate decision, not
 a side effect of moving to AWS.
 
-**The three ES-only indices still need their own backup on AWS.** Schedule
-`python -m scripts.es_only_backup export` as an EventBridge Scheduler → ECS
-RunTask on the same cadence as the Postgres snapshot. One gap to close: the
-script writes to a local `--out-dir` and has no S3 support, so the task must copy
-the directory to S3 afterwards (`boto3` is available in the image; the AWS CLI is
-not).
+**The three ES-only indices no longer need their own backup.** Migration
+`0008_fuel_asset_tables` gave `customer_tanks`, `truck_compartments` and
+`fuel_stations` Postgres tables, so an Aurora snapshot plus
+`rebuild_from_postgres --all` covers them and `ES_ONLY_INDICES` is empty. The
+scheduled `es_only_backup export` task is no longer required; the script refuses
+its default scope rather than writing an empty manifest that looks like a
+successful backup.
+
+If you still want a whole-cluster Elasticsearch export (reasonable while the
+ES → Postgres migration is in flight), schedule `es_only_backup export --all` as
+an EventBridge Scheduler → ECS RunTask. One gap remains: the script writes to a
+local `--out-dir` and has no S3 support, so the task must copy the directory to S3
+afterwards (`boto3` is available in the image; the AWS CLI is not).
 
 ## Configuration and secrets
 
@@ -346,8 +353,8 @@ the same bytes tomorrow.
 
 Deploy order, all of it from the runbook, mapped onto AWS primitives:
 
-1. **Snapshot.** Aurora manual snapshot (+ `es_only_backup export` if the ES-only
-   indices have changed since the last scheduled run).
+1. **Snapshot.** Aurora manual snapshot. No companion Elasticsearch export is
+   needed — every index is rebuildable from Postgres.
 2. **Migrate.** `ecs run-task` with the new image and `alembic upgrade head`.
    One task, waited on to completion, exit code checked. Not in the app
    entrypoint — the runbook and the Dockerfile both say why.

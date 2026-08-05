@@ -3,38 +3,49 @@
 ``persistence.rebuild_from_postgres`` ended its docstring with "so dropping an
 index is safe: it can always be reconstructed here". Acting on that during an
 end-to-end test of the MVP pipeline destroyed the contents of three indices that
-have no Postgres table, no ORM model and no projector behind them —
-``customer_tanks``, ``truck_compartments`` and ``fuel_stations``. The A1 tank
-forecasting and A3 compartment loading stages then had no input whatsoever, which
-is the data half of the "plan generated, zero output" bug.
+had no Postgres table, no ORM model and no projector —  ``customer_tanks``,
+``truck_compartments`` and ``fuel_stations``. The A1 tank forecasting and A3
+compartment loading stages then had no input whatsoever, which is the data half
+of the "plan generated, zero output" bug.
 
-Those three are not seed data. ``KFactorCalibrationService`` writes calibrated
+Those three were never seed data. ``KFactorCalibrationService`` writes calibrated
 ``k_factor`` values back into ``customer_tanks``, the Veeder-Root ATG connector
 updates tank levels, and ``CompartmentLoadingAgent`` writes
 ``last_loaded_product`` into ``truck_compartments`` — the history the
-cross-contamination guard reads before allowing a product into a compartment. The
-copy in Elasticsearch is the only copy.
+cross-contamination guard reads before allowing a product into a compartment.
+While Elasticsearch held the only copy, losing the cluster lost all of it.
 
-Giving them a Postgres source of truth is a migration plus ORM models,
-projectors and repository rewiring, and is not done. What is done is removing the
-false promise. These tests hold that honest:
+They now have Postgres tables, passthrough projectors, a backfill and
+``_REBUILD_SPECS`` entries, so ``ES_ONLY_INDICES`` is empty. These tests keep
+both halves of that honest:
 
-  * every index named in ``ES_ONLY_INDICES`` really is unrebuildable, so the
+  * whatever is listed in ``ES_ONLY_INDICES`` really is unrebuildable, so the
     list cannot rot into scaremongering about something since fixed;
-  * nothing appears in both ``ES_ONLY_INDICES`` and the rebuildable set, so the
-    two cannot contradict each other;
+  * nothing appears in both ``ES_ONLY_INDICES`` and the rebuildable set;
+  * the three that were fixed stay fixed — each keeps its ORM model, projector
+    and rebuild spec, so the gap cannot silently reopen;
   * the docstring no longer carries the unconditional claim.
 
-The first is a ratchet: the day ``customer_tanks`` gets a projector, this test
-fails and the fix is to delete it from the list.
+The first two are generic: a fourth index added without a projector belongs on
+the list, and these tests then hold it to the same standard.
 """
 from __future__ import annotations
+
+import pytest
 
 import persistence.rebuild_from_postgres as rebuild_mod
 from persistence.projections import PROJECTORS
 from persistence.rebuild_from_postgres import (
     ES_ONLY_INDICES,
     _REBUILD_SPECS,
+)
+
+#: The three that produced the empty plan run, and the Postgres homes they were
+#: given. ``(aggregate_type, es_index, ORM class name)``.
+_FORMERLY_ES_ONLY = (
+    ("customer_tank", "customer_tanks", "CustomerTankORM"),
+    ("truck_compartment", "truck_compartments", "TruckCompartmentORM"),
+    ("fuel_station", "fuel_stations", "FuelStationORM"),
 )
 
 
@@ -72,23 +83,80 @@ class TestEsOnlyIndicesAreReallyUnrebuildable:
             "the two registries contradict each other."
         )
 
-    def test_the_list_is_not_empty_and_names_the_three_known_gaps(self):
-        """Pins the specific indices whose loss produced the empty plan run."""
-        assert set(ES_ONLY_INDICES) == {
-            "customer_tanks",
-            "truck_compartments",
-            "fuel_stations",
-        }
+    def test_the_list_is_empty_now_that_the_three_gaps_are_closed(self):
+        assert ES_ONLY_INDICES == (), (
+            "an index is listed as having no Postgres source of truth. If that "
+            "is genuinely true, extend _FORMERLY_ES_ONLY reasoning to it and "
+            "back it up with scripts.es_only_backup; if it is stale, remove it."
+        )
 
-    def test_no_orm_model_exists_for_them(self):
-        """The underlying reason they cannot be rebuilt: nothing to read from."""
+
+class TestTheThreeClosedGapsStayClosed:
+    """Each of the three keeps a Postgres home, a projector and a rebuild spec.
+
+    Any one of the three missing is enough to reopen the original bug, and the
+    failure mode is silent: the rebuild simply skips the aggregate and the fuel
+    planning stages run on an empty index.
+    """
+
+    @pytest.mark.parametrize("aggregate,index,model_name", _FORMERLY_ES_ONLY)
+    def test_orm_model_exists(self, aggregate, index, model_name):
         from persistence import models
 
-        for name in ("TruckCompartmentORM", "CustomerTankORM", "FuelStationORM"):
-            assert not hasattr(models, name), (
-                f"{name} exists now, so this entity may be rebuildable — "
-                "reassess ES_ONLY_INDICES."
-            )
+        assert hasattr(models, model_name), (
+            f"{model_name} is gone, so {index} has no Postgres table again"
+        )
+
+    @pytest.mark.parametrize("aggregate,index,model_name", _FORMERLY_ES_ONLY)
+    def test_projector_targets_the_right_index(self, aggregate, index, model_name):
+        assert aggregate in PROJECTORS, f"{aggregate} lost its projector"
+        assert PROJECTORS[aggregate][0] == index
+
+    @pytest.mark.parametrize("aggregate,index,model_name", _FORMERLY_ES_ONLY)
+    def test_rebuild_spec_names_the_same_model(self, aggregate, index, model_name):
+        assert aggregate in _REBUILD_SPECS, f"{aggregate} lost its rebuild spec"
+        assert _REBUILD_SPECS[aggregate][0] == model_name
+
+    @pytest.mark.parametrize("aggregate,index,model_name", _FORMERLY_ES_ONLY)
+    def test_rebuild_spec_pk_is_the_write_path_pk(self, aggregate, index, model_name):
+        """The rebuild must index under the same id the writers use.
+
+        A mismatch would rebuild the index under a different ``_id`` than the
+        application fetches by — every document present, every lookup a 404.
+        Two of the three are exposed to this: ``truck_compartments`` is keyed by
+        the composite ``truck_id_compartment_id`` and ``fuel_stations`` by an
+        ``_id`` that may or may not carry a ``::fuel_type`` suffix.
+        """
+        from persistence.repositories import hybrid_spec_for
+
+        _model, write_pk, _typed = hybrid_spec_for(aggregate)
+        assert _REBUILD_SPECS[aggregate][1] == write_pk
+
+    @pytest.mark.parametrize("aggregate,index,model_name", _FORMERLY_ES_ONLY)
+    def test_read_path_is_registered(self, aggregate, index, model_name):
+        """Without this the read cutover silently falls back to Elasticsearch."""
+        from persistence.read_repositories import HybridReadRepository
+
+        assert HybridReadRepository.is_registered(aggregate)
+
+    def test_last_loaded_product_is_a_typed_column_not_only_json(self):
+        """The cross-contamination guard's input must survive as a column.
+
+        It is the one field whose loss is worse than losing data: the guard
+        reads it to decide whether a compartment may take a product, and an
+        absent value reads as "no history", i.e. permitted.
+        """
+        from persistence.models import TruckCompartmentORM
+
+        assert hasattr(TruckCompartmentORM, "last_loaded_product")
+
+        from persistence.repositories import hybrid_spec_for
+
+        _model, _pk, typed_cols = hybrid_spec_for("truck_compartment")
+        assert "last_loaded_product" in typed_cols, (
+            "the column exists but no writer populates it, so every "
+            "filter on it returns empty — the depot/status failure mode"
+        )
 
 
 class TestTheFalsePromiseIsGone:
@@ -106,17 +174,20 @@ class TestTheFalsePromiseIsGone:
 
 
 class TestRebuildAllWarnsAboutTheGap:
-    def test_rebuild_all_names_the_es_only_indices_in_a_warning(
-        self, caplog, monkeypatch
-    ):
-        """``--all`` finishing cleanly reads as "the cluster is whole" otherwise."""
+    def test_rebuild_all_warns_only_when_there_is_a_gap(self, caplog, monkeypatch):
+        """``--all`` finishing cleanly reads as "the cluster is whole" otherwise.
+
+        With the list empty there is nothing to warn about and warning anyway
+        would train operators to ignore it, so the assertion is conditional on
+        the registry rather than pinned to today's empty tuple.
+        """
         import asyncio
         import logging
 
         # Stub the per-aggregate rebuild: without DATABASE_URL every call raises
-        # and rebuild_all logs a traceback for each of the 25 aggregates, which
-        # would bury this assertion's own output in unrelated noise. The warning
-        # under test fires before the loop, so the loop can be a no-op.
+        # and rebuild_all logs a traceback for each aggregate, which would bury
+        # this assertion's own output in unrelated noise. The warning under test
+        # fires before the loop, so the loop can be a no-op.
         async def _noop(aggregate_type, tenant_id=None, *, dry_run=False):
             return 0
 
@@ -130,7 +201,12 @@ class TestRebuildAllWarnsAboutTheGap:
             for r in caplog.records
             if r.levelno == logging.WARNING
         ]
-        assert any(
-            all(index in message for index in ES_ONLY_INDICES)
-            for message in warnings
-        ), warnings
+        if ES_ONLY_INDICES:
+            assert any(
+                all(index in message for index in ES_ONLY_INDICES)
+                for message in warnings
+            ), warnings
+        else:
+            assert not any(
+                "ES-only index" in message for message in warnings
+            ), warnings

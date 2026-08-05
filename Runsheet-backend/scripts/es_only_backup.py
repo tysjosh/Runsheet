@@ -3,31 +3,28 @@
 
 Most Elasticsearch content here is a **projection**: it is fed by the
 transactional outbox and can be regenerated with
-``python -m persistence.rebuild_from_postgres --all``. Three indices are not.
-
-``persistence.rebuild_from_postgres.ES_ONLY_INDICES`` names them, and a unit test
-asserts each entry genuinely has no projector, no rebuild spec and no ORM model —
-so the list cannot rot into scaremongering about something since fixed. Losing the
-Elasticsearch cluster loses this data outright, and
-``truck_compartments.last_loaded_product`` is what the cross-contamination guard
-reads before assigning a product to a compartment: without it the guard cannot
+``python -m persistence.rebuild_from_postgres --all``. Three indices were not:
+``customer_tanks``, ``truck_compartments`` and ``fuel_stations`` held
+authoritative operational state with no Postgres table behind them, so losing the
+cluster lost the data outright — including
+``truck_compartments.last_loaded_product``, which the cross-contamination guard
+reads before assigning a product to a compartment. Without it the guard cannot
 tell that a compartment last carried diesel before loading gasoline.
 
-A proper answer is either a Postgres source of truth for these entities (a
-migration plus ORM models, projectors and repository rewiring) or a configured
-Elasticsearch snapshot repository. Both need decisions and infrastructure this
-script deliberately does not assume. What it provides is a portable
-export/restore that works against any cluster with no extra setup, so the gap is
-covered while that decision is made.
+The proper answer — a Postgres source of truth, meaning a migration plus ORM
+models, projectors and repository rewiring — has since been built, so
+``persistence.rebuild_from_postgres.ES_ONLY_INDICES`` is now **empty** and the
+default scope of this script has no work to do. It refuses rather than writing an
+empty manifest that looks like a successful backup.
 
-The index list is imported, never restated, so adding a fourth ES-only index
-extends this backup automatically.
+The list is imported, never restated, so if a fourth index is ever added without
+a projector this script covers it automatically and a unit test asserts the entry
+genuinely has no projector, no rebuild spec and no ORM model.
 
-``--all`` widens the scope from the three ES-only indices to **every** index in
-the cluster. That is the mode the Postgres migration needs: once ES stops being
-written to, everything in it is irreplaceable, not just the three that lack a
-projector today. The default is unchanged, so the runbook's routine backup keeps
-exporting exactly the indices Postgres cannot rebuild.
+``--all`` widens the scope to **every** index in the cluster. That is the mode the
+Elasticsearch → Postgres migration needs: once ES stops being written to,
+everything in it is irreplaceable, not just the entries that lack a projector.
+With the ES-only list empty this is the only useful mode, and ``drill`` uses it.
 
 Usage
 -----
@@ -87,7 +84,30 @@ def _all_indices(client) -> Tuple[str, ...]:
 
 
 def _scope(client, all_indices: bool) -> Tuple[str, ...]:
-    return _all_indices(client) if all_indices else _indices()
+    """Resolve the set of indices to act on, refusing an empty default scope.
+
+    An empty default scope means every index now has a Postgres source of truth.
+    Exporting it would write a manifest with zero entries, which ``verify``
+    happily calls internally consistent — a green backup covering nothing. So we
+    stop and point at ``--all``, which is what a migration-era backup wants.
+    """
+    if all_indices:
+        return _all_indices(client)
+    return _indices_or_refuse()
+
+
+def _indices_or_refuse() -> Tuple[str, ...]:
+    """:func:`_indices`, but exit rather than return an empty scope."""
+    scope = _indices()
+    if not scope:
+        raise SystemExit(
+            "ES_ONLY_INDICES is empty: every index now has a Postgres source of "
+            "truth and can be rebuilt with 'python -m "
+            "persistence.rebuild_from_postgres --all'. There is nothing for the "
+            "default scope to protect. Re-run with --all for a whole-cluster "
+            "export."
+        )
+    return scope
 
 
 def _scroll(client, index: str) -> Iterator[Tuple[str, dict]]:
@@ -264,7 +284,7 @@ def cmd_restore(out_dir: pathlib.Path, all_indices: bool = False) -> int:
     manifest = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
     # Restore what the export actually contains when --all, so a whole-cluster
     # export is not silently narrowed to three indices on the way back in.
-    scope = sorted(manifest) if all_indices else _indices()
+    scope = sorted(manifest) if all_indices else _indices_or_refuse()
     for index in scope:
         records = _read(out_dir, index)
         n = _restore_into(client, index, records, index)
@@ -284,7 +304,10 @@ def cmd_drill() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         out_dir = pathlib.Path(tmp)
         print("=== 1. export ===")
-        cmd_export(out_dir)
+        # Whole-cluster scope: with ES_ONLY_INDICES empty the default scope
+        # refuses, and a drill that cannot export cannot prove anything about
+        # the restore path.
+        cmd_export(out_dir, all_indices=True)
         print("=== 2. verify ===")
         if cmd_verify(out_dir) != 0:
             return 1
@@ -293,16 +316,21 @@ def cmd_drill() -> int:
         total = sum(manifest.values())
         if total == 0:
             print(
-                "❌ every ES-only index is empty, so this drill would compare "
-                "zero to zero and prove nothing about the restore path"
+                "❌ every index in the cluster is empty, so this drill would "
+                "compare zero to zero and prove nothing about the restore path"
             )
             return 1
 
         print("=== 3. restore into scratch indices ===")
         scratch: List[str] = []
         ok = True
+        # Driven by the manifest, matching the export scope above. It used to
+        # iterate ``_indices()``: once that list emptied, the drill restored
+        # nothing, compared nothing and still printed "restore drill passed —
+        # 7623 document(s) round-tripped". A drill that cannot fail is worse
+        # than no drill.
         try:
-            for index in _indices():
+            for index in sorted(manifest):
                 target = f"{index}__drill"
                 if client.indices.exists(index=target):
                     client.indices.delete(index=target)
@@ -310,7 +338,7 @@ def cmd_drill() -> int:
                 _restore_into(client, index, _read(out_dir, index), target)
 
             print("=== 4. compare document counts AND content ===")
-            for index in _indices():
+            for index in sorted(manifest):
                 target = f"{index}__drill"
                 client.indices.refresh(index=target)
                 got = client.count(index=target)["count"]
