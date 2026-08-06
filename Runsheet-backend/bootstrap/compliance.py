@@ -55,9 +55,6 @@ async def initialize(app, container: ServiceContainer) -> None:
     so that endpoint modules can resolve the dependency through the
     explicit ``ServiceContainer`` (see ``bootstrap/container.py``).
     """
-    from compliance.services.compliance_es_mappings import (
-        setup_compliance_indices,
-    )
 
     es_service = container.es_service
 
@@ -66,12 +63,6 @@ async def initialize(app, container: ServiceContainer) -> None:
     # failures are logged but do not abort the bootstrap chain so
     # remaining modules still initialize (fail-open, per
     # ``bootstrap/__init__.py``).
-    try:
-        logger.info("Setting up compliance indices...")
-        setup_compliance_indices(es_service)
-        logger.info("Compliance indices ready")
-    except Exception as exc:
-        logger.warning("Failed to set up compliance indices: %s", exc)
 
     # ── Tax Engine REST endpoints (Task 3.9) ───────────────────────
     # Wire the application-scoped ES service into

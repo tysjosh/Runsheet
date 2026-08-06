@@ -35,36 +35,3 @@ JOB_AUDIT_TIMELINE_MAPPING = {
 }
 
 
-def setup_audit_indices(es_service):
-    """
-    Create audit timeline indices if they don't already exist.
-
-    Creates the job_audit_timeline index with strict mappings and
-    append-only semantics. Handles serverless-incompatible settings
-    via the ElasticsearchService helper.
-
-    Args:
-        es_service: An ElasticsearchService instance (uses es_service.client).
-
-    Validates: Requirements 12.1
-    """
-    from services.elasticsearch_service import ElasticsearchService
-
-    es_client = es_service.client
-    is_serverless = es_service.is_serverless
-
-    indices = {
-        JOB_AUDIT_TIMELINE_INDEX: JOB_AUDIT_TIMELINE_MAPPING,
-    }
-
-    for index_name, mapping in indices.items():
-        try:
-            if not es_client.indices.exists(index=index_name):
-                if is_serverless:
-                    mapping = ElasticsearchService.strip_serverless_incompatible_settings(mapping)
-                es_client.indices.create(index=index_name, body=mapping)
-                logger.info(f"✅ Created audit index: {index_name}")
-            else:
-                logger.info(f"📋 Audit index already exists: {index_name}")
-        except Exception:
-            logger.exception("Failed to create audit index %s", index_name)

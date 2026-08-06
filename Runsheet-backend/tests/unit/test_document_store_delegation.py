@@ -1,18 +1,22 @@
-"""The document-store backend switch must be complete, inert by default, and loud.
+"""Every document method on the facade must reach the Postgres store.
 
-``ElasticsearchService`` keeps its identity, its circuit breakers and its raw
-``client`` while the document plane moves to Postgres; the switch lives inside the
-nine async document methods. Three things about that have to hold, and none of
-them is obvious from reading the diff:
+``ElasticsearchService`` keeps its name, its circuit breakers and a ``client``
+attribute; what it no longer keeps is an Elasticsearch implementation. The nine
+async document methods delegate to
+:class:`persistence.document_store.PostgresDocumentStore`, and a method that was
+missed would reach ``NoClusterClient``, whose data plane raises.
 
-1. **Every document method delegates.** A method that was missed keeps writing to
-   Elasticsearch after the cutover, so the two stores diverge silently and the
-   divergence is only visible as a stale read much later.
-2. **It is inert without the flag, and without a database.** A default-on switch,
-   or one that routes to a dormant persistence layer, breaks every request.
-3. **A misspelled backend value fails at startup.** ``postgresql`` instead of
-   ``postgres`` would otherwise leave the service on the legacy path while the
-   operator believed the cutover had happened.
+Formerly ``test_document_store_backend_switch.py``. Two of its three concerns went
+with ``DOCUMENT_STORE_BACKEND``: that the switch was inert without the flag and
+without a database, and that a misspelled value (``postgresql``, ``pg``) failed at
+startup rather than leaving the service quietly on the legacy path. There is no
+flag and no legacy path — ``postgres`` is not a value to get wrong, it is the only
+implementation — so both sets of assertions had nothing left to assert about.
+
+What remains is the concern that outlived the switch: **completeness**. It was the
+strongest of the three even then, since a missed delegation diverged the two stores
+silently and only showed up as a stale read much later, and it is still load-bearing
+now that the alternative branch raises instead of writing elsewhere.
 """
 
 from __future__ import annotations
@@ -21,7 +25,7 @@ import inspect
 
 import pytest
 
-from config.settings import Settings, clear_settings_cache
+from config.settings import clear_settings_cache
 
 
 # ---------------------------------------------------------------------------
@@ -45,7 +49,7 @@ _DELEGATING_METHODS = (
 
 @pytest.mark.parametrize("method", _DELEGATING_METHODS)
 def test_every_document_method_consults_the_postgres_store(method):
-    """A missed method keeps writing to Elasticsearch after the cutover.
+    """A missed method reaches a client whose data plane raises.
 
     Asserted against the source rather than by calling each method, because
     calling them needs a live backend and the property under test is structural:
@@ -55,8 +59,8 @@ def test_every_document_method_consults_the_postgres_store(method):
 
     source = inspect.getsource(getattr(ElasticsearchService, method))
     assert "_pg_store()" in source, (
-        f"{method} does not consult _pg_store(), so it would keep using "
-        "Elasticsearch after the document store is cut over to Postgres"
+        f"{method} does not consult _pg_store(), so it would fall through to the "
+        "raw client, which has no cluster behind it"
     )
 
 
@@ -79,65 +83,8 @@ def test_the_store_implements_every_method_the_service_delegates_to():
     for method in _DELEGATING_METHODS:
         assert hasattr(PostgresDocumentStore, method), (
             f"ElasticsearchService delegates {method} but the store has no such "
-            "method, so the cutover would raise AttributeError at runtime"
+            "method, so the call would raise AttributeError at runtime"
         )
-
-
-# ---------------------------------------------------------------------------
-# Inert by default
-# ---------------------------------------------------------------------------
-
-
-def _settings(**over) -> Settings:
-    base = {
-        # ``development`` because every other environment additionally requires
-        # redis_url / supertokens credentials, and none of that is what these
-        # tests are about.
-        "environment": "development",
-        "elastic_endpoint": "http://localhost:9200",
-        "elastic_api_key": "k",
-    }
-    base.update(over)
-    return Settings(**base)
-
-
-class TestDefaultIsElasticsearch:
-    def test_the_default_backend_is_elasticsearch(self):
-        assert _settings().document_store_backend == "elasticsearch"
-
-    def test_the_default_does_not_route_to_postgres(self):
-        assert _settings(database_url="postgresql+psycopg://x/y").document_store_is_postgres is False
-
-    def test_postgres_without_a_database_url_stays_on_elasticsearch(self):
-        """Routing reads at a dormant persistence layer would fail every request.
-
-        Inert rather than fatal so the flag can be pre-set in a config template
-        before the database exists.
-        """
-        assert _settings(document_store_backend="postgres").document_store_is_postgres is False
-
-    def test_postgres_with_a_database_url_routes(self):
-        settings = _settings(
-            document_store_backend="postgres",
-            database_url="postgresql+psycopg://runsheet@localhost/runsheet",
-        )
-        assert settings.document_store_is_postgres is True
-
-    def test_the_value_is_case_and_whitespace_tolerant(self):
-        settings = _settings(
-            document_store_backend="  Postgres ",
-            database_url="postgresql+psycopg://runsheet@localhost/runsheet",
-        )
-        assert settings.document_store_is_postgres is True
-
-
-class TestAMisspelledBackendIsRejected:
-    @pytest.mark.parametrize("value", ["postgresql", "pg", "psql", "elastic", "none", ""])
-    def test_unknown_values_raise_at_construction(self, value):
-        """Not silently ignored: the operator would believe the cutover happened."""
-        with pytest.raises(Exception) as exc:
-            _settings(document_store_backend=value)
-        assert "document_store_backend" in str(exc.value)
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +93,7 @@ class TestAMisspelledBackendIsRejected:
 
 
 class _RecordingStore:
-    """Stands in for the real store so the switch can be tested without a database."""
+    """Stands in for the real store so delegation can be tested without a database."""
 
     def __init__(self):
         self.calls = []
@@ -155,7 +102,7 @@ class _RecordingStore:
         self.calls.append(("search_documents", index))
         return {"hits": {"total": {"value": 0, "relation": "eq"}, "hits": []}}
 
-    async def index_document(self, index, doc_id, document):
+    async def index_document(self, index, doc_id, document, *, stamp_timestamps=True):
         self.calls.append(("index_document", index, doc_id))
         return {"result": "created"}
 
@@ -178,7 +125,7 @@ def service_with_stub_store(monkeypatch):
     return service, store
 
 
-async def test_search_is_served_by_the_store_when_the_flag_is_on(service_with_stub_store):
+async def test_search_is_served_by_the_store(service_with_stub_store):
     service, store = service_with_stub_store
     result = await service.search_documents("some_index", {"query": {"match_all": {}}})
     assert store.calls == [("search_documents", "some_index")]
@@ -189,6 +136,27 @@ async def test_index_is_served_by_the_store(service_with_stub_store):
     service, store = service_with_stub_store
     await service.index_document("some_index", "a", {"tenant_id": "t"})
     assert store.calls == [("index_document", "some_index", "a")]
+
+
+async def test_the_verbatim_opt_out_reaches_the_store(service_with_stub_store):
+    """``stamp_timestamps`` has to be forwarded, not swallowed by the facade.
+
+    The rebuild tool and ``seed_kfactor_demo`` pass ``False`` because their
+    timestamps ARE the data. A facade that accepted the keyword and dropped it
+    would restamp every rebuilt document to now() while the caller believed it had
+    opted out — and the caller cannot tell, because the return value is the same.
+    """
+    service, store = service_with_stub_store
+    seen = {}
+
+    async def _capture(index, doc_id, document, *, stamp_timestamps=True):
+        seen["stamp_timestamps"] = stamp_timestamps
+        return {"result": "created"}
+
+    store.index_document = _capture
+    await service.index_document("i", "a", {"tenant_id": "t"}, stamp_timestamps=False)
+
+    assert seen == {"stamp_timestamps": False}
 
 
 async def test_get_and_delete_are_served_by_the_store(service_with_stub_store):
@@ -212,9 +180,9 @@ async def test_a_retired_index_is_still_skipped_before_the_store_is_consulted(
 ):
     """Retirement is a stronger statement than backend choice.
 
-    A retired index has been dropped and its writes must go nowhere at all — not
-    to Elasticsearch and not to the document store, which would resurrect it
-    under a different roof.
+    A retired index's relational table is its sole store, and its writes must go
+    nowhere at all — not to a cluster and not to the document store, which would
+    accumulate rows no read path consults.
     """
     service, store = service_with_stub_store
     monkeypatch.setattr(service, "_is_retired_index", lambda index: True)
@@ -249,7 +217,7 @@ class TestBulkIdDerivation:
         assert _id_field_for("support_tickets") == "ticket_id"
 
     def test_unmapped_indices_fall_back_to_singularise_and_suffix(self):
-        """Copied from the Elasticsearch path so both backends key identically."""
+        """Copied from the Elasticsearch path so ids did not change at the cutover."""
         from persistence.document_store import _id_field_for
 
         assert _id_field_for("customers") == "customer_id"
@@ -265,7 +233,7 @@ class TestBulkIdDerivation:
         assert _bulk_doc_id("trucks", {"truck_id": "Y"}) == "Y"
 
     def test_no_derivable_id_returns_none_rather_than_inventing_one(self):
-        """The ES path lets the cluster mint a random id, which nothing can fetch."""
+        """The ES path let the cluster mint a random id, which nothing can fetch."""
         from persistence.document_store import _bulk_doc_id
 
         assert _bulk_doc_id("trucks", {"plate": "AAA"}) is None

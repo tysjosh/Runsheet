@@ -188,11 +188,16 @@ class TestWriteSideDoesNotMirrorARetiredAggregate:
         is only a fix if the documents it writes are acceptable there.
         """
         import seed_all_data
-        from ops.services.ops_es_service import OpsElasticsearchService
+        from ops.services.ops_es_mappings import OPS_INDEX_MAPPINGS
 
-        service = OpsElasticsearchService.__new__(OpsElasticsearchService)
+        # Read from the mapping registry rather than
+        # ``OpsElasticsearchService._get_shipments_current_mapping()``, which Phase 6
+        # deleted with the rest of the index-creation code. The declaration itself
+        # moved to ``ops/services/ops_es_mappings.py`` unchanged — verified by
+        # importing both and comparing — and joined the field-policy registry, so it
+        # is still the schema of record for this index.
         mapped = set(
-            service._get_shipments_current_mapping()["mappings"]["properties"]
+            OPS_INDEX_MAPPINGS["shipments_current"]["mappings"]["properties"]
         )
 
         recorded: list = []

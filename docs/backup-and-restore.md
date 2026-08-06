@@ -1,8 +1,12 @@
 # Backup and restore
 
-Postgres is the source-of-truth. Elasticsearch is a **projection** and is
-rebuildable from it. That is now true without exception; it was not until the
-fuel-asset migration, and the section below records what changed.
+**One store. A `pg_dump` is the whole backup.**
+
+That is the single biggest change the Elasticsearch removal made to this document.
+There used to be two stores to think about and a rule for which one could be
+reconstructed from the other; now the relational tables and the document plane
+(`es_documents`) are in the same database and the same dump. Nothing needs
+re-projecting after a restore, because the projection is *in* the restore.
 
 Everything here is executable: `Runsheet-backend/scripts/backup_restore.sh`.
 The `drill` subcommand performs a real dump → restore → row-count comparison, and
@@ -11,12 +15,33 @@ was no restore procedure and nobody had restored this database.
 
 ## What is authoritative, and what is not
 
-| Store | Role | Recoverable from |
+| Table group | Role | Recoverable from |
 |---|---|---|
-| Postgres | Source-of-truth for commerce/financial records, orders and jobs current-state, master data, idempotency keys, invoice counters | Its own dump. Nothing else. |
-| Elasticsearch | Search + read projection, fed by the transactional outbox | `python -m persistence.rebuild_from_postgres --all` |
+| Relational (commerce/financial records, orders and jobs current-state, master data, idempotency keys, invoice counters) | Source-of-truth | The dump. Nothing else. |
+| `es_documents` | Document plane: everything reads and writes documents here. Projected aggregates are fed by the transactional outbox | The dump. Projected indices can additionally be rebuilt with `python -m persistence.rebuild_document_store --all` |
+
+The second row is worth reading twice: `es_documents` is **not** purely a
+projection. Indices with no relational table behind them — the majority of the 103
+— hold their only copy there. The rebuild tool covers the ~28 aggregates in
+`_REBUILD_SPECS`; the dump covers everything.
+
+### The Elasticsearch cluster is gone
+
+The final whole-cluster export is at `Runsheet-backend/es-full-backup/`: 103
+indices, 7,623 documents, 7.1 MB, verified, gitignored. It is the only remaining
+copy of the cluster and is deliberately kept. Everything in it was copied into
+`es_documents` and checked at 1,426 identical query comparisons across all 103
+indices before the cluster was deleted — see
+[docs/elasticsearch-to-postgres-migration.md](elasticsearch-to-postgres-migration.md).
+
+`scripts/es_only_backup.py`, which produced that export, was deleted with the
+cluster.
 
 ### Three indices used to be unrecoverable. They are not any more.
+
+This is history now — there is no cluster to lose — but it is the reason the
+fuel-asset tables exist and the reason
+`tests/unit/test_fuel_asset_postgres_homes.py` guards them, so it stays recorded.
 
 `customer_tanks`, `truck_compartments` and `fuel_stations` held authoritative
 operational state with no Postgres table, no ORM model and no projector behind
@@ -36,13 +61,13 @@ diesel before loading gasoline — so losing that field does not merely lose dat
 it removes the evidence a safety check depends on.
 
 Migration `0008_fuel_asset_tables` gives all three a Postgres table with the
-established hybrid shape (typed filter columns plus the verbatim Elasticsearch
-document, in `jsonb`). Each has a passthrough projector, a `_REBUILD_SPECS` entry,
-a backfill and dual-write from every writer, so `rebuild_from_postgres --all`
-restores them like anything else and `ES_ONLY_INDICES` is empty.
+established hybrid shape (typed filter columns plus the verbatim document, in
+`jsonb`). Each has a passthrough projector, a `_REBUILD_SPECS` entry, a backfill
+and dual-write from every writer, so `rebuild_document_store --all` restores them
+like anything else.
 
-Verified by drill against the dev cluster — drop the index, rebuild from Postgres,
-compare:
+Verified by drill against the dev cluster while it still existed — drop the index,
+rebuild from Postgres, compare:
 
 | Index | Documents | Bodies | Mapping | Tenant-scoped `term` |
 |---|---|---|---|---|
@@ -50,40 +75,20 @@ compare:
 | `truck_compartments` | 9 | identical | all filter fields `keyword` | 9/9 |
 | `fuel_stations` | 14 | identical | all filter fields `keyword` | 14/14 |
 
-The mapping column is not decoration. The first run of that drill rebuilt
-`truck_compartments` with a **dynamic** mapping, because
-`rebuild_from_postgres._lookup_mapping` consulted five mapping registries and the
-`truck_compartments` mapping lives in a sixth. `tenant_id` came back as `text`
-instead of `keyword`, so a tenant-scoped `term` query matched **0 of 9**
-documents while the rebuild logged nine indexed and exited 0. `fuel_stations` had
-the same gap and its module had no registry to consult at all.
-`tests/unit/test_rebuild_mapping_coverage.py` now asserts that every rebuildable
-index resolves to a declared mapping whose `tenant_id` is `keyword`.
+The mapping column in that table is worth explaining, because the failure it
+records cannot happen any more and the reason is instructive. The first run of that
+drill rebuilt `truck_compartments` with a **dynamic** mapping: the rebuild tool's
+`_lookup_mapping` consulted five mapping registries and the `truck_compartments`
+mapping lived in a sixth. `tenant_id` came back as `text` instead of `keyword`, so a
+tenant-scoped `term` query matched **0 of 9** documents while the rebuild logged
+nine indexed and exited 0.
 
-#### The ES-only backup script
-
-`scripts/es_only_backup.py` still exists and still imports its index list from
-`ES_ONLY_INDICES`, so a fourth index added without a projector is covered
-automatically. With the list empty its **default scope refuses** rather than
-writing an empty manifest that `verify` would call internally consistent — a green
-backup covering nothing.
-
-Use `--all` for a whole-cluster export. That is the mode the Elasticsearch →
-Postgres migration needs: once ES stops being written to, everything in it is
-irreplaceable, not just the entries that lack a projector.
-
-```sh
-cd Runsheet-backend
-python -m scripts.es_only_backup export --all --out-dir ./es-full-backup
-python -m scripts.es_only_backup verify --out-dir ./es-full-backup
-python -m scripts.es_only_backup restore --all --out-dir ./es-full-backup  # refuses an export that does not verify
-python -m scripts.es_only_backup drill                                     # export → restore to scratch → compare → clean up
-```
-
-`verify` is driven by the manifest, not by the index list, so it cannot pass a
-whole-cluster export while leaving most of its files unread. `drill` compares
-document **content**, not just counts — a count-only check would pass a restore
-that silently dropped `last_loaded_product`.
+The document store has no index to create and no per-index typing — it is one table
+keyed `(index_name, doc_id)` with a `varchar` tenant column — so index creation and
+mapping lookup were deleted from the rebuild tool along with
+`tests/unit/test_rebuild_mapping_coverage.py`, whose premise was exactly this. The
+mapping *registries* survive for a different reason: the field policy reads them to
+keep declared-unsearchable fields unqueryable.
 
 ## Commands
 
@@ -120,15 +125,18 @@ irreversible without a dump. Take and verify one first — this is step 2 of
 1. Stop the application, or scale it to zero. A restore drops and recreates
    objects; requests served mid-restore see a partial schema.
 2. `scripts/backup_restore.sh restore "$DATABASE_URL" <dump>`
-3. Re-project Elasticsearch from the restored source of truth:
-   `python -m persistence.rebuild_from_postgres --all --tenant <tenant>`
-4. Step 3 now covers the fuel assets too (`customer_tanks`,
-   `truck_compartments`, `fuel_stations`), so no separate restore is needed. If
-   `ES_ONLY_INDICES` is ever non-empty again, restore those from their own export
-   here — a Postgres restore cannot reconstruct them:
-   `python -m scripts.es_only_backup restore --out-dir ./es-backup`
-5. Confirm the schema is at head: `python -m scripts.check_migrations`
-6. Start the application and confirm `/health/ready` returns 200.
+3. Confirm the schema is at head: `python -m scripts.check_migrations`
+4. Start the application and confirm `/health/ready` returns 200.
+
+There is no re-projection step. Steps 3 and 4 here used to be
+`rebuild_document_store --all` followed by a separate restore for the three
+fuel-asset indices from their own Elasticsearch export, because a Postgres restore
+could not reconstruct them. Both are gone: `es_documents` is in the dump.
+
+`python -m persistence.rebuild_document_store --all --tenant <tenant>` is still
+available and is now a *repair* tool rather than a recovery step — use it if the
+document projection has drifted from the relational tables, which
+`python -m persistence.parity_check` detects.
 
 Do **not** use `alembic downgrade` to undo past `0007_drop_shipments_current`:
 the table is dropped and the rows are gone, so a downgrade recreates an empty
@@ -147,11 +155,10 @@ make. Naming them here so they are not mistaken for solved:
 - **RPO / RTO.** Managed Postgres point-in-time recovery gives a much lower RPO
   than periodic dumps and is worth enabling regardless of this script; the
   drill's value is that it proves the dumps are restorable.
-- **Whether the ES-only indices are acceptable at launch.** The export above
-  covers them operationally, but it is a periodic snapshot: anything written
-  between exports is still lost with the cluster. Whether that is tolerable is a
-  product decision. `truck_compartments` is the one to weigh first — its
-  `last_loaded_product` gates a physical safety check, so the cost of losing it
-  is a cross-contamination guard that cannot see the previous load, not merely
-  missing data. Give it a Postgres source of truth, or accept the snapshot window
-  explicitly and say what it is.
+A fourth item stood here: whether the ES-only indices were acceptable at launch,
+given that the whole-cluster export covering them was a periodic snapshot and
+anything written between exports was lost with the cluster. It is **settled** — the
+cluster is gone and `es_documents` is in the same dump as everything else, so there
+is no separate snapshot window to accept. `truck_compartments`, the one to weigh
+first because `last_loaded_product` gates a physical safety check, has had a
+Postgres table since `0008_fuel_asset_tables`.

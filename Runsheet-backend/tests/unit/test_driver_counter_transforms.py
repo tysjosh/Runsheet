@@ -145,146 +145,32 @@ class TestResetCompletedToday:
 # ---------------------------------------------------------------------------
 
 
-class _FakeNotFound(Exception):
-    status_code = 404
 
 
-class _FakeClient:
-    """The subset of the ES client ``update_by_query`` drives, in memory."""
-
-    def __init__(self) -> None:
-        self.docs: Dict[str, Dict[str, Any]] = {}
-        self.searches: List[Dict[str, Any]] = []
-
-    def get(self, *, index: str, id: str) -> Dict[str, Any]:
-        if id not in self.docs:
-            raise _FakeNotFound(id)
-        return {"_source": dict(self.docs[id]), "_seq_no": 1, "_primary_term": 1}
-
-    def index(self, *, index: str, id: str, body: Dict[str, Any], **_: Any) -> Dict[str, Any]:
-        self.docs[id] = dict(body)
-        return {"result": "updated"}
-
-    def search(self, *, index: str, body: Dict[str, Any], **_: Any) -> Dict[str, Any]:
-        # Matching is not the point here — the point is that every returned id is
-        # re-read and transformed. The DSL itself is exercised against the real
-        # implementation in the Postgres tests.
-        self.searches.append(dict(body))
-        return {"hits": {"hits": [{"_id": doc_id} for doc_id in self.docs]}}
 
 
-class _FakeService:
-    """Runs the REAL facade methods against :class:`_FakeClient`.
-
-    Borrowed rather than reimplemented: a reimplementation would let the shipped
-    fan-out and this fake drift, and the cap assertion below would then be testing
-    the fake. Real circuit breakers because ``search_documents`` executes through
-    one.
-    """
-
-    from services.elasticsearch_service import ElasticsearchService as _Real
-
-    atomic_update = _Real.atomic_update
-    update_by_query = _Real.update_by_query
-    search_documents = _Real.search_documents
-    _is_retired_index = _Real._is_retired_index
-    _handle_circuit_breaker_exception = _Real._handle_circuit_breaker_exception
-    _handle_elasticsearch_error = _Real._handle_elasticsearch_error
-    UPDATE_BY_QUERY_MAX_DOCS = _Real.UPDATE_BY_QUERY_MAX_DOCS
-    del _Real
-
-    def __init__(self, client: _FakeClient) -> None:
-        from resilience.circuit_breaker import CircuitBreaker, CircuitBreakerConfig
-
-        self.client = client
-        self._circuit_breaker = CircuitBreaker(
-            name="test_write", config=CircuitBreakerConfig(failure_threshold=10)
-        )
-        self._read_circuit_breaker = CircuitBreaker(
-            name="test_read", config=CircuitBreakerConfig(failure_threshold=10)
-        )
-
-    def _pg_store(self) -> Optional[object]:
-        """Exercise the Elasticsearch branch."""
-        return None
 
 
-@pytest.fixture
-def client() -> _FakeClient:
-    return _FakeClient()
 
 
-@pytest.fixture
-def service(client: _FakeClient) -> _FakeService:
-    return _FakeService(client)
 
 
-class TestUpdateByQueryOnElasticsearch:
-    async def test_it_transforms_every_hit_and_returns_the_count(
-        self, service: _FakeService, client: _FakeClient
-    ):
-        client.docs = {"a": {"completed_today": 3}, "b": {"completed_today": 7}}
 
-        changed = await service.update_by_query(
-            "drivers", {"match_all": {}}, lambda doc: {**doc, "completed_today": 0}
-        )
 
-        assert changed == 2
-        assert client.docs["a"]["completed_today"] == 0
-        assert client.docs["b"]["completed_today"] == 0
-
-    async def test_a_transform_returning_none_is_not_counted(
-        self, service: _FakeService, client: _FakeClient
-    ):
-        """Matching the store, where ``None`` skips the row."""
-        client.docs = {"a": {"n": 1}, "b": {"n": 2}}
-
-        changed = await service.update_by_query(
-            "drivers",
-            {"match_all": {}},
-            lambda doc: {**doc, "n": 0} if doc["n"] == 1 else None,
-        )
-
-        assert changed == 1
-        assert client.docs["b"]["n"] == 2
-
-    async def test_it_fetches_ids_only(self, service: _FakeService, client: _FakeClient):
-        """Each hit is re-read inside ``atomic_update`` under its own version
-        assertion. Transforming a body fetched by the search instead would
-        reintroduce the lost update the whole primitive exists to avoid."""
-        client.docs = {"a": {"n": 1}}
-
-        await service.update_by_query("drivers", {"match_all": {}}, lambda doc: doc)
-
-        assert client.searches[0]["_source"] is False
-
-    async def test_it_refuses_to_apply_a_partial_update(
-        self, service: _FakeService, client: _FakeClient, monkeypatch
-    ):
-        """Over the cap it raises rather than updating a prefix.
-
-        A partially-applied ``update_by_query`` leaves the index in a state no
-        caller asked for and no caller can detect — worse than a loud failure.
-        """
-        monkeypatch.setattr(service, "UPDATE_BY_QUERY_MAX_DOCS", 2)
-        client.docs = {"a": {"n": 1}, "b": {"n": 1}, "c": {"n": 1}}
-
-        with pytest.raises(Exception) as excinfo:
-            await service.update_by_query(
-                "drivers", {"match_all": {}}, lambda doc: {**doc, "n": 0}
-            )
-
-        assert "partial" in str(excinfo.value).lower()
-        assert all(doc["n"] == 1 for doc in client.docs.values())
-
-    async def test_a_retired_index_is_skipped(
-        self, service: _FakeService, client: _FakeClient, monkeypatch
-    ):
-        """A retired index has been dropped; writing would recreate it with
-        dynamic mappings, which is how a ``keyword`` tenant filter silently
-        becomes ``text`` and matches nothing."""
-        client.docs = {"a": {"n": 1}}
-        monkeypatch.setattr(service, "_is_retired_index", lambda index: True)
-
-        assert await service.update_by_query("drivers", {"match_all": {}}, lambda d: d) == 0
-        assert client.docs["a"]["n"] == 1
+# The Elasticsearch branch of ``update_by_query`` was tested here — a fake client,
+# a fake facade borrowing the real method, and four tests covering the fan-out, the
+# no-op transform, the ids-only fetch and the refusal to apply a partial update.
+# Phase 6 deleted that branch, so all of it went with it.
+#
+# ``update_by_query`` is now one delegation to
+# ``PostgresDocumentStore.update_by_query``, which is covered directly in
+# ``tests/postgres/test_document_store_atomic.py`` (including the transform
+# returning ``None``, and refusing an unsearchable field), and end to end through
+# ``DriverRepository.reset_completed_today`` in
+# ``tests/postgres/test_driver_repository_counters.py`` — where the tenant filter
+# and the ``completed_today > 0`` range are compiled to real SQL rather than matched
+# by a fake.
+#
+# The scan cap that lived on the facade went with the branch: the store applies the
+# transform in one statement over locked rows, so there is no round-trip count to
+# bound.

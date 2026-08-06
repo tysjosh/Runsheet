@@ -57,15 +57,26 @@ Write **one** Postgres-backed adapter implementing the existing
 | 1 | Postgres source of truth for the three ES-only indices | done |
 | 2 | Postgres-backed document store (DSL → SQL over `jsonb`) | done |
 | 3 | Copy every remaining index; whole-cluster parity | done |
-| 4 | Flip `DOCUMENT_STORE_BACKEND=postgres`; soak | **flipped in development**; staging next |
-| 5 | Stop writing to Elasticsearch | not started |
-| 6 | Remove the client, mappings and ILM policies | not started |
-| 7 | **Delete the cluster** | not started |
+| 4 | Flip `DOCUMENT_STORE_BACKEND=postgres`; soak | done in development |
+| 5 | Stop writing to Elasticsearch | done |
+| 6 | Remove the client, mappings and ILM policies | done |
+| 7 | **Delete the cluster** | done |
 
-Deletion is step 7, after parity, with explicit confirmation. Nothing before it
-destroys data.
+Deletion was step 7, after parity, with explicit confirmation. Nothing before it
+destroyed data, and the whole-cluster export from Phase 0 is kept.
+
+`DOCUMENT_STORE_BACKEND` no longer exists. It was the Phase 4 switch, and Phase 6
+removed it along with `ELASTIC_ENDPOINT`, `ELASTIC_API_KEY`, the `elasticsearch`
+dependency and every cluster-management code path. Rolling back is no longer a flag:
+it means restoring the cluster from `Runsheet-backend/es-full-backup/` and reverting
+the Phase 5 and 6 commits.
 
 ### Phase 0 — whole-cluster backup
+
+> `scripts/es_only_backup.py` was **deleted in Phase 6** along with the cluster it
+> talked to. The export it produced —
+> `Runsheet-backend/es-full-backup/`, 103 indices, 7,623 documents, 7.1 MB, verified
+> — is kept and is the only remaining copy. What follows is how it was taken.
 
 `scripts/es_only_backup.py` gained `--all` (whole-cluster) and `verify` became
 **manifest-driven**. It previously read 3 of 103 files, so it would have passed a
@@ -218,6 +229,11 @@ blocked.
 
 ### Phase 3 — whole-cluster parity
 
+> `scripts/document_store_parity.py` was **deleted in Phase 6**: it compared the two
+> backends and there is only one left. Its result is the record below. For ongoing
+> drift between the relational tables and the document projection, use
+> `python -m persistence.parity_check`, which compares those two and is still live.
+
 `scripts/document_store_parity.py` copies an index into `es_documents` and then
 runs a battery of query bodies against **both** backends, diffing the total, the
 ordered id list, every returned document body, and every aggregation.
@@ -258,28 +274,16 @@ the generic `JSON` comparator compiling `contains` to string `LIKE`; SQL
 three-valued logic making a document match neither a query nor its negation; and
 `minimum_should_match: 0` being treated as 1.
 
-### Phase 4 — the cutover (development is on Postgres)
+### Phase 4 — the cutover
 
-Set `DOCUMENT_STORE_BACKEND=postgres` (requires `DATABASE_URL`). The flag is
-validated at startup, so a misspelling — `postgresql`, `pg` — fails rather than
-leaving the service quietly on the legacy path. It is inert without a database.
+Setting `DOCUMENT_STORE_BACKEND=postgres` (requires `DATABASE_URL`) routed the
+document plane at Postgres. The flag was validated at startup, so a misspelling —
+`postgresql`, `pg` — failed rather than leaving the service quietly on the legacy
+path, and it was inert without a database.
 
-`.env.development` now sets it. Rolling back is deleting that line; nothing is
-destroyed by flipping it, the cluster keeps its data and the relay keeps
-projecting.
-
-Note that `.env.development` is **gitignored**, so a fresh checkout starts on the
-legacy path and has to set the flag itself. `.env.example` carries the
-recommendation; this is the only place the state of a developer's local flip is
-recorded, which is worth knowing when someone reports behaviour that does not match
-this document.
-
-Before flipping, per environment:
-
-```sh
-cd Runsheet-backend
-python -m scripts.document_store_parity run --all --tenant <tenant>
-```
+Phase 6 **removed the flag**, because there is no other path to select. There is
+also no `scripts/document_store_parity.py` any more: it compared the two backends
+and one of them is gone. What it proved is recorded below and in Phase 3.
 
 #### What the flip actually looked like
 
@@ -313,10 +317,11 @@ Two behaviour notes an operator will see in the logs:
 
 #### The raw-client surface is closed
 
-Code that reaches past `ElasticsearchService` to `es.client.search(...)` or
-`es.client.update(...)` is **not** routed by the switch. After the cutover those
-sites keep talking to Elasticsearch while everything else talks to Postgres, and
-the two stores diverge — silently, because each call individually succeeds.
+Code that reached past `ElasticsearchService` to `es.client.search(...)` or
+`es.client.update(...)` was **not** routed by the switch. After the cutover those
+sites would keep talking to Elasticsearch while everything else talked to Postgres,
+and the two stores would diverge — silently, because each call individually
+succeeds.
 
 `tests/unit/test_raw_elasticsearch_client_inventory.py` inventories that surface
 with an explicit allowlist. The test fails on an unlisted call site, and on a
@@ -336,9 +341,23 @@ been rewritten onto the facade:
 | `ops/services/ops_es_service.py` | 1 | `upsert_if_newer` (bulk scripted upsert) |
 | `bootstrap/core.py` | 1 | never was Elasticsearch — Redis `scan`, misclassified |
 
-What is left on the list is migration tooling (3 calls, exists to talk to
-Elasticsearch, moves last) and the facade's own Elasticsearch branch (13 calls,
-which are the calls the switch chooses *between*).
+The list is **empty** now. What was left after those 41 was migration tooling (3
+calls) and the facade's own Elasticsearch branch (13 calls, the calls the switch
+chose *between*), and Phase 6 closed all four files:
+
+| Was | Calls | Now |
+|---|---|---|
+| `services/elasticsearch_service.py` | 13 | deleted with the Elasticsearch branch |
+| `persistence/rebuild_from_postgres.py` | 1 | `rebuild_document_store.py`, `index_document(..., stamp_timestamps=False)` |
+| `scripts/seed_kfactor_demo.py` | 1 | same opt-out — its delivery dates are the data |
+| `services/data_seeder.py` | 1 | `delete_by_query` |
+
+The three tooling calls all existed for one reason: `index_document` force-stamps
+`updated_at` to now(), which would have restamped a rebuilt index and collapsed the
+K-factor demo's three-week delivery spacing into a single instant. The
+`stamp_timestamps=False` opt-out is therefore load-bearing for the empty inventory,
+not a convenience — `tests/unit/test_raw_elasticsearch_client_inventory.py` pins its
+existence for that reason.
 
 Note the direction of the facade's count: it went **up**, from 9 to 13, as
 `upsert_if_newer`, `atomic_update` and `update_by_query` each absorbed a raw call
@@ -476,25 +495,99 @@ The store now honours `search_after`, returns `sort` values on hits as Elasticse
 does, accepts `track_total_hits` and `timeout` with a stated reason, and **refuses
 every other top-level key**.
 
+### Phases 5–7 — no cluster, no client, no container
+
+**Phase 5 — stop talking to the cluster.** `services/no_cluster.py` replaces the
+Elasticsearch client with `NoClusterClient`: control-plane namespaces (`indices`,
+`ilm`, `cluster`, `cat`, `snapshot`) become logged no-ops, and every data-plane
+method **raises** `ClusterRemovedError`.
+
+The split is the point. A permissive mock would also swallow `client.index(...)`,
+so a document write that still reached the raw client would vanish with no error —
+the failure mode this whole migration kept finding. `client = None` was the other
+option and would have meant nineteen individual guards in eighteen modules.
+
+`connect()` used to raise on a failed ping, and this class builds a module-level
+singleton, so stopping the container did not degrade the service: it stopped the
+application from **importing**, inside `import data_endpoints`. Verified by stopping
+it — uvicorn died at `ConnectionError: Failed to ping Elasticsearch` before a single
+route was registered.
+
+Readiness moved with it. `elasticsearch` was a **critical** health dependency, so a
+stopped cluster made `/health/ready` report `unhealthy` and an orchestrator would
+have pulled a working service out of rotation. The probe is now `SELECT 1` through
+the engine the document store uses.
+
+**Phase 6 — delete the code.** Roughly 1,400 lines went: 15 `setup_*_indices`
+functions, 27 `ElasticsearchService` methods (ILM, index setup, schema validation,
+serverless detection, seven legacy mapping getters), nine ops methods,
+`services/mapping_validator.py`, the `elasticsearch` import and dependency, the
+`ELASTIC_*` settings and their validators, `DOCUMENT_STORE_BACKEND` and the
+per-method dual branches.
+
+Two things deliberately survived:
+
+* **The mapping registries stay.** `persistence/document_field_policy.py` reads the
+  declared mappings to decide which fields must remain unqueryable — in a `jsonb`
+  column everything is queryable, so moving off Elasticsearch silently *widens* the
+  filterable surface. Two of the affected fields are credentials:
+  `fuel_orders_current.pod_otp` (the proof-of-delivery one-time code) and
+  `driver_devices.push_token`. Deleting the mappings would have removed the policy's
+  input.
+* **`ElasticsearchService` keeps its name.** Renaming it would touch 567 files for
+  no behavioural gain.
+
+Moving the ops mappings out of four deleted methods into
+`ops/services/ops_es_mappings.py` and registering them with the field policy closed
+a gap that predates the migration: `ops_poison_queue.original_payload` is declared
+`enabled: false` — Elasticsearch cannot filter on it at all — and was freely
+queryable in `jsonb` because those mappings had never been in the policy's registry.
+
+Rehoming `all_index_mappings()` into the field policy made it registry-driven rather
+than a 160-line hand-written list, which took its coverage from ~70 indices to 86 and
+surfaced a latent Elasticsearch defect: **seven `dynamic: strict` indices do not
+declare `created_at` / `updated_at`** (`payments_current`, `ar_aging_snapshots`,
+`dunning_events`, `driver_reports`, `tenant_job_policies`, `riders_current`,
+`ops_poison_queue`) while `index_document` auto-stamps both. `PaymentService.ingest`
+writes `payments_current` through `index_document`, so on Elasticsearch every such
+write would have been rejected. Pinned as a frozen list.
+
+One diagnostic change worth naming: `_iter_mappings` logs a failed registry import
+at **ERROR**, not DEBUG. A registry that fails to import does not degrade the field
+policy, it **deletes part of it** — and silently. Found the hard way: the generated
+ops module was first written with `json.dumps`, so it contained a lowercase `false`,
+parsed fine, and raised `NameError` on import. At DEBUG the policy simply reported no
+restrictions for the ops indices and nothing said so.
+
+**Phase 7 — delete the container.** The `runsheet-es` container and its volume are
+gone, along with the Elasticsearch service in CI's image-smoke job (which stood up a
+cluster only because readiness checked one). `Runsheet-backend/es-full-backup/` —
+103 indices, 7,623 documents, 7.1 MB, verified — is the only remaining copy of the
+cluster and is deliberately kept.
+
 ##### Still outstanding
 
-* **Staging and production have not been flipped.** Run the parity tool against
-  each before setting the flag. `.env.production` is still placeholders.
-* **The outbox relay is now redundant rather than misdirected.** It projects
-  through `index_document`, so under this flag it copies Postgres aggregates into
-  `es_documents` — another Postgres table. Harmless but pointless; it should stop
-  running once nothing reads the ES projection.
-* **Phases 5–7**: stop writing to Elasticsearch, remove the client and the 16
-  non-test mapping modules and the ILM policies, then delete the cluster. 567 files
-  mention `elasticsearch` or `es_service` (4,214 mentions), so this is mechanical
-  but large.
+* **Staging and production were never on Elasticsearch under this code.** They are
+  not flipped because there is no longer a flag: the first deploy of these commits
+  is their cutover, and it needs `DATABASE_URL` set and migrations at head or
+  readiness fails. `.env.production` is still placeholders.
+* **The two pipeline-aggregation shapes are still refused.** `bucket_script` /
+  `stats_bucket` / `avg_bucket` and script-valued `sum` raise rather than being
+  translated; the three call sites do their own Python post-processing. A new caller
+  reaching for a pipeline aggregation gets an exception, which is the intended
+  behaviour but is worth knowing before writing one.
+* **The outbox relay is redundant, not misdirected.** It projects through
+  `index_document`, so it copies relational aggregates into `es_documents` — another
+  Postgres table. Harmless, and `persistence/parity_check.py` is what detects drift
+  between the two, but it should stop running for any aggregate whose reads have
+  moved to the relational path.
 
 ## Standing facts
 
-- Not on Elastic Cloud and never were. `ELASTIC_ENDPOINT` is a placeholder;
-  development runs `elasticsearch:8.11.0` in Docker.
+- Never on Elastic Cloud. `ELASTIC_ENDPOINT` was a placeholder throughout;
+  development ran `elasticsearch:8.11.0` in Docker.
 - `COMMERCE_READ_FROM_POSTGRES` is `true` in development, defaults to `False`, and
   is absent from `.env.production`.
-- `_cat/indices` `docs.count` includes nested documents and ES system indices. Use
-  `_count` for a top-level figure; `_cluster/stats` overcounts (it reported 9,353
-  against a real 7,623).
+- `_cat/indices` `docs.count` included nested documents and ES system indices. The
+  top-level figure came from `_count`; `_cluster/stats` overcounted (it reported
+  9,353 against a real 7,623).

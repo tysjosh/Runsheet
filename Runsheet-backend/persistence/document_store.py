@@ -168,7 +168,12 @@ class PostgresDocumentStore:
     # ------------------------------------------------------------------
 
     async def index_document(
-        self, index: str, doc_id: str, document: Dict[str, Any]
+        self,
+        index: str,
+        doc_id: str,
+        document: Dict[str, Any],
+        *,
+        stamp_timestamps: bool = True,
     ) -> Dict[str, Any]:
         """Upsert a whole document, replacing any existing body.
 
@@ -177,13 +182,22 @@ class PostgresDocumentStore:
         when absent. The stamping is done on the caller's dict, as the ES path
         does, because several callers read the timestamps back off the dict they
         passed in.
+
+        ``stamp_timestamps=False`` writes the document exactly as given. It exists
+        for one narrow case — restoring or seeding data whose timestamps ARE the
+        data. ``scripts/seed_kfactor_demo.py`` writes deliveries spaced three weeks
+        apart, and stamping ``updated_at`` to now would make every delivery look
+        simultaneous and starve the prior-delivery lookup the variance window needs.
+        That script used the raw Elasticsearch client to get around the stamping;
+        this is the same escape hatch, named, and the only way to reach it is to ask
+        for it.
         """
         if doc_id is None or str(doc_id) == "":
             raise ValueError(f"index_document({index}) requires a non-empty doc_id")
 
         from services.elasticsearch_service import TIMESTAMP_SKIP_INDICES
 
-        if index not in TIMESTAMP_SKIP_INDICES:
+        if stamp_timestamps and index not in TIMESTAMP_SKIP_INDICES:
             document["updated_at"] = self._clock()
             if "created_at" not in document:
                 document["created_at"] = self._clock()

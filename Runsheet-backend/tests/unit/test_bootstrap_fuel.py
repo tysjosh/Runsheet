@@ -47,8 +47,7 @@ class TestFuelBootstrap:
         """Verify FuelService is registered in the container."""
         mock_fuel = MagicMock()
 
-        with patch("fuel.services.fuel_es_mappings.setup_fuel_indices") as mock_setup, \
-             patch("fuel.services.fuel_service.FuelService", return_value=mock_fuel), \
+        with patch("fuel.services.fuel_service.FuelService", return_value=mock_fuel), \
              patch("fuel.api.endpoints.configure_fuel_api") as mock_configure:
 
             sys.modules.pop("bootstrap.fuel", None)
@@ -56,15 +55,24 @@ class TestFuelBootstrap:
             await initialize(mock_app, container)
 
         assert container.fuel_service is mock_fuel
-        mock_setup.assert_called_once()
+        # ``mock_setup.assert_called_once()`` was here, asserting bootstrap created
+        # the fuel indices. Phase 6 deleted ``setup_fuel_indices``: the document
+        # store is one Postgres table created by a migration, so there is nothing
+        # for bootstrap to create. What still matters — that the service is
+        # registered and the API is wired — is asserted either side.
         mock_configure.assert_called_once_with(fuel_service=mock_fuel)
 
     @pytest.mark.asyncio
-    async def test_index_failure_does_not_crash(self, mock_app, container):
-        """Fuel index setup failure should not crash initialization."""
-        with patch("fuel.services.fuel_es_mappings.setup_fuel_indices",
-                   side_effect=RuntimeError("index fail")), \
-             patch("fuel.services.fuel_service.FuelService", return_value=MagicMock()), \
+    async def test_initialize_is_fail_open(self, mock_app, container):
+        """Bootstrap registers the service even when an earlier step misbehaves.
+
+        This was ``test_index_failure_does_not_crash``, and it made
+        ``setup_fuel_indices`` raise to prove the bootstrap chain was fail-open. That
+        function is gone, so the specific trigger is gone with it. The property is
+        still worth an assertion — the chain must reach ``fuel_service`` — so it is
+        kept rather than deleted along with its old trigger.
+        """
+        with patch("fuel.services.fuel_service.FuelService", return_value=MagicMock()), \
              patch("fuel.api.endpoints.configure_fuel_api"):
 
             sys.modules.pop("bootstrap.fuel", None)
@@ -88,8 +96,7 @@ class TestPODOTPServiceRegistration:
         order_service = MagicMock()
         container.order_repository = MagicMock()
 
-        with patch("fuel.services.fuel_es_mappings.setup_fuel_indices"), \
-             patch("fuel.services.fuel_service.FuelService", return_value=MagicMock()), \
+        with patch("fuel.services.fuel_service.FuelService", return_value=MagicMock()), \
              patch("fuel.api.endpoints.configure_fuel_api"), \
              patch("fuel.services.order_service.OrderService",
                    return_value=order_service):
@@ -116,8 +123,7 @@ class TestPODOTPServiceRegistration:
         """``notifications`` boots after ``fuel``, so it cannot be wired yet."""
         container.order_repository = MagicMock()
 
-        with patch("fuel.services.fuel_es_mappings.setup_fuel_indices"), \
-             patch("fuel.services.fuel_service.FuelService", return_value=MagicMock()), \
+        with patch("fuel.services.fuel_service.FuelService", return_value=MagicMock()), \
              patch("fuel.api.endpoints.configure_fuel_api"), \
              patch("fuel.services.order_service.OrderService",
                    return_value=MagicMock()):

@@ -45,6 +45,54 @@ class TestThePolicyReadsTheRealMappings:
     def test_disabled_object_subtrees_are_covered_by_their_parent(self):
         assert "event_payload" in unsearchable_fields("job_events")
 
+    def test_every_registry_actually_imports(self):
+        """A registry that fails to import deletes part of the policy, silently.
+
+        ``_iter_mappings`` skips a registry it cannot import. That is the right
+        behaviour for a module that is genuinely optional and the wrong behaviour to
+        rely on: when ``ops.services.ops_es_mappings`` was first generated with
+        ``json.dumps`` it contained a lowercase ``false``, so it parsed and then
+        raised ``NameError`` on import — and the ops indices quietly reported no
+        unsearchable fields at all.
+
+        So the registry list is checked directly rather than through the policy,
+        which is the only way to tell "declares nothing" from "could not be read".
+        """
+        from persistence.document_field_policy import _REGISTRIES
+
+        broken = []
+        for module_path, attribute in _REGISTRIES:
+            try:
+                module = __import__(module_path, fromlist=[attribute])
+            except Exception as exc:  # noqa: BLE001
+                broken.append(f"{module_path}: {type(exc).__name__}: {exc}")
+                continue
+            registry = getattr(module, attribute, None)
+            if not isinstance(registry, dict):
+                broken.append(
+                    f"{module_path}.{attribute} is {type(registry).__name__}, not a dict"
+                )
+            elif not registry:
+                broken.append(f"{module_path}.{attribute} is empty")
+
+        assert not broken, (
+            "these mapping registries cannot be read, so any unsearchable field "
+            f"they declare is queryable: {broken}"
+        )
+
+    def test_the_ops_poison_queue_payload_is_unsearchable(self):
+        """``original_payload`` is declared ``enabled: false``.
+
+        It holds the raw payload of a failed ingestion — whatever an upstream system
+        sent, which is exactly the kind of thing that turns out to contain a token.
+        Elasticsearch cannot filter on it at all; jsonb can filter on anything, and
+        the ops mappings were not in the registry until Phase 6 moved them out of
+        ``OpsElasticsearchService``.
+        """
+        from persistence.document_field_policy import unsearchable_fields
+
+        assert "original_payload" in unsearchable_fields("ops_poison_queue")
+
     def test_an_index_with_no_declared_mapping_has_no_restrictions(self):
         """A dynamically-mapped index indexed everything, by definition."""
         assert unsearchable_fields("no_such_index_anywhere") == frozenset()

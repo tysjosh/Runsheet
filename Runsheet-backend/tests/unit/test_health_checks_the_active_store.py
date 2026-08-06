@@ -6,9 +6,17 @@ orchestrator pulls a working service out of rotation over a dependency nothing
 reads. Worse than a cosmetic wrong label: it is an outage caused by the migration
 succeeding.
 
-So the check follows the backend. The reported dependency name says which store was
-probed, and both names are critical — in either configuration, a failure means
-documents are unreachable.
+So the check probes Postgres and reports it by name. Three tests here followed the
+``DOCUMENT_STORE_BACKEND`` switch — that the name tracked the flag, that a settings
+failure fell back to the legacy name, and that a failed ``elasticsearch`` check
+stayed critical so a rollback kept its semantics. The switch is gone: there is one
+store, ``_document_store_name`` returns a constant, and a rollback is a cluster
+restore rather than a flag. The ``elasticsearch`` name is still treated as critical
+by ``_determine_overall_status`` and that is deliberately left alone — it costs
+nothing and it is the safe direction for any caller that still constructs one.
+
+What is asserted here is what still has teeth: the probe does not consult the
+cluster, and it can fail.
 """
 
 from __future__ import annotations
@@ -20,38 +28,13 @@ import pytest
 from health.service import HealthCheckService
 
 
-class _FakeSettings:
-    def __init__(self, postgres: bool) -> None:
-        self.document_store_is_postgres = postgres
-
-
-def _pin_backend(monkeypatch, *, postgres: bool) -> None:
-    monkeypatch.setattr(
-        "config.settings.get_settings", lambda: _FakeSettings(postgres)
-    )
-
-
-class TestTheProbedStoreFollowsTheBackend:
-    def test_it_names_postgres_on_the_postgres_backend(self, monkeypatch):
-        _pin_backend(monkeypatch, postgres=True)
+class TestTheProbedStoreIsPostgres:
+    def test_it_names_postgres(self):
         assert HealthCheckService._document_store_name() == "postgres"
-
-    def test_it_names_elasticsearch_on_the_legacy_backend(self, monkeypatch):
-        _pin_backend(monkeypatch, postgres=False)
-        assert HealthCheckService._document_store_name() == "elasticsearch"
-
-    def test_a_settings_failure_falls_back_to_elasticsearch(self, monkeypatch):
-        """The conservative direction: report the legacy dependency rather than
-        claim a Postgres store that may not be configured."""
-        def _boom():
-            raise RuntimeError("settings unavailable")
-
-        monkeypatch.setattr("config.settings.get_settings", _boom)
-        assert HealthCheckService._document_store_name() == "elasticsearch"
 
 
 class TestAMissingClusterDoesNotMarkTheServiceUnhealthy:
-    async def test_a_stopped_cluster_is_irrelevant_on_postgres(self, monkeypatch):
+    async def test_a_stopped_cluster_is_irrelevant(self, monkeypatch):
         """The regression this exists to prevent.
 
         The stand-in's ``ping()`` returns False, which is honest — and must not be
@@ -59,7 +42,6 @@ class TestAMissingClusterDoesNotMarkTheServiceUnhealthy:
         """
         from services.no_cluster import NoClusterClient
 
-        _pin_backend(monkeypatch, postgres=True)
         es_service = MagicMock()
         es_service.client = NoClusterClient()
         service = HealthCheckService(es_service)
@@ -73,9 +55,39 @@ class TestAMissingClusterDoesNotMarkTheServiceUnhealthy:
         assert result.name == "postgres"
         assert result.healthy is True
 
-    async def test_an_unreachable_database_is_unhealthy_on_postgres(self, monkeypatch):
+    async def test_the_probe_does_not_touch_the_client_at_all(self):
+        """Stronger than the test above, which stubs the probe out.
+
+        ``NoClusterClient``'s data plane raises and its control plane no-ops, so a
+        probe that still reached for the cluster would either blow up or quietly
+        report a made-up answer. Asserting on a client whose every attribute access
+        is recorded catches both.
+        """
+        touched: list = []
+
+        class _Tripwire:
+            def __getattr__(self, name):
+                touched.append(name)
+                raise AssertionError(
+                    f"the readiness probe reached the Elasticsearch client "
+                    f"(.{name}); it must probe Postgres"
+                )
+
+        es_service = MagicMock()
+        es_service.client = _Tripwire()
+        service = HealthCheckService(es_service)
+
+        # The real probe, against the real database if one is configured. Either
+        # outcome is fine — what matters is that the client was never consulted.
+        try:
+            await service._check_document_store()
+        except Exception:  # noqa: BLE001 — no database configured is an acceptable outcome
+            pass
+
+        assert touched == []
+
+    async def test_an_unreachable_database_is_unhealthy(self, monkeypatch):
         """The probe has to be able to fail, or it is decoration."""
-        _pin_backend(monkeypatch, postgres=True)
         service = HealthCheckService(MagicMock())
 
         async def _postgres_is_down():
@@ -91,23 +103,12 @@ class TestAMissingClusterDoesNotMarkTheServiceUnhealthy:
 
 class TestTheAggregateStatus:
     def test_a_failed_postgres_check_is_unhealthy_not_degraded(self):
-        """Documents unreachable is not a degradation, whichever store it is."""
+        """Documents unreachable is not a degradation."""
         from health.service import DependencyHealth
 
         service = HealthCheckService(MagicMock())
         status = service._determine_overall_status(
             [DependencyHealth(name="postgres", healthy=False, response_time_ms=1.0)]
-        )
-
-        assert status == "unhealthy"
-
-    def test_a_failed_elasticsearch_check_is_still_unhealthy(self):
-        """The legacy name stays critical so a rollback keeps its semantics."""
-        from health.service import DependencyHealth
-
-        service = HealthCheckService(MagicMock())
-        status = service._determine_overall_status(
-            [DependencyHealth(name="elasticsearch", healthy=False, response_time_ms=1.0)]
         )
 
         assert status == "unhealthy"

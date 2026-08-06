@@ -40,10 +40,33 @@ class TestSettings:
         with patch.dict(os.environ, valid_env_vars, clear=True):
             settings = Settings()
             
-            assert settings.elastic_endpoint == "https://elasticsearch.example.com:9200"
-            assert settings.elastic_api_key == "test-api-key-12345"
             assert settings.google_cloud_project == "test-project-id"
             assert settings.environment == Environment.DEVELOPMENT
+
+    def test_the_elasticsearch_settings_are_gone_and_ignored(self, valid_env_vars):
+        """A stale ``ELASTIC_*`` in someone's shell must not resurrect anything.
+
+        ``elastic_endpoint`` and ``elastic_api_key`` were REQUIRED fields with
+        validators of their own — non-empty, HTTP/HTTPS scheme — and five tests here
+        covered missing, empty and malformed values. All of that is gone with the
+        cluster. What replaces it is the opposite assertion: the fields do not exist,
+        and ``model_config`` sets ``extra="ignore"``, so an operator with the old
+        variables still exported gets a working process rather than a crash — and no
+        setting that quietly claims to point somewhere.
+        """
+        env_vars = {
+            **valid_env_vars,
+            "ELASTIC_ENDPOINT": "https://stale.example.com:9200",
+            "ELASTIC_API_KEY": "stale-key",
+        }
+
+        with patch.dict(os.environ, env_vars, clear=True):
+            settings = Settings()
+
+        assert not hasattr(settings, "elastic_endpoint")
+        assert not hasattr(settings, "elastic_api_key")
+        assert "elastic_endpoint" not in settings.model_fields
+        assert "elastic_api_key" not in settings.model_fields
     
     def test_default_values_are_applied(self, valid_env_vars):
         """Test that default values are correctly applied."""
@@ -58,47 +81,6 @@ class TestSettings:
             assert settings.log_level == "INFO"
             assert settings.otel_service_name == "runsheet-backend"
             assert settings.cors_origins == ["http://localhost:3000"]
-    
-    def test_missing_elastic_endpoint_raises_error(self, valid_env_vars):
-        """Test that missing elastic_endpoint raises validation error."""
-        env_vars = {k: v for k, v in valid_env_vars.items() if k != "ELASTIC_ENDPOINT"}
-        
-        with patch.dict(os.environ, env_vars, clear=True):
-            with pytest.raises(Exception) as exc_info:
-                Settings()
-            
-            # Pydantic should raise a validation error for missing required field
-            assert "elastic_endpoint" in str(exc_info.value).lower()
-    
-    def test_missing_elastic_api_key_raises_error(self, valid_env_vars):
-        """Test that missing elastic_api_key raises validation error."""
-        env_vars = {k: v for k, v in valid_env_vars.items() if k != "ELASTIC_API_KEY"}
-        
-        with patch.dict(os.environ, env_vars, clear=True):
-            with pytest.raises(Exception) as exc_info:
-                Settings()
-            
-            assert "elastic_api_key" in str(exc_info.value).lower()
-    
-    def test_empty_elastic_endpoint_raises_error(self, valid_env_vars):
-        """Test that empty elastic_endpoint raises validation error."""
-        env_vars = {**valid_env_vars, "ELASTIC_ENDPOINT": "   "}
-        
-        with patch.dict(os.environ, env_vars, clear=True):
-            with pytest.raises(Exception) as exc_info:
-                Settings()
-            
-            assert "elastic_endpoint" in str(exc_info.value).lower()
-    
-    def test_invalid_elastic_endpoint_url_raises_error(self, valid_env_vars):
-        """Test that invalid elastic_endpoint URL format raises error."""
-        env_vars = {**valid_env_vars, "ELASTIC_ENDPOINT": "not-a-valid-url"}
-        
-        with patch.dict(os.environ, env_vars, clear=True):
-            with pytest.raises(Exception) as exc_info:
-                Settings()
-            
-            assert "url" in str(exc_info.value).lower() or "http" in str(exc_info.value).lower()
     
     def test_invalid_log_level_raises_error(self, valid_env_vars):
         """Test that invalid log_level raises validation error."""
@@ -446,14 +428,19 @@ class TestGetSettings:
             assert isinstance(settings, Settings)
     
     def test_get_settings_raises_configuration_error_on_invalid_config(self):
-        """Test that get_settings raises ConfigurationError on invalid config."""
+        """Test that get_settings raises ConfigurationError on invalid config.
+
+        The invalid value used to be an empty ``ELASTIC_ENDPOINT``, which is now
+        ignored rather than rejected — that field is gone. ``LOG_LEVEL`` takes its
+        place: still a field validator, still a startup failure, and it does not
+        depend on anything the migration can remove.
+        """
         # Clear the cache first
         clear_settings_cache()
         
         # Use invalid values that will fail validation
         with patch.dict(os.environ, {
-            "ELASTIC_ENDPOINT": "",  # Empty endpoint should fail
-            "ELASTIC_API_KEY": "test-key",
+            "LOG_LEVEL": "NOT_A_LEVEL",
             "GOOGLE_CLOUD_PROJECT": "test-project-id",
         }, clear=True):
             with pytest.raises(ConfigurationError):

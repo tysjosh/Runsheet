@@ -187,14 +187,8 @@ async def _initialize_voice_integration(
             VoiceApiKeyRepository,
             configure_voice_auth,
         )
-        from fuel.voice.voice_es_mappings import setup_voice_indices
 
         # Create the voice_api_keys index (idempotent).
-        try:
-            setup_voice_indices(es_service)
-            logger.info("Voice ES indices ready")
-        except Exception as exc:
-            logger.warning("Failed to set up voice ES indices: %s", exc)
 
         salt = getattr(settings, "voice_api_key_salt", "") if settings else ""
         if salt:

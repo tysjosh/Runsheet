@@ -18,7 +18,10 @@ uvicorn==0.40.0
 pydantic==2.12.5
 pydantic-settings==2.12.0
 python-multipart==0.0.18
-elasticsearch==8.11.0
+# ``elasticsearch==8.11.0`` was here. Nothing imports it: the document plane is
+# PostgreSQL (persistence/document_store.py over the ``es_documents`` table) and
+# the last ``import elasticsearch`` went with the client. Left in place it would
+# be a dependency the image installs and a CVE surface nothing uses.
 python-dotenv==1.0.0
 litellm==1.55.0
 strands-agents==1.8.0
@@ -29,9 +32,10 @@ google-cloud-aiplatform==1.72.0
 # Redis for session storage (Requirement 8.4)
 redis==5.2.0
 
-# PostgreSQL source-of-truth for transactional/financial models
-# (Commerce backbone + idempotency). Elasticsearch becomes a rebuildable
-# read/search projection fed by a transactional outbox (persistence/).
+# PostgreSQL: source-of-truth for transactional/financial models (Commerce
+# backbone + idempotency) AND, since the Elasticsearch removal, the document
+# plane too — the ``es_documents`` table is fed by the same transactional outbox
+# (persistence/).
 #   - SQLAlchemy 2.x async ORM (engine + session)
 #   - asyncpg/psycopg3 driver for the app's async engine; psycopg3 also
 #     serves Alembic's synchronous migration runner, so a single driver

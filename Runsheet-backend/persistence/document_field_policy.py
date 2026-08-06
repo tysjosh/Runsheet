@@ -84,6 +84,12 @@ _REGISTRIES: Tuple[Tuple[str, str], ...] = (
     ("fuel.voice.voice_es_mappings", "VOICE_INDEX_MAPPINGS"),
     ("integrations.stripe_es_mappings", "STRIPE_INDEX_MAPPINGS"),
     ("scheduling.services.scheduling_es_mappings", "SCHEDULING_INDEX_MAPPINGS"),
+    # Added when Phase 6 deleted ``setup_ops_indices``: the ops mappings used to
+    # live as four methods on ``OpsElasticsearchService`` and were never in this
+    # registry, so ``ops_poison_queue.original_payload`` — declared
+    # ``enabled: false``, holding the raw payload of a failed ingestion — was
+    # freely queryable in jsonb where Elasticsearch could not filter on it at all.
+    ("ops.services.ops_es_mappings", "OPS_INDEX_MAPPINGS"),
 )
 
 _cache: Dict[str, FrozenSet[str]] = {}
@@ -93,12 +99,29 @@ def _iter_mappings() -> Iterable[Tuple[str, Dict[str, Any]]]:
     for module_path, attribute in _REGISTRIES:
         try:
             module = __import__(module_path, fromlist=[attribute])
-        except Exception as exc:  # noqa: BLE001 — a registry is optional
-            logger.debug("field policy: registry %s unavailable: %s", module_path, exc)
+        except Exception as exc:  # noqa: BLE001 — narrowed by the log level below
+            # Logged at ERROR, not DEBUG. This function decides which fields are
+            # unqueryable, so a registry that fails to import does not degrade the
+            # policy, it DELETES part of it — and silently. That is not
+            # hypothetical: ``ops.services.ops_es_mappings`` was first generated
+            # with ``json.dumps``, so it contained a lowercase ``false``, parsed
+            # fine, and raised ``NameError`` on import. At DEBUG the policy simply
+            # reported no restrictions for the ops indices and nothing said so.
+            logger.error(
+                "field policy: registry %s FAILED to import, so any unsearchable "
+                "field it declares is now queryable: %s",
+                module_path, exc,
+            )
             continue
         registry = getattr(module, attribute, None)
         if isinstance(registry, dict):
             yield from registry.items()
+        else:
+            logger.error(
+                "field policy: %s.%s is %s, not a dict — its unsearchable fields "
+                "are not being enforced",
+                module_path, attribute, type(registry).__name__,
+            )
 
 
 def _walk(properties: Dict[str, Any], prefix: str = "") -> Iterable[Tuple[str, str]]:
@@ -120,6 +143,26 @@ def _walk(properties: Dict[str, Any], prefix: str = "") -> Iterable[Tuple[str, s
             continue
         if "properties" in spec:
             yield from _walk(spec["properties"], f"{path}.")
+
+
+def all_index_mappings() -> List[Tuple[str, Dict[str, Any]]]:
+    """Every ``(index_name, mapping)`` the codebase declares.
+
+    Rehomed from ``services/mapping_validator._collect_all_index_mappings``, which
+    Phase 6 deleted along with the rest of the cluster-management code. The
+    *collection* is not cluster-management: it is the union of the schema
+    declarations, and it is still the input to two contracts worth keeping —
+    ``tests/unit/test_mapping_timestamp_contract.py`` (every auto-stamped index
+    declares ``created_at`` and ``updated_at``) and the driver-surface
+    ``dynamic: strict`` assertions.
+
+    It also reads better here than it did there: the old version named ~70
+    ``*_INDEX`` / ``*_MAPPING`` pairs by hand across a 160-line function, so a new
+    index was only covered if someone remembered to add it. This walks the same
+    registries the field policy already walks, so a new index in any registry is
+    included automatically.
+    """
+    return list(_iter_mappings())
 
 
 def unsearchable_fields(index: str) -> FrozenSet[str]:

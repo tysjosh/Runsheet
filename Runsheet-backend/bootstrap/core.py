@@ -377,13 +377,6 @@ async def initialize(app, container: ServiceContainer) -> None:
     # pattern in bootstrap/agents.py but gates on the flag so tenants
     # without commerce enabled never pay the index-creation cost.
     if getattr(settings, "commerce_backbone_enabled", False):
-        try:
-            from commerce.services.commerce_es_mappings import setup_commerce_indices
-
-            setup_commerce_indices(elasticsearch_service)
-            logger.info("Commerce backbone ES indices provisioned")
-        except Exception as exc:
-            logger.warning("Commerce backbone ES index setup failed: %s", exc)
 
         # ── Commerce Customer API wiring (Task 3.3) ────────────────────
         # Wire the CustomerService into the customer_endpoints module so

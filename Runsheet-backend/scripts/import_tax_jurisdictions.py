@@ -239,26 +239,24 @@ async def _index_rates(
     rates: List[JurisdictionRate],
     elastic_url: Optional[str],
 ) -> int:
-    """Index each rate into the ``tax_jurisdictions`` index.
+    """Write each rate into the ``tax_jurisdictions`` index.
 
     Uses the existing :class:`services.elasticsearch_service.ElasticsearchService`
-    so the script honors the same circuit-breaker and index-bootstrap
-    wiring as the REST endpoints. When *elastic_url* is provided, it
-    overrides ``ELASTIC_ENDPOINT`` from the environment for this
-    invocation only.
+    so the script honors the same circuit-breaker wiring as the REST endpoints.
+
+    *elastic_url* is accepted and ignored. It used to override
+    ``ELASTIC_ENDPOINT`` for one invocation, pointing the import at a different
+    cluster; the document store is the application database and there is no
+    per-invocation endpoint to redirect. The argument stays so an existing
+    ``--elastic-url ...`` command line does not fail, and ``main`` warns when it
+    is supplied — silently ignoring it would let someone believe they had
+    imported into a different environment.
     """
-    import os
-
     if elastic_url:
-        os.environ["ELASTIC_ENDPOINT"] = elastic_url
-        # Force settings reload so the override takes effect.
-        from config import settings as settings_module
-
-        if hasattr(settings_module, "get_settings"):
-            try:
-                settings_module.get_settings.cache_clear()  # type: ignore[attr-defined]
-            except AttributeError:
-                pass
+        logger.warning(
+            "--elastic-url is ignored: documents are written to the application "
+            "database (DATABASE_URL), not to an Elasticsearch endpoint."
+        )
 
     from services.elasticsearch_service import ElasticsearchService
 
@@ -384,15 +382,15 @@ Examples:
         "--elastic-url",
         default=None,
         help=(
-            "Optional override for ELASTIC_ENDPOINT. When omitted, the "
-            "value from config.settings / the environment is used."
+            "Deprecated and ignored. Documents go to the application database "
+            "(DATABASE_URL); there is no Elasticsearch endpoint to override."
         ),
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
         default=False,
-        help="Validate rows without indexing to Elasticsearch.",
+        help="Validate rows without writing them.",
     )
 
     args = parser.parse_args()

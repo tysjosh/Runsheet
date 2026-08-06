@@ -57,7 +57,6 @@ from Agents.support.route_solver import (
 )
 
 # ES mappings
-from Agents.support.mvp_es_mappings import setup_mvp_indices
 
 # Pipeline coordinator
 from Agents.support.fuel_distribution_pipeline import (
@@ -110,7 +109,6 @@ __all__ = [
     "INSERT_REASON_SLA",
     "INSERT_REASON_OFF_DUTY",
     # ES mappings
-    "setup_mvp_indices",
     # Pipeline coordinator
     "FuelDistributionPipeline",
     "PipelineState",

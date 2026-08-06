@@ -5,8 +5,9 @@ Revises: 0007_drop_shipments_current
 Create Date: 2026-08-05
 
 ``customer_tanks``, ``truck_compartments`` and ``fuel_stations`` were the whole
-contents of ``persistence.rebuild_from_postgres.ES_ONLY_INDICES``: authoritative
-operational state with no Postgres table, no ORM model and no projector, so
+contents of the rebuild tool's ``ES_ONLY_INDICES`` registry (deleted with the
+cluster in Phase 6): authoritative operational state with no Postgres table, no
+ORM model and no projector, so
 recreating the Elasticsearch cluster destroyed them permanently. That is not a
 hypothetical — it happened during an end-to-end test of the MVP pipeline, and
 the A1 tank-forecasting and A3 compartment-loading stages then ran with no input
@@ -59,10 +60,11 @@ because no fixture gave one customer two tanks; the second would have silently
 overwritten the first. The backfill remaps as it copies, and this primary key
 makes the collision impossible to reintroduce.
 
-``downgrade()`` drops all three. **That is data loss** once dual-write is live
-and Elasticsearch has been retired, because at that point Postgres is the only
-copy. Take a backup first (``python -m scripts.es_only_backup export --all``
-covers the Elasticsearch side while it still exists).
+``downgrade()`` drops all three. **That is data loss**: Elasticsearch has since
+been retired, so Postgres is the only copy. Take a ``pg_dump`` first
+(``scripts/backup_restore.sh``). The Elasticsearch-side export that used to be
+recommended here no longer exists; the final whole-cluster snapshot it produced is
+the frozen one described in ``docs/backup-and-restore.md``.
 """
 from typing import Sequence, Union
 

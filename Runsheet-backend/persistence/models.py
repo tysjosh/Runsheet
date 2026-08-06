@@ -841,8 +841,9 @@ class LocationORM(_ComplianceConfigBase, Base):
 # ---------------------------------------------------------------------------
 #
 # ``customer_tanks``, ``truck_compartments`` and ``fuel_stations`` were listed in
-# ``persistence.rebuild_from_postgres.ES_ONLY_INDICES``: authoritative state with
-# no Postgres table, no projector and no rebuild spec, so recreating the
+# the rebuild tool's ``ES_ONLY_INDICES`` registry (deleted with the cluster in
+# Phase 6): authoritative state with no Postgres table, no projector and no
+# rebuild spec, so recreating the
 # Elasticsearch cluster destroyed them permanently. They are not seed data —
 # live code paths write them:
 #

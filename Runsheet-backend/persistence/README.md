@@ -436,7 +436,9 @@ lockstep.
      None" on BOTH paths. Fixed the tool to accept both field shapes.
   3. `parity_check._fetch_es_all` now clears its scroll contexts (the serverless
      cluster caps open scroll contexts; the multi-query fallback would otherwise
-     exhaust them).
+     exhaust them). *Both went with the cluster:* the function is
+     `_fetch_documents_all` and reads `es_documents` with one `SELECT`, so there is
+     no scroll and no `tenant_id.keyword` fallback chain.
   **Live-position write-mirror:** the ingestion location-update path
   (`ingestion/service.py`) and the Geotab connector wrote `current_location` to
   the ES `trucks` doc only. Now that the fleet reads serve from PG, both mirror
@@ -524,37 +526,48 @@ lockstep.
 - **Phase 5 — stop the ES projection.** After a parity soak with reads on
   Postgres, stop running the outbox relay (and/or turn off dual-write) so the
   migrated ES indices stop receiving writes.
-- **Phase 6 — drop the ES indices.** Drop the migrated index and add it to
-  `RETIRED_ES_INDICES` (see below). Note: keep the index's **mapping** in its
-  `*_es_mappings.py` registry — `rebuild_from_postgres` needs it to recreate
-  the index with the correct strict mapping if you ever rebuild. Only remove a
-  mapping/seeder entry when an aggregate is being deleted entirely (not just
-  retired from ES). The deprecated `invoice_numbering.py` + its
-  `invoice_counter_checkpoints` index were fully removed since the Postgres
-  counter replaced them outright.
+- **Phase 6 — retire the index.** Add it to `RETIRED_ES_INDICES` (see below) so
+  nothing projects to it any more. Note: keep the index's **mapping** in its
+  `*_es_mappings.py` registry. The reason changed when Elasticsearch went — the
+  rebuild tool no longer creates indices, because the document store is one table
+  with no per-index typing — but `persistence/document_field_policy.py` reads those
+  mappings to decide which fields must stay unqueryable, and in a `jsonb` column
+  everything is queryable unless something says otherwise. Only remove a
+  mapping/seeder entry when an aggregate is being deleted entirely. The deprecated
+  `invoice_numbering.py` + its `invoice_counter_checkpoints` index were fully
+  removed since the Postgres counter replaced them outright.
 
-### Reversibility safety net: rebuild-from-Postgres (`persistence.rebuild_from_postgres`)
+### Drift repair: rebuild-from-Postgres (`persistence.rebuild_document_store`)
 
-Once reads are cut over, the migrated ES indices are disposable *projections*,
-so dropping one must be reversible. `rebuild_from_postgres` is the inverse of
-`backfill`: it reads every PG row for an aggregate, runs it through the SAME
-projector the relay uses (`persistence.projections.PROJECTORS`), recreates the
-index with its **correct strict mapping** (looked up from the domain mapping
-registries — NOT ES dynamic typing, which would silently make `tenant_id`
-`text` and break `term` queries), and indexes each doc **verbatim** (it writes
-via the raw ES client so `index_document`'s `updated_at = now()` rewrite does
-not diverge the field from the PG-stored value), then refreshes.
+The migrated indices are *projections* of the relational tables, so they can be
+reconstructed. `rebuild_document_store` is the inverse of `backfill`: it reads every
+row for an aggregate, runs it through the SAME projector the relay uses
+(`persistence.projections.PROJECTORS`), and writes each document **verbatim** —
+`index_document(..., stamp_timestamps=False)`, because the default rewrites
+`updated_at` to now() and would diverge the field from the value stored on the row.
+
+Two things it used to do are gone with the cluster: recreating the index with its
+declared strict mapping (the document store has no index to create, and no
+per-index typing to get wrong), and refreshing afterwards (a write is visible to the
+next read). It also used to be the *reversibility safety net* for dropping an ES
+index; a dropped index is not a thing any more, so its remaining job is repairing
+drift that `persistence.parity_check` has found.
 
 ```bash
 # Rebuild one index from Postgres:
-ENVIRONMENT=development ./venv/bin/python -m persistence.rebuild_from_postgres \
+ENVIRONMENT=development ./venv/bin/python -m persistence.rebuild_document_store \
     --aggregate intake_channel --tenant demo-tenant
 # Rebuild every migrated aggregate's index:
-ENVIRONMENT=development ./venv/bin/python -m persistence.rebuild_from_postgres \
+ENVIRONMENT=development ./venv/bin/python -m persistence.rebuild_document_store \
     --all --tenant demo-tenant     # add --dry-run to report counts only
 ```
 
 ### Proven reversible drop runbook (Phase 5→6 per index)
+
+> **Historical.** This procedure operated on Elasticsearch indices and there is no
+> cluster to drop from. Retiring an aggregate today is the `RETIRED_ES_INDICES` gate
+> below and nothing else. Kept because steps 1 and 5 are still the right shape for
+> retiring one, and because of the lesson at the end.
 
 Demonstrated end-to-end on `intake_channels` against the live cluster:
 
@@ -563,28 +576,33 @@ Demonstrated end-to-end on `intake_channels` against the live cluster:
 2. `DELETE` the ES index.
 3. Confirm the app's read path still works — it now serves from Postgres with
    the index gone (this is the whole point of the read-cutover).
-4. `rebuild_from_postgres --aggregate <agg>` to reconstruct it (or leave it
+4. `rebuild_document_store --aggregate <agg>` to reconstruct it (or leave it
    dropped for good once you no longer need the ES search/dashboard surface).
 5. `parity_check` → `PARITY OK`.
 
-The drop is only truly final once nothing reads the index. Re-running the
-rebuild restores it byte-identically at any time, so the operation is safe to
-rehearse. **Lesson learned during the POC:** always recreate the index with its
-registered mapping — a dynamically-typed recreate breaks `tenant_id` `term`
-filtering (it lands as `text`). `rebuild_from_postgres` handles this.
+**Lesson learned during the POC:** a dynamically-typed recreate broke `tenant_id`
+`term` filtering — it landed as `text`, so a tenant-scoped query matched nothing
+while the rebuild logged every document indexed and exited 0. The rebuild tool
+handled it by looking the mapping up from the registries. That whole failure mode
+belonged to Elasticsearch: the document store keys on `(index_name, doc_id)` with a
+`varchar` tenant column, so there is no typing decision to get wrong.
 
-### Permanent drop: the `RETIRED_ES_INDICES` gate
+### Retiring an index: the `RETIRED_ES_INDICES` gate
 
-A *permanent* Phase 6 drop needs one more thing than the rehearsal: a way to
-stop the app from recreating the dropped index. Set `RETIRED_ES_INDICES`
-(comma-separated, or a JSON array) to the dropped index names. This gate, read
-inside `ElasticsearchService`, makes `index_document` / `update_document` /
+Set `RETIRED_ES_INDICES` (comma-separated, or a JSON array) to the index names whose
+relational table is their sole store. This gate, read inside
+`ElasticsearchService`, makes `index_document` / `update_document` /
 `delete_document` **skip** those indices — so the direct service writes AND the
-outbox-relay projection (which calls `index_document`) become no-ops, and the
-startup index-setup (`setup_order_intake_indices`) skips recreating them.
-`parity_check` skips retired indices (Postgres is their sole store). Fully
-reversible: remove the name from `RETIRED_ES_INDICES` and
-`rebuild_from_postgres --aggregate <agg>` to bring the index back.
+outbox-relay projection (which calls `index_document`) become no-ops.
+`parity_check` skips retired indices. Fully reversible: remove the name from
+`RETIRED_ES_INDICES` and `rebuild_document_store --aggregate <agg>` to repopulate.
+
+What the gate protects against changed with the cluster. It used to stop the app
+recreating a dropped index with dynamic mappings — the startup index-setup would
+otherwise have done exactly that, and `setup_order_intake_indices` was the specific
+one to watch. Those functions are deleted. The remaining cost of not setting it is
+redundant rows accumulating in `es_documents` that no read path consults, which is
+cheaper but still worth avoiding: they are a second copy that can drift.
 
 Before retiring an index, audit EVERY consumer — not just the obvious get/list.
 The `intake_channels` retirement surfaced two extra read paths that had to be
@@ -605,7 +623,7 @@ across a restart, reads + webhook resolution serve from PG, writes return
 `skipped_retired_index` without recreating the index, and `parity_check` is
 green (95 records across the remaining indices). To undo:
 `RETIRED_ES_INDICES=` (drop it from the list), restart, then
-`python -m persistence.rebuild_from_postgres --aggregate intake_channel`.
+`python -m persistence.rebuild_document_store --aggregate intake_channel`.
 
 #### Done: `supplier_contracts` retired (2026-06-04)
 
@@ -618,7 +636,7 @@ end-to-end: pre-drop PG=2 ES=2; after `DELETE` the repo still served
 with the index gone; a `repo.create` after retirement returned
 `skipped_retired_index` from ES yet **persisted to PG** (read back from PG);
 the index stayed dropped across a restart; `parity_check` skips it and is green
-(108 records). Reversibility proven live: `rebuild_from_postgres --aggregate
+(108 records). Reversibility proven live: `rebuild_document_store --aggregate
 supplier_contract` recreated it byte-identically with the correct **strict**
 mapping (`tenant_id` `keyword`, `dynamic: strict`), then it was re-dropped.
 **Gap found + fixed during this drop:** `setup_fuel_ops_indices` did not honor
@@ -626,7 +644,7 @@ the `RETIRED_ES_INDICES` gate (only the order-intake setup did), so the first
 restart silently recreated the dropped index. Added the same retired-index skip
 guard (regression test: `test_skips_retired_indices`). To undo:
 `RETIRED_ES_INDICES=intake_channels` (drop it from the list), restart, then
-`python -m persistence.rebuild_from_postgres --aggregate supplier_contract`.
+`python -m persistence.rebuild_document_store --aggregate supplier_contract`.
 
 #### Done: pricing family retired (2026-06-04)
 
@@ -657,7 +675,7 @@ the compliance + fuel-ops mapping suites). The programmatic seeders are now
 also retirement-safe centrally: `seed_all_data._bulk` / `_single` drop writes
 to any retired index. To undo any of these:
 `RETIRED_ES_INDICES=…` (remove the name), restart, then
-`python -m persistence.rebuild_from_postgres --aggregate price_book|pricing_rule|compliance_pricing_rule`.
+`python -m persistence.rebuild_document_store --aggregate price_book|pricing_rule|compliance_pricing_rule`.
 - **Migration scope complete** — all recommended source-of-truth domains
   (commerce, compliance config, orders/jobs current-state, master data) now
   dual-write to Postgres with outbox→ES projection, backfill, and parity. The
