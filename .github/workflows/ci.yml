@@ -323,7 +323,17 @@ jobs:
       # by the cheaper check first.
       - name: Document store — query translation and store behaviour
         env:
-          ENVIRONMENT: "development"
+          # ENVIRONMENT=test, overriding this job's development default, because
+          # ``ElasticsearchService.connect()`` raises outside the test environment
+          # and this job has no Elasticsearch service — importing
+          # tests/conftest.py therefore failed before a single test ran. These
+          # tests never touch Elasticsearch; they need PostgreSQL, which the job
+          # does have.
+          ENVIRONMENT: "test"
+          # Required by settings validation in a non-development environment when
+          # session_store_type is redis (the default). Never dialled: no test here
+          # opens a session.
+          REDIS_URL: "redis://localhost:6379/0"
           DATABASE_URL: "postgresql+psycopg://runsheet:runsheet@localhost:5432/runsheet"
           POSTGRES_TEST_URL: "postgresql+psycopg://runsheet:runsheet@localhost:5432/runsheet"
         working-directory: Runsheet-backend
