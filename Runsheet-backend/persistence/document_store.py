@@ -61,12 +61,15 @@ from persistence.document_aggregations import (
 )
 from persistence.document_field_policy import assert_searchable
 from persistence.document_query import (
+    UnsupportedQueryError,
     apply_source_filter,
     build_order_by,
     build_predicate,
+    build_search_after,
     collect_query_fields,
     collect_sort_fields,
     resolve_source_filter,
+    sort_values_of,
 )
 
 logger = logging.getLogger(__name__)
@@ -77,6 +80,51 @@ __all__ = ["PostgresDocumentStore"]
 #: default is 10,000 and several call sites pass ``size=10000`` right up against
 #: it, so matching the number keeps their behaviour identical.
 MAX_RESULT_WINDOW = 10_000
+
+#: Top-level keys of a ``_search`` body that :meth:`search_documents` acts on.
+_HONOURED_BODY_KEYS = frozenset(
+    {"query", "size", "from", "aggs", "aggregations", "sort", "_source", "search_after"}
+)
+
+#: Top-level keys accepted and ignored, each for a stated reason. This set is
+#: deliberately tiny and deliberately explicit: the whole point of
+#: :func:`_assert_body_understood` is that "ignored" has to be a decision someone
+#: made, not a key nobody thought about.
+_IGNORED_BODY_KEYS = {
+    # Asks Elasticsearch to count beyond 10,000 rather than reporting a lower
+    # bound. A Postgres ``COUNT(*)`` is always exact and always ``"eq"``, so the
+    # request is already satisfied.
+    "track_total_hits": "Postgres totals are always exact",
+    # Per-call timeout. The equivalent here is the statement timeout on the
+    # session, so accepting it keeps call sites unchanged.
+    "timeout": "handled by the session statement timeout",
+}
+
+
+def _assert_body_understood(index: str, body: Dict[str, Any]) -> None:
+    """Raise unless every top-level key in ``body`` is honoured or knowingly ignored.
+
+    The module docstring promises that an unsupported clause fails loudly. That
+    promise was kept for clauses *inside* ``query`` and ``aggs`` and quietly broken
+    at the top level, where an unrecognised key was simply never read. Two real
+    consequences, both silent:
+
+    * ``runtime_mappings`` in ``communication_metrics_service`` computes a latency
+      in painless and aggregates ``stats`` over it. Dropped, the aggregation runs
+      against a field that does not exist and the endpoint reports zero seconds of
+      send latency as though it had measured it.
+    * ``search_after`` paginates seventeen commerce, compliance and integration
+      reads. Dropped, every request returns the first page.
+
+    Neither logged anything. So the top level is checked the same way the clauses
+    are.
+    """
+    unknown = sorted(set(body) - _HONOURED_BODY_KEYS - set(_IGNORED_BODY_KEYS))
+    if unknown:
+        raise UnsupportedQueryError(
+            f"top-level search body key(s) {unknown} on index {index!r}",
+            "search body",
+        )
 
 
 def _utcnow_iso() -> str:
@@ -483,6 +531,7 @@ class PostgresDocumentStore:
         """
         model = self._model()
         body = dict(query or {})
+        _assert_body_understood(index, body)
         # ES takes ``size`` from the body when present, from the argument
         # otherwise. The facade normalises this by writing it into the body; we
         # read it the same way round so the two paths page identically.
@@ -490,6 +539,7 @@ class PostgresDocumentStore:
         offset = int(body.get("from", 0) or 0)
         aggs = body.get("aggs") or body.get("aggregations")
         source_spec = resolve_source_filter(body.get("_source"))
+        sort = body.get("sort")
 
         # Refuse to query a field the Elasticsearch mapping declares unsearchable
         # (``binary``, ``index: false``, ``enabled: false``). In jsonb everything
@@ -511,6 +561,16 @@ class PostgresDocumentStore:
         )
         scope = [model.index_name == index, predicate]
 
+        # ``search_after`` narrows the rows, so it belongs in the scope of the page
+        # but NOT in the total: Elasticsearch reports the total for the query, not
+        # for the remaining tail, and a caller showing "N results" across pages
+        # would watch N shrink as it paged.
+        page_scope = list(scope)
+        if "search_after" in body:
+            page_scope.append(
+                build_search_after(model.document, sort, body["search_after"])
+            )
+
         async with self._session_scope() as session:
             total = (
                 await session.execute(
@@ -521,28 +581,32 @@ class PostgresDocumentStore:
             hits: List[Dict[str, Any]] = []
             if effective_size > 0:
                 order_by = build_order_by(
-                    model.document, body.get("sort"), id_column=model.doc_id
+                    model.document, sort, id_column=model.doc_id
                 )
                 rows = (
                     await session.execute(
                         select(model)
-                        .where(*scope)
+                        .where(*page_scope)
                         .order_by(*order_by)
                         .offset(offset)
                         .limit(min(effective_size, MAX_RESULT_WINDOW))
                     )
                 ).scalars().all()
-                hits = [
-                    {
+                hits = []
+                for row in rows:
+                    document = dict(row.document or {})
+                    hit: Dict[str, Any] = {
                         "_index": index,
                         "_id": row.doc_id,
                         "_score": None,
-                        "_source": apply_source_filter(
-                            dict(row.document or {}), source_spec
-                        ),
+                        "_source": apply_source_filter(document, source_spec),
                     }
-                    for row in rows
-                ]
+                    # ES returns ``sort`` on every hit when a sort is requested and
+                    # omits it otherwise. The keyset callers build their next cursor
+                    # from it, so omitting it reads to them as "no further pages".
+                    if sort:
+                        hit["sort"] = sort_values_of(document, sort)
+                    hits.append(hit)
 
             response: Dict[str, Any] = {
                 "took": 0,

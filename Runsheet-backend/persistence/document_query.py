@@ -83,10 +83,13 @@ __all__ = [
     "UnsupportedQueryError",
     "build_predicate",
     "build_order_by",
+    "build_search_after",
     "collect_query_fields",
     "collect_sort_fields",
     "parse_date_math",
     "resolve_source_filter",
+    "sort_entries",
+    "sort_values_of",
 ]
 
 
@@ -645,30 +648,8 @@ def build_order_by(
     or skip a row when the sort field ties, which is a real risk on
     ``created_at`` fields stamped at second resolution.
     """
-    entries: List[Tuple[str, str]] = []
-    if sort is None:
-        pass
-    elif isinstance(sort, str):
-        entries.append((sort, "asc"))
-    elif isinstance(sort, dict):
-        for field, spec in sort.items():
-            entries.append((field, _sort_order(spec)))
-    elif isinstance(sort, (list, tuple)):
-        for item in sort:
-            if isinstance(item, str):
-                entries.append((item, "asc"))
-            elif isinstance(item, dict):
-                for field, spec in item.items():
-                    entries.append((field, _sort_order(spec)))
-            else:
-                raise UnsupportedQueryError(
-                    f"sort entry of type {type(item).__name__}", "sort"
-                )
-    else:
-        raise UnsupportedQueryError(f"sort of type {type(sort).__name__}", "sort")
-
     order_by: List[ColumnElement] = []
-    for field, direction in entries:
+    for field, direction in sort_entries(sort):
         if field in ("_score", "_doc"):
             continue
         element = _json_value(column, field)
@@ -680,6 +661,117 @@ def build_order_by(
     if tiebreak:
         order_by.append(id_column.asc())
     return order_by
+
+
+def sort_entries(sort: Any) -> List[Tuple[str, str]]:
+    """Normalise every ``sort`` shape the codebase uses into ``[(field, order)]``.
+
+    Shared by :func:`build_order_by` and :func:`build_search_after` on purpose: a
+    keyset cursor that disagreed with the ORDER BY about field order or direction
+    would skip or repeat rows at every page boundary, and that is the kind of
+    defect that only shows up as a customer noticing a missing record.
+    """
+    if sort is None:
+        return []
+    if isinstance(sort, str):
+        return [(sort, "asc")]
+    if isinstance(sort, dict):
+        return [(field, _sort_order(spec)) for field, spec in sort.items()]
+    if isinstance(sort, (list, tuple)):
+        entries: List[Tuple[str, str]] = []
+        for item in sort:
+            if isinstance(item, str):
+                entries.append((item, "asc"))
+            elif isinstance(item, dict):
+                for field, spec in item.items():
+                    entries.append((field, _sort_order(spec)))
+            else:
+                raise UnsupportedQueryError(
+                    f"sort entry of type {type(item).__name__}", "sort"
+                )
+        return entries
+    raise UnsupportedQueryError(f"sort of type {type(sort).__name__}", "sort")
+
+
+def sort_values_of(document: Dict[str, Any], sort: Any) -> List[Any]:
+    """The values a document sorted by, in sort order — the ``sort`` key on a hit.
+
+    Elasticsearch returns this on every hit when a sort is requested, and the
+    keyset-pagination callers build their next cursor out of it. The Postgres store
+    has to return it too, or those callers see ``None`` and conclude there is no
+    next page.
+
+    The values are the raw stored values, so a date comes back as its ISO-8601
+    string where Elasticsearch would return epoch millis. That difference is why a
+    cursor issued by one backend must not be replayed against the other.
+    """
+    values: List[Any] = []
+    for field, _direction in sort_entries(sort):
+        if field in ("_score", "_doc"):
+            continue
+        current: Any = document
+        for segment in _path(field):
+            if isinstance(current, dict):
+                current = current.get(segment)
+            else:
+                current = None
+                break
+        values.append(current)
+    return values
+
+
+def build_search_after(column, sort: Any, values: Sequence[Any]) -> ColumnElement:
+    """The keyset predicate for ``search_after``: strictly past ``values``.
+
+    Compiles the lexicographic comparison Elasticsearch performs, which is not the
+    same as comparing the first sort key alone::
+
+        (k1 > v1) OR (k1 = v1 AND k2 > v2) OR (k1 = v1 AND k2 = v2 AND k3 > v3)
+
+    with ``>`` flipped to ``<`` per descending key. Comparison goes through the
+    jsonb value rather than its text form, for the same reason ORDER BY does: as
+    text, ``"10"`` sorts before ``"9"``.
+
+    ``values`` must have one entry per sort key. Elasticsearch rejects a
+    length mismatch and so does this — a short cursor would silently paginate by a
+    prefix of the sort, which repeats rows rather than failing.
+    """
+    entries = [
+        (field, direction)
+        for field, direction in sort_entries(sort)
+        if field not in ("_score", "_doc")
+    ]
+    if not entries:
+        raise UnsupportedQueryError("search_after without a sort", "search_after")
+    if not isinstance(values, (list, tuple)):
+        raise UnsupportedQueryError(
+            f"search_after of type {type(values).__name__}", "search_after"
+        )
+    if len(values) != len(entries):
+        raise UnsupportedQueryError(
+            f"search_after with {len(values)} value(s) for {len(entries)} sort "
+            "key(s)",
+            "search_after",
+        )
+
+    disjuncts: List[ColumnElement] = []
+    for index, (field, direction) in enumerate(entries):
+        conjuncts: List[ColumnElement] = [
+            _json_value(column, earlier_field) == _as_jsonb_literal(values[earlier])
+            for earlier, (earlier_field, _earlier_direction) in enumerate(entries[:index])
+        ]
+        element = _json_value(column, field)
+        boundary = _as_jsonb_literal(values[index])
+        conjuncts.append(
+            element < boundary if direction == "desc" else element > boundary
+        )
+        disjuncts.append(and_(*conjuncts))
+    return or_(*disjuncts)
+
+
+def _as_jsonb_literal(value: Any):
+    """Bind ``value`` as jsonb so comparisons stay type-aware."""
+    return type_coerce(value, JSONB)
 
 
 def _sort_order(spec: Any) -> str:
