@@ -71,11 +71,13 @@ TENANT = os.environ.get("SEED_TENANT_ID", "").strip()
 
 
 def _retired_indices() -> set:
-    """ES indices retired in migration Phase 6 (Postgres is their sole store).
+    """Indices retired to Postgres as their sole store.
 
-    The seeder must NOT recreate or load these — doing so would resurrect a
-    dropped index (with a dynamic mapping) that the app no longer reads from.
-    Sourced from the same ``RETIRED_ES_INDICES`` setting the runtime gate uses.
+    Still meaningful after Elasticsearch is gone: the seeder writes through
+    ``ElasticsearchService``, which serves the document store, and a retired index
+    is one whose aggregate has a relational table instead. Seeding it would
+    resurrect a shape nothing reads. Sourced from the same ``RETIRED_ES_INDICES``
+    setting the runtime gate uses.
     """
     try:
         from config.settings import get_settings
@@ -191,254 +193,6 @@ def _single(index: str, doc_id: str, body: dict):
 # ---------------------------------------------------------------------------
 # Step 1: Index mappings (create / recreate)
 # ---------------------------------------------------------------------------
-
-def _index_setup_functions():
-    """Return the list of (label, setup_fn) for every domain's index mappings.
-
-    Each ``setup_*_indices`` function is idempotent: it creates indices that
-    do not yet exist and leaves existing ones untouched. They are the single
-    source of truth for index names + mappings, so deriving the managed-index
-    list from them (see :func:`_managed_indices`) keeps everything in sync.
-    """
-    from notifications.services.notification_es_mappings import setup_notification_indices
-    from notifications.services.audit_es_mappings import setup_audit_indices
-    from fuel.services.order_es_mappings import setup_order_intake_indices
-    from Agents.support.mvp_es_mappings import setup_mvp_indices
-    from Agents.overlay.overlay_es_mappings import setup_overlay_indices
-    from Agents.agent_es_mappings import setup_agent_indices
-    from compliance.services.compliance_es_mappings import setup_compliance_indices
-    from commerce.services.commerce_es_mappings import setup_commerce_indices
-    from inventory.es_mappings import setup_inventory_indices
-    from scheduling.services.scheduling_es_mappings import setup_scheduling_indices
-    from driver.services.driver_es_mappings import setup_driver_indices
-    from fuel.services.fuel_es_mappings import setup_fuel_indices
-    from fuel.services.fuel_ops_es_mappings import setup_fuel_ops_indices
-    from integrations.stripe_es_mappings import setup_stripe_indices
-
-    # ``setup_fuel_indices`` takes (es_client, es_service); wrap it so every
-    # entry in this list shares the uniform ``setup_fn(es_service)`` shape.
-    def _setup_fuel(es_service):
-        setup_fuel_indices(es_service.client, es_service=es_service)
-
-    # Legacy core indices (trucks, locations, inventory, support_tickets,
-    # analytics_events) are created by the ElasticsearchService singleton's
-    # own setup_indices(); mirror that here so the seed is self-contained.
-    def _setup_core(es_service):
-        es_service.setup_indices()
-
-    # Ops Intelligence indices (shipments_current, shipment_events,
-    # riders_current, ops_poison_queue) live on OpsElasticsearchService.
-    def _setup_ops(es_service):
-        from ops.services.ops_es_service import OpsElasticsearchService
-        OpsElasticsearchService(es_service).setup_ops_indices()
-
-    return [
-        ("Core/legacy indices", _setup_core),
-        ("Ops Intelligence indices", _setup_ops),
-        ("Notification indices", setup_notification_indices),
-        ("Audit timeline indices", setup_audit_indices),
-        ("Order/Intake indices", setup_order_intake_indices),
-        ("MVP overlay indices", setup_mvp_indices),
-        ("Agent overlay indices", setup_overlay_indices),
-        ("Agent system indices", setup_agent_indices),
-        ("Compliance indices", setup_compliance_indices),
-        ("Commerce indices", setup_commerce_indices),
-        ("Inventory indices", setup_inventory_indices),
-        ("Scheduling indices", setup_scheduling_indices),
-        ("Driver indices", setup_driver_indices),
-        ("Fuel monitoring indices", _setup_fuel),
-        ("Fuel Ops indices", setup_fuel_ops_indices),
-        # Must run before the JSON fixtures load: stripe_payment_seeds.json
-        # bulk-writes into stripe_payment_intents, and a bulk write to a
-        # non-existent index creates it with a dynamic mapping.
-        ("Stripe demo indices", setup_stripe_indices),
-    ]
-
-
-def _managed_index_mappings() -> dict:
-    """Collect ``{index_name: mapping}`` for every index the app defines.
-
-    Pulls directly from each domain's mapping registry so the recreate list
-    can never drift from what the setup functions actually create. Also folds
-    in the handful of standalone indices that have a setup helper but no
-    module-level registry dict (agent system, fleet/assets).
-    """
-    mappings: dict = {}
-
-    # Domain registries (dict of index_name -> mapping)
-    from notifications.services.notification_es_mappings import (
-        NOTIFICATIONS_CURRENT_INDEX, NOTIFICATIONS_CURRENT_MAPPING,
-        NOTIFICATION_PREFERENCES_INDEX, NOTIFICATION_PREFERENCES_MAPPING,
-        NOTIFICATION_TEMPLATES_INDEX, NOTIFICATION_TEMPLATES_MAPPING,
-        NOTIFICATION_RULES_INDEX, NOTIFICATION_RULES_MAPPING,
-        DEAD_LETTER_QUEUE_INDEX, DEAD_LETTER_QUEUE_MAPPING,
-    )
-    mappings.update({
-        NOTIFICATIONS_CURRENT_INDEX: NOTIFICATIONS_CURRENT_MAPPING,
-        NOTIFICATION_PREFERENCES_INDEX: NOTIFICATION_PREFERENCES_MAPPING,
-        NOTIFICATION_TEMPLATES_INDEX: NOTIFICATION_TEMPLATES_MAPPING,
-        NOTIFICATION_RULES_INDEX: NOTIFICATION_RULES_MAPPING,
-        DEAD_LETTER_QUEUE_INDEX: DEAD_LETTER_QUEUE_MAPPING,
-    })
-
-    from fuel.services.order_es_mappings import ORDER_INTAKE_INDEX_MAPPINGS
-    mappings.update(ORDER_INTAKE_INDEX_MAPPINGS)
-
-    from Agents.support.mvp_es_mappings import MVP_INDEX_MAPPINGS
-    mappings.update(MVP_INDEX_MAPPINGS)
-
-    from Agents.overlay.overlay_es_mappings import OVERLAY_INDEX_MAPPINGS
-    mappings.update(OVERLAY_INDEX_MAPPINGS)
-
-    from compliance.services.compliance_es_mappings import COMPLIANCE_INDEX_MAPPINGS
-    mappings.update(COMPLIANCE_INDEX_MAPPINGS)
-
-    from commerce.services.commerce_es_mappings import COMMERCE_INDEX_MAPPINGS
-    mappings.update(COMMERCE_INDEX_MAPPINGS)
-
-    from inventory.es_mappings import (
-        INVENTORY_INDEX, INVENTORY_MAPPING,
-        INVENTORY_EVENTS_INDEX, INVENTORY_EVENTS_MAPPING,
-        RESTOCK_REQUESTS_INDEX, RESTOCK_REQUESTS_MAPPING,
-    )
-    mappings.update({
-        INVENTORY_INDEX: INVENTORY_MAPPING,
-        INVENTORY_EVENTS_INDEX: INVENTORY_EVENTS_MAPPING,
-        RESTOCK_REQUESTS_INDEX: RESTOCK_REQUESTS_MAPPING,
-    })
-
-    from scheduling.services.scheduling_es_mappings import SCHEDULING_INDEX_MAPPINGS
-    mappings.update(SCHEDULING_INDEX_MAPPINGS)
-
-    from fuel.services.fuel_ops_es_mappings import FUEL_OPS_INDEX_MAPPINGS
-    mappings.update(FUEL_OPS_INDEX_MAPPINGS)
-
-    # Agent system indices (registry-less; named constants).
-    from Agents.agent_es_mappings import (
-        AGENT_APPROVAL_QUEUE_INDEX, AGENT_APPROVAL_QUEUE_MAPPING,
-        AGENT_ACTIVITY_LOG_INDEX, AGENT_ACTIVITY_LOG_MAPPING,
-        AGENT_MEMORY_INDEX, AGENT_MEMORY_MAPPING,
-        AGENT_FEEDBACK_INDEX, AGENT_FEEDBACK_MAPPING,
-    )
-    mappings.update({
-        AGENT_APPROVAL_QUEUE_INDEX: AGENT_APPROVAL_QUEUE_MAPPING,
-        AGENT_ACTIVITY_LOG_INDEX: AGENT_ACTIVITY_LOG_MAPPING,
-        AGENT_MEMORY_INDEX: AGENT_MEMORY_MAPPING,
-        AGENT_FEEDBACK_INDEX: AGENT_FEEDBACK_MAPPING,
-    })
-
-    # Fleet / assets + ops poison queue (seeded programmatically below).
-    from fuel.services.fuel_es_mappings import (
-        FUEL_STATIONS_INDEX, FUEL_STATIONS_MAPPING,
-        FUEL_EVENTS_INDEX, FUEL_EVENTS_MAPPING,
-    )
-    mappings.update({
-        FUEL_STATIONS_INDEX: FUEL_STATIONS_MAPPING,
-        FUEL_EVENTS_INDEX: FUEL_EVENTS_MAPPING,
-    })
-
-    # Driver communication indices.
-    from driver.services.driver_es_mappings import (
-        JOB_MESSAGES_INDEX, JOB_MESSAGES_MAPPING,
-        PROOF_OF_DELIVERY_INDEX, PROOF_OF_DELIVERY_MAPPING,
-        DRIVER_PRESENCE_INDEX, DRIVER_PRESENCE_MAPPING,
-        DRIVER_EXCEPTIONS_INDEX, DRIVER_EXCEPTIONS_MAPPING,
-        IDEMPOTENCY_KEYS_INDEX, IDEMPOTENCY_KEYS_MAPPING,
-    )
-    mappings.update({
-        JOB_MESSAGES_INDEX: JOB_MESSAGES_MAPPING,
-        PROOF_OF_DELIVERY_INDEX: PROOF_OF_DELIVERY_MAPPING,
-        DRIVER_PRESENCE_INDEX: DRIVER_PRESENCE_MAPPING,
-        DRIVER_EXCEPTIONS_INDEX: DRIVER_EXCEPTIONS_MAPPING,
-        IDEMPOTENCY_KEYS_INDEX: IDEMPOTENCY_KEYS_MAPPING,
-    })
-
-    # Audit timeline.
-    from notifications.services.audit_es_mappings import (
-        JOB_AUDIT_TIMELINE_INDEX, JOB_AUDIT_TIMELINE_MAPPING,
-    )
-    mappings.update({JOB_AUDIT_TIMELINE_INDEX: JOB_AUDIT_TIMELINE_MAPPING})
-
-    # Stripe demo payment intents (fixture-populated, connector-read).
-    from integrations.stripe_es_mappings import STRIPE_INDEX_MAPPINGS
-    mappings.update(STRIPE_INDEX_MAPPINGS)
-
-    # Legacy core indices (mappings are methods on the ES singleton).
-    from services.elasticsearch_service import elasticsearch_service as _es
-    mappings.update({
-        "trucks": _es._get_trucks_mapping(),
-        "locations": _es._get_locations_mapping(),
-        "inventory": _es._get_inventory_mapping(),
-        "support_tickets": _es._get_support_tickets_mapping(),
-        "analytics_events": _es._get_analytics_mapping(),
-        "import_sessions": _es._get_import_sessions_mapping(),
-    })
-
-    # Ops Intelligence indices (mappings are methods on OpsElasticsearchService).
-    from ops.services.ops_es_service import OpsElasticsearchService
-    _ops = OpsElasticsearchService(_es)
-    mappings.update({
-        OpsElasticsearchService.SHIPMENTS_CURRENT: _ops._get_shipments_current_mapping(),
-        OpsElasticsearchService.SHIPMENT_EVENTS: _ops._get_shipment_events_mapping(),
-        OpsElasticsearchService.RIDERS_CURRENT: _ops._get_riders_current_mapping(),
-        OpsElasticsearchService.POISON_QUEUE: _ops._get_poison_queue_mapping(),
-    })
-
-    # Drop indices retired in Phase 6 (Postgres-only) so neither create nor
-    # recreate resurrects a dropped index with a stale/dynamic mapping.
-    for _retired in _RETIRED_INDICES:
-        mappings.pop(_retired, None)
-
-    return mappings
-
-
-def recreate_indices(assume_yes: bool = False):
-    """DROP and recreate every managed index. DESTRUCTIVE.
-
-    Deletes all indices derived from the domain mapping registries, then
-    re-runs the idempotent setup functions to recreate them with current
-    mappings. Requires interactive confirmation unless ``assume_yes``.
-    """
-    managed = sorted(_managed_index_mappings().keys())
-
-    print("\n" + "=" * 60)
-    print("  ⚠️  RECREATE: this DELETES ALL DATA in managed indices")
-    print("=" * 60)
-    print(f"  {len(managed)} indices will be dropped and recreated.")
-
-    if not assume_yes:
-        response = input("\nType 'YES' to proceed with index recreation: ")
-        if response != "YES":
-            print("❌ Aborted. No changes made.")
-            sys.exit(0)
-
-    deleted = 0
-    for index_name in managed:
-        try:
-            if ES.indices.exists(index=index_name):
-                ES.indices.delete(index=index_name)
-                deleted += 1
-        except Exception as e:  # noqa: BLE001
-            print(f"  ✗ Error deleting {index_name}: {e}")
-    print(f"🗑️  Deleted {deleted} indices\n")
-
-    create_indices()
-
-
-def create_indices():
-    """Create any missing index mappings (idempotent).
-
-    Runs every domain's ``setup_*_indices`` function. Existing indices are
-    left untouched, so this is safe to run on every seed.
-    """
-    print("🔨 Ensuring index mappings exist...")
-    for label, setup_fn in _index_setup_functions():
-        try:
-            setup_fn(elasticsearch_service)
-            print(f"  ✓ {label}")
-        except Exception as e:  # noqa: BLE001
-            print(f"  ✗ {label}: {e}")
-    print()
 
 
 # ---------------------------------------------------------------------------
@@ -759,7 +513,6 @@ def seed_riders(force: bool = False):
     logger.info(f"✅ Seeded {len(rider_names)} docs → {index}")
 
 
-
 # ---------------------------------------------------------------------------
 # 2. jobs_current
 # ---------------------------------------------------------------------------
@@ -847,7 +600,6 @@ def seed_jobs(force: bool = False):
 
     _bulk(actions)
     logger.info(f"✅ Seeded {len(status_list)} docs → {index}")
-
 
 
 # ---------------------------------------------------------------------------
@@ -1123,7 +875,6 @@ def seed_fuel_events(force: bool = False):
 
     _bulk(actions)
     logger.info(f"✅ Seeded 25 docs → {index}")
-
 
 
 # ---------------------------------------------------------------------------
@@ -2052,7 +1803,6 @@ def seed_road_restrictions(force: bool = False):
     logger.info(f"✅ Seeded {len(restrictions)} docs → {index}")
 
 
-
 # ---------------------------------------------------------------------------
 # 16. Commerce: customers_current
 # ---------------------------------------------------------------------------
@@ -2325,11 +2075,16 @@ def main():
         sys.exit(1)
 
     # ----- Step 1: indices -------------------------------------------------
-    print(f"{'═' * 60}\n  Step 1: Index mappings\n{'═' * 60}")
+    #
+    # Gone with Elasticsearch. There are no indices to create or recreate: the
+    # document store is one Postgres table, created by ``alembic upgrade head``.
+    # ``--recreate`` used to DROP every managed index and rebuild it from the
+    # mapping registries; the equivalent now is a migration, and dropping data is
+    # not something a seed script should offer as a flag.
+    print(f"{'═' * 60}\n  Step 1: Index mappings — skipped\n{'═' * 60}")
+    print("  The document store is PostgreSQL; run 'alembic upgrade head' instead.")
     if recreate:
-        recreate_indices(assume_yes=assume_yes)
-    else:
-        create_indices()
+        print("  --recreate is a no-op: there are no Elasticsearch indices to drop.")
 
     # ----- Step 2: static JSON fixtures -----------------------------------
     if not skip_json:

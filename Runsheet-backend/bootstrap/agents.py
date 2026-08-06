@@ -199,7 +199,6 @@ async def initialize(app, container: ServiceContainer) -> None:
     from Agents.memory_service import MemoryService
     from Agents.feedback_service import FeedbackService
     from Agents.tools.mutation_tools import configure_mutation_tools
-    from Agents.agent_es_mappings import setup_agent_indices
     from Agents.specialists import (
         FleetAgent,
         SchedulingAgent,
@@ -224,15 +223,12 @@ async def initialize(app, container: ServiceContainer) -> None:
     settings = container.settings
     es_service = container.es_service
 
-    # ---- Startup Mapping Validation (Req 5.1, 5.5) ----
-    try:
-        from services.mapping_validator import MappingValidator
-
-        mapping_validator = MappingValidator(es_service=es_service)
-        drift_items = await mapping_validator.validate_all()
-        await mapping_validator.remediate(drift_items)
-    except Exception as exc:
-        logger.error("Mapping validation failed (non-blocking): %s", exc)
+    # Startup mapping validation is gone with Elasticsearch (Req 5.1, 5.5). It
+    # compared live index mappings against the code-defined ones and added missing
+    # fields; there are no live mappings to drift from now. The declarations survive
+    # in the ``*_es_mappings`` modules because
+    # ``persistence/document_field_policy.py`` reads them to decide which fields
+    # must stay unqueryable — that is the one job they still do.
 
     # Agent WebSocket manager
     agent_ws_manager = AgentActivityWSManager()
@@ -510,13 +506,6 @@ async def initialize(app, container: ServiceContainer) -> None:
     # ---- Fuel-Ops Hardening ES indices (Task 12.2 prerequisite) --------
     # Create the 21 new indices introduced by this spec. The helper is
     # idempotent — existing indices are left untouched.
-    try:
-        from fuel.services.fuel_ops_es_mappings import setup_fuel_ops_indices
-
-        setup_fuel_ops_indices(es_service)
-        logger.info("Fuel-ops ES indices ready")
-    except Exception as exc:
-        logger.warning("Fuel-ops ES index setup failed: %s", exc)
 
     # ---- Fuel-Ops feature-flag defaults (Task 12.1, 12.7) -------------
     # Seed every overlay feature flag introduced by this spec to
@@ -753,14 +742,12 @@ async def initialize(app, container: ServiceContainer) -> None:
     configure_orchestrator(agent_orchestrator)
 
     # Set up agent ES indices
-    setup_agent_indices(es_service)
     logger.info("Agent ES indices ready")
 
     # ---- Overlay Infrastructure (Phase 2) ----
     # Imports inside function to avoid circular imports
     from Agents.overlay.signal_bus import SignalBus
     from Agents.overlay.outcome_tracker import OutcomeTracker
-    from Agents.overlay.overlay_es_mappings import setup_overlay_indices
     from Agents.overlay.dispatch_optimizer import DispatchOptimizer
     from Agents.overlay.exception_commander import ExceptionCommander
     from Agents.overlay.revenue_guard import RevenueGuard
@@ -785,7 +772,6 @@ async def initialize(app, container: ServiceContainer) -> None:
         agent._signal_bus = signal_bus
 
     # Set up overlay ES indices
-    setup_overlay_indices(es_service)
     logger.info("Overlay ES indices ready")
 
     # Shared dependencies for overlay agents (Req 10.1, 10.4)
@@ -843,11 +829,9 @@ async def initialize(app, container: ServiceContainer) -> None:
     from Agents.overlay.compartment_loading_agent import CompartmentLoadingAgent
     from Agents.overlay.route_planning_agent import RoutePlanningAgent
     from Agents.overlay.exception_replanning_agent import ExceptionReplanningAgent
-    from Agents.support.mvp_es_mappings import setup_mvp_indices
     from Agents.support.fuel_distribution_pipeline import FuelDistributionPipeline
 
     # Set up MVP ES indices (Req 7.9)
-    setup_mvp_indices(es_service)
     logger.info("MVP ES indices ready")
 
     # Instantiate MVP agents with shared dependencies (Req 11.1–11.6)

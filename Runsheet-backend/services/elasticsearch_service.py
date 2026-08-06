@@ -12,7 +12,6 @@ import os
 import logging
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
-from elasticsearch import Elasticsearch
 from dotenv import load_dotenv
 from config.settings import get_settings, Environment
 from resilience.circuit_breaker import CircuitBreaker, CircuitBreakerConfig, CircuitOpenException
@@ -48,19 +47,6 @@ TIMESTAMP_SKIP_INDICES = frozenset(
 # stored one is discarded. At-least-once delivery makes an equal timestamp the
 # common case for a redelivery, and applying it would overwrite whatever a later
 # event had already written.
-_UPSERT_IF_NEWER_SCRIPT = """
-    if (ctx._source.containsKey('last_event_timestamp') && ctx._source.last_event_timestamp != null) {
-        ZonedDateTime existing = ZonedDateTime.parse(ctx._source.last_event_timestamp);
-        ZonedDateTime incoming = ZonedDateTime.parse(params.last_event_timestamp);
-        if (incoming.isBefore(existing) || incoming.isEqual(existing)) {
-            ctx.op = 'noop';
-            return;
-        }
-    }
-    for (entry in params.entrySet()) {
-        ctx._source[entry.getKey()] = entry.getValue();
-    }
-""".strip()
 
 
 class ElasticsearchService:
@@ -75,10 +61,16 @@ class ElasticsearchService:
     - Requirement 2.4: Return specific error code indicating database unavailability
     """
     
+    #: The lazily-constructed document store, as a CLASS attribute so an instance
+    #: built without ``__init__`` — which several tests do, to avoid the settings
+    #: lookup and the circuit breakers — still has it. As an instance attribute it
+    #: raised ``AttributeError: no attribute '_document_store'`` from ``_pg_store``
+    #: the moment the Elasticsearch branch stopped short-circuiting first.
+    _document_store = None
+
     def __init__(self):
         self.client = None
         self.settings = get_settings()
-        self._serverless: bool | None = None
         
         # Initialize separate circuit breakers for read and write operations
         # so that agent write failures don't block user read queries
@@ -103,36 +95,27 @@ class ElasticsearchService:
         self.connect()
 
     # ------------------------------------------------------------------
-    # Postgres document-store delegation (migration Phase 4)
+    # Postgres document store
     # ------------------------------------------------------------------
     #
-    # The nine async document methods below check ``_pg_store()`` first. When the
-    # ``document_store_backend`` setting is ``postgres`` they hand off to
+    # Every async document method below delegates to
     # :class:`persistence.document_store.PostgresDocumentStore`, which returns the
-    # same response shapes — so none of the 684 Elasticsearch call sites change,
-    # and a rollback is flipping one environment variable.
+    # Elasticsearch response shapes — so none of the ~680 call sites in the codebase
+    # changed when the store moved, and none of them changed again when the cluster
+    # was deleted.
     #
-    # The delegation lives here rather than in a wrapper class because ``client``
-    # is also used directly in 20 files (index management, ILM, scripted upserts).
-    # Those are a separate migration item; putting the switch inside the methods
-    # keeps the object identity, the circuit breakers and the raw client all
-    # exactly where they are while the document plane moves.
+    # This used to be a switch: ``_pg_store()`` returned ``None`` on the legacy path
+    # and each method had two implementations. There is no legacy path now, so the
+    # branch is gone and the ES half with it. The CLASS NAME stays
+    # ``ElasticsearchService`` deliberately — renaming it would touch 567 files for
+    # no behavioural gain, and the name is now simply historical.
 
     def _pg_store(self):
-        """The Postgres document store, or ``None`` when on the legacy path."""
-        try:
-            if not get_settings().document_store_is_postgres:
-                return None
-        except Exception:  # noqa: BLE001 — a settings hiccup must not break reads
-            return None
+        """The Postgres document store. Constructed on first use."""
         if self._document_store is None:
             from persistence.document_store import PostgresDocumentStore
 
             self._document_store = PostgresDocumentStore()
-            logger.info(
-                "Document operations are served from PostgreSQL "
-                "(document_store_backend=postgres)"
-            )
         return self._document_store
 
     def _is_retired_index(self, index: str) -> bool:
@@ -183,455 +166,25 @@ class ElasticsearchService:
             )
             return
 
-        try:
-            api_key = self.settings.elastic_api_key.strip('"')
-            endpoint = self.settings.elastic_endpoint.strip('"')
-            
-            if not api_key or not endpoint:
-                raise ValueError("ELASTIC_API_KEY and ELASTIC_ENDPOINT must be set in configuration")
-            
-            self.client = Elasticsearch(
-                endpoint,
-                api_key=api_key,
-                verify_certs=True,
-                request_timeout=30
-            )
-            
-            # Test connection
-            if self.client.ping():
-                logger.info("✅ Connected to Elasticsearch successfully")
-                # Set up ILM policies before creating indices
-                self.setup_ilm_policies()
-                self.setup_indices()
-                # Apply ILM policies to existing indices
-                self.apply_ilm_policies_to_indices()
-                # Validate index schemas match expected mappings
-                self.validate_index_schemas()
-            else:
-                raise ConnectionError("Failed to ping Elasticsearch")
-                
-        except Exception:
-            logger.exception("Failed to connect to Elasticsearch")
-            raise
-    
-    def _check_ilm_available(self) -> bool:
-        """
-        Check if ILM (Index Lifecycle Management) is available on this Elasticsearch cluster.
-        
-        ILM requires specific license tiers (Basic+ for some features, Platinum for others).
-        This method detects availability to avoid errors on clusters without ILM support.
-        
-        Returns:
-            True if ILM is available, False otherwise
-        """
-        try:
-            # Try to list ILM policies - this will fail if ILM is not available
-            self.client.ilm.get_lifecycle()
-            return True
-        except Exception as e:
-            error_str = str(e).lower()
-            # Check for common indicators that ILM is not available
-            if "no handler found" in error_str or "unknown setting" in error_str or "ilm" in error_str:
-                logger.info("ℹ️ ILM (Index Lifecycle Management) is not available on this Elasticsearch cluster. "
-                          "This is normal for serverless or basic tier deployments. Skipping ILM configuration.")
-                return False
-            # For other errors, assume ILM might be available but there's a different issue
-            logger.debug(f"ILM availability check encountered error: {e}")
-            return False
+        # Phase 6: there is no Elasticsearch branch left to take.
+        #
+        # This method used to build an ``Elasticsearch`` client, ping it, and then
+        # run ILM setup, index creation and schema validation — 1,089 lines of
+        # cluster management that are gone, because there is no cluster and one
+        # Postgres table needs no managing.
+        #
+        # ``ELASTIC_API_KEY`` / ``ELASTIC_ENDPOINT`` are no longer read. Rolling
+        # back to Elasticsearch is not a flag any more: it would mean restoring the
+        # cluster from ``es-full-backup`` and reverting this commit.
+        from services.no_cluster import NoClusterClient
 
-    @property
-    def is_serverless(self) -> bool:
-        """Detect whether the connected Elasticsearch cluster is running in serverless mode.
+        self.client = NoClusterClient()
+        logger.info(
+            "Document operations are served from PostgreSQL. Elasticsearch has "
+            "been removed: index and lifecycle management are no-ops, and a raw "
+            "document call on .client raises."
+        )
 
-        The result is cached after the first call so subsequent checks are free.
-        Detection works by attempting to read ILM policies — serverless clusters
-        reject this with a 400 / "no handler found" error.
-        """
-        if self._serverless is None:
-            self._serverless = not self._check_ilm_available()
-        return self._serverless
-
-    @staticmethod
-    def strip_serverless_incompatible_settings(mapping: dict) -> dict:
-        """Return a copy of *mapping* with shard/replica settings removed.
-
-        Elastic Cloud Serverless does not allow ``number_of_shards`` or
-        ``number_of_replicas`` in index creation requests.  Call this before
-        ``indices.create`` when running against a serverless cluster.
-        """
-        import copy
-        mapping = copy.deepcopy(mapping)
-        settings = mapping.get("settings", {})
-        settings.pop("number_of_shards", None)
-        settings.pop("number_of_replicas", None)
-        if not settings:
-            mapping.pop("settings", None)
-        return mapping
-
-    def setup_ilm_policies(self):
-        """
-        Set up Index Lifecycle Management (ILM) policies for data tiering.
-        
-        Creates ILM policies that move old data to warm/cold tiers after 30 days.
-        Gracefully skips if ILM is not available on the cluster.
-        
-        Validates:
-        - Requirement 7.1: Implement index lifecycle management policies that move 
-          old data to warm/cold tiers after 30 days
-        """
-        # Check if ILM is available before attempting to create policies
-        if not self._check_ilm_available():
-            self._ilm_available = False
-            return
-        
-        self._ilm_available = True
-        
-        # Define ILM policies for different data types
-        ilm_policies = {
-            "runsheet-standard-policy": self._get_standard_ilm_policy(),
-            "runsheet-analytics-policy": self._get_analytics_ilm_policy(),
-            "runsheet-logs-policy": self._get_logs_ilm_policy(),
-        }
-        
-        for policy_name, policy_body in ilm_policies.items():
-            try:
-                # Check if policy already exists
-                try:
-                    existing_policy = self.client.ilm.get_lifecycle(name=policy_name)
-                    logger.info(f"📋 ILM policy already exists: {policy_name}")
-                    # Update the policy if it exists
-                    self.client.ilm.put_lifecycle(name=policy_name, body=policy_body)
-                    logger.info(f"✅ Updated ILM policy: {policy_name}")
-                except Exception:
-                    # Policy doesn't exist, create it
-                    self.client.ilm.put_lifecycle(name=policy_name, body=policy_body)
-                    logger.info(f"✅ Created ILM policy: {policy_name}")
-            except Exception as e:
-                logger.warning(f"⚠️ Failed to create/update ILM policy {policy_name}: {e}")
-                # Continue with other policies even if one fails
-    
-    def _get_standard_ilm_policy(self) -> Dict[str, Any]:
-        """
-        Get the standard ILM policy for operational data (trucks, inventory, etc.).
-        
-        Policy phases:
-        - Hot: Active data, optimized for indexing and search
-        - Warm: Data older than 30 days, read-only, optimized for search
-        - Cold: Data older than 90 days, minimal resources
-        - Delete: Data older than 365 days (optional, can be disabled)
-        
-        Validates:
-        - Requirement 7.1: Move old data to warm/cold tiers after 30 days
-        
-        Returns:
-            Dict containing the ILM policy configuration
-        """
-        return {
-            "policy": {
-                "phases": {
-                    "hot": {
-                        "min_age": "0ms",
-                        "actions": {
-                            "rollover": {
-                                "max_age": "30d",
-                                "max_primary_shard_size": "50gb"
-                            },
-                            "set_priority": {
-                                "priority": 100
-                            }
-                        }
-                    },
-                    "warm": {
-                        "min_age": "30d",
-                        "actions": {
-                            "set_priority": {
-                                "priority": 50
-                            },
-                            "shrink": {
-                                "number_of_shards": 1
-                            },
-                            "forcemerge": {
-                                "max_num_segments": 1
-                            },
-                            "readonly": {}
-                        }
-                    },
-                    "cold": {
-                        "min_age": "90d",
-                        "actions": {
-                            "set_priority": {
-                                "priority": 0
-                            },
-                            "allocate": {
-                                "number_of_replicas": 0
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    
-    def _get_analytics_ilm_policy(self) -> Dict[str, Any]:
-        """
-        Get the ILM policy for analytics data.
-        
-        Analytics data has a longer retention period and different tiering strategy:
-        - Hot: Active data for real-time analytics
-        - Warm: Data older than 30 days, still queryable for historical analysis
-        - Cold: Data older than 180 days, archived for compliance
-        
-        Validates:
-        - Requirement 7.1: Move old data to warm/cold tiers after 30 days
-        
-        Returns:
-            Dict containing the ILM policy configuration
-        """
-        return {
-            "policy": {
-                "phases": {
-                    "hot": {
-                        "min_age": "0ms",
-                        "actions": {
-                            "rollover": {
-                                "max_age": "30d",
-                                "max_primary_shard_size": "50gb"
-                            },
-                            "set_priority": {
-                                "priority": 100
-                            }
-                        }
-                    },
-                    "warm": {
-                        "min_age": "30d",
-                        "actions": {
-                            "set_priority": {
-                                "priority": 50
-                            },
-                            "forcemerge": {
-                                "max_num_segments": 1
-                            },
-                            "readonly": {}
-                        }
-                    },
-                    "cold": {
-                        "min_age": "180d",
-                        "actions": {
-                            "set_priority": {
-                                "priority": 0
-                            },
-                            "allocate": {
-                                "number_of_replicas": 0
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    
-    def _get_logs_ilm_policy(self) -> Dict[str, Any]:
-        """
-        Get the ILM policy for log data.
-        
-        Log data has shorter retention and aggressive tiering:
-        - Hot: Recent logs for active debugging
-        - Warm: Logs older than 7 days
-        - Cold: Logs older than 30 days
-        - Delete: Logs older than 90 days
-        
-        Validates:
-        - Requirement 7.1: Move old data to warm/cold tiers after 30 days
-        
-        Returns:
-            Dict containing the ILM policy configuration
-        """
-        return {
-            "policy": {
-                "phases": {
-                    "hot": {
-                        "min_age": "0ms",
-                        "actions": {
-                            "rollover": {
-                                "max_age": "7d",
-                                "max_primary_shard_size": "30gb"
-                            },
-                            "set_priority": {
-                                "priority": 100
-                            }
-                        }
-                    },
-                    "warm": {
-                        "min_age": "7d",
-                        "actions": {
-                            "set_priority": {
-                                "priority": 50
-                            },
-                            "shrink": {
-                                "number_of_shards": 1
-                            },
-                            "forcemerge": {
-                                "max_num_segments": 1
-                            },
-                            "readonly": {}
-                        }
-                    },
-                    "cold": {
-                        "min_age": "30d",
-                        "actions": {
-                            "set_priority": {
-                                "priority": 0
-                            },
-                            "allocate": {
-                                "number_of_replicas": 0
-                            }
-                        }
-                    },
-                    "delete": {
-                        "min_age": "90d",
-                        "actions": {
-                            "delete": {}
-                        }
-                    }
-                }
-            }
-        }
-    
-    def apply_ilm_policies_to_indices(self):
-        """
-        Apply ILM policies to existing indices.
-        
-        Maps indices to their appropriate ILM policies:
-        - trucks, inventory, support_tickets, locations -> standard policy
-        - analytics_events -> analytics policy
-        
-        Skips if ILM is not available on the cluster.
-        
-        Validates:
-        - Requirement 7.1: Implement index lifecycle management policies
-        """
-        # Skip if ILM is not available
-        if not getattr(self, '_ilm_available', False):
-            logger.debug("Skipping ILM policy application - ILM not available on this cluster")
-            return
-        
-        # Define index to policy mapping
-        index_policy_mapping = {
-            "trucks": "runsheet-standard-policy",
-            "inventory": "runsheet-standard-policy",
-            "support_tickets": "runsheet-standard-policy",
-            "locations": "runsheet-standard-policy",
-            "analytics_events": "runsheet-analytics-policy",
-        }
-        
-        for index_name, policy_name in index_policy_mapping.items():
-            try:
-                # Check if index exists
-                if self.client.indices.exists(index=index_name):
-                    # Apply ILM policy to the index
-                    self.client.indices.put_settings(
-                        index=index_name,
-                        body={
-                            "index": {
-                                "lifecycle": {
-                                    "name": policy_name
-                                }
-                            }
-                        }
-                    )
-                    logger.info(f"✅ Applied ILM policy '{policy_name}' to index '{index_name}'")
-            except Exception as e:
-                logger.warning(f"⚠️ Failed to apply ILM policy to {index_name}: {e}")
-                # Continue with other indices even if one fails
-    
-    def get_ilm_policy_status(self, index_name: str) -> Optional[Dict[str, Any]]:
-        """
-        Get the ILM status for a specific index.
-        
-        Args:
-            index_name: Name of the index to check
-            
-        Returns:
-            Dict containing ILM status information, or None if not available
-            
-        Validates:
-        - Requirement 7.1: Index lifecycle management policies
-        """
-        try:
-            response = self.client.ilm.explain_lifecycle(index=index_name)
-            if "indices" in response and index_name in response["indices"]:
-                return response["indices"][index_name]
-            return None
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to get ILM status for {index_name}: {e}")
-            return None
-    
-    def get_all_ilm_policies(self) -> Dict[str, Any]:
-        """
-        Get all ILM policies configured in the cluster.
-        
-        Returns:
-            Dict containing all ILM policies
-            
-        Validates:
-        - Requirement 7.1: Index lifecycle management policies
-        """
-        try:
-            return self.client.ilm.get_lifecycle()
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to get ILM policies: {e}")
-            return {}
-    
-    def update_ilm_policy(self, policy_name: str, policy_body: Dict[str, Any]) -> bool:
-        """
-        Update an existing ILM policy.
-        
-        Args:
-            policy_name: Name of the policy to update
-            policy_body: New policy configuration
-            
-        Returns:
-            True if update was successful, False otherwise
-            
-        Validates:
-        - Requirement 7.1: Index lifecycle management policies
-        """
-        try:
-            self.client.ilm.put_lifecycle(name=policy_name, body=policy_body)
-            logger.info(f"✅ Updated ILM policy: {policy_name}")
-            return True
-        except Exception:
-            logger.exception("Failed to update ILM policy %s", policy_name)
-            return False
-    
-    def remove_ilm_policy_from_index(self, index_name: str) -> bool:
-        """
-        Remove ILM policy from an index.
-        
-        Args:
-            index_name: Name of the index
-            
-        Returns:
-            True if removal was successful, False otherwise
-            
-        Validates:
-        - Requirement 7.1: Index lifecycle management policies
-        """
-        try:
-            self.client.indices.put_settings(
-                index=index_name,
-                body={
-                    "index": {
-                        "lifecycle": {
-                            "name": None
-                        }
-                    }
-                }
-            )
-            logger.info(f"✅ Removed ILM policy from index: {index_name}")
-            return True
-        except Exception:
-            logger.exception("Failed to remove ILM policy from %s", index_name)
-            return False
-    
     @property
     def circuit_breaker(self) -> CircuitBreaker:
         """Get the circuit breaker instance for external access."""
@@ -688,519 +241,6 @@ class ElasticsearchService:
         )
     
 
-    def setup_indices(self):
-        """Create indices with proper mappings if they don't exist, and update mappings for existing indices."""
-        indices = {
-            "trucks": self._get_trucks_mapping(),
-            "locations": self._get_locations_mapping(),
-            "inventory": self._get_inventory_mapping(),
-            "support_tickets": self._get_support_tickets_mapping(),
-            "analytics_events": self._get_analytics_mapping(),
-            "import_sessions": self._get_import_sessions_mapping(),
-            "import_sessions_active": self._get_active_import_sessions_mapping(),
-        }
-
-        for index_name, mapping in indices.items():
-            try:
-                if not self.client.indices.exists(index=index_name):
-                    self.client.indices.create(
-                        index=index_name,
-                        body=mapping
-                    )
-                    logger.info(f"✅ Created index: {index_name}")
-                else:
-                    logger.info(f"📋 Index already exists: {index_name}")
-                    # Update mapping with any new fields (existing fields are unchanged)
-                    self._update_index_mapping(index_name, mapping)
-            except Exception:
-                logger.exception("Failed to create index %s", index_name)
-
-        # Create 'assets' alias pointing to 'trucks' index for multi-asset support
-        try:
-            alias_exists = self.client.indices.exists_alias(name="assets")
-            if not alias_exists:
-                self.client.indices.put_alias(index="trucks", name="assets")
-                logger.info("✅ Created alias: assets → trucks")
-            else:
-                logger.info("📋 Alias already exists: assets → trucks")
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to create 'assets' alias pointing to 'trucks': {e}")
-    def _update_index_mapping(self, index_name: str, expected_mapping: Dict[str, Any]):
-        """
-        Update an existing index mapping with any new fields from the expected mapping.
-        Elasticsearch allows adding new fields to an existing mapping via PUT mapping.
-        Existing fields are not modified.
-        """
-        try:
-            current_mapping = self.client.indices.get_mapping(index=index_name)
-            current_props = (
-                current_mapping.get(index_name, {})
-                .get("mappings", {})
-                .get("properties", {})
-            )
-            expected_props = expected_mapping.get("mappings", {}).get("properties", {})
-
-            # Find fields that exist in expected but not in current
-            missing_fields = {
-                k: v for k, v in expected_props.items() if k not in current_props
-            }
-
-            # Find existing fields that need sub-field updates (e.g., adding .keyword)
-            subfield_updates = {}
-            for field_name, expected_def in expected_props.items():
-                if field_name not in current_props:
-                    continue
-                expected_fields = expected_def.get("fields", {})
-                current_fields = current_props[field_name].get("fields", {})
-                if expected_fields and expected_fields != current_fields:
-                    new_subfields = {
-                        k: v for k, v in expected_fields.items() if k not in current_fields
-                    }
-                    if new_subfields:
-                        subfield_updates[field_name] = {
-                            "type": current_props[field_name].get("type", "text"),
-                            "fields": new_subfields,
-                        }
-
-            updates = {**missing_fields, **subfield_updates}
-
-            if updates:
-                logger.info(
-                    f"📝 Updating index '{index_name}' with {len(updates)} field update(s): "
-                    f"{list(updates.keys())}"
-                )
-                self.client.indices.put_mapping(
-                    index=index_name,
-                    body={"properties": updates},
-                )
-                logger.info(f"✅ Updated mapping for index: {index_name}")
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to update mapping for index '{index_name}': {e}")
-
-    def validate_index_schemas(self) -> Dict[str, Any]:
-        """
-        Validate that index mappings match expected schemas and log warnings for mismatches.
-        
-        This method compares the actual Elasticsearch index mappings against the expected
-        schemas defined in the mapping methods. Any mismatches are logged as warnings.
-        
-        Validates:
-        - Requirement 7.3: WHEN the Backend_Service starts, THE Elasticsearch_Client SHALL 
-          verify index mappings match expected schemas and log warnings for mismatches
-        
-        Returns:
-            Dict containing validation results with structure:
-            {
-                "valid": bool,
-                "indices": {
-                    "index_name": {
-                        "valid": bool,
-                        "mismatches": [list of mismatch descriptions]
-                    }
-                }
-            }
-        """
-        logger.info("🔍 Validating index schemas...")
-        
-        # Get expected mappings for all indices
-        expected_mappings = {
-            "trucks": self._get_trucks_mapping(),
-            "locations": self._get_locations_mapping(),
-            "inventory": self._get_inventory_mapping(),
-            "support_tickets": self._get_support_tickets_mapping(),
-            "analytics_events": self._get_analytics_mapping()
-        }
-        
-        validation_results = {
-            "valid": True,
-            "indices": {}
-        }
-        
-        for index_name, expected_mapping in expected_mappings.items():
-            index_result = self._validate_single_index_schema(index_name, expected_mapping)
-            validation_results["indices"][index_name] = index_result
-            
-            if not index_result["valid"]:
-                validation_results["valid"] = False
-        
-        # Log summary
-        if validation_results["valid"]:
-            logger.info("✅ All index schemas validated successfully")
-        else:
-            invalid_indices = [
-                name for name, result in validation_results["indices"].items() 
-                if not result["valid"]
-            ]
-            logger.warning(f"⚠️ Schema validation completed with mismatches in indices: {invalid_indices}")
-        
-        return validation_results
-    
-    def _validate_single_index_schema(self, index_name: str, expected_mapping: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Validate a single index's mapping against expected schema.
-        
-        Args:
-            index_name: Name of the index to validate
-            expected_mapping: Expected mapping configuration
-            
-        Returns:
-            Dict with validation result:
-            {
-                "valid": bool,
-                "mismatches": [list of mismatch descriptions],
-                "missing_fields": [list of missing field names],
-                "type_mismatches": [list of type mismatch descriptions],
-                "extra_fields": [list of unexpected field names]
-            }
-            
-        Validates:
-        - Requirement 7.3: Verify index mappings match expected schemas
-        """
-        result = {
-            "valid": True,
-            "mismatches": [],
-            "missing_fields": [],
-            "type_mismatches": [],
-            "extra_fields": []
-        }
-        
-        try:
-            # Check if index exists
-            if not self.client.indices.exists(index=index_name):
-                result["valid"] = False
-                result["mismatches"].append(f"Index '{index_name}' does not exist")
-                logger.warning(f"⚠️ Schema validation: Index '{index_name}' does not exist")
-                return result
-            
-            # Get actual mapping from Elasticsearch
-            actual_mapping_response = self.client.indices.get_mapping(index=index_name)
-            actual_mapping = actual_mapping_response.get(index_name, {}).get("mappings", {})
-            
-            # Get expected properties
-            expected_properties = expected_mapping.get("mappings", {}).get("properties", {})
-            actual_properties = actual_mapping.get("properties", {})
-            
-            # Compare properties
-            self._compare_properties(
-                expected_properties, 
-                actual_properties, 
-                result, 
-                index_name,
-                path=""
-            )
-            
-            # tenant_id is not just another field: every read is scoped with
-            # ``{"term": {"tenant_id": ...}}`` (inject_tenant_filter), and a term
-            # query against analyzed text matches only when a produced token
-            # equals the whole term. A tenant id containing a hyphen is split by
-            # the standard analyzer, so an index that inferred ``text`` here
-            # serves ZERO rows to every tenant while looking perfectly healthy.
-            # Say so at ERROR, separately from the generic type-mismatch list,
-            # because the fix is a reindex rather than a mapping update.
-            actual_tenant = actual_properties.get("tenant_id")
-            if actual_tenant is not None and actual_tenant.get("type") != "keyword":
-                result["valid"] = False
-                detail = (
-                    f"tenant_id is mapped as '{actual_tenant.get('type')}', not "
-                    f"'keyword' — every tenant-scoped term filter on "
-                    f"'{index_name}' will match nothing. The index needs a "
-                    f"reindex; a put-mapping cannot change a field's type."
-                )
-                result["mismatches"].append(detail)
-                logger.error(f"❌ Schema validation [{index_name}]: {detail}")
-
-            # Log warnings for any mismatches
-            if result["missing_fields"]:
-                logger.warning(
-                    f"⚠️ Schema validation [{index_name}]: Missing fields: {result['missing_fields']}"
-                )
-            
-            if result["type_mismatches"]:
-                for mismatch in result["type_mismatches"]:
-                    logger.warning(f"⚠️ Schema validation [{index_name}]: {mismatch}")
-            
-            if result["extra_fields"]:
-                logger.info(
-                    f"ℹ️ Schema validation [{index_name}]: Extra fields in actual mapping "
-                    f"(may be auto-generated): {result['extra_fields']}"
-                )
-            
-            if result["valid"]:
-                logger.info(f"✅ Schema validation [{index_name}]: Mapping matches expected schema")
-            
-        except Exception as e:
-            result["valid"] = False
-            result["mismatches"].append(f"Failed to validate index '{index_name}': {str(e)}")
-            logger.exception("Schema validation [%s]: failed to validate", index_name)
-        
-        return result
-    
-    def _compare_properties(
-        self, 
-        expected: Dict[str, Any], 
-        actual: Dict[str, Any], 
-        result: Dict[str, Any],
-        index_name: str,
-        path: str = ""
-    ) -> None:
-        """
-        Recursively compare expected and actual property mappings.
-        
-        Args:
-            expected: Expected properties mapping
-            actual: Actual properties mapping from Elasticsearch
-            result: Result dict to update with mismatches
-            index_name: Name of the index being validated
-            path: Current path in the property hierarchy (for nested fields)
-            
-        Validates:
-        - Requirement 7.3: Verify index mappings match expected schemas
-        """
-        # Check for missing fields in actual mapping
-        for field_name, expected_config in expected.items():
-            full_path = f"{path}.{field_name}" if path else field_name
-            
-            if field_name not in actual:
-                result["valid"] = False
-                result["missing_fields"].append(full_path)
-                result["mismatches"].append(f"Missing field: {full_path}")
-                continue
-            
-            actual_config = actual[field_name]
-            
-            # Compare field types
-            expected_type = expected_config.get("type")
-            actual_type = actual_config.get("type")
-            
-            # Handle nested properties (objects without explicit type)
-            if "properties" in expected_config:
-                # This is an object type with nested properties
-                if "properties" not in actual_config:
-                    result["valid"] = False
-                    result["type_mismatches"].append(
-                        f"Field '{full_path}': Expected object with properties, "
-                        f"but actual has no nested properties"
-                    )
-                    result["mismatches"].append(
-                        f"Type mismatch at '{full_path}': expected object, got {actual_type}"
-                    )
-                else:
-                    # Recursively compare nested properties
-                    self._compare_properties(
-                        expected_config["properties"],
-                        actual_config.get("properties", {}),
-                        result,
-                        index_name,
-                        full_path
-                    )
-            elif expected_type:
-                # Compare explicit types
-                if actual_type and expected_type != actual_type:
-                    # Some type variations are acceptable (e.g., semantic_text might be stored differently)
-                    if not self._is_compatible_type(expected_type, actual_type):
-                        result["valid"] = False
-                        result["type_mismatches"].append(
-                            f"Field '{full_path}': Expected type '{expected_type}', "
-                            f"but actual type is '{actual_type}'"
-                        )
-                        result["mismatches"].append(
-                            f"Type mismatch at '{full_path}': expected {expected_type}, got {actual_type}"
-                        )
-        
-        # Check for extra fields in actual mapping (informational, not a validation failure)
-        for field_name in actual:
-            full_path = f"{path}.{field_name}" if path else field_name
-            if field_name not in expected:
-                result["extra_fields"].append(full_path)
-    
-    def _is_compatible_type(self, expected_type: str, actual_type: str) -> bool:
-        """
-        Check if two Elasticsearch field types are compatible.
-        
-        Some type variations are acceptable due to Elasticsearch's type inference
-        or plugin-specific types.
-        
-        Args:
-            expected_type: The expected field type
-            actual_type: The actual field type from Elasticsearch
-            
-        Returns:
-            True if types are compatible, False otherwise
-            
-        Validates:
-        - Requirement 7.3: Verify index mappings match expected schemas
-        """
-        # Define compatible type pairs
-        compatible_types = {
-            # ``("semantic_text", "text")`` used to be declared compatible here.
-            # No mapping declares ``semantic_text`` any more (see the note above
-            # _get_locations_mapping), so the pair is unreachable — but it was
-            # also actively harmful while it lasted: it made this validator
-            # report "compatible" for exactly the indices whose declared mapping
-            # had been rejected and replaced by a dynamic one, which is how the
-            # dead tenant filters went unreported at every startup.
-            # long and integer are often interchangeable
-            ("integer", "long"): True,
-            ("long", "integer"): True,
-            # float and double are often interchangeable
-            ("float", "double"): True,
-            ("double", "float"): True,
-        }
-        
-        return compatible_types.get((expected_type, actual_type), False)
-    
-    def get_index_mapping(self, index_name: str) -> Optional[Dict[str, Any]]:
-        """
-        Get the current mapping for a specific index.
-        
-        Args:
-            index_name: Name of the index
-            
-        Returns:
-            Dict containing the index mapping, or None if index doesn't exist
-            
-        Validates:
-        - Requirement 7.3: Verify index mappings match expected schemas
-        """
-        try:
-            if not self.client.indices.exists(index=index_name):
-                return None
-            
-            response = self.client.indices.get_mapping(index=index_name)
-            return response.get(index_name, {}).get("mappings", {})
-        except Exception:
-            logger.exception("Failed to get mapping for index %s", index_name)
-            return None
-    
-    def get_schema_validation_summary(self) -> Dict[str, Any]:
-        """
-        Get a summary of schema validation status for all indices.
-        
-        Returns:
-            Dict containing validation summary with counts and details
-            
-        Validates:
-        - Requirement 7.3: Verify index mappings match expected schemas
-        """
-        validation_results = self.validate_index_schemas()
-        
-        total_indices = len(validation_results["indices"])
-        valid_indices = sum(
-            1 for result in validation_results["indices"].values() 
-            if result["valid"]
-        )
-        invalid_indices = total_indices - valid_indices
-        
-        total_mismatches = sum(
-            len(result["mismatches"]) 
-            for result in validation_results["indices"].values()
-        )
-        
-        return {
-            "overall_valid": validation_results["valid"],
-            "total_indices": total_indices,
-            "valid_indices": valid_indices,
-            "invalid_indices": invalid_indices,
-            "total_mismatches": total_mismatches,
-            "details": validation_results["indices"]
-        }
-    
-    def _get_trucks_mapping(self):
-        """Get mapping for trucks index"""
-        return {
-            "mappings": {
-                "dynamic": False,
-                "properties": {
-                    "truck_id": {"type": "keyword"},
-                    "plate_number": {"type": "keyword"},
-                    "driver_id": {"type": "keyword"},
-                    "driver_name": {"type": "text"},
-                    "current_location": {
-                        "properties": {
-                            "id": {"type": "keyword"},
-                            "name": {"type": "text"},
-                            "type": {"type": "keyword"},
-                            "coordinates": {"type": "geo_point"},
-                            "address": {"type": "text"}
-                        }
-                    },
-                    "destination": {
-                        "properties": {
-                            "id": {"type": "keyword"},
-                            "name": {"type": "text"},
-                            "type": {"type": "keyword"},
-                            "coordinates": {"type": "geo_point"},
-                            "address": {"type": "text"}
-                        }
-                    },
-                    "route": {
-                        "properties": {
-                            "id": {"type": "keyword"},
-                            "distance": {"type": "float"},
-                            "estimated_duration": {"type": "integer"},
-                            "actual_duration": {"type": "integer"}
-                        }
-                    },
-                    "status": {"type": "keyword"},
-                    # Operational state, distinct from the movement ``status``
-                    # above: ``out_of_service`` is written by
-                    # Inspection_Service when a driver reports a defect of that
-                    # severity (driver-mobile-app R8.5), and tracking updates
-                    # that move ``status`` must not clear it.
-                    "operational_state": {"type": "keyword"},
-                    "estimated_arrival": {"type": "date"},
-                    "last_update": {"type": "date"},
-                    "cargo": {
-                        "properties": {
-                            "type": {"type": "keyword"},
-                            "weight": {"type": "float"},
-                            "volume": {"type": "float"},
-                            # ``semantic_text`` until it was found to be
-                            # load-bearing in the worst way — see the note above
-                            # _get_locations_mapping. The only consumer,
-                            # ``semantic_search``, issues a plain multi_match,
-                            # which behaves identically on ``text``.
-                            "description": {
-                                "type": "text",
-                                "fields": {"keyword": {"type": "keyword", "ignore_above": 256}},
-                            },
-                            "priority": {"type": "keyword"}
-                        }
-                    },
-                    "created_at": {"type": "date"},
-                    "updated_at": {"type": "date"},
-                    # Core asset classification
-                    "asset_type": {"type": "keyword"},
-                    "asset_subtype": {"type": "keyword"},
-                    "asset_name": {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
-                    # Vessel-specific fields
-                    "vessel_name": {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
-                    "imo_number": {"type": "keyword"},
-                    "port_of_registry": {"type": "keyword"},
-                    "draft_meters": {"type": "float"},
-                    "vessel_capacity_tonnes": {"type": "float"},
-                    # Equipment-specific fields
-                    "equipment_model": {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
-                    "lifting_capacity_tonnes": {"type": "float"},
-                    "operational_radius_meters": {"type": "float"},
-                    # Container-specific fields
-                    "container_number": {"type": "keyword"},
-                    "container_size": {"type": "keyword"},
-                    "seal_number": {"type": "keyword"},
-                    "contents_description": {"type": "text"},
-                    "weight_tonnes": {"type": "float"},
-                    # Fuel monitoring fields
-                    "fuel_level_pct": {"type": "float"},
-                    # Depot assignment (cross-module-entity-linkage Req 10.1/10.2).
-                    # Nullable/additive: an asset's home/operating depot. Used to
-                    # resolve the asset → depot reference and to enumerate the
-                    # assets assigned to a depot.
-                    "assigned_depot_id": {"type": "keyword"},
-                    "tenant_id": {"type": "keyword"},
-                }
-            }
-        }
-    
     # ------------------------------------------------------------------
     # Why these four mappings no longer declare ``semantic_text``
     # ------------------------------------------------------------------
@@ -1228,192 +268,7 @@ class ElasticsearchService:
     # that already went down this path needs a reindex — a put-mapping cannot
     # change a field's type. See ``.kiro/runbooks`` for the repair.
 
-    def _get_locations_mapping(self):
-        """Get mapping for locations index"""
-        return {
-            "mappings": {
-                "properties": {
-                    "location_id": {"type": "keyword"},
-                    "name": {"type": "text"},
-                    "type": {"type": "keyword"},
-                    "coordinates": {"type": "geo_point"},
-                    "address": {
-                        "type": "text",
-                        "fields": {"keyword": {"type": "keyword", "ignore_above": 256}},
-                    },
-                    "region": {"type": "keyword"},
-                    # Declared so it is never inferred as analyzed text: reads go
-                    # through inject_tenant_filter, which uses a term query.
-                    "tenant_id": {"type": "keyword"},
-                    "created_at": {"type": "date"},
-                    "updated_at": {"type": "date"}
-                }
-            }
-        }
     
-    def _get_inventory_mapping(self):
-        """Get mapping for inventory index"""
-        return {
-            "mappings": {
-                "properties": {
-                    "item_id": {"type": "keyword"},
-                    "name": {
-                        "type": "text",
-                        "fields": {"keyword": {"type": "keyword", "ignore_above": 256}},
-                    },
-                    "category": {"type": "keyword"},
-                    "quantity": {"type": "integer"},
-                    "unit": {"type": "keyword"},
-                    "location": {"type": "text"},
-                    "status": {"type": "keyword"},
-                    "tenant_id": {"type": "keyword"},
-                    "last_updated": {"type": "date"},
-                    "created_at": {"type": "date"},
-                    "updated_at": {"type": "date"}
-                }
-            }
-        }
-    
-    def _get_support_tickets_mapping(self):
-        """Get mapping for support tickets index"""
-        return {
-            "mappings": {
-                "properties": {
-                    "ticket_id": {"type": "keyword"},
-                    "customer": {"type": "text"},
-                    "customer_id": {"type": "keyword"},
-                    "issue": {
-                        "type": "text",
-                        "fields": {"keyword": {"type": "keyword", "ignore_above": 256}},
-                    },
-                    "description": {
-                        "type": "text",
-                        "fields": {"keyword": {"type": "keyword", "ignore_above": 256}},
-                    },
-                    "priority": {"type": "keyword"},
-                    "status": {"type": "keyword"},
-                    "assigned_to": {"type": "keyword"},
-                    "related_order": {"type": "keyword"},
-                    "tenant_id": {"type": "keyword"},
-                    "created_at": {"type": "date"},
-                    "updated_at": {"type": "date"},
-                    "resolved_at": {"type": "date"}
-                }
-            }
-        }
-    
-    def _get_analytics_mapping(self):
-        """Get mapping for analytics events index"""
-        return {
-            "mappings": {
-                "properties": {
-                    "event_id": {"type": "keyword"},
-                    "event_type": {"type": "keyword"},
-                    "tenant_id": {"type": "keyword"},
-                    "timestamp": {"type": "date"},
-                    "truck_id": {"type": "keyword"},
-                    "order_id": {"type": "keyword"},
-                    "region": {"type": "keyword"},
-                    "route_name": {
-                        "type": "text",
-                        "fields": {"keyword": {"type": "keyword"}}
-                    },
-                    "route_id": {"type": "keyword"},
-                    "delay_cause": {"type": "keyword"},
-                    "metrics": {
-                        "properties": {
-                            # Performance metrics
-                            "delivery_performance_pct": {"type": "float"},
-                            "average_delay_minutes": {"type": "float"},
-                            "fleet_utilization_pct": {"type": "float"},
-                            "customer_satisfaction": {"type": "float"},
-                            "on_time_percentage": {"type": "float"},
-                            
-                            # Delivery metrics
-                            "delivery_time_minutes": {"type": "integer"},
-                            "delay_minutes": {"type": "integer"},
-                            "distance_km": {"type": "float"},
-                            "fuel_consumed_liters": {"type": "float"},
-                            "customer_rating": {"type": "float"},
-                            
-                            # Count metrics
-                            "total_deliveries": {"type": "integer"},
-                            "on_time_deliveries": {"type": "integer"},
-                            "active_trucks": {"type": "integer"},
-                            "completed_trips": {"type": "integer"},
-                            "delay_incidents": {"type": "integer"},
-                            "incident_count": {"type": "integer"},
-                            
-                            # Performance analysis
-                            "performance_pct": {"type": "float"},
-                            "avg_delivery_time": {"type": "float"},
-                            "percentage": {"type": "float"},
-                            "avg_delay_minutes": {"type": "float"},
-                            
-                            # Planning metrics
-                            "planned_distance_km": {"type": "float"},
-                            "estimated_duration_minutes": {"type": "integer"},
-                            "expected_delay_duration": {"type": "integer"}
-                        }
-                    },
-                    "created_at": {"type": "date"}
-                }
-            }
-        }
-
-    def _get_import_sessions_mapping(self):
-        """Get mapping for import sessions index"""
-        return {
-            "mappings": {
-                "properties": {
-                    "session_id": {"type": "keyword"},
-                    "tenant_id": {"type": "keyword"},
-                    "data_type": {"type": "keyword"},
-                    "source_type": {"type": "keyword"},
-                    "source_name": {
-                        "type": "text",
-                        "fields": {
-                            "keyword": {"type": "keyword"}
-                        }
-                    },
-                    "total_records": {"type": "integer"},
-                    "imported_records": {"type": "integer"},
-                    "skipped_records": {"type": "integer"},
-                    "error_count": {"type": "integer"},
-                    "status": {"type": "keyword"},
-                    "errors": {"type": "text"},
-                    "field_mapping": {"type": "object", "enabled": False},
-                    "created_at": {"type": "date"},
-                    "completed_at": {"type": "date"},
-                    "duration_seconds": {"type": "float"}
-                }
-            }
-        }
-
-    def _get_active_import_sessions_mapping(self):
-        """Get mapping for durable in-progress import sessions."""
-        return {
-            "mappings": {
-                "properties": {
-                    "session_id": {"type": "keyword"},
-                    "tenant_id": {"type": "keyword"},
-                    "data_type": {"type": "keyword"},
-                    "source_type": {"type": "keyword"},
-                    "source_name": {"type": "text"},
-                    "rows_json": {"type": "text", "index": False},
-                    "columns": {"type": "keyword"},
-                    "sample_rows": {"type": "object", "enabled": False},
-                    "total_rows": {"type": "integer"},
-                    "suggested_mapping": {"type": "object", "enabled": False},
-                    "field_mapping": {"type": "object", "enabled": False},
-                    "validation_result": {"type": "object", "enabled": False},
-                    "status": {"type": "keyword"},
-                    "created_at": {"type": "date"},
-                    "updated_at": {"type": "date"},
-                }
-            }
-        }
-
     # CRUD Operations
     async def index_document(self, index: str, doc_id: str, document: Dict[Any, Any]):
         """
@@ -1426,32 +281,7 @@ class ElasticsearchService:
         if self._is_retired_index(index):
             return {"result": "skipped_retired_index"}
         store = self._pg_store()
-        if store is not None:
-            return await store.index_document(index, doc_id, document)
-        try:
-            async def _do_index():
-                # Only inject timestamps for indices that have these fields in
-                # their mapping. Strict-mapped event-stream indices carry their
-                # own domain timestamps and reject the auto-stamped fields, so
-                # they are excluded via the module-level TIMESTAMP_SKIP_INDICES.
-                if index not in TIMESTAMP_SKIP_INDICES:
-                    document["updated_at"] = utcnow().isoformat()
-                    if "created_at" not in document:
-                        document["created_at"] = utcnow().isoformat()
-                
-                response = self.client.index(
-                    index=index,
-                    id=doc_id,
-                    body=document,
-                    refresh=False
-                )
-                return response
-            
-            return await self._circuit_breaker.execute(_do_index)
-        except CircuitOpenException as e:
-            self._handle_circuit_breaker_exception(e)
-        except Exception as e:
-            self._handle_elasticsearch_error(f"index_document({index})", e)
+        return await store.index_document(index, doc_id, document)
 
     async def update_document(self, index: str, doc_id: str, partial_doc: Dict[Any, Any]):
         """
@@ -1462,34 +292,17 @@ class ElasticsearchService:
         if self._is_retired_index(index):
             return {"result": "skipped_retired_index"}
         store = self._pg_store()
-        if store is not None:
-            from persistence.document_store import DocumentNotFound
+        from persistence.document_store import DocumentNotFound
 
-            try:
-                return await store.update_document(index, doc_id, partial_doc)
-            except DocumentNotFound as exc:
-                # The ES client raises NotFoundError here, which callers already
-                # handle; re-raise through the same error path so behaviour on
-                # both backends is identical.
-                self._handle_elasticsearch_error(
-                    f"update_document({index}, {doc_id})", exc
-                )
         try:
-            async def _do_update():
-                partial_doc["updated_at"] = utcnow().isoformat()
-                response = self.client.update(
-                    index=index,
-                    id=doc_id,
-                    body={"doc": partial_doc},
-                    refresh=True,
-                )
-                return response
-
-            return await self._circuit_breaker.execute(_do_update)
-        except CircuitOpenException as e:
-            self._handle_circuit_breaker_exception(e)
-        except Exception as e:
-            self._handle_elasticsearch_error(f"update_document({index}, {doc_id})", e)
+            return await store.update_document(index, doc_id, partial_doc)
+        except DocumentNotFound as exc:
+            # The ES client raises NotFoundError here, which callers already
+            # handle; re-raise through the same error path so behaviour on
+            # both backends is identical.
+            self._handle_elasticsearch_error(
+                f"update_document({index}, {doc_id})", exc
+            )
 
     
     async def upsert_if_newer(
@@ -1523,65 +336,9 @@ class ElasticsearchService:
             return False
 
         store = self._pg_store()
-        if store is not None:
-            return await store.upsert_if_newer(
-                index, doc_id, document, timestamp_field=timestamp_field
-            )
-
-        try:
-            async def _do_upsert():
-                response = self.client.update(
-                    index=index,
-                    id=doc_id,
-                    body={
-                        "scripted_upsert": True,
-                        "script": {
-                            "source": _UPSERT_IF_NEWER_SCRIPT,
-                            "lang": "painless",
-                            "params": document,
-                        },
-                        "upsert": document,
-                    },
-                    refresh=True,
-                )
-                if response.get("result", "") != "noop":
-                    return True
-
-                # A "noop" has two causes and they need opposite handling:
-                #
-                #   (a) a genuine stale-event discard — the document exists and
-                #       the incoming timestamp is older-or-equal;
-                #   (b) a serverless-Elasticsearch quirk where ``scripted_upsert``
-                #       reports "noop" AND fails to materialise the ``upsert``
-                #       body on a FRESH insert.
-                #
-                # Case (b) silently dropped every new order, and since reads are
-                # served from Postgres the dispatcher got a 404 immediately after
-                # a 201. The document's absence distinguishes them.
-                #
-                # Neither case exists on the Postgres path: there is no split
-                # between "run the script" and "apply the upsert".
-                if self.client.exists(index=index, id=doc_id):
-                    logger.info(
-                        "upsert_if_newer(%s): discarded stale event for %s "
-                        "(incoming %s=%s)",
-                        index, doc_id, timestamp_field,
-                        document.get(timestamp_field),
-                    )
-                    return False
-                self.client.index(index=index, id=doc_id, body=document, refresh=True)
-                logger.info(
-                    "upsert_if_newer(%s): scripted_upsert no-op'd a fresh insert "
-                    "for %s; indexed directly (serverless-ES fallback)",
-                    index, doc_id,
-                )
-                return True
-
-            return await self._circuit_breaker.execute(_do_upsert)
-        except CircuitOpenException as e:
-            self._handle_circuit_breaker_exception(e)
-        except Exception as e:
-            self._handle_elasticsearch_error(f"upsert_if_newer({index}, {doc_id})", e)
+        return await store.upsert_if_newer(
+            index, doc_id, document, timestamp_field=timestamp_field
+        )
 
     async def atomic_update(
         self,
@@ -1619,67 +376,8 @@ class ElasticsearchService:
         increments produce three.
         """
         store = self._pg_store()
-        if store is not None:
-            return await store.atomic_update(
-                index, doc_id, transform, upsert=upsert
-            )
-
-        import asyncio
-        import random
-
-        for attempt in range(max(max_retries, 1)):
-            try:
-                current = self.client.get(index=index, id=doc_id)
-            except Exception as exc:  # noqa: BLE001
-                if getattr(exc, "status_code", None) == 404 or "notfound" in type(exc).__name__.lower():
-                    if upsert is None:
-                        return (None, False)
-                    document = dict(upsert)
-                    document.setdefault("created_at", utcnow().isoformat())
-                    document["updated_at"] = utcnow().isoformat()
-                    self.client.index(
-                        index=index, id=doc_id, body=document, refresh=True
-                    )
-                    return (document, True)
-                raise
-
-            source = dict(current.get("_source") or {})
-            updated = transform(dict(source))
-            if updated is None:
-                return (source, False)
-            updated["updated_at"] = utcnow().isoformat()
-            try:
-                self.client.index(
-                    index=index,
-                    id=doc_id,
-                    body=updated,
-                    if_seq_no=current.get("_seq_no"),
-                    if_primary_term=current.get("_primary_term"),
-                    refresh=True,
-                )
-                return (updated, True)
-            except Exception as exc:  # noqa: BLE001
-                conflict = (
-                    getattr(exc, "status_code", None) == 409
-                    or "conflict" in type(exc).__name__.lower()
-                    or "version_conflict" in str(exc).lower()
-                )
-                if not conflict:
-                    raise
-                logger.info(
-                    "atomic_update(%s, %s): version conflict on attempt %d/%d",
-                    index, doc_id, attempt + 1, max_retries,
-                )
-                await asyncio.sleep(
-                    backoff_base_seconds * (2 ** attempt) * random.uniform(0.5, 1.5)
-                )
-
-        raise elasticsearch_unavailable(
-            message=(
-                f"concurrent modification of {doc_id!r} in {index!r} after "
-                f"{max_retries} attempts"
-            ),
-            details={"index": index, "doc_id": doc_id, "attempts": max_retries},
+        return await store.atomic_update(
+            index, doc_id, transform, upsert=upsert
         )
 
     #: Ceiling on how many documents one :meth:`update_by_query` call will touch
@@ -1723,35 +421,7 @@ class ElasticsearchService:
             return 0
 
         store = self._pg_store()
-        if store is not None:
-            return await store.update_by_query(index, query, transform)
-
-        # ``_source: false`` because the ids are all this needs; ``atomic_update``
-        # re-reads each document under its own version assertion, and using a body
-        # fetched before that read would reintroduce the lost update this exists
-        # to avoid.
-        response = await self.search_documents(
-            index,
-            {"query": query, "_source": False},
-            size=self.UPDATE_BY_QUERY_MAX_DOCS + 1,
-        )
-        hits = ((response or {}).get("hits") or {}).get("hits") or []
-        if len(hits) > self.UPDATE_BY_QUERY_MAX_DOCS:
-            raise elasticsearch_unavailable(
-                message=(
-                    f"update_by_query on {index!r} matched more than "
-                    f"{self.UPDATE_BY_QUERY_MAX_DOCS} documents; refusing to "
-                    "apply a partial update"
-                ),
-                details={"index": index, "limit": self.UPDATE_BY_QUERY_MAX_DOCS},
-            )
-
-        changed = 0
-        for hit in hits:
-            _doc, applied = await self.atomic_update(index, hit["_id"], transform)
-            if applied:
-                changed += 1
-        return changed
+        return await store.update_by_query(index, query, transform)
 
     async def bulk_index_documents(self, index: str, documents: List[Dict[Any, Any]]) -> Dict[str, Any]:
         """
@@ -1781,191 +451,8 @@ class ElasticsearchService:
             - errors: list of error details for failed documents
         """
         store = self._pg_store()
-        if store is not None:
-            return await store.bulk_index_documents(index, documents)
-        try:
-            async def _do_bulk_index():
-                from elasticsearch.helpers import bulk, BulkIndexError
-                
-                actions = []
-                doc_id_map = {}  # Map action index to document info for error reporting
-                
-                for idx, doc in enumerate(documents):
-                    doc["updated_at"] = utcnow().isoformat()
-                    if "created_at" not in doc:
-                        doc["created_at"] = utcnow().isoformat()
-                    
-                    # Map index names to correct ID fields
-                    id_field_map = {
-                        "trucks": "truck_id",
-                        "inventory": "item_id", 
-                        "support_tickets": "ticket_id",
-                        "locations": "location_id",
-                        "analytics_events": "event_id"
-                    }
-                    
-                    # Get the correct ID field for this index
-                    id_field = id_field_map.get(index, f"{index[:-1]}_id")
-                    doc_id = doc.get("id") or doc.get(id_field)
-                    
-                    if not doc_id:
-                        logger.warning(f"No ID found for document in {index} index. Available fields: {list(doc.keys())}")
-                    
-                    action = {
-                        "_index": index,
-                        "_id": doc_id,
-                        "_source": doc
-                    }
-                    actions.append(action)
-                    doc_id_map[idx] = {"doc_id": doc_id, "index": index}
-                
-                # Initialize result structure
-                result = {
-                    "success": True,
-                    "total": len(documents),
-                    "successful": 0,
-                    "failed": 0,
-                    "errors": []
-                }
-                
-                try:
-                    # Use raise_on_error=False to handle partial failures
-                    # This allows us to continue processing even when some documents fail
-                    success_count, errors = bulk(
-                        self.client, 
-                        actions, 
-                        refresh=True,
-                        raise_on_error=False,
-                        raise_on_exception=False
-                    )
-                    
-                    result["successful"] = success_count
-                    
-                    # Process any errors that occurred
-                    if errors:
-                        result["success"] = False
-                        result["failed"] = len(errors)
-                        
-                        for error in errors:
-                            # Extract error details from the bulk response
-                            error_info = self._extract_bulk_error_info(error)
-                            result["errors"].append(error_info)
-                            
-                            # Log each failed document with details
-                            # Validates Requirement 7.6: log failed documents
-                            logger.error(
-                                f"❌ Bulk indexing failed for document in '{index}': "
-                                f"doc_id={error_info.get('doc_id', 'unknown')}, "
-                                f"error_type={error_info.get('error_type', 'unknown')}, "
-                                f"reason={error_info.get('reason', 'unknown')}"
-                            )
-                        
-                        # Log summary of partial failure
-                        logger.warning(
-                            f"⚠️ Bulk indexing to '{index}' completed with partial failures: "
-                            f"{result['successful']}/{result['total']} documents indexed successfully, "
-                            f"{result['failed']} documents failed"
-                        )
-                    else:
-                        logger.info(f"✅ Bulk indexed {result['successful']} documents to {index}")
-                    
-                    return result
-                    
-                except BulkIndexError as e:
-                    # Handle BulkIndexError which contains details about failed documents
-                    # This exception is raised when raise_on_error=True (not our case, but handle defensively)
-                    result["success"] = False
-                    result["failed"] = len(e.errors)
-                    result["successful"] = result["total"] - result["failed"]
-                    
-                    for error in e.errors:
-                        error_info = self._extract_bulk_error_info(error)
-                        result["errors"].append(error_info)
-                        
-                        # Log each failed document
-                        logger.error(
-                            f"❌ Bulk indexing failed for document in '{index}': "
-                            f"doc_id={error_info.get('doc_id', 'unknown')}, "
-                            f"error_type={error_info.get('error_type', 'unknown')}, "
-                            f"reason={error_info.get('reason', 'unknown')}"
-                        )
-                    
-                    logger.warning(
-                        f"⚠️ Bulk indexing to '{index}' completed with partial failures: "
-                        f"{result['successful']}/{result['total']} documents indexed successfully, "
-                        f"{result['failed']} documents failed"
-                    )
-                    
-                    return result
-            
-            return await self._circuit_breaker.execute(_do_bulk_index)
-        except CircuitOpenException as e:
-            self._handle_circuit_breaker_exception(e)
-        except Exception as e:
-            self._handle_elasticsearch_error(f"bulk_index_documents({index})", e)
+        return await store.bulk_index_documents(index, documents)
     
-    def _extract_bulk_error_info(self, error: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Extract detailed error information from a bulk operation error.
-        
-        This method parses the error structure returned by Elasticsearch bulk operations
-        and extracts relevant information for logging and reporting.
-        
-        Validates:
-        - Requirement 7.6: Log failed documents with details
-        
-        Args:
-            error: The error dict from Elasticsearch bulk response
-            
-        Returns:
-            Dict containing:
-            - doc_id: The document ID that failed
-            - index: The target index
-            - error_type: The type of error (e.g., 'mapper_parsing_exception')
-            - reason: Human-readable error reason
-            - caused_by: Additional cause information if available
-        """
-        error_info = {
-            "doc_id": None,
-            "index": None,
-            "error_type": None,
-            "reason": None,
-            "caused_by": None
-        }
-        
-        try:
-            # The error structure can vary based on the operation type (index, create, update, delete)
-            # Common structure: {'index': {'_index': '...', '_id': '...', 'error': {...}, 'status': 400}}
-            for operation_type in ['index', 'create', 'update', 'delete']:
-                if operation_type in error:
-                    op_result = error[operation_type]
-                    error_info["doc_id"] = op_result.get("_id")
-                    error_info["index"] = op_result.get("_index")
-                    
-                    if "error" in op_result:
-                        error_detail = op_result["error"]
-                        error_info["error_type"] = error_detail.get("type")
-                        error_info["reason"] = error_detail.get("reason")
-                        
-                        # Extract caused_by if present (nested error details)
-                        if "caused_by" in error_detail:
-                            caused_by = error_detail["caused_by"]
-                            error_info["caused_by"] = {
-                                "type": caused_by.get("type"),
-                                "reason": caused_by.get("reason")
-                            }
-                    break
-            
-            # If we couldn't parse the standard structure, store the raw error
-            if error_info["error_type"] is None and error_info["reason"] is None:
-                error_info["reason"] = str(error)
-                
-        except Exception as parse_error:
-            # If parsing fails, store what we can
-            logger.warning(f"Failed to parse bulk error details: {parse_error}")
-            error_info["reason"] = str(error)
-        
-        return error_info
     
     async def search_documents(self, index: str, query: Dict[Any, Any], size: int = 100, request_timeout: int = 10):
         """
@@ -1984,28 +471,9 @@ class ElasticsearchService:
         - Requirement 2.4: Return specific error code indicating database unavailability
         """
         store = self._pg_store()
-        if store is not None:
-            return await store.search_documents(
-                index, query, size, request_timeout
-            )
-        try:
-            async def _do_search():
-                # Add size to query body if not already present
-                if "size" not in query:
-                    query["size"] = size
-                
-                response = self.client.search(
-                    index=index,
-                    body=query,
-                    request_timeout=request_timeout,
-                )
-                return response
-            
-            return await self._read_circuit_breaker.execute(_do_search)
-        except CircuitOpenException as e:
-            self._handle_circuit_breaker_exception(e)
-        except Exception as e:
-            self._handle_elasticsearch_error(f"search_documents({index})", e)
+        return await store.search_documents(
+            index, query, size, request_timeout
+        )
     
     async def multi_search(
         self,
@@ -2041,30 +509,7 @@ class ElasticsearchService:
             return {"responses": []}
 
         store = self._pg_store()
-        if store is not None:
-            return await store.multi_search(searches, request_timeout)
-
-        try:
-            async def _do_multi_search():
-                body: List[Dict[str, Any]] = []
-                for entry in searches:
-                    header = {
-                        "index": entry["index"],
-                        "ignore_unavailable": True,
-                    }
-                    body.append(header)
-                    body.append(dict(entry.get("query") or {}))
-                return self.client.msearch(
-                    body=body,
-                    request_timeout=request_timeout,
-                )
-
-            return await self._read_circuit_breaker.execute(_do_multi_search)
-        except CircuitOpenException as e:
-            self._handle_circuit_breaker_exception(e)
-        except Exception as e:
-            indices = ",".join(str(entry.get("index")) for entry in searches)
-            self._handle_elasticsearch_error(f"multi_search({indices})", e)
+        return await store.multi_search(searches, request_timeout)
 
     async def get_document(self, index: str, doc_id: str):
         """
@@ -2082,23 +527,7 @@ class ElasticsearchService:
         - Requirement 2.4: Return specific error code indicating database unavailability
         """
         store = self._pg_store()
-        if store is not None:
-            return await store.get_document(index, doc_id)
-        try:
-            async def _do_get():
-                response = self.client.get(index=index, id=doc_id)
-                return response["_source"]
-            
-            return await self._read_circuit_breaker.execute(_do_get)
-        except CircuitOpenException as e:
-            self._handle_circuit_breaker_exception(e)
-        except Exception as e:
-            # NotFoundError (404) means the doc doesn't exist — return None
-            # without logging at ERROR. This is an expected path for
-            # existence/idempotency probes.
-            if getattr(e, "status_code", None) == 404:
-                return None
-            self._handle_elasticsearch_error(f"get_document({index}, {doc_id})", e)
+        return await store.get_document(index, doc_id)
     
     async def delete_document(self, index: str, doc_id: str) -> bool:
         """
@@ -2109,21 +538,7 @@ class ElasticsearchService:
         if self._is_retired_index(index):
             return False
         store = self._pg_store()
-        if store is not None:
-            return await store.delete_document(index, doc_id)
-        try:
-            async def _do_delete():
-                self.client.delete(index=index, id=doc_id, refresh="wait_for")
-                return True
-
-            return await self._read_circuit_breaker.execute(_do_delete)
-        except CircuitOpenException as e:
-            self._handle_circuit_breaker_exception(e)
-        except Exception as e:
-            # NotFoundError means the doc doesn't exist — return False
-            if hasattr(e, 'status_code') and e.status_code == 404:
-                return False
-            self._handle_elasticsearch_error(f"delete_document({index}, {doc_id})", e)
+        return await store.delete_document(index, doc_id)
 
     async def get_all_documents(self, index: str, size: int = 1000):
         """

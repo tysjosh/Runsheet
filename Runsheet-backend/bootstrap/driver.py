@@ -192,44 +192,21 @@ async def initialize(app, container: ServiceContainer) -> None:
     _report_degradations(container)
 
     # ------------------------------------------------------------------
-    # Index setup, then the mapping-validator pass — in that order, in this
-    # module (R15.12).
+    # Index setup and the mapping-validator pass are gone with Elasticsearch
+    # (R15.12).
     #
-    # ``setup_driver_indices`` is invoked only by the seeder today
-    # (``seed_all_data.py:213``, ``:247``), so a deployment that skipped the
-    # seeder has driver indices Elasticsearch auto-created on first write with
-    # ``dynamic: true`` — the strict declarations are simply not in force.
-    # Calling it here creates what is absent and tightens ``dynamic`` on what
-    # already exists.
+    # Both existed for the same reason: a deployment that skipped the seeder had
+    # driver indices the cluster auto-created on first write with ``dynamic: true``,
+    # so the strict declarations were not in force, and the validator then added
+    # the missing fields. Neither failure mode exists against one Postgres table
+    # created by a migration.
     #
-    # The validator runs immediately after, in the same module, rather than
-    # relying on the earlier pass in ``bootstrap/agents.py``:
-    # ``validate_all`` skips an index that does not exist, so an index this
-    # boot has just created would go unvalidated until the next boot.
-    # Create-then-remediate in one place closes that window. Both steps are
-    # guarded separately — a failure to create one index should not cost the
-    # remediation of the others.
+    # What ``dynamic: strict`` did enforce and jsonb does not is rejection of an
+    # undeclared field. That protection now rests entirely on ``extra="forbid"`` in
+    # the driver-surface Pydantic models, which is upstream of the store and
+    # therefore applies to every write path — including the ones that used to reach
+    # the raw client.
     # ------------------------------------------------------------------
-    try:
-        from driver.services.driver_es_mappings import setup_driver_indices
-
-        logger.info("Setting up driver indices...")
-        setup_driver_indices(es_service)
-        logger.info("Driver indices ready")
-    except Exception as exc:
-        logger.error("Driver index setup failed (non-blocking): %s", exc)
-
-    try:
-        from services.mapping_validator import MappingValidator
-
-        mapping_validator = MappingValidator(es_service=es_service)
-        drift_items = await mapping_validator.validate_all()
-        await mapping_validator.remediate(drift_items)
-        logger.info("Driver mapping validation pass complete")
-    except Exception as exc:
-        logger.error(
-            "Driver mapping validation failed (non-blocking): %s", exc
-        )
 
     # ------------------------------------------------------------------
     # Mobile_Session — reads ``drivers_current`` so sign-in can fail with

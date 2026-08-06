@@ -23,7 +23,6 @@ async def initialize(app, container: ServiceContainer) -> None:
     """Create and register scheduling domain services."""
     global _delay_check_task
 
-    from scheduling.services.scheduling_es_mappings import setup_scheduling_indices
     from scheduling.services.job_service import JobService
     from scheduling.services.cargo_service import CargoService
     from scheduling.services.delay_detection_service import DelayDetectionService
@@ -46,12 +45,6 @@ async def initialize(app, container: ServiceContainer) -> None:
     es_service = container.es_service
 
     # Set up scheduling indices
-    try:
-        logger.info("Setting up scheduling indices...")
-        setup_scheduling_indices(es_service)
-        logger.info("Scheduling indices ready")
-    except Exception as e:
-        logger.warning("Failed to set up scheduling indices: %s", e)
 
     # Scheduling WebSocket manager
     scheduling_ws_manager = SchedulingWebSocketManager()
