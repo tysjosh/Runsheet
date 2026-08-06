@@ -36,23 +36,15 @@ logger = logging.getLogger(__name__)
 _MAX_ATTEMPTS = 10
 
 
-def _relay_target() -> str:
-    """Where projections are landing, for the log line only.
-
-    Read from settings rather than assumed, because the relay projects through
-    ``ElasticsearchService.index_document`` and therefore follows
-    ``DOCUMENT_STORE_BACKEND`` like every other write.
-    """
-    try:
-        from config.settings import get_settings
-
-        return (
-            "PostgreSQL (es_documents)"
-            if get_settings().document_store_is_postgres
-            else "Elasticsearch"
-        )
-    except Exception:  # noqa: BLE001 — a log line must never break the relay
-        return "the document store"
+#: Where projections are landing, for the log line only.
+#:
+#: This was read from settings while ``DOCUMENT_STORE_BACKEND`` existed, because the
+#: relay projects through ``ElasticsearchService.index_document`` and therefore
+#: followed the switch like every other write. The line used to say "to
+#: Elasticsearch" unconditionally, which under the flipped flag told an operator
+#: watching a soak the exact opposite of what was happening. There is one target
+#: now, so it is a constant.
+_RELAY_TARGET = "PostgreSQL (es_documents)"
 
 #: Postgres advisory-lock key identifying "the outbox relay". Arbitrary but
 #: fixed: any two processes using this constant contend for the same lock.
@@ -169,13 +161,8 @@ class OutboxRelay:
             # session_scope commits published_at / attempts updates atomically.
 
         if published:
-            # The target is whichever backend ``index_document`` routes to, so it
-            # is read rather than named. The line used to say "to Elasticsearch"
-            # unconditionally, which under ``DOCUMENT_STORE_BACKEND=postgres`` told
-            # an operator watching the soak the exact opposite of what was
-            # happening — the relay follows the switch like every other write.
             logger.info(
-                "Outbox relay published %d event(s) to %s", published, _relay_target()
+                "Outbox relay published %d event(s) to %s", published, _RELAY_TARGET
             )
         return published
 

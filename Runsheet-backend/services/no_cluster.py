@@ -35,11 +35,16 @@ Why not a plain mock that accepts everything
 Because that reintroduces the exact failure this migration keeps finding. A
 permissive null object would also swallow ``client.index(...)`` and
 ``client.search(...)``, so a data-plane call that still reached the raw client would
-silently do nothing and return nothing — a write that vanishes, with no error. The
-three remaining raw-client users are migration tooling
-(``persistence/rebuild_from_postgres.py``, ``scripts/seed_kfactor_demo.py``,
-``services/data_seeder.py``) and they are *supposed* to fail loudly here, because
-projecting into a cluster that is gone is a mistake worth hearing about.
+silently do nothing and return nothing — a write that vanishes, with no error.
+
+There are no raw-client users left. The last three were migration tooling — the
+rebuild tool (now ``persistence/rebuild_document_store.py``),
+``scripts/seed_kfactor_demo.py`` and ``services/data_seeder.py`` — and all three
+moved onto the facade, which is what ``index_document(..., stamp_timestamps=False)``
+exists for: they used the raw client to write a document without having its
+``updated_at`` overwritten. ``tests/unit/test_raw_elasticsearch_client_inventory.py``
+now pins the inventory at zero. This class is the backstop for the next one, and it
+is deliberately the loud kind.
 
 So the split is explicit: control plane no-ops, data plane raises.
 """

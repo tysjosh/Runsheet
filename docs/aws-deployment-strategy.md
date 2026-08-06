@@ -33,22 +33,26 @@ Everything else follows from these.
    spread across replicas — one replica runs all of it. Spreading it needs
    transaction-scoped locks per job, which is a larger change and is not
    required for safe deploys.
-2. **Scale out, not up.** The Elasticsearch client is the *synchronous*
-   `elasticsearch.Elasticsearch`, and `index_document` / `search_documents` call
-   it directly inside `async def` with no `asyncio.to_thread`. Every ES round
-   trip blocks the event loop. That is the mechanism behind the measured ceiling
-   (8× concurrency bought 1.8× throughput), and it means extra vCPU on one
-   process buys almost nothing — a second process buys a second event loop.
-   `uvicorn --workers N` is also viable now that fact 1 is fixed: each worker is
-   a process, and only one of them wins the sweep lock. More tasks is still
-   preferable to more workers per task, because it also buys AZ redundancy.
-3. **Postgres holds three guarantees nothing else can.** Invoice numbering,
-   idempotency-key uniqueness, and the credit-check `SELECT ... FOR UPDATE`.
-   Startup refuses staging/production without `DATABASE_URL` for exactly this
-   reason. Aurora is therefore load-bearing, not a cache.
-4. **Elasticsearch is not just a projection.** Three indices —
-   `customer_tanks`, `truck_compartments`, `fuel_stations` — have no Postgres
-   source and cannot be rebuilt from one. See
+2. **Scale out, not up.** The measured ceiling was 8× concurrency buying 1.8×
+   throughput, and the mechanism was the *synchronous* `elasticsearch.Elasticsearch`
+   client being called directly inside `async def` with no `asyncio.to_thread` —
+   every round trip blocked the event loop. **That client is gone**: the document
+   plane is `persistence/document_store.py`, which is SQLAlchemy async over the same
+   engine as everything else, so document operations no longer block the loop. The
+   conclusion still holds for a different reason — CPU-bound JSON and projection work
+   is single-threaded per process — but the headline number predates the removal and
+   should be re-measured before it is used for sizing.
+3. **Aurora holds everything.** Invoice numbering, idempotency-key uniqueness, the
+   credit-check `SELECT ... FOR UPDATE` — and, since the Elasticsearch removal, the
+   document plane (`es_documents`). Startup refuses staging/production without
+   `DATABASE_URL`, and `/health/ready` probes it, so a dormant persistence layer is
+   a dead service rather than a degraded one. Aurora is the single point of failure
+   by design; size and back it accordingly.
+4. **One store to back up.** Three indices — `customer_tanks`,
+   `truck_compartments`, `fuel_stations` — used to have no Postgres source and could
+   not be rebuilt from one, which made an Elasticsearch export a mandatory companion
+   to every Aurora snapshot. Migration `0008_fuel_asset_tables` closed that, and the
+   cluster is now gone entirely: an Aurora snapshot is the whole backup. See
    [docs/backup-and-restore.md](backup-and-restore.md).
 
 ## Service topology
@@ -65,13 +69,11 @@ Internet
         │
         ├──► Aurora PostgreSQL (writer endpoint only)      private subnets
         ├──► ElastiCache Redis (cluster mode DISABLED)     private subnets
-        ├──► Elastic Cloud (HTTPS, via NAT)                internet egress
         ├──► SuperTokens managed core (HTTPS, via NAT)     internet egress
         └──► KMS · S3 · Textract (VPC endpoints or NAT)
 
       ECS RunTask, one-shot, same image:
         · alembic upgrade head            (deploy step, never in the entrypoint)
-        · scripts.es_only_backup export   (scheduled, EventBridge Scheduler)
 ```
 
 Two AZs minimum for the ALB, the Aurora subnet group, and now the API service
@@ -96,21 +98,29 @@ Two consequences worth stating plainly:
   shortest interval is 60 s, so a 5 s gap is not observable. It is not a missed
   run, just a later one.
 - **Autoscaling the API service is now safe.** It was not before. Scale on ALB
-  request count or target-response-time rather than CPU, because ES calls block
-  the event loop (fact 2) and CPU under-reports load.
+  request count or target-response-time rather than CPU. That advice was originally
+  because blocking Elasticsearch calls made CPU under-report load; the blocking
+  client is gone, but request-count and latency remain the better signals for an
+  async service whose work is mostly I/O wait on Aurora.
 
 ### ALB health check: `/health/live`, not `/health/ready`
 
 This differs from the deploy runbook on purpose, and it matters more with several
 tasks, not less.
 
-`/health/ready` returns **503 when Elasticsearch is unreachable**. Wired into the
-target group, an Elastic Cloud blip marks *every* task unhealthy at once, because
-they all share the same dependency. ECS kills them, each replacement checks the
-same unreachable cluster and is also killed — a dependency wobble becomes a
-fleet-wide crash loop. Replicas do not help here; they all fail together.
-`/health/live` returns 200 with every datastore down, which is the correct signal
-for "should this process be restarted".
+`/health/ready` returns **503 when the document store is unreachable** — a
+`SELECT 1` against Aurora since the Elasticsearch removal, an Elastic Cloud ping
+before it. Wired into the target group, an Aurora blip or failover marks *every*
+task unhealthy at once, because they all share the same dependency. ECS kills them,
+each replacement checks the same unreachable database and is also killed — a
+dependency wobble becomes a fleet-wide crash loop. Replicas do not help here; they
+all fail together.
+
+Moving the probe from Elastic Cloud to Aurora **raises** the stakes rather than
+lowering them: Aurora failover is a routine, expected event with a 30–60 s window,
+and it is now the thing that would take the fleet down if this were wired to the
+target group. `/health/live` returns 200 with every datastore down, which is the
+correct signal for "should this process be restarted".
 
 So: **target group → `/health/live`**. Keep `/health/ready` as the deploy gate,
 checked by the deploy script after the task is running and before it is declared
@@ -241,34 +251,34 @@ Two things to know about how Redis is used here:
   conversation context and trips `SESSION_STORE_UNAVAILABLE` (503); it does not
   lose business records.
 
-## Elasticsearch: stay on Elastic Cloud
+## Elasticsearch: there isn't one
 
-The client is `elasticsearch==8.11.0`, connecting with `api_key` and using ILM
-(`setup_ilm_policies`, `apply_ilm_policies_to_indices`) plus strict mappings
-validated at boot. **Amazon OpenSearch is not a drop-in for this.** The 8.x
-client refuses to talk to OpenSearch, ILM is Elastic-specific (OpenSearch has
-ISM), and OpenSearch Serverless additionally requires SigV4 request signing that
-nothing in `services/elasticsearch_service.py` does.
+**Nothing to provision, nothing to decide.** This section used to argue for staying
+on Elastic Cloud rather than moving to Amazon OpenSearch, and to price that move as
+a project: the 8.x client refuses to talk to OpenSearch, ILM is Elastic-specific
+(OpenSearch has ISM), and OpenSearch Serverless needs SigV4 signing the client did
+not do.
 
-So: keep Elastic Cloud, reachable over the internet through NAT (or over an
-AWS PrivateLink Elastic deployment if you want to avoid NAT egress). Migrating to
-OpenSearch is a project — client swap, ILM→ISM rewrite, SigV4 auth, and
-re-validating every strict mapping — and it should be a deliberate decision, not
-a side effect of moving to AWS.
+That decision is moot. The document plane is `persistence/document_store.py`, which
+translates the Elasticsearch query DSL to SQL over a `jsonb` column in the same
+Aurora cluster. The `elasticsearch` dependency, the ILM policies, the strict-mapping
+boot validation and the `ELASTIC_*` settings are all gone. See
+[docs/elasticsearch-to-postgres-migration.md](elasticsearch-to-postgres-migration.md).
 
-**The three ES-only indices no longer need their own backup.** Migration
-`0008_fuel_asset_tables` gave `customer_tanks`, `truck_compartments` and
-`fuel_stations` Postgres tables, so an Aurora snapshot plus
-`rebuild_from_postgres --all` covers them and `ES_ONLY_INDICES` is empty. The
-scheduled `es_only_backup export` task is no longer required; the script refuses
-its default scope rather than writing an empty manifest that looks like a
-successful backup.
+What this removes from an AWS deployment:
 
-If you still want a whole-cluster Elasticsearch export (reasonable while the
-ES → Postgres migration is in flight), schedule `es_only_backup export --all` as
-an EventBridge Scheduler → ECS RunTask. One gap remains: the script writes to a
-local `--out-dir` and has no S3 support, so the task must copy the directory to S3
-afterwards (`boto3` is available in the image; the AWS CLI is not).
+- one managed service and its subscription;
+- **the NAT egress path that existed for it** — check whether anything else still
+  needs NAT before keeping it;
+- one secret (`ELASTIC_API_KEY`) and one plain variable (`ELASTIC_ENDPOINT`);
+- the scheduled `es_only_backup export` RunTask, and with it the gap that the
+  script wrote to a local `--out-dir` with no S3 support;
+- the OpenSearch migration decision entirely.
+
+What it concentrates: Aurora is now the only stateful dependency, so its sizing,
+failover behaviour and snapshot schedule carry all the weight. The `jsonb` document
+table is indexed with GIN; a load test against the real instance class is the way to
+size it, not extrapolation from the old split-store baseline.
 
 ## Configuration and secrets
 
@@ -278,7 +288,6 @@ Startup refuses staging/production without these, so they are not optional:
 |---|---|
 | `DATABASE_URL` | Contains the Aurora password. `postgresql+psycopg://…@<writer-endpoint>:5432/runsheet` |
 | `REDIS_URL` | Contains the AUTH token when TLS/AUTH is on |
-| `ELASTIC_API_KEY` | Elastic Cloud credential |
 | `SUPERTOKENS_API_KEY` | Managed-core credential |
 | `VOICE_API_KEY_SALT` | Not enforced at startup; defaults to `""` and silently derives every stored key hash from an empty salt |
 | `GEMINI_API_KEY` | The agent stack's LLM credential. Startup refuses staging/production without it unless `AGENT_LLM_PROVIDER=vertex_ai`, which needs Google ADC — on Fargate that means mounting a GCP service-account key, so the API key is the simpler path here |
@@ -286,7 +295,6 @@ Startup refuses staging/production without these, so they are not optional:
 | Plain task-definition environment | Value |
 |---|---|
 | `ENVIRONMENT` | `production` / `staging` |
-| `ELASTIC_ENDPOINT` | Elastic Cloud URL |
 | `SUPERTOKENS_CONNECTION_URI` | Managed core URL |
 | `SUPERTOKENS_API_DOMAIN` / `SUPERTOKENS_WEBSITE_DOMAIN` | Public backend and frontend origins |
 | `CORS_ORIGINS` | JSON array. Production **rejects** any `localhost` origin |
@@ -346,15 +354,16 @@ CMK with an encryption-context condition on `tenant_id`; `s3:GetObject` /
 ## Image and migration flow
 
 CI already builds and checks the image (`docker-image` job: refuses leaked
-`.env.*`, venv, `.git`, tests; refuses uid 0; boots against a real
-Elasticsearch). Extend that job to push to ECR on the default branch, tagged with
-the commit SHA — never `latest`, because a rollback needs a name that still means
-the same bytes tomorrow.
+`.env.*`, venv, `.git`, tests; refuses uid 0; boots against a real PostgreSQL with
+the migration chain applied, and confirms `/health/ready` → 200 and `/api/orders` →
+401). Extend that job to push to ECR on the default branch, tagged with the commit
+SHA — never `latest`, because a rollback needs a name that still means the same bytes
+tomorrow.
 
 Deploy order, all of it from the runbook, mapped onto AWS primitives:
 
-1. **Snapshot.** Aurora manual snapshot. No companion Elasticsearch export is
-   needed — every index is rebuildable from Postgres.
+1. **Snapshot.** Aurora manual snapshot. That is the whole backup — there is no
+   second store to export.
 2. **Migrate.** `ecs run-task` with the new image and `alembic upgrade head`.
    One task, waited on to completion, exit code checked. Not in the app
    entrypoint — the runbook and the Dockerfile both say why.
@@ -445,13 +454,12 @@ target** or **target response time**, not CPU. Two bounds to set deliberately:
 - **Whether a destructive migration gets a serialised deploy.** A rolling deploy
   now runs old and new code together against the migrated schema. That is a
   per-migration judgement, not a standing setting.
-- **Whether to stay on Elastic Cloud long term.** Staying is the low-risk choice
-  and the one this document assumes. Moving to OpenSearch is a real project;
-  price it before agreeing to it.
-- **Whether the ES-only snapshot window is acceptable.** Anything written to
-  `customer_tanks` / `truck_compartments` / `fuel_stations` between scheduled
-  exports is lost with the cluster. `truck_compartments.last_loaded_product`
-  gates a cross-contamination check, so weigh that one first.
+- Two decisions stood here and are both **closed**: whether to stay on Elastic
+  Cloud long term, and whether the ES-only snapshot window was acceptable. There is
+  no cluster and no separate snapshot; `customer_tanks`, `truck_compartments` and
+  `fuel_stations` have Aurora tables, so `truck_compartments.last_loaded_product` —
+  the field that gates a cross-contamination check — is covered by the same snapshot
+  as everything else.
 - **Multi-tenancy and multi-region.** Single region, single environment per
   account assumed throughout. Nothing here has been designed for a second
   region.
@@ -460,6 +468,7 @@ target** or **target response time**, not CPU. Two bounds to set deliberately:
   client IP only via `X-Forwarded-For`. Whether that is trusted, and whether a
   WAF rate rule should sit in front, is an open decision.
 - **Cost.** No estimate here. The shape (one small Fargate task, one Aurora
-  cluster, one small Redis replication group, plus existing Elastic Cloud and
-  SuperTokens subscriptions) is enough to price, but the ACU/instance sizing
-  needs a load test against the real environment first.
+  cluster, one small Redis replication group, plus the SuperTokens subscription) is
+  enough to price, but the ACU/instance sizing needs a load test against the real
+  environment first — and it should be a fresh one, since Aurora now carries the
+  document plane as well.

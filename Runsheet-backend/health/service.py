@@ -193,20 +193,16 @@ class HealthCheckService:
     
     @staticmethod
     def _document_store_name() -> str:
-        """``postgres`` or ``elasticsearch`` — whichever actually serves documents.
+        """The store that serves documents. ``postgres``, and only that now.
 
-        The reported dependency name follows what was probed rather than staying
-        ``elasticsearch`` forever, so an operator reading a health payload can tell
-        which store the check exercised. Both names are critical (see
-        :meth:`_determine_overall_status`), because in either case a failure means documents
-        are unreachable.
+        This read ``document_store_backend`` while the switch existed, so a health
+        payload named the store the check had actually exercised rather than saying
+        ``elasticsearch`` forever. Kept as a method rather than inlining the string
+        because it is the reported dependency name in every branch below and in
+        :meth:`_determine_overall_status`, which treats it as critical: a failure
+        means documents are unreachable.
         """
-        try:
-            from config.settings import get_settings
-
-            return "postgres" if get_settings().document_store_is_postgres else "elasticsearch"
-        except Exception:  # noqa: BLE001 — a settings hiccup must not fail the probe
-            return "elasticsearch"
+        return "postgres"
 
     async def _check_document_store(self) -> DependencyHealth:
         """
@@ -272,36 +268,18 @@ class HealthCheckService:
     async def _ping_document_store(self) -> bool:
         """Probe the store that serves documents.
 
-        On Postgres this is a real query — ``SELECT 1`` through the same engine the
-        document store uses, so a readiness probe fails when the database is
-        unreachable rather than when a cluster nobody reads is down.
+        A real query — ``SELECT 1`` through the same engine the document store uses —
+        so a readiness probe fails when the database is unreachable. It used to ping
+        the Elasticsearch cluster, which by the end of the migration meant readiness
+        tracked a cluster nothing read: the probe would have gone red on a stopped
+        cluster while every request succeeded, and green on a healthy cluster while
+        Postgres was down.
         """
-        if self._document_store_name() == "postgres":
-            from persistence.database import session_scope
-            from sqlalchemy import text
+        from persistence.database import session_scope
+        from sqlalchemy import text
 
-            async with session_scope() as session:
-                return bool((await session.execute(text("SELECT 1"))).scalar_one() == 1)
-        return await self._ping_elasticsearch()
-    
-    async def _ping_elasticsearch(self) -> bool:
-        """
-        Ping Elasticsearch to check connectivity.
-        
-        This method wraps the synchronous Elasticsearch ping in an async context.
-        
-        Returns:
-            bool: True if Elasticsearch is reachable, False otherwise
-        """
-        # The Elasticsearch client's ping() is synchronous, so we run it in a thread pool
-        loop = asyncio.get_event_loop()
-        
-        def _sync_ping() -> bool:
-            if self.es_service is None or self.es_service.client is None:
-                return False
-            return self.es_service.client.ping()
-        
-        return await loop.run_in_executor(None, _sync_ping)
+        async with session_scope() as session:
+            return bool((await session.execute(text("SELECT 1"))).scalar_one() == 1)
     
     async def _check_session_store(self) -> DependencyHealth:
         """

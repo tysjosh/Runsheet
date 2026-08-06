@@ -16,8 +16,7 @@ the failure was moved to startup where it is visible.
 
 | Variable | Why it is required |
 |---|---|
-| `ELASTIC_ENDPOINT`, `ELASTIC_API_KEY` | Search and every projection read |
-| `DATABASE_URL` | Invoice numbering, idempotency uniqueness, credit-check row lock. A dormant persistence layer silently loses all three |
+| `DATABASE_URL` | **Everything.** Invoice numbering, idempotency uniqueness, credit-check row lock — and, since Elasticsearch was removed, the document plane too: `/health/ready` probes it, and every document read and write goes to `es_documents`. A dormant persistence layer is now a dead service, not a degraded one |
 | `REDIS_URL` | Session store (when `SESSION_STORE_TYPE=redis`) |
 | `SUPERTOKENS_CONNECTION_URI`, `SUPERTOKENS_API_KEY` | Session verification. `main.py` fails closed at import if unset, in every environment |
 | `CORS_ORIGINS` | Production rejects any `localhost` / `127.0.0.1` origin |
@@ -59,26 +58,20 @@ scripts/backup_restore.sh dump "$DATABASE_URL" "runsheet-$(date -u +%Y%m%dT%H%M%
 The script verifies the archive is readable before reporting success — a dump
 nobody has read back is a hope, not a backup.
 
-Every Elasticsearch index is now rebuildable from Postgres with
-`python -m persistence.rebuild_from_postgres --all`. `customer_tanks`,
-`truck_compartments` and `fuel_stations` were the three that were not, until
-migration `0008_fuel_asset_tables` gave them Postgres tables; the ES-only list is
-empty and `scripts.es_only_backup` refuses its default scope rather than writing an
-empty manifest. Whole-cluster export, if you want one:
-
-```sh
-python -m scripts.es_only_backup export --all --out-dir ./es-full-backup
-```
+**This dump is now the entire backup.** There is no second store to snapshot:
+Elasticsearch is gone and the document plane is the `es_documents` table in this
+same database. A separate `scripts.es_only_backup export` step stood here and has
+been deleted along with the script.
 
 See [docs/backup-and-restore.md](backup-and-restore.md) for the restore path and
 the drills that prove both work.
 
 > ⚠️ **The migration chain contains destructive revisions.**
 > `0007_drop_shipments_current` **drops the `shipments_current` table**. It is
-> irreversible without this dump. Shipments now live only in Elasticsearch.
+> irreversible without this dump; shipment documents survive in `es_documents`.
 > `0008_fuel_asset_tables` is additive on the way up, but its `downgrade()` drops
-> the three fuel-asset tables — and once Elasticsearch is retired those are the
-> only copy.
+> the three fuel-asset tables, and with Elasticsearch retired this dump is the only
+> copy of what they hold.
 
 ## 3. Apply migrations — once, from one place
 
@@ -86,7 +79,6 @@ the drills that prove both work.
 docker run --rm \
   -e ENVIRONMENT="$ENVIRONMENT" \
   -e DATABASE_URL="$DATABASE_URL" \
-  -e ELASTIC_ENDPOINT="$ELASTIC_ENDPOINT" -e ELASTIC_API_KEY="$ELASTIC_API_KEY" \
   -e SUPERTOKENS_CONNECTION_URI="$SUPERTOKENS_CONNECTION_URI" \
   -e SUPERTOKENS_API_KEY="$SUPERTOKENS_API_KEY" \
   -e REDIS_URL="$REDIS_URL" -e CORS_ORIGINS="$CORS_ORIGINS" \
@@ -110,8 +102,11 @@ Start the image with the environment from step 0. `PORT` defaults to 8080.
 Point the platform's readiness gate at **`/health/ready`**, not `/health/live`
 and not `/health`:
 
-- `/health/ready` — checks Elasticsearch and returns **503** when a dependency
-  is unreachable. This is the rollout gate.
+- `/health/ready` — probes the document store with `SELECT 1` through the engine it
+  uses, and returns **503** when a dependency is unreachable. This is the rollout
+  gate. It used to probe the Elasticsearch cluster, which by the end of the
+  migration would have been backwards: red on a stopped cluster while every request
+  succeeded, green on a healthy cluster while Postgres was down.
 - `/health/live` — liveness only. Returns 200 with every datastore down, which
   is correct for restart decisions and useless for shifting traffic.
 - `/health`, `/api/health` — banner endpoints. Do not gate on them.
@@ -122,7 +117,7 @@ start period; first readiness locally is ~20s.
 ## 5. Verify before shifting traffic
 
 ```sh
-curl -fsS "$BASE/health/ready"            # 200, elasticsearch healthy
+curl -fsS "$BASE/health/ready"            # 200, dependency name "postgres"
 curl -o /dev/null -w '%{http_code}\n' "$BASE/api/orders"   # 401 — auth is enforced
 ```
 
@@ -145,15 +140,16 @@ docker run ... runsheet-backend:"$PREVIOUS_SHA"
 ```
 
 If a migration must be undone, restore the step-2 dump — full procedure in
-[docs/backup-and-restore.md](backup-and-restore.md), including the Elasticsearch
-re-projection that has to follow it. Do **not** rely on `alembic downgrade` past
+[docs/backup-and-restore.md](backup-and-restore.md). There is no re-projection step
+after it any more; the document plane is in the dump. Do **not** rely on
+`alembic downgrade` past
 `0007_drop_shipments_current`: the table is dropped and the rows are gone, so the
 downgrade recreates an empty table and the data is only in the dump.
 
 ## Not covered here
 
 - **Infrastructure provisioning.** There is no Terraform/CDK/Kubernetes in this
-  repo; the compute, managed Postgres, Elasticsearch and Redis are provisioned
+  repo; the compute, managed Postgres and Redis are provisioned
   out of band. [docs/aws-deployment-strategy.md](aws-deployment-strategy.md) is
   the target architecture for AWS (ECS Fargate, Aurora PostgreSQL, ElastiCache
   Redis) and maps each step above onto an AWS primitive — including why the ALB
@@ -166,7 +162,8 @@ downgrade recreates an empty table and the data is only in the dump.
   pre-migration snapshot, not a backup policy. The restore path itself is
   executable and drilled on every pull request — see
   [docs/backup-and-restore.md](backup-and-restore.md) — but nothing is
-  scheduled, and the three non-projected Elasticsearch indices have no backup
-  at all.
+  scheduled. The gap that used to sit here, three non-projected Elasticsearch
+  indices with no backup at all, is closed: they have Postgres tables and the dump
+  covers them.
 - **Load characteristics.** No load test has been run against this stack, so the
   replica count and the outbox relay's drain rate under load are unmeasured.

@@ -136,15 +136,15 @@ async def main() -> int:
         )
     print(f"seeded {n_days} weather_observations for zip {ZIP} (hdd={HDD_PER_DAY}/day)")
 
-    # 3. Delivered fuel orders. Write via the raw ES client so the historical
-    #    delivery dates survive — es.index_document() force-stamps updated_at
-    #    to "now", which would make every delivery look simultaneous and
-    #    starve the prior-delivery lookup the variance window needs.
+    # 3. Delivered fuel orders. ``stamp_timestamps=False`` so the historical
+    #    delivery dates survive — the default force-stamps updated_at to "now",
+    #    which would make every delivery look simultaneous and starve the
+    #    prior-delivery lookup the variance window needs.
     for order_id, d, gallons in DELIVERIES:
-        es.client.index(
-            index=FUEL_ORDERS_CURRENT_INDEX,
-            id=order_id,
-            document={
+        await es.index_document(
+            FUEL_ORDERS_CURRENT_INDEX,
+            order_id,
+            {
                 "order_id": order_id,
                 "tenant_id": tenant_id,
                 "customer_id": CUSTOMER_ID,
@@ -155,20 +155,12 @@ async def main() -> int:
                 "created_at": _iso(d),
                 "updated_at": _iso(d),
             },
+            stamp_timestamps=False,
         )
     print(f"seeded {len(DELIVERIES)} delivered orders for {TANK_ID}")
 
-    # Make everything searchable immediately.
-    for index in (
-        CUSTOMERS_CURRENT_INDEX,
-        CUSTOMER_TANKS_INDEX,
-        WEATHER_OBSERVATIONS_INDEX,
-        FUEL_ORDERS_CURRENT_INDEX,
-    ):
-        try:
-            es.client.indices.refresh(index=index)
-        except Exception:
-            pass
+    # No refresh step: writes land in Postgres inside the same transaction, so
+    # they are visible to the next read with no indexing delay.
 
     print(
         "\nDone. Open K-Factor (Fuel Ops → K-Factor), click 'Consumption' on "

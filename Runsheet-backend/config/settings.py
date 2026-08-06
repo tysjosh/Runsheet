@@ -96,15 +96,13 @@ class Settings(BaseSettings):
         description="Deployment environment (development, staging, production)"
     )
     
-    # Elasticsearch Configuration
-    elastic_endpoint: str = Field(
-        ...,
-        description="Elasticsearch endpoint URL"
-    )
-    elastic_api_key: str = Field(
-        ...,
-        description="Elasticsearch API key for authentication"
-    )
+    # Elasticsearch: removed. ``ELASTIC_ENDPOINT`` and ``ELASTIC_API_KEY`` were
+    # REQUIRED fields here, so every process — including one-shot scripts and the
+    # test suite — refused to start without them. The document plane is PostgreSQL
+    # (``es_documents``) and there is no cluster left to point at, so they are gone
+    # rather than defaulted: a required-to-optional-to-ignored setting is how a
+    # placeholder endpoint survives into production looking configured.
+    # See docs/elasticsearch-to-postgres-migration.md.
     
     # Google Cloud / Gemini Configuration
     google_cloud_project: str = Field(
@@ -252,33 +250,26 @@ class Settings(BaseSettings):
         le=60.0,
         description="OutboxRelay idle poll interval in seconds.",
     )
-    document_store_backend: str = Field(
-        default="elasticsearch",
-        description=(
-            "Where ElasticsearchService's document operations (index / update / "
-            "search / get / delete / bulk / msearch) are served from. "
-            "'elasticsearch' is the legacy path. 'postgres' routes them to "
-            "persistence.document_store, which translates the query DSL to SQL "
-            "over a jsonb column and requires database_url. Call sites are "
-            "unchanged either way — the response shapes are identical — so this "
-            "is a per-environment switch and a rollback is flipping it back. "
-            "Phase 4 of the Elasticsearch to Postgres migration; see "
-            "docs/elasticsearch-to-postgres-migration.md. Default "
-            "'elasticsearch' so adopting the Postgres path is deliberate."
-        ),
-    )
+    # ``DOCUMENT_STORE_BACKEND`` is gone. It chose between Elasticsearch and
+    # Postgres for ElasticsearchService's document operations; there is only one
+    # backend now, so a switch would only ever select a path that does not exist.
+    # Rolling back is no longer a flag — it means restoring the cluster from
+    # ``es-full-backup`` and reverting the Phase 5/6 commits.
     retired_es_indices_raw: str = Field(
         default="",
         alias="RETIRED_ES_INDICES",
         description=(
-            "Comma-separated (or JSON array) list of Elasticsearch indices "
-            "retired (migrated to the Postgres source-of-truth and DROPPED in "
-            "migration Phase 6). Writes to these indices (direct "
+            "Comma-separated (or JSON array) list of document indices retired in "
+            "favour of a relational source-of-truth. Writes to them (direct "
             "index/update/delete AND outbox-relay projection) are silently "
-            "skipped so a dropped index is not recreated with dynamic "
-            "mappings. Reversible: remove an index from this list (and rebuild "
-            "it via persistence.rebuild_from_postgres) to resume projecting. "
-            "Read it via the ``retired_es_indices`` property."
+            "skipped, so nothing accumulates document rows that no read path "
+            "consults. Named for Elasticsearch because that is what it originally "
+            "kept indices from being recreated in; it still earns its keep against "
+            "the Postgres document store, where the cost is redundant rows in "
+            "es_documents rather than a dynamically-mapped index. Reversible: "
+            "remove an index from this list (and rebuild it via "
+            "persistence.rebuild_document_store) to resume projecting. Read it "
+            "via the ``retired_es_indices`` property."
         ),
     )
 
@@ -821,25 +812,6 @@ class Settings(BaseSettings):
         extra="ignore"
     )
     
-    @field_validator("elastic_endpoint")
-    @classmethod
-    def validate_elastic_endpoint(cls, v: str) -> str:
-        """Validate that elastic_endpoint is not empty and is a valid URL format."""
-        if not v or not v.strip():
-            raise ValueError("elastic_endpoint cannot be empty")
-        v = v.strip()
-        if not (v.startswith("http://") or v.startswith("https://")):
-            raise ValueError("elastic_endpoint must be a valid HTTP/HTTPS URL")
-        return v
-    
-    @field_validator("elastic_api_key")
-    @classmethod
-    def validate_elastic_api_key(cls, v: str) -> str:
-        """Validate that elastic_api_key is not empty."""
-        if not v or not v.strip():
-            raise ValueError("elastic_api_key cannot be empty")
-        return v.strip()
-    
     @field_validator("google_cloud_project")
     @classmethod
     def validate_google_cloud_project(cls, v: str) -> str:
@@ -977,38 +949,16 @@ class Settings(BaseSettings):
                 pass
         return [part.strip() for part in raw.split(",") if part.strip()]
 
-    @property
-    def document_store_is_postgres(self) -> bool:
-        """True when document operations should be served from Postgres.
-
-        Requires ``database_url``: routing reads to a dormant persistence layer
-        would fail every request, so the flag is inert without one and the
-        service stays on Elasticsearch. Checked as a property rather than at
-        validation time so the flag can be flipped per environment without
-        making ``database_url`` conditionally required.
-        """
-        return (
-            str(self.document_store_backend).strip().lower() == "postgres"
-            and bool(self.database_url)
-        )
-
-    @model_validator(mode="after")
-    def validate_document_store_backend(self) -> "Settings":
-        """Reject a misspelled backend instead of silently using Elasticsearch.
-
-        ``DOCUMENT_STORE_BACKEND=postgresql`` (or ``pg``, or a stray space) would
-        otherwise leave the service on the legacy path while the operator
-        believed the cutover had happened — the migration would look complete and
-        nothing would have moved.
-        """
-        value = str(self.document_store_backend).strip().lower()
-        if value not in ("elasticsearch", "postgres"):
-            raise ValueError(
-                "document_store_backend must be 'elasticsearch' or 'postgres', "
-                f"got {self.document_store_backend!r}"
-            )
-        self.document_store_backend = value
-        return self
+    # ``document_store_is_postgres`` and its backend validator are gone with the
+    # switch. Both existed to answer "which store is this environment on?", and the
+    # answer is now structural: ``PostgresDocumentStore`` is the only
+    # implementation. Callers that branched on it (the outbox relay's log label,
+    # the health check's probe, the client construction) are unconditional.
+    #
+    # The property also required ``database_url`` before it would report Postgres,
+    # so a missing URL silently kept an environment on Elasticsearch. That failure
+    # mode is gone in the honest direction: without ``database_url`` the store now
+    # fails loudly rather than routing elsewhere.
 
     @model_validator(mode="after")
     def validate_session_store_config(self) -> "Settings":

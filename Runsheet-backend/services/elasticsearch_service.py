@@ -141,41 +141,26 @@ class ElasticsearchService:
             logger.info("⏭️  Skipping Elasticsearch connection in test environment")
             return
 
-        # Phase 5: no cluster when the document plane is Postgres.
-        #
-        # This method used to raise on a failed ping, and this class instantiates a
-        # module-level singleton, so stopping the cluster did not degrade the
-        # service — it stopped the application from IMPORTING, inside
-        # ``import data_endpoints``. Verified by stopping the container: uvicorn
-        # failed at ``ConnectionError: Failed to ping Elasticsearch`` before any
-        # route was registered.
-        #
-        # ``NoClusterClient`` makes the control plane a no-op and the data plane
-        # raise, so the eighteen ``setup_*_indices`` functions, the ILM setup and the
-        # schema validators below all become no-ops without eighteen guards, while a
-        # document call that still reached the raw client is heard rather than
-        # silently dropped. See services/no_cluster.py.
-        if self.settings.document_store_is_postgres:
-            from services.no_cluster import NoClusterClient
-
-            self.client = NoClusterClient()
-            logger.info(
-                "Elasticsearch is not used: the document plane is PostgreSQL "
-                "(DOCUMENT_STORE_BACKEND=postgres). Index and ILM management are "
-                "no-ops; a raw document call will raise."
-            )
-            return
-
-        # Phase 6: there is no Elasticsearch branch left to take.
+        # There is no Elasticsearch branch left to take.
         #
         # This method used to build an ``Elasticsearch`` client, ping it, and then
         # run ILM setup, index creation and schema validation — 1,089 lines of
         # cluster management that are gone, because there is no cluster and one
-        # Postgres table needs no managing.
+        # Postgres table needs no managing. It also used to RAISE on a failed ping,
+        # and this class instantiates a module-level singleton, so stopping the
+        # cluster did not degrade the service — it stopped the application from
+        # IMPORTING, inside ``import data_endpoints``. Verified by stopping the
+        # container: uvicorn failed at ``ConnectionError: Failed to ping
+        # Elasticsearch`` before any route was registered.
         #
-        # ``ELASTIC_API_KEY`` / ``ELASTIC_ENDPOINT`` are no longer read. Rolling
-        # back to Elasticsearch is not a flag any more: it would mean restoring the
-        # cluster from ``es-full-backup`` and reverting this commit.
+        # ``NoClusterClient`` makes the control plane a no-op and the data plane
+        # raise, so the remaining ``.client`` attribute accesses are harmless while a
+        # document call that reached the raw client is heard rather than silently
+        # dropped. See services/no_cluster.py.
+        #
+        # ``ELASTIC_API_KEY`` / ``ELASTIC_ENDPOINT`` are gone from settings entirely.
+        # Rolling back to Elasticsearch is not a flag any more: it would mean
+        # restoring the cluster from ``es-full-backup`` and reverting Phases 5 and 6.
         from services.no_cluster import NoClusterClient
 
         self.client = NoClusterClient()
@@ -270,18 +255,30 @@ class ElasticsearchService:
 
     
     # CRUD Operations
-    async def index_document(self, index: str, doc_id: str, document: Dict[Any, Any]):
+    async def index_document(
+        self,
+        index: str,
+        doc_id: str,
+        document: Dict[Any, Any],
+        *,
+        stamp_timestamps: bool = True,
+    ):
         """
-        Index a single document with circuit breaker protection.
-        
+        Index a single document.
+
+        ``stamp_timestamps=False`` preserves the document's own ``created_at`` /
+        ``updated_at`` instead of overwriting them. Only for seeding or restoring
+        data whose timestamps are the data — see the store's docstring.
+
         Validates:
-        - Requirement 3.5: Implement circuit breakers for Elasticsearch
         - Requirement 2.4: Return specific error code indicating database unavailability
         """
         if self._is_retired_index(index):
             return {"result": "skipped_retired_index"}
         store = self._pg_store()
-        return await store.index_document(index, doc_id, document)
+        return await store.index_document(
+            index, doc_id, document, stamp_timestamps=stamp_timestamps
+        )
 
     async def update_document(self, index: str, doc_id: str, partial_doc: Dict[Any, Any]):
         """

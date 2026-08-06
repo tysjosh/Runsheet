@@ -88,10 +88,8 @@ jobs:
 
       - name: Run tests with coverage
         env:
-          ELASTICSEARCH_URL: "http://localhost:9200"
-          ELASTIC_ENDPOINT: "http://localhost:9200"
-          ELASTIC_API_KEY: "mock-key-for-ci"
-          ELASTICSEARCH_API_KEY: "mock-key-for-ci"
+          # ELASTIC_ENDPOINT / ELASTIC_API_KEY were here because config.settings
+          # made them required fields. Both are gone with the cluster.
           REDIS_URL: "redis://localhost:6379"
           JWT_SECRET: "ci-test-jwt-secret"
           JWT_ALGORITHM: "HS256"
@@ -164,10 +162,6 @@ jobs:
 
       - name: Generate endpoint registry
         env:
-          ELASTICSEARCH_URL: "http://localhost:9200"
-          ELASTIC_ENDPOINT: "http://localhost:9200"
-          ELASTIC_API_KEY: "mock-key-for-ci"
-          ELASTICSEARCH_API_KEY: "mock-key-for-ci"
           REDIS_URL: "redis://localhost:6379"
           JWT_SECRET: "ci-test-jwt-secret"
           JWT_ALGORITHM: "HS256"
@@ -204,23 +198,18 @@ jobs:
           --health-retries 5
     # Job-level so all three alembic steps share it. Every step here imports
     # ``config.settings``, which validates the whole configuration before alembic
-    # gets a chance to run, and ``elastic_endpoint`` / ``elastic_api_key`` are
-    # required fields. Locally they come from ``.env.development``, which is
-    # gitignored and therefore absent on a runner, so without these the job died
-    # at "Missing required fields: elastic_endpoint, elastic_api_key" before
-    # touching a migration. Nobody saw it because this job declares
-    # ``needs: backend-tests``, which was failing earlier for an unrelated reason.
+    # gets a chance to run.
     #
-    # The values are placeholders: nothing in this job reaches Elasticsearch.
-    # They exist only to satisfy settings validation, and match what the other
-    # jobs already pass.
+    # ``ELASTIC_ENDPOINT`` / ``ELASTIC_API_KEY`` used to be here: they were
+    # REQUIRED settings fields, and locally they came from the gitignored
+    # ``.env.development``, so without placeholders this job died at "Missing
+    # required fields: elastic_endpoint, elastic_api_key" before touching a
+    # migration. Nobody saw it because the job declares ``needs: backend-tests``,
+    # which was failing earlier for an unrelated reason. Both fields are gone from
+    # settings now, so the placeholders went with them.
     env:
       ENVIRONMENT: "development"
       DATABASE_URL: "postgresql+psycopg://runsheet:runsheet@localhost:5432/runsheet"
-      ELASTIC_ENDPOINT: "http://localhost:9200"
-      ELASTIC_API_KEY: "mock-key-for-ci"
-      ELASTICSEARCH_URL: "http://localhost:9200"
-      ELASTICSEARCH_API_KEY: "mock-key-for-ci"
       JWT_SECRET: "ci-test-jwt-secret"
       JWT_ALGORITHM: "HS256"
     defaults:
@@ -323,12 +312,13 @@ jobs:
       # by the cheaper check first.
       - name: Document store — query translation and store behaviour
         env:
-          # ENVIRONMENT=test, overriding this job's development default, because
-          # ``ElasticsearchService.connect()`` raises outside the test environment
-          # and this job has no Elasticsearch service — importing
-          # tests/conftest.py therefore failed before a single test ran. These
-          # tests never touch Elasticsearch; they need PostgreSQL, which the job
-          # does have.
+          # ENVIRONMENT=test, overriding this job's development default. It was
+          # originally needed because ``ElasticsearchService.connect()`` raised on a
+          # failed ping outside the test environment and this job had no
+          # Elasticsearch service, so importing tests/conftest.py failed before a
+          # single test ran. ``connect()`` cannot fail any more — there is no
+          # cluster to ping — but the tests are written for the test environment
+          # and this is where the rest of the suite runs them.
           ENVIRONMENT: "test"
           # Required by settings validation in a non-development environment when
           # session_store_type is redis (the default). Never dialled: no test here
@@ -505,27 +495,37 @@ jobs:
 
       - name: Start the image and wait for readiness
         run: |
-          # Elasticsearch is the only dependency /health/ready checks, so that is
-          # the only one this job stands up. Postgres and Redis are exercised by
-          # backend-tests; what is being proved here is that the IMAGE boots —
-          # imports resolve, the venv is intact, uvicorn binds.
+          # PostgreSQL is the only dependency /health/ready checks, so that is the
+          # only one this job stands up. It used to be Elasticsearch, which was the
+          # readiness dependency until the document plane moved: the probe now runs
+          # SELECT 1 through the same engine the document store uses. Redis is
+          # exercised by backend-tests; what is being proved here is that the IMAGE
+          # boots — imports resolve, the venv is intact, uvicorn binds.
           docker network create ci-net
-          docker run -d --name es --network ci-net \
-            -e discovery.type=single-node \
-            -e xpack.security.enabled=false \
-            -e ES_JAVA_OPTS="-Xms512m -Xmx512m" \
-            docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+          docker run -d --name pg --network ci-net \
+            -e POSTGRES_USER=runsheet \
+            -e POSTGRES_PASSWORD=runsheet \
+            -e POSTGRES_DB=runsheet \
+            postgres:16-alpine
 
           for i in $(seq 1 60); do
-            if docker run --rm --network ci-net curlimages/curl:latest \
-                 -fsS http://es:9200 >/dev/null 2>&1; then break; fi
+            if docker exec pg pg_isready -U runsheet -d runsheet >/dev/null 2>&1; then
+              break
+            fi
             sleep 2
           done
 
+          # Schema first, in a one-shot container, exactly as the deploy runbook
+          # orders it. The app image deliberately does not migrate on start.
+          docker run --rm --network ci-net \
+            -e ENVIRONMENT=development \
+            -e DATABASE_URL=postgresql+psycopg://runsheet:runsheet@pg:5432/runsheet \
+            -e JWT_SECRET=ci-test-jwt-secret \
+            --entrypoint alembic runsheet-backend:ci upgrade head
+
           docker run -d --name app --network ci-net -p 8080:8080 \
             -e ENVIRONMENT=development \
-            -e ELASTIC_ENDPOINT=http://es:9200 \
-            -e ELASTIC_API_KEY=ci-placeholder \
+            -e DATABASE_URL=postgresql+psycopg://runsheet:runsheet@pg:5432/runsheet \
             -e GEMINI_API_KEY=ci-placeholder \
             -e SESSION_STORE_TYPE=redis \
             -e REDIS_URL=redis://localhost:6379 \

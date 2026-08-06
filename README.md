@@ -4,7 +4,7 @@
 
 [![Powered by Strands SDK](https://img.shields.io/badge/Powered%20by-Strands%20SDK-blue?style=for-the-badge)](https://strandsagents.com)
 [![Google Gemini 2.5](https://img.shields.io/badge/Google-Gemini%202.5%20Flash-4285F4?style=for-the-badge&logo=google)](https://cloud.google.com/vertex-ai)
-[![Elasticsearch](https://img.shields.io/badge/Elasticsearch-005571?style=for-the-badge&logo=elasticsearch)](https://www.elastic.co/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![Next.js 15](https://img.shields.io/badge/Next.js-15-000000?style=for-the-badge&logo=next.js)](https://nextjs.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&logo=fastapi)](https://fastapi.tiangolo.com/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?style=for-the-badge&logo=typescript)](https://www.typescriptlang.org/)
@@ -13,6 +13,15 @@
 **AI-powered logistics monitoring system with real-time fleet tracking, inventory management, and intelligent analytics.**
 
 </div>
+
+> **Elasticsearch has been removed.** PostgreSQL is the only datastore: the
+> relational tables hold the transactional source-of-truth and the `es_documents`
+> table holds the document plane, served by `persistence/document_store.py`, which
+> translates the Elasticsearch query DSL to SQL over `jsonb`. Many names in this
+> file and in the code still say "Elasticsearch" or `es_service` — the
+> `ElasticsearchService` class deliberately kept its name rather than churn 567
+> files — so read those as "the document store". See
+> [docs/elasticsearch-to-postgres-migration.md](docs/elasticsearch-to-postgres-migration.md).
 
 ## Architecture
 
@@ -36,7 +45,7 @@ graph TB
     subgraph "Bootstrap Lifecycle"
         BOOT[bootstrap/core.py]
         BOOT -->|initialize_all| BOOT_MW[Register Middleware]
-        BOOT -->|initialize_all| BOOT_ES[Connect Elasticsearch]
+        BOOT -->|initialize_all| BOOT_ES[Connect PostgreSQL]
         BOOT -->|initialize_all| BOOT_RED[Connect Redis]
         BOOT -->|initialize_all| BOOT_AGT[Start Agent Scheduler]
         BOOT -->|initialize_all| BOOT_DOM[Mount Domain Routers]
@@ -69,7 +78,7 @@ graph TB
     end
 
     subgraph "Data Layer"
-        OPS --> ES[(Elasticsearch)]
+        OPS --> ES[("PostgreSQL<br/>relational + es_documents")]
         FUEL --> ES
         SCHED --> ES
         DATA --> ES
@@ -223,8 +232,7 @@ Runsheet-backend/
 │   └── support/                   # Agent support utilities
 ├── scripts/                       # Utility scripts
 │   ├── check_coverage.py          # Coverage verification
-│   ├── generate_endpoint_registry.py
-│   └── backfill_asset_type.py
+│   └── generate_endpoint_registry.py
 ├── tests/                         # Test suite
 ├── demo-data/                     # Sample CSV files
 └── compliance/                    # Fuel compliance backbone (see Compliance Backbone section)
@@ -742,8 +750,10 @@ Set up your environment configuration:
 cp .env.example .env.development
 
 # Open .env.development and fill in your actual credentials:
-# - ELASTIC_ENDPOINT: Your Elasticsearch Cloud endpoint URL
-# - ELASTIC_API_KEY: Your Elasticsearch API key (from Elastic Cloud console)
+# - DATABASE_URL: PostgreSQL connection string. Required — it is the only
+#   datastore now, holding both the relational tables and the document plane.
+#   Start it with: docker compose up -d postgres
+#   Then create the schema: ./venv/bin/alembic upgrade head
 # - GOOGLE_CLOUD_PROJECT: Your GCP project ID
 # - JWT_SECRET: A strong random secret for JWT signing (min 32 chars)
 # - DINEE_WEBHOOK_SECRET: HMAC secret for webhook verification
@@ -1172,9 +1182,10 @@ See each `.env.example` file for the full list of variables with descriptions, e
 
 Key variables:
 ```bash
-# Elasticsearch (required)
-ELASTIC_API_KEY=your-api-key-here
-ELASTIC_ENDPOINT=https://your-elasticsearch-endpoint.elastic-cloud.com
+# PostgreSQL (required) — the only datastore. There is no Elasticsearch: the
+# document plane is the es_documents table. See
+# docs/elasticsearch-to-postgres-migration.md.
+DATABASE_URL=postgresql+psycopg://runsheet:runsheet@localhost:5432/runsheet
 
 # Google Cloud (required)
 GOOGLE_CLOUD_PROJECT=your-gcp-project-id

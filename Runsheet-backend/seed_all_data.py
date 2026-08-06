@@ -30,6 +30,7 @@ client.bulk() methods directly.
 
 import sys
 import os
+import asyncio
 import json
 import glob
 import uuid
@@ -59,7 +60,9 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 from services.elasticsearch_service import elasticsearch_service
 
-ES = elasticsearch_service.client
+# ``ES = elasticsearch_service.client`` used to be here. Every write now goes
+# through the facade instead, so the raw client is neither needed nor usable:
+# Phase 6 replaced it with a stand-in that refuses document operations.
 
 # Directory holding the static JSON fixtures (step 2).
 DATA_DIR = Path(__file__).parent / "scripts" / "data"
@@ -129,13 +132,29 @@ def _geo(city: str) -> dict:
             "lon": c["lon"] + random.uniform(-0.02, 0.02)}
 
 
+def _run(coro):
+    """Run one coroutine on the seeder's private loop.
+
+    The seeder is synchronous top to bottom and the document store is async, so a
+    bridge is needed. One long-lived loop rather than ``asyncio.run`` per call:
+    this file makes thousands of writes, and ``asyncio.run`` builds and tears down
+    a loop — and with it the SQLAlchemy async engine's connection pool — every time.
+    """
+    return _SEED_LOOP.run_until_complete(coro)
+
+
+_SEED_LOOP = asyncio.new_event_loop()
+
+
 def _index_count(index: str) -> int:
-    """Return document count for an index, 0 if it doesn't exist."""
+    """Return document count for an index, 0 when absent or unreadable."""
     try:
-        if not ES.indices.exists(index=index):
-            return 0
-        resp = ES.count(index=index)
-        return resp.get("count", 0)
+        response = _run(
+            elasticsearch_service.search_documents(
+                index, {"query": {"match_all": {}}, "size": 0}
+            )
+        )
+        return ((response or {}).get("hits") or {}).get("total", {}).get("value", 0)
     except Exception:
         return 0
 
@@ -175,19 +194,52 @@ def _bulk(actions: list):
         actions = filtered
     if not actions:
         return
-    resp = ES.bulk(body=actions, refresh=True)
-    if resp.get("errors"):
-        for item in resp["items"]:
-            for op, detail in item.items():
-                if detail.get("error"):
-                    logger.error("Bulk error: %s", detail["error"])
+
+    # One ``index_document`` per pair rather than ``bulk_index_documents``.
+    #
+    # The store derives a document id itself when given a bare list, and these
+    # actions carry an EXPLICIT ``_id`` — the seeder is where four silent id bugs
+    # were found and fixed (``rack_prices`` keyed on ``terminal_id`` collapsing 5
+    # rows into 3, ``weather_observations`` skipped entirely, and two more). Letting
+    # the store re-derive ids would reintroduce exactly that class of bug, so the
+    # ids the caller chose are passed through verbatim.
+    #
+    # ``stamp_timestamps=False`` for the same reason the ids are explicit: the
+    # timestamps in the seed data ARE the data. This used to be
+    # ``helpers.bulk(ES, actions)``, which wrote the document as given; routing it
+    # through ``index_document`` with the default would overwrite ``updated_at``
+    # (and ``created_at`` where absent) with the moment the seeder ran. That is not
+    # cosmetic — ``parity_check`` compares the document plane against the relational
+    # tables, which take the seed values verbatim, so every seeded record in eight
+    # aggregates reported as diverging. Caught exactly that way.
+    index_of = 0
+    while index_of < len(actions):
+        meta = actions[index_of]
+        target = (meta.get("index") or meta.get("create") or {}).get("_index")
+        doc_id = (meta.get("index") or meta.get("create") or {}).get("_id")
+        document = actions[index_of + 1] if index_of + 1 < len(actions) else None
+        index_of += 2
+        if not target or document is None:
+            continue
+        try:
+            _run(
+                elasticsearch_service.index_document(
+                    target, doc_id, document, stamp_timestamps=False
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 — one bad document, not the batch
+            logger.error("Seed write failed for %s/%s: %s", target, doc_id, exc)
 
 
 def _single(index: str, doc_id: str, body: dict):
     if index in _RETIRED_INDICES:
         logger.info("⏭️  Skipping write to retired index: %s", index)
         return
-    ES.index(index=index, id=doc_id, body=body, refresh=True)
+    _run(
+        elasticsearch_service.index_document(
+            index, doc_id, body, stamp_timestamps=False
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -303,13 +355,23 @@ def _index_property_names(index_name: str):
 
     result = None
     try:
-        if ES.indices.exists(index=index_name):
-            mapping = ES.indices.get_mapping(index=index_name)
-            mappings = mapping.get(index_name, {}).get("mappings", {})
+        # Read the DECLARED mapping, not a live one. This used to ask the cluster,
+        # which meant the filter only applied to indices that already existed —
+        # and a mapping declared in code but never created was treated as
+        # permissive. The declarations are the same source ``document_field_policy``
+        # uses, so a strict index is now constrained whether or not anything has
+        # been written to it.
+        from persistence.document_field_policy import all_index_mappings
+
+        for name, body in all_index_mappings():
+            if name != index_name:
+                continue
+            mappings = body.get("mappings", {})
             # Only constrain when the index is strict; dynamic indices accept
             # arbitrary fields so there's nothing to filter.
             if mappings.get("dynamic") == "strict":
                 result = set((mappings.get("properties") or {}).keys())
+            break
     except Exception:  # noqa: BLE001 — be permissive on any lookup failure
         result = None
 
@@ -321,7 +383,7 @@ _index_property_names._cache = {}
 
 
 def _load_json_file(filepath: Path, force: bool) -> int:
-    """Load one JSON fixture file into ES. Returns records loaded."""
+    """Load one JSON fixture file into the document store. Returns records loaded."""
     with open(filepath, "r") as f:
         data = json.load(f)
 
@@ -2065,13 +2127,19 @@ def main():
     print(f"  Skip programmatic: {'YES' if skip_programmatic else 'no'}")
     print("=" * 60)
 
+    # Reachability check against the store that actually receives the writes. It
+    # pinged Elasticsearch before; pinging a cluster nothing writes to would pass
+    # while every write failed.
     try:
-        if not ES.ping():
-            print("❌ Cannot reach Elasticsearch. Check your .env / connection settings.")
-            sys.exit(1)
-        print("✅ Elasticsearch connection OK\n")
+        _run(
+            elasticsearch_service.search_documents(
+                "fuel_orders_current", {"query": {"match_all": {}}, "size": 0}
+            )
+        )
+        print("✅ PostgreSQL document store reachable\n")
     except Exception as e:
-        print(f"❌ Elasticsearch connection failed: {e}")
+        print(f"❌ Cannot reach the document store: {e}")
+        print("   Check DATABASE_URL and that 'alembic upgrade head' has run.")
         sys.exit(1)
 
     # ----- Step 1: indices -------------------------------------------------
