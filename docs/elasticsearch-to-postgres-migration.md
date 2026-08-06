@@ -57,7 +57,7 @@ Write **one** Postgres-backed adapter implementing the existing
 | 1 | Postgres source of truth for the three ES-only indices | done |
 | 2 | Postgres-backed document store (DSL → SQL over `jsonb`) | done |
 | 3 | Copy every remaining index; whole-cluster parity | done |
-| 4 | Flip `DOCUMENT_STORE_BACKEND=postgres`; soak | ready, not flipped |
+| 4 | Flip `DOCUMENT_STORE_BACKEND=postgres`; soak | raw-client surface closed; two items open |
 | 5 | Stop writing to Elasticsearch | not started |
 | 6 | Remove the client, mappings and ILM policies | not started |
 | 7 | **Delete the cluster** | not started |
@@ -258,7 +258,7 @@ the generic `JSON` comparator compiling `contains` to string `LIKE`; SQL
 three-valued logic making a document match neither a query nor its negation; and
 `minimum_should_match: 0` being treated as 1.
 
-### Phase 4 — the cutover (ready)
+### Phase 4 — the cutover (not yet flipped)
 
 Set `DOCUMENT_STORE_BACKEND=postgres` (requires `DATABASE_URL`). The flag is
 validated at startup, so a misspelling — `postgresql`, `pg` — fails rather than
@@ -271,7 +271,7 @@ cd Runsheet-backend
 python -m scripts.document_store_parity run --all --tenant <tenant>
 ```
 
-#### The flag is not yet safe to flip
+#### The raw-client surface is closed
 
 Code that reaches past `ElasticsearchService` to `es.client.search(...)` or
 `es.client.update(...)` is **not** routed by the switch. After the cutover those
@@ -281,18 +281,43 @@ the two stores diverge — silently, because each call individually succeeds.
 `tests/unit/test_raw_elasticsearch_client_inventory.py` inventories that surface
 with an explicit allowlist. The test fails on an unlisted call site, and on a
 listed one that no longer exists, so the list cannot rot and can only shrink.
-**While it is non-empty the flag splits writes across two stores.**
 
-| Remaining | Sites | Why it has not moved |
+**It has now shrunk to nothing in the application data plane.** All 41 sites have
+been rewritten onto the facade:
+
+| Was | Sites | Now |
 |---|---|---|
-| `ops/api/endpoints.py` | 21 | mechanical searches; the store answers them unchanged |
-| `ops/ingestion/poison_queue.py` | 7 | index / get / update / delete / count / search |
-| `fuel/driver_repository.py` | 4 | painless counter scripts + `update_by_query` |
-| `fuel/compartment_state_models.py` | 4 | two `if_seq_no` OCC loops |
-| `Agents/approval_queue_service.py` | 2 | `if_seq_no` OCC |
-| `Agents/tools/ops_{report,search}_tools.py` | 2 | mechanical searches |
-| `bootstrap/core.py` | 1 | `scan` over an index at startup |
-| migration tooling | 3 | exists to talk to Elasticsearch; moves last |
+| `ops/api/endpoints.py` | 21 | `search_documents` |
+| `ops/ingestion/poison_queue.py` | 7 | the facade passthroughs on `OpsElasticsearchService` |
+| `fuel/driver_repository.py` | 4 | `atomic_update`, `update_by_query` |
+| `fuel/compartment_state_models.py` | 4 | `atomic_update`, `get_document` |
+| `Agents/approval_queue_service.py` | 2 | `atomic_update` |
+| `Agents/tools/ops_{report,search}_tools.py` | 2 | `search_documents` |
+| `ops/services/ops_es_service.py` | 1 | `upsert_if_newer` (bulk scripted upsert) |
+| `bootstrap/core.py` | 1 | never was Elasticsearch — Redis `scan`, misclassified |
+
+What is left on the list is migration tooling (3 calls, exists to talk to
+Elasticsearch, moves last) and the facade's own Elasticsearch branch (13 calls,
+which are the calls the switch chooses *between*).
+
+Note the direction of the facade's count: it went **up**, from 9 to 13, as
+`upsert_if_newer`, `atomic_update` and `update_by_query` each absorbed a raw call
+from elsewhere. That is the expected shape — the total across the codebase falls
+while the facade's share of it rises.
+
+The scanner was also wrong in two ways worth recording, because both made the
+number look better than it was:
+
+* it matched text, so the docstrings five of these files carry explaining which
+  raw call they *used* to make counted as raw calls. `poison_queue.py` had all
+  seven migrated and still reported one. It parses the AST now.
+* it only recognised `.client.<method>(...)`, so
+  `helpers.bulk(self.client, actions)` in `ops_es_service.py` was invisible — a
+  write of every batched shipment and rider, on a code path the inventory
+  reported as clean. Passing the client to a data-plane helper now counts.
+
+An empty application data plane is necessary for the cutover, not sufficient.
+See *Still outstanding* below.
 
 ##### Read-modify-write now has a replacement
 
@@ -308,11 +333,27 @@ arise.
 Verified non-vacuously: with the row lock removed, ten concurrent increments
 produce **3**, losing seven writes. With it, ten.
 
-Two of the four sites are migrated. `ElasticsearchService.upsert_if_newer` now owns
-the timestamp guard, with an Elasticsearch implementation and a Postgres one, so
-`fuel/order_repository.py` (3 raw calls → 0) and `ops/services/ops_es_service.py`
-(1 → 0) go through the facade. Three byte-identical transcriptions of the painless
-script existed; there is now one, and the other reference binds to it.
+All of these sites are migrated. `ElasticsearchService.upsert_if_newer` owns the
+timestamp guard, `atomic_update` owns the read-modify-write, and
+`update_by_query` owns the bulk variant — each with an Elasticsearch
+implementation and a Postgres one behind the same signature. Three byte-identical
+transcriptions of the painless upsert script existed; there is now one, and the
+remaining reference binds to it rather than restating it.
+
+`update_by_query` is the one place the two backends differ in cost rather than
+just in mechanism. On Postgres it is one statement over locked rows. On
+Elasticsearch it resolves the matching ids and calls `atomic_update` on each,
+which is N round trips instead of one. That is deliberate: the alternative was
+writing the same rule twice, once in Python and once in painless, and paying for
+that duplication permanently to optimise the branch that is being deleted. It
+refuses to run past `UPDATE_BY_QUERY_MAX_DOCS` (5,000) rather than applying a
+prefix, because a partially-applied `update_by_query` leaves the index in a state
+no caller asked for and no caller can detect.
+
+One behaviour changed in the bulk path, deliberately. `helpers.bulk` counted a
+scripted `noop` as a success, so an ingestion run that discarded every event as
+stale was indistinguishable from one that applied every event. `bulk_upsert` now
+returns `discarded` separately from `successful`.
 
 The comparison is `isBefore || isEqual` — an event whose timestamp **equals** the
 stored one is discarded. That reads like an off-by-one and is not: at-least-once
@@ -335,16 +376,17 @@ after a 201. The Postgres path cannot have that failure — there is no split be
 
 ##### Still outstanding
 
-* **Two `if_seq_no` OCC sites** (`compartment_state_models.py`,
-  `approval_queue_service.py`) and **`driver_repository.py`'s counter scripts** to
-  move onto `atomic_update`.
-* **24 mechanical searches** to route through `search_documents`.
+The raw-client surface is closed, so what remains is about query *shapes* the
+Postgres store does not yet answer, plus one write path pointed at the wrong
+target. Neither is caught by the inventory test, which is why they are listed
+here rather than left to be inferred from a green run.
+
 * **Six pipeline aggregations** in
   `notifications/services/communication_metrics_service.py` and one script-valued
-  `sum` in `inventory/service.py`, to be rewritten as Python post-processing over
-  bucket output.
-* **A bulk scripted upsert** in `ops/services/ops_es_service.py` — a different
-  shape from the single-document one, still on `helpers.bulk`.
+  `sum` in `inventory/service.py`. These raise `UnsupportedAggregationError`
+  rather than returning a wrong number, so on the Postgres backend they fail
+  loudly — an error, not silent corruption, but still an outage for those
+  endpoints. To be rewritten as Python post-processing over bucket output.
 * **The outbox relay** still projects into Elasticsearch. It should project into
   `es_documents`, at which point the ES indices for the ~25 already-migrated
   aggregates stop being written at all.

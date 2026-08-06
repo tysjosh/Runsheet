@@ -1558,6 +1558,176 @@ class ElasticsearchService:
         except Exception as e:
             self._handle_elasticsearch_error(f"upsert_if_newer({index}, {doc_id})", e)
 
+    async def atomic_update(
+        self,
+        index: str,
+        doc_id: str,
+        transform,
+        *,
+        upsert: Optional[Dict[str, Any]] = None,
+        max_retries: int = 3,
+        backoff_base_seconds: float = 0.01,
+    ):
+        """Read-modify-write one document, safely under concurrency.
+
+        One call replacing two hand-rolled patterns that each appeared in several
+        places and each reached past this facade to the raw client:
+
+        * ``if_seq_no`` / ``if_primary_term`` optimistic concurrency with a
+          retry-on-409 loop (``fuel/compartment_state_models.py``,
+          ``Agents/approval_queue_service.py``);
+        * painless scripts that increment counters
+          (``fuel/driver_repository.py``).
+
+        ``transform`` is called with a copy of the stored document and returns the
+        new document, or ``None`` to leave it unchanged. ``None`` is the direct
+        equivalent of painless ``ctx.op = 'noop'``.
+
+        Returns ``(document, applied)``.
+
+        The two backends reach the same guarantee by different means, and the
+        difference is worth stating: Elasticsearch retries a compare-and-set and
+        can eventually give up, so ``max_retries`` and the backoff exist and
+        :class:`AppException` surfaces persistent contention. Postgres takes a row
+        lock, so a concurrent writer waits instead of colliding — nothing is lost
+        and nothing has to retry. Verified: with the lock removed, ten concurrent
+        increments produce three.
+        """
+        store = self._pg_store()
+        if store is not None:
+            return await store.atomic_update(
+                index, doc_id, transform, upsert=upsert
+            )
+
+        import asyncio
+        import random
+
+        for attempt in range(max(max_retries, 1)):
+            try:
+                current = self.client.get(index=index, id=doc_id)
+            except Exception as exc:  # noqa: BLE001
+                if getattr(exc, "status_code", None) == 404 or "notfound" in type(exc).__name__.lower():
+                    if upsert is None:
+                        return (None, False)
+                    document = dict(upsert)
+                    document.setdefault("created_at", utcnow().isoformat())
+                    document["updated_at"] = utcnow().isoformat()
+                    self.client.index(
+                        index=index, id=doc_id, body=document, refresh=True
+                    )
+                    return (document, True)
+                raise
+
+            source = dict(current.get("_source") or {})
+            updated = transform(dict(source))
+            if updated is None:
+                return (source, False)
+            updated["updated_at"] = utcnow().isoformat()
+            try:
+                self.client.index(
+                    index=index,
+                    id=doc_id,
+                    body=updated,
+                    if_seq_no=current.get("_seq_no"),
+                    if_primary_term=current.get("_primary_term"),
+                    refresh=True,
+                )
+                return (updated, True)
+            except Exception as exc:  # noqa: BLE001
+                conflict = (
+                    getattr(exc, "status_code", None) == 409
+                    or "conflict" in type(exc).__name__.lower()
+                    or "version_conflict" in str(exc).lower()
+                )
+                if not conflict:
+                    raise
+                logger.info(
+                    "atomic_update(%s, %s): version conflict on attempt %d/%d",
+                    index, doc_id, attempt + 1, max_retries,
+                )
+                await asyncio.sleep(
+                    backoff_base_seconds * (2 ** attempt) * random.uniform(0.5, 1.5)
+                )
+
+        raise elasticsearch_unavailable(
+            message=(
+                f"concurrent modification of {doc_id!r} in {index!r} after "
+                f"{max_retries} attempts"
+            ),
+            details={"index": index, "doc_id": doc_id, "attempts": max_retries},
+        )
+
+    #: Ceiling on how many documents one :meth:`update_by_query` call will touch
+    #: on the Elasticsearch branch. The branch fans the transform out over the
+    #: matched ids one document at a time, so an unbounded match set would be an
+    #: unbounded number of round trips. Exceeding it raises rather than applying
+    #: a prefix of the change: a silently partial ``update_by_query`` leaves the
+    #: index in a state no caller asked for and no caller can detect.
+    UPDATE_BY_QUERY_MAX_DOCS: int = 5_000
+
+    async def update_by_query(
+        self,
+        index: str,
+        query: Dict[str, Any],
+        transform,
+    ) -> int:
+        """Apply ``transform`` to every document matching ``query``; return the count.
+
+        The facade equivalent of ``_update_by_query``, which
+        ``fuel/driver_repository.py`` used with a painless script to reset
+        denormalised driver counters.
+
+        ``transform`` is a Python callable on both backends, and the
+        Elasticsearch branch deliberately pays for that: rather than translate the
+        change into painless it searches for the matching ids and calls
+        :meth:`atomic_update` on each. A painless twin would mean the same rule
+        written twice in two languages, drifting apart with nothing to catch it —
+        and the ES branch is the one being deleted, so the duplication would be
+        paid permanently to optimise the path with the shorter life.
+
+        The row-locking difference from :meth:`atomic_update` carries over: on
+        Postgres every matched row is locked for one transaction, so a concurrent
+        write to a matched document cannot be lost. Elasticsearch resolves the
+        query first and then updates each hit, so concurrent writers race per
+        document.
+
+        Returns the number of documents actually changed — a transform that
+        returns ``None`` for a hit is not counted.
+        """
+        if self._is_retired_index(index):
+            return 0
+
+        store = self._pg_store()
+        if store is not None:
+            return await store.update_by_query(index, query, transform)
+
+        # ``_source: false`` because the ids are all this needs; ``atomic_update``
+        # re-reads each document under its own version assertion, and using a body
+        # fetched before that read would reintroduce the lost update this exists
+        # to avoid.
+        response = await self.search_documents(
+            index,
+            {"query": query, "_source": False},
+            size=self.UPDATE_BY_QUERY_MAX_DOCS + 1,
+        )
+        hits = ((response or {}).get("hits") or {}).get("hits") or []
+        if len(hits) > self.UPDATE_BY_QUERY_MAX_DOCS:
+            raise elasticsearch_unavailable(
+                message=(
+                    f"update_by_query on {index!r} matched more than "
+                    f"{self.UPDATE_BY_QUERY_MAX_DOCS} documents; refusing to "
+                    "apply a partial update"
+                ),
+                details={"index": index, "limit": self.UPDATE_BY_QUERY_MAX_DOCS},
+            )
+
+        changed = 0
+        for hit in hits:
+            _doc, applied = await self.atomic_update(index, hit["_id"], transform)
+            if applied:
+                changed += 1
+        return changed
+
     async def bulk_index_documents(self, index: str, documents: List[Dict[Any, Any]]) -> Dict[str, Any]:
         """
         Bulk index multiple documents with circuit breaker protection and partial failure handling.

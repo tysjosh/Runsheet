@@ -142,6 +142,16 @@ def _create_ops_app(ff_service: FakeFeatureFlagService, tenant_id: str) -> TestC
     mock_ops_es = MagicMock(spec=OpsElasticsearchService)
     mock_ops_es.client = mock_es_client
 
+    # The ops endpoints call ``es.search_documents(...)`` now instead of
+    # ``es.client.search(...)`` — a raw client call bypasses the
+    # Postgres/Elasticsearch backend switch. Delegate the facade to the same
+    # canned client so tests that reconfigure ``mock_es_client.search``
+    # mid-test keep working: the lambda reads it at call time.
+    mock_ops_es.search_documents = AsyncMock(
+        side_effect=lambda index, query, **kw: mock_es_client.search(
+            index=index, body=query
+        )
+    )
     configure_ops_api(
         ops_es_service=mock_ops_es,
         feature_flag_service=ff_service,

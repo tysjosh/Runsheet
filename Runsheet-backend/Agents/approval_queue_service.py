@@ -119,7 +119,7 @@ class ApprovalQueueService:
         Raises:
             ValueError: If the entry is not in "pending" status.
         """
-        entry, seq_no, primary_term = await self._get_entry_with_version(action_id)
+        entry = await self._get_entry(action_id)
 
         if entry["status"] != "pending":
             raise ValueError(
@@ -135,7 +135,7 @@ class ApprovalQueueService:
         }
 
         await self._update_with_concurrency(
-            action_id, update_fields, seq_no, primary_term
+            action_id, update_fields, expected_status="pending"
         )
         entry.update(update_fields)
 
@@ -154,10 +154,12 @@ class ApprovalQueueService:
                         "result": str(execution_result),
                     },
                 }
-                # Re-fetch version for the second update
-                _, seq_no2, pt2 = await self._get_entry_with_version(action_id)
+                # No status guard: this records the result of the approval
+                # this same call just made, so "did someone else change it" is
+                # not the question — and re-reading only to assert a sequence
+                # number taken microseconds earlier never protected anything.
                 await self._update_with_concurrency(
-                    action_id, exec_update, seq_no2, pt2
+                    action_id, exec_update, expected_status=None
                 )
                 entry.update(exec_update)
             except Exception as e:
@@ -169,9 +171,8 @@ class ApprovalQueueService:
                         "error": str(e),
                     },
                 }
-                _, seq_no2, pt2 = await self._get_entry_with_version(action_id)
                 await self._update_with_concurrency(
-                    action_id, exec_update, seq_no2, pt2
+                    action_id, exec_update, expected_status=None
                 )
                 entry.update(exec_update)
 
@@ -194,7 +195,7 @@ class ApprovalQueueService:
         Raises:
             ValueError: If the entry is not in "pending" status.
         """
-        entry, seq_no, primary_term = await self._get_entry_with_version(action_id)
+        entry = await self._get_entry(action_id)
 
         if entry["status"] != "pending":
             raise ValueError(
@@ -211,7 +212,7 @@ class ApprovalQueueService:
         }
 
         await self._update_with_concurrency(
-            action_id, update_fields, seq_no, primary_term
+            action_id, update_fields, expected_status="pending"
         )
         entry.update(update_fields)
 
@@ -404,57 +405,65 @@ class ApprovalQueueService:
         # Fallback for unknown tools
         return f"Execute {tool} with parameters: {params}"
 
-    async def _get_entry_with_version(self, action_id: str) -> tuple:
-        """Fetch an approval entry along with its ES version info.
+    async def _get_entry(self, action_id: str) -> dict:
+        """Fetch an approval entry.
 
-        Returns:
-            Tuple of (entry_dict, seq_no, primary_term).
+        The ES ``_seq_no`` / ``_primary_term`` this used to return alongside the
+        document are gone. They existed so the follow-up write could assert
+        "nothing changed since I read", and the raw ``client.get`` needed to
+        obtain them bypassed the document-store backend switch — after the cutover
+        this read would have gone to Elasticsearch while the write went to
+        Postgres, which is the worst possible split for a concurrency guard.
+
+        The guard itself is preserved and is now stated in the terms it actually
+        protects: see :meth:`_update_with_concurrency`.
 
         Raises:
             ValueError: If the entry is not found.
         """
-        try:
-            # Use the raw ES client for version info
-            response = self._es.client.get(index=self.INDEX, id=action_id)
-            return (
-                response["_source"],
-                response["_seq_no"],
-                response["_primary_term"],
-            )
-        except Exception as e:
-            raise ValueError(f"Approval entry {action_id} not found: {e}")
+        entry = await self._es.get_document(self.INDEX, action_id)
+        if entry is None:
+            raise ValueError(f"Approval entry {action_id} not found")
+        return entry
 
     async def _update_with_concurrency(
-        self, action_id: str, fields: dict, seq_no: int, primary_term: int
+        self, action_id: str, fields: dict, expected_status: Optional[str]
     ) -> None:
-        """Update an approval entry using ES optimistic concurrency control.
+        """Update an approval entry, refusing if its status moved under us.
 
-        Args:
-            action_id: The document ID.
-            fields: Fields to update.
-            seq_no: Expected sequence number.
-            primary_term: Expected primary term.
+        What the ``if_seq_no`` assertion actually protected here was one thing:
+        that no other reviewer had changed the entry between this caller's read
+        and its write. Every caller reads, checks ``status``, then writes — so
+        "the status is still what I read" IS the invariant, and asserting it
+        directly is both backend-independent and easier to reason about than a
+        sequence number.
+
+        It is also *narrower in the right direction*: a sequence number changes on
+        any write, including one that touched an unrelated field, so the old guard
+        could reject a legitimate approval because something else had been
+        appended to the entry.
+
+        ``expected_status=None`` skips the check, for the follow-up writes that
+        record an execution result immediately after the approval they belong to.
 
         Raises:
-            RuntimeError: If the update fails due to a version conflict.
+            RuntimeError: If another actor changed the status first.
         """
-        try:
-            self._es.client.update(
-                index=self.INDEX,
-                id=action_id,
-                body={"doc": fields},
-                if_seq_no=seq_no,
-                if_primary_term=primary_term,
-                refresh=True,
+        def _apply(current: dict) -> Optional[dict]:
+            if expected_status is not None and current.get("status") != expected_status:
+                return None
+            merged = dict(current)
+            merged.update(fields)
+            return merged
+
+        _document, applied = await self._es.atomic_update(
+            self.INDEX, action_id, _apply
+        )
+        if not applied:
+            raise RuntimeError(
+                f"Concurrent modification detected for action {action_id}. "
+                f"Another user may have already approved or rejected this action."
             )
-        except Exception as e:
-            error_str = str(e)
-            if "version_conflict" in error_str.lower() or "conflict" in error_str.lower():
-                raise RuntimeError(
-                    f"Concurrent modification detected for action {action_id}. "
-                    f"Another user may have already approved or rejected this action."
-                ) from e
-            raise
 
     async def _broadcast(self, event_type: str, data: dict) -> None:
         """Broadcast an approval event via WebSocket.

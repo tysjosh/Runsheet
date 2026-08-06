@@ -51,9 +51,10 @@ class OpsElasticsearchService:
     # and left stale in the others, silently, because a wrong comparison shows up
     # as an order moving backwards weeks later rather than as an error.
     #
-    # Only the ``bulk_index`` path below still uses it: a bulk scripted upsert is
-    # a different shape from a single-document one and has not been moved onto
-    # ``ElasticsearchService.upsert_if_newer`` yet.
+    # Nothing in this class runs it any more — ``bulk_upsert`` was the last
+    # user and now calls ``ElasticsearchService.upsert_if_newer``. Kept as a
+    # bound alias because it is a documented attribute of this class and the
+    # binding is what guarantees it cannot drift from the canonical script.
     UPSERT_SCRIPT = _UPSERT_IF_NEWER_SCRIPT
 
     def __init__(self, es_service: ElasticsearchService):
@@ -63,6 +64,40 @@ class OpsElasticsearchService:
     def client(self):
         """Access the underlying Elasticsearch client."""
         return self._es.client
+
+    async def search_documents(self, index, query, size=100, request_timeout=10):
+        """Passthrough to the facade's search, so callers stay off the raw client.
+
+        ``ops/api/endpoints.py`` and the two ops agent tools all held an
+        ``OpsElasticsearchService`` and reached through it to
+        ``es.client.search(...)``, which bypasses the document-store backend
+        switch — those 23 reads would have kept going to Elasticsearch after the
+        document plane moved to Postgres.
+
+        Same shape as the existing ``client`` passthrough, so nothing has to know
+        whether it is holding this class or ``ElasticsearchService``.
+        """
+        return await self._es.search_documents(
+            index, query, size=size, request_timeout=request_timeout
+        )
+
+    # The rest of the document plane, passed through for the same reason: the
+    # poison queue held an ``OpsElasticsearchService`` and reached
+    # ``.client.index`` / ``.get`` / ``.update`` / ``.delete`` / ``.count``, all of
+    # which bypass the backend switch. A poison-queue entry that lands in the
+    # wrong store after the cutover is an incident nobody can find.
+
+    async def index_document(self, index, doc_id, document):
+        return await self._es.index_document(index, doc_id, document)
+
+    async def get_document(self, index, doc_id):
+        return await self._es.get_document(index, doc_id)
+
+    async def update_document(self, index, doc_id, partial_doc):
+        return await self._es.update_document(index, doc_id, partial_doc)
+
+    async def delete_document(self, index, doc_id):
+        return await self._es.delete_document(index, doc_id)
 
     @property
     def circuit_breaker(self):
@@ -491,124 +526,99 @@ class OpsElasticsearchService:
     # Bulk operations
     # ------------------------------------------------------------------
 
+    #: ``action -> (index, id field)``. Both upsert actions go through
+    #: out-of-order reconciliation; ``append_event`` is an immutable event
+    #: document and is written as-is.
+    _BULK_ACTIONS = {
+        "upsert_shipment": ("SHIPMENTS_CURRENT", "shipment_id", True),
+        "upsert_rider": ("RIDERS_CURRENT", "rider_id", True),
+        "append_event": ("SHIPMENT_EVENTS", "event_id", False),
+    }
+
     async def bulk_upsert(self, operations: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """
-        Bulk API for batch ingestion. Routes failures to poison queue.
+        """Batch ingestion of shipment / rider / event documents.
 
         Each operation dict must contain:
           - "action": "upsert_shipment" | "upsert_rider" | "append_event"
           - "doc": the document payload
 
-        Returns summary with success/failure counts.
+        Returns a summary with success/failure counts and per-document errors.
         Validates: Req 6.5, 6.6
-        """
-        from resilience.circuit_breaker import CircuitOpenException
 
+        This used to build ``elasticsearch.helpers.bulk`` actions carrying a
+        ``scripted_upsert`` and hand ``self.client`` to the helper. That was the
+        last application write in the codebase that bypassed the document-store
+        backend switch, and it was invisible to the raw-client inventory because
+        the client was passed as an ARGUMENT rather than called as
+        ``.client.bulk(...)`` — the inventory now recognises that shape too.
+
+        The batching is gone with it: each operation is one
+        :meth:`~services.elasticsearch_service.ElasticsearchService.upsert_if_newer`
+        or ``index_document`` call. On Postgres that costs nothing, because the
+        store applies the timestamp comparison per row under a lock either way;
+        on Elasticsearch it trades one round trip for N. Worth it — the
+        alternative was a fourth transcription of the painless script living on a
+        code path with no callers and no tests to catch it drifting.
+
+        One behaviour deliberately changed: a stale document (older-or-equal
+        ``last_event_timestamp``) now counts as ``discarded`` rather than
+        ``successful``. The bulk helper reported a scripted no-op as a success, so
+        an ingestion run that discarded every event as stale was indistinguishable
+        from one that applied every event.
+        """
         results: Dict[str, Any] = {
             "total": len(operations),
             "successful": 0,
+            "discarded": 0,
             "failed": 0,
             "errors": [],
         }
 
-        # Build bulk actions list
-        actions: List[Dict[str, Any]] = []
-        action_meta: List[Dict[str, Any]] = []  # parallel metadata
-
         for op in operations:
             action_type = op.get("action")
-            doc = op.get("doc", {})
-
-            if action_type == "upsert_shipment":
-                doc_id = doc.get("shipment_id")
-                actions.append({
-                    "_op_type": "update",
-                    "_index": self.SHIPMENTS_CURRENT,
-                    "_id": doc_id,
-                    "scripted_upsert": True,
-                    "script": {
-                        "source": self.UPSERT_SCRIPT,
-                        "lang": "painless",
-                        "params": doc,
-                    },
-                    "upsert": doc,
-                })
-                action_meta.append({"action": action_type, "doc_id": doc_id, "doc": doc})
-
-            elif action_type == "upsert_rider":
-                doc_id = doc.get("rider_id")
-                actions.append({
-                    "_op_type": "update",
-                    "_index": self.RIDERS_CURRENT,
-                    "_id": doc_id,
-                    "scripted_upsert": True,
-                    "script": {
-                        "source": self.UPSERT_SCRIPT,
-                        "lang": "painless",
-                        "params": doc,
-                    },
-                    "upsert": doc,
-                })
-                action_meta.append({"action": action_type, "doc_id": doc_id, "doc": doc})
-
-            elif action_type == "append_event":
-                doc_id = doc.get("event_id")
-                actions.append({
-                    "_op_type": "index",
-                    "_index": self.SHIPMENT_EVENTS,
-                    "_id": doc_id,
-                    "_source": doc,
-                })
-                action_meta.append({"action": action_type, "doc_id": doc_id, "doc": doc})
-            else:
+            doc = op.get("doc", {}) or {}
+            spec = self._BULK_ACTIONS.get(action_type)
+            if spec is None:
                 results["failed"] += 1
                 results["errors"].append({
                     "action": action_type,
                     "error": f"Unknown action type: {action_type}",
                 })
+                continue
 
-        if not actions:
-            return results
-
-        try:
-            async def _do_bulk():
-                from elasticsearch.helpers import bulk
-
-                success_count, errors = bulk(
-                    self.client,
-                    actions,
-                    refresh=True,
-                    raise_on_error=False,
-                    raise_on_exception=False,
-                )
-                return success_count, errors
-
-            success_count, errors = await self._es._circuit_breaker.execute(_do_bulk)
-            results["successful"] = success_count
-
-            if errors:
-                results["failed"] += len(errors)
-                for err in errors:
-                    error_info = self._es._extract_bulk_error_info(err)
-                    results["errors"].append(error_info)
-                    logger.error(
-                        f"❌ Bulk ops indexing failed: "
-                        f"doc_id={error_info.get('doc_id', 'unknown')}, "
-                        f"error_type={error_info.get('error_type', 'unknown')}, "
-                        f"reason={error_info.get('reason', 'unknown')}"
-                    )
-            else:
-                logger.info(
-                    f"✅ Bulk ops indexed {results['successful']} documents"
+            index_attribute, id_field, reconcile = spec
+            index = getattr(self, index_attribute)
+            doc_id = doc.get(id_field)
+            try:
+                if reconcile:
+                    applied = await self._es.upsert_if_newer(index, doc_id, doc)
+                    if applied:
+                        results["successful"] += 1
+                    else:
+                        results["discarded"] += 1
+                else:
+                    await self._es.index_document(index, doc_id, doc)
+                    results["successful"] += 1
+            except Exception as exc:  # noqa: BLE001 — one bad document must not
+                # abandon the rest of the batch, which is what the bulk helper's
+                # ``raise_on_error=False`` bought.
+                results["failed"] += 1
+                results["errors"].append({
+                    "action": action_type,
+                    "doc_id": doc_id,
+                    "error_type": type(exc).__name__,
+                    "reason": str(exc),
+                })
+                logger.error(
+                    "Bulk ops ingestion failed: action=%s doc_id=%s error=%s: %s",
+                    action_type, doc_id, type(exc).__name__, exc,
                 )
 
-        except CircuitOpenException as e:
-            self._es._handle_circuit_breaker_exception(e)
-            results["failed"] = len(actions)
-        except Exception as e:
-            self._es._handle_elasticsearch_error("bulk_upsert(ops)", e)
-            results["failed"] = len(actions)
-
+        if not results["failed"]:
+            logger.info(
+                "Bulk ops ingested %d documents (%d discarded as stale)",
+                results["successful"], results["discarded"],
+            )
         return results
 
     # ------------------------------------------------------------------

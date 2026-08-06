@@ -241,6 +241,49 @@ class _FakeESClient:
         return {"_id": id, "result": "updated"}
 
 
+    def index(
+        self,
+        *,
+        index: str,
+        id: str,
+        body: Dict[str, Any],
+        if_seq_no: Optional[int] = None,
+        if_primary_term: Optional[int] = None,
+        refresh: bool = False,
+    ) -> Dict[str, Any]:
+        """Whole-document write with the same OCC assertions as :meth:`update`.
+
+        ``ElasticsearchService.atomic_update`` writes the transform's output with
+        ``index`` rather than ``update``, because the transform returns the
+        complete new document and ``update``'s merge semantics would silently
+        keep a field the transform removed. The Postgres backend replaces the
+        document too, so ``index`` is the faithful pairing.
+        """
+        self.update_calls.append(
+            {
+                "index": index,
+                "id": id,
+                "body": {"doc": dict(body)},
+                "if_seq_no": if_seq_no,
+                "if_primary_term": if_primary_term,
+                "refresh": refresh,
+            }
+        )
+        if self._forced_conflicts.get(id, 0) > 0:
+            self._forced_conflicts[id] -= 1
+            raise _FakeConflictError("version_conflict")
+
+        version = self.versions.setdefault(id, {"_seq_no": 0, "_primary_term": 1})
+        if if_seq_no is not None and if_seq_no != version["_seq_no"]:
+            raise _FakeConflictError("version_conflict")
+        if if_primary_term is not None and if_primary_term != version["_primary_term"]:
+            raise _FakeConflictError("version_conflict")
+
+        self.docs[id] = dict(body)
+        version["_seq_no"] += 1
+        return {"_id": id, "result": "updated"}
+
+
 class _FakeNotFoundError(Exception):
     status_code = 404
 
@@ -250,8 +293,46 @@ class _FakeConflictError(Exception):
 
 
 class _FakeESService:
+    """Fake facade that runs the REAL ``atomic_update`` against the fake client.
+
+    ``CompartmentStateRepository`` used to hand-roll the read / assert-seq-no /
+    write / retry-on-409 loop against ``es.client``, which bypasses the
+    document-store backend switch — that write records ``last_loaded_product``,
+    the field the cross-contamination guard reads, so after the cutover it would
+    have gone to the wrong store. The loop now lives once in
+    ``ElasticsearchService.atomic_update``.
+
+    The method is BORROWED rather than reimplemented here. A reimplementation
+    would let the shipped retry loop and this fake drift apart, and the conflict
+    tests below would then be testing the fake. ``atomic_update`` touches only
+    ``self._pg_store()`` and ``self.client``, so borrowing it is enough to drive
+    the real code path.
+    """
+
+    from services.elasticsearch_service import ElasticsearchService as _Real
+
+    atomic_update = _Real.atomic_update
+    del _Real
+
     def __init__(self, client: _FakeESClient) -> None:
         self.client = client
+
+    def _pg_store(self):
+        """No Postgres backend in these tests: exercise the Elasticsearch branch."""
+        return None
+
+    async def get_document(self, index: str, doc_id: str):
+        """The read half of the facade contract, with the facade's 404 -> None.
+
+        The repository's read path used ``es.client.get`` directly, so a read and
+        a write in the same repository could have landed on different stores after
+        the cutover. Reimplemented rather than borrowed because the real method is
+        wrapped in a circuit breaker whose construction needs the whole service.
+        """
+        try:
+            return dict(self.client.get(index=index, id=doc_id)["_source"])
+        except _FakeNotFoundError:
+            return None
 
 
 # ---------------------------------------------------------------------------
@@ -564,9 +645,27 @@ class TestMarkNeedsCleaning:
             2025, 1, 10, 8, 0, tzinfo=timezone.utc
         )
 
-        # Only ``state`` is in the persisted patch.
-        call = es_client.update_calls[-1]
-        assert call["body"]["doc"] == {"state": "needs_cleaning"}
+        # Only ``state`` changed; every other field is byte-identical to the seed.
+        #
+        # Asserted on the STORED DOCUMENT rather than on the wire payload. The
+        # repository used to send a partial ``{"doc": {"state": ...}}`` and let
+        # Elasticsearch merge it server-side; ``atomic_update`` computes the whole
+        # new document and writes that, because a merge would silently keep a
+        # field the transform removed and because the Postgres backend replaces
+        # the row. The observable guarantee — nothing but ``state`` moves — is the
+        # same, and is what this now checks.
+        stored = es_client.docs["T1_c1"]
+        assert stored["state"] == "needs_cleaning"
+        seeded = _base_compartment_doc(
+            state="loaded",
+            last_loaded_product="DIESEL_2",
+            last_loaded_at="2025-01-14T08:00:00+00:00",
+            last_cleaned_at="2025-01-10T08:00:00+00:00",
+        )
+        for field, value in seeded.items():
+            if field == "state":
+                continue
+            assert stored[field] == value, field
 
     async def test_mark_needs_cleaning_rejects_cross_tenant(
         self, repo: CompartmentStateRepository, es_client: _FakeESClient
