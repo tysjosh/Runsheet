@@ -57,7 +57,7 @@ Write **one** Postgres-backed adapter implementing the existing
 | 1 | Postgres source of truth for the three ES-only indices | done |
 | 2 | Postgres-backed document store (DSL → SQL over `jsonb`) | done |
 | 3 | Copy every remaining index; whole-cluster parity | done |
-| 4 | Flip `DOCUMENT_STORE_BACKEND=postgres`; soak | raw-client surface closed; two items open |
+| 4 | Flip `DOCUMENT_STORE_BACKEND=postgres`; soak | **flipped in development**; staging next |
 | 5 | Stop writing to Elasticsearch | not started |
 | 6 | Remove the client, mappings and ILM policies | not started |
 | 7 | **Delete the cluster** | not started |
@@ -258,11 +258,21 @@ the generic `JSON` comparator compiling `contains` to string `LIKE`; SQL
 three-valued logic making a document match neither a query nor its negation; and
 `minimum_should_match: 0` being treated as 1.
 
-### Phase 4 — the cutover (not yet flipped)
+### Phase 4 — the cutover (development is on Postgres)
 
 Set `DOCUMENT_STORE_BACKEND=postgres` (requires `DATABASE_URL`). The flag is
 validated at startup, so a misspelling — `postgresql`, `pg` — fails rather than
 leaving the service quietly on the legacy path. It is inert without a database.
+
+`.env.development` now sets it. Rolling back is deleting that line; nothing is
+destroyed by flipping it, the cluster keeps its data and the relay keeps
+projecting.
+
+Note that `.env.development` is **gitignored**, so a fresh checkout starts on the
+legacy path and has to set the flag itself. `.env.example` carries the
+recommendation; this is the only place the state of a developer's local flip is
+recorded, which is worth knowing when someone reports behaviour that does not match
+this document.
 
 Before flipping, per environment:
 
@@ -270,6 +280,36 @@ Before flipping, per environment:
 cd Runsheet-backend
 python -m scripts.document_store_parity run --all --tenant <tenant>
 ```
+
+#### What the flip actually looked like
+
+Verified against the live development stack rather than inferred from the suite,
+because the suite cannot answer "does the flag route against real data":
+
+| Check | Result |
+|---|---|
+| `_pg_store()` engaged | `PostgresDocumentStore` |
+| counts vs the cluster, 6 indices | identical (see the `customer_tanks` note) |
+| read-after-write | written, read back, and searchable with **no refresh** |
+| keyset pagination through `MeterAuditService` | 2 pages, 3 items, 3 distinct |
+| the three rewritten metrics | return numbers, not empty results |
+| inventory summary (was a 500) | 14 items, £27,645.07 |
+
+`customer_tanks` reads 7 in Postgres against 6 in Elasticsearch. That is
+`TANK-DRILL-1`, left in the development database by the Phase 1 drop-and-rebuild
+drill — dev-only residue, not a migration defect. Worth knowing before the next
+person runs the same comparison and reads it as one.
+
+Two behaviour notes an operator will see in the logs:
+
+* the relay's log line said "published N event(s) to Elasticsearch"
+  unconditionally. Under this flag that is the opposite of what happens — the
+  relay projects through `index_document` and follows the switch like every other
+  write — so it now reads the backend rather than naming it.
+* `job_events` is empty in development, so the two paired-event latency metrics
+  report `count: 0`. That is the honest answer, and it is distinguishable from the
+  old failure, which returned the same empty shape because the aggregation had
+  raised.
 
 #### The raw-client surface is closed
 
@@ -374,22 +414,80 @@ fresh insert, which silently dropped every new order and produced a 404 straight
 after a 201. The Postgres path cannot have that failure — there is no split between
 "run the script" and "apply the upsert".
 
+#### The query shapes the store refused, and the two it silently dropped
+
+Closing the raw-client surface was necessary and not sufficient. What remained was
+query *shapes*, and chasing them turned up a worse category than the one that was
+already written down.
+
+**Refused loudly** — three sites. Two pipeline-aggregation latency metrics
+(`bucket_script` / `stats_bucket` / `avg_bucket`) and one script-valued `sum`. The
+metrics caught their own exception and returned `{"buckets": [], "overall": {}}`,
+so "fails loudly" was only true inside the log; a caller saw an empty metric.
+`inventory.get_summary` has no `except` and was a genuine 500. All three are now
+Python post-processing over supported aggregations.
+
+**Dropped silently** — and this is the category that was not in this document at
+all. The store's rule is that an unsupported clause raises rather than being
+ignored; it was enforced for clauses inside `query` and `aggs` and *not at all* for
+the top level of the search body, where an unrecognised key was simply never read.
+
+| Key | Sites | What dropping it did |
+|---|---|---|
+| `search_after` | 9 public, 8 internal | pagination returns page 1 forever |
+| `runtime_mappings` | 1 | `stats` over a field that does not exist → **reports zero seconds of send latency as though measured** |
+| `track_total_hits` | 9 | nothing; Postgres totals are always exact |
+
+`search_after` also exposed a live defect that has nothing to do with this
+migration. All nine public sites built the boundary as `[cursor, cursor]` where
+`cursor` is an id, against a `[{created_at: desc}, {id: asc}]` sort — so an id went
+in as a date boundary. On the cluster, today:
+
+```
+page 1: HTTP 200
+    _id=ACC-004  sort=[1767978188875, 'ACC-004']
+    _id=ACC-008  sort=[1762448588875, 'ACC-008']
+
+page 2 with the shipped [cursor, cursor]: HTTP 400
+    failed to parse date field [ACC-008] with format
+    [strict_date_optional_time||epoch_millis]
+
+page 2 with the real sort values [1762448588875, 'ACC-008']: HTTP 200
+    _id=ACC-010
+    _id=ACC-007
+```
+
+Page 2 has never worked on any of them. The cursor stays an **id** rather than
+becoming an opaque encoded sort tuple, because these endpoints have a second
+implementation — `persistence/read_repositories.py` serves them from the relational
+tables under `COMMERCE_READ_FROM_POSTGRES` — and that one already paginates
+correctly with an id cursor. Two implementations of one endpoint handing out
+different cursor formats would invalidate every in-flight cursor on either flag
+flip. `services/keyset_pagination.py` resolves the cursor row server-side, which is
+what the relational path does in SQL, so there is no API change.
+
+One deliberate asymmetry: an unresolvable cursor is a 400 here, where the
+relational path silently restarts at page 1. For the usual `while next_cursor:`
+loop, restarting never terminates — page 1 returns with the same cursor attached.
+That is also how the regression showed up when it was injected: nine tests failed
+with `pagination did not terminate`.
+
+The store now honours `search_after`, returns `sort` values on hits as Elasticsearch
+does, accepts `track_total_hits` and `timeout` with a stated reason, and **refuses
+every other top-level key**.
+
 ##### Still outstanding
 
-The raw-client surface is closed, so what remains is about query *shapes* the
-Postgres store does not yet answer, plus one write path pointed at the wrong
-target. Neither is caught by the inventory test, which is why they are listed
-here rather than left to be inferred from a green run.
-
-* **Six pipeline aggregations** in
-  `notifications/services/communication_metrics_service.py` and one script-valued
-  `sum` in `inventory/service.py`. These raise `UnsupportedAggregationError`
-  rather than returning a wrong number, so on the Postgres backend they fail
-  loudly — an error, not silent corruption, but still an outage for those
-  endpoints. To be rewritten as Python post-processing over bucket output.
-* **The outbox relay** still projects into Elasticsearch. It should project into
-  `es_documents`, at which point the ES indices for the ~25 already-migrated
-  aggregates stop being written at all.
+* **Staging and production have not been flipped.** Run the parity tool against
+  each before setting the flag. `.env.production` is still placeholders.
+* **The outbox relay is now redundant rather than misdirected.** It projects
+  through `index_document`, so under this flag it copies Postgres aggregates into
+  `es_documents` — another Postgres table. Harmless but pointless; it should stop
+  running once nothing reads the ES projection.
+* **Phases 5–7**: stop writing to Elasticsearch, remove the client and the 16
+  non-test mapping modules and the ILM policies, then delete the cluster. 567 files
+  mention `elasticsearch` or `es_service` (4,214 mentions), so this is mechanical
+  but large.
 
 ## Standing facts
 
