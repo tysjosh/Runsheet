@@ -252,6 +252,21 @@ class Settings(BaseSettings):
         le=60.0,
         description="OutboxRelay idle poll interval in seconds.",
     )
+    document_store_backend: str = Field(
+        default="elasticsearch",
+        description=(
+            "Where ElasticsearchService's document operations (index / update / "
+            "search / get / delete / bulk / msearch) are served from. "
+            "'elasticsearch' is the legacy path. 'postgres' routes them to "
+            "persistence.document_store, which translates the query DSL to SQL "
+            "over a jsonb column and requires database_url. Call sites are "
+            "unchanged either way — the response shapes are identical — so this "
+            "is a per-environment switch and a rollback is flipping it back. "
+            "Phase 4 of the Elasticsearch to Postgres migration; see "
+            "docs/elasticsearch-to-postgres-migration.md. Default "
+            "'elasticsearch' so adopting the Postgres path is deliberate."
+        ),
+    )
     retired_es_indices_raw: str = Field(
         default="",
         alias="RETIRED_ES_INDICES",
@@ -961,6 +976,39 @@ class Settings(BaseSettings):
             except (ValueError, TypeError):
                 pass
         return [part.strip() for part in raw.split(",") if part.strip()]
+
+    @property
+    def document_store_is_postgres(self) -> bool:
+        """True when document operations should be served from Postgres.
+
+        Requires ``database_url``: routing reads to a dormant persistence layer
+        would fail every request, so the flag is inert without one and the
+        service stays on Elasticsearch. Checked as a property rather than at
+        validation time so the flag can be flipped per environment without
+        making ``database_url`` conditionally required.
+        """
+        return (
+            str(self.document_store_backend).strip().lower() == "postgres"
+            and bool(self.database_url)
+        )
+
+    @model_validator(mode="after")
+    def validate_document_store_backend(self) -> "Settings":
+        """Reject a misspelled backend instead of silently using Elasticsearch.
+
+        ``DOCUMENT_STORE_BACKEND=postgresql`` (or ``pg``, or a stray space) would
+        otherwise leave the service on the legacy path while the operator
+        believed the cutover had happened — the migration would look complete and
+        nothing would have moved.
+        """
+        value = str(self.document_store_backend).strip().lower()
+        if value not in ("elasticsearch", "postgres"):
+            raise ValueError(
+                "document_store_backend must be 'elasticsearch' or 'postgres', "
+                f"got {self.document_store_backend!r}"
+            )
+        self.document_store_backend = value
+        return self
 
     @model_validator(mode="after")
     def validate_session_store_config(self) -> "Settings":

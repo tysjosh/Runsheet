@@ -69,7 +69,45 @@ class ElasticsearchService:
             )
         )
         
+        # Lazily constructed on first use so importing this module does not pull
+        # in the persistence layer, and so a deployment on the legacy path never
+        # touches it at all.
+        self._document_store = None
+
         self.connect()
+
+    # ------------------------------------------------------------------
+    # Postgres document-store delegation (migration Phase 4)
+    # ------------------------------------------------------------------
+    #
+    # The nine async document methods below check ``_pg_store()`` first. When the
+    # ``document_store_backend`` setting is ``postgres`` they hand off to
+    # :class:`persistence.document_store.PostgresDocumentStore`, which returns the
+    # same response shapes — so none of the 684 Elasticsearch call sites change,
+    # and a rollback is flipping one environment variable.
+    #
+    # The delegation lives here rather than in a wrapper class because ``client``
+    # is also used directly in 20 files (index management, ILM, scripted upserts).
+    # Those are a separate migration item; putting the switch inside the methods
+    # keeps the object identity, the circuit breakers and the raw client all
+    # exactly where they are while the document plane moves.
+
+    def _pg_store(self):
+        """The Postgres document store, or ``None`` when on the legacy path."""
+        try:
+            if not get_settings().document_store_is_postgres:
+                return None
+        except Exception:  # noqa: BLE001 — a settings hiccup must not break reads
+            return None
+        if self._document_store is None:
+            from persistence.document_store import PostgresDocumentStore
+
+            self._document_store = PostgresDocumentStore()
+            logger.info(
+                "Document operations are served from PostgreSQL "
+                "(document_store_backend=postgres)"
+            )
+        return self._document_store
 
     def _is_retired_index(self, index: str) -> bool:
         """True when ``index`` has been retired (migrated to Postgres + dropped).
@@ -1336,6 +1374,9 @@ class ElasticsearchService:
         """
         if self._is_retired_index(index):
             return {"result": "skipped_retired_index"}
+        store = self._pg_store()
+        if store is not None:
+            return await store.index_document(index, doc_id, document)
         try:
             async def _do_index():
                 # Only inject timestamps for indices that have these fields in
@@ -1369,6 +1410,19 @@ class ElasticsearchService:
         """
         if self._is_retired_index(index):
             return {"result": "skipped_retired_index"}
+        store = self._pg_store()
+        if store is not None:
+            from persistence.document_store import DocumentNotFound
+
+            try:
+                return await store.update_document(index, doc_id, partial_doc)
+            except DocumentNotFound as exc:
+                # The ES client raises NotFoundError here, which callers already
+                # handle; re-raise through the same error path so behaviour on
+                # both backends is identical.
+                self._handle_elasticsearch_error(
+                    f"update_document({index}, {doc_id})", exc
+                )
         try:
             async def _do_update():
                 partial_doc["updated_at"] = utcnow().isoformat()
@@ -1414,6 +1468,9 @@ class ElasticsearchService:
             - failed: count of failed documents
             - errors: list of error details for failed documents
         """
+        store = self._pg_store()
+        if store is not None:
+            return await store.bulk_index_documents(index, documents)
         try:
             async def _do_bulk_index():
                 from elasticsearch.helpers import bulk, BulkIndexError
@@ -1614,6 +1671,11 @@ class ElasticsearchService:
         - Requirement 3.5: Implement circuit breakers for Elasticsearch
         - Requirement 2.4: Return specific error code indicating database unavailability
         """
+        store = self._pg_store()
+        if store is not None:
+            return await store.search_documents(
+                index, query, size, request_timeout
+            )
         try:
             async def _do_search():
                 # Add size to query body if not already present
@@ -1666,6 +1728,10 @@ class ElasticsearchService:
         if not searches:
             return {"responses": []}
 
+        store = self._pg_store()
+        if store is not None:
+            return await store.multi_search(searches, request_timeout)
+
         try:
             async def _do_multi_search():
                 body: List[Dict[str, Any]] = []
@@ -1703,6 +1769,9 @@ class ElasticsearchService:
         - Requirement 3.5: Implement circuit breakers for Elasticsearch
         - Requirement 2.4: Return specific error code indicating database unavailability
         """
+        store = self._pg_store()
+        if store is not None:
+            return await store.get_document(index, doc_id)
         try:
             async def _do_get():
                 response = self.client.get(index=index, id=doc_id)
@@ -1727,6 +1796,9 @@ class ElasticsearchService:
         """
         if self._is_retired_index(index):
             return False
+        store = self._pg_store()
+        if store is not None:
+            return await store.delete_document(index, doc_id)
         try:
             async def _do_delete():
                 self.client.delete(index=index, id=doc_id, refresh="wait_for")

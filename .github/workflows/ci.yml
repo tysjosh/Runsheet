@@ -309,6 +309,45 @@ jobs:
             "postgresql://runsheet:runsheet@localhost:5432/runsheet" \
             runsheet_ci_drill
 
+      # The Postgres document store translates the Elasticsearch query DSL to
+      # SQL over a jsonb column. That translation rests entirely on jsonb
+      # operators — containment (@>), key existence (?), jsonb's total ordering
+      # for sort — none of which SQLite has, so the main backend-tests job (which
+      # runs against in-memory SQLite) CANNOT cover it. Its fixtures skip without
+      # a server, which is the honest behaviour but means the tests would never
+      # run anywhere if this step did not exist.
+      #
+      # This job is the right home: it already has a postgres:16 service and has
+      # already applied the full migration chain, so es_documents exists with its
+      # GIN index. Placed after the restore drill so a schema problem is reported
+      # by the cheaper check first.
+      - name: Document store — query translation and store behaviour
+        env:
+          ENVIRONMENT: "development"
+          DATABASE_URL: "postgresql+psycopg://runsheet:runsheet@localhost:5432/runsheet"
+          POSTGRES_TEST_URL: "postgresql+psycopg://runsheet:runsheet@localhost:5432/runsheet"
+        working-directory: Runsheet-backend
+        run: |
+          # -p no:cacheprovider keeps the hypothesis example database out of the
+          # workspace, which the git-hygiene job would otherwise flag.
+          python -m pytest tests/postgres -q --no-cov -p no:cacheprovider \
+            | tee /tmp/docstore.log
+
+          # pytest exits 0 when every test SKIPS, and these tests skip without a
+          # reachable server. A green step that ran nothing is precisely the
+          # outcome the fixtures were written to avoid, so require passes and
+          # forbid skips explicitly.
+          if ! grep -qE '[0-9]+ passed' /tmp/docstore.log; then
+            echo "❌ No document-store tests passed — they were skipped or not collected."
+            echo "   The Postgres service or POSTGRES_TEST_URL is not reachable."
+            exit 1
+          fi
+          if grep -qE '[0-9]+ skipped' /tmp/docstore.log; then
+            echo "❌ Some document-store tests skipped; every one of them needs the database."
+            exit 1
+          fi
+          echo "✅ Document-store tests ran against PostgreSQL."
+
   # -----------------------------------------------------------------
   # Job 7: Git hygiene — no ignored files tracked, ADR index exists
   # -----------------------------------------------------------------

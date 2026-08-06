@@ -55,9 +55,9 @@ Write **one** Postgres-backed adapter implementing the existing
 |---|---|---|
 | 0 | Whole-cluster backup, verified | done |
 | 1 | Postgres source of truth for the three ES-only indices | done |
-| 2 | Postgres-backed `ElasticsearchService` adapter (DSL → SQL over `jsonb`) | next |
-| 3 | Backfill every remaining index; parity per index | not started |
-| 4 | Flip reads to the adapter behind a flag; soak | not started |
+| 2 | Postgres-backed document store (DSL → SQL over `jsonb`) | done |
+| 3 | Copy every remaining index; whole-cluster parity | done |
+| 4 | Flip `DOCUMENT_STORE_BACKEND=postgres`; soak | ready, not flipped |
 | 5 | Stop writing to Elasticsearch | not started |
 | 6 | Remove the client, mappings and ILM policies | not started |
 | 7 | **Delete the cluster** | not started |
@@ -144,14 +144,148 @@ Two defects were found by that verification rather than by reading:
    `_INDEX_BY_AGG` after rev 0007 dropped its table, and only surfaces when
    `shipments_current` is absent from `retired_es_indices`.
 
-### Phase 2 — the adapter (next)
+### Phase 2 — the document store
 
-Implement the `ElasticsearchService` interface over Postgres. Scope is set by the
-clause counts above: `term`, `terms`, `bool`/`must`/`filter`/`should`/`must_not`,
-`range`, `exists`, `match_all`, plus `terms`/`range`/`sum`/`avg`/`date_histogram`
-aggregations. `script` (18), `wildcard` (4) and `query_string` (2) need
-case-by-case handling; `nested` (7) needs a decision on whether to model the
-subdocuments relationally.
+Migration `0009_es_documents` adds one generic table — `(index_name, doc_id)`
+primary key matching Elasticsearch exactly, `tenant_id` lifted to a typed column,
+the document in `jsonb`, and a GIN index. One table rather than ~75 because the
+whole cluster is 7,623 documents and the largest index holds 988, so per-index
+partitioning buys nothing measurable, and these documents have no agreed schema.
+
+Four modules:
+
+| Module | Job |
+|---|---|
+| `persistence/document_query.py` | DSL → SQL predicates, sort, `_source` |
+| `persistence/document_matcher.py` | the same DSL in Python, for `filter` aggregations and as the property-test oracle |
+| `persistence/document_aggregations.py` | aggregations over the fetched match set |
+| `persistence/document_store.py` | the `ElasticsearchService` async surface |
+| `persistence/document_field_policy.py` | fields that must stay unsearchable |
+
+`ElasticsearchService` delegates its nine async document methods to the store when
+`DOCUMENT_STORE_BACKEND=postgres`. No call site changes; a rollback is flipping
+the variable back.
+
+**Aggregations run in Python, not SQL.** Filtering and sorting need indexes and
+decide which rows are read, so they go to SQL. Aggregation does not: every
+aggregating query in the codebase passes `size: 0` over one tenant's slice of an
+index of at most 988 documents. `date_histogram` with nested sub-aggregations,
+`top_hits`, and ES's epoch-millis treatment of `min`/`max` on dates are each
+awkward in SQL and simple over Python values. The bound is enforced, not assumed:
+`MAX_AGGREGATION_ROWS = 50_000` and past it the store raises rather than
+truncating.
+
+**An unsupported clause raises.** This is the load-bearing decision. `script`,
+`nested`, `query_string`, `geo_*`, pipeline aggregations and calendar-month
+histograms all fail loudly with the clause named. A translator that silently drops
+a clause returns wrong rows and the caller cannot tell that from a real result —
+which is the shape of every silent-empty defect this migration has found.
+
+#### Behaviour differences, stated rather than hidden
+
+| Area | Elasticsearch | Postgres store |
+|---|---|---|
+| Read-after-write | needs a refresh | immediately consistent |
+| `_score` | computed | always `null`; sorting by it is a no-op |
+| `match` / `multi_match` | analyzed terms, stemming, `fuzziness` | case-insensitive substring |
+| `date` precision | milliseconds | full microseconds, so fewer ties |
+| `float` fields | 32-bit, so `2.28` sums as `2.2799999713897705` | full double |
+| unsorted queries | arbitrary order | ordered by id |
+
+The text-matching row is the one with user-visible consequences: four call sites
+pass `fuzziness: AUTO` and get substring behaviour instead. Accepted rather than
+refused, because refusing would break four working reads for a difference none of
+them depends on — but it is a real change, not a no-op.
+
+#### Fields that must stay unsearchable
+
+Eighteen indices declare fields Elasticsearch stores but does not index —
+`"type": "binary"`, `"index": false`, `"enabled": false`. In a `jsonb` column
+everything is queryable, so the move silently widens what a caller can filter on.
+Two cases make that a security property rather than a curiosity:
+
+* **`fuel_orders_current.pod_otp`** — the proof-of-delivery one-time code. With ES
+  it cannot appear in a filter at all. Made searchable, an authenticated caller
+  who can reach any order-search endpoint can confirm a guessed OTP one query at a
+  time.
+* **`driver_devices.push_token`** — an Expo push credential, same reasoning.
+
+`persistence/document_field_policy.py` reads the declared mappings (the code, not
+the cluster, so it survives the cluster) and the store refuses any query that
+filters, sorts or aggregates on such a field. Returning the document is
+unaffected — Elasticsearch returns these fields too; only querying them is
+blocked.
+
+### Phase 3 — whole-cluster parity
+
+`scripts/document_store_parity.py` copies an index into `es_documents` and then
+runs a battery of query bodies against **both** backends, diffing the total, the
+ordered id list, every returned document body, and every aggregation.
+
+Result on the development cluster: **1,426 comparisons identical across all 103
+indices**, with 21 void — queries Elasticsearch itself refuses (a `terms`
+aggregation on a dynamically-mapped `text` field needs fielddata), so there is
+nothing to compare against.
+
+Comparing ids rather than counts is the point. Two backends can return the same
+number of different documents; the ordered id list catches a sort that puts
+`"10"` before `"9"`.
+
+The tool distinguishes four outcomes, because conflating them makes it unreadable:
+a genuine divergence; a legitimate tie-break difference (verified by checking the
+sort *values* are monotonic and the page boundary matches, not the ids); a
+float32-precision difference in an aggregation; and a void comparison. The first
+whole-cluster run reported 119 of 1,125 divergences, nearly all of them the tool
+comparing unsorted pages of 50 from 1,151 documents — which neither backend
+promises anything about.
+
+#### Defects the parity run found that the tests had not
+
+1. **`exists` on an empty array.** `mvp_tank_forecasts` has two documents with
+   `anomaly_flags: []`. Elasticsearch excludes them — an empty array is zero
+   values — and the store included them, because `->>'anomaly_flags'` renders an
+   array as the *text* `'[]'`, which is not NULL. ES=1981, PG=1983. Now tested via
+   `jsonb_typeof`, and the property test generates empty arrays.
+2. **`terms` aggregation tie-break.** Elasticsearch orders by count in the
+   requested direction and breaks ties by key **ascending** regardless. Sorting on
+   a tuple with `reverse=True` reversed both, so equal-count buckets came back
+   key-descending: `[C4, C3, C2, C1, C5]` where ES returns `[C1, C2, C3, C4, C5]`.
+   Same counts, different order, and any caller taking "the top bucket" from a tie
+   got a different answer.
+
+Three earlier defects were found by the property test before the parity run:
+the generic `JSON` comparator compiling `contains` to string `LIKE`; SQL
+three-valued logic making a document match neither a query nor its negation; and
+`minimum_should_match: 0` being treated as 1.
+
+### Phase 4 — the cutover (ready)
+
+Set `DOCUMENT_STORE_BACKEND=postgres` (requires `DATABASE_URL`). The flag is
+validated at startup, so a misspelling — `postgresql`, `pg` — fails rather than
+leaving the service quietly on the legacy path. It is inert without a database.
+
+Before flipping, per environment:
+
+```sh
+cd Runsheet-backend
+python -m scripts.document_store_parity run --all --tenant <tenant>
+```
+
+Remaining work before Phase 5:
+
+* **20 files use the raw `.client`** for index management, ILM, and painless
+  scripted upserts (`fuel/order_repository.py`, `ops/services/ops_es_service.py`,
+  `fuel/driver_repository.py`, `scheduling/services/cargo_service.py`,
+  `Agents/approval_queue_service.py`). Those are a separate migration item: a
+  scripted upsert needs rewriting as a read-modify-write under a row lock, which
+  is a behaviour change worth making deliberately.
+* **Six pipeline aggregations** in
+  `notifications/services/communication_metrics_service.py` and one script-valued
+  `sum` in `inventory/service.py` need rewriting as Python post-processing over
+  bucket output.
+* **The outbox relay** still projects into Elasticsearch. It should project into
+  `es_documents` instead, at which point the ES indices for the ~25 already-migrated
+  aggregates stop being written at all.
 
 ## Standing facts
 

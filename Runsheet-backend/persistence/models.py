@@ -978,3 +978,71 @@ class FuelStationORM(_FuelAssetBase, Base):
         Index("ix_fuel_station_tenant_status", "tenant_id", "status"),
         Index("ix_fuel_station_tenant_fuel_type", "tenant_id", "fuel_type"),
     )
+
+
+# ---------------------------------------------------------------------------
+# Generic document store: the Postgres replacement for the Elasticsearch cluster
+# ---------------------------------------------------------------------------
+#
+# Phase 2 of the Elasticsearch → Postgres migration. Every index that is NOT
+# already a hybrid/relational aggregate lands here, one row per document, keyed
+# exactly as Elasticsearch keyed it. ``persistence.document_store`` serves the
+# ``ElasticsearchService`` async surface (``index_document``, ``search_documents``,
+# ``get_document`` …) from this table, so the 684 call sites do not change.
+#
+# One generic table rather than ~75 per-index tables, because:
+#
+#   * the whole cluster is 7,623 documents / 6.1 MB, and the largest single index
+#     holds 988 — so per-table partitioning buys nothing measurable;
+#   * a per-index table would need a schema decision and a migration for each of
+#     the ~75, and the point of this phase is that call sites keep working
+#     unchanged while their storage moves;
+#   * documents in these indices have no agreed schema. Several are written by
+#     more than one producer with different field sets, which is exactly what a
+#     ``jsonb`` column is for.
+#
+# ``document`` is ``jsonb``, not ``json``: the query translator needs the
+# containment operator (``@>``) and key-existence (``?``) to be index-backed, and
+# it needs jsonb's total ordering for ``sort`` — jsonb orders numbers numerically
+# and strings lexicographically, so one expression sorts both correctly, where
+# ``->>`` would compare every number as text and put "10" before "9".
+#
+# ``tenant_id`` is lifted out of the document into a typed column because
+# essentially every read is tenant-scoped (813 ``term`` clauses across the
+# codebase, ``tenant_id`` the most common field), and a NULL-tolerant column with
+# a composite index answers that far faster than a jsonb extraction. It is
+# nullable: the legacy ``trucks`` / ``locations`` indices were created with
+# dynamic mappings and some documents genuinely carry no tenant.
+#
+# The GIN index on ``document`` is created by the migration and deliberately NOT
+# declared here: ``postgresql_using="gin"`` would break ``Base.metadata.create_all``
+# against the SQLite database the test suite uses.
+
+
+class EsDocumentORM(Base):
+    """One Elasticsearch document, stored in Postgres.
+
+    Primary key is ``(index_name, doc_id)`` — the same pair Elasticsearch uses,
+    so a document keyed ``TNK-002_C1`` in ``truck_compartments`` is keyed
+    identically here and every existing reader finds it.
+    """
+
+    __tablename__ = "es_documents"
+
+    index_name: Mapped[str] = mapped_column(String(128), primary_key=True)
+    doc_id: Mapped[str] = mapped_column(String(512), primary_key=True)
+    tenant_id: Mapped[Optional[str]] = mapped_column(String(128))
+    document: Mapped[Dict[str, Any]] = mapped_column(_JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+    __table_args__ = (
+        Index("ix_es_documents_index_tenant", "index_name", "tenant_id"),
+        # Supports the ``sort: created_at desc`` default that ``get_all_documents``
+        # and most list endpoints use.
+        Index("ix_es_documents_index_updated", "index_name", "updated_at"),
+    )
