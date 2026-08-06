@@ -18,7 +18,10 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from services.elasticsearch_service import ElasticsearchService
+from services.elasticsearch_service import (
+    ElasticsearchService,
+    _UPSERT_IF_NEWER_SCRIPT,
+)
 from services.time_utils import utcnow
 
 logger = logging.getLogger(__name__)
@@ -37,22 +40,21 @@ class OpsElasticsearchService:
 
     # Painless script for current-state upsert with out-of-order reconciliation.
     # Compares incoming event_timestamp vs existing last_event_timestamp.
-    # Discards (noop) if incoming is older. Otherwise partial-updates only
-    # the fields present in the incoming params.
+    # Discards (noop) if incoming is older-or-equal. Otherwise partial-updates
+    # only the fields present in the incoming params.
     # Validates: Req 6.1, 6.2, 6.4, 6.7, 6.8
-    UPSERT_SCRIPT = """
-        if (ctx._source.containsKey('last_event_timestamp') && ctx._source.last_event_timestamp != null) {
-            ZonedDateTime existing = ZonedDateTime.parse(ctx._source.last_event_timestamp);
-            ZonedDateTime incoming = ZonedDateTime.parse(params.last_event_timestamp);
-            if (incoming.isBefore(existing) || incoming.isEqual(existing)) {
-                ctx.op = 'noop';
-                return;
-            }
-        }
-        for (entry in params.entrySet()) {
-            ctx._source[entry.getKey()] = entry.getValue();
-        }
-    """.strip()
+    #
+    # BOUND to the canonical copy rather than restated. Three identical
+    # transcriptions of this script existed — here, in
+    # ``fuel/order_repository.py``, and now in ``ElasticsearchService`` — and a
+    # painless script is exactly the kind of thing that gets fixed in one place
+    # and left stale in the others, silently, because a wrong comparison shows up
+    # as an order moving backwards weeks later rather than as an error.
+    #
+    # Only the ``bulk_index`` path below still uses it: a bulk scripted upsert is
+    # a different shape from a single-document one and has not been moved onto
+    # ``ElasticsearchService.upsert_if_newer`` yet.
+    UPSERT_SCRIPT = _UPSERT_IF_NEWER_SCRIPT
 
     def __init__(self, es_service: ElasticsearchService):
         self._es = es_service
@@ -439,33 +441,22 @@ class OpsElasticsearchService:
         from resilience.circuit_breaker import CircuitOpenException
 
         try:
-            async def _do_upsert():
-                response = self.client.update(
-                    index=index,
-                    id=doc_id,
-                    body={
-                        "scripted_upsert": True,
-                        "script": {
-                            "source": self.UPSERT_SCRIPT,
-                            "lang": "painless",
-                            "params": doc,
-                        },
-                        "upsert": doc,
-                    },
-                    refresh=True,
+            # ``ElasticsearchService.upsert_if_newer`` owns the comparison now.
+            # This method's painless script was byte-identical to the one in
+            # ``fuel/order_repository.py``; both reached past the facade to
+            # ``client.update``, which would keep them writing to Elasticsearch
+            # after the document plane moved to Postgres while everything around
+            # them wrote to Postgres. The facade also carries the circuit breaker,
+            # so the wrapper that used to be here is redundant.
+            applied = await self._es.upsert_if_newer(index, doc_id, doc)
+            if not applied:
+                logger.info(
+                    f"Discarded stale {entity_label} event: "
+                    f"entity_id={doc_id}, "
+                    f"incoming_timestamp={doc.get('last_event_timestamp')}, "
+                    f"event_id={doc.get('trace_id', 'unknown')}"
                 )
-                result = response.get("result", "")
-                if result == "noop":
-                    logger.info(
-                        f"Discarded stale {entity_label} event: "
-                        f"entity_id={doc_id}, "
-                        f"incoming_timestamp={doc.get('last_event_timestamp')}, "
-                        f"event_id={doc.get('trace_id', 'unknown')}"
-                    )
-                    return False
-                return True
-
-            return await self._es._circuit_breaker.execute(_do_upsert)
+            return applied
         except CircuitOpenException as e:
             self._es._handle_circuit_breaker_exception(e)
             return False

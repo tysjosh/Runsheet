@@ -271,20 +271,82 @@ cd Runsheet-backend
 python -m scripts.document_store_parity run --all --tenant <tenant>
 ```
 
-Remaining work before Phase 5:
+#### The flag is not yet safe to flip
 
-* **20 files use the raw `.client`** for index management, ILM, and painless
-  scripted upserts (`fuel/order_repository.py`, `ops/services/ops_es_service.py`,
-  `fuel/driver_repository.py`, `scheduling/services/cargo_service.py`,
-  `Agents/approval_queue_service.py`). Those are a separate migration item: a
-  scripted upsert needs rewriting as a read-modify-write under a row lock, which
-  is a behaviour change worth making deliberately.
+Code that reaches past `ElasticsearchService` to `es.client.search(...)` or
+`es.client.update(...)` is **not** routed by the switch. After the cutover those
+sites keep talking to Elasticsearch while everything else talks to Postgres, and
+the two stores diverge — silently, because each call individually succeeds.
+
+`tests/unit/test_raw_elasticsearch_client_inventory.py` inventories that surface
+with an explicit allowlist. The test fails on an unlisted call site, and on a
+listed one that no longer exists, so the list cannot rot and can only shrink.
+**While it is non-empty the flag splits writes across two stores.**
+
+| Remaining | Sites | Why it has not moved |
+|---|---|---|
+| `ops/api/endpoints.py` | 21 | mechanical searches; the store answers them unchanged |
+| `ops/ingestion/poison_queue.py` | 7 | index / get / update / delete / count / search |
+| `fuel/driver_repository.py` | 4 | painless counter scripts + `update_by_query` |
+| `fuel/compartment_state_models.py` | 4 | two `if_seq_no` OCC loops |
+| `Agents/approval_queue_service.py` | 2 | `if_seq_no` OCC |
+| `Agents/tools/ops_{report,search}_tools.py` | 2 | mechanical searches |
+| `bootstrap/core.py` | 1 | `scan` over an index at startup |
+| migration tooling | 3 | exists to talk to Elasticsearch; moves last |
+
+##### Read-modify-write now has a replacement
+
+Two Elasticsearch patterns did read-modify-write: painless `scripted_upsert`, and
+`if_seq_no` / `if_primary_term` optimistic concurrency with a retry loop.
+`PostgresDocumentStore.atomic_update` replaces both with `SELECT … FOR UPDATE`,
+which is strictly stronger — a concurrent writer waits instead of losing a race,
+so **the retry loops disappear**. `CompartmentStateRepository` retries three times
+with jittered backoff and raises `CompartmentStateConflictError` on persistent
+contention, a 409 the caller has to handle; against a locked row that state cannot
+arise.
+
+Verified non-vacuously: with the row lock removed, ten concurrent increments
+produce **3**, losing seven writes. With it, ten.
+
+Two of the four sites are migrated. `ElasticsearchService.upsert_if_newer` now owns
+the timestamp guard, with an Elasticsearch implementation and a Postgres one, so
+`fuel/order_repository.py` (3 raw calls → 0) and `ops/services/ops_es_service.py`
+(1 → 0) go through the facade. Three byte-identical transcriptions of the painless
+script existed; there is now one, and the other reference binds to it.
+
+The comparison is `isBefore || isEqual` — an event whose timestamp **equals** the
+stored one is discarded. That reads like an off-by-one and is not: at-least-once
+delivery makes an equal timestamp the common case for a redelivery, and applying it
+would overwrite whatever a later event already wrote. Verified against both
+backends live, all four cases agreeing:
+
+| Case | Elasticsearch | Postgres |
+|---|---|---|
+| fresh insert | applied | applied |
+| newer event | applied | applied |
+| older event | discarded | discarded |
+| equal timestamp | discarded | discarded |
+
+The Elasticsearch implementation also keeps a workaround worth naming: serverless
+Elasticsearch reported `noop` **and** failed to materialise the `upsert` body on a
+fresh insert, which silently dropped every new order and produced a 404 straight
+after a 201. The Postgres path cannot have that failure — there is no split between
+"run the script" and "apply the upsert".
+
+##### Still outstanding
+
+* **Two `if_seq_no` OCC sites** (`compartment_state_models.py`,
+  `approval_queue_service.py`) and **`driver_repository.py`'s counter scripts** to
+  move onto `atomic_update`.
+* **24 mechanical searches** to route through `search_documents`.
 * **Six pipeline aggregations** in
   `notifications/services/communication_metrics_service.py` and one script-valued
-  `sum` in `inventory/service.py` need rewriting as Python post-processing over
+  `sum` in `inventory/service.py`, to be rewritten as Python post-processing over
   bucket output.
+* **A bulk scripted upsert** in `ops/services/ops_es_service.py` — a different
+  shape from the single-document one, still on `helpers.bulk`.
 * **The outbox relay** still projects into Elasticsearch. It should project into
-  `es_documents` instead, at which point the ES indices for the ~25 already-migrated
+  `es_documents`, at which point the ES indices for the ~25 already-migrated
   aggregates stop being written at all.
 
 ## Standing facts

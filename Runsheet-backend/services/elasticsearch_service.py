@@ -37,6 +37,32 @@ TIMESTAMP_SKIP_INDICES = frozenset(
 )
 
 
+# Out-of-order protection for current-state documents, used by
+# ``ElasticsearchService.upsert_if_newer``. Two byte-identical copies of this
+# lived in ``fuel/order_repository.py`` and ``ops/services/ops_es_service.py``,
+# each reaching past the facade to ``client.update``; they are here once so both
+# call sites go through the facade and so the Postgres document store can answer
+# the same call.
+#
+# ``isBefore || isEqual`` is deliberate: an event whose timestamp EQUALS the
+# stored one is discarded. At-least-once delivery makes an equal timestamp the
+# common case for a redelivery, and applying it would overwrite whatever a later
+# event had already written.
+_UPSERT_IF_NEWER_SCRIPT = """
+    if (ctx._source.containsKey('last_event_timestamp') && ctx._source.last_event_timestamp != null) {
+        ZonedDateTime existing = ZonedDateTime.parse(ctx._source.last_event_timestamp);
+        ZonedDateTime incoming = ZonedDateTime.parse(params.last_event_timestamp);
+        if (incoming.isBefore(existing) || incoming.isEqual(existing)) {
+            ctx.op = 'noop';
+            return;
+        }
+    }
+    for (entry in params.entrySet()) {
+        ctx._source[entry.getKey()] = entry.getValue();
+    }
+""".strip()
+
+
 class ElasticsearchService:
     """
     Elasticsearch service with circuit breaker protection.
@@ -1441,6 +1467,97 @@ class ElasticsearchService:
             self._handle_elasticsearch_error(f"update_document({index}, {doc_id})", e)
 
     
+    async def upsert_if_newer(
+        self,
+        index: str,
+        doc_id: str,
+        document: Dict[str, Any],
+        *,
+        timestamp_field: str = "last_event_timestamp",
+    ) -> bool:
+        """Upsert unless the stored ``timestamp_field`` is newer or equal.
+
+        Out-of-order protection for current-state documents: at-least-once
+        delivery means an event can arrive after a later one has already been
+        applied, and a plain last-write-wins upsert would move the document
+        backwards.
+
+        Two identical copies of a painless ``scripted_upsert`` used to implement
+        this — one in ``fuel/order_repository.py``, one in
+        ``ops/services/ops_es_service.py`` — each reaching past this facade to
+        ``client.update``. They are the same script character for character, so
+        they belong here once, and putting them here is what lets the Postgres
+        document store answer the same call: it does the comparison under a
+        ``SELECT … FOR UPDATE`` instead, which cannot lose a concurrent write and
+        needs no retry loop.
+
+        Returns ``True`` when the document was written, ``False`` when the event
+        was discarded as stale.
+        """
+        if self._is_retired_index(index):
+            return False
+
+        store = self._pg_store()
+        if store is not None:
+            return await store.upsert_if_newer(
+                index, doc_id, document, timestamp_field=timestamp_field
+            )
+
+        try:
+            async def _do_upsert():
+                response = self.client.update(
+                    index=index,
+                    id=doc_id,
+                    body={
+                        "scripted_upsert": True,
+                        "script": {
+                            "source": _UPSERT_IF_NEWER_SCRIPT,
+                            "lang": "painless",
+                            "params": document,
+                        },
+                        "upsert": document,
+                    },
+                    refresh=True,
+                )
+                if response.get("result", "") != "noop":
+                    return True
+
+                # A "noop" has two causes and they need opposite handling:
+                #
+                #   (a) a genuine stale-event discard — the document exists and
+                #       the incoming timestamp is older-or-equal;
+                #   (b) a serverless-Elasticsearch quirk where ``scripted_upsert``
+                #       reports "noop" AND fails to materialise the ``upsert``
+                #       body on a FRESH insert.
+                #
+                # Case (b) silently dropped every new order, and since reads are
+                # served from Postgres the dispatcher got a 404 immediately after
+                # a 201. The document's absence distinguishes them.
+                #
+                # Neither case exists on the Postgres path: there is no split
+                # between "run the script" and "apply the upsert".
+                if self.client.exists(index=index, id=doc_id):
+                    logger.info(
+                        "upsert_if_newer(%s): discarded stale event for %s "
+                        "(incoming %s=%s)",
+                        index, doc_id, timestamp_field,
+                        document.get(timestamp_field),
+                    )
+                    return False
+                self.client.index(index=index, id=doc_id, body=document, refresh=True)
+                logger.info(
+                    "upsert_if_newer(%s): scripted_upsert no-op'd a fresh insert "
+                    "for %s; indexed directly (serverless-ES fallback)",
+                    index, doc_id,
+                )
+                return True
+
+            return await self._circuit_breaker.execute(_do_upsert)
+        except CircuitOpenException as e:
+            self._handle_circuit_breaker_exception(e)
+        except Exception as e:
+            self._handle_elasticsearch_error(f"upsert_if_newer({index}, {doc_id})", e)
+
     async def bulk_index_documents(self, index: str, documents: List[Dict[Any, Any]]) -> Dict[str, Any]:
         """
         Bulk index multiple documents with circuit breaker protection and partial failure handling.

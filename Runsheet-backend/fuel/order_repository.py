@@ -73,26 +73,10 @@ class OrderCrossTenantAccessError(PermissionError):
         )
 
 
-# ---------------------------------------------------------------------------
-# Painless script for timestamp-guarded upsert
-# ---------------------------------------------------------------------------
-
-#: Compares incoming ``last_event_timestamp`` against the stored value.
-#: If the incoming timestamp is older or equal, the operation is a noop.
-#: Otherwise all incoming fields overwrite the stored document.
-_ORDER_UPSERT_SCRIPT = """
-    if (ctx._source.containsKey('last_event_timestamp') && ctx._source.last_event_timestamp != null) {
-        ZonedDateTime existing = ZonedDateTime.parse(ctx._source.last_event_timestamp);
-        ZonedDateTime incoming = ZonedDateTime.parse(params.last_event_timestamp);
-        if (incoming.isBefore(existing) || incoming.isEqual(existing)) {
-            ctx.op = 'noop';
-            return;
-        }
-    }
-    for (entry in params.entrySet()) {
-        ctx._source[entry.getKey()] = entry.getValue();
-    }
-""".strip()
+# The timestamp-guarded upsert used to be a painless script here, byte-identical
+# to the one in ``ops/services/ops_es_service.py``. Both now go through
+# ``ElasticsearchService.upsert_if_newer``, which holds one copy and lets the
+# Postgres document store answer the same call under a row lock instead.
 
 
 # ---------------------------------------------------------------------------
@@ -394,59 +378,23 @@ class FuelOrderRepository:
         doc = model.model_dump(mode="json", exclude_none=False)
 
         try:
-            response = self._es.client.update(
-                index=self._orders_index,
-                id=order_id,
-                body={
-                    "scripted_upsert": True,
-                    "script": {
-                        "source": _ORDER_UPSERT_SCRIPT,
-                        "lang": "painless",
-                        "params": doc,
-                    },
-                    "upsert": doc,
-                },
-                refresh=True,
+            # The stale-event comparison, the painless script that expressed it,
+            # and the serverless-Elasticsearch fresh-insert fallback all moved to
+            # ``ElasticsearchService.upsert_if_newer``. They were reaching past
+            # the facade to ``client.update`` / ``client.exists`` /
+            # ``client.index``, which meant they would keep writing to
+            # Elasticsearch after the document plane was cut over to Postgres
+            # while everything around them wrote to Postgres. Going through the
+            # facade means one implementation per backend, and on Postgres the
+            # comparison happens under a row lock rather than in a script.
+            #
+            # The return value keeps its meaning: False is a discarded stale
+            # event, and callers branch on it.
+            applied = await self._es.upsert_if_newer(
+                self._orders_index, order_id, doc
             )
-            result = response.get("result", "")
-            if result == "noop":
-                # Two cases produce a scripted_upsert "noop":
-                #   (a) genuine stale-event discard — the doc EXISTS and the
-                #       incoming last_event_timestamp is older-or-equal; OR
-                #   (b) a serverless-ES quirk where ``scripted_upsert`` reports
-                #       "noop" AND fails to materialise the ``upsert`` body on a
-                #       FRESH insert (the doc does not exist afterwards).
-                # Case (b) silently dropped every new order from BOTH stores —
-                # and since reads are served from Postgres, the dispatcher hit a
-                # 404 immediately after a 201 create. Distinguish them: if the
-                # doc is absent, index it directly (fresh insert); only a true
-                # existing-doc noop is a stale discard.
-                exists = self._es.client.exists(
-                    index=self._orders_index, id=order_id
-                )
-                if exists:
-                    logger.info(
-                        "FuelOrderRepository.upsert_with_last_event_timestamp: "
-                        "discarded stale event for order=%s, "
-                        "incoming_timestamp=%s",
-                        order_id,
-                        doc.get("last_event_timestamp"),
-                    )
-                    return False
-                # Fresh insert that the scripted upsert failed to apply — index
-                # the document directly so ES and Postgres both receive it.
-                self._es.client.index(
-                    index=self._orders_index,
-                    id=order_id,
-                    body=doc,
-                    refresh=True,
-                )
-                logger.info(
-                    "FuelOrderRepository.upsert_with_last_event_timestamp: "
-                    "scripted_upsert no-op'd a fresh insert for order=%s; "
-                    "indexed directly (serverless-ES fallback)",
-                    order_id,
-                )
+            if not applied:
+                return False
             # Dual-write the order current-state to Postgres. The repository's
             # own stale-event guard mirrors the ES scripted-upsert semantics.
             from commerce.services.commerce_persistence_bridge import (

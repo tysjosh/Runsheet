@@ -177,6 +177,28 @@ class RecordingESService:
         self.updated_documents.append(kwargs)
         return {"result": "created", "_version": 1}
 
+    async def upsert_if_newer(
+        self,
+        index: str,
+        doc_id: str,
+        document: Dict[str, Any],
+        *,
+        timestamp_field: str = "last_event_timestamp",
+    ) -> bool:
+        """Record a timestamp-guarded upsert.
+
+        The order repository used to build the painless ``scripted_upsert`` itself
+        and call ``client.update``, so this fake mocked the raw client. That write
+        would have kept going to Elasticsearch after the document plane moved to
+        Postgres, so it now goes through the facade — and the fake models the
+        facade, which is what the code under test actually depends on. Recorded in
+        the same shape ``get_orders_written`` already reads.
+        """
+        self.updated_documents.append(
+            {"index": index, "id": doc_id, "body": {"upsert": document}}
+        )
+        return True
+
     def indices_touched(self) -> set:
         """Every ES index this fake saw any write against."""
         touched = {doc["index"] for doc in self.indexed_documents}

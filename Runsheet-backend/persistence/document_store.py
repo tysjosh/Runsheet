@@ -51,7 +51,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from sqlalchemy import delete as sql_delete, func, select
 
@@ -243,6 +243,206 @@ class PostgresDocumentStore:
             "failed": len(errors),
             "errors": errors,
         }
+
+    async def atomic_update(
+        self,
+        index: str,
+        doc_id: str,
+        transform: "Callable[[Dict[str, Any]], Optional[Dict[str, Any]]]",
+        *,
+        upsert: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[Optional[Dict[str, Any]], bool]:
+        """Read-modify-write one document under a row lock.
+
+        Replaces two Elasticsearch patterns that this codebase uses for the same
+        purpose, and replaces them with something strictly stronger:
+
+        **Painless scripted upserts.** ``fuel/order_repository.py`` and
+        ``ops/services/ops_es_service.py`` ship a painless script that compares
+        ``last_event_timestamp`` and sets ``ctx.op = 'noop'`` when the incoming
+        event is stale; ``fuel/driver_repository.py`` ships one that increments
+        counters. Both are read-modify-write expressed in a language that only
+        runs inside Elasticsearch.
+
+        **``if_seq_no`` / ``if_primary_term`` optimistic concurrency.**
+        ``fuel/compartment_state_models.py`` and ``Agents/approval_queue_service.py``
+        read a document with its sequence number, write with the number asserted,
+        and retry with backoff on a 409.
+
+        ``SELECT … FOR UPDATE`` subsumes both. The row is locked for the
+        transaction, so a concurrent writer waits rather than losing a race —
+        which means **the retry loops disappear**. The compartment repository
+        retries three times with jittered backoff and raises
+        ``CompartmentStateConflictError`` on persistent contention, a 409 the
+        caller has to handle; against a locked row that state cannot arise.
+
+        Args:
+            index: Index name.
+            doc_id: Document id.
+            transform: Called with a copy of the stored document. Returns the new
+                document, or ``None`` to leave it unchanged — which is exactly
+                what painless ``ctx.op = 'noop'`` means, so a script's control
+                flow maps over directly.
+            upsert: Document to insert when none exists. ``None`` means "do
+                nothing if absent", matching a plain ``_update``.
+
+        Returns:
+            ``(document, applied)``. ``document`` is the state after the call, or
+            ``None`` when nothing existed and no ``upsert`` was given. ``applied``
+            is ``False`` for a no-op, so a caller can distinguish "discarded a
+            stale event" from "wrote the update" — the distinction
+            ``upsert_with_last_event_timestamp`` returns to its callers.
+        """
+        model = self._model()
+        async with self._session_scope() as session:
+            row = (
+                await session.execute(
+                    select(model)
+                    .where(model.index_name == index, model.doc_id == str(doc_id))
+                    .with_for_update()
+                )
+            ).scalars().first()
+
+            if row is None:
+                if upsert is None:
+                    return (None, False)
+                document = dict(upsert)
+                document.setdefault("created_at", self._clock())
+                document["updated_at"] = self._clock()
+                session.add(
+                    model(
+                        index_name=index,
+                        doc_id=str(doc_id),
+                        tenant_id=_tenant_of(document),
+                        document=document,
+                    )
+                )
+                return (document, True)
+
+            current = dict(row.document or {})
+            updated = transform(dict(current))
+            if updated is None:
+                return (current, False)
+            updated["updated_at"] = self._clock()
+            row.document = updated
+            row.tenant_id = _tenant_of(updated)
+            return (updated, True)
+
+    async def upsert_if_newer(
+        self,
+        index: str,
+        doc_id: str,
+        document: Dict[str, Any],
+        *,
+        timestamp_field: str = "last_event_timestamp",
+    ) -> bool:
+        """Upsert unless the stored ``timestamp_field`` is newer or equal.
+
+        The Postgres equivalent of the ``scripted_upsert`` guard, and the one
+        place worth being precise about the comparison: the painless script uses
+        ``incoming.isBefore(existing) || incoming.isEqual(existing)`` — so an
+        event with a timestamp EQUAL to the stored one is discarded, not applied.
+        Reproduced exactly, because at-least-once delivery makes an equal
+        timestamp the common case for a redelivery, and applying it would
+        overwrite whatever a later event had already written.
+
+        A stored document with no timestamp, or an incoming document with none, is
+        applied: the script only compares when the stored field is present and
+        non-null.
+
+        Returns ``True`` when written, ``False`` when discarded as stale.
+        """
+        incoming = document.get(timestamp_field)
+
+        def _transform(current: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+            stored = current.get(timestamp_field)
+            if stored is not None and incoming is not None and incoming <= stored:
+                return None
+            merged = dict(current)
+            merged.update(document)
+            return merged
+
+        _doc, applied = await self.atomic_update(
+            index, doc_id, _transform, upsert=dict(document)
+        )
+        return applied
+
+    async def document_exists(self, index: str, doc_id: str) -> bool:
+        """Whether a document exists, without transferring its body."""
+        model = self._model()
+        async with self._session_scope() as session:
+            found = (
+                await session.execute(
+                    select(model.doc_id).where(
+                        model.index_name == index, model.doc_id == str(doc_id)
+                    )
+                )
+            ).first()
+        return found is not None
+
+    async def update_by_query(
+        self,
+        index: str,
+        query: Optional[Dict[str, Any]],
+        transform: "Callable[[Dict[str, Any]], Optional[Dict[str, Any]]]",
+        *,
+        now: Optional[datetime] = None,
+    ) -> int:
+        """Apply ``transform`` to every document matching ``query``. Returns the count.
+
+        The Postgres equivalent of ``_update_by_query``, which
+        ``fuel/driver_repository.py`` uses twice to fix up denormalised driver
+        counters. Every matching row is locked for the transaction, so unlike the
+        Elasticsearch version there is no window in which a concurrent write to a
+        matched document is silently lost — ES runs the query first and then
+        updates each hit with a version check, abandoning conflicts.
+        """
+        model = self._model()
+        predicate = build_predicate(
+            model.document, query, id_column=model.doc_id, now=now
+        )
+        assert_searchable(index, collect_query_fields(query))
+        changed = 0
+        async with self._session_scope() as session:
+            rows = (
+                await session.execute(
+                    select(model)
+                    .where(model.index_name == index, predicate)
+                    .with_for_update()
+                )
+            ).scalars().all()
+            for row in rows:
+                updated = transform(dict(row.document or {}))
+                if updated is None:
+                    continue
+                updated["updated_at"] = self._clock()
+                row.document = updated
+                row.tenant_id = _tenant_of(updated)
+                changed += 1
+        return changed
+
+    async def delete_by_query(
+        self,
+        index: str,
+        query: Optional[Dict[str, Any]],
+        *,
+        now: Optional[datetime] = None,
+    ) -> int:
+        """Delete every document matching ``query``. Returns the count deleted.
+
+        Note the deliberate asymmetry with :meth:`search_documents`: this has no
+        page limit, because a partially-applied delete is worse than a slow one.
+        """
+        model = self._model()
+        predicate = build_predicate(
+            model.document, query, id_column=model.doc_id, now=now
+        )
+        assert_searchable(index, collect_query_fields(query))
+        async with self._session_scope() as session:
+            result = await session.execute(
+                sql_delete(model).where(model.index_name == index, predicate)
+            )
+        return int(result.rowcount or 0)
 
     async def delete_document(self, index: str, doc_id: str) -> bool:
         """Delete by id. ``False`` when the document was not there."""
