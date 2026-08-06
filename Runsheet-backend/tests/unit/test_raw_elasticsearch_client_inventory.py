@@ -89,13 +89,12 @@ _ALLOWLIST = {
     "persistence/rebuild_from_postgres.py": 1,   # projects PG -> ES, by design
     "scripts/seed_kfactor_demo.py": 1,           # seeds ES directly
     "services/data_seeder.py": 1,                # clears ES indices
-    # The facade's own Elasticsearch branch: these are the calls the backend
-    # switch chooses BETWEEN, so they are the one place a raw call belongs.
-    # Thirteen, and the count went UP through this migration, which is the shape
-    # to expect: ``upsert_if_newer``, ``atomic_update`` and ``update_by_query``
-    # each absorbed a raw call from somewhere else, so the total across the
-    # codebase fell while this file's share of it rose.
-    "services/elasticsearch_service.py": 13,
+    #
+    # ``services/elasticsearch_service.py`` is GONE from this list. It held 13 raw
+    # calls — the two implementations the backend switch chose between — and Phase 6
+    # deleted the Elasticsearch half along with the ``Elasticsearch`` import itself.
+    # The facade is now a delegation to ``PostgresDocumentStore``, so the count went
+    # 9 → 13 → 0: up while it absorbed raw calls from elsewhere, then to nothing.
     #
     # --- The application data plane is empty. --------------------------------
     #
@@ -336,12 +335,18 @@ class TestTheScannerActuallyScans:
             "path can contain '.worktrees' or a checkout directory name."
         )
 
-    def test_it_finds_the_facade_which_definitely_has_raw_calls(self):
-        """A specific anchor, so a scanner that finds only test fixtures fails."""
+    def test_it_finds_the_projector_which_definitely_has_a_raw_call(self):
+        """A specific anchor, so a scanner that finds only test fixtures fails.
+
+        The anchor used to be ``ElasticsearchService`` itself, which held 13 raw
+        calls. Phase 6 deleted them, so the anchor moved to
+        ``persistence/rebuild_from_postgres.py`` — which projects Postgres back into
+        a cluster and therefore keeps a raw ``client.index`` by design.
+        """
         found = _scan()
-        assert found.get("services/elasticsearch_service.py", 0) > 0, (
-            "the scanner did not find the raw client calls in "
-            "ElasticsearchService, which certainly has them"
+        assert found.get("persistence/rebuild_from_postgres.py", 0) > 0, (
+            "the scanner did not find the raw client call in "
+            "rebuild_from_postgres, which projects into Elasticsearch by design"
         )
 
     def test_it_runs_from_a_path_containing_the_worktree_marker(self, tmp_path, monkeypatch):

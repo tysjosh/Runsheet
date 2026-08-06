@@ -126,25 +126,26 @@ class TestTheServiceUsesItWhenThereIsNoCluster:
 
         assert isinstance(service.client, NoClusterClient)
 
-    def test_it_is_not_installed_on_the_elasticsearch_backend(self, monkeypatch):
-        """The legacy path must still get a real client, so a rollback works."""
-        from config.settings import Environment
+    def test_there_is_no_longer_an_elasticsearch_branch_to_take(self):
+        """``connect()`` installs the stand-in unconditionally now.
+
+        This test previously asserted the opposite half: that
+        ``document_store_is_postgres = False`` still built a real client, so a
+        rollback worked by flipping one variable. Phase 6 removed that branch along
+        with the ``Elasticsearch`` import, so rolling back is no longer a flag — it
+        means restoring the cluster from ``es-full-backup`` and reverting the commit.
+        Asserted rather than assumed, because a stray credentials read here would be
+        a connection attempt to a cluster that does not exist.
+        """
+        import inspect
+
         from services.elasticsearch_service import ElasticsearchService
 
-        service = ElasticsearchService.__new__(ElasticsearchService)
-        service.client = None
-        service._document_store = None
+        source = inspect.getsource(ElasticsearchService.connect)
 
-        class _Settings:
-            environment = Environment.DEVELOPMENT
-            document_store_is_postgres = False
-            elastic_api_key = ""
-            elastic_endpoint = ""
-
-        service.settings = _Settings()
-
-        # Empty credentials, so it raises rather than reaching a network — the point
-        # is that it TRIED to connect instead of installing the stand-in.
-        with pytest.raises(Exception):
-            service.connect()
-        assert not isinstance(service.client, NoClusterClient)
+        assert "NoClusterClient" in source
+        for gone in ("Elasticsearch(", "elastic_api_key", "elastic_endpoint", "ping()"):
+            assert gone not in source, (
+                f"connect() still references {gone!r}; there is no cluster to "
+                "connect to, and reading the credentials implies there is"
+            )

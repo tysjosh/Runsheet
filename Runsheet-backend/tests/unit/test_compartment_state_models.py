@@ -149,214 +149,98 @@ class TestCompartmentStateModel:
 # ---------------------------------------------------------------------------
 
 
-class _FakeESClient:
-    """Synchronous fake mirroring the subset of the ES client we use.
+class _FakeStore:
+    """In-memory stand-in for :class:`persistence.document_store.PostgresDocumentStore`.
 
-    Stores a single document per ``doc_id`` plus its ``_seq_no`` and
-    ``_primary_term``. ``update`` bumps ``_seq_no`` on every successful
-    write so OCC is observable in tests.
+    Implements the two methods the repository reaches through the facade, with the
+    store's documented contract: ``atomic_update`` calls ``transform`` with a COPY
+    of the stored document, writes whatever it returns, treats ``None`` as a no-op,
+    and answers ``(document, applied)``.
+
+    This replaced a fake Elasticsearch client plus a fake facade that borrowed the
+    real ``atomic_update`` to drive its ``if_seq_no`` retry loop. That loop is gone:
+    Phase 6 deleted the Elasticsearch branch, and on Postgres the row is locked, so
+    a concurrent writer waits instead of colliding. Borrowing the shipped method is
+    no longer worth anything either — it is now a one-line delegation to the store,
+    so there is no logic left in it to exercise. The store's own behaviour, including
+    real contention, is covered in ``tests/postgres/test_document_store_atomic.py``.
+
+    What is under test here is the REPOSITORY: which fields it patches, how it
+    canonicalises a product code, and that it refuses a cross-tenant write before
+    touching anything.
     """
 
     def __init__(self) -> None:
         self.docs: Dict[str, Dict[str, Any]] = {}
-        self.versions: Dict[str, Dict[str, int]] = {}
-        self.update_calls: List[Dict[str, Any]] = []
-        #: ``doc_id -> remaining conflict count``. Each conflict consumes
-        #: one unit before the next call goes through.
-        self._forced_conflicts: Dict[str, int] = {}
-        self._forced_conflicts_total: Dict[str, int] = {}
+        #: Every document written, in order — the assertion surface that replaces
+        #: the old ``update_calls`` list.
+        self.writes: List[Dict[str, Any]] = []
 
-    # -- configuration helpers ------------------------------------------------
-
-    def force_conflicts(self, doc_id: str, n: int) -> None:
-        self._forced_conflicts[doc_id] = n
-        self._forced_conflicts_total[doc_id] = n
-
-    def seed(
-        self,
-        doc_id: str,
-        source: Dict[str, Any],
-        *,
-        seq_no: int = 0,
-        primary_term: int = 1,
-    ) -> None:
+    def seed(self, doc_id: str, source: Dict[str, Any]) -> None:
         self.docs[doc_id] = dict(source)
-        self.versions[doc_id] = {"_seq_no": seq_no, "_primary_term": primary_term}
 
-    # -- ES-compatible API ---------------------------------------------------
+    async def get_document(self, index: str, doc_id: str) -> Optional[Dict[str, Any]]:
+        stored = self.docs.get(doc_id)
+        return dict(stored) if stored is not None else None
 
-    def get(self, *, index: str, id: str) -> Dict[str, Any]:
-        if id not in self.docs:
-            raise _FakeNotFoundError(f"doc {id!r} not found")
-        version = self.versions[id]
-        return {
-            "_source": dict(self.docs[id]),
-            "_seq_no": version["_seq_no"],
-            "_primary_term": version["_primary_term"],
-        }
-
-    def update(
-        self,
-        *,
-        index: str,
-        id: str,
-        body: Dict[str, Any],
-        if_seq_no: Optional[int] = None,
-        if_primary_term: Optional[int] = None,
-        refresh: bool = False,
-    ) -> Dict[str, Any]:
-        self.update_calls.append(
-            {
-                "index": index,
-                "id": id,
-                "body": dict(body),
-                "if_seq_no": if_seq_no,
-                "if_primary_term": if_primary_term,
-                "refresh": refresh,
-            }
-        )
-        if self._forced_conflicts.get(id, 0) > 0:
-            self._forced_conflicts[id] -= 1
-            raise _FakeConflictError("version_conflict")
-
-        if id not in self.docs:
-            raise _FakeNotFoundError(f"doc {id!r} not found")
-
-        version = self.versions[id]
-        # Simulate OCC: assert supplied versions match the stored ones.
-        if if_seq_no is not None and if_seq_no != version["_seq_no"]:
-            raise _FakeConflictError("version_conflict")
-        if (
-            if_primary_term is not None
-            and if_primary_term != version["_primary_term"]
-        ):
-            raise _FakeConflictError("version_conflict")
-
-        # Merge the ``doc`` payload into the stored source. Explicit
-        # ``None`` values clear fields, matching ES's own semantics.
-        patch = body.get("doc", {})
-        merged = {**self.docs[id], **patch}
-        self.docs[id] = merged
-        version["_seq_no"] += 1
-        return {"_id": id, "result": "updated"}
-
-
-    def index(
-        self,
-        *,
-        index: str,
-        id: str,
-        body: Dict[str, Any],
-        if_seq_no: Optional[int] = None,
-        if_primary_term: Optional[int] = None,
-        refresh: bool = False,
-    ) -> Dict[str, Any]:
-        """Whole-document write with the same OCC assertions as :meth:`update`.
-
-        ``ElasticsearchService.atomic_update`` writes the transform's output with
-        ``index`` rather than ``update``, because the transform returns the
-        complete new document and ``update``'s merge semantics would silently
-        keep a field the transform removed. The Postgres backend replaces the
-        document too, so ``index`` is the faithful pairing.
-        """
-        self.update_calls.append(
-            {
-                "index": index,
-                "id": id,
-                "body": {"doc": dict(body)},
-                "if_seq_no": if_seq_no,
-                "if_primary_term": if_primary_term,
-                "refresh": refresh,
-            }
-        )
-        if self._forced_conflicts.get(id, 0) > 0:
-            self._forced_conflicts[id] -= 1
-            raise _FakeConflictError("version_conflict")
-
-        version = self.versions.setdefault(id, {"_seq_no": 0, "_primary_term": 1})
-        if if_seq_no is not None and if_seq_no != version["_seq_no"]:
-            raise _FakeConflictError("version_conflict")
-        if if_primary_term is not None and if_primary_term != version["_primary_term"]:
-            raise _FakeConflictError("version_conflict")
-
-        self.docs[id] = dict(body)
-        version["_seq_no"] += 1
-        return {"_id": id, "result": "updated"}
-
-
-class _FakeNotFoundError(Exception):
-    status_code = 404
-
-
-class _FakeConflictError(Exception):
-    status_code = 409
+    async def atomic_update(self, index, doc_id, transform, *, upsert=None):
+        stored = self.docs.get(doc_id)
+        if stored is None:
+            if upsert is None:
+                return (None, False)
+            document = dict(upsert)
+            self.docs[doc_id] = document
+            self.writes.append(dict(document))
+            return (document, True)
+        # A copy, so a transform that mutates in place cannot corrupt the store —
+        # the real store passes a copy for the same reason.
+        updated = transform(dict(stored))
+        if updated is None:
+            return (dict(stored), False)
+        self.docs[doc_id] = dict(updated)
+        self.writes.append(dict(updated))
+        return (dict(updated), True)
 
 
 class _FakeESService:
-    """Fake facade that runs the REAL ``atomic_update`` against the fake client.
+    """The facade surface the repository uses, backed by :class:`_FakeStore`."""
 
-    ``CompartmentStateRepository`` used to hand-roll the read / assert-seq-no /
-    write / retry-on-409 loop against ``es.client``, which bypasses the
-    document-store backend switch — that write records ``last_loaded_product``,
-    the field the cross-contamination guard reads, so after the cutover it would
-    have gone to the wrong store. The loop now lives once in
-    ``ElasticsearchService.atomic_update``.
-
-    The method is BORROWED rather than reimplemented here. A reimplementation
-    would let the shipped retry loop and this fake drift apart, and the conflict
-    tests below would then be testing the fake. ``atomic_update`` touches only
-    ``self._pg_store()`` and ``self.client``, so borrowing it is enough to drive
-    the real code path.
-    """
-
-    from services.elasticsearch_service import ElasticsearchService as _Real
-
-    atomic_update = _Real.atomic_update
-    del _Real
-
-    def __init__(self, client: _FakeESClient) -> None:
-        self.client = client
-
-    def _pg_store(self):
-        """No Postgres backend in these tests: exercise the Elasticsearch branch."""
-        return None
+    def __init__(self, store: _FakeStore) -> None:
+        self._store = store
+        #: Present and unusable on purpose: the repository must not reach the raw
+        #: client. Any attempt raises AttributeError rather than silently working.
+        self.client = None
 
     async def get_document(self, index: str, doc_id: str):
-        """The read half of the facade contract, with the facade's 404 -> None.
+        return await self._store.get_document(index, doc_id)
 
-        The repository's read path used ``es.client.get`` directly, so a read and
-        a write in the same repository could have landed on different stores after
-        the cutover. Reimplemented rather than borrowed because the real method is
-        wrapped in a circuit breaker whose construction needs the whole service.
-        """
-        try:
-            return dict(self.client.get(index=index, id=doc_id)["_source"])
-        except _FakeNotFoundError:
-            return None
+    async def atomic_update(self, index, doc_id, transform, **kwargs):
+        # ``max_retries`` / ``backoff_base_seconds`` are accepted and ignored, as
+        # the Postgres path ignores them: there is nothing to retry against a lock.
+        kwargs.pop("max_retries", None)
+        kwargs.pop("backoff_base_seconds", None)
+        return await self._store.atomic_update(index, doc_id, transform, **kwargs)
 
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture
-def es_client() -> _FakeESClient:
-    return _FakeESClient()
+def es_client() -> _FakeStore:
+    """Kept under its old name so the twenty-odd existing tests read unchanged.
+
+    It is the STORE now, not a client — the repository no longer has a raw client
+    to talk to. ``seed`` and ``docs`` work as they did.
+    """
+    return _FakeStore()
 
 
 @pytest.fixture
-def es(es_client: _FakeESClient) -> _FakeESService:
+def es(es_client: _FakeStore) -> _FakeESService:
     return _FakeESService(es_client)
 
 
 @pytest.fixture
 def repo(es: _FakeESService) -> CompartmentStateRepository:
-    # Zero backoff keeps test runtime tight while still exercising the
-    # retry loop.
-    repo = CompartmentStateRepository(es_service=es)
-    repo.OCC_BACKOFF_BASE_SECONDS = 0.0  # type: ignore[assignment]
-    return repo
+    return CompartmentStateRepository(es_service=es)
 
 
 def _base_compartment_doc(**overrides: Any) -> Dict[str, Any]:
@@ -399,7 +283,7 @@ class TestRepositoryConstruction:
 @pytest.mark.asyncio
 class TestRepositoryGet:
     async def test_get_returns_state_for_owned_doc(
-        self, repo: CompartmentStateRepository, es_client: _FakeESClient
+        self, repo: CompartmentStateRepository, es_client: _FakeStore
     ):
         es_client.seed("T1_c1", _base_compartment_doc(state="loaded",
                                                      last_loaded_product="DIESEL_2"))
@@ -409,7 +293,7 @@ class TestRepositoryGet:
         assert state.last_loaded_product == "DIESEL_2"
 
     async def test_get_defaults_legacy_doc_to_clean(
-        self, repo: CompartmentStateRepository, es_client: _FakeESClient
+        self, repo: CompartmentStateRepository, es_client: _FakeStore
     ):
         # Legacy compartments written before Task 6.1 will have no
         # ``state`` field — the repo must coerce them to clean rather
@@ -425,7 +309,7 @@ class TestRepositoryGet:
         assert await repo.get("tenant-A", "missing") is None
 
     async def test_get_returns_none_for_cross_tenant_doc(
-        self, repo: CompartmentStateRepository, es_client: _FakeESClient
+        self, repo: CompartmentStateRepository, es_client: _FakeStore
     ):
         es_client.seed(
             "T1_c1",
@@ -454,7 +338,7 @@ class TestRepositoryGet:
 @pytest.mark.asyncio
 class TestMarkLoaded:
     async def test_mark_loaded_sets_state_and_timestamp(
-        self, repo: CompartmentStateRepository, es_client: _FakeESClient
+        self, repo: CompartmentStateRepository, es_client: _FakeStore
     ):
         es_client.seed("T1_c1", _base_compartment_doc())
 
@@ -473,7 +357,7 @@ class TestMarkLoaded:
         assert stored["last_loaded_at"] == when.isoformat()
 
     async def test_mark_loaded_canonicalizes_alias(
-        self, repo: CompartmentStateRepository, es_client: _FakeESClient
+        self, repo: CompartmentStateRepository, es_client: _FakeStore
     ):
         es_client.seed("T1_c1", _base_compartment_doc())
 
@@ -484,52 +368,32 @@ class TestMarkLoaded:
         assert state.last_loaded_product == "PROPANE"
         assert es_client.docs["T1_c1"]["last_loaded_product"] == "PROPANE"
 
-    async def test_mark_loaded_asserts_seq_no_and_primary_term(
-        self, repo: CompartmentStateRepository, es_client: _FakeESClient
-    ):
-        es_client.seed("T1_c1", _base_compartment_doc(), seq_no=7, primary_term=2)
+    # Three optimistic-concurrency tests were removed here, not silenced:
+    #
+    #   test_mark_loaded_asserts_seq_no_and_primary_term
+    #   test_mark_loaded_retries_on_single_conflict_then_succeeds
+    #   test_mark_loaded_raises_on_persistent_conflict
+    #
+    # They asserted that the repository read ``_seq_no`` / ``_primary_term``, wrote
+    # with them asserted, retried on a 409, and raised
+    # ``CompartmentStateConflictError`` once the retry budget ran out. All four
+    # behaviours belonged to the Elasticsearch branch that Phase 6 deleted. Against
+    # Postgres the row is locked for the transaction, so a concurrent writer waits
+    # rather than colliding: there is no version to assert, no conflict to retry,
+    # and ``CompartmentStateConflictError`` is unreachable. The repository still
+    # translates it if the facade ever raises one, which is the only part of that
+    # contract left.
+    #
+    # Concurrency is covered where it is now real:
+    # ``tests/postgres/test_document_store_atomic.py`` runs ten concurrent
+    # increments against the actual store and was verified non-vacuous by removing
+    # the row lock, which loses seven of them.
 
-        await repo.mark_loaded(
-            "tenant-A", "T1_c1", product_code="DIESEL_2"
-        )
 
-        # The update call must carry the seq_no + primary_term pulled
-        # from the prior ``get``.
-        assert len(es_client.update_calls) == 1
-        call = es_client.update_calls[0]
-        assert call["if_seq_no"] == 7
-        assert call["if_primary_term"] == 2
-        assert call["refresh"] is True
 
-    async def test_mark_loaded_retries_on_single_conflict_then_succeeds(
-        self, repo: CompartmentStateRepository, es_client: _FakeESClient
-    ):
-        es_client.seed("T1_c1", _base_compartment_doc())
-        es_client.force_conflicts("T1_c1", 1)
-
-        state = await repo.mark_loaded(
-            "tenant-A", "T1_c1", product_code="DIESEL_2"
-        )
-
-        assert state.state == "loaded"
-        # One conflict + one successful write == two update attempts.
-        assert len(es_client.update_calls) == 2
-
-    async def test_mark_loaded_raises_on_persistent_conflict(
-        self, repo: CompartmentStateRepository, es_client: _FakeESClient
-    ):
-        es_client.seed("T1_c1", _base_compartment_doc())
-        # Force more conflicts than the retry budget so the repo gives up.
-        es_client.force_conflicts("T1_c1", repo.MAX_OCC_RETRIES + 1)
-
-        with pytest.raises(CompartmentStateConflictError):
-            await repo.mark_loaded(
-                "tenant-A", "T1_c1", product_code="DIESEL_2"
-            )
-        assert len(es_client.update_calls) == repo.MAX_OCC_RETRIES
 
     async def test_mark_loaded_rejects_cross_tenant_write(
-        self, repo: CompartmentStateRepository, es_client: _FakeESClient
+        self, repo: CompartmentStateRepository, es_client: _FakeStore
     ):
         es_client.seed("T1_c1", _base_compartment_doc(tenant_id="tenant-B"))
 
@@ -539,7 +403,7 @@ class TestMarkLoaded:
             )
         # No update should have been issued — the tenant guard fires
         # before any mutation.
-        assert es_client.update_calls == []
+        assert es_client.writes == []
 
     async def test_mark_loaded_raises_when_compartment_missing(
         self, repo: CompartmentStateRepository
@@ -550,7 +414,7 @@ class TestMarkLoaded:
             )
 
     async def test_mark_loaded_rejects_empty_product(
-        self, repo: CompartmentStateRepository, es_client: _FakeESClient
+        self, repo: CompartmentStateRepository, es_client: _FakeStore
     ):
         es_client.seed("T1_c1", _base_compartment_doc())
         with pytest.raises(ValueError):
@@ -565,7 +429,7 @@ class TestMarkLoaded:
 @pytest.mark.asyncio
 class TestMarkCleaned:
     async def test_mark_cleaned_resets_state_and_clears_product(
-        self, repo: CompartmentStateRepository, es_client: _FakeESClient
+        self, repo: CompartmentStateRepository, es_client: _FakeStore
     ):
         es_client.seed(
             "T1_c1",
@@ -592,7 +456,7 @@ class TestMarkCleaned:
         assert stored["last_loaded_at"] == "2025-01-14T08:00:00+00:00"
 
     async def test_mark_cleaned_defaults_to_now_when_no_timestamp(
-        self, repo: CompartmentStateRepository, es_client: _FakeESClient
+        self, repo: CompartmentStateRepository, es_client: _FakeStore
     ):
         es_client.seed("T1_c1", _base_compartment_doc())
 
@@ -604,7 +468,7 @@ class TestMarkCleaned:
         assert before <= state.last_cleaned_at <= after
 
     async def test_mark_cleaned_rejects_cross_tenant(
-        self, repo: CompartmentStateRepository, es_client: _FakeESClient
+        self, repo: CompartmentStateRepository, es_client: _FakeStore
     ):
         es_client.seed("T1_c1", _base_compartment_doc(tenant_id="tenant-B"))
 
@@ -620,7 +484,7 @@ class TestMarkCleaned:
 @pytest.mark.asyncio
 class TestMarkNeedsCleaning:
     async def test_mark_needs_cleaning_preserves_timestamps(
-        self, repo: CompartmentStateRepository, es_client: _FakeESClient
+        self, repo: CompartmentStateRepository, es_client: _FakeStore
     ):
         es_client.seed(
             "T1_c1",
@@ -668,7 +532,7 @@ class TestMarkNeedsCleaning:
             assert stored[field] == value, field
 
     async def test_mark_needs_cleaning_rejects_cross_tenant(
-        self, repo: CompartmentStateRepository, es_client: _FakeESClient
+        self, repo: CompartmentStateRepository, es_client: _FakeStore
     ):
         es_client.seed("T1_c1", _base_compartment_doc(tenant_id="tenant-B"))
 
