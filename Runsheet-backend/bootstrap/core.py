@@ -214,7 +214,24 @@ async def assert_driver_surface_wired(container: ServiceContainer) -> None:
     # index. A failure of the check itself is never treated as a violation —
     # an unreachable cluster is a different fault with its own signal.
     es_service = container.es_service if container.has("es_service") else None
-    if es_service is None or getattr(es_service, "client", None) is None:
+    if container.settings.document_store_is_postgres:
+        # There are no indices to be present: the document store is one Postgres
+        # table and ``es_documents`` is created by a migration, so the failure this
+        # check exists to catch — a write auto-creating an index with
+        # ``dynamic: true`` — cannot happen.
+        #
+        # What IS lost with the mappings is worth stating rather than glossing:
+        # ``dynamic: strict`` rejected an undeclared field at write time, so a
+        # typo'd key was a 400. jsonb accepts anything, so the same typo now stores
+        # silently. The compensating controls are the Pydantic models on the way in
+        # (``extra="forbid"`` on every driver-surface model) and
+        # ``persistence/document_field_policy.py``, which still reads the declared
+        # mappings — that is why the mapping modules survive Phase 6.
+        logger.debug(
+            "Skipping driver index presence assertion: the document plane is "
+            "PostgreSQL, so there are no indices to declare"
+        )
+    elif es_service is None or getattr(es_service, "client", None) is None:
         logger.debug(
             "Skipping driver index presence assertion: "
             "Elasticsearch client not connected"

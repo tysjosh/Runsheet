@@ -32,10 +32,19 @@ def _es_service(missing_indices=()):
 
 @pytest.fixture
 def container():
-    """Container in a fully-wired development state."""
+    """Container in a fully-wired development state, on the Elasticsearch backend.
+
+    ``document_store_is_postgres`` is set EXPLICITLY rather than left to the
+    ``MagicMock``. A mock answers every attribute with a truthy mock, so when the
+    index-presence check learned to skip itself on the Postgres backend, these tests
+    silently stopped checking anything and the ``exists`` assertion collapsed to
+    ``set() == {11 indices}``. Any new setting this assertion consults has to be
+    pinned here for the same reason.
+    """
     c = ServiceContainer()
     settings = MagicMock()
     settings.environment = Environment.DEVELOPMENT
+    settings.document_store_is_postgres = False
     c.settings = settings
     c.order_service = MagicMock()
     c.es_service = _es_service()
@@ -60,6 +69,43 @@ class TestDriverSurfaceAssertion:
             for call in container.es_service.client.indices.exists.call_args_list
         }
         assert checked == set(DRIVER_INDEX_MAPPINGS)
+
+    @pytest.mark.asyncio
+    async def test_index_presence_is_not_asserted_on_the_postgres_backend(
+        self, container, caplog
+    ):
+        """There are no indices to be present, so the check has nothing to say.
+
+        The failure it guards against is a write auto-creating an index with
+        ``dynamic: true``. The Postgres document store is one table created by a
+        migration, so that cannot happen — and leaving the check in place would
+        report all eleven indices missing and refuse to boot, which is exactly what
+        happened when the cluster was stopped before this branch existed.
+
+        What ``dynamic: strict`` did provide and jsonb does not is rejection of an
+        undeclared field. The compensating control is ``extra="forbid"`` on the
+        driver-surface Pydantic models, which is upstream of the store.
+        """
+        container.settings.document_store_is_postgres = True
+
+        await assert_driver_surface_wired(container)
+
+        container.es_service.client.indices.exists.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_order_service_is_still_asserted_on_the_postgres_backend(
+        self, container
+    ):
+        """Skipping the index check must not skip the rest of the assertion."""
+        container.settings.document_store_is_postgres = True
+        c = ServiceContainer()
+        c.settings = container.settings
+        c.es_service = container.es_service
+
+        with pytest.raises(DriverBootstrapMisconfigurationError) as exc_info:
+            await assert_driver_surface_wired(c)
+
+        assert "order_service" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_raises_when_order_service_absent(self, container):

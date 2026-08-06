@@ -157,7 +157,32 @@ class ElasticsearchService:
         if self.settings.environment == Environment.TEST:
             logger.info("⏭️  Skipping Elasticsearch connection in test environment")
             return
-            
+
+        # Phase 5: no cluster when the document plane is Postgres.
+        #
+        # This method used to raise on a failed ping, and this class instantiates a
+        # module-level singleton, so stopping the cluster did not degrade the
+        # service — it stopped the application from IMPORTING, inside
+        # ``import data_endpoints``. Verified by stopping the container: uvicorn
+        # failed at ``ConnectionError: Failed to ping Elasticsearch`` before any
+        # route was registered.
+        #
+        # ``NoClusterClient`` makes the control plane a no-op and the data plane
+        # raise, so the eighteen ``setup_*_indices`` functions, the ILM setup and the
+        # schema validators below all become no-ops without eighteen guards, while a
+        # document call that still reached the raw client is heard rather than
+        # silently dropped. See services/no_cluster.py.
+        if self.settings.document_store_is_postgres:
+            from services.no_cluster import NoClusterClient
+
+            self.client = NoClusterClient()
+            logger.info(
+                "Elasticsearch is not used: the document plane is PostgreSQL "
+                "(DOCUMENT_STORE_BACKEND=postgres). Index and ILM management are "
+                "no-ops; a raw document call will raise."
+            )
+            return
+
         try:
             api_key = self.settings.elastic_api_key.strip('"')
             endpoint = self.settings.elastic_endpoint.strip('"')
