@@ -294,7 +294,8 @@ Not created (and why):
                      two ElastiCache alarms and nothing else would misrepresent
                      the coverage. Monitoring is its own piece of work.
 
-SuperTokens core .... ${ST_URI:-<from .env.development — pass ST_URI/ST_KEY to override>}
+SuperTokens core .... ${ST_URI:-$(grep -E '^SUPERTOKENS_CONNECTION_URI=' "$(dirname "$0")/../.env.${ENV_NAME}" 2>/dev/null | cut -d= -f2- || true)}
+                      ${ST_URI:+(from ST_URI)}${ST_URI:-$([ -f "$(dirname "$0")/../.env.${ENV_NAME}" ] && echo "(from .env.${ENV_NAME})" || echo "NONE FOUND — will fall back to the DEVELOPMENT core")}
 
 Tear down with:  ./scripts/staging_aws.sh down
 PLAN
@@ -429,14 +430,33 @@ secret_arn() {
 #: the task — against SuperTokens Cloud it would have failed every session
 #: verification, and the app would have looked broken for an unrelated reason.
 resolve_supertokens() {
-  local st_env="$(dirname "$0")/../.env.development"
+  #: Resolution order: explicit env vars, then .env.<ENV_NAME>, then .env.development.
+  #:
+  #: The middle step is the one that matters and was missing. This used to read
+  #: .env.development directly, so staging silently shared development's identity
+  #: store — same users, same sessions — even once a staging core existed. Reading
+  #: .env.staging first makes the per-environment file the natural place to put it,
+  #: and the development fallback stays only so a fresh environment can still boot.
+  local env_file="$(dirname "$0")/../.env.${ENV_NAME}"
+  local dev_file="$(dirname "$0")/../.env.development"
+
+  #: Braces are load-bearing for the reader, not the shell: || and && bind equally and
+  #: left to right, so the unbraced form already means "(missing either) and file
+  #: exists". Spelling it out stops the next person from "fixing" it into
+  #: "missing URI, or (missing key and file exists)".
+  if { [ -z "$ST_URI" ] || [ -z "$ST_KEY" ]; } && [ -f "$env_file" ]; then
+    ST_URI="${ST_URI:-$(grep -E '^SUPERTOKENS_CONNECTION_URI=' "$env_file" 2>/dev/null | cut -d= -f2-)}"
+    ST_KEY="${ST_KEY:-$(grep -E '^SUPERTOKENS_API_KEY=' "$env_file" 2>/dev/null | cut -d= -f2-)}"
+    [ -n "$ST_URI" ] && [ -n "$ST_KEY" ] && ok "supertokens core from .env.${ENV_NAME}"
+  fi
+
   if [ -z "$ST_URI" ] || [ -z "$ST_KEY" ]; then
-    [ -f "$st_env" ] || die "no ST_URI/ST_KEY and no .env.development to fall back to"
-    ST_URI="${ST_URI:-$(grep -E '^SUPERTOKENS_CONNECTION_URI=' "$st_env" | cut -d= -f2-)}"
-    ST_KEY="${ST_KEY:-$(grep -E '^SUPERTOKENS_API_KEY=' "$st_env" | cut -d= -f2-)}"
-    warn "using the DEVELOPMENT SuperTokens core — staging shares development's"
-    warn "identity store (same users, same sessions). Pass ST_URI and ST_KEY to"
-    warn "point at a staging-specific core in SuperTokens Cloud."
+    [ -f "$dev_file" ] || die "no ST_URI/ST_KEY, no .env.${ENV_NAME}, no .env.development"
+    ST_URI="${ST_URI:-$(grep -E '^SUPERTOKENS_CONNECTION_URI=' "$dev_file" | cut -d= -f2-)}"
+    ST_KEY="${ST_KEY:-$(grep -E '^SUPERTOKENS_API_KEY=' "$dev_file" | cut -d= -f2-)}"
+    warn "using the DEVELOPMENT SuperTokens core — ${ENV_NAME} shares development's"
+    warn "identity store (same users, same sessions). Put a ${ENV_NAME}-specific core"
+    warn "in .env.${ENV_NAME}, or pass ST_URI and ST_KEY."
   fi
   [ -n "$ST_URI" ] || die "no SuperTokens connection URI (set ST_URI)"
   [ -n "$ST_KEY" ] || die "no SuperTokens API key (set ST_KEY)"
