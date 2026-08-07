@@ -148,6 +148,26 @@ REDIS_ENGINE_VERSION="7.1"
 REDIS_SUBNET_GROUP="${PREFIX}-redis-subnets"
 SG_REDIS="${PREFIX}-redis-sg"
 
+#: The Next.js dispatcher UI, as a second ECS service behind the SAME load balancer.
+#:
+#: Host-based routing rather than a second ALB: api.$DOMAIN falls through to the
+#: default action and app.$DOMAIN matches a host-header rule, which saves the ~$17
+#: a month a second ALB would cost and keeps both hosts on one certificate story.
+#:
+#: The UI is NOT static. S3 + CloudFront was the intended cheap answer and does not
+#: work here — verified, see runsheet/Dockerfile for the build output. Eleven routes
+#: are server-rendered and there is no generateStaticParams anywhere, so it runs as
+#: a Node server from Next's standalone output.
+UI_ECR_REPO="${PREFIX}-ui"
+UI_SERVICE="${PREFIX}-ui"
+UI_TASK_FAMILY="${PREFIX}-ui"
+UI_TG_NAME="${PREFIX}-ui-tg"
+UI_LOG_GROUP="/ecs/${PREFIX}-ui"
+SG_UI="${PREFIX}-ui-sg"
+UI_PORT="3000"
+UI_CPU="512"
+UI_MEM="1024"
+
 ALB_NAME="${PREFIX}-alb"
 TG_NAME="${PREFIX}-tg"
 SG_ALB="${PREFIX}-alb-sg"
@@ -165,7 +185,25 @@ SG_DB="${PREFIX}-db-sg"
 #: real registrant contact details into the ICANN WHOIS record and bills a
 #: non-refundable year, so it is a human decision made once, not a step in an
 #: idempotent provisioning script that people re-run after failures.
+#: DOMAIN is what the HOSTS hang off; ZONE_DOMAIN is the REGISTRABLE domain that owns
+#: the Route 53 hosted zone. They are usually the same and deliberately separable:
+#:
+#:   DOMAIN=staging.runsheetops.com  ->  api.staging.runsheetops.com
+#:                                       app.staging.runsheetops.com
+#:                                       records written into the runsheetops.com zone
+#:
+#: Without this split, pointing DOMAIN at a subdomain would look for a hosted zone
+#: named staging.runsheetops.com, not find one, create it, and then need NS records
+#: delegated from the parent before ACM validation could ever succeed. One zone for
+#: the registrable domain avoids that entirely.
+#:
+#: Staging deliberately does NOT sit on api./app. directly. Those are production's
+#: names, and an environment whose own header says not to put real customer data in it
+#: should not be the thing answering on them.
 DOMAIN="${DOMAIN:-}"
+#: Last two labels of DOMAIN. Override for a multi-part public suffix (.co.uk etc.),
+#: where the registrable domain is three labels rather than two.
+ZONE_DOMAIN="${ZONE_DOMAIN:-$(echo "${DOMAIN}" | awk -F. 'NF>1{print $(NF-1)"."$NF}')}"
 API_HOST="${DOMAIN:+api.${DOMAIN}}"
 APP_HOST="${DOMAIN:+app.${DOMAIN}}"
 
@@ -319,9 +357,11 @@ redis_status() {
 api_origin() { if [ -n "$DOMAIN" ]; then echo "https://${API_HOST}"; else echo "http://$(alb_dns)"; fi; }
 app_origin() { if [ -n "$DOMAIN" ]; then echo "https://${APP_HOST}"; else echo "http://$(alb_dns)"; fi; }
 
+#: The zone for ZONE_DOMAIN, not DOMAIN. api.staging.runsheetops.com is a record
+#: inside the runsheetops.com zone, not a zone of its own.
 zone_id() {
-  aws route53 list-hosted-zones-by-name --dns-name "${DOMAIN}." \
-    --query "HostedZones[?Name=='${DOMAIN}.'].Id | [0]" --output text 2>/dev/null \
+  aws route53 list-hosted-zones-by-name --dns-name "${ZONE_DOMAIN}." \
+    --query "HostedZones[?Name=='${ZONE_DOMAIN}.'].Id | [0]" --output text 2>/dev/null \
     | grep -v '^None$' | sed 's|/hostedzone/||' || true
 }
 
@@ -338,6 +378,24 @@ cert_arn() {
 cert_status() {
   aws acm describe-certificate --certificate-arn "$1" \
     --query 'Certificate.Status' --output text 2>/dev/null || true
+}
+
+#: Certificate for an arbitrary host in this domain. Used for APP_HOST; API_HOST has
+#: its own path above because it is also the listener's DEFAULT certificate.
+cert_arn_for() {
+  aws acm list-certificates \
+    --query "CertificateSummaryList[?DomainName=='$1'].CertificateArn | [0]" \
+    --output text 2>/dev/null | grep -v '^None$' || true
+}
+
+alb_arn() {
+  aws elbv2 describe-load-balancers --names "${ALB_NAME}" \
+    --query 'LoadBalancers[0].LoadBalancerArn' --output text 2>/dev/null | grep -v '^None$' || true
+}
+
+https_listener_arn() {
+  aws elbv2 describe-listeners --load-balancer-arn "$(alb_arn)" \
+    --query 'Listeners[?Port==`443`].ListenerArn | [0]' --output text 2>/dev/null | grep -v '^None$' || true
 }
 
 secret_value() {
@@ -420,6 +478,14 @@ cmd_up() {
   aws ec2 authorize-security-group-ingress --group-id "$db_sg" \
     --protocol tcp --port 5432 --source-group "$task_sg" >/dev/null 2>&1 \
     && ok "db-sg :5432 from task-sg only" || ok "db-sg :5432 already allowed"
+
+  # The UI container port, reachable only from the ALB — same containment as the API.
+  # The UI needs no inbound access from anything else and no outbound AWS access:
+  # browsers call the API directly, so nothing server-side talks to it.
+  local ui_sg; ui_sg="$(ensure_sg "${SG_UI}" "Runsheet staging UI tasks")"
+  aws ec2 authorize-security-group-ingress --group-id "$ui_sg" \
+    --protocol tcp --port "${UI_PORT}" --source-group "$alb_sg" >/dev/null 2>&1 \
+    && ok "ui-sg :${UI_PORT} from alb-sg only" || ok "ui-sg :${UI_PORT} already allowed"
 
   # ElastiCache is reachable only from the tasks. It sits in the same public subnets
   # as the tasks (the documented departure), so the security group is the whole of
@@ -620,6 +686,13 @@ cmd_up() {
     local cert; cert="$(ensure_certificate)"
     ensure_https_listener "$alb_arn" "$tg_arn" "$cert"
     ensure_dns_records
+
+    log "UI routing for ${APP_HOST}"
+    ensure_ui_certificate
+    local ui_tg; ui_tg="$(ensure_ui_target_group)"
+    ensure_ui_listener_rule "$ui_tg"
+    ensure_ui_dns
+    warn "next: ./scripts/staging_aws.sh deploy-ui"
   else
     warn "no DOMAIN set — the ALB serves plaintext HTTP on its own DNS name."
     warn "Session cookies cross the internet in cleartext and an HTTPS frontend"
@@ -649,14 +722,14 @@ cmd_up() {
 #: absent so a domain registered elsewhere and delegated to Route 53 also works.
 ensure_hosted_zone() {
   local existing; existing="$(zone_id)"
-  if [ -n "$existing" ]; then ok "hosted zone ${DOMAIN} (${existing})"; echo "$existing"; return; fi
+  if [ -n "$existing" ]; then ok "hosted zone ${ZONE_DOMAIN} (${existing})"; echo "$existing"; return; fi
   local created
-  created="$(aws route53 create-hosted-zone --name "${DOMAIN}" \
+  created="$(aws route53 create-hosted-zone --name "${ZONE_DOMAIN}" \
       --caller-reference "${PREFIX}-$(date +%s)" \
       --hosted-zone-config "Comment=Runsheet ${ENV_NAME}" \
       --query 'HostedZone.Id' --output text | sed 's|/hostedzone/||')"
   ok "created hosted zone ${created}"
-  warn "if ${DOMAIN} is registered elsewhere, delegate it to these name servers:"
+  warn "if ${ZONE_DOMAIN} is registered elsewhere, delegate it to these name servers:"
   aws route53 get-hosted-zone --id "$created" --query 'DelegationSet.NameServers' --output text >&2
   echo "$created"
 }
@@ -719,6 +792,21 @@ ensure_certificate() {
 #: working over HTTP and nobody notices the cleartext path is still open.
 ensure_https_listener() {
   local alb_arn="$1" tg_arn="$2" cert="$3"
+  # An EXISTING listener keeps whatever default certificate it was created with, so a
+  # host rename would leave api.<old-domain> as the default and the new host would be
+  # served the wrong certificate. modify-listener re-points it; it is a no-op when the
+  # certificate is already correct.
+  local existing_listener
+  existing_listener="$(aws elbv2 describe-listeners --load-balancer-arn "$alb_arn" --query 'Listeners[?Port==`443`].ListenerArn | [0]' --output text 2>/dev/null | grep -v '^None$' || true)"
+  if [ -n "$existing_listener" ]; then
+    local current_default
+    current_default="$(aws elbv2 describe-listeners --listener-arns "$existing_listener" --query 'Listeners[0].Certificates[0].CertificateArn' --output text)"
+    if [ "$current_default" != "$cert" ]; then
+      aws elbv2 modify-listener --listener-arn "$existing_listener" \
+        --certificates "CertificateArn=$cert" >/dev/null
+      ok "default certificate re-pointed to ${API_HOST}"
+    fi
+  fi
   if [ -z "$(aws elbv2 describe-listeners --load-balancer-arn "$alb_arn" --query 'Listeners[?Port==`443`].ListenerArn' --output text)" ]; then
     aws elbv2 create-listener --load-balancer-arn "$alb_arn" \
       --protocol HTTPS --port 443 --certificates "CertificateArn=$cert" \
@@ -758,6 +846,119 @@ ensure_dns_records() {
   ok "${API_HOST} -> ALIAS ${alb_dns_name}"
   warn "point ${APP_HOST} at Vercel yourself — Vercel issues its own certificate and"
   warn "will tell you which CNAME to add. This script does not manage that record."
+}
+
+# ---------------------------------------------------------------------------
+# UI: certificate, target group, host-header rule, DNS
+# ---------------------------------------------------------------------------
+
+#: A SECOND certificate on the same :443 listener, attached via SNI.
+#:
+#: A SAN certificate covering both hosts would also work, but would mean reissuing
+#: and re-attaching the API's certificate to add the UI — a change to a working
+#: production path for the sake of a host that does not exist yet. Two certificates
+#: on one listener keeps the two lifecycles independent.
+ensure_ui_certificate() {
+  local arn; arn="$(cert_arn_for "${APP_HOST}")"
+  if [ -n "$arn" ] && [ "$(cert_status "$arn")" = "FAILED" ]; then
+    warn "existing certificate for ${APP_HOST} is FAILED; requesting a fresh one"
+    arn=""
+  fi
+  if [ -z "$arn" ]; then
+    arn="$(aws acm request-certificate --domain-name "${APP_HOST}" \
+        --validation-method DNS --key-algorithm RSA_2048 \
+        --tags "Key=Project,Value=${PROJECT}" "Key=Environment,Value=${ENV_NAME}" \
+        --query CertificateArn --output text)"
+    ok "requested certificate for ${APP_HOST}"
+  else
+    ok "ui certificate exists ($(cert_status "$arn"))"
+  fi
+
+  if [ "$(cert_status "$arn")" != "ISSUED" ]; then
+    local name value waited=0
+    while :; do
+      name="$(aws acm describe-certificate --certificate-arn "$arn" \
+          --query 'Certificate.DomainValidationOptions[0].ResourceRecord.Name' --output text 2>/dev/null | grep -v '^None$' || true)"
+      value="$(aws acm describe-certificate --certificate-arn "$arn" \
+          --query 'Certificate.DomainValidationOptions[0].ResourceRecord.Value' --output text 2>/dev/null | grep -v '^None$' || true)"
+      [ -n "$name" ] && [ -n "$value" ] && break
+      [ "$waited" -ge 60 ] && die "ACM never published a validation record for ${APP_HOST}"
+      sleep 5; waited=$((waited + 5))
+    done
+    aws route53 change-resource-record-sets --hosted-zone-id "$(zone_id)" --change-batch "$(printf '{
+      "Changes":[{"Action":"UPSERT","ResourceRecordSet":{
+        "Name":"%s","Type":"CNAME","TTL":300,"ResourceRecords":[{"Value":"%s"}]}}]}' "$name" "$value")" >/dev/null
+    ok "wrote ACM validation CNAME for ${APP_HOST}"
+    log "Waiting for the UI certificate to be issued"
+    aws acm wait certificate-validated --certificate-arn "$arn" || die "ui certificate not issued"
+    ok "ui certificate ISSUED"
+  fi
+
+  # Idempotent: add-listener-certificates is a no-op when already attached.
+  aws elbv2 add-listener-certificates --listener-arn "$(https_listener_arn)" \
+    --certificates "CertificateArn=$arn" >/dev/null
+  ok "attached ${APP_HOST} certificate to the :443 listener (SNI)"
+}
+
+ensure_ui_target_group() {
+  local tg
+  if aws elbv2 describe-target-groups --names "${UI_TG_NAME}" >/dev/null 2>&1; then
+    tg="$(aws elbv2 describe-target-groups --names "${UI_TG_NAME}" --query 'TargetGroups[0].TargetGroupArn' --output text)"
+    ok "ui target group ${UI_TG_NAME}"
+  else
+    # "/" rather than a dedicated health path: the app has no health route, and the
+    # root page is statically prerendered so it answers without touching the API.
+    # A check that reached the API would mark the UI unhealthy whenever the API was
+    # down and replace tasks for no reason — the same trap as /health/ready on the
+    # API's own target group.
+    tg="$(aws elbv2 create-target-group --name "${UI_TG_NAME}" \
+        --protocol HTTP --port "${UI_PORT}" --vpc-id "${VPC_ID}" --target-type ip \
+        --health-check-path / --health-check-interval-seconds 30 \
+        --healthy-threshold-count 2 --unhealthy-threshold-count 5 \
+        --matcher HttpCode=200 \
+        --query 'TargetGroups[0].TargetGroupArn' --output text)"
+    aws elbv2 modify-target-group-attributes --target-group-arn "$tg" \
+      --attributes Key=deregistration_delay.timeout_seconds,Value=30 >/dev/null
+    ok "created ui target group (health check /)"
+  fi
+  echo "$tg"
+}
+
+#: Route app.$DOMAIN to the UI. api.$DOMAIN needs no rule: it falls through to the
+#: listener's default action, which already forwards to the API target group.
+ensure_ui_listener_rule() {
+  local tg="$1" listener; listener="$(https_listener_arn)"
+  # Matched on PRIORITY, not on the host value. Matching on the host meant a rename
+  # found nothing, tried to create a second rule at the same priority, and failed with
+  # PriorityInUse — leaving the old host still routed to the UI.
+  local existing
+  existing="$(aws elbv2 describe-rules --listener-arn "$listener" \
+      --query "Rules[?Priority=='10'].RuleArn | [0]" \
+      --output text 2>/dev/null | grep -v '^None$' || true)"
+  if [ -n "$existing" ]; then
+    aws elbv2 modify-rule --rule-arn "$existing" \
+      --conditions "Field=host-header,Values=${APP_HOST}" \
+      --actions "Type=forward,TargetGroupArn=$tg" >/dev/null
+    ok "ui host rule -> ${APP_HOST} (updated)"
+  else
+    aws elbv2 create-rule --listener-arn "$listener" --priority 10 \
+      --conditions "Field=host-header,Values=${APP_HOST}" \
+      --actions "Type=forward,TargetGroupArn=$tg" >/dev/null
+    ok "created ui host rule: ${APP_HOST} -> ui target group"
+  fi
+}
+
+ensure_ui_dns() {
+  local zone alb_dns_name alb_zone
+  zone="$(zone_id)"
+  alb_dns_name="$(aws elbv2 describe-load-balancers --names "${ALB_NAME}" --query 'LoadBalancers[0].DNSName' --output text)"
+  alb_zone="$(aws elbv2 describe-load-balancers --names "${ALB_NAME}" --query 'LoadBalancers[0].CanonicalHostedZoneId' --output text)"
+  aws route53 change-resource-record-sets --hosted-zone-id "$zone" --change-batch "$(printf '{
+    "Changes":[{"Action":"UPSERT","ResourceRecordSet":{
+      "Name":"%s","Type":"A","AliasTarget":{
+        "HostedZoneId":"%s","DNSName":"%s","EvaluateTargetHealth":false}}}]}' \
+    "$APP_HOST" "$alb_zone" "$alb_dns_name")" >/dev/null
+  ok "${APP_HOST} -> ALIAS ${alb_dns_name}"
 }
 
 # ---------------------------------------------------------------------------
@@ -946,6 +1147,141 @@ PY
 }
 
 # ---------------------------------------------------------------------------
+# deploy-ui: build, push and roll the Next.js dispatcher UI
+# ---------------------------------------------------------------------------
+register_ui_task_def() {
+  local image="$1"
+  local exec_arn task_arn
+  exec_arn="$(aws iam get-role --role-name "${PREFIX}-execution" --query 'Role.Arn' --output text)"
+  task_arn="$(aws iam get-role --role-name "${PREFIX}-task" --query 'Role.Arn' --output text)"
+
+  local gen="/tmp/${PREFIX}-ui-taskdef-gen.py"
+  cat > "$gen" <<'PY'
+import json, os, sys
+
+image, exec_arn, task_arn = sys.argv[1:4]
+
+# NO "secrets" block and NO NEXT_PUBLIC_* here, deliberately.
+#
+# Next inlines every NEXT_PUBLIC_* value into the JavaScript bundle at BUILD time,
+# so setting them at runtime would do nothing at all — the built bundle already
+# contains whatever the image was built with. Putting them here would be worse than
+# useless: it would read as configuration and quietly not be.
+#
+# The UI also holds no credentials. It talks to the API over the public internet like
+# any browser would, so it needs no database, no Redis, and no Secrets Manager
+# access. The task role is the same empty one the API uses.
+print(json.dumps({
+    "family": os.environ["UI_TASK_FAMILY"],
+    "networkMode": "awsvpc",
+    "requiresCompatibilities": ["FARGATE"],
+    "cpu": os.environ["UI_CPU"],
+    "memory": os.environ["UI_MEM"],
+    "executionRoleArn": exec_arn,
+    "taskRoleArn": task_arn,
+    "runtimePlatform": {"cpuArchitecture": "X86_64", "operatingSystemFamily": "LINUX"},
+    "containerDefinitions": [{
+        "name": "ui",
+        "image": image,
+        "essential": True,
+        "portMappings": [{"containerPort": int(os.environ["UI_PORT"]), "protocol": "tcp"}],
+        "environment": [
+            {"name": "NODE_ENV", "value": "production"},
+            {"name": "PORT", "value": os.environ["UI_PORT"]},
+            # server.js binds to this; without it Next listens on localhost only and
+            # the ALB health check cannot reach the container at all.
+            {"name": "HOSTNAME", "value": "0.0.0.0"},
+        ],
+        "logConfiguration": {
+            "logDriver": "awslogs",
+            "options": {
+                "awslogs-group": os.environ["UI_LOG_GROUP"],
+                "awslogs-region": os.environ["AWS_REGION"],
+                "awslogs-stream-prefix": "ui",
+            },
+        },
+    }],
+}))
+PY
+  python3 "$gen" "$image" "$exec_arn" "$task_arn" > "/tmp/${PREFIX}-ui-taskdef.json"
+  aws ecs register-task-definition --cli-input-json "file:///tmp/${PREFIX}-ui-taskdef.json" \
+    --query 'taskDefinition.taskDefinitionArn' --output text
+}
+
+cmd_deploy_ui() {
+  [ -n "$DOMAIN" ] || die "deploy-ui needs DOMAIN: the build refuses a non-https API origin"
+  local sha image api app
+  sha="$(git rev-parse --short HEAD)"
+  image="${REGISTRY}/${UI_ECR_REPO}:${sha}"
+  api="$(api_origin)"; app="$(app_origin)"
+
+  log "ECR repository for the UI"
+  aws ecr describe-repositories --repository-names "${UI_ECR_REPO}" >/dev/null 2>&1 \
+    || aws ecr create-repository --repository-name "${UI_ECR_REPO}" \
+         --image-scanning-configuration scanOnPush=true \
+         --tags "Key=Project,Value=${PROJECT}" "Key=Environment,Value=${ENV_NAME}" >/dev/null
+  ok "ecr ${UI_ECR_REPO}"
+
+  log "CloudWatch log group for the UI"
+  aws logs create-log-group --log-group-name "${UI_LOG_GROUP}" >/dev/null 2>&1 || true
+  aws logs put-retention-policy --log-group-name "${UI_LOG_GROUP}" --retention-in-days 14 >/dev/null
+  ok "${UI_LOG_GROUP} (14 days)"
+
+  # The origins are BUILD ARGS, not runtime env. See runsheet/Dockerfile. This also
+  # means the image is environment-specific and cannot be promoted between
+  # environments by changing a task-definition variable.
+  log "Building ${image} with api=${api} app=${app}"
+  local maps_key
+  maps_key="$(grep -E '^NEXT_PUBLIC_GOOGLE_MAPS_API_KEY=' "$(dirname "$0")/../../runsheet/.env.local" 2>/dev/null | cut -d= -f2- || true)"
+  [ -n "$maps_key" ] || warn "no Maps key found in runsheet/.env.local — maps will not render"
+  docker build --platform linux/amd64 \
+    --build-arg "NEXT_PUBLIC_API_URL=${api}/api" \
+    --build-arg "NEXT_PUBLIC_WS_URL=$(echo "$api" | sed 's|^https|wss|; s|^http|ws|')" \
+    --build-arg "NEXT_PUBLIC_ST_API_DOMAIN=${api}" \
+    --build-arg "NEXT_PUBLIC_ST_WEBSITE_DOMAIN=${app}" \
+    --build-arg "NEXT_PUBLIC_TENANT_ID=demo-tenant" \
+    --build-arg "NEXT_PUBLIC_SITE_URL=${app}" \
+    --build-arg "NEXT_PUBLIC_GOOGLE_MAPS_API_KEY=${maps_key}" \
+    -t "$image" "$(dirname "$0")/../../runsheet" >/dev/null
+  ok "built"
+
+  log "Pushing to ECR"
+  aws ecr get-login-password | docker login --username AWS --password-stdin "${REGISTRY}" >/dev/null 2>&1
+  docker push "$image" >/dev/null
+  ok "pushed ${sha}"
+
+  log "Registering the UI task definition"
+  export UI_TASK_FAMILY UI_CPU UI_MEM UI_PORT UI_LOG_GROUP AWS_REGION
+  local td; td="$(register_ui_task_def "$image")"
+  ok "$td"
+
+  local tg ui_sg
+  tg="$(aws elbv2 describe-target-groups --names "${UI_TG_NAME}" --query 'TargetGroups[0].TargetGroupArn' --output text)"
+  ui_sg="$(sg_id "${SG_UI}")"
+
+  if [ "$(aws ecs describe-services --cluster "${CLUSTER}" --services "${UI_SERVICE}" \
+          --query 'services[0].status' --output text 2>/dev/null)" = "ACTIVE" ]; then
+    log "Updating the UI service"
+    aws ecs update-service --cluster "${CLUSTER}" --service "${UI_SERVICE}" \
+      --task-definition "$td" --force-new-deployment >/dev/null
+    ok "rolling"
+  else
+    log "Creating the UI service"
+    aws ecs create-service --cluster "${CLUSTER}" --service-name "${UI_SERVICE}" \
+      --task-definition "$td" --desired-count 1 --launch-type FARGATE \
+      --network-configuration "awsvpcConfiguration={subnets=[${SUBNETS_CSV}],securityGroups=[${ui_sg}],assignPublicIp=ENABLED}" \
+      --load-balancers "targetGroupArn=$tg,containerName=ui,containerPort=${UI_PORT}" \
+      --health-check-grace-period-seconds 90 \
+      --tags "key=Project,value=${PROJECT}" "key=Environment,value=${ENV_NAME}" >/dev/null
+    ok "created"
+  fi
+
+  log "Waiting for the UI service to stabilise"
+  aws ecs wait services-stable --cluster "${CLUSTER}" --services "${UI_SERVICE}" \
+    && ok "stable" || warn "did not stabilise — see CloudWatch ${UI_LOG_GROUP}"
+}
+
+# ---------------------------------------------------------------------------
 # deploy: build, push, register, roll
 # ---------------------------------------------------------------------------
 cmd_deploy() {
@@ -1106,9 +1442,57 @@ cmd_verify() {
     || die "readiness does not report postgres"
 
   verify_redis
+  verify_ui
 
   echo
   ok "staging verified at ${base}"
+}
+
+#: Verify the UI, if it is deployed. Skipped rather than failed when absent, so
+#: `verify` stays useful on a backend-only environment.
+verify_ui() {
+  [ -n "$DOMAIN" ] || return 0
+  if [ "$(aws ecs describe-services --cluster "${CLUSTER}" --services "${UI_SERVICE}" \
+          --query 'services[0].status' --output text 2>/dev/null)" != "ACTIVE" ]; then
+    warn "no UI service — skipping UI checks (run deploy-ui)"
+    return 0
+  fi
+
+  log "Verifying the UI at $(app_origin)"
+  local code
+  code="$(curl -s -o "/tmp/${PREFIX}-ui.html" -m 20 -w '%{http_code}' "$(app_origin)/" || true)"
+  [ "$code" = "200" ] && ok "${APP_HOST} -> 200" || die "${APP_HOST} -> ${code}"
+
+  # Host-based routing actually discriminating, not both hosts hitting one service.
+  # Without this the UI could be served from the API's default action (or vice
+  # versa) and every other check would still pass.
+  grep -qi '<!DOCTYPE html' "/tmp/${PREFIX}-ui.html" \
+    && ok "served HTML, not the API" \
+    || die "${APP_HOST} did not return HTML — the host rule may be routing to the API"
+
+  # A server-rendered route, which is the thing a static host could not have done.
+  code="$(curl -s -o /dev/null -m 20 -w '%{http_code}' "$(app_origin)/orders/ORD-1" || true)"
+  [ "$code" = "200" ] && ok "/orders/ORD-1 -> 200 (server-rendered)" \
+    || warn "/orders/ORD-1 -> ${code}"
+
+  # The origin baked into the bundle at build time. If this says localhost the image
+  # was built without the build args and every API call from the browser will fail.
+  local chunk
+  chunk="$(grep -oE '/_next/static/chunks/[a-zA-Z0-9._-]+\.js' "/tmp/${PREFIX}-ui.html" | head -1)"
+  if [ -n "$chunk" ]; then
+    if curl -s -m 20 "$(app_origin)${chunk}" | grep -q 'localhost:8080'; then
+      die "the deployed bundle still points at localhost — rebuilt without build args"
+    fi
+    ok "no localhost origin in the served bundle"
+  fi
+
+  # The API must accept the UI's origin, or every authenticated call is a CORS
+  # failure the browser reports and the server does not.
+  local acao
+  acao="$(curl -s -o /dev/null -m 15 -D - "$(api_origin)/api/orders" \
+          -H "Origin: $(app_origin)" -w '' 2>/dev/null | grep -i '^access-control-allow-origin' | tr -d '\r' || true)"
+  [ -n "$acao" ] && ok "api allows the UI origin (${acao#*: })" \
+    || warn "api returned no Access-Control-Allow-Origin for $(app_origin) — check CORS_ORIGINS"
 }
 
 #: Prove ElastiCache from INSIDE the task, as a one-shot RunTask on the deployed task
@@ -1282,10 +1666,12 @@ WARNING
   read -r confirm
   [ "$confirm" = "DESTROY" ] || die "aborted"
 
-  log "Scaling the service to zero"
-  aws ecs update-service --cluster "${CLUSTER}" --service "${SERVICE}" --desired-count 0 >/dev/null 2>&1 || true
-  aws ecs delete-service --cluster "${CLUSTER}" --service "${SERVICE}" --force >/dev/null 2>&1 \
-    && ok "service deleted" || warn "no service"
+  log "Scaling the services to zero"
+  for svc in "${SERVICE}" "${UI_SERVICE}"; do
+    aws ecs update-service --cluster "${CLUSTER}" --service "$svc" --desired-count 0 >/dev/null 2>&1 || true
+    aws ecs delete-service --cluster "${CLUSTER}" --service "$svc" --force >/dev/null 2>&1 \
+      && ok "$svc deleted" || warn "no $svc"
+  done
 
   if [ -n "$DOMAIN" ]; then
     log "Deleting DNS records and the certificate"
@@ -1317,9 +1703,13 @@ WARNING
     aws elbv2 wait load-balancers-deleted --load-balancer-arns "$alb_arn" 2>/dev/null || sleep 30
     ok "alb deleted"
   fi
-  local tg_arn
-  tg_arn="$(aws elbv2 describe-target-groups --names "${TG_NAME}" --query 'TargetGroups[0].TargetGroupArn' --output text 2>/dev/null || true)"
-  [ -n "$tg_arn" ] && [ "$tg_arn" != "None" ] && aws elbv2 delete-target-group --target-group-arn "$tg_arn" >/dev/null && ok "target group deleted" || true
+  for tgn in "${TG_NAME}" "${UI_TG_NAME}"; do
+    local tg_arn
+    tg_arn="$(aws elbv2 describe-target-groups --names "$tgn" --query 'TargetGroups[0].TargetGroupArn' --output text 2>/dev/null || true)"
+    [ -n "$tg_arn" ] && [ "$tg_arn" != "None" ] \
+      && aws elbv2 delete-target-group --target-group-arn "$tg_arn" >/dev/null 2>&1 \
+      && ok "$tgn deleted" || true
+  done
 
   log "Deleting the database"
   aws rds delete-db-instance --db-instance-identifier "${DB_ID}" \
@@ -1344,15 +1734,17 @@ WARNING
   aws ecs delete-cluster --cluster "${CLUSTER}" >/dev/null 2>&1 && ok "cluster deleted" || true
 
   log "Deregistering task definitions"
-  for arn in $(aws ecs list-task-definitions --family-prefix "${TASK_FAMILY}" --query 'taskDefinitionArns[]' --output text 2>/dev/null); do
-    aws ecs deregister-task-definition --task-definition "$arn" >/dev/null 2>&1 || true
+  for fam in "${TASK_FAMILY}" "${UI_TASK_FAMILY}"; do
+    for arn in $(aws ecs list-task-definitions --family-prefix "$fam" --query 'taskDefinitionArns[]' --output text 2>/dev/null); do
+      aws ecs deregister-task-definition --task-definition "$arn" >/dev/null 2>&1 || true
+    done
   done
   ok "deregistered"
 
   log "Deleting security groups"
   # Ordered: the DB and Redis groups reference the task group, which references the
   # ALB group, so they have to go in dependency order or AWS refuses.
-  for name in "${SG_DB}" "${SG_REDIS}" "${SG_TASK}" "${SG_ALB}"; do
+  for name in "${SG_DB}" "${SG_REDIS}" "${SG_TASK}" "${SG_UI}" "${SG_ALB}"; do
     local id; id="$(sg_id "$name")"
     if [ -n "$id" ]; then
       for _ in 1 2 3 4 5 6; do
@@ -1380,16 +1772,21 @@ WARNING
     aws iam delete-role --role-name "$role" >/dev/null 2>&1 && ok "$role deleted" || true
   done
 
-  log "Deleting log group and ECR repository"
-  aws logs delete-log-group --log-group-name "${LOG_GROUP}" >/dev/null 2>&1 && ok "log group" || true
-  aws ecr delete-repository --repository-name "${ECR_REPO}" --force >/dev/null 2>&1 && ok "ecr" || true
+  log "Deleting log groups and ECR repositories"
+  for lg in "${LOG_GROUP}" "${UI_LOG_GROUP}"; do
+    aws logs delete-log-group --log-group-name "$lg" >/dev/null 2>&1 && ok "$lg" || true
+  done
+  for repo in "${ECR_REPO}" "${UI_ECR_REPO}"; do
+    aws ecr delete-repository --repository-name "$repo" --force >/dev/null 2>&1 && ok "$repo" || true
+  done
 
   if [ -n "$DOMAIN" ]; then
-    # The certificate can only go once the :443 listener that used it is gone with
-    # the load balancer, which happened above.
-    local cert; cert="$(cert_arn)"
-    [ -n "$cert" ] && aws acm delete-certificate --certificate-arn "$cert" >/dev/null 2>&1 \
-      && ok "certificate deleted" || true
+    # Certificates can only go once the :443 listener that referenced them is gone
+    # with the load balancer, which happened above.
+    for c in "$(cert_arn)" "$(cert_arn_for "${APP_HOST}")"; do
+      [ -n "$c" ] && aws acm delete-certificate --certificate-arn "$c" >/dev/null 2>&1 \
+        && ok "certificate deleted" || true
+    done
     local zone; zone="$(zone_id)"
     if [ -n "$zone" ]; then
       aws route53 delete-hosted-zone --id "$zone" >/dev/null 2>&1 \
@@ -1411,11 +1808,12 @@ case "${1:-plan}" in
   plan)    cmd_plan    ;;
   up)      cmd_up      ;;
   deploy)  cmd_deploy  ;;
+  deploy-ui) cmd_deploy_ui ;;
   migrate) cmd_migrate ;;
   verify)  cmd_verify  ;;
   status)  cmd_status  ;;
   logs)    cmd_logs "${2:-10m}" ;;
   frontend-env) cmd_frontend_env ;;
   down)    cmd_down    ;;
-  *)       die "unknown command '$1' — one of plan|up|deploy|migrate|verify|status|logs|frontend-env|down" ;;
+  *)       die "unknown command '$1' — one of plan|up|deploy|deploy-ui|migrate|verify|status|logs|frontend-env|down" ;;
 esac
