@@ -26,16 +26,31 @@
 # ---------------------------------------------------------------------------
 # That document describes the PRODUCTION target: Aurora PostgreSQL, ElastiCache
 # Redis, private subnets behind NAT, ALB with ACM. This is staging, provisioned
-# for cost and speed, and it departs in four places on purpose:
+# for cost and speed, and it departs in TWO places on purpose:
 #
 #   * RDS db.t4g.micro, single-AZ, instead of Aurora Serverless v2. No failover.
-#   * Redis runs as a SIDECAR container in the task, not ElastiCache. This one is a
-#     KNOWN COMPROMISE, not a clean substitution: the sidecar is ephemeral and
-#     per-task, and the scheduling job-ID counter lives in it, so a wipe restarts
-#     job ids at 1 and the upsert-by-job_id write path overwrites existing jobs.
-#     Safe at desiredCount=1 with synthetic data; must become ElastiCache before
-#     this service scales or this shape is reused. Full detail at the container
-#     definition below.
+#   * Tasks run in PUBLIC subnets with assignPublicIp=ENABLED, so there is no NAT
+#     gateway (~$32/month plus data processing). The task security group allows no
+#     inbound except from the ALB. The document's target is private subnets.
+#
+# Two things that look like departures and are not:
+#
+#   * Redis is ELASTICACHE, in the exact shape the document specifies: a replication
+#     group with CLUSTER MODE DISABLED (all six consumers build the client with
+#     redis.asyncio.from_url, which is the plain client — a cluster-mode cluster
+#     answers MOVED redirects that only RedisCluster follows, so it would fail at
+#     runtime, per key, not at startup), two nodes across AZs with automatic
+#     failover, encryption in transit and at rest, an AUTH token, and REDIS_URL
+#     pointing at the PRIMARY endpoint so it follows a failover. Because the URL
+#     carries the token it is a Secrets Manager secret, not a plain environment
+#     variable.
+#
+#     Redis previously ran as a per-task SIDECAR here. That was a data-loss shape,
+#     not a cheap substitution: the sidecar is wiped on every task replacement and
+#     scheduling/services/job_id_generator.py does INCR on scheduling:job_id_counter,
+#     so a wipe restarted job ids at 1 and JobService's index_document(
+#     JOBS_CURRENT_INDEX, job_id, doc) — an upsert keyed on job_id — silently
+#     overwrote the existing JOB_1. Full detail at the container definition below.
 #   * SuperTokens is the MANAGED SaaS core, reached over HTTPS. Not a sidecar.
 #     This script briefly ran a self-hosted supertokens-postgresql container against
 #     the same RDS instance, which contradicted a resolved architectural decision:
@@ -45,11 +60,8 @@
 #     wget health check on an image that ships only curl, and a second libpq-form
 #     database secret) and made staging unrepresentative of production's auth
 #     topology, which is the one thing staging is for.
-#   * Tasks run in PUBLIC subnets with assignPublicIp=ENABLED, so there is no NAT
-#     gateway (~$32/month plus data processing). The task security group allows no
-#     inbound except from the ALB.
 #
-# NO TLS. There is no Route 53 zone for this project and no ACM certificate, so
+# NO TLS ON THE ALB. There is no Route 53 zone for this project and no ACM certificate, so
 # the listener is HTTP on the ALB's own DNS name. Session cookies therefore cross
 # the internet in cleartext. Do not put real customer data in this environment.
 # Fixing it needs a domain: create the zone, request a cert, then add a :443
@@ -107,6 +119,19 @@ DB_ENGINE_VERSION="16.14"
 DB_STORAGE_GB="20"
 DB_SUBNET_GROUP="${PREFIX}-db-subnets"
 
+#: ElastiCache Redis, cluster mode DISABLED. See the header: this is the one shape
+#: docs/aws-deployment-strategy.md makes non-negotiable, because every consumer uses
+#: the plain redis.asyncio client and a cluster-mode cluster would fail per-key at
+#: runtime rather than at startup.
+#:
+#: Two nodes (one primary, one replica) so --automatic-failover-enabled and
+#: --multi-az-enabled are legal; the cache subnet group spans three AZs.
+REDIS_ID="${PREFIX}-redis"
+REDIS_NODE_TYPE="cache.t4g.micro"
+REDIS_ENGINE_VERSION="7.1"
+REDIS_SUBNET_GROUP="${PREFIX}-redis-subnets"
+SG_REDIS="${PREFIX}-redis-sg"
+
 ALB_NAME="${PREFIX}-alb"
 TG_NAME="${PREFIX}-tg"
 SG_ALB="${PREFIX}-alb-sg"
@@ -116,6 +141,9 @@ SG_DB="${PREFIX}-db-sg"
 SECRET_DB="${PREFIX}/database-url"
 SECRET_GEMINI="${PREFIX}/gemini-api-key"
 SECRET_ST="${PREFIX}/supertokens-api-key"
+#: REDIS_URL is a SECRET, not a plain environment variable, because TLS + AUTH puts
+#: the auth token inside the URL: rediss://:<token>@<primary-endpoint>:6379/0
+SECRET_REDIS="${PREFIX}/redis-url"
 
 #: SuperTokens Cloud connection details for staging. Supplied by the environment so
 #: a staging-specific core can be used without editing this file:
@@ -160,19 +188,27 @@ Billable resources this creates:
 
   RDS ${DB_CLASS} postgres ${DB_ENGINE_VERSION}, ${DB_STORAGE_GB}GB gp3, single-AZ
                                               ~\$13/month
+  ElastiCache ${REDIS_NODE_TYPE} redis ${REDIS_ENGINE_VERSION}, 2 nodes,
+    cluster mode disabled, multi-AZ, TLS+AUTH      ~\$23/month
   Application Load Balancer (HTTP :80 only)   ~\$17/month + LCU
   Fargate task, ${TASK_CPU} CPU / ${TASK_MEM} MB, 1 replica     ~\$36/month
-  Secrets Manager, 3 secrets                  ~\$1.20/month
+  Secrets Manager, 4 secrets                  ~\$1.60/month
   CloudWatch Logs, ECR storage                cents
                                               ------------
-                                              ~\$67/month
+                                              ~\$90/month
 
 Not created (and why):
   NAT gateway        tasks get public IPs in public subnets instead   -\$32/mo
-  ElastiCache Redis  runs as a sidecar in the task                    -\$11/mo
   Aurora             db.t4g.micro is enough for staging              -\$50/mo+
   ACM certificate    no domain exists, so the listener is HTTP        (see header)
   SuperTokens core   managed SaaS (SuperTokens Cloud), not self-hosted
+  Redis sidecar      REPLACED by ElastiCache above. It was ephemeral and
+                     per-task, and the scheduling job-id counter lived in it.
+  CloudWatch alarms  none, for ANY resource here. The strategy document lists
+                     eight day-one alarms and several are log-metric filters on
+                     application output (sweep leader, outbox backlog); wiring
+                     two ElastiCache alarms and nothing else would misrepresent
+                     the coverage. Monitoring is its own piece of work.
 
 SuperTokens core .... ${ST_URI:-<from .env.development — pass ST_URI/ST_KEY to override>}
 
@@ -209,6 +245,21 @@ alb_dns() {
 db_endpoint() {
   aws rds describe-db-instances --db-instance-identifier "${DB_ID}" \
     --query 'DBInstances[0].Endpoint.Address' --output text 2>/dev/null | grep -v '^None$' || true
+}
+
+# Cluster mode is disabled, so there is exactly one node group and the address to
+# use is its PrimaryEndpoint. Reading the primary (not a node's own endpoint, and not
+# the reader endpoint) is what makes REDIS_URL survive a failover: ElastiCache
+# repoints this DNS name at the promoted replica.
+redis_primary() {
+  aws elasticache describe-replication-groups --replication-group-id "${REDIS_ID}" \
+    --query 'ReplicationGroups[0].NodeGroups[0].PrimaryEndpoint.Address' \
+    --output text 2>/dev/null | grep -v '^None$' || true
+}
+
+redis_status() {
+  aws elasticache describe-replication-groups --replication-group-id "${REDIS_ID}" \
+    --query 'ReplicationGroups[0].Status' --output text 2>/dev/null | grep -v '^None$' || true
 }
 
 secret_value() {
@@ -271,10 +322,11 @@ cmd_up() {
   fi
 
   log "Security groups"
-  local alb_sg task_sg db_sg
+  local alb_sg task_sg db_sg redis_sg
   alb_sg="$(ensure_sg "${SG_ALB}"  "Runsheet staging ALB: public HTTP in")"
   task_sg="$(ensure_sg "${SG_TASK}" "Runsheet staging Fargate tasks")"
   db_sg="$(ensure_sg "${SG_DB}"   "Runsheet staging RDS: from tasks only")"
+  redis_sg="$(ensure_sg "${SG_REDIS}" "Runsheet staging ElastiCache: from tasks only")"
 
   # ALB accepts public HTTP. No :443 — there is no certificate. See the header.
   aws ec2 authorize-security-group-ingress --group-id "$alb_sg" \
@@ -290,6 +342,14 @@ cmd_up() {
   aws ec2 authorize-security-group-ingress --group-id "$db_sg" \
     --protocol tcp --port 5432 --source-group "$task_sg" >/dev/null 2>&1 \
     && ok "db-sg :5432 from task-sg only" || ok "db-sg :5432 already allowed"
+
+  # ElastiCache is reachable only from the tasks. It sits in the same public subnets
+  # as the tasks (the documented departure), so the security group is the whole of
+  # its network isolation — there is no private subnet behind it. TLS and the AUTH
+  # token are the second and third layers.
+  aws ec2 authorize-security-group-ingress --group-id "$redis_sg" \
+    --protocol tcp --port 6379 --source-group "$task_sg" >/dev/null 2>&1 \
+    && ok "redis-sg :6379 from task-sg only" || ok "redis-sg :6379 already allowed"
 
   log "RDS subnet group"
   if aws rds describe-db-subnet-groups --db-subnet-group-name "${DB_SUBNET_GROUP}" >/dev/null 2>&1; then
@@ -329,10 +389,70 @@ cmd_up() {
     ensure_secret "${SECRET_DB}-password" "$db_password"
   fi
 
+  log "ElastiCache subnet group"
+  if aws elasticache describe-cache-subnet-groups --cache-subnet-group-name "${REDIS_SUBNET_GROUP}" >/dev/null 2>&1; then
+    ok "cache subnet group ${REDIS_SUBNET_GROUP}"
+  else
+    aws elasticache create-cache-subnet-group --cache-subnet-group-name "${REDIS_SUBNET_GROUP}" \
+      --cache-subnet-group-description "Runsheet staging" --subnet-ids ${SUBNETS} \
+      --tags "Key=Project,Value=${PROJECT}" "Key=Environment,Value=${ENV_NAME}" >/dev/null
+    ok "created cache subnet group (3 AZs — multi-AZ needs at least 2)"
+  fi
+
+  # Started here, BEFORE the RDS waiter, so the two ~7 minute creations overlap
+  # instead of running end to end. Both are waited on below.
+  log "ElastiCache replication group (~7-10 minutes, starts in parallel with RDS)"
+  if [ -n "$(redis_status)" ]; then
+    ok "elasticache ${REDIS_ID} exists ($(redis_status))"
+  else
+    # AUTH token constraints: 16-128 printable characters, and ElastiCache rejects
+    # '/', '"', '@' and spaces. Restricting to alphanumerics satisfies that AND
+    # keeps the token safe to embed in a URL without percent-encoding, which matters
+    # because from_url would otherwise mis-parse it.
+    local auth_token
+    auth_token="$(python3 -c 'import secrets,string;print("".join(secrets.choice(string.ascii_letters+string.digits) for _ in range(40)))')"
+    # NO --cluster-enabled. That is the whole point: all six consumers construct the
+    # client with redis.asyncio.from_url, and only RedisCluster follows the MOVED
+    # redirects a cluster-mode cluster returns.
+    aws elasticache create-replication-group \
+      --replication-group-id "${REDIS_ID}" \
+      --replication-group-description "Runsheet staging Redis, cluster mode disabled" \
+      --engine redis --engine-version "${REDIS_ENGINE_VERSION}" \
+      --cache-node-type "${REDIS_NODE_TYPE}" \
+      --num-cache-clusters 2 \
+      --automatic-failover-enabled --multi-az-enabled \
+      --transit-encryption-enabled --at-rest-encryption-enabled \
+      --auth-token "$auth_token" \
+      --cache-subnet-group-name "${REDIS_SUBNET_GROUP}" \
+      --security-group-ids "$redis_sg" \
+      --snapshot-retention-limit 1 \
+      --tags "Key=Project,Value=${PROJECT}" "Key=Environment,Value=${ENV_NAME}" >/dev/null
+    ok "creating elasticache ${REDIS_ID}"
+    # Stashed on its own the way the RDS password is: the REDIS_URL secret cannot be
+    # written until the primary endpoint exists, and a re-run after a failure between
+    # those two points must be able to rebuild the URL rather than rotate the token.
+    ensure_secret "${SECRET_REDIS}-token" "$auth_token"
+  fi
+
   log "Waiting for RDS to become available"
   aws rds wait db-instance-available --db-instance-identifier "${DB_ID}"
   local endpoint; endpoint="$(db_endpoint)"
   ok "rds endpoint ${endpoint}"
+
+  log "Waiting for ElastiCache to become available"
+  # Polled rather than ``aws elasticache wait replication-group-available``, whose
+  # default budget is 40 attempts at 15s = 10 minutes. A two-node group with
+  # transit encryption regularly takes 8-11, so the waiter is a coin flip, and under
+  # ``set -e`` a timed-out waiter kills the whole run at the point where the group is
+  # nearly ready — leaving a billable cluster and no REDIS_URL secret. 20 minutes.
+  local waited=0
+  while [ "$(redis_status)" != "available" ]; do
+    [ "$waited" -ge 1200 ] && die "elasticache ${REDIS_ID} still $(redis_status) after 20 minutes"
+    sleep 20; waited=$((waited + 20))
+  done
+  local redis_host; redis_host="$(redis_primary)"
+  [ -n "$redis_host" ] || die "elasticache ${REDIS_ID} has no primary endpoint"
+  ok "redis primary ${redis_host}"
 
   log "Secrets"
   local db_password
@@ -340,6 +460,16 @@ cmd_up() {
   [ -n "$db_password" ] || die "no stored RDS password; delete ${DB_ID} and re-run up"
   ensure_secret "${SECRET_DB}" \
     "postgresql+psycopg://${DB_USER}:${db_password}@${endpoint}:5432/${DB_NAME}"
+
+  # rediss:// — two s. from_url reads the scheme as "TLS" and the empty username with
+  # a password as the AUTH token, so TLS and AUTH need no application change at all.
+  # The port is the primary endpoint's, and the /0 database index is preserved
+  # because a bare host with no path would leave consumers on a different db than
+  # development.
+  local redis_token
+  redis_token="$(secret_value "${SECRET_REDIS}-token")"
+  [ -n "$redis_token" ] || die "no stored Redis AUTH token; delete ${REDIS_ID} and re-run up"
+  ensure_secret "${SECRET_REDIS}" "rediss://:${redis_token}@${redis_host}:6379/0"
 
   # Reused from development rather than newly issued: staging needs *a* valid
   # Gemini credential to start (settings refuses staging without one) and issuing
@@ -436,11 +566,12 @@ ensure_execution_role() {
     ok "created role $role"
   fi
   # Least privilege on the secrets: the execution role resolves them at task
-  # start, and it is scoped to these three ARNs rather than secretsmanager:*.
+  # start, and it is scoped to these four ARNs rather than secretsmanager:*.
+  # REDIS_URL is one of them because it carries the ElastiCache AUTH token.
   local doc
-  doc="$(printf '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["secretsmanager:GetSecretValue"],"Resource":["%s","%s","%s"]}]}' \
+  doc="$(printf '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["secretsmanager:GetSecretValue"],"Resource":["%s","%s","%s","%s"]}]}' \
       "$(secret_arn "${SECRET_DB}")" "$(secret_arn "${SECRET_GEMINI}")" \
-      "$(secret_arn "${SECRET_ST}")")"
+      "$(secret_arn "${SECRET_ST}")" "$(secret_arn "${SECRET_REDIS}")")"
   aws iam put-role-policy --role-name "$role" --policy-name "${PREFIX}-read-secrets" \
     --policy-document "$doc" >/dev/null
   ok "scoped secret read policy"
@@ -489,6 +620,7 @@ region = os.environ["AWS_REGION"]
 secret_db = os.environ["SECRET_DB_ARN"]
 secret_gemini = os.environ["SECRET_GEMINI_ARN"]
 secret_st = os.environ["SECRET_ST_ARN"]
+secret_redis = os.environ["SECRET_REDIS_ARN"]
 
 def logs(stream):
     return {
@@ -500,13 +632,13 @@ def logs(stream):
         },
     }
 
-# Redis is a sidecar in this task, so the app reaches it on localhost and it needs
-# no security group, subnet or managed service.
+# ONE container. No "redis" sidecar, and no self-hosted "supertokens" — Redis is
+# ElastiCache and the SuperTokens core is managed SaaS, both reached over the network.
 #
-# WARNING, and an earlier version of this comment claimed the opposite ("no business
-# record lives there"). That was wrong. A sidecar Redis is EPHEMERAL (wiped on every
-# task replacement) and PER-TASK (each replica gets its own), and six components
-# depend on it:
+# The sidecar that used to stand here was removed rather than kept as a cheaper
+# staging substitution, because it was not a substitution. It was EPHEMERAL (wiped on
+# every task replacement) and PER-TASK (a second replica got a second, unrelated
+# Redis), and six components depend on Redis:
 #
 #   session/redis_store.py                  sessions / agent conversation memory
 #   ops/ingestion/idempotency.py            webhook de-duplication
@@ -515,33 +647,22 @@ def logs(stream):
 #   bootstrap/agents.py                     agent runtime client
 #   scheduling/services/job_id_generator.py INCR on scheduling:job_id_counter
 #
-# The last one is a data-loss path, not a degradation. Wiping the counter restarts it
-# at 1, and JobService writes with index_document(JOBS_CURRENT_INDEX, job_id, doc) —
-# an upsert keyed on job_id — so the next created job SILENTLY OVERWRITES the
+# The last one was a data-loss path, not a degradation. Wiping the counter restarted
+# it at 1, and JobService writes with index_document(JOBS_CURRENT_INDEX, job_id, doc)
+# — an upsert keyed on job_id — so the next created job SILENTLY OVERWROTE the
 # existing JOB_1. Its own docstring says the counter exists "for atomicity across
-# multiple backend instances", which is precisely what a per-task Redis removes.
+# multiple backend instances", which is precisely what a per-task Redis removed.
 #
-# This is tolerable ONLY because staging runs desiredCount=1 with synthetic data.
-# docs/aws-deployment-strategy.md specifies ElastiCache (cluster mode disabled) for a
-# reason. Scaling this service past one task, or copying this shape anywhere real,
-# needs ElastiCache first (~$11/month, cache.t4g.micro).
+# Two consequences of the move, both intentional:
+#
+#   * REDIS_URL is in "secrets", not "environment". It is rediss:// with the AUTH
+#     token in the userinfo, so it is a credential.
+#   * there is no "dependsOn" any more. It waited for the sidecar to report HEALTHY;
+#     with a managed endpoint there is nothing in the task to wait for. If Redis is
+#     unreachable the session store raises SESSION_STORE_UNAVAILABLE (503) on the
+#     affected requests, and /health/live keeps answering, which is the correct
+#     failure mode — the process is alive, one dependency is not.
 containers = [
-    {
-        "name": "redis",
-        # ECR Public mirrors Docker Hub's library, but only some tags: :7-alpine is
-        # absent there while :7 is present. Verified rather than assumed. Preferring
-        # the mirror over Docker Hub avoids anonymous pull-rate limits on task
-        # replacement, which is a real source of "it redeployed and now it won't
-        # start" in Fargate.
-        "image": "public.ecr.aws/docker/library/redis:7",
-        "essential": True,
-        "command": ["redis-server", "--save", "", "--appendonly", "no"],
-        "logConfiguration": logs("redis"),
-        "healthCheck": {
-            "command": ["CMD-SHELL", "redis-cli ping | grep -q PONG"],
-            "interval": 10, "timeout": 3, "retries": 5, "startPeriod": 10,
-        },
-    },
     # No self-hosted "supertokens" container. The core is SuperTokens Cloud,
     # reached over HTTPS from the task's public IP. A sidecar running
     # supertokens-postgresql against this same RDS instance stood here and was
@@ -552,18 +673,11 @@ containers = [
         "image": image,
         "essential": True,
         "portMappings": [{"containerPort": 8080, "protocol": "tcp"}],
-        # Redis only. It is the session store, and waiting for HEALTHY rather than
-        # STARTED removes a first-boot race that shows up as an unexplained restart.
-        # There is no SuperTokens container to depend on any more.
-        "dependsOn": [
-            {"containerName": "redis", "condition": "HEALTHY"},
-        ],
         "environment": [
             {"name": "ENVIRONMENT", "value": "staging"},
             {"name": "PORT", "value": "8080"},
             {"name": "LOG_LEVEL", "value": "INFO"},
             {"name": "SESSION_STORE_TYPE", "value": "redis"},
-            {"name": "REDIS_URL", "value": "redis://localhost:6379/0"},
             # SuperTokens Cloud over HTTPS. The API key arrives as a secret below.
             {"name": "SUPERTOKENS_CONNECTION_URI", "value": os.environ["ST_URI"]},
             {"name": "SUPERTOKENS_API_DOMAIN", "value": f"http://{alb}"},
@@ -583,6 +697,9 @@ containers = [
             {"name": "DATABASE_URL", "valueFrom": secret_db},
             {"name": "GEMINI_API_KEY", "valueFrom": secret_gemini},
             {"name": "SUPERTOKENS_API_KEY", "valueFrom": secret_st},
+            # Points at the ElastiCache PRIMARY endpoint, so a failover is followed
+            # by DNS rather than needing a task-definition revision.
+            {"name": "REDIS_URL", "valueFrom": secret_redis},
         ],
         "logConfiguration": logs("api"),
     },
@@ -633,6 +750,7 @@ cmd_deploy() {
   export SECRET_DB_ARN="$(secret_arn "${SECRET_DB}")"
   export SECRET_GEMINI_ARN="$(secret_arn "${SECRET_GEMINI}")"
   export SECRET_ST_ARN="$(secret_arn "${SECRET_ST}")"
+  export SECRET_REDIS_ARN="$(secret_arn "${SECRET_REDIS}")"
   local td; td="$(register_task_def "$image" "$alb")"
   ok "$td"
 
@@ -748,13 +866,102 @@ cmd_verify() {
     && ok "document store reported as postgres" \
     || die "readiness does not report postgres"
 
+  verify_redis
+
   echo
   ok "staging verified at ${base}"
+}
+
+#: Prove ElastiCache from INSIDE the task, as a one-shot RunTask on the deployed task
+#: definition.
+#:
+#: /health/ready cannot do this. bootstrap/core.py constructs HealthCheckService with
+#: session_store=None, so the readiness payload reports postgres and nothing else —
+#: Redis could be entirely unreachable and readiness would still return 200. Checking
+#: it here, with the same task definition, the same execution role and the same
+#: secret, is the only thing that actually exercises the path the app uses.
+verify_redis() {
+  local td task_sg arn exit_code
+  td="$(aws ecs describe-task-definition --task-definition "${TASK_FAMILY}" \
+        --query 'taskDefinition.taskDefinitionArn' --output text)"
+  task_sg="$(sg_id "${SG_TASK}")"
+
+  # Written to a file, then read, for the same reason register_task_def does it: bash
+  # scans a "$( ... )" for its closing paren without fully honouring a nested quoted
+  # heredoc, and an apostrophe inside the Python once broke the script 380 lines away.
+  local gen="/tmp/${PREFIX}-redis-probe-gen.py"
+  cat > "$gen" <<'PY'
+import json
+
+# Deliberately redis.asyncio.from_url, the plain client, because that is what all six
+# consumers use. If the replication group were ever recreated with cluster mode
+# enabled this probe would fail on a MOVED redirect, which is the failure the
+# deployment strategy document warns is otherwise invisible until runtime.
+probe = """
+import asyncio, os
+import redis.asyncio as redis
+
+url = os.environ["REDIS_URL"]
+assert url.startswith("rediss://"), "REDIS_URL is not TLS: " + url[:16]
+assert "@" in url.split("//", 1)[1], "REDIS_URL carries no AUTH token"
+
+async def main():
+    client = redis.from_url(url, decode_responses=True)
+    assert await client.ping() is True
+    await client.set("staging:verify", "ok", ex=60)
+    assert await client.get("staging:verify") == "ok"
+    first = await client.incr("staging:verify:counter")
+    second = await client.incr("staging:verify:counter")
+    assert second == first + 1, (first, second)
+    info = await client.info("replication")
+    await client.aclose()
+    print("REDIS_VERIFY_OK role=%s connected_slaves=%s endpoint=%s" % (
+        info.get("role"), info.get("connected_slaves"), url.split("@", 1)[1]))
+
+asyncio.run(main())
+"""
+
+print(json.dumps({
+    "containerOverrides": [{"name": "api", "command": ["python", "-c", probe]}]
+}))
+PY
+  python3 "$gen" > "/tmp/${PREFIX}-redis-probe.json"
+
+  log "Probing ElastiCache from inside the task"
+  arn="$(aws ecs run-task --cluster "${CLUSTER}" --task-definition "$td" \
+      --launch-type FARGATE \
+      --network-configuration "awsvpcConfiguration={subnets=[${SUBNETS_CSV}],securityGroups=[${task_sg}],assignPublicIp=ENABLED}" \
+      --overrides "file:///tmp/${PREFIX}-redis-probe.json" \
+      --query 'tasks[0].taskArn' --output text)"
+  aws ecs wait tasks-stopped --cluster "${CLUSTER}" --tasks "$arn"
+  exit_code="$(aws ecs describe-tasks --cluster "${CLUSTER}" --tasks "$arn" \
+      --query 'tasks[0].containers[?name==`api`].exitCode' --output text)"
+
+  local line
+  line="$(aws logs tail "${LOG_GROUP}" --since 10m --format short 2>/dev/null | grep REDIS_VERIFY_OK | tail -1 || true)"
+  if [ "$exit_code" = "0" ] && [ -n "$line" ]; then
+    ok "elasticache reachable over TLS with AUTH"
+    ok "${line#* }"
+  else
+    warn "redis probe exited ${exit_code}"
+    aws logs tail "${LOG_GROUP}" --since 10m --format short 2>/dev/null | tail -20 || true
+    die "REDIS_URL does not work from the task"
+  fi
+
+  # One container, not two. Catches a stale task definition revision still carrying
+  # the sidecar, which would otherwise let the app keep talking to localhost:6379 and
+  # make every check above pass for the wrong reason.
+  local n
+  n="$(aws ecs describe-task-definition --task-definition "${TASK_FAMILY}" \
+       --query 'length(taskDefinition.containerDefinitions)' --output text)"
+  [ "$n" = "1" ] && ok "task definition has 1 container (no redis sidecar)" \
+    || die "task definition has ${n} containers — the redis sidecar is still there"
 }
 
 cmd_status() {
   echo "ALB           $(alb_dns || echo '-')"
   echo "RDS           $(db_endpoint || echo '-')  $(aws rds describe-db-instances --db-instance-identifier "${DB_ID}" --query 'DBInstances[0].DBInstanceStatus' --output text 2>/dev/null || echo '-')"
+  echo "Redis         $(redis_primary || echo '-')  $(redis_status || echo '-')  $(aws elasticache describe-replication-groups --replication-group-id "${REDIS_ID}" --query 'ReplicationGroups[0].[AutomaticFailover,MultiAZ,TransitEncryptionEnabled]' --output text 2>/dev/null || echo '-')"
   echo "Service       $(aws ecs describe-services --cluster "${CLUSTER}" --services "${SERVICE}" --query 'services[0].[status,desiredCount,runningCount]' --output text 2>/dev/null || echo '-')"
   echo "Task def      $(aws ecs describe-task-definition --task-definition "${TASK_FAMILY}" --query 'taskDefinition.revision' --output text 2>/dev/null || echo '-')"
   echo "Targets       $(aws elbv2 describe-target-health --target-group-arn "$(aws elbv2 describe-target-groups --names "${TG_NAME}" --query 'TargetGroups[0].TargetGroupArn' --output text 2>/dev/null)" --query 'TargetHealthDescriptions[].TargetHealth.State' --output text 2>/dev/null || echo '-')"
@@ -777,8 +984,9 @@ This DESTROYS the Runsheet staging environment in ${AWS_REGION}:
 
   ECS service ${SERVICE} and cluster ${CLUSTER}
   RDS instance ${DB_ID}  -- NO FINAL SNAPSHOT, all staging data is lost
+  ElastiCache ${REDIS_ID}  -- NO FINAL SNAPSHOT, sessions and the job-id counter go
   ALB ${ALB_NAME}, target group ${TG_NAME}
-  Secrets ${SECRET_DB}, ${SECRET_GEMINI}, ${SECRET_ST} (+ password)
+  Secrets ${SECRET_DB}, ${SECRET_GEMINI}, ${SECRET_ST}, ${SECRET_REDIS} (+ password, + auth token)
   IAM roles ${PREFIX}-execution, ${PREFIX}-task
   Security groups, subnet group, log group, ECR repo ${ECR_REPO} and its images
 
@@ -816,6 +1024,17 @@ WARNING
   aws rds delete-db-subnet-group --db-subnet-group-name "${DB_SUBNET_GROUP}" >/dev/null 2>&1 \
     && ok "subnet group deleted" || true
 
+  log "Deleting ElastiCache"
+  # --no-retain-primary-cluster: take the whole replication group, both nodes, and do
+  # not leave a standalone cache cluster behind still billing. The waiter has to run
+  # before the cache subnet group and the security group can go.
+  aws elasticache delete-replication-group --replication-group-id "${REDIS_ID}" \
+    --no-retain-primary-cluster >/dev/null 2>&1 \
+    && ok "elasticache deleting" || warn "no elasticache"
+  aws elasticache wait replication-group-deleted --replication-group-id "${REDIS_ID}" 2>/dev/null || true
+  aws elasticache delete-cache-subnet-group --cache-subnet-group-name "${REDIS_SUBNET_GROUP}" >/dev/null 2>&1 \
+    && ok "cache subnet group deleted" || true
+
   log "Deleting the cluster"
   aws ecs delete-cluster --cluster "${CLUSTER}" >/dev/null 2>&1 && ok "cluster deleted" || true
 
@@ -826,9 +1045,9 @@ WARNING
   ok "deregistered"
 
   log "Deleting security groups"
-  # Ordered: the DB group references the task group, which references the ALB
-  # group, so they have to go in dependency order or AWS refuses.
-  for name in "${SG_DB}" "${SG_TASK}" "${SG_ALB}"; do
+  # Ordered: the DB and Redis groups reference the task group, which references the
+  # ALB group, so they have to go in dependency order or AWS refuses.
+  for name in "${SG_DB}" "${SG_REDIS}" "${SG_TASK}" "${SG_ALB}"; do
     local id; id="$(sg_id "$name")"
     if [ -n "$id" ]; then
       for _ in 1 2 3 4 5 6; do
@@ -839,7 +1058,8 @@ WARNING
   done
 
   log "Deleting secrets"
-  for s in "${SECRET_DB}" "${SECRET_DB}-password" "${SECRET_GEMINI}" "${SECRET_ST}"; do
+  for s in "${SECRET_DB}" "${SECRET_DB}-password" "${SECRET_GEMINI}" "${SECRET_ST}" \
+           "${SECRET_REDIS}" "${SECRET_REDIS}-token"; do
     aws secretsmanager delete-secret --secret-id "$s" --force-delete-without-recovery >/dev/null 2>&1 \
       && ok "$s" || true
   done
