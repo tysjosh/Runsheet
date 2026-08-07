@@ -32,8 +32,15 @@
 #   * Redis runs as a SIDECAR container in the task, not ElastiCache. Losing it
 #     loses AI-agent conversation memory and nothing else — no business records —
 #     which is an acceptable staging trade for ~$11/month and one less service.
-#   * SuperTokens core runs as a SIDECAR too, against the same RDS instance, so
-#     staging gets its own identity store rather than borrowing development's.
+#   * SuperTokens is the MANAGED SaaS core, reached over HTTPS. Not a sidecar.
+#     This script briefly ran a self-hosted supertokens-postgresql container against
+#     the same RDS instance, which contradicted a resolved architectural decision:
+#     .kiro/specs/supertokens-auth-migration says "Deployment is the SuperTokens
+#     managed SaaS core — there are no container/docker tasks for the core". It also
+#     caused three separate deploy failures on its own (a guessed image reference, a
+#     wget health check on an image that ships only curl, and a second libpq-form
+#     database secret) and made staging unrepresentative of production's auth
+#     topology, which is the one thing staging is for.
 #   * Tasks run in PUBLIC subnets with assignPublicIp=ENABLED, so there is no NAT
 #     gateway (~$32/month plus data processing). The task security group allows no
 #     inbound except from the ALB.
@@ -105,9 +112,18 @@ SG_DB="${PREFIX}-db-sg"
 SECRET_DB="${PREFIX}/database-url"
 SECRET_GEMINI="${PREFIX}/gemini-api-key"
 SECRET_ST="${PREFIX}/supertokens-api-key"
-#: The same database, in libpq form, for the SuperTokens core. Two secrets rather
-#: than one because ECS injects a secret verbatim and cannot rewrite the scheme.
-SECRET_ST_DB="${PREFIX}/supertokens-db-uri"
+
+#: SuperTokens Cloud connection details for staging. Supplied by the environment so
+#: a staging-specific core can be used without editing this file:
+#:
+#:   ST_URI=https://st-stg-xxxx.aws.supertokens.io \
+#:   ST_KEY=... ./scripts/staging_aws.sh up
+#:
+#: When unset these fall back to the DEVELOPMENT core in .env.development, which
+#: works but means staging and development share one identity store — the same users
+#: and sessions in both. ``up`` warns loudly when it does that.
+ST_URI="${ST_URI:-}"
+ST_KEY="${ST_KEY:-}"
 
 TASK_CPU="1024"
 TASK_MEM="2048"
@@ -152,6 +168,9 @@ Not created (and why):
   ElastiCache Redis  runs as a sidecar in the task                    -\$11/mo
   Aurora             db.t4g.micro is enough for staging              -\$50/mo+
   ACM certificate    no domain exists, so the listener is HTTP        (see header)
+  SuperTokens core   managed SaaS (SuperTokens Cloud), not self-hosted
+
+SuperTokens core .... ${ST_URI:-<from .env.development — pass ST_URI/ST_KEY to override>}
 
 Tear down with:  ./scripts/staging_aws.sh down
 PLAN
@@ -206,6 +225,31 @@ ensure_secret() {
 
 secret_arn() {
   aws secretsmanager describe-secret --secret-id "$1" --query ARN --output text
+}
+
+#: Resolve the SuperTokens Cloud core, setting ST_URI and ST_KEY.
+#:
+#: Both ``up`` (which stores the API key as a secret) and ``deploy`` (which bakes the
+#: connection URI into the task definition) need these, so it lives in one place
+#: rather than being resolved twice and drifting.
+#:
+#: The API key is a REAL managed-core credential and is never generated. An earlier
+#: version minted a random one, which only made sense while a self-hosted core was in
+#: the task — against SuperTokens Cloud it would have failed every session
+#: verification, and the app would have looked broken for an unrelated reason.
+resolve_supertokens() {
+  local st_env="$(dirname "$0")/../.env.development"
+  if [ -z "$ST_URI" ] || [ -z "$ST_KEY" ]; then
+    [ -f "$st_env" ] || die "no ST_URI/ST_KEY and no .env.development to fall back to"
+    ST_URI="${ST_URI:-$(grep -E '^SUPERTOKENS_CONNECTION_URI=' "$st_env" | cut -d= -f2-)}"
+    ST_KEY="${ST_KEY:-$(grep -E '^SUPERTOKENS_API_KEY=' "$st_env" | cut -d= -f2-)}"
+    warn "using the DEVELOPMENT SuperTokens core — staging shares development's"
+    warn "identity store (same users, same sessions). Pass ST_URI and ST_KEY to"
+    warn "point at a staging-specific core in SuperTokens Cloud."
+  fi
+  [ -n "$ST_URI" ] || die "no SuperTokens connection URI (set ST_URI)"
+  [ -n "$ST_KEY" ] || die "no SuperTokens API key (set ST_KEY)"
+  export ST_URI ST_KEY
 }
 
 # ---------------------------------------------------------------------------
@@ -292,8 +336,6 @@ cmd_up() {
   [ -n "$db_password" ] || die "no stored RDS password; delete ${DB_ID} and re-run up"
   ensure_secret "${SECRET_DB}" \
     "postgresql+psycopg://${DB_USER}:${db_password}@${endpoint}:5432/${DB_NAME}"
-  ensure_secret "${SECRET_ST_DB}" \
-    "postgresql://${DB_USER}:${db_password}@${endpoint}:5432/${DB_NAME}"
 
   # Reused from development rather than newly issued: staging needs *a* valid
   # Gemini credential to start (settings refuses staging without one) and issuing
@@ -304,14 +346,9 @@ cmd_up() {
   [ -n "$gemini" ] || die "GEMINI_API_KEY not found in .env.development"
   ensure_secret "${SECRET_GEMINI}" "$gemini"
 
-  # SuperTokens core runs as a sidecar, so this is the key the app and the core
-  # agree on, not a managed-service credential. Generated, not borrowed.
-  if [ -z "$(secret_value "${SECRET_ST}")" ]; then
-    ensure_secret "${SECRET_ST}" \
-      "$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')"
-  else
-    ok "secret ${SECRET_ST} (kept)"
-  fi
+  resolve_supertokens
+  ensure_secret "${SECRET_ST}" "$ST_KEY"
+  ok "supertokens core ${ST_URI}"
 
   log "CloudWatch log group"
   aws logs create-log-group --log-group-name "${LOG_GROUP}" >/dev/null 2>&1 \
@@ -397,9 +434,9 @@ ensure_execution_role() {
   # Least privilege on the secrets: the execution role resolves them at task
   # start, and it is scoped to these three ARNs rather than secretsmanager:*.
   local doc
-  doc="$(printf '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["secretsmanager:GetSecretValue"],"Resource":["%s","%s","%s","%s"]}]}' \
+  doc="$(printf '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["secretsmanager:GetSecretValue"],"Resource":["%s","%s","%s"]}]}' \
       "$(secret_arn "${SECRET_DB}")" "$(secret_arn "${SECRET_GEMINI}")" \
-      "$(secret_arn "${SECRET_ST}")" "$(secret_arn "${SECRET_ST_DB}")")"
+      "$(secret_arn "${SECRET_ST}")")"
   aws iam put-role-policy --role-name "$role" --policy-name "${PREFIX}-read-secrets" \
     --policy-document "$doc" >/dev/null
   ok "scoped secret read policy"
@@ -448,7 +485,6 @@ region = os.environ["AWS_REGION"]
 secret_db = os.environ["SECRET_DB_ARN"]
 secret_gemini = os.environ["SECRET_GEMINI_ARN"]
 secret_st = os.environ["SECRET_ST_ARN"]
-secret_st_db = os.environ["SECRET_ST_DB_ARN"]
 
 def logs(stream):
     return {
@@ -481,59 +517,21 @@ containers = [
             "interval": 10, "timeout": 3, "retries": 5, "startPeriod": 10,
         },
     },
-    {
-        "name": "supertokens",
-        # Docker Hub, not ECR Public. ``public.ecr.aws/supertokens/...`` was a guess
-        # and does not exist; the service failed to place a task seven times with
-        # CannotPullContainerError before that showed up. Verified with
-        # ``docker manifest inspect`` before being written here.
-        #
-        # Pinned by digest rather than :latest so a task replacement six months from
-        # now gets the same core, and because the AWS deployment strategy makes the
-        # same argument about never deploying :latest.
-        "image": ("docker.io/supertokens/supertokens-postgresql@sha256:"
-                  "4516ec7c00b8fb2a773012694d8ebf03b54799d59cfc974160590f16d235ce72"),
-        "essential": True,
-        # No "environment" block. ``API_KEYS`` arrives via "secrets" below, and ECS
-        # rejects a task definition where the same name appears in both — the error
-        # is explicit about it, which is how this was caught on first register.
-        "secrets": [
-            # The core stores its own tables in the same RDS instance, and it needs a
-            # libpq URL where the app needs SQLAlchemy's ``postgresql+psycopg://``.
-            # ECS cannot transform a secret, so the two forms are two secrets rather
-            # than one plus a shell rewrite in the command — which is what was here
-            # first, and it also overrode the entrypoint incorrectly: the real one is
-            # ``docker-entrypoint.sh supertokens start``, confirmed with
-            # ``docker inspect``, not the path that was guessed.
-            {"name": "POSTGRESQL_CONNECTION_URI", "valueFrom": secret_st_db},
-            {"name": "API_KEYS", "valueFrom": secret_st},
-        ],
-        "logConfiguration": logs("supertokens"),
-        # curl, not wget: this image has no wget, so the probe failed on a core that
-        # was up and connected. The task then sat with supertokens RUNNING/UNHEALTHY
-        # and api PENDING forever on its dependsOn, which reads like a database
-        # problem and was not one. Checked with docker run before changing it.
-        #
-        # /hello is the right endpoint rather than a TCP check: it answers only once
-        # the storage layer is connected, so it distinguishes "process started" from
-        # "core is usable".
-        "healthCheck": {
-            "command": ["CMD-SHELL",
-                        "curl -fsS http://localhost:3567/hello | grep -q Hello"],
-            "interval": 15, "timeout": 5, "retries": 10, "startPeriod": 60,
-        },
-    },
+    # No self-hosted "supertokens" container. The core is SuperTokens Cloud,
+    # reached over HTTPS from the task's public IP. A sidecar running
+    # supertokens-postgresql against this same RDS instance stood here and was
+    # wrong: .kiro/specs/supertokens-auth-migration resolves the deployment model
+    # as the managed SaaS core and states there are no container tasks for it.
     {
         "name": "api",
         "image": image,
         "essential": True,
         "portMappings": [{"containerPort": 8080, "protocol": "tcp"}],
-        # Ordered start: the app pings SuperTokens during bootstrap, and Redis is
-        # the session store. Waiting for HEALTHY (not just STARTED) removes a
-        # first-boot race that would otherwise show up as an unexplained restart.
+        # Redis only. It is the session store, and waiting for HEALTHY rather than
+        # STARTED removes a first-boot race that shows up as an unexplained restart.
+        # There is no SuperTokens container to depend on any more.
         "dependsOn": [
             {"containerName": "redis", "condition": "HEALTHY"},
-            {"containerName": "supertokens", "condition": "HEALTHY"},
         ],
         "environment": [
             {"name": "ENVIRONMENT", "value": "staging"},
@@ -541,7 +539,8 @@ containers = [
             {"name": "LOG_LEVEL", "value": "INFO"},
             {"name": "SESSION_STORE_TYPE", "value": "redis"},
             {"name": "REDIS_URL", "value": "redis://localhost:6379/0"},
-            {"name": "SUPERTOKENS_CONNECTION_URI", "value": "http://localhost:3567"},
+            # SuperTokens Cloud over HTTPS. The API key arrives as a secret below.
+            {"name": "SUPERTOKENS_CONNECTION_URI", "value": os.environ["ST_URI"]},
             {"name": "SUPERTOKENS_API_DOMAIN", "value": f"http://{alb}"},
             {"name": "SUPERTOKENS_WEBSITE_DOMAIN", "value": f"http://{alb}"},
             {"name": "CORS_ORIGINS", "value": json.dumps([f"http://{alb}"])},
@@ -604,11 +603,11 @@ cmd_deploy() {
   ok "pushed ${sha}"
 
   log "Registering task definition"
+  resolve_supertokens
   export PREFIX LOG_GROUP AWS_REGION TASK_FAMILY TASK_CPU TASK_MEM
   export SECRET_DB_ARN="$(secret_arn "${SECRET_DB}")"
   export SECRET_GEMINI_ARN="$(secret_arn "${SECRET_GEMINI}")"
   export SECRET_ST_ARN="$(secret_arn "${SECRET_ST}")"
-  export SECRET_ST_DB_ARN="$(secret_arn "${SECRET_ST_DB}")"
   local td; td="$(register_task_def "$image" "$alb")"
   ok "$td"
 
@@ -815,7 +814,7 @@ WARNING
   done
 
   log "Deleting secrets"
-  for s in "${SECRET_DB}" "${SECRET_DB}-password" "${SECRET_GEMINI}" "${SECRET_ST}" "${SECRET_ST_DB}"; do
+  for s in "${SECRET_DB}" "${SECRET_DB}-password" "${SECRET_GEMINI}" "${SECRET_ST}"; do
     aws secretsmanager delete-secret --secret-id "$s" --force-delete-without-recovery >/dev/null 2>&1 \
       && ok "$s" || true
   done
