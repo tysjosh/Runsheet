@@ -1229,14 +1229,24 @@ Set these in the Vercel project (Production scope):
   NEXT_PUBLIC_ST_WEBSITE_DOMAIN=${app}
   NEXT_PUBLIC_ST_API_BASE_PATH=/auth
   NEXT_PUBLIC_TENANT_ID=demo-tenant
-  NEXT_PUBLIC_GOOGLE_MAPS_API_KEY=<rotate the key in runsheet/.env.local first>
+  NEXT_PUBLIC_GOOGLE_MAPS_API_KEY=<the value from runsheet/.env.local>
+  NEXT_PUBLIC_SITE_URL=${app}
 
-The Maps key currently in runsheet/.env.local is committed to git. Every
-NEXT_PUBLIC_* value ships to the browser and cannot be secret, so the fix is not
-hiding it — it is restricting the key to these HTTP referrers in the Google Cloud
-console, and rotating it because the old value is in history:
+The Maps key is NOT leaked in git. runsheet/.gitignore excludes .env*, the file was
+never committed, and the value appears in no tracked file and nowhere in history.
+Stated explicitly because an earlier version of this text claimed the opposite.
+
+It does still become public, for a different and unavoidable reason: every
+NEXT_PUBLIC_* value is inlined into the JavaScript bundle and served to the browser,
+so anyone can read it off the deployed site. That is how the mechanism works, not a
+mistake, and it means secrecy is not the control. A referrer restriction in the
+Google Cloud console is:
 
   ${app}/*
+
+NEXT_PUBLIC_SITE_URL is included because layout.tsx, robots.ts and sitemap.ts each
+fall back to http://localhost:3000 when it is unset, which would otherwise publish
+localhost canonical URLs and a localhost sitemap.
 ENV
   if [ -z "$DOMAIN" ]; then
     echo
