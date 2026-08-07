@@ -147,6 +147,13 @@ if _provider_enforces(getattr(_auth_settings, "auth_provider", "legacy")):
 # Migration_Controller flag flips, without re-wiring (Req 9.1).
 _register_auth_enforcement(app, _auth_settings)
 
+# RequestID, rate limiting and security headers, for the same reason as the auth gate
+# above: add_middleware is refused once the app has started, so bootstrap/middleware.py
+# raised on every boot and installed none of them. See that module for the detail.
+from bootstrap.middleware import register_at_import as _register_middleware
+
+_register_middleware(app, _auth_settings)
+
 # CORS must be added before the app starts (cannot be added in lifespan/bootstrap)
 from fastapi.middleware.cors import CORSMiddleware
 import json as _json
