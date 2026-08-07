@@ -14,9 +14,15 @@
 #   ./scripts/staging_aws.sh up         # create everything (idempotent)
 #   ./scripts/staging_aws.sh deploy     # build + push image, roll the service
 #   ./scripts/staging_aws.sh migrate    # alembic upgrade head as a one-shot task
-#   ./scripts/staging_aws.sh verify     # readiness + auth enforcement
+#   ./scripts/staging_aws.sh verify     # readiness + auth + TLS + redis
 #   ./scripts/staging_aws.sh status     # what exists right now
+#   ./scripts/staging_aws.sh frontend-env  # env vars to paste into Vercel
 #   ./scripts/staging_aws.sh down       # DESTROY everything this script made
+#
+# Pass DOMAIN to get TLS. Without it the ALB serves plaintext HTTP on its own DNS
+# name and an HTTPS frontend cannot call it at all:
+#
+#   DOMAIN=runsheetops.com ./scripts/staging_aws.sh up
 #
 # Idempotent: every step checks for the resource before creating it, so a re-run
 # after a failure continues rather than duplicating. Safe to run repeatedly.
@@ -61,11 +67,21 @@
 #     database secret) and made staging unrepresentative of production's auth
 #     topology, which is the one thing staging is for.
 #
-# NO TLS ON THE ALB. There is no Route 53 zone for this project and no ACM certificate, so
-# the listener is HTTP on the ALB's own DNS name. Session cookies therefore cross
-# the internet in cleartext. Do not put real customer data in this environment.
-# Fixing it needs a domain: create the zone, request a cert, then add a :443
-# listener and set SUPERTOKENS_WEBSITE_DOMAIN / CORS_ORIGINS to the https origin.
+# TLS is CONDITIONAL ON $DOMAIN, and everything downstream of it follows.
+#
+# With DOMAIN set: a Route 53 hosted zone, an ACM certificate for api.$DOMAIN
+# validated by a CNAME this script writes itself, a :443 listener on a TLS 1.2+
+# policy, :80 permanently redirecting to it, and an ALIAS record. The task
+# definition's SUPERTOKENS_API_DOMAIN / SUPERTOKENS_WEBSITE_DOMAIN / CORS_ORIGINS all
+# derive from the same two origin helpers, so the scheme cannot drift between them.
+#
+# Without it: plaintext HTTP on the ALB's own DNS name, session cookies in the clear,
+# and — the part that surprises people — a browser on an HTTPS page (Vercel) cannot
+# call the API at all. Mixed-content blocking kills every fetch and every ws://
+# socket, so the UI loads and then does nothing.
+#
+# The frontend host (app.$DOMAIN) is NOT managed here. Vercel issues its own
+# certificate and owns that record.
 #
 # Everything is tagged Project=runsheet,Environment=staging. `down` finds
 # resources by name, not by tag, but the tags make an orphan obvious in the
@@ -138,6 +154,21 @@ SG_ALB="${PREFIX}-alb-sg"
 SG_TASK="${PREFIX}-task-sg"
 SG_DB="${PREFIX}-db-sg"
 
+#: Custom domain, and the whole TLS story is conditional on it. Unset, this script
+#: behaves exactly as it did before: HTTP on the ALB's own DNS name, no certificate,
+#: no Route 53. Set, it additionally creates the hosted zone, an ACM certificate
+#: validated by DNS, a :443 listener, a :80 -> :443 redirect, and an ALIAS record.
+#:
+#:   DOMAIN=runsheetops.com ./scripts/staging_aws.sh up
+#:
+#: The domain REGISTRATION is deliberately not automated. register-domain writes
+#: real registrant contact details into the ICANN WHOIS record and bills a
+#: non-refundable year, so it is a human decision made once, not a step in an
+#: idempotent provisioning script that people re-run after failures.
+DOMAIN="${DOMAIN:-}"
+API_HOST="${DOMAIN:+api.${DOMAIN}}"
+APP_HOST="${DOMAIN:+app.${DOMAIN}}"
+
 SECRET_DB="${PREFIX}/database-url"
 SECRET_GEMINI="${PREFIX}/gemini-api-key"
 SECRET_ST="${PREFIX}/supertokens-api-key"
@@ -179,6 +210,18 @@ REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
 # plan
 # ---------------------------------------------------------------------------
 cmd_plan() {
+  # Built here rather than with ${DOMAIN:+...}${DOMAIN:-...} inside the heredoc.
+  # That trick printed the domain itself in the DOMAIN-set case, because
+  # ${VAR:-default} expands to VAR's VALUE when set, not to nothing.
+  local _plan_tls _plan_zone=""
+  if [ -n "$DOMAIN" ]; then
+    _plan_tls="HTTPS :443 (ACM certificate, free) + :80 -> :443 redirect"
+    _plan_zone="
+  Route 53 hosted zone ${DOMAIN}          ~\$0.50/month
+    ACM certificate for ${API_HOST}       free"
+  else
+    _plan_tls="HTTP :80 only, no certificate — see the header"
+  fi
   cat <<PLAN
 Region ................ ${AWS_REGION}
 Account ............... ${ACCOUNT_ID}
@@ -190,7 +233,8 @@ Billable resources this creates:
                                               ~\$13/month
   ElastiCache ${REDIS_NODE_TYPE} redis ${REDIS_ENGINE_VERSION}, 2 nodes,
     cluster mode disabled, multi-AZ, TLS+AUTH      ~\$23/month
-  Application Load Balancer (HTTP :80 only)   ~\$17/month + LCU
+  Application Load Balancer                   ~\$17/month + LCU
+    ${_plan_tls}${_plan_zone}
   Fargate task, ${TASK_CPU} CPU / ${TASK_MEM} MB, 1 replica     ~\$36/month
   Secrets Manager, 4 secrets                  ~\$1.60/month
   CloudWatch Logs, ECR storage                cents
@@ -200,7 +244,9 @@ Billable resources this creates:
 Not created (and why):
   NAT gateway        tasks get public IPs in public subnets instead   -\$32/mo
   Aurora             db.t4g.micro is enough for staging              -\$50/mo+
-  ACM certificate    no domain exists, so the listener is HTTP        (see header)
+  Domain registration  NEVER automated. register-domain writes real WHOIS
+                     contact details and bills a non-refundable year, so it is
+                     not a step in a script people re-run after failures.
   SuperTokens core   managed SaaS (SuperTokens Cloud), not self-hosted
   Redis sidecar      REPLACED by ElastiCache above. It was ephemeral and
                      per-task, and the scheduling job-id counter lived in it.
@@ -260,6 +306,38 @@ redis_primary() {
 redis_status() {
   aws elasticache describe-replication-groups --replication-group-id "${REDIS_ID}" \
     --query 'ReplicationGroups[0].Status' --output text 2>/dev/null | grep -v '^None$' || true
+}
+
+# ---------------------------------------------------------------------------
+# DNS and TLS
+#
+# The public origins. Every consumer of these — the task definition, `verify`, and
+# the Vercel env vars printed by `frontend-env` — reads them from here rather than
+# rebuilding "http://$alb" locally, which is how the scheme got hard-coded to http
+# in four places the first time round.
+# ---------------------------------------------------------------------------
+api_origin() { if [ -n "$DOMAIN" ]; then echo "https://${API_HOST}"; else echo "http://$(alb_dns)"; fi; }
+app_origin() { if [ -n "$DOMAIN" ]; then echo "https://${APP_HOST}"; else echo "http://$(alb_dns)"; fi; }
+
+zone_id() {
+  aws route53 list-hosted-zones-by-name --dns-name "${DOMAIN}." \
+    --query "HostedZones[?Name=='${DOMAIN}.'].Id | [0]" --output text 2>/dev/null \
+    | grep -v '^None$' | sed 's|/hostedzone/||' || true
+}
+
+#: The certificate for API_HOST, whatever its status. FAILED ones are excluded
+#: deliberately: this account already contains a FAILED cleanupng.com certificate
+#: whose DNS validation never completed, and reusing a FAILED certificate can never
+#: succeed — ACM will not retry validation on it, so it has to be replaced.
+cert_arn() {
+  aws acm list-certificates --includes keyTypes=RSA_2048 \
+    --query "CertificateSummaryList[?DomainName=='${API_HOST}'].CertificateArn | [0]" \
+    --output text 2>/dev/null | grep -v '^None$' || true
+}
+
+cert_status() {
+  aws acm describe-certificate --certificate-arn "$1" \
+    --query 'Certificate.Status' --output text 2>/dev/null || true
 }
 
 secret_value() {
@@ -531,9 +609,21 @@ cmd_up() {
   if [ -z "$(aws elbv2 describe-listeners --load-balancer-arn "$alb_arn" --query 'Listeners[?Port==`80`].ListenerArn' --output text)" ]; then
     aws elbv2 create-listener --load-balancer-arn "$alb_arn" --protocol HTTP --port 80 \
       --default-actions "Type=forward,TargetGroupArn=$tg_arn" >/dev/null
-    ok "created listener :80 (HTTP — no certificate available)"
+    ok "created listener :80"
   else
     ok "listener :80"
+  fi
+
+  if [ -n "$DOMAIN" ]; then
+    log "DNS and TLS for ${DOMAIN}"
+    ensure_hosted_zone >/dev/null
+    local cert; cert="$(ensure_certificate)"
+    ensure_https_listener "$alb_arn" "$tg_arn" "$cert"
+    ensure_dns_records
+  else
+    warn "no DOMAIN set — the ALB serves plaintext HTTP on its own DNS name."
+    warn "Session cookies cross the internet in cleartext and an HTTPS frontend"
+    warn "(Vercel) cannot call this origin at all: browsers block mixed content."
   fi
 
   log "ECS cluster"
@@ -548,6 +638,126 @@ cmd_up() {
   echo
   ok "infrastructure ready — ALB http://$(alb_dns)"
   warn "next: ./scripts/staging_aws.sh deploy"
+}
+
+# ---------------------------------------------------------------------------
+# TLS: hosted zone, ACM certificate, :443 listener, ALIAS record
+# ---------------------------------------------------------------------------
+
+#: The hosted zone. Route 53 creates one automatically when a domain is registered
+#: THROUGH Route 53, so this usually just finds it. It is still created here when
+#: absent so a domain registered elsewhere and delegated to Route 53 also works.
+ensure_hosted_zone() {
+  local existing; existing="$(zone_id)"
+  if [ -n "$existing" ]; then ok "hosted zone ${DOMAIN} (${existing})"; echo "$existing"; return; fi
+  local created
+  created="$(aws route53 create-hosted-zone --name "${DOMAIN}" \
+      --caller-reference "${PREFIX}-$(date +%s)" \
+      --hosted-zone-config "Comment=Runsheet ${ENV_NAME}" \
+      --query 'HostedZone.Id' --output text | sed 's|/hostedzone/||')"
+  ok "created hosted zone ${created}"
+  warn "if ${DOMAIN} is registered elsewhere, delegate it to these name servers:"
+  aws route53 get-hosted-zone --id "$created" --query 'DelegationSet.NameServers' --output text >&2
+  echo "$created"
+}
+
+#: Request the certificate and complete DNS validation without a human in the loop.
+#:
+#: This is the step that makes Route 53 worth its price premium over a cheaper
+#: registrar: ACM publishes the validation CNAME it wants, and because the zone is in
+#: the same account we can write it ourselves. With DNS anywhere else this becomes
+#: "copy this record, paste it in your registrar, tell me when it is live".
+ensure_certificate() {
+  local arn; arn="$(cert_arn)"
+  if [ -n "$arn" ] && [ "$(cert_status "$arn")" = "FAILED" ]; then
+    warn "existing certificate for ${API_HOST} is FAILED; requesting a fresh one"
+    arn=""
+  fi
+  if [ -z "$arn" ]; then
+    arn="$(aws acm request-certificate --domain-name "${API_HOST}" \
+        --validation-method DNS --key-algorithm RSA_2048 \
+        --tags "Key=Project,Value=${PROJECT}" "Key=Environment,Value=${ENV_NAME}" \
+        --query CertificateArn --output text)"
+    ok "requested certificate for ${API_HOST}"
+  else
+    ok "certificate exists ($(cert_status "$arn"))"
+  fi
+
+  if [ "$(cert_status "$arn")" = "ISSUED" ]; then echo "$arn"; return; fi
+
+  # The validation record does not appear on the certificate immediately after
+  # request-certificate returns; polling for it beats a fixed sleep.
+  local name value waited=0
+  while :; do
+    name="$(aws acm describe-certificate --certificate-arn "$arn" \
+        --query 'Certificate.DomainValidationOptions[0].ResourceRecord.Name' --output text 2>/dev/null | grep -v '^None$' || true)"
+    value="$(aws acm describe-certificate --certificate-arn "$arn" \
+        --query 'Certificate.DomainValidationOptions[0].ResourceRecord.Value' --output text 2>/dev/null | grep -v '^None$' || true)"
+    [ -n "$name" ] && [ -n "$value" ] && break
+    [ "$waited" -ge 60 ] && die "ACM never published a validation record for ${API_HOST}"
+    sleep 5; waited=$((waited + 5))
+  done
+
+  local zone; zone="$(zone_id)"
+  # UPSERT, not CREATE, so a re-run after a partial failure is not an error.
+  aws route53 change-resource-record-sets --hosted-zone-id "$zone" --change-batch "$(printf '{
+    "Changes":[{"Action":"UPSERT","ResourceRecordSet":{
+      "Name":"%s","Type":"CNAME","TTL":300,"ResourceRecords":[{"Value":"%s"}]}}]}' "$name" "$value")" >/dev/null
+  ok "wrote ACM validation CNAME"
+
+  log "Waiting for the certificate to be issued (usually 1-3 minutes)"
+  aws acm wait certificate-validated --certificate-arn "$arn" \
+    || die "certificate not issued; check DNS delegation for ${DOMAIN}"
+  ok "certificate ISSUED"
+  echo "$arn"
+}
+
+#: :443 forwarding to the target group, and :80 permanently redirecting to it.
+#:
+#: The redirect matters more than it looks. Without it the plaintext listener keeps
+#: serving the API, so a stale client, an old bookmark or a copy-pasted curl keeps
+#: working over HTTP and nobody notices the cleartext path is still open.
+ensure_https_listener() {
+  local alb_arn="$1" tg_arn="$2" cert="$3"
+  if [ -z "$(aws elbv2 describe-listeners --load-balancer-arn "$alb_arn" --query 'Listeners[?Port==`443`].ListenerArn' --output text)" ]; then
+    aws elbv2 create-listener --load-balancer-arn "$alb_arn" \
+      --protocol HTTPS --port 443 --certificates "CertificateArn=$cert" \
+      --ssl-policy ELBSecurityPolicy-TLS13-1-2-2021-06 \
+      --default-actions "Type=forward,TargetGroupArn=$tg_arn" >/dev/null
+    ok "created listener :443 (TLS 1.2+ policy)"
+  else
+    ok "listener :443"
+  fi
+
+  local http_arn
+  http_arn="$(aws elbv2 describe-listeners --load-balancer-arn "$alb_arn" --query 'Listeners[?Port==`80`].ListenerArn' --output text)"
+  aws elbv2 modify-listener --listener-arn "$http_arn" \
+    --default-actions 'Type=redirect,RedirectConfig={Protocol=HTTPS,Port=443,StatusCode=HTTP_301}' >/dev/null
+  ok ":80 now redirects to :443 (301)"
+
+  # The ALB security group only ever allowed :80. Without this the new listener is
+  # unreachable and every request times out rather than failing loudly.
+  local alb_sg; alb_sg="$(sg_id "${SG_ALB}")"
+  aws ec2 authorize-security-group-ingress --group-id "$alb_sg" \
+    --protocol tcp --port 443 --cidr 0.0.0.0/0 >/dev/null 2>&1 \
+    && ok "alb-sg :443 from world" || ok "alb-sg :443 already allowed"
+}
+
+#: ALIAS, not CNAME. An ALB's addresses change, and an alias tracks them; alias
+#: queries to an AWS target are also not billed as DNS queries.
+ensure_dns_records() {
+  local zone; zone="$(zone_id)"
+  local alb_dns_name alb_zone
+  alb_dns_name="$(aws elbv2 describe-load-balancers --names "${ALB_NAME}" --query 'LoadBalancers[0].DNSName' --output text)"
+  alb_zone="$(aws elbv2 describe-load-balancers --names "${ALB_NAME}" --query 'LoadBalancers[0].CanonicalHostedZoneId' --output text)"
+  aws route53 change-resource-record-sets --hosted-zone-id "$zone" --change-batch "$(printf '{
+    "Changes":[{"Action":"UPSERT","ResourceRecordSet":{
+      "Name":"%s","Type":"A","AliasTarget":{
+        "HostedZoneId":"%s","DNSName":"%s","EvaluateTargetHealth":false}}}]}' \
+    "$API_HOST" "$alb_zone" "$alb_dns_name")" >/dev/null
+  ok "${API_HOST} -> ALIAS ${alb_dns_name}"
+  warn "point ${APP_HOST} at Vercel yourself — Vercel issues its own certificate and"
+  warn "will tell you which CNAME to add. This script does not manage that record."
 }
 
 # ---------------------------------------------------------------------------
@@ -598,7 +808,7 @@ ensure_task_role() {
 # task definition
 # ---------------------------------------------------------------------------
 register_task_def() {
-  local image="$1" alb="$2"
+  local image="$1"
   local exec_arn task_arn
   exec_arn="$(aws iam get-role --role-name "${PREFIX}-execution" --query 'Role.Arn' --output text)"
   task_arn="$(aws iam get-role --role-name "${PREFIX}-task" --query 'Role.Arn' --output text)"
@@ -613,7 +823,12 @@ register_task_def() {
   cat > "$gen" <<'PY'
 import json, sys, os
 
-image, alb, exec_arn, task_arn = sys.argv[1:5]
+image, exec_arn, task_arn = sys.argv[1:4]
+# Origins arrive resolved rather than as an ALB hostname to concatenate. The scheme
+# used to be built here as "http://" + alb in four places, which is precisely how it
+# would have silently stayed plaintext after the certificate landed.
+api_origin = os.environ["API_ORIGIN"]
+app_origin = os.environ["APP_ORIGIN"]
 prefix = os.environ["PREFIX"]
 log_group = os.environ["LOG_GROUP"]
 region = os.environ["AWS_REGION"]
@@ -680,9 +895,15 @@ containers = [
             {"name": "SESSION_STORE_TYPE", "value": "redis"},
             # SuperTokens Cloud over HTTPS. The API key arrives as a secret below.
             {"name": "SUPERTOKENS_CONNECTION_URI", "value": os.environ["ST_URI"]},
-            {"name": "SUPERTOKENS_API_DOMAIN", "value": f"http://{alb}"},
-            {"name": "SUPERTOKENS_WEBSITE_DOMAIN", "value": f"http://{alb}"},
-            {"name": "CORS_ORIGINS", "value": json.dumps([f"http://{alb}"])},
+            {"name": "SUPERTOKENS_API_DOMAIN", "value": api_origin},
+            # The FRONTEND origin, which is not the API origin once the UI is on
+            # Vercel. These were the same value only while both were the ALB.
+            {"name": "SUPERTOKENS_WEBSITE_DOMAIN", "value": app_origin},
+            # Exact-match origins: main.py passes this list straight to
+            # CORSMiddleware(allow_origins=...) and never sets allow_origin_regex,
+            # so Vercel PREVIEW deployments — which get a random hostname each
+            # build — will fail CORS against this. Only the stable alias works.
+            {"name": "CORS_ORIGINS", "value": json.dumps([app_origin])},
             # Commerce needs dual-write whenever the backbone is on; staging
             # validation refuses the combination otherwise.
             {"name": "COMMERCE_BACKBONE_ENABLED", "value": "true"},
@@ -718,7 +939,7 @@ print(json.dumps({
 }))
 PY
 
-  python3 "$gen" "$image" "$alb" "$exec_arn" "$task_arn" \
+  python3 "$gen" "$image" "$exec_arn" "$task_arn" \
     > "/tmp/${PREFIX}-taskdef.json"
   aws ecs register-task-definition --cli-input-json "file:///tmp/${PREFIX}-taskdef.json" \
     --query 'taskDefinition.taskDefinitionArn' --output text
@@ -728,9 +949,9 @@ PY
 # deploy: build, push, register, roll
 # ---------------------------------------------------------------------------
 cmd_deploy() {
-  local sha alb image
+  local sha image
   sha="$(git rev-parse --short HEAD)"
-  alb="$(alb_dns)"; [ -n "$alb" ] || die "no ALB — run 'up' first"
+  [ -n "$(alb_dns)" ] || die "no ALB — run 'up' first"
   image="${REGISTRY}/${ECR_REPO}:${sha}"
 
   log "Building ${image} (linux/amd64)"
@@ -751,7 +972,10 @@ cmd_deploy() {
   export SECRET_GEMINI_ARN="$(secret_arn "${SECRET_GEMINI}")"
   export SECRET_ST_ARN="$(secret_arn "${SECRET_ST}")"
   export SECRET_REDIS_ARN="$(secret_arn "${SECRET_REDIS}")"
-  local td; td="$(register_task_def "$image" "$alb")"
+  export API_ORIGIN="$(api_origin)" APP_ORIGIN="$(app_origin)"
+  ok "api origin ${API_ORIGIN}"
+  ok "app origin ${APP_ORIGIN}"
+  local td; td="$(register_task_def "$image")"
   ok "$td"
 
   # Migrations run BEFORE the service is created or rolled, which is the order
@@ -834,9 +1058,24 @@ cmd_migrate() {
 # verify
 # ---------------------------------------------------------------------------
 cmd_verify() {
-  local alb; alb="$(alb_dns)"; [ -n "$alb" ] || die "no ALB"
-  local base="http://${alb}"
+  [ -n "$(alb_dns)" ] || die "no ALB"
+  local base; base="$(api_origin)"
   log "Verifying ${base}"
+
+  # With a domain there are two extra properties worth asserting, because both can
+  # regress silently: the certificate has to actually cover the host the browser
+  # asks for, and plaintext must not keep serving the API behind the redirect.
+  if [ -n "$DOMAIN" ]; then
+    curl -sS -o /dev/null -m 15 "https://${API_HOST}/health/live" \
+      && ok "TLS handshake and certificate valid for ${API_HOST}" \
+      || die "TLS failed for ${API_HOST} — cert, DNS or the :443 listener"
+    local redirect
+    redirect="$(curl -s -o /dev/null -m 10 -w '%{http_code} %{redirect_url}' "http://${API_HOST}/health/live" || true)"
+    case "$redirect" in
+      301*https://*) ok "http -> https redirect (${redirect})" ;;
+      *) die "plaintext :80 did not redirect (got: ${redirect}) — the API is still served over HTTP" ;;
+    esac
+  fi
 
   local ready=0 code
   for _ in $(seq 1 60); do
@@ -971,6 +1210,41 @@ cmd_logs() {
   aws logs tail "${LOG_GROUP}" --since "${1:-10m}" --format short
 }
 
+#: Print the frontend environment contract, derived from the same origins the task
+#: definition uses, so the two cannot disagree.
+#:
+#: NEXT_PUBLIC_WS_URL is separate from the API url and needed explicitly: one caller
+#: derives its socket url with API_BASE_URL.replace("http","ws") — which yields wss
+#: correctly once the origin is https — but InvoiceDetailPage.tsx reads
+#: NEXT_PUBLIC_WS_URL and falls back to ws://localhost:8080 when it is unset.
+cmd_frontend_env() {
+  local api app
+  api="$(api_origin)"; app="$(app_origin)"
+  cat <<ENV
+Set these in the Vercel project (Production scope):
+
+  NEXT_PUBLIC_API_URL=${api}/api
+  NEXT_PUBLIC_WS_URL=$(echo "$api" | sed 's|^https|wss|; s|^http|ws|')
+  NEXT_PUBLIC_ST_API_DOMAIN=${api}
+  NEXT_PUBLIC_ST_WEBSITE_DOMAIN=${app}
+  NEXT_PUBLIC_ST_API_BASE_PATH=/auth
+  NEXT_PUBLIC_TENANT_ID=demo-tenant
+  NEXT_PUBLIC_GOOGLE_MAPS_API_KEY=<rotate the key in runsheet/.env.local first>
+
+The Maps key currently in runsheet/.env.local is committed to git. Every
+NEXT_PUBLIC_* value ships to the browser and cannot be secret, so the fix is not
+hiding it — it is restricting the key to these HTTP referrers in the Google Cloud
+console, and rotating it because the old value is in history:
+
+  ${app}/*
+ENV
+  if [ -z "$DOMAIN" ]; then
+    echo
+    warn "DOMAIN is unset, so the origins above are http:// and WILL NOT WORK from"
+    warn "Vercel: an https page cannot call an http api or open a ws:// socket."
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # down: destroy everything this script created
 # ---------------------------------------------------------------------------
@@ -1002,6 +1276,27 @@ WARNING
   aws ecs update-service --cluster "${CLUSTER}" --service "${SERVICE}" --desired-count 0 >/dev/null 2>&1 || true
   aws ecs delete-service --cluster "${CLUSTER}" --service "${SERVICE}" --force >/dev/null 2>&1 \
     && ok "service deleted" || warn "no service"
+
+  if [ -n "$DOMAIN" ]; then
+    log "Deleting DNS records and the certificate"
+    # Records first: Route 53 refuses to delete a zone that still has records, and
+    # ACM refuses to delete a certificate still attached to a listener — which is why
+    # this runs before the load balancer goes.
+    local zone; zone="$(zone_id)"
+    if [ -n "$zone" ]; then
+      local alb_dns_name alb_zone
+      alb_dns_name="$(aws elbv2 describe-load-balancers --names "${ALB_NAME}" --query 'LoadBalancers[0].DNSName' --output text 2>/dev/null || true)"
+      alb_zone="$(aws elbv2 describe-load-balancers --names "${ALB_NAME}" --query 'LoadBalancers[0].CanonicalHostedZoneId' --output text 2>/dev/null || true)"
+      if [ -n "$alb_dns_name" ] && [ "$alb_dns_name" != "None" ]; then
+        aws route53 change-resource-record-sets --hosted-zone-id "$zone" --change-batch "$(printf '{
+          "Changes":[{"Action":"DELETE","ResourceRecordSet":{
+            "Name":"%s","Type":"A","AliasTarget":{
+              "HostedZoneId":"%s","DNSName":"%s","EvaluateTargetHealth":false}}}]}' \
+          "$API_HOST" "$alb_zone" "$alb_dns_name")" >/dev/null 2>&1 \
+          && ok "deleted ${API_HOST}" || true
+      fi
+    fi
+  fi
 
   log "Deleting the load balancer"
   local alb_arn
@@ -1079,6 +1374,25 @@ WARNING
   aws logs delete-log-group --log-group-name "${LOG_GROUP}" >/dev/null 2>&1 && ok "log group" || true
   aws ecr delete-repository --repository-name "${ECR_REPO}" --force >/dev/null 2>&1 && ok "ecr" || true
 
+  if [ -n "$DOMAIN" ]; then
+    # The certificate can only go once the :443 listener that used it is gone with
+    # the load balancer, which happened above.
+    local cert; cert="$(cert_arn)"
+    [ -n "$cert" ] && aws acm delete-certificate --certificate-arn "$cert" >/dev/null 2>&1 \
+      && ok "certificate deleted" || true
+    local zone; zone="$(zone_id)"
+    if [ -n "$zone" ]; then
+      aws route53 delete-hosted-zone --id "$zone" >/dev/null 2>&1 \
+        && ok "hosted zone deleted" \
+        || warn "hosted zone ${zone} not deleted — it still has records (check for the ${APP_HOST} record you added for Vercel)"
+    fi
+    echo
+    warn "THE DOMAIN REGISTRATION IS UNTOUCHED. ${DOMAIN} is still registered and"
+    warn "will still auto-renew. Registrations are non-refundable and cannot be"
+    warn "deleted, only left to expire or transferred; turn off auto-renew in the"
+    warn "Route 53 console if you are done with it."
+  fi
+
   echo
   ok "staging destroyed"
 }
@@ -1091,6 +1405,7 @@ case "${1:-plan}" in
   verify)  cmd_verify  ;;
   status)  cmd_status  ;;
   logs)    cmd_logs "${2:-10m}" ;;
+  frontend-env) cmd_frontend_env ;;
   down)    cmd_down    ;;
-  *)       die "unknown command '$1' — one of plan|up|deploy|migrate|verify|status|logs|down" ;;
+  *)       die "unknown command '$1' — one of plan|up|deploy|migrate|verify|status|logs|frontend-env|down" ;;
 esac
