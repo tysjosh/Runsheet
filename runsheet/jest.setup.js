@@ -44,20 +44,30 @@ jest.mock("next/image", () => ({
   },
 }));
 
-// Mock window.matchMedia for responsive components
-Object.defineProperty(window, "matchMedia", {
-  writable: true,
-  value: jest.fn().mockImplementation((query) => ({
-    matches: false,
-    media: query,
-    onchange: null,
-    addListener: jest.fn(), // deprecated
-    removeListener: jest.fn(), // deprecated
-    addEventListener: jest.fn(),
-    removeEventListener: jest.fn(),
-    dispatchEvent: jest.fn(),
-  })),
-});
+// Browser-only shims, guarded on `window`.
+//
+// The suite default is jsdom, but route handlers under src/app/api must run in
+// the `node` environment: they need the real Request/Response/fetch globals,
+// which jsdom does not provide. A file opting in with `@jest-environment node`
+// still loads this setup file, and an unguarded `Object.defineProperty(window,
+// ...)` threw `ReferenceError: window is not defined` before the suite could
+// start. Guarding keeps both environments working from one setup file.
+if (typeof window !== "undefined") {
+  // Mock window.matchMedia for responsive components
+  Object.defineProperty(window, "matchMedia", {
+    writable: true,
+    value: jest.fn().mockImplementation((query) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addListener: jest.fn(), // deprecated
+      removeListener: jest.fn(), // deprecated
+      addEventListener: jest.fn(),
+      removeEventListener: jest.fn(),
+      dispatchEvent: jest.fn(),
+    })),
+  });
+}
 
 // Mock ResizeObserver for components that use it
 global.ResizeObserver = jest.fn().mockImplementation(() => ({

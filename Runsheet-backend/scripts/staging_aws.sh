@@ -1191,6 +1191,18 @@ image, exec_arn, task_arn = sys.argv[1:4]
 # The UI also holds no credentials. It talks to the API over the public internet like
 # any browser would, so it needs no database, no Redis, and no Secrets Manager
 # access. The task role is the same empty one the API uses.
+#
+# HUBSPOT_* are the exception that proves the rule, and belong here precisely
+# BECAUSE they carry no NEXT_PUBLIC_ prefix. The /api/pilot-request route handler
+# reads them from process.env on each request, server-side, so a new form GUID is
+# a task-definition update rather than an image rebuild. Neither value is secret
+# (HubSpot's embed code puts both in page source), so no "secrets" block is
+# needed and the empty task role still suffices.
+#
+# Passed through from the deploy environment rather than hardcoded, so the form
+# GUID can differ per environment. Unset is a supported state: the endpoint
+# returns 503 and the page tells the prospect to email instead of falsely
+# reporting the lead as captured.
 print(json.dumps({
     "family": os.environ["UI_TASK_FAMILY"],
     "networkMode": "awsvpc",
@@ -1211,6 +1223,14 @@ print(json.dumps({
             # server.js binds to this; without it Next listens on localhost only and
             # the ALB health check cannot reach the container at all.
             {"name": "HOSTNAME", "value": "0.0.0.0"},
+        ] + [
+            # Omitted entirely when blank. An empty-string HUBSPOT_FORM_GUID would
+            # be indistinguishable from a set one to a naive truthiness check, and
+            # leaving the variable out keeps the task definition honest about what
+            # is actually configured.
+            {"name": name, "value": os.environ[name]}
+            for name in ("HUBSPOT_PORTAL_ID", "HUBSPOT_FORM_GUID")
+            if os.environ.get(name, "").strip()
         ],
         "logConfiguration": {
             "logDriver": "awslogs",
@@ -1271,7 +1291,22 @@ cmd_deploy_ui() {
   ok "pushed ${sha}"
 
   log "Registering the UI task definition"
+  #: Read from runsheet/.env.local so a local developer and the deployed task agree
+  #: on the same HubSpot form, the same way the Maps key is sourced above. An
+  #: explicit environment variable still wins, so CI can override without editing
+  #: a gitignored file.
+  local ui_env="$(dirname "$0")/../../runsheet/.env.local"
+  HUBSPOT_PORTAL_ID="${HUBSPOT_PORTAL_ID:-$(grep -E '^HUBSPOT_PORTAL_ID=' "$ui_env" 2>/dev/null | cut -d= -f2- || true)}"
+  HUBSPOT_FORM_GUID="${HUBSPOT_FORM_GUID:-$(grep -E '^HUBSPOT_FORM_GUID=' "$ui_env" 2>/dev/null | cut -d= -f2- || true)}"
+  if [ -n "${HUBSPOT_FORM_GUID:-}" ]; then
+    ok "hubspot lead capture -> portal ${HUBSPOT_PORTAL_ID:-246986931}"
+  else
+    warn "no HUBSPOT_FORM_GUID — /api/pilot-request will return 503 and the"
+    warn "Request a Pilot page will tell prospects to email instead. Set it in"
+    warn "runsheet/.env.local or pass HUBSPOT_FORM_GUID to capture leads."
+  fi
   export UI_TASK_FAMILY UI_CPU UI_MEM UI_PORT UI_LOG_GROUP AWS_REGION
+  export HUBSPOT_PORTAL_ID="${HUBSPOT_PORTAL_ID:-}" HUBSPOT_FORM_GUID="${HUBSPOT_FORM_GUID:-}"
   local td; td="$(register_ui_task_def "$image")"
   ok "$td"
 

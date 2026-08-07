@@ -7,9 +7,14 @@
  * sales entry point: a short qualification form for distributors who want to
  * trial Runsheet. Matches the landing page's dark editorial aesthetic.
  *
- * The submit handler currently resolves locally into a success state — there
- * is no lead-capture backend yet. Wire `submitPilotRequest` to a real endpoint
- * (or a CRM webhook) when one exists; the validated payload shape is ready.
+ * Submissions POST to `/api/pilot-request`, which forwards them to HubSpot. The
+ * success panel is shown ONLY when that call succeeds.
+ *
+ * It used to be shown unconditionally: `submitPilotRequest` slept 900ms and
+ * resolved, so every lead was discarded while the prospect was told "our team
+ * will reach out at {email}". There was no failure path at all, because a sleep
+ * cannot fail. Both halves of that are fixed here — the request is real, and a
+ * failure says so and offers the mailto instead of silently swallowing a lead.
  */
 
 import { ArrowLeft, ArrowRight, Check, Loader2 } from "lucide-react";
@@ -59,12 +64,25 @@ function validate(form: PilotForm): PilotErrors {
   return errors;
 }
 
+/** Where a prospect should be sent when the pipeline itself is broken. */
+const FALLBACK_EMAIL = "hello@runsheet.app";
+
 /**
- * Placeholder submission. Resolves after a short delay to simulate a network
- * round-trip. Replace the body with a POST to the real lead endpoint.
+ * Submit the lead. Throws on any outcome that did not capture it.
+ *
+ * Throwing rather than returning a flag is deliberate: the caller shows the
+ * success panel on the non-throwing path, so a capture failure cannot reach it
+ * by omission. That is exactly how the old placeholder failed.
  */
-async function submitPilotRequest(_payload: PilotForm): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, 900));
+async function submitPilotRequest(payload: PilotForm): Promise<void> {
+  const response = await fetch("/api/pilot-request", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    throw new Error(`Lead capture failed with status ${response.status}`);
+  }
 }
 
 export default function RequestPilotPage() {
@@ -72,6 +90,7 @@ export default function RequestPilotPage() {
   const [errors, setErrors] = useState<PilotErrors>({});
   const [submitting, setSubmitting] = useState(false);
   const [done, setDone] = useState(false);
+  const [failed, setFailed] = useState(false);
 
   const update = (field: keyof PilotForm, value: string) => {
     setForm((prev) => ({ ...prev, [field]: value }));
@@ -86,9 +105,14 @@ export default function RequestPilotPage() {
       return;
     }
     setSubmitting(true);
+    setFailed(false);
     try {
       await submitPilotRequest(form);
       setDone(true);
+    } catch {
+      // No `setDone(true)` on this path. The form stays filled in so the
+      // prospect can retry without retyping, and the banner offers the mailto.
+      setFailed(true);
     } finally {
       setSubmitting(false);
     }
@@ -203,6 +227,27 @@ export default function RequestPilotPage() {
             </div>
           ) : (
             <form onSubmit={handleSubmit} noValidate>
+              {failed && (
+                <div
+                  role="alert"
+                  className="mb-6 rounded-lg border border-[#ef4444]/40 bg-[#ef4444]/10 p-4"
+                >
+                  <p className="text-sm font-bold text-[#ef4444]">
+                    We couldn't submit your request
+                  </p>
+                  <p className="mt-1.5 text-xs leading-relaxed text-[#f5f4ef]/70">
+                    Nothing was sent, so please try again. If it keeps failing,
+                    email us directly at{" "}
+                    <a
+                      href={`mailto:${FALLBACK_EMAIL}`}
+                      className="text-[#16b88c] hover:underline"
+                    >
+                      {FALLBACK_EMAIL}
+                    </a>{" "}
+                    and we'll pick it up from there.
+                  </p>
+                </div>
+              )}
               <div className="mb-5">
                 <label htmlFor="rp-name" className={labelClass}>
                   Full name
