@@ -1,0 +1,28 @@
+# Keep credentials and build cruft out of the build context. The backend image is
+# CI-checked for leaked .env files; the same discipline applies here, and it matters
+# more than it looks because the build context is sent to the daemon in full.
+.env
+.env.*
+!.env.example
+
+node_modules
+.next
+out
+coverage
+playwright-report
+test-results
+
+.git
+.gitignore
+.vscode
+.idea
+*.log
+.DS_Store
+
+# Tests and tooling config are not needed to build or run the server image.
+**/*.test.ts
+**/*.test.tsx
+**/__tests__
+jest.config.*
+jest.setup.*
+playwright.config.*
