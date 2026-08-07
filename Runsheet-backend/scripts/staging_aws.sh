@@ -29,9 +29,13 @@
 # for cost and speed, and it departs in four places on purpose:
 #
 #   * RDS db.t4g.micro, single-AZ, instead of Aurora Serverless v2. No failover.
-#   * Redis runs as a SIDECAR container in the task, not ElastiCache. Losing it
-#     loses AI-agent conversation memory and nothing else — no business records —
-#     which is an acceptable staging trade for ~$11/month and one less service.
+#   * Redis runs as a SIDECAR container in the task, not ElastiCache. This one is a
+#     KNOWN COMPROMISE, not a clean substitution: the sidecar is ephemeral and
+#     per-task, and the scheduling job-ID counter lives in it, so a wipe restarts
+#     job ids at 1 and the upsert-by-job_id write path overwrites existing jobs.
+#     Safe at desiredCount=1 with synthetic data; must become ElastiCache before
+#     this service scales or this shape is reused. Full detail at the container
+#     definition below.
 #   * SuperTokens is the MANAGED SaaS core, reached over HTTPS. Not a sidecar.
 #     This script briefly ran a self-hosted supertokens-postgresql container against
 #     the same RDS instance, which contradicted a resolved architectural decision:
@@ -496,10 +500,31 @@ def logs(stream):
         },
     }
 
-# Redis and SuperTokens are sidecars in the same task, so the app reaches both on
-# localhost and neither needs a security group, a subnet or a managed service.
-# The trade is stated in the script header: Redis here is EPHEMERAL, so a task
-# replacement drops AI-agent conversation memory. No business record lives there.
+# Redis is a sidecar in this task, so the app reaches it on localhost and it needs
+# no security group, subnet or managed service.
+#
+# WARNING, and an earlier version of this comment claimed the opposite ("no business
+# record lives there"). That was wrong. A sidecar Redis is EPHEMERAL (wiped on every
+# task replacement) and PER-TASK (each replica gets its own), and six components
+# depend on it:
+#
+#   session/redis_store.py                  sessions / agent conversation memory
+#   ops/ingestion/idempotency.py            webhook de-duplication
+#   ops/services/feature_flags.py           per-tenant Ops + overlay agent flags
+#   fuel/voice/voice_submission_ledger.py   voice submission de-duplication
+#   bootstrap/agents.py                     agent runtime client
+#   scheduling/services/job_id_generator.py INCR on scheduling:job_id_counter
+#
+# The last one is a data-loss path, not a degradation. Wiping the counter restarts it
+# at 1, and JobService writes with index_document(JOBS_CURRENT_INDEX, job_id, doc) —
+# an upsert keyed on job_id — so the next created job SILENTLY OVERWRITES the
+# existing JOB_1. Its own docstring says the counter exists "for atomicity across
+# multiple backend instances", which is precisely what a per-task Redis removes.
+#
+# This is tolerable ONLY because staging runs desiredCount=1 with synthetic data.
+# docs/aws-deployment-strategy.md specifies ElastiCache (cluster mode disabled) for a
+# reason. Scaling this service past one task, or copying this shape anywhere real,
+# needs ElastiCache first (~$11/month, cache.t4g.micro).
 containers = [
     {
         "name": "redis",
