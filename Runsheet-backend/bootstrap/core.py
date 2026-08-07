@@ -210,52 +210,30 @@ async def assert_driver_surface_wired(container: ServiceContainer) -> None:
             "and the order.delivered subscribers stay dormant"
         )
 
-    # Declared-index presence. Bounded work: one exists() call per declared
-    # index. A failure of the check itself is never treated as a violation —
-    # an unreachable cluster is a different fault with its own signal.
-    es_service = container.es_service if container.has("es_service") else None
-    if container.settings.document_store_is_postgres:
-        # There are no indices to be present: the document store is one Postgres
-        # table and ``es_documents`` is created by a migration, so the failure this
-        # check exists to catch — a write auto-creating an index with
-        # ``dynamic: true`` — cannot happen.
-        #
-        # What IS lost with the mappings is worth stating rather than glossing:
-        # ``dynamic: strict`` rejected an undeclared field at write time, so a
-        # typo'd key was a 400. jsonb accepts anything, so the same typo now stores
-        # silently. The compensating controls are the Pydantic models on the way in
-        # (``extra="forbid"`` on every driver-surface model) and
-        # ``persistence/document_field_policy.py``, which still reads the declared
-        # mappings — that is why the mapping modules survive Phase 6.
-        logger.debug(
-            "Skipping driver index presence assertion: the document plane is "
-            "PostgreSQL, so there are no indices to declare"
-        )
-    elif es_service is None or getattr(es_service, "client", None) is None:
-        logger.debug(
-            "Skipping driver index presence assertion: "
-            "Elasticsearch client not connected"
-        )
-    else:
-        try:
-            from driver.services.driver_es_mappings import DRIVER_INDEX_MAPPINGS
-
-            missing = [
-                index_name
-                for index_name in DRIVER_INDEX_MAPPINGS
-                if not es_service.client.indices.exists(index=index_name)
-            ]
-            if missing:
-                problems.append(
-                    "declared driver index absent from Elasticsearch: "
-                    f"{', '.join(sorted(missing))} — the dynamic: strict "
-                    "declaration is not in force for these, so the first write "
-                    "auto-creates them with dynamic: true"
-                )
-        except Exception as exc:
-            logger.warning(
-                "Driver index presence assertion could not complete: %s", exc
-            )
+    # The declared-index presence check is gone with the cluster.
+    #
+    # It called ``indices.exists`` for each declared driver index and complained
+    # about any that were absent, because on Elasticsearch the first write to a
+    # missing index auto-created it with ``dynamic: true`` — silently discarding
+    # the ``dynamic: strict`` declaration. The document store is one Postgres table
+    # created by migration ``0009_es_documents``, so there is no index to be absent
+    # and that failure mode cannot occur.
+    #
+    # Phase 5 scoped the check with ``settings.document_store_is_postgres``. Phase 6
+    # deleted that property and left the read here, which raised AttributeError into
+    # the caller's ``except`` in ``bootstrap/__init__.py`` — so the WHOLE assertion,
+    # including the ``order_service`` check above, silently stopped running in every
+    # environment. Found by booting with ENVIRONMENT=staging; the unit tests missed
+    # it because they set ``document_store_is_postgres`` on a ``MagicMock``
+    # container, supplying an attribute production settings no longer had.
+    #
+    # What IS lost with strict mappings is worth stating rather than glossing:
+    # ``dynamic: strict`` rejected an undeclared field at write time, so a typo'd
+    # key was a 400. jsonb accepts anything, so the same typo now stores silently.
+    # The compensating controls are the Pydantic models on the way in
+    # (``extra="forbid"`` on every driver-surface model) and
+    # ``persistence/document_field_policy.py``, which still reads the declared
+    # mappings — that is why the mapping modules survive.
 
     if not problems:
         return
