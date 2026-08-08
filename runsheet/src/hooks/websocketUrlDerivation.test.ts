@@ -80,7 +80,8 @@ describe("WebSocket URL derivation against an api-prefixed https origin", () => 
   });
 
   it("still works for a host that does not begin with api", () => {
-    const alb = "http://runsheet-staging-alb-1966675674.us-east-2.elb.amazonaws.com/api";
+    const alb =
+      "http://runsheet-staging-alb-1966675674.us-east-2.elb.amazonaws.com/api";
     const anchored = alb.replace(/\/api$/, "").replace("http", "ws");
     const parsed = new URL(`${anchored}/ws/ops`);
     expect(parsed.protocol).toBe("ws:");
