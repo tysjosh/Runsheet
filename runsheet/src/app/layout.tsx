@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
+import { isIndexableSite, SITE_URL } from "@/config/site";
 import { SuperTokensProvider } from "../components/SuperTokensProvider";
 import "./globals.css";
 
@@ -14,9 +15,9 @@ const inter = Inter({
 
 // `metadataBase` resolves Open Graph / canonical URLs, which must be absolute.
 // Without it Next emits a build warning and social crawlers receive relative
-// paths they cannot fetch. Set NEXT_PUBLIC_SITE_URL in the production
-// environment; the localhost fallback only keeps dev and CI quiet.
-const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000";
+// paths they cannot fetch. `SITE_URL` now comes from `config/site.ts`, which also
+// owns the indexability decision used by `robots` below and by robots.txt and
+// sitemap.xml — one source of truth for all three.
 
 export const metadata: Metadata = {
   metadataBase: new URL(SITE_URL),
@@ -56,9 +57,14 @@ export const metadata: Metadata = {
     description:
       "Runout forecasting, compliant load planning and route optimization for US regional fuel distributors.",
   },
+  // Emits `<meta name="robots" content="noindex, nofollow">` on staging,
+  // localhost and previews. This is separate from robots.txt on purpose: a
+  // crawler that reached a page via an inbound link may never fetch robots.txt,
+  // and the meta tag is what removes an already-indexed page. Both are gated on
+  // the same `isIndexableSite()` so they cannot disagree.
   robots: {
-    index: true,
-    follow: true,
+    index: isIndexableSite(),
+    follow: isIndexableSite(),
   },
   // `apple` is deliberately absent: `src/app/apple-icon.tsx` generates a
   // 180x180 PNG and Next wires it automatically. Declaring it here as the SVG

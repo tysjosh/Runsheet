@@ -427,8 +427,22 @@ export default function RequestPilotPage() {
                 )}
               </button>
 
-              <p className="mt-4 text-center text-xs text-[#f5f4ef]/40">
-                We'll only use your details to set up the pilot.
+              {/*
+                The consent line names the recipient. "We'll only use your
+                details to set up the pilot" was true about our intent but said
+                nothing about the details leaving for a third-party CRM in the
+                US, which is the disclosure that actually matters.
+              */}
+              <p className="mt-4 text-center text-xs leading-relaxed text-[#f5f4ef]/40">
+                We'll only use your details to set up the pilot. Your submission
+                is stored in our CRM (HubSpot, in the US). See our{" "}
+                <Link
+                  href="/privacy"
+                  className="text-[#f5f4ef]/60 underline hover:text-[#16b88c]"
+                >
+                  privacy notice
+                </Link>
+                .
               </p>
             </form>
           )}
