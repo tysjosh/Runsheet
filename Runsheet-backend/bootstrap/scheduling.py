@@ -10,6 +10,7 @@ import asyncio
 import logging
 
 from bootstrap.container import ServiceContainer
+from persistence.leader_election import run_periodic
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +23,6 @@ async def initialize(app, container: ServiceContainer) -> None:
     """Create and register scheduling domain services."""
     global _delay_check_task
 
-    from scheduling.services.scheduling_es_mappings import setup_scheduling_indices
     from scheduling.services.job_service import JobService
     from scheduling.services.cargo_service import CargoService
     from scheduling.services.delay_detection_service import DelayDetectionService
@@ -45,12 +45,6 @@ async def initialize(app, container: ServiceContainer) -> None:
     es_service = container.es_service
 
     # Set up scheduling indices
-    try:
-        logger.info("Setting up scheduling indices...")
-        setup_scheduling_indices(es_service)
-        logger.info("Scheduling indices ready")
-    except Exception as e:
-        logger.warning("Failed to set up scheduling indices: %s", e)
 
     # Scheduling WebSocket manager
     scheduling_ws_manager = SchedulingWebSocketManager()
@@ -170,24 +164,18 @@ async def initialize(app, container: ServiceContainer) -> None:
     # Start periodic delay detection background task
     interval = settings.scheduling_delay_check_interval_seconds
 
-    async def _periodic_delay_check() -> None:
-        """Background task that periodically checks for delayed jobs."""
-        try:
-            while True:
-                await asyncio.sleep(interval)
-                try:
-                    newly_delayed = await delay_service.check_delays(tenant_id=None)
-                    if newly_delayed:
-                        logger.info(
-                            "Periodic delay check: %d job(s) newly delayed",
-                            len(newly_delayed),
-                        )
-                except Exception as exc:
-                    logger.error("Periodic delay check failed: %s", exc)
-        except asyncio.CancelledError:
-            logger.info("Periodic delay check task cancelled")
+    async def _delay_check_cycle() -> None:
+        """One pass checking for delayed jobs."""
+        newly_delayed = await delay_service.check_delays(tenant_id=None)
+        if newly_delayed:
+            logger.info(
+                "Periodic delay check: %d job(s) newly delayed",
+                len(newly_delayed),
+            )
 
-    _delay_check_task = asyncio.create_task(_periodic_delay_check())
+    _delay_check_task = asyncio.create_task(
+        run_periodic("scheduling.delay-check", interval, _delay_check_cycle)
+    )
     logger.info("Periodic delay check started (interval: %ds)", interval)
 
     # ---------------------------------------------------------------
@@ -224,17 +212,16 @@ async def initialize(app, container: ServiceContainer) -> None:
             )
             container.driver_daily_reset_job = daily_reset_job
 
-            async def _periodic_driver_daily_reset() -> None:
-                """Background task that checks for midnight and resets counters."""
-                try:
-                    while True:
-                        await asyncio.sleep(RESET_CHECK_INTERVAL_SECONDS)
-                        await run_daily_reset_cycle(daily_reset_job)
-                except asyncio.CancelledError:
-                    logger.info("Driver daily reset task cancelled")
+            async def _driver_daily_reset_cycle() -> None:
+                """One pass checking for midnight and resetting counters."""
+                await run_daily_reset_cycle(daily_reset_job)
 
             _driver_daily_reset_task = asyncio.create_task(
-                _periodic_driver_daily_reset()
+                run_periodic(
+                    "driver.daily-reset",
+                    RESET_CHECK_INTERVAL_SECONDS,
+                    _driver_daily_reset_cycle,
+                )
             )
             logger.info(
                 "Driver daily reset cron started (check interval: %ds)",

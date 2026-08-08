@@ -192,9 +192,37 @@ class RecordingESService:
         }
 
     def _record_update(self, **kwargs) -> Dict[str, Any]:
-        """Record a scripted update (used by upsert_with_last_event_timestamp)."""
+        """Record a raw scripted update.
+
+        Retained for any path that still reaches the client directly; the order
+        repository no longer does — see :meth:`upsert_if_newer`.
+        """
         self.updated_documents.append(kwargs)
         return {"result": "created", "_version": 1}
+
+    async def upsert_if_newer(
+        self,
+        index: str,
+        doc_id: str,
+        document: Dict[str, Any],
+        *,
+        timestamp_field: str = "last_event_timestamp",
+    ) -> bool:
+        """Record a timestamp-guarded upsert.
+
+        The order repository used to build the painless ``scripted_upsert`` itself
+        and call ``client.update``, so this fake mocked the raw client. That write
+        would have kept going to Elasticsearch after the document plane moved to
+        Postgres, so it now goes through the facade — and the fake models the
+        facade, which is what the code under test actually depends on.
+
+        Recorded in the same ``updated_documents`` shape the raw path produced, so
+        ``get_orders_written`` keeps working for both.
+        """
+        self.updated_documents.append(
+            {"index": index, "id": doc_id, "body": {"upsert": document}}
+        )
+        return True
 
     def get_orders_written(self) -> List[Dict[str, Any]]:
         """Get all documents written to fuel_orders_current."""

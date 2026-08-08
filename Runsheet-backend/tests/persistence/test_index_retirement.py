@@ -156,52 +156,23 @@ async def test_non_retired_index_not_gated(monkeypatch):
     clear_settings_cache()
 
 
-class _PassthroughBreaker:
-    """Minimal circuit breaker stub that just runs the wrapped coroutine."""
-
-    async def execute(self, fn):
-        return await fn()
-
-
-class _NotFound(Exception):
-    """Mimics an elasticsearch NotFoundError carrying a 404 status_code."""
-
-    status_code = 404
-
-
-async def test_get_document_returns_none_on_404(monkeypatch):
-    """A missing document is an expected outcome for existence/idempotency
-    probes — get_document returns None quietly, not raising or logging ERROR."""
-    from unittest.mock import MagicMock
-
-    from services.elasticsearch_service import ElasticsearchService
-
-    es = ElasticsearchService.__new__(ElasticsearchService)
-    es._read_circuit_breaker = _PassthroughBreaker()
-    client = MagicMock()
-    client.get = MagicMock(side_effect=_NotFound("not_found"))
-    es.client = client
-
-    result = await es.get_document("weather_alerts", "missing-id")
-    assert result is None
+# ``test_get_document_returns_none_on_404`` and ``test_get_document_raises_on_non_404``
+# were removed here, along with the ``_NotFound`` stub and the passthrough breaker
+# they needed.
+#
+# They drove ``get_document`` with a fake Elasticsearch client: a 404 had to return
+# ``None`` quietly (an existence probe is an expected miss, not an error) while any
+# other failure had to raise through the error handler. Phase 6 deleted the client and
+# the branch, so there is no 404 to translate.
+#
+# The surviving half of that contract — a missing document reads as ``None`` — is the
+# store's own behaviour and is asserted directly in
+# ``tests/postgres/test_document_store.py``. The other half was Elasticsearch-specific:
+# there is no "non-404 failure" to distinguish, because a database error is not an
+# HTTP status.
 
 
-async def test_get_document_raises_on_non_404(monkeypatch):
-    """A genuine ES failure (non-404) still raises through the error handler."""
-    from unittest.mock import MagicMock
 
-    from errors.exceptions import AppException
-    from services.elasticsearch_service import ElasticsearchService
 
-    es = ElasticsearchService.__new__(ElasticsearchService)
-    es._read_circuit_breaker = _PassthroughBreaker()
 
-    class _ServerError(Exception):
-        status_code = 503
 
-    client = MagicMock()
-    client.get = MagicMock(side_effect=_ServerError("unavailable"))
-    es.client = client
-
-    with pytest.raises(AppException):
-        await es.get_document("weather_alerts", "any-id")

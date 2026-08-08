@@ -36,6 +36,10 @@ from errors.exceptions import resource_not_found, validation_error
 from ops.middleware.tenant_guard import inject_tenant_filter
 from services.elasticsearch_service import ElasticsearchService
 from services.time_utils import utcnow
+from services.keyset_pagination import (
+    next_cursor_from_hits,
+    search_after_for_cursor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -416,6 +420,14 @@ class AccountService:
         Default limit is 50, max 200. Cursor is the ``account_id`` of the
         last item on the previous page (keyset pagination via search_after).
 
+        The cursor is resolved to its sort values by
+        :func:`services.keyset_pagination.search_after_for_cursor` rather than
+        passed to ``search_after`` directly. It used to be passed directly, twice,
+        which made an id the boundary for a ``created_at`` sort — Elasticsearch
+        answered every page-2 request with a 400. Raises
+        :class:`~services.keyset_pagination.InvalidCursorError` (400) for a cursor
+        naming no account, instead of silently restarting from page 1.
+
         Validates: Constraint C3
         """
         # Clamp limit
@@ -457,7 +469,9 @@ class AccountService:
 
         # Cursor-based pagination using search_after
         if cursor:
-            base_query["search_after"] = [cursor, cursor]
+            base_query["search_after"] = await search_after_for_cursor(
+                self._es, ACCOUNTS_CURRENT_INDEX, cursor, base_query["sort"]
+            )
 
         query = inject_tenant_filter(base_query, tenant_id)
 
@@ -469,11 +483,9 @@ class AccountService:
         items = [hit["_source"] for hit in hits]
 
         # Determine next cursor
-        next_cursor: Optional[str] = None
-        if hits and len(hits) == limit:
-            last_sort = hits[-1].get("sort")
-            if last_sort and len(last_sort) >= 2:
-                next_cursor = hits[-1]["_source"]["account_id"]
+        next_cursor = next_cursor_from_hits(
+            hits, limit, id_field="account_id"
+        )
 
         return {
             "items": items,

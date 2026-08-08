@@ -287,6 +287,18 @@ class OverlayAgentBase(AutonomousAgentBase):
     # Mode management
     # ------------------------------------------------------------------
 
+    def overlay_flag_key(self) -> str:
+        """Redis flag key this agent is gated on: ``overlay.{agent_id}``.
+
+        Exposed so the bootstrap seeder and its guard test derive the key from
+        the same place the agent reads it. These keys and the fuel-ops
+        *capability* flags (``overlay.bol_generation`` and friends) were two
+        disjoint sets: the capability names were seeded and the agent-level
+        names — the ones that actually decide whether an agent runs — were not
+        set anywhere, so every overlay agent skipped every tenant.
+        """
+        return f"overlay.{self.agent_id}"
+
     async def _get_mode(self, tenant_id: str) -> str:
         """Get the overlay agent's mode for a tenant.
 
@@ -294,30 +306,75 @@ class OverlayAgentBase(AutonomousAgentBase):
         ``overlay.{agent_id}``. Returns one of: ``'disabled'``,
         ``'shadow'``, ``'active_gated'``, or ``'active_auto'``.
 
-        Defaults to ``'shadow'`` when the feature flag service is
-        unavailable or the flag is not set.
+        When the tenant has no value for the flag, returns the deployment-wide
+        default from ``settings.overlay_default_mode``.
+
+        This used to claim a ``'shadow'`` default it could not deliver.
+        ``get_overlay_state`` returns the *string* ``"disabled"`` for a missing
+        key, so ``state or "shadow"`` never fell through and every unset tenant
+        resolved to ``disabled`` — which ``monitor_cycle`` skips outright. The
+        distinction now comes from ``get_overlay_state_or_none``, and the
+        fallback is a setting rather than a literal so "the overlay agents do
+        nothing" is answerable from configuration instead of from this line.
         """
         # Pipeline mode override: when running inside a pipeline context,
         # bypass feature flags and use the override mode directly.
         if hasattr(self, '_pipeline_mode_override') and self._pipeline_mode_override:
             return self._pipeline_mode_override
 
+        default_mode = self._default_overlay_mode()
+
         if not self._feature_flags:
-            return "shadow"
+            return default_mode
+
+        flag_key = self.overlay_flag_key()
+
+        # Preferred: the variant that distinguishes "unset" from "disabled".
+        # AttributeError covers a FeatureFlagService predating it; TypeError
+        # covers a service (or test double) that exposes the name without a
+        # coroutine behind it. Either way the legacy read below still answers,
+        # it just cannot express "unset" — so an unset tenant resolves to
+        # ``disabled`` on that path, which is the historical behaviour.
         try:
-            flag_key = f"overlay.{self.agent_id}"
-            state = await self._feature_flags.get_overlay_state(
+            state = await self._feature_flags.get_overlay_state_or_none(
                 flag_key, tenant_id
             )
-            return state or "shadow"
-        except AttributeError:
-            # Fallback: basic is_enabled check when get_overlay_state
-            # is not yet available on the FeatureFlagService.
-            try:
-                enabled = await self._feature_flags.is_enabled(tenant_id)
-                return "shadow" if enabled else "disabled"
-            except Exception:
-                return "shadow"
+            return state or default_mode
+        except (AttributeError, TypeError):
+            pass
+        except Exception:
+            return default_mode
+
+        try:
+            state = await self._feature_flags.get_overlay_state(flag_key, tenant_id)
+            return state or default_mode
+        except (AttributeError, TypeError):
+            pass
+        except Exception:
+            return default_mode
+
+        # Last resort: the ops master flag only tells us enabled/disabled.
+        try:
+            enabled = await self._feature_flags.is_enabled(tenant_id)
+            return default_mode if enabled else "disabled"
+        except Exception:
+            return default_mode
+
+    @staticmethod
+    def _default_overlay_mode() -> str:
+        """Deployment-wide fallback mode for a tenant with no flag set.
+
+        Read per call rather than cached so an operator can flip it without a
+        restart in environments that reload settings. Falls back to
+        ``"disabled"`` if settings cannot be loaded at all, which preserves the
+        historical behaviour rather than silently activating twelve agents.
+        """
+        try:
+            from config.settings import get_settings
+
+            return get_settings().overlay_default_mode
+        except Exception:  # noqa: BLE001 — never let config break a cycle
+            return "disabled"
 
     async def _is_active_commit_mode(self, tenant_id: str) -> bool:
         """Whether this tenant's mode represents a real commit path.

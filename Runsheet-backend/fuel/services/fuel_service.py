@@ -15,6 +15,10 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
+from commerce.services.commerce_persistence_bridge import (
+    mirror_current_state_fields,
+    mirror_current_state_upsert,
+)
 from config.settings import get_settings
 from errors.exceptions import resource_not_found, validation_error
 from fuel.models import (
@@ -330,6 +334,11 @@ class FuelService:
 
         doc_id = self._make_doc_id(station.station_id, canonical_fuel_type)
         await self._es.index_document(FUEL_STATIONS_INDEX, doc_id, doc)
+        # Postgres source of truth. ``fuel_stations`` existed only in
+        # Elasticsearch, so recreating the cluster destroyed retail tank
+        # inventory outright. ``doc_id`` is passed explicitly because the
+        # composite id cannot be derived from the document body.
+        await mirror_current_state_upsert("fuel_station", doc, doc_id=doc_id)
 
         logger.info(
             "Created fuel station %s (fuel_type=%s, tenant=%s)",
@@ -406,6 +415,9 @@ class FuelService:
         )
 
         await self._es.update_document(FUEL_STATIONS_INDEX, doc_id, partial)
+        await mirror_current_state_fields(
+            "fuel_station", tenant_id, doc_id, partial
+        )
 
         # Merge partial into existing to return the full updated station
         merged = {**existing, **partial}
@@ -532,6 +544,9 @@ class FuelService:
             "last_updated": now,
         }
         await self._es.update_document(FUEL_STATIONS_INDEX, doc_id, partial_update)
+        await mirror_current_state_fields(
+            "fuel_station", tenant_id, doc_id, partial_update
+        )
 
         logger.info(
             "Recorded consumption: station=%s, quantity=%.2f, new_stock=%.2f, status=%s",
@@ -677,6 +692,9 @@ class FuelService:
             "last_updated": now,
         }
         await self._es.update_document(FUEL_STATIONS_INDEX, doc_id, partial_update)
+        await mirror_current_state_fields(
+            "fuel_station", tenant_id, doc_id, partial_update
+        )
 
         logger.info(
             "Recorded refill: station=%s, quantity=%.2f, new_stock=%.2f, status=%s",
@@ -800,6 +818,9 @@ class FuelService:
         }
 
         await self._es.update_document(FUEL_STATIONS_INDEX, doc_id, partial)
+        await mirror_current_state_fields(
+            "fuel_station", tenant_id, doc_id, partial
+        )
 
         merged = {**existing, **partial}
         logger.info(

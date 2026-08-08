@@ -28,6 +28,7 @@ import asyncio
 import logging
 
 from bootstrap.container import ServiceContainer
+from persistence.leader_election import run_periodic
 
 logger = logging.getLogger(__name__)
 
@@ -54,9 +55,6 @@ async def initialize(app, container: ServiceContainer) -> None:
     so that endpoint modules can resolve the dependency through the
     explicit ``ServiceContainer`` (see ``bootstrap/container.py``).
     """
-    from compliance.services.compliance_es_mappings import (
-        setup_compliance_indices,
-    )
 
     es_service = container.es_service
 
@@ -65,12 +63,6 @@ async def initialize(app, container: ServiceContainer) -> None:
     # failures are logged but do not abort the bootstrap chain so
     # remaining modules still initialize (fail-open, per
     # ``bootstrap/__init__.py``).
-    try:
-        logger.info("Setting up compliance indices...")
-        setup_compliance_indices(es_service)
-        logger.info("Compliance indices ready")
-    except Exception as exc:
-        logger.warning("Failed to set up compliance indices: %s", exc)
 
     # ── Tax Engine REST endpoints (Task 3.9) ───────────────────────
     # Wire the application-scoped ES service into
@@ -160,32 +152,24 @@ async def initialize(app, container: ServiceContainer) -> None:
             PRICE_PROTECTION_EXPIRY_INTERVAL_SECONDS,
         )
 
-        async def _periodic_price_protection_expiry() -> None:
-            """Background task that transitions terminal contracts daily."""
-            try:
-                while True:
-                    await asyncio.sleep(
-                        PRICE_PROTECTION_EXPIRY_INTERVAL_SECONDS
-                    )
-                    try:
-                        transitioned = await run_price_protection_expiry_cycle(
-                            es_service=es_service,
-                        )
-                        if transitioned:
-                            logger.info(
-                                "Price protection expiry job: %d "
-                                "contract(s) transitioned",
-                                transitioned,
-                            )
-                    except Exception as exc:
-                        logger.error(
-                            "Price protection expiry job failed: %s", exc
-                        )
-            except asyncio.CancelledError:
-                logger.info("Price protection expiry task cancelled")
+        async def _price_protection_expiry_cycle() -> None:
+            """One pass transitioning terminal contracts."""
+            transitioned = await run_price_protection_expiry_cycle(
+                es_service=es_service,
+            )
+            if transitioned:
+                logger.info(
+                    "Price protection expiry job: %d "
+                    "contract(s) transitioned",
+                    transitioned,
+                )
 
         _price_protection_expiry_task = asyncio.create_task(
-            _periodic_price_protection_expiry()
+            run_periodic(
+                "compliance.price-protection-expiry",
+                PRICE_PROTECTION_EXPIRY_INTERVAL_SECONDS,
+                _price_protection_expiry_cycle,
+            )
         )
         logger.info(
             "Price protection expiry job started (interval: %ds)",
@@ -208,28 +192,22 @@ async def initialize(app, container: ServiceContainer) -> None:
             RACK_PRICE_REFRESH_INTERVAL_SECONDS,
         )
 
-        async def _periodic_rack_price_refresh() -> None:
-            """Background task that refreshes OPIS rack prices daily."""
-            try:
-                while True:
-                    await asyncio.sleep(RACK_PRICE_REFRESH_INTERVAL_SECONDS)
-                    try:
-                        refreshed = await refresh_rack_prices()
-                        if refreshed:
-                            logger.info(
-                                "Rack price refresh job: %d price(s) "
-                                "refreshed",
-                                refreshed,
-                            )
-                    except Exception as exc:
-                        logger.error(
-                            "Rack price refresh job failed: %s", exc
-                        )
-            except asyncio.CancelledError:
-                logger.info("Rack price refresh task cancelled")
+        async def _rack_price_refresh_cycle() -> None:
+            """One pass refreshing OPIS rack prices."""
+            refreshed = await refresh_rack_prices()
+            if refreshed:
+                logger.info(
+                    "Rack price refresh job: %d price(s) "
+                    "refreshed",
+                    refreshed,
+                )
 
         _rack_price_refresh_task = asyncio.create_task(
-            _periodic_rack_price_refresh()
+            run_periodic(
+                "compliance.rack-price-refresh",
+                RACK_PRICE_REFRESH_INTERVAL_SECONDS,
+                _rack_price_refresh_cycle,
+            )
         )
         logger.info(
             "Rack price refresh job started (interval: %ds)",

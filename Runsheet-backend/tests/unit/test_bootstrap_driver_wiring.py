@@ -74,23 +74,6 @@ def _stubbed_import(real_modules):
     return _import
 
 
-class _RecordingValidator:
-    """``MappingValidator`` double that records its pass into a shared log."""
-
-    def __init__(self, calls, es_service=None):
-        self._calls = calls
-        self.es_service = es_service
-        calls.append("MappingValidator(...)")
-
-    async def validate_all(self):
-        self._calls.append("validate_all")
-        return ["drift-item"]
-
-    async def remediate(self, drift_items):
-        self._calls.append("remediate")
-        return drift_items
-
-
 @pytest.fixture
 def app():
     return FastAPI()
@@ -228,91 +211,17 @@ class TestOrderServiceWiring:
         assert _BOOT_ORDER.index("core") < _BOOT_ORDER.index("fuel")
 
 
-class TestDriverIndexSetupWiring:
-    """Defect 2 — index setup runs at boot, and the validator runs after it."""
-
-    @pytest.mark.asyncio
-    async def test_setup_driver_indices_runs_during_boot(self, boot, container):
-        """Boot calls ``setup_driver_indices``; the seeder is no longer the only caller.
-
-        Validates: Requirements 15.12
-        """
-        calls = []
-        setup_indices = MagicMock(side_effect=lambda es: calls.append("setup"))
-
-        with patch(
-            "driver.services.driver_es_mappings.setup_driver_indices", setup_indices
-        ), patch(
-            "services.mapping_validator.MappingValidator",
-            lambda es_service=None: _RecordingValidator(calls, es_service),
-        ):
-            await boot()
-
-        setup_indices.assert_called_once_with(container.es_service)
-
-    @pytest.mark.asyncio
-    async def test_setup_driver_indices_comes_from_the_driver_module(self, boot):
-        """Control case: with ``driver`` stubbed out, nothing else calls it.
-
-        This is what makes the previous test meaningful — the call is made by
-        ``bootstrap/driver.py`` and by no other module in the boot sequence.
-
-        Validates: Requirements 15.12
-        """
-        setup_indices = MagicMock()
-
-        with patch(
-            "driver.services.driver_es_mappings.setup_driver_indices", setup_indices
-        ):
-            await boot(real_modules=("core", "fuel"))
-
-        setup_indices.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_validator_pass_runs_after_index_setup(self, boot):
-        """Create first, then validate and remediate — in that order.
-
-        ``validate_all`` skips an index that does not exist, so a validator
-        pass that ran before ``setup_driver_indices`` would leave an index this
-        boot just created unvalidated until the next boot.
-
-        Validates: Requirements 15.12
-        """
-        calls = []
-
-        with patch(
-            "driver.services.driver_es_mappings.setup_driver_indices",
-            MagicMock(side_effect=lambda es: calls.append("setup")),
-        ), patch(
-            "services.mapping_validator.MappingValidator",
-            lambda es_service=None: _RecordingValidator(calls, es_service),
-        ):
-            await boot()
-
-        assert calls == [
-            "setup",
-            "MappingValidator(...)",
-            "validate_all",
-            "remediate",
-        ], f"unexpected driver index-setup sequence: {calls}"
-
-    @pytest.mark.asyncio
-    async def test_validator_receives_the_container_es_service(self, boot, container):
-        """The validator inspects the cluster the rest of the boot writes to.
-
-        Validates: Requirements 15.12
-        """
-        calls = []
-        validators = []
-
-        def _make_validator(es_service=None):
-            validator = _RecordingValidator(calls, es_service)
-            validators.append(validator)
-            return validator
-
-        with patch(
-            "driver.services.driver_es_mappings.setup_driver_indices", MagicMock()
-        ), patch("services.mapping_validator.MappingValidator", _make_validator):
-            await boot()
-
-        assert [v.es_service for v in validators] == [container.es_service]
+# ``TestDriverIndexSetupWiring`` and its ``_RecordingValidator`` were removed here.
+#
+# They asserted two things about boot, both from Defect 2 of the driver spec
+# (R15.12): that ``bootstrap/driver.py`` called ``setup_driver_indices``, so a
+# deployment which skipped the seeder still got strict mappings; and that the mapping
+# validator ran immediately afterwards, closing the window where a freshly-created
+# index went unvalidated until the next boot.
+#
+# Phase 6 deleted both. There are no indices to create — the document store is one
+# Postgres table created by a migration — and no live mappings to drift from.
+#
+# The surviving property is the boot ORDER, asserted above. What did NOT survive is
+# ``dynamic: strict`` rejecting an undeclared field; that now rests on
+# ``extra="forbid"`` in the driver-surface Pydantic models, upstream of the store.

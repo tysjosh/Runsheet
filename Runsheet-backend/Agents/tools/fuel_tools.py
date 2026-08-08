@@ -122,7 +122,9 @@ async def search_fuel_stations(query: str, fuel_type: str = None, status: str = 
                 filter_msg += f" with status='{status}'"
             return f"No fuel stations found for query: '{query}'{filter_msg}"
 
-        response_text = f"⛽ Found {len(results)} fuel station(s) matching '{query}':\n\n"
+        # "Showing", not "Found" — this is a capped page, and phrasing a page
+        # length as a total invites the model to state a count it never measured.
+        response_text = f"⛽ Showing {len(results)} fuel station(s) matching '{query}':\n\n"
         for station in results:
             capacity = station.get("capacity_liters", 0)
             stock = station.get("current_stock_liters", 0)

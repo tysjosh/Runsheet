@@ -28,11 +28,10 @@ if str(_BACKEND_DIR) not in sys.path:
 
 def _setup_mock_env() -> None:
     """Set minimal environment variables needed for app import."""
+    # ``ELASTIC_ENDPOINT`` / ``ELASTIC_API_KEY`` used to be here because they were
+    # REQUIRED settings and importing the app without them raised. Both are gone
+    # from ``config.settings``, so a placeholder would be ignored.
     defaults = {
-        "ELASTICSEARCH_URL": "http://localhost:9200",
-        "ELASTIC_ENDPOINT": "http://localhost:9200",
-        "ELASTIC_API_KEY": "mock-key-for-registry-gen",
-        "ELASTICSEARCH_API_KEY": "mock-key-for-registry-gen",
         "REDIS_URL": "redis://localhost:6379",
         "ENVIRONMENT": "development",
     }

@@ -34,6 +34,7 @@ from typing import Any, Optional
 
 from bootstrap.container import ServiceContainer
 from bootstrap.routing import mount_router
+from persistence.leader_election import run_periodic
 
 logger = logging.getLogger(__name__)
 
@@ -191,44 +192,21 @@ async def initialize(app, container: ServiceContainer) -> None:
     _report_degradations(container)
 
     # ------------------------------------------------------------------
-    # Index setup, then the mapping-validator pass — in that order, in this
-    # module (R15.12).
+    # Index setup and the mapping-validator pass are gone with Elasticsearch
+    # (R15.12).
     #
-    # ``setup_driver_indices`` is invoked only by the seeder today
-    # (``seed_all_data.py:213``, ``:247``), so a deployment that skipped the
-    # seeder has driver indices Elasticsearch auto-created on first write with
-    # ``dynamic: true`` — the strict declarations are simply not in force.
-    # Calling it here creates what is absent and tightens ``dynamic`` on what
-    # already exists.
+    # Both existed for the same reason: a deployment that skipped the seeder had
+    # driver indices the cluster auto-created on first write with ``dynamic: true``,
+    # so the strict declarations were not in force, and the validator then added
+    # the missing fields. Neither failure mode exists against one Postgres table
+    # created by a migration.
     #
-    # The validator runs immediately after, in the same module, rather than
-    # relying on the earlier pass in ``bootstrap/agents.py``:
-    # ``validate_all`` skips an index that does not exist, so an index this
-    # boot has just created would go unvalidated until the next boot.
-    # Create-then-remediate in one place closes that window. Both steps are
-    # guarded separately — a failure to create one index should not cost the
-    # remediation of the others.
+    # What ``dynamic: strict`` did enforce and jsonb does not is rejection of an
+    # undeclared field. That protection now rests entirely on ``extra="forbid"`` in
+    # the driver-surface Pydantic models, which is upstream of the store and
+    # therefore applies to every write path — including the ones that used to reach
+    # the raw client.
     # ------------------------------------------------------------------
-    try:
-        from driver.services.driver_es_mappings import setup_driver_indices
-
-        logger.info("Setting up driver indices...")
-        setup_driver_indices(es_service)
-        logger.info("Driver indices ready")
-    except Exception as exc:
-        logger.error("Driver index setup failed (non-blocking): %s", exc)
-
-    try:
-        from services.mapping_validator import MappingValidator
-
-        mapping_validator = MappingValidator(es_service=es_service)
-        drift_items = await mapping_validator.validate_all()
-        await mapping_validator.remediate(drift_items)
-        logger.info("Driver mapping validation pass complete")
-    except Exception as exc:
-        logger.error(
-            "Driver mapping validation failed (non-blocking): %s", exc
-        )
 
     # ------------------------------------------------------------------
     # Mobile_Session — reads ``drivers_current`` so sign-in can fail with
@@ -912,29 +890,21 @@ async def initialize(app, container: ServiceContainer) -> None:
             )
             container.pod_transition_reconciler = pod_transition_reconciler
 
-            async def _periodic_pod_transition_repair() -> None:
-                try:
-                    while True:
-                        try:
-                            counts = (
-                                await pod_transition_reconciler.repair_pending()
-                            )
-                            if counts["examined"]:
-                                logger.info(
-                                    "POD transition repair cycle: %s", counts
-                                )
-                        except Exception as exc:
-                            logger.exception(
-                                "POD transition repair cycle failed: %s", exc
-                            )
-                        await asyncio.sleep(
-                            POD_TRANSITION_REPAIR_INTERVAL_SECONDS
-                        )
-                except asyncio.CancelledError:
-                    logger.info("POD transition repair task cancelled")
+            async def _pod_transition_repair_cycle() -> None:
+                """One pass repairing PODs whose order transition never landed."""
+                counts = await pod_transition_reconciler.repair_pending()
+                if counts["examined"]:
+                    logger.info("POD transition repair cycle: %s", counts)
 
+            # The original loop repaired before its first sleep, so a repair
+            # pass ran at boot. ``run_immediately`` preserves that.
             _pod_transition_repair_task = asyncio.create_task(
-                _periodic_pod_transition_repair()
+                run_periodic(
+                    "driver.pod-transition-repair",
+                    POD_TRANSITION_REPAIR_INTERVAL_SECONDS,
+                    _pod_transition_repair_cycle,
+                    run_immediately=True,
+                )
             )
             logger.info(
                 "POD transition repair started (interval: %ds)",
@@ -956,10 +926,10 @@ async def initialize(app, container: ServiceContainer) -> None:
     #
     # The loop shape follows ``DriverDailyResetJob``
     # (``bootstrap/scheduling.py``) verbatim: a module-global task handle, one
-    # ``asyncio.create_task`` around a ``while True`` / ``await asyncio.sleep``
-    # loop, the per-cycle exception caught *inside* the loop so a failed sweep
-    # never kills the task, and cancellation in this module's ``shutdown``.
-    # Sleep-then-sweep, so boot is never delayed by a retention pass.
+    # ``asyncio.create_task`` around ``run_periodic``, which keeps a failed
+    # sweep from killing the task and runs only on the sweep leader, and
+    # cancellation in this module's ``shutdown``. Sleep-then-sweep, so boot is
+    # never delayed by a retention pass.
     # ------------------------------------------------------------------
     global _retention_task
 
@@ -973,21 +943,17 @@ async def initialize(app, container: ServiceContainer) -> None:
         retention_job = DriverRetentionJob(es_service=es_service)
         container.driver_retention_job = retention_job
 
-        async def _periodic_driver_retention() -> None:
-            """Background task that sweeps each driver data class every 24 h."""
-            try:
-                while True:
-                    await asyncio.sleep(RETENTION_INTERVAL_SECONDS)
-                    try:
-                        await run_retention_cycle(retention_job)
-                    except Exception as exc:
-                        logger.exception(
-                            "Driver retention cycle failed: %s", exc
-                        )
-            except asyncio.CancelledError:
-                logger.info("Driver retention task cancelled")
+        async def _driver_retention_cycle() -> None:
+            """One sweep of each driver data class."""
+            await run_retention_cycle(retention_job)
 
-        _retention_task = asyncio.create_task(_periodic_driver_retention())
+        _retention_task = asyncio.create_task(
+            run_periodic(
+                "driver.retention",
+                RETENTION_INTERVAL_SECONDS,
+                _driver_retention_cycle,
+            )
+        )
         logger.info(
             "Driver retention job started (interval: %ds)",
             RETENTION_INTERVAL_SECONDS,

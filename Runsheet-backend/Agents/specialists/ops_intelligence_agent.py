@@ -23,6 +23,8 @@ from Agents.tools import (
     generate_sla_report,
     generate_failure_report,
     generate_driver_productivity_report,
+    # Commerce read-only context for the dispatch decision
+    get_customer_delivery_eligibility,
 )
 from Agents.tools.order_tools import (
     search_orders,
@@ -49,6 +51,11 @@ class OpsIntelligenceAgent:
         get_order_events,
         get_orders_metrics,
         get_ops_metrics,
+        # Credit context. Without it the agent answered "I cannot identify
+        # accounts over their credit limit. My tools do not have access to
+        # credit limit information" while accounts_current held the limits.
+        # Read-only on purpose: the ERP owns the ledger.
+        get_customer_delivery_eligibility,
         # Ops report tools
         generate_sla_report,
         generate_failure_report,
@@ -74,6 +81,14 @@ class OpsIntelligenceAgent:
         "- Get aggregated operational metrics (orders, drivers, sla, failures)\n"
         "- `get_ops_metrics(metric_type, bucket, start_date, end_date, tenant_id)` "
         "- Get aggregated operational metrics\n"
+        "- `get_customer_delivery_eligibility(customer_id, account_id, "
+        "order_total_cents, limit)` - Whether a customer can take a delivery on "
+        "credit: verdict, credit state, limit, open balance and AR aging in one "
+        "answer. Use it for any question about credit limits, credit holds, "
+        "accounts over their limit, or whether to send a truck. Call it with no id "
+        "to list the accounts currently blocked. It is READ-ONLY — it cannot change "
+        "a limit, release a hold or touch an invoice, and you must not claim "
+        "otherwise\n"
         "- `generate_sla_report(start_date, end_date, tenant_id)` - Generate SLA "
         "violations report\n"
         "- `generate_failure_report(start_date, end_date, tenant_id, intake_channel=None)` - Generate "
@@ -83,6 +98,14 @@ class OpsIntelligenceAgent:
         "**Guidelines:**\n"
         "- Always announce what you are searching for before using tools\n"
         "- Highlight SLA breaches and at-risk orders\n"
+        "- On credit answers, always pass on `credit_holds_enforced`. If it is "
+        "false, a hold does not actually stop an order on this deployment and the "
+        "verdict is advice rather than a block\n"
+        "- Report `total_blocked_candidates` and `shown` as the different numbers "
+        "they are, and never present the rows you were shown as the total\n"
+        "- Never offer to raise a credit limit, release a hold, or adjust an "
+        "invoice. Those live in the customer's accounting system, not here. Point "
+        "the user at their controller instead\n"
         "- If you cannot fulfill a request with your tools, say so clearly"
     )
 

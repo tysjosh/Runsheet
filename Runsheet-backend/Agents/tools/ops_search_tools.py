@@ -7,7 +7,6 @@ this module only keeps the shared ops metrics tool used by the specialist
 agents.
 """
 
-import inspect
 import json
 import logging
 import time
@@ -44,15 +43,17 @@ def _get_es():
 
 
 async def _search(es, index: str, body: dict) -> dict:
-    """Run an Elasticsearch search against sync or async clients."""
-    response = es.client.search(
-        index=index,
-        body=body,
-        request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
+    """Run a search through the service facade.
+
+    Reaching ``es.client.search(...)`` directly bypassed the document-store
+    backend switch, so this read would have kept going to Elasticsearch after the
+    document plane moved to Postgres. ``search_documents`` is already async and
+    returns the same response shape, so the sync/awaitable dance the raw client
+    needed is gone too.
+    """
+    return await es.search_documents(
+        index, body, request_timeout=ES_SEARCH_TIMEOUT_SECONDS
     )
-    if inspect.isawaitable(response):
-        response = await response
-    return response
 
 
 def _log_tool_call(tool_name: str, params: dict, tenant_id: str, user_id: str = "ai_agent"):

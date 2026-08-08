@@ -96,15 +96,13 @@ class Settings(BaseSettings):
         description="Deployment environment (development, staging, production)"
     )
     
-    # Elasticsearch Configuration
-    elastic_endpoint: str = Field(
-        ...,
-        description="Elasticsearch endpoint URL"
-    )
-    elastic_api_key: str = Field(
-        ...,
-        description="Elasticsearch API key for authentication"
-    )
+    # Elasticsearch: removed. ``ELASTIC_ENDPOINT`` and ``ELASTIC_API_KEY`` were
+    # REQUIRED fields here, so every process — including one-shot scripts and the
+    # test suite — refused to start without them. The document plane is PostgreSQL
+    # (``es_documents``) and there is no cluster left to point at, so they are gone
+    # rather than defaulted: a required-to-optional-to-ignored setting is how a
+    # placeholder endpoint survives into production looking configured.
+    # See docs/elasticsearch-to-postgres-migration.md.
     
     # Google Cloud / Gemini Configuration
     google_cloud_project: str = Field(
@@ -122,6 +120,42 @@ class Settings(BaseSettings):
     google_application_credentials: Optional[str] = Field(
         default=None,
         description="Path to Google Cloud service account credentials file"
+    )
+
+    # ── Agent LLM routing ─────────────────────────────────────────────
+    #
+    # The provider is explicit because LiteLLM routes on the model-id prefix
+    # and the two providers authenticate differently: "gemini/" is Google AI
+    # Studio (API key) and "vertex_ai/" is Google Cloud (ADC). The model id
+    # used to be a literal in three modules, so a fully populated GCP config
+    # still produced 401s against AI Studio. See Agents/model_provider.py.
+    agent_llm_provider: str = Field(
+        default="gemini",
+        description=(
+            "LLM provider for the agent stack: 'gemini' (Google AI Studio, "
+            "authenticates with GEMINI_API_KEY) or 'vertex_ai' (Google Cloud, "
+            "authenticates with Application Default Credentials)"
+        ),
+    )
+    agent_llm_model: str = Field(
+        default="gemini-2.5-flash",
+        description="Model name (without provider prefix) the agents run on",
+    )
+
+    # ── Overlay agent default mode ────────────────────────────────────
+    #
+    # Mode a tenant gets when it has no ``overlay_ff:overlay.{agent_id}``
+    # value. Kept at "disabled" so this setting's introduction changes no
+    # behaviour, but it is now a one-line switch instead of an unreachable
+    # default buried in _get_mode. "shadow" runs the full decision logic and
+    # writes proposals to the shadow index without touching live state, which
+    # is the intended way to observe an overlay before activating it.
+    overlay_default_mode: str = Field(
+        default="disabled",
+        description=(
+            "Overlay mode for tenants with no per-tenant flag: 'disabled', "
+            "'shadow', 'active_gated' or 'active_auto'"
+        ),
     )
     
     # ── PostgreSQL source-of-truth (persistence/) ─────────────────────
@@ -216,18 +250,26 @@ class Settings(BaseSettings):
         le=60.0,
         description="OutboxRelay idle poll interval in seconds.",
     )
+    # ``DOCUMENT_STORE_BACKEND`` is gone. It chose between Elasticsearch and
+    # Postgres for ElasticsearchService's document operations; there is only one
+    # backend now, so a switch would only ever select a path that does not exist.
+    # Rolling back is no longer a flag — it means restoring the cluster from
+    # ``es-full-backup`` and reverting the Phase 5/6 commits.
     retired_es_indices_raw: str = Field(
         default="",
         alias="RETIRED_ES_INDICES",
         description=(
-            "Comma-separated (or JSON array) list of Elasticsearch indices "
-            "retired (migrated to the Postgres source-of-truth and DROPPED in "
-            "migration Phase 6). Writes to these indices (direct "
+            "Comma-separated (or JSON array) list of document indices retired in "
+            "favour of a relational source-of-truth. Writes to them (direct "
             "index/update/delete AND outbox-relay projection) are silently "
-            "skipped so a dropped index is not recreated with dynamic "
-            "mappings. Reversible: remove an index from this list (and rebuild "
-            "it via persistence.rebuild_from_postgres) to resume projecting. "
-            "Read it via the ``retired_es_indices`` property."
+            "skipped, so nothing accumulates document rows that no read path "
+            "consults. Named for Elasticsearch because that is what it originally "
+            "kept indices from being recreated in; it still earns its keep against "
+            "the Postgres document store, where the cost is redundant rows in "
+            "es_documents rather than a dynamically-mapped index. Reversible: "
+            "remove an index from this list (and rebuild it via "
+            "persistence.rebuild_document_store) to resume projecting. Read it "
+            "via the ``retired_es_indices`` property."
         ),
     )
 
@@ -770,25 +812,6 @@ class Settings(BaseSettings):
         extra="ignore"
     )
     
-    @field_validator("elastic_endpoint")
-    @classmethod
-    def validate_elastic_endpoint(cls, v: str) -> str:
-        """Validate that elastic_endpoint is not empty and is a valid URL format."""
-        if not v or not v.strip():
-            raise ValueError("elastic_endpoint cannot be empty")
-        v = v.strip()
-        if not (v.startswith("http://") or v.startswith("https://")):
-            raise ValueError("elastic_endpoint must be a valid HTTP/HTTPS URL")
-        return v
-    
-    @field_validator("elastic_api_key")
-    @classmethod
-    def validate_elastic_api_key(cls, v: str) -> str:
-        """Validate that elastic_api_key is not empty."""
-        if not v or not v.strip():
-            raise ValueError("elastic_api_key cannot be empty")
-        return v.strip()
-    
     @field_validator("google_cloud_project")
     @classmethod
     def validate_google_cloud_project(cls, v: str) -> str:
@@ -798,6 +821,57 @@ class Settings(BaseSettings):
         v = v.strip()
         return v
     
+    @field_validator("overlay_default_mode")
+    @classmethod
+    def validate_overlay_default_mode(cls, v: str) -> str:
+        """Reject a mode the overlay agents cannot interpret.
+
+        An unrecognised value would reach ``monitor_cycle``, fail the
+        ``== "disabled"`` check, and be treated as a commit path — activating
+        every overlay agent because of a typo.
+        """
+        v = (v or "").strip().lower()
+        valid = {"disabled", "shadow", "active_gated", "active_auto"}
+        if v not in valid:
+            raise ValueError(
+                f"overlay_default_mode must be one of: {', '.join(sorted(valid))}"
+            )
+        return v
+
+    @field_validator("agent_llm_provider")
+    @classmethod
+    def validate_agent_llm_provider(cls, v: str) -> str:
+        """Reject an unknown provider rather than building an unroutable model id.
+
+        A typo here would otherwise reach LiteLLM as a model-id prefix it does
+        not recognise, and surface as a per-request routing error.
+        """
+        v = (v or "").strip().lower()
+        if v not in {"gemini", "vertex_ai"}:
+            raise ValueError(
+                "agent_llm_provider must be 'gemini' or 'vertex_ai'"
+            )
+        return v
+
+    @field_validator("agent_llm_model")
+    @classmethod
+    def validate_agent_llm_model(cls, v: str) -> str:
+        """The model name must not carry a provider prefix.
+
+        ``AGENT_LLM_MODEL=gemini/gemini-2.5-flash`` would compose to
+        ``gemini/gemini/gemini-2.5-flash``. The prefix comes from
+        ``agent_llm_provider``, which is the whole point of splitting them.
+        """
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("agent_llm_model cannot be empty")
+        if "/" in v:
+            raise ValueError(
+                "agent_llm_model must not include a provider prefix "
+                f"(got {v!r}); set agent_llm_provider instead"
+            )
+        return v
+
     @field_validator("log_level")
     @classmethod
     def validate_log_level(cls, v: str) -> str:
@@ -875,6 +949,17 @@ class Settings(BaseSettings):
                 pass
         return [part.strip() for part in raw.split(",") if part.strip()]
 
+    # ``document_store_is_postgres`` and its backend validator are gone with the
+    # switch. Both existed to answer "which store is this environment on?", and the
+    # answer is now structural: ``PostgresDocumentStore`` is the only
+    # implementation. Callers that branched on it (the outbox relay's log label,
+    # the health check's probe, the client construction) are unconditional.
+    #
+    # The property also required ``database_url`` before it would report Postgres,
+    # so a missing URL silently kept an environment on Elasticsearch. That failure
+    # mode is gone in the honest direction: without ``database_url`` the store now
+    # fails loudly rather than routing elsewhere.
+
     @model_validator(mode="after")
     def validate_session_store_config(self) -> "Settings":
         """Validate that the appropriate session store URL/table is provided."""
@@ -916,6 +1001,83 @@ class Settings(BaseSettings):
                     f"auth_provider='{self.auth_provider}' in a "
                     f"{self.environment.value} environment: "
                     f"{', '.join(missing_supertokens)}"
+                )
+
+            # The Postgres source-of-truth is NOT optional outside development.
+            #
+            # ``database_url`` is Optional because an ES-only deployment was the
+            # pre-migration posture, and the persistence layer degrades to it
+            # silently: ``is_persistence_enabled()`` returns False and every
+            # caller takes the legacy path. That is a defensible default on a
+            # laptop and indefensible in production, because three correctness
+            # guarantees exist only in Postgres:
+            #
+            #   * invoice numbering — ``allocate_invoice_number`` returns None
+            #     when dormant, and the invoice is finalized with NO number.
+            #   * idempotency keys — the ES index cannot prevent two concurrent
+            #     requests with the same key from both being processed.
+            #   * credit limits — the ``SELECT ... FOR UPDATE`` row lock behind
+            #     the credit check has no ES equivalent, so concurrent orders
+            #     can exceed a limit.
+            #
+            # None of those failures raises. Requiring the URL here converts a
+            # silent, per-request correctness loss into a startup error naming
+            # exactly what is missing.
+            if not self.database_url:
+                raise ValueError(
+                    "database_url is required in a "
+                    f"{self.environment.value} environment: without it the "
+                    "persistence layer is dormant, invoices finalize with no "
+                    "invoice_number, idempotency keys lose their uniqueness "
+                    "guarantee, and credit checks lose their row lock — all "
+                    "silently. Set the async SQLAlchemy URL, e.g. "
+                    "postgresql+psycopg://user:pass@host:5432/runsheet"
+                )
+
+            # Having the URL is not sufficient: invoice numbering is gated on
+            # BOTH database_url and commerce_dual_write_postgres
+            # (``commerce_persistence_bridge._enabled``). A deployment with
+            # commerce enabled but dual-write off still finalizes unnumbered
+            # invoices, so refuse that combination rather than discover it in
+            # the accounting export.
+            if self.commerce_backbone_enabled and not self.commerce_dual_write_postgres:
+                raise ValueError(
+                    "commerce_dual_write_postgres must be True in a "
+                    f"{self.environment.value} environment when "
+                    "commerce_backbone_enabled is True: invoice numbering, "
+                    "payment de-duplication and the credit-check row lock are "
+                    "all gated on it, and each degrades silently when it is off"
+                )
+            # The agent stack has no credential unless one is configured, and
+            # the failure mode was invisible: every call site passed
+            # ``os.environ.get("GEMINI_API_KEY", "")``, so an unset variable
+            # became an EMPTY key rather than an error. The model constructed
+            # fine, boot succeeded, and each agent request failed on
+            # authentication instead — the specialists, the orchestrator's
+            # intent classification and the conversational surface all of them.
+            #
+            # GOOGLE_CLOUD_PROJECT is not a substitute and looked like one: the
+            # hardcoded ``gemini/`` model-id prefix routes to Google AI Studio,
+            # which authenticates by API key, so a fully populated GCP config
+            # still 401s. Choosing Vertex is now explicit
+            # (AGENT_LLM_PROVIDER=vertex_ai) and checked against the setting it
+            # actually needs. See Agents/model_provider.py.
+            if self.agent_llm_provider == "gemini" and not self.gemini_api_key:
+                raise ValueError(
+                    "gemini_api_key is required in a "
+                    f"{self.environment.value} environment when "
+                    "agent_llm_provider is 'gemini': the agents authenticate to "
+                    "Google AI Studio by API key, and an unset value silently "
+                    "becomes an empty key that fails on every request. Set "
+                    "GEMINI_API_KEY, or set AGENT_LLM_PROVIDER=vertex_ai to "
+                    "authenticate to Google Cloud with Application Default "
+                    "Credentials instead."
+                )
+            if self.agent_llm_provider == "vertex_ai" and not self.google_cloud_project:
+                raise ValueError(
+                    "google_cloud_project is required in a "
+                    f"{self.environment.value} environment when "
+                    "agent_llm_provider is 'vertex_ai'"
                 )
             # Validate CORS: reject any localhost origins in production
             if self.environment == Environment.PRODUCTION:

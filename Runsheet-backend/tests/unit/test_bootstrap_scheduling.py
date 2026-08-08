@@ -54,8 +54,7 @@ class TestSchedulingBootstrap:
         mock_delay = MagicMock()
         mock_ws = MagicMock()
 
-        with patch("scheduling.services.scheduling_es_mappings.setup_scheduling_indices"), \
-             patch("scheduling.services.job_service.JobService", return_value=mock_job), \
+        with patch("scheduling.services.job_service.JobService", return_value=mock_job), \
              patch("scheduling.services.cargo_service.CargoService", return_value=mock_cargo), \
              patch("scheduling.services.delay_detection_service.DelayDetectionService", return_value=mock_delay), \
              patch("scheduling.websocket.scheduling_ws.SchedulingWebSocketManager", return_value=mock_ws), \

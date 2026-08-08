@@ -1724,7 +1724,15 @@ export default function LandingPage() {
           </div>
 
           <div className="mt-12 flex flex-col gap-2 border-t border-[#f5f4ef]/10 pt-6 font-mono text-[10px] uppercase tracking-[0.22em] text-[#f5f4ef]/50 sm:flex-row sm:items-center sm:justify-between">
-            <span>© {new Date().getFullYear()} Runsheet · Beta</span>
+            <span className="flex flex-wrap items-center gap-x-4 gap-y-2">
+              <span>© {new Date().getFullYear()} Runsheet · Beta</span>
+              <Link
+                href="/privacy"
+                className="transition-colors hover:text-[#f5f4ef]"
+              >
+                Privacy
+              </Link>
+            </span>
             <span>
               Fuel Distribution · Runout Prevention · Dispatch Support
             </span>

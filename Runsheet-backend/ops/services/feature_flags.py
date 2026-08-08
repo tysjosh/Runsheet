@@ -20,6 +20,22 @@ logger = logging.getLogger(__name__)
 OVERLAY_PREFIX = "overlay_ff:"
 VALID_OVERLAY_STATES = frozenset({"disabled", "shadow", "active_gated", "active_auto"})
 
+#: Expiry applied to every flag key, refreshed on each read (see
+#: :meth:`FeatureFlagService._refresh_ttl`).
+#:
+#: The TTL exists so an offboarded tenant's keys clean themselves up. The
+#: refresh exists because without it the TTL silently *revoked configuration*:
+#: both write paths set 90 days and nothing renewed them, so a tenant enabled
+#: once and left alone reverted to the fail-closed default on day 90 — no event,
+#: no log at the moment of expiry, and nothing to tell "never enabled" apart
+#: from "expired". For the ops master flag that is an outage, not a degrade: a
+#: disabled tenant gets 404 on the ops API and its webhooks are skipped.
+#:
+#: Sliding the window on read delivers what ``enable`` already documented
+#: ("active tenants refresh this"), and keeps the cleanup property: a tenant
+#: nothing reads for 90 days is a tenant nothing is serving.
+FLAG_TTL_SECONDS = 90 * 24 * 60 * 60
+
 
 class FeatureFlagService:
     """
@@ -65,6 +81,22 @@ class FeatureFlagService:
         """Build the Redis key for a tenant's feature flag."""
         return f"{self.PREFIX}{tenant_id}"
 
+    async def _refresh_ttl(self, key: str) -> None:
+        """Slide *key*'s expiry window. Never raises.
+
+        Called after a successful read so a flag that is actively being consulted
+        cannot expire underneath a live tenant. Failing to refresh is not worth
+        failing the read over — the caller already has the value, and the worst
+        case is the key expiring on its original schedule, which is the
+        behaviour this method exists to improve on.
+        """
+        if not self.client:
+            return
+        try:
+            await self.client.expire(key, FLAG_TTL_SECONDS)
+        except Exception as exc:  # noqa: BLE001 — refresh is best-effort
+            logger.debug("Could not refresh TTL for %s: %s", key, exc)
+
     async def is_enabled(self, tenant_id: str) -> bool:
         """
         Check whether the Ops Intelligence Layer is enabled for a tenant.
@@ -78,7 +110,11 @@ class FeatureFlagService:
             return False
         try:
             key = self._get_key(tenant_id)
-            return await self.client.exists(key) > 0
+            exists = await self.client.exists(key) > 0
+            if exists:
+                # An enabled tenant being actively served must not expire.
+                await self._refresh_ttl(key)
+            return exists
         except Exception as exc:
             logger.warning(
                 "FeatureFlagService: Redis error checking flag for tenant %s: %s — defaulting to disabled",
@@ -91,15 +127,16 @@ class FeatureFlagService:
         """
         Enable the Ops Intelligence Layer for a tenant.
 
-        Sets the Redis flag key to ``"1"`` with a 90-day TTL. Active tenants
-        refresh this on every enable call; deleted tenants expire naturally.
+        Sets the Redis flag key to ``"1"`` with :data:`FLAG_TTL_SECONDS`, which
+        every read then refreshes, so an actively served tenant cannot expire
+        while an offboarded one still cleans itself up.
 
         Validates: Req 27.1, 27.6
         """
         if not self.client:
             raise RuntimeError("Redis client not connected. Call connect() first.")
         key = self._get_key(tenant_id)
-        await self.client.set(key, "1", ex=90 * 24 * 60 * 60)
+        await self.client.set(key, "1", ex=FLAG_TTL_SECONDS)
         ops_feature_flag_changes_total.labels(tenant_id=tenant_id, action="enable").inc()
         logger.info(
             "Feature flag change: tenant_id=%s, action=enable, user_id=%s",
@@ -230,7 +267,26 @@ class FeatureFlagService:
         Logs a warning and returns ``"disabled"`` on any Redis error
         (fail-closed behaviour).
 
+        Callers that need to tell "no flag configured" apart from "explicitly
+        disabled" must use :meth:`get_overlay_state_or_none`. Collapsing both
+        into ``"disabled"`` here is what made the overlay agents' documented
+        ``shadow`` default unreachable: a missing key produced the truthy
+        string ``"disabled"``, so ``state or "shadow"`` never fell through.
+
         Validates: Req 12.1, 12.4, 12.7
+        """
+        state = await self.get_overlay_state_or_none(flag_key, tenant_id)
+        return state if state is not None else "disabled"
+
+    async def get_overlay_state_or_none(
+        self, flag_key: str, tenant_id: str
+    ) -> Optional[str]:
+        """Return the configured overlay state, or ``None`` when unset.
+
+        ``None`` means "this tenant has no value for this flag" and lets the
+        caller apply its own default. A Redis failure returns ``"disabled"``
+        rather than ``None``, because an unreachable Redis is not the same as
+        an unconfigured flag and must still fail closed.
         """
         if not self.client:
             raise RuntimeError("Redis client not connected. Call connect() first.")
@@ -238,7 +294,11 @@ class FeatureFlagService:
             key = f"{OVERLAY_PREFIX}{flag_key}:{tenant_id}"
             value = await self.client.get(key)
             if value is None:
-                return "disabled"
+                return None
+            # A flag being consulted is a flag in use; slide its window.
+            await self._refresh_ttl(key)
+            if isinstance(value, (bytes, bytearray)):
+                value = value.decode("utf-8")
             return value
         except Exception as exc:
             logger.warning(
@@ -277,7 +337,7 @@ class FeatureFlagService:
         previous = await self.get_overlay_state(flag_key, tenant_id)
 
         key = f"{OVERLAY_PREFIX}{flag_key}:{tenant_id}"
-        await self.client.set(key, state, ex=90 * 24 * 60 * 60)
+        await self.client.set(key, state, ex=FLAG_TTL_SECONDS)
 
         logger.info(
             "Overlay flag transition: flag_key=%s, tenant_id=%s, "

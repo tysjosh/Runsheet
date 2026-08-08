@@ -35,7 +35,6 @@ from Agents.overlay.customer_promise import CustomerPromise
 from Agents.overlay.driver_nudge_agent import DriverNudgeAgent
 from Agents.overlay.learning_policy_agent import LearningPolicyAgent
 from Agents.overlay.outcome_tracker import OutcomeTracker
-from Agents.overlay.overlay_es_mappings import setup_overlay_indices
 
 __all__ = [
     # Data contracts
@@ -60,5 +59,4 @@ __all__ = [
     # Outcome tracking
     "OutcomeTracker",
     # ES mappings
-    "setup_overlay_indices",
 ]

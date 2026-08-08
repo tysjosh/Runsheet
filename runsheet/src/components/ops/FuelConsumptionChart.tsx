@@ -1,8 +1,8 @@
 "use client";
 
 import { TrendingDown, TrendingUp } from "lucide-react";
-import { LITERS_PER_GALLON } from "../../services/fuelApi";
 import type { ConsumptionMetric, FuelType } from "../../services/fuelApi";
+import { LITERS_PER_GALLON } from "../../services/fuelApi";
 
 interface FuelConsumptionChartProps {
   /** Daily consumption metrics, may include multiple fuel types */

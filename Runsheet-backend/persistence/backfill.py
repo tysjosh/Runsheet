@@ -101,6 +101,36 @@ _MASTER_DATA_BACKFILL = [
     ("location", _LOCATIONS_INDEX),
 ]
 
+# Fuel-asset hybrid aggregates — the three former ``ES_ONLY_INDICES``.
+_CUSTOMER_TANKS_INDEX = "customer_tanks"
+_TRUCK_COMPARTMENTS_INDEX = "truck_compartments"
+_FUEL_STATIONS_INDEX = "fuel_stations"
+
+# (aggregate_type, es_index)
+#
+# Deliberately a separate loop from ``_MASTER_DATA_BACKFILL``: two of these
+# three cannot take that loop's id rule.
+#
+#   * ``customer_tanks`` documents live in ES under an ``_id`` of the *customer*
+#     id, not the tank id — ``seed_all_data._resolve_json_doc_id`` walked one
+#     ordered candidate list and ``customer_id`` won. It was latent only because
+#     no fixture gave one customer two tanks; the second would have overwritten
+#     the first. We key the Postgres row on ``customer_tank_id`` from the
+#     document body, which remaps the id as it copies rather than importing the
+#     collision, and the primary key then makes it unreintroducible.
+#   * ``truck_compartments`` has no single id field at all: the ES ``_id`` is the
+#     composite ``f"{truck_id}_{compartment_id}"``, and the application fetches
+#     compartments by it, so it is copied verbatim.
+#   * ``fuel_stations`` carries two id conventions in one index — bare
+#     ``station_id`` for seeded documents and the ATG connector,
+#     ``station_id::fuel_type`` for anything ``FuelService.create_station``
+#     wrote — so its ``_id`` is likewise copied verbatim rather than derived.
+_FUEL_ASSET_BACKFILL = [
+    ("customer_tank", _CUSTOMER_TANKS_INDEX),
+    ("truck_compartment", _TRUCK_COMPARTMENTS_INDEX),
+    ("fuel_station", _FUEL_STATIONS_INDEX),
+]
+
 _SCROLL_SIZE = 500
 
 
@@ -128,6 +158,38 @@ def _parse_date(value: Optional[str]) -> Optional[date]:
         return None
 
 
+def _fuel_asset_doc_id(
+    aggregate_type: str, pk_field: str, es_id: str, src: Dict[str, Any]
+) -> Optional[str]:
+    """Resolve the Postgres primary key for one fuel-asset document.
+
+    Each of the three needs a different rule, which is why this is a function
+    rather than ``src.get(pk_field)`` inline:
+
+    ``customer_tank``
+        Read from the document body, deliberately ignoring the Elasticsearch
+        ``_id``. The two disagree in the live cluster: the ``_id`` is the
+        *customer* id because ``seed_all_data._resolve_json_doc_id`` walked one
+        ordered candidate list and the foreign key won. Copying the ``_id``
+        would import a collision that only stayed latent because no fixture gave
+        one customer two tanks.
+
+    ``truck_compartment`` / ``fuel_station``
+        Take the ``_id`` verbatim. Neither can be reconstructed from the body:
+        the compartment id is the composite ``truck_id_compartment_id``, and a
+        station document may be keyed either bare or as
+        ``station_id::fuel_type`` with nothing in the body to say which.
+
+    Returns ``None`` when the document cannot be keyed; the caller skips it
+    rather than minting a synthetic id, which would leave the row unreachable
+    from every reader.
+    """
+    if aggregate_type == "customer_tank":
+        value = src.get(pk_field)
+        return str(value) if value else None
+    return str(es_id) if es_id else None
+
+
 def _scroll(es_client, index: str, tenant_id: Optional[str]) -> Iterable[Dict[str, Any]]:
     """Yield ``_source`` dicts for every doc in ``index`` (optionally one tenant).
 
@@ -150,6 +212,39 @@ def _scroll(es_client, index: str, tenant_id: Optional[str]) -> Iterable[Dict[st
     while hits:
         for hit in hits:
             yield hit["_source"]
+        resp = es_client.scroll(scroll_id=scroll_id, scroll="2m")
+        scroll_id = resp.get("_scroll_id")
+        hits = resp["hits"]["hits"]
+
+
+def _scroll_with_ids(
+    es_client, index: str, tenant_id: Optional[str]
+) -> Iterable[tuple]:
+    """Yield ``(_id, _source)`` pairs, for aggregates keyed by the ES ``_id``.
+
+    A separate generator rather than a change to :func:`_scroll` so the twenty
+    existing backfill loops keep their signature. Two of the three fuel-asset
+    tables key on the Elasticsearch ``_id``: ``truck_compartments`` because the
+    id is the composite ``truck_id_compartment_id``, and ``fuel_stations``
+    because the index carries two id conventions and the document body cannot
+    tell them apart.
+    """
+    query: Dict[str, Any] = {"match_all": {}}
+    if tenant_id:
+        query = {"term": {"tenant_id": tenant_id}}
+
+    if not es_client.indices.exists(index=index):
+        logger.warning("Index %s does not exist — nothing to backfill", index)
+        return
+
+    resp = es_client.search(
+        index=index, query=query, size=_SCROLL_SIZE, scroll="2m"
+    )
+    scroll_id = resp.get("_scroll_id")
+    hits = resp["hits"]["hits"]
+    while hits:
+        for hit in hits:
+            yield hit["_id"], hit["_source"]
         resp = es_client.scroll(scroll_id=scroll_id, scroll="2m")
         scroll_id = resp.get("_scroll_id")
         hits = resp["hits"]["hits"]
@@ -191,6 +286,7 @@ async def backfill(tenant_id: Optional[str] = None, *, dry_run: bool = False) ->
         "tenant_job_policies": 0,
         "drivers": 0, "depots": 0, "terminals": 0, "asset_certifications": 0,
         "intake_channels": 0, "trucks": 0, "locations": 0,
+        "customer_tanks": 0, "truck_compartments": 0, "fuel_stations": 0,
     }
 
     # --- Customers ---------------------------------------------------------
@@ -558,6 +654,33 @@ async def backfill(tenant_id: Optional[str] = None, *, dry_run: bool = False) ->
                     **typed,
                 ))
 
+    # --- Fuel assets (hybrid document tables) -------------------------------
+    _fa_count_key = {
+        _CUSTOMER_TANKS_INDEX: "customer_tanks",
+        _TRUCK_COMPARTMENTS_INDEX: "truck_compartments",
+        _FUEL_STATIONS_INDEX: "fuel_stations",
+    }
+    for aggregate_type, index in _FUEL_ASSET_BACKFILL:
+        model, pk_field, typed_cols = hybrid_spec_for(aggregate_type)
+        ckey = _fa_count_key[index]
+        async with session_scope() as session:
+            for es_id, src in _scroll_with_ids(es_client, index, tenant_id):
+                doc_id = _fuel_asset_doc_id(aggregate_type, pk_field, es_id, src)
+                if not doc_id or await session.get(model, doc_id):
+                    continue
+                counts[ckey] += 1
+                if dry_run:
+                    continue
+                typed = {c: src.get(c) for c in typed_cols if c in src}
+                session.add(model(
+                    **{pk_field: doc_id},
+                    tenant_id=src.get("tenant_id") or "unknown",
+                    document=dict(src),
+                    created_at=_parse_dt(src.get("created_at")) or datetime.utcnow(),
+                    updated_at=_parse_dt(src.get("updated_at")) or datetime.utcnow(),
+                    **typed,
+                ))
+
     verb = "Would backfill" if dry_run else "Backfilled"
     logger.info(
         "%s: %d customers, %d accounts, %d invoices, %d payments, "
@@ -567,7 +690,8 @@ async def backfill(tenant_id: Optional[str] = None, *, dry_run: bool = False) ->
         "%d compliance_pricing_rules, %d supplier_contracts, "
         "%d fuel_orders_current, %d jobs_current, %d shipments_current, "
         "%d tenant_job_policies, %d drivers, %d depots, %d terminals, "
-        "%d asset_certifications, %d intake_channels, %d trucks, %d locations%s",
+        "%d asset_certifications, %d intake_channels, %d trucks, %d locations, "
+        "%d customer_tanks, %d truck_compartments, %d fuel_stations%s",
         verb, counts["customers"], counts["accounts"], counts["invoices"],
         counts["payments"], counts["price_books"], counts["pricing_rules"],
         counts["invoice_events"], counts["account_events"], counts["dunning_events"],
@@ -579,6 +703,8 @@ async def backfill(tenant_id: Optional[str] = None, *, dry_run: bool = False) ->
         counts["drivers"], counts["depots"], counts["terminals"],
         counts["asset_certifications"], counts["intake_channels"],
         counts["trucks"], counts["locations"],
+        counts["customer_tanks"], counts["truck_compartments"],
+        counts["fuel_stations"],
         f" (tenant={tenant_id})" if tenant_id else "",
     )
     return counts

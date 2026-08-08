@@ -45,6 +45,11 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from commerce.services.commerce_persistence_bridge import (
+    mirror_current_state_delete,
+    mirror_current_state_fields,
+    mirror_current_state_upsert,
+)
 from fuel.services.fuel_ops_es_mappings import CUSTOMER_TANKS_INDEX
 from fuel.services.fuel_product_catalog import (
     UnknownFuelProductError,
@@ -443,6 +448,13 @@ class CustomerTankRepository:
 
         doc = model.model_dump(mode="json", exclude_none=False)
         await self._es.index_document(self._index, model.customer_tank_id, doc)
+        # Postgres source of truth. ``customer_tanks`` used to exist only in
+        # Elasticsearch, so recreating the cluster destroyed calibrated
+        # k-factors and ATG level history outright. Best-effort during the
+        # dual-write soak; ES stays authoritative until read cutover.
+        await mirror_current_state_upsert(
+            "customer_tank", doc, doc_id=model.customer_tank_id
+        )
 
         return model
 
@@ -639,6 +651,12 @@ class CustomerTankRepository:
         # Persist only the delta — ES _update merges into the live doc.
         partial = validated.model_dump(mode="json", include=set(clean_patch.keys()) | {"updated_at"})
         await self._es.update_document(self._index, customer_tank_id, partial)
+        # Mirror the same delta into Postgres. Sending the delta rather than the
+        # merged document keeps the two stores converging on the same result even
+        # if a concurrent writer touched a field this patch does not name.
+        await mirror_current_state_fields(
+            "customer_tank", tenant_id, customer_tank_id, partial
+        )
 
         return validated
 
@@ -670,7 +688,12 @@ class CustomerTankRepository:
                 owning_tenant_id=owner,
             )
 
-        return bool(await self._es.delete_document(self._index, customer_tank_id))
+        deleted = bool(await self._es.delete_document(self._index, customer_tank_id))
+        if deleted:
+            await mirror_current_state_delete(
+                "customer_tank", tenant_id, customer_tank_id
+            )
+        return deleted
 
     # ------------------------------------------------------------------
     # Internals

@@ -21,8 +21,17 @@ import {
 // API base URL for WebSocket
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080/api";
-const WS_BASE_URL = API_BASE_URL.replace("http", "ws").replace("/api", "");
-const PLAN_EXECUTION_WS_BASE_URL = `${WS_BASE_URL}/ws/plan-execution`;
+// The /api strip is ANCHORED (/\/api$/), matching every other WebSocket hook.
+// It used to be an unanchored .replace("/api", ""), which was correct only while
+// the backend host did not itself start with "api". Against the deployed origin
+// https://api.runsheetops.com/api the unanchored form matched the "/api" inside
+// "//api.runsheetops.com" and produced wss:/.runsheetops.com/api — an unparseable
+// host, so plan-execution sockets failed while every other socket worked.
+const WS_BASE_URL = API_BASE_URL.replace(/\/api$/, "").replace("http", "ws");
+// Exported so websocketUrlDerivation.test.ts asserts against the REAL derivation
+// rather than a copy of the expression, which would pass even if this line
+// regressed.
+export const PLAN_EXECUTION_WS_BASE_URL = `${WS_BASE_URL}/ws/plan-execution`;
 
 /**
  * Build WebSocket URL with JWT token for authentication

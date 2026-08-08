@@ -67,25 +67,32 @@ def _make_service(
         }
     )
 
-    # Raw client for optimistic concurrency
+    # The service used ``client.get`` + ``client.update`` with ``if_seq_no`` for
+    # optimistic concurrency; both bypass the document-store backend switch, so
+    # after the cutover the read would have gone to Elasticsearch and the write to
+    # Postgres — the worst possible split for a concurrency guard. It now uses
+    # ``get_document`` + ``atomic_update``, and the guard is stated in the terms it
+    # actually protects: the status must still be what the caller read.
+    #
+    # Backed by a real in-memory document so ``atomic_update`` behaves like the
+    # facade does: the transform sees the CURRENT stored state, which is what lets
+    # the concurrency tests below simulate a race by mutating it.
+    es_service.stored_document = dict(get_response) if get_response else {}
+
+    async def _get_document(index, doc_id):
+        return dict(es_service.stored_document) if es_service.stored_document else None
+
+    async def _atomic_update(index, doc_id, transform, *, upsert=None, **kwargs):
+        current = dict(es_service.stored_document)
+        updated = transform(current)
+        if updated is None:
+            return (dict(es_service.stored_document), False)
+        es_service.stored_document = dict(updated)
+        return (dict(updated), True)
+
+    es_service.get_document = AsyncMock(side_effect=_get_document)
+    es_service.atomic_update = AsyncMock(side_effect=_atomic_update)
     es_service.client = MagicMock()
-    if get_response:
-        es_service.client.get = MagicMock(
-            return_value={
-                "_source": get_response,
-                "_seq_no": 1,
-                "_primary_term": 1,
-            }
-        )
-    else:
-        es_service.client.get = MagicMock(
-            return_value={
-                "_source": {},
-                "_seq_no": 1,
-                "_primary_term": 1,
-            }
-        )
-    es_service.client.update = MagicMock(return_value={"result": "updated"})
 
     if ws_manager is None:
         ws_manager = MagicMock()
@@ -242,11 +249,11 @@ class TestApprove:
         service = _make_service(get_response=entry)
         await service.approve("action-1", "reviewer-1")
 
-        # Should use client.update with if_seq_no and if_primary_term
-        service._es.client.update.assert_called()
-        call_kwargs = service._es.client.update.call_args[1]
-        assert call_kwargs["if_seq_no"] == 1
-        assert call_kwargs["if_primary_term"] == 1
+        # The concurrency guard is now stated in the terms it protects: the
+        # status must still be what the caller read. Asserting ``if_seq_no`` was
+        # asserting the mechanism; this asserts the invariant.
+        service._es.atomic_update.assert_called()
+        assert service._es.stored_document["status"] == "approved"
 
     async def test_approve_broadcasts_approval_approved(self):
         entry = self._pending_entry()
@@ -387,9 +394,8 @@ class TestReject:
         service = _make_service(get_response=entry)
         await service.reject("action-1", "reviewer-1")
 
-        call_kwargs = service._es.client.update.call_args[1]
-        assert call_kwargs["if_seq_no"] == 1
-        assert call_kwargs["if_primary_term"] == 1
+        service._es.atomic_update.assert_called()
+        assert service._es.stored_document["status"] == "rejected"
 
 
 # ---------------------------------------------------------------------------
@@ -668,8 +674,21 @@ class TestConcurrencyControl:
             "tenant_id": "t1",
         }
         service = _make_service(get_response=entry)
-        service._es.client.update = MagicMock(
-            side_effect=Exception("version_conflict_engine_exception")
+
+        # Simulate the actual race rather than a synthetic ES error: another
+        # reviewer approves between this caller's read and its write, so the
+        # status the caller checked is no longer the stored one. Under the old
+        # mechanism this showed up as a sequence-number mismatch; the guard now
+        # names the condition, and the test can express it directly.
+        original_get = service._es.get_document.side_effect
+
+        async def _read_then_someone_else_approves(index, doc_id):
+            document = await original_get(index, doc_id)
+            service._es.stored_document["status"] = "approved"
+            return document
+
+        service._es.get_document = AsyncMock(
+            side_effect=_read_then_someone_else_approves
         )
 
         with pytest.raises(RuntimeError, match="Concurrent modification"):
@@ -685,7 +704,7 @@ class TestConcurrencyControl:
             "tenant_id": "t1",
         }
         service = _make_service(get_response=entry)
-        service._es.client.update = MagicMock(
+        service._es.atomic_update = AsyncMock(
             side_effect=Exception("connection_timeout")
         )
 

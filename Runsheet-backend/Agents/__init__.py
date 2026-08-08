@@ -39,7 +39,6 @@ _PATCH_PLACEHOLDERS = {
         "SLAGuardianAgent",
     ),
     "mainagent": ("configure_orchestrator",),
-    "agent_es_mappings": ("setup_agent_indices",),
 }
 
 

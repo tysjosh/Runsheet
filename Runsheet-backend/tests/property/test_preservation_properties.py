@@ -72,6 +72,16 @@ def preservation_app():
         "hits": {"hits": [], "total": {"value": 0, "relation": "eq"}},
         "aggregations": {},
     })
+    # The ops endpoints call ``es.search_documents(...)`` now instead of
+    # ``es.client.search(...)`` — a raw client call bypasses the
+    # Postgres/Elasticsearch backend switch. Delegated to the same canned client
+    # so the assertions below, which inspect ``client.search.call_args`` to check
+    # tenant scoping, keep reading the query they were written against.
+    mock_ops_es.search_documents = AsyncMock(
+        side_effect=lambda index, query, **kw: mock_ops_es.client.search(
+            index=index, body=query
+        )
+    )
 
     # Mock FeatureFlagService
     mock_ff_service = MagicMock()
@@ -230,12 +240,27 @@ class TestOpsTenantScoping:
     """
 
     @pytest.fixture(autouse=True)
-    def _enable_legacy_ng_delivery(self, monkeypatch):
+    def _enable_legacy_ng_delivery(self, monkeypatch, preservation_app):
         """``/api/ops/shipments`` is part of the legacy NG last-mile surface,
         gated behind ``legacy_ng_delivery`` (default OFF). Enable it so the
         tenant-scoping property still reaches the ES query.
 
         Audit reference: product-owner-audit-2026-05-08 recommendation #1.
+
+        ``preservation_app`` is requested here purely for ORDERING, and that is
+        load-bearing. Building the app imports ``main``, which runs
+        ``load_dotenv(..., override=True)`` — and ``.env.test`` sets
+        ``LEGACY_NG_DELIVERY_ENABLED=false``, so the import overwrites this
+        monkeypatch in ``os.environ``. Requesting the app makes it exist first,
+        so the variable is set afterwards and survives.
+
+        Without the ordering the test passed on luck: in a full-suite run some
+        earlier module had already imported ``main``, so ``load_dotenv`` did not
+        run again and the monkeypatch stood. Run alone, the module got
+        ``LEGACY_NG_DELIVERY_DISABLED`` — and the original assertion (that
+        ``client.search`` was called) could not tell a closed gate from a genuine
+        failure to query. The ``status_code == 200`` assertion added below is what
+        made it visible.
         """
         monkeypatch.setenv("LEGACY_NG_DELIVERY_ENABLED", "true")
 
@@ -255,6 +280,7 @@ class TestOpsTenantScoping:
             "/api/ops/shipments",
             headers=token_headers,
         )
+        assert resp.status_code == 200, resp.text
 
         # The ops endpoint uses inject_tenant_filter which wraps the query
         # with a bool.filter containing tenant_id

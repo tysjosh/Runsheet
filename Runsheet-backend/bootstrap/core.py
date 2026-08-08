@@ -10,6 +10,7 @@ import asyncio
 import logging
 
 from bootstrap.container import ServiceContainer
+from persistence.leader_election import run_periodic
 
 logger = logging.getLogger(__name__)
 
@@ -209,35 +210,30 @@ async def assert_driver_surface_wired(container: ServiceContainer) -> None:
             "and the order.delivered subscribers stay dormant"
         )
 
-    # Declared-index presence. Bounded work: one exists() call per declared
-    # index. A failure of the check itself is never treated as a violation —
-    # an unreachable cluster is a different fault with its own signal.
-    es_service = container.es_service if container.has("es_service") else None
-    if es_service is None or getattr(es_service, "client", None) is None:
-        logger.debug(
-            "Skipping driver index presence assertion: "
-            "Elasticsearch client not connected"
-        )
-    else:
-        try:
-            from driver.services.driver_es_mappings import DRIVER_INDEX_MAPPINGS
-
-            missing = [
-                index_name
-                for index_name in DRIVER_INDEX_MAPPINGS
-                if not es_service.client.indices.exists(index=index_name)
-            ]
-            if missing:
-                problems.append(
-                    "declared driver index absent from Elasticsearch: "
-                    f"{', '.join(sorted(missing))} — the dynamic: strict "
-                    "declaration is not in force for these, so the first write "
-                    "auto-creates them with dynamic: true"
-                )
-        except Exception as exc:
-            logger.warning(
-                "Driver index presence assertion could not complete: %s", exc
-            )
+    # The declared-index presence check is gone with the cluster.
+    #
+    # It called ``indices.exists`` for each declared driver index and complained
+    # about any that were absent, because on Elasticsearch the first write to a
+    # missing index auto-created it with ``dynamic: true`` — silently discarding
+    # the ``dynamic: strict`` declaration. The document store is one Postgres table
+    # created by migration ``0009_es_documents``, so there is no index to be absent
+    # and that failure mode cannot occur.
+    #
+    # Phase 5 scoped the check with ``settings.document_store_is_postgres``. Phase 6
+    # deleted that property and left the read here, which raised AttributeError into
+    # the caller's ``except`` in ``bootstrap/__init__.py`` — so the WHOLE assertion,
+    # including the ``order_service`` check above, silently stopped running in every
+    # environment. Found by booting with ENVIRONMENT=staging; the unit tests missed
+    # it because they set ``document_store_is_postgres`` on a ``MagicMock``
+    # container, supplying an attribute production settings no longer had.
+    #
+    # What IS lost with strict mappings is worth stating rather than glossing:
+    # ``dynamic: strict`` rejected an undeclared field at write time, so a typo'd
+    # key was a 400. jsonb accepts anything, so the same typo now stores silently.
+    # The compensating controls are the Pydantic models on the way in
+    # (``extra="forbid"`` on every driver-surface model) and
+    # ``persistence/document_field_policy.py``, which still reads the declared
+    # mappings — that is why the mapping modules survive.
 
     if not problems:
         return
@@ -271,6 +267,32 @@ async def initialize(app, container: ServiceContainer) -> None:
     # Settings
     settings = get_settings()
     container.settings = settings
+
+    # ── Sweep leader election ─────────────────────────────────────────
+    # Started first, before anything schedules a periodic job, because every
+    # background job in this process consults it. Without it the API had to run
+    # as exactly one task — two processes meant two AR-aging snapshots for the
+    # same day and two overdue sweeps racing the same invoices — which made
+    # every deploy a downtime window. See persistence/leader_election.py.
+    try:
+        from persistence.leader_election import SweepLeader, set_sweep_leader
+
+        sweep_leader = SweepLeader()
+        set_sweep_leader(sweep_leader)
+        container.sweep_leader = sweep_leader
+        await sweep_leader.start()
+    except Exception as exc:
+        # Fail closed on the *scheduling* side rather than the request side: if
+        # election cannot start, leave no leader registered so periodic jobs run
+        # (single-process assumption) and say so loudly, rather than silently
+        # running no background work at all.
+        logger.error(
+            "Sweep leader election failed to start (%s) — periodic jobs will run "
+            "in every process. Do NOT run more than one replica until this is "
+            "resolved.",
+            exc,
+            exc_info=True,
+        )
 
     # Telemetry
     telemetry_service = initialize_telemetry(settings)
@@ -333,13 +355,6 @@ async def initialize(app, container: ServiceContainer) -> None:
     # pattern in bootstrap/agents.py but gates on the flag so tenants
     # without commerce enabled never pay the index-creation cost.
     if getattr(settings, "commerce_backbone_enabled", False):
-        try:
-            from commerce.services.commerce_es_mappings import setup_commerce_indices
-
-            setup_commerce_indices(elasticsearch_service)
-            logger.info("Commerce backbone ES indices provisioned")
-        except Exception as exc:
-            logger.warning("Commerce backbone ES index setup failed: %s", exc)
 
         # ── Commerce Customer API wiring (Task 3.3) ────────────────────
         # Wire the CustomerService into the customer_endpoints module so
@@ -762,30 +777,24 @@ async def initialize(app, container: ServiceContainer) -> None:
                 else _CreditServiceCls(es_service=elasticsearch_service)
             )
 
-            async def _periodic_credit_override_expiry() -> None:
-                """Background task that expires stale credit overrides."""
-                try:
-                    while True:
-                        await asyncio.sleep(CREDIT_OVERRIDE_EXPIRY_INTERVAL_SECONDS)
-                        try:
-                            expired = await run_credit_override_expiry_cycle(
-                                es_service=elasticsearch_service,
-                                credit_service=_expiry_credit_service,
-                            )
-                            if expired:
-                                logger.info(
-                                    "Credit override expiry job: %d override(s) expired",
-                                    expired,
-                                )
-                        except Exception as exc:
-                            logger.error(
-                                "Credit override expiry job failed: %s", exc
-                            )
-                except asyncio.CancelledError:
-                    logger.info("Credit override expiry task cancelled")
+            async def _credit_override_expiry_cycle() -> None:
+                """One pass expiring stale credit overrides."""
+                expired = await run_credit_override_expiry_cycle(
+                    es_service=elasticsearch_service,
+                    credit_service=_expiry_credit_service,
+                )
+                if expired:
+                    logger.info(
+                        "Credit override expiry job: %d override(s) expired",
+                        expired,
+                    )
 
             _credit_override_expiry_task = asyncio.create_task(
-                _periodic_credit_override_expiry()
+                run_periodic(
+                    "commerce.credit-override-expiry",
+                    CREDIT_OVERRIDE_EXPIRY_INTERVAL_SECONDS,
+                    _credit_override_expiry_cycle,
+                )
             )
             logger.info(
                 "Credit override expiry job started (interval: %ds)",
@@ -814,30 +823,24 @@ async def initialize(app, container: ServiceContainer) -> None:
                 else _InvoiceServiceCls(es_service=elasticsearch_service)
             )
 
-            async def _periodic_invoice_overdue() -> None:
-                """Background task that transitions past-due invoices to overdue."""
-                try:
-                    while True:
-                        await asyncio.sleep(INVOICE_OVERDUE_INTERVAL_SECONDS)
-                        try:
-                            transitioned = await run_invoice_overdue_cycle(
-                                es_service=elasticsearch_service,
-                                invoice_service=_overdue_invoice_service,
-                            )
-                            if transitioned:
-                                logger.info(
-                                    "Invoice overdue job: %d invoice(s) transitioned",
-                                    transitioned,
-                                )
-                        except Exception as exc:
-                            logger.error(
-                                "Invoice overdue job failed: %s", exc
-                            )
-                except asyncio.CancelledError:
-                    logger.info("Invoice overdue task cancelled")
+            async def _invoice_overdue_cycle() -> None:
+                """One pass transitioning past-due invoices to overdue."""
+                transitioned = await run_invoice_overdue_cycle(
+                    es_service=elasticsearch_service,
+                    invoice_service=_overdue_invoice_service,
+                )
+                if transitioned:
+                    logger.info(
+                        "Invoice overdue job: %d invoice(s) transitioned",
+                        transitioned,
+                    )
 
             _invoice_overdue_task = asyncio.create_task(
-                _periodic_invoice_overdue()
+                run_periodic(
+                    "commerce.invoice-overdue",
+                    INVOICE_OVERDUE_INTERVAL_SECONDS,
+                    _invoice_overdue_cycle,
+                )
             )
             logger.info(
                 "Invoice overdue job started (interval: %ds)",
@@ -862,34 +865,26 @@ async def initialize(app, container: ServiceContainer) -> None:
                 else None
             )
 
-            async def _periodic_invoice_draft_finalize() -> None:
-                """Background task that finalizes drafts past their grace."""
-                try:
-                    while True:
-                        await asyncio.sleep(
-                            INVOICE_DRAFT_FINALIZE_INTERVAL_SECONDS
-                        )
-                        try:
-                            finalized = await run_invoice_draft_finalize_cycle(
-                                es_service=elasticsearch_service,
-                                invoice_service=_overdue_invoice_service,
-                                redis_client=_draft_redis,
-                            )
-                            if finalized:
-                                logger.info(
-                                    "Invoice draft-finalize job: %d "
-                                    "invoice(s) finalized",
-                                    finalized,
-                                )
-                        except Exception as exc:
-                            logger.error(
-                                "Invoice draft-finalize job failed: %s", exc
-                            )
-                except asyncio.CancelledError:
-                    logger.info("Invoice draft-finalize task cancelled")
+            async def _invoice_draft_finalize_cycle() -> None:
+                """One pass finalizing drafts past their grace."""
+                finalized = await run_invoice_draft_finalize_cycle(
+                    es_service=elasticsearch_service,
+                    invoice_service=_overdue_invoice_service,
+                    redis_client=_draft_redis,
+                )
+                if finalized:
+                    logger.info(
+                        "Invoice draft-finalize job: %d "
+                        "invoice(s) finalized",
+                        finalized,
+                    )
 
             _invoice_draft_finalize_task = asyncio.create_task(
-                _periodic_invoice_draft_finalize()
+                run_periodic(
+                    "commerce.invoice-draft-finalize",
+                    INVOICE_DRAFT_FINALIZE_INTERVAL_SECONDS,
+                    _invoice_draft_finalize_cycle,
+                )
             )
             logger.info(
                 "Invoice draft-finalize job started (interval: %ds)",
@@ -919,30 +914,24 @@ async def initialize(app, container: ServiceContainer) -> None:
             )
             container.commerce_ar_aging_service = _snapshot_ar_aging_service
 
-            async def _periodic_ar_aging_snapshot() -> None:
-                """Background task that writes daily AR aging snapshots."""
-                try:
-                    while True:
-                        await asyncio.sleep(AR_AGING_SNAPSHOT_INTERVAL_SECONDS)
-                        try:
-                            written = await run_ar_aging_snapshot_cycle(
-                                es_service=elasticsearch_service,
-                                ar_aging_service=_snapshot_ar_aging_service,
-                            )
-                            if written:
-                                logger.info(
-                                    "AR aging snapshot job: %d snapshot(s) written",
-                                    written,
-                                )
-                        except Exception as exc:
-                            logger.error(
-                                "AR aging snapshot job failed: %s", exc
-                            )
-                except asyncio.CancelledError:
-                    logger.info("AR aging snapshot task cancelled")
+            async def _ar_aging_snapshot_cycle() -> None:
+                """One pass writing daily AR aging snapshots."""
+                written = await run_ar_aging_snapshot_cycle(
+                    es_service=elasticsearch_service,
+                    ar_aging_service=_snapshot_ar_aging_service,
+                )
+                if written:
+                    logger.info(
+                        "AR aging snapshot job: %d snapshot(s) written",
+                        written,
+                    )
 
             _ar_aging_snapshot_task = asyncio.create_task(
-                _periodic_ar_aging_snapshot()
+                run_periodic(
+                    "commerce.ar-aging-snapshot",
+                    AR_AGING_SNAPSHOT_INTERVAL_SECONDS,
+                    _ar_aging_snapshot_cycle,
+                )
             )
             logger.info(
                 "AR aging snapshot job started (interval: %ds)",
@@ -985,6 +974,18 @@ async def shutdown(app, container: ServiceContainer) -> None:
     global _credit_override_expiry_task
     global _invoice_overdue_task
     global _ar_aging_snapshot_task
+
+    # Stand down as sweep leader first, so the replacement task can pick up
+    # leadership as soon as this one's lock connection closes rather than
+    # waiting for the OS to reap it.
+    try:
+        from persistence.leader_election import set_sweep_leader
+
+        if container.has("sweep_leader"):
+            await container.sweep_leader.stop()
+        set_sweep_leader(None)
+    except Exception as exc:
+        logger.warning("Sweep leader shutdown failed: %s", exc)
 
     # Cancel the credit override expiry background task if running.
     if _credit_override_expiry_task is not None and not _credit_override_expiry_task.done():

@@ -641,6 +641,9 @@ async def configure_compartments(
     tenant_id = tenant.tenant_id
 
     from Agents.support.mvp_es_mappings import TRUCK_COMPARTMENTS_INDEX
+    from commerce.services.commerce_persistence_bridge import (
+        mirror_current_state_upsert,
+    )
 
     try:
         # Write each compartment document to the truck_compartments index
@@ -676,6 +679,12 @@ async def configure_compartments(
             # Use composite key: truck_id + compartment_id
             doc_id = f"{truck_id}_{compartment.compartment_id}"
             await es.index_document(TRUCK_COMPARTMENTS_INDEX, doc_id, doc)
+            # Postgres source of truth. The composite id is passed explicitly
+            # because it is what every reader fetches by; the repository can
+            # rebuild it from the document but should not have to.
+            await mirror_current_state_upsert(
+                "truck_compartment", doc, doc_id=doc_id
+            )
             written_compartments.append(doc)
 
         logger.info(

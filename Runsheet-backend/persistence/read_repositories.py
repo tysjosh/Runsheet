@@ -547,6 +547,10 @@ class HybridReadRepository:
         # legacy generic-ES indices may carry no tenant_id
         "truck": ("TruckORM", "truck_id", True),
         "location": ("LocationORM", "location_id", True),
+        # fuel assets (previously Elasticsearch-only)
+        "customer_tank": ("CustomerTankORM", "customer_tank_id", False),
+        "truck_compartment": ("TruckCompartmentORM", "compartment_key", False),
+        "fuel_station": ("FuelStationORM", "station_key", False),
     }
 
     @classmethod

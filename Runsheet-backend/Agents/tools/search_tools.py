@@ -110,7 +110,10 @@ async def search_fleet_data(query: str, asset_type: str = None) -> str:
             return f"No fleet data found for query: '{query}'{filter_msg}"
 
         type_label = asset_type if asset_type else "assets"
-        response_text = f"🚛 Found {len(results)} {type_label} matching '{query}':\n\n"
+        # "Showing", not "Found": this is a capped page, and phrasing a page
+        # length as a total is what let the agent report a count it had never
+        # measured. A true total would need semantic_search to return one.
+        response_text = f"🚛 Showing {len(results)} {type_label} matching '{query}':\n\n"
         for asset in results:
             # Use asset_name or plate_number as the display name
             display_name = asset.get('asset_name') or asset.get('plate_number') or asset.get('vessel_name') or asset.get('equipment_model') or asset.get('container_number') or 'Unknown'
@@ -134,47 +137,20 @@ async def search_fleet_data(query: str, asset_type: str = None) -> str:
 
 
 @tool
-async def search_orders(query: str) -> str:
-    """
-    Search order data using natural language.
+# ``search_orders`` used to live here and has been removed rather than repaired.
+#
+# It searched an index named ``orders``, which does not exist — live orders are in
+# ``fuel_orders_current``. It also capped at 5 hits and returned ``len(page)``
+# phrased as a count, so it could not report a true total even against a healthy
+# index, and it rendered ``customer`` / ``value`` / ``items`` / ``priority``
+# against a document whose fields are ``customer_name`` / ``gallons_requested`` /
+# ``product_code`` / ``status``.
+#
+# ``Agents.tools.order_tools.search_orders`` already queries the live index with
+# real filters and a true total, and is what ``mainagent``'s system prompt
+# documents. Keeping a second tool of the same name reaching different data is
+# what let one reply report two different counts for the same question.
 
-    The search is scoped to the current tenant so cross-tenant orders never leak.
-
-    Args:
-        query: Natural language search query (e.g., "network equipment orders", "high priority deliveries")
-    
-    Returns:
-        Search results from orders database
-    """
-    start_time = time.time()
-    success = False
-    error_msg = None
-    tenant_id = get_current_tenant()
-
-    try:
-        logger.info(f"🔍 Searching orders for: {query}")
-        results = await elasticsearch_service.semantic_search(tenant_id, "orders", query, ["items", "customer"], 5)
-        
-        if not results:
-            success = True
-            return f"No orders found for query: '{query}'"
-        
-        response = f"📦 Found {len(results)} orders matching '{query}':\n\n"
-        for order in results:
-            response += f"• **{order.get('order_id')}** - {order.get('customer')}\n"
-            response += f"  Status: {order.get('status')}\n"
-            response += f"  Value: ${order.get('value', 0):,.2f}\n"
-            response += f"  Items: {order.get('items', 'N/A')}\n"
-            response += f"  Priority: {order.get('priority', 'N/A')}\n\n"
-        
-        success = True
-        return response
-    except Exception as e:
-        error_msg = str(e)
-        logger.exception("Error searching orders")
-        return f"Error searching orders: {str(e)}"
-    finally:
-        _log_tool_invocation("search_orders", {"query": query}, start_time, success, error_msg)
 
 @tool
 async def search_support_tickets(query: str) -> str:
@@ -225,7 +201,7 @@ async def search_support_tickets(query: str) -> str:
             success = True
             return f"No support tickets found for query: '{query}'"
         
-        response = f"🎫 Found {len(results)} support tickets matching '{query}':\n\n"
+        response = f"🎫 Showing {len(results)} support tickets matching '{query}':\n\n"
         for ticket in results:
             response += f"• **{ticket.get('ticket_id')}** - {ticket.get('customer')}\n"
             response += f"  Issue: {ticket.get('issue')}\n"
@@ -284,7 +260,7 @@ async def search_inventory(query: str) -> str:
             success = True
             return f"No inventory items found for: '{query}'"
         
-        response = f"📦 Found {len(results)} inventory items:\n\n"
+        response = f"📦 Showing {len(results)} inventory items:\n\n"
         for item in results:
             status_emoji = "🟢" if item.get('status') == 'in_stock' else "🟡" if item.get('status') == 'low_stock' else "🔴"
             response += f"{status_emoji} **{item.get('name')}**\n"

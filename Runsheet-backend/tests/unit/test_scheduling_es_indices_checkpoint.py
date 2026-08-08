@@ -23,37 +23,17 @@ import pytest
 # ---------------------------------------------------------------------------
 _mock_es_module = MagicMock()
 _mock_es_class = MagicMock()
-_mock_es_class.strip_serverless_incompatible_settings = staticmethod(lambda m: m)
 _mock_es_module.ElasticsearchService = _mock_es_class
 _mock_es_module.elasticsearch_service = MagicMock()
 sys.modules.setdefault("services.elasticsearch_service", _mock_es_module)
 
-from scheduling.services.scheduling_es_mappings import (
-    JOB_EVENTS_ILM_POLICY,
-    JOB_EVENTS_ILM_POLICY_NAME,
-    JOB_EVENTS_INDEX,
-    JOB_EVENTS_MAPPING,
-    JOBS_CURRENT_INDEX,
-    JOBS_CURRENT_MAPPING,
-    TENANT_JOB_POLICIES_INDEX,
-    TENANT_JOB_POLICIES_MAPPING,
-    setup_scheduling_indices,
-)
+from scheduling.services.scheduling_es_mappings import JOB_EVENTS_ILM_POLICY, JOB_EVENTS_ILM_POLICY_NAME, JOB_EVENTS_INDEX, JOB_EVENTS_MAPPING, JOBS_CURRENT_INDEX, JOBS_CURRENT_MAPPING, TENANT_JOB_POLICIES_INDEX, TENANT_JOB_POLICIES_MAPPING
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_es_service(existing_indices=None):
-    """Return a mock ElasticsearchService whose .client behaves like an ES client."""
-    existing = existing_indices or set()
-    es_service = MagicMock()
-    es_service.is_serverless = False
-    client = MagicMock()
-    client.indices.exists.side_effect = lambda index: index in existing
-    es_service.client = client
-    return es_service, client
 
 
 # ---------------------------------------------------------------------------
@@ -63,40 +43,9 @@ def _make_es_service(existing_indices=None):
 class TestIndicesCreatedOnStartup:
     """Verify that setup_scheduling_indices creates both indices."""
 
-    def test_creates_jobs_current_and_job_events(self):
-        es_service, client = _make_es_service()
-        setup_scheduling_indices(es_service)
 
-        created = {c.kwargs["index"] for c in client.indices.create.call_args_list}
-        assert JOBS_CURRENT_INDEX in created
-        assert JOB_EVENTS_INDEX in created
 
-    def test_skips_existing_indices(self):
-        es_service, client = _make_es_service(
-            existing_indices={JOBS_CURRENT_INDEX, JOB_EVENTS_INDEX, TENANT_JOB_POLICIES_INDEX}
-        )
-        setup_scheduling_indices(es_service)
-        client.indices.create.assert_not_called()
 
-    def test_jobs_current_uses_correct_mapping(self):
-        es_service, client = _make_es_service()
-        setup_scheduling_indices(es_service)
-
-        for c in client.indices.create.call_args_list:
-            if c.kwargs["index"] == JOBS_CURRENT_INDEX:
-                assert c.kwargs["body"] == JOBS_CURRENT_MAPPING
-                return
-        pytest.fail("jobs_current index was not created")
-
-    def test_job_events_uses_correct_mapping(self):
-        es_service, client = _make_es_service()
-        setup_scheduling_indices(es_service)
-
-        for c in client.indices.create.call_args_list:
-            if c.kwargs["index"] == JOB_EVENTS_INDEX:
-                assert c.kwargs["body"] == JOB_EVENTS_MAPPING
-                return
-        pytest.fail("job_events index was not created")
 
 
 # ---------------------------------------------------------------------------
@@ -198,40 +147,8 @@ class TestILMPolicyAttachedToJobEvents:
         assert delete["min_age"] == "365d"
         assert "delete" in delete["actions"]
 
-    def test_setup_creates_ilm_policy(self):
-        es_service, client = _make_es_service()
-        setup_scheduling_indices(es_service)
 
-        client.ilm.put_lifecycle.assert_called_once_with(
-            name=JOB_EVENTS_ILM_POLICY_NAME,
-            body=JOB_EVENTS_ILM_POLICY,
-        )
 
-    def test_setup_applies_ilm_policy_to_job_events(self):
-        es_service, client = _make_es_service()
-        # After creation, indices exist for the put_settings call
-        client.indices.exists.side_effect = None
-        client.indices.exists.return_value = True
-
-        setup_scheduling_indices(es_service)
-
-        client.indices.put_settings.assert_called_once_with(
-            index=JOB_EVENTS_INDEX,
-            body={
-                "index": {
-                    "lifecycle": {
-                        "name": JOB_EVENTS_ILM_POLICY_NAME,
-                    }
-                }
-            },
-        )
-
-    def test_ilm_failure_does_not_raise(self):
-        es_service, client = _make_es_service()
-        client.ilm.put_lifecycle.side_effect = Exception("ILM unavailable")
-
-        # Should not raise — graceful degradation
-        setup_scheduling_indices(es_service)
 
 
 # ---------------------------------------------------------------------------
@@ -241,23 +158,4 @@ class TestILMPolicyAttachedToJobEvents:
 class TestNoErrorLogsDuringSetup:
     """Verify that a clean setup produces no ERROR-level log entries."""
 
-    def test_no_error_logs_on_successful_setup(self, caplog):
-        es_service, client = _make_es_service()
 
-        with caplog.at_level(logging.DEBUG, logger="scheduling.services.scheduling_es_mappings"):
-            setup_scheduling_indices(es_service)
-
-        error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
-        assert len(error_records) == 0, (
-            f"Expected no ERROR logs, got: {[r.message for r in error_records]}"
-        )
-
-    def test_index_creation_failure_logs_error(self, caplog):
-        es_service, client = _make_es_service()
-        client.indices.create.side_effect = Exception("Connection refused")
-
-        with caplog.at_level(logging.DEBUG, logger="scheduling.services.scheduling_es_mappings"):
-            setup_scheduling_indices(es_service)
-
-        error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
-        assert len(error_records) > 0, "Expected ERROR log on index creation failure"

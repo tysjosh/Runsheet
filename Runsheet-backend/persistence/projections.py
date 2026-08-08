@@ -32,11 +32,14 @@ from compliance.services.compliance_es_mappings import (
     TAX_EXEMPTIONS_INDEX,
     TAX_JURISDICTIONS_INDEX,
 )
+from fuel.services.fuel_es_mappings import FUEL_STATIONS_INDEX
 from fuel.services.fuel_ops_es_mappings import (
+    CUSTOMER_TANKS_INDEX,
     DEPOTS_INDEX,
     SUPPLIER_CONTRACTS_INDEX,
     TERMINALS_INDEX,
 )
+from Agents.support.mvp_es_mappings import TRUCK_COMPARTMENTS_INDEX
 from fuel.services.order_es_mappings import (
     FUEL_ORDERS_CURRENT_INDEX,
     INTAKE_CHANNELS_INDEX,
@@ -56,10 +59,12 @@ from persistence.models import (
     AssetCertificationORM,
     CompliancePricingRuleORM,
     CustomerORM,
+    CustomerTankORM,
     DepotORM,
     DriverMasterORM,
     DunningEventORM,
     FuelOrderCurrentORM,
+    FuelStationORM,
     IntakeChannelORM,
     InvoiceEventORM,
     InvoiceORM,
@@ -74,6 +79,7 @@ from persistence.models import (
     TaxJurisdictionORM,
     TenantJobPolicyORM,
     TerminalORM,
+    TruckCompartmentORM,
     TruckORM,
 )
 
@@ -383,4 +389,25 @@ PROJECTORS.update({
     "intake_channel": (INTAKE_CHANNELS_INDEX, _document_passthrough),
     "truck": ("trucks", _document_passthrough),
     "location": ("locations", _document_passthrough),
+})
+
+
+# ---------------------------------------------------------------------------
+# Fuel assets (hybrid: stored ``document`` is the projection)
+# ---------------------------------------------------------------------------
+#
+# These three indices held authoritative state with no Postgres table behind
+# them, so recreating the Elasticsearch cluster destroyed them for good — see
+# the note above ``CustomerTankORM`` in :mod:`persistence.models`. Registering a
+# projector here is what makes them rebuildable, and it is deliberately the
+# passthrough: the stored ``document`` is the verbatim ES source, so a rebuild
+# reproduces byte-identical documents and no read path changes.
+#
+# Index names come from the domain constants rather than literals so a rename
+# cannot leave the projection writing to a dead index.
+
+PROJECTORS.update({
+    "customer_tank": (CUSTOMER_TANKS_INDEX, _document_passthrough),
+    "truck_compartment": (TRUCK_COMPARTMENTS_INDEX, _document_passthrough),
+    "fuel_station": (FUEL_STATIONS_INDEX, _document_passthrough),
 })

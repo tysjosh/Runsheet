@@ -7,19 +7,7 @@ Validates: Requirements 2.1, 8.1, 8.6, 11.1, 12.3
 import sys
 from unittest.mock import MagicMock, PropertyMock, patch
 
-from Agents.agent_es_mappings import (
-    AGENT_ACTIVITY_LOG_ILM_POLICY,
-    AGENT_ACTIVITY_LOG_ILM_POLICY_NAME,
-    AGENT_ACTIVITY_LOG_INDEX,
-    AGENT_ACTIVITY_LOG_MAPPING,
-    AGENT_APPROVAL_QUEUE_INDEX,
-    AGENT_APPROVAL_QUEUE_MAPPING,
-    AGENT_FEEDBACK_INDEX,
-    AGENT_FEEDBACK_MAPPING,
-    AGENT_MEMORY_INDEX,
-    AGENT_MEMORY_MAPPING,
-    setup_agent_indices,
-)
+from Agents.agent_es_mappings import AGENT_ACTIVITY_LOG_ILM_POLICY, AGENT_ACTIVITY_LOG_ILM_POLICY_NAME, AGENT_ACTIVITY_LOG_INDEX, AGENT_ACTIVITY_LOG_MAPPING, AGENT_APPROVAL_QUEUE_INDEX, AGENT_APPROVAL_QUEUE_MAPPING, AGENT_FEEDBACK_INDEX, AGENT_FEEDBACK_MAPPING, AGENT_MEMORY_INDEX, AGENT_MEMORY_MAPPING
 
 
 # ---------------------------------------------------------------------------
@@ -236,116 +224,11 @@ class TestAgentActivityLogILMPolicy:
 class TestSetupAgentIndices:
     """Tests for the setup_agent_indices helper function."""
 
-    def _make_es_service(self, existing_indices=None):
-        """Create a mock ElasticsearchService with a mock client."""
-        existing = existing_indices or set()
-        es_service = MagicMock()
-        client = MagicMock()
-        client.indices.exists.side_effect = lambda index: index in existing
-        es_service.client = client
-        type(es_service).is_serverless = PropertyMock(return_value=False)
-        return es_service
 
-    def _patch_es_module(self):
-        """Return a patch context manager that stubs the ES service module.
 
-        The ``setup_agent_indices`` function does a deferred
-        ``from services.elasticsearch_service import ElasticsearchService``
-        which triggers a real ES connection at module level.  We inject a
-        fake module into ``sys.modules`` so the import succeeds without
-        network access.
-        """
-        fake_module = MagicMock()
-        fake_module.ElasticsearchService = MagicMock()
-        fake_module.ElasticsearchService.strip_serverless_incompatible_settings = (
-            lambda mapping: mapping
-        )
-        return patch.dict(sys.modules, {"services.elasticsearch_service": fake_module})
 
-    def test_creates_all_four_indices_when_missing(self):
-        es_service = self._make_es_service()
-        with self._patch_es_module():
-            setup_agent_indices(es_service)
 
-        create_calls = es_service.client.indices.create.call_args_list
-        created_indices = {c.kwargs["index"] for c in create_calls}
-        assert AGENT_APPROVAL_QUEUE_INDEX in created_indices
-        assert AGENT_ACTIVITY_LOG_INDEX in created_indices
-        assert AGENT_MEMORY_INDEX in created_indices
-        assert AGENT_FEEDBACK_INDEX in created_indices
 
-    def test_skips_existing_indices(self):
-        existing = {
-            AGENT_APPROVAL_QUEUE_INDEX,
-            AGENT_ACTIVITY_LOG_INDEX,
-            AGENT_MEMORY_INDEX,
-            AGENT_FEEDBACK_INDEX,
-        }
-        es_service = self._make_es_service(existing_indices=existing)
-        with self._patch_es_module():
-            setup_agent_indices(es_service)
-        es_service.client.indices.create.assert_not_called()
 
-    def test_creates_ilm_policy(self):
-        es_service = self._make_es_service()
-        with self._patch_es_module():
-            setup_agent_indices(es_service)
 
-        es_service.client.ilm.put_lifecycle.assert_called_once_with(
-            name=AGENT_ACTIVITY_LOG_ILM_POLICY_NAME,
-            body=AGENT_ACTIVITY_LOG_ILM_POLICY,
-        )
 
-    def test_applies_ilm_policy_to_activity_log_index(self):
-        es_service = self._make_es_service()
-        # After creation the index exists for the put_settings call
-        es_service.client.indices.exists.side_effect = None
-        es_service.client.indices.exists.return_value = True
-
-        with self._patch_es_module():
-            setup_agent_indices(es_service)
-
-        es_service.client.indices.put_settings.assert_called_once_with(
-            index=AGENT_ACTIVITY_LOG_INDEX,
-            body={
-                "index": {
-                    "lifecycle": {
-                        "name": AGENT_ACTIVITY_LOG_ILM_POLICY_NAME,
-                    }
-                }
-            },
-        )
-
-    def test_ilm_failure_does_not_raise(self):
-        es_service = self._make_es_service()
-        es_service.client.ilm.put_lifecycle.side_effect = Exception("ILM unavailable")
-
-        with self._patch_es_module():
-            # Should not raise
-            setup_agent_indices(es_service)
-
-    def test_ilm_failure_skips_put_settings(self):
-        """When ILM policy creation fails, put_settings should not be called."""
-        es_service = self._make_es_service()
-        es_service.client.ilm.put_lifecycle.side_effect = Exception("ILM unavailable")
-
-        with self._patch_es_module():
-            setup_agent_indices(es_service)
-
-        es_service.client.indices.put_settings.assert_not_called()
-
-    def test_index_creation_failure_does_not_stop_others(self):
-        """A failure creating one index should not prevent creating the rest."""
-        es_service = self._make_es_service()
-
-        def create_side_effect(**kwargs):
-            if kwargs.get("index") == AGENT_APPROVAL_QUEUE_INDEX:
-                raise Exception("creation failed")
-
-        es_service.client.indices.create.side_effect = create_side_effect
-
-        with self._patch_es_module():
-            setup_agent_indices(es_service)
-
-        # All four indices should have been attempted
-        assert es_service.client.indices.create.call_count == 4

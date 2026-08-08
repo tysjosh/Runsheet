@@ -21,7 +21,7 @@ Requirements: 7.6, 7.7, 7.8
 
 import logging
 import time
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +89,36 @@ class AgentOrchestrator:
         self._specialists = specialists
         self._planner = execution_planner
         self._activity_log = activity_log_service
+
+        # Let the planner answer read-only steps through the specialists.
+        # Without this a plan's read steps went through the mutation path,
+        # where the risk registry classifies their invented tool names
+        # (``fleet_query`` and friends) as HIGH — so every step of every
+        # complex request became a dispatcher approval for a read.
+        setter = getattr(execution_planner, "set_read_step_executor", None)
+        if callable(setter):
+            setter(self._execute_read_step)
+
+    async def _execute_read_step(
+        self,
+        step,
+        resolved_params: Dict[str, Any],
+        tenant_id: str,
+    ) -> str:
+        """Answer one read-only plan step with its specialist.
+
+        Raises when the step names a domain this orchestrator has no
+        specialist for, so ``execute_plan`` records a step failure and
+        ``_execute_complex_request`` falls back to simple execution instead of
+        reporting a success that never happened.
+        """
+        agent = self._specialists.get(step.agent)
+        if agent is None:
+            raise RuntimeError(
+                f"No specialist registered for domain '{step.agent}'"
+            )
+        request = resolved_params.get("request") or step.description
+        return await agent.handle(request, {"tenant_id": tenant_id})
 
     async def route(
         self,
@@ -219,8 +249,18 @@ class AgentOrchestrator:
 
         # Step 2: LLM-based classification when keywords fail
         try:
-            import os
             from litellm import acompletion
+
+            from Agents.model_provider import try_resolve_agent_model_spec
+
+            # Optional path: this classification already has a keyword-matching
+            # fallback, so a missing credential should degrade routing rather
+            # than raise into a user request. It previously passed an empty
+            # api_key, which made every classification a silent 401 that the
+            # except-block below logged as "LLM classification failed".
+            model_id, model_kwargs = try_resolve_agent_model_spec()
+            if model_id is None:
+                return matched
 
             domains = list(self.ROUTING_TABLE.keys())
             classification_prompt = (
@@ -231,11 +271,11 @@ class AgentOrchestrator:
             )
 
             response = await acompletion(
-                model="gemini/gemini-2.5-flash",
+                model=model_id,
                 messages=[{"role": "user", "content": classification_prompt}],
-                api_key=os.environ.get("GEMINI_API_KEY", ""),
                 max_tokens=50,
                 temperature=0.0,
+                **model_kwargs,
             )
 
             result_text = response.choices[0].message.content.strip().lower()

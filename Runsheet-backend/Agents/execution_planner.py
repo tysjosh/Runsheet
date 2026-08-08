@@ -75,6 +75,11 @@ class PlanStep:
     status: StepStatus = StepStatus.PENDING
     result: Optional[str] = None
     recovery_attempts: int = 0
+    #: True when the step only reads. Read-only steps must NOT go through the
+    #: ConfirmationProtocol: the risk registry classifies unknown tool names as
+    #: HIGH by design, so a read was parked in the dispatcher approval queue and
+    #: — if approved — hit "Unknown tool … no mutation executed".
+    read_only: bool = False
 
 
 @dataclass
@@ -219,6 +224,20 @@ class ExecutionPlanner:
         """
         self._activity_log = activity_log_service
         self._confirmation_protocol = confirmation_protocol
+        # Answers read-only steps. Injected by AgentOrchestrator, which owns the
+        # specialists; the planner has no specialist references of its own.
+        self._read_step_executor = None
+
+    def set_read_step_executor(self, executor) -> None:
+        """Inject the coroutine that answers read-only steps.
+
+        Signature: ``async (step, resolved_params, tenant_id) -> str``.
+
+        Passing ``None`` leaves read-only steps failing loudly, which is the
+        right outcome: it surfaces as a plan error the orchestrator recovers
+        from, rather than a queue of approval requests for reads.
+        """
+        self._read_step_executor = executor
 
     # ------------------------------------------------------------------
     # Plan creation
@@ -249,6 +268,12 @@ class ExecutionPlanner:
                 agent=domain,
                 tool_name=f"{domain}_query",
                 parameters={"request": request},
+                # ``{domain}_query`` is a read: the specialist answers it with
+                # its search tools. Marked so ``_execute_step`` dispatches it to
+                # the specialist instead of the mutation path — these invented
+                # names are in no risk registry, so they classified HIGH and
+                # every step of every complex request went to the approval queue.
+                read_only=True,
             )
             steps.append(step)
 
@@ -447,6 +472,9 @@ class ExecutionPlanner:
         Returns:
             The execution result string.
         """
+        if step.read_only:
+            return await self._execute_read_step(step, resolved_params, tenant_id)
+
         if self._confirmation_protocol:
             from Agents.confirmation_protocol import MutationRequest
 
@@ -483,6 +511,34 @@ class ExecutionPlanner:
             f"Step {step.step_id} ({step.tool_name}) executed successfully "
             f"(simulated — no confirmation protocol wired)"
         )
+
+    async def _execute_read_step(
+        self,
+        step: PlanStep,
+        resolved_params: Dict[str, Any],
+        tenant_id: str,
+    ) -> str:
+        """Answer a read-only step via the injected read executor.
+
+        Deliberately never touches the ConfirmationProtocol. A read has nothing
+        to approve, and routing it there was actively harmful: the risk registry
+        defaults unknown tool names to HIGH, so each step returned "Queued for
+        approval" — which is not an exception, so the orchestrator's fallback to
+        simple execution never fired and the user got a list of approval ids
+        instead of an answer, while the dispatcher's queue filled with
+        approvals for reads that no handler could execute.
+        """
+        if self._read_step_executor is None:
+            logger.warning(
+                "ExecutionPlanner: no read-step executor wired — step %s (%s) "
+                "cannot be answered. Wire one via set_read_step_executor().",
+                step.step_id,
+                step.tool_name,
+            )
+            raise RuntimeError(
+                f"No read-step executor wired for {step.tool_name}"
+            )
+        return await self._read_step_executor(step, resolved_params, tenant_id)
 
     def _resolve_parameters(
         self,

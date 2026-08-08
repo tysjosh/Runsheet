@@ -23,9 +23,17 @@ import pytest
 
 # Mock strands and ES service BEFORE any tool imports so the module-level
 # instance never touches a real cluster or requires the strands package.
-_mock_strands = MagicMock()
-_mock_strands.tool = lambda f: f  # @tool is a no-op passthrough
-sys.modules.setdefault("strands", _mock_strands)
+#
+# Real SDK first: a MagicMock in ``sys.modules["strands"]`` is not a package, so
+# a later ``from strands.models.litellm import ...`` in any other test module
+# would fail. setdefault only avoided that when something had already imported
+# strands for real, which depends on collection order.
+try:
+    import strands  # noqa: F401
+except ImportError:  # pragma: no cover - only on installs without the SDK
+    _mock_strands = MagicMock()
+    _mock_strands.tool = lambda f: f  # @tool is a no-op passthrough
+    sys.modules["strands"] = _mock_strands
 
 _mock_es_module = MagicMock()
 _mock_es_module.ElasticsearchService = MagicMock

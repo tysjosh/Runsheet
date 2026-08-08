@@ -27,8 +27,17 @@ sys.modules.setdefault("services.elasticsearch_service", _mock_es_module)
 
 # ---------------------------------------------------------------------------
 # Patch strands BEFORE any Agents.tools imports (strands may not be installed)
+#
+# Prefer the real SDK whenever it is importable. A MagicMock is not a package,
+# so installing one here leaks to every test module collected afterwards and
+# turns ``from strands.models.litellm import LiteLLMModel`` into
+# "ModuleNotFoundError: 'strands' is not a package" — a failure in an unrelated
+# test that only appears in a full-suite run. Checking ``sys.modules`` alone was
+# not enough: nothing had imported strands yet at this point in collection.
 # ---------------------------------------------------------------------------
-if "strands" not in sys.modules:
+try:
+    import strands  # noqa: F401
+except ImportError:  # pragma: no cover - only on installs without the SDK
     _mock_strands = MagicMock()
     _mock_strands.tool = lambda f=None, **kwargs: f if f else (lambda fn: fn)
     sys.modules["strands"] = _mock_strands
@@ -125,6 +134,16 @@ class TestApiFeatureFlagGating:
         mock_ops_es = MagicMock(spec=OpsElasticsearchService)
         mock_ops_es.client = mock_es_client
 
+        # The ops endpoints call ``es.search_documents(...)`` now instead of
+        # ``es.client.search(...)`` — a raw client call bypasses the
+        # Postgres/Elasticsearch backend switch. Delegate the facade to the same
+        # canned client so tests that reconfigure ``mock_es_client.search``
+        # mid-test keep working: the lambda reads it at call time.
+        mock_ops_es.search_documents = AsyncMock(
+            side_effect=lambda index, query, **kw: mock_es_client.search(
+                index=index, body=query
+            )
+        )
         configure_ops_api(
             ops_es_service=mock_ops_es,
             feature_flag_service=self.ff_service,

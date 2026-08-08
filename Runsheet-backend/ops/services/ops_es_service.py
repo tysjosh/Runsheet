@@ -37,22 +37,21 @@ class OpsElasticsearchService:
 
     # Painless script for current-state upsert with out-of-order reconciliation.
     # Compares incoming event_timestamp vs existing last_event_timestamp.
-    # Discards (noop) if incoming is older. Otherwise partial-updates only
-    # the fields present in the incoming params.
+    # Discards (noop) if incoming is older-or-equal. Otherwise partial-updates
+    # only the fields present in the incoming params.
     # Validates: Req 6.1, 6.2, 6.4, 6.7, 6.8
-    UPSERT_SCRIPT = """
-        if (ctx._source.containsKey('last_event_timestamp') && ctx._source.last_event_timestamp != null) {
-            ZonedDateTime existing = ZonedDateTime.parse(ctx._source.last_event_timestamp);
-            ZonedDateTime incoming = ZonedDateTime.parse(params.last_event_timestamp);
-            if (incoming.isBefore(existing) || incoming.isEqual(existing)) {
-                ctx.op = 'noop';
-                return;
-            }
-        }
-        for (entry in params.entrySet()) {
-            ctx._source[entry.getKey()] = entry.getValue();
-        }
-    """.strip()
+    #
+    # BOUND to the canonical copy rather than restated. Three identical
+    # transcriptions of this script existed — here, in
+    # ``fuel/order_repository.py``, and now in ``ElasticsearchService`` — and a
+    # painless script is exactly the kind of thing that gets fixed in one place
+    # and left stale in the others, silently, because a wrong comparison shows up
+    # as an order moving backwards weeks later rather than as an error.
+    #
+    # Nothing in this class runs it any more — ``bulk_upsert`` was the last
+    # user and now calls ``ElasticsearchService.upsert_if_newer``. Kept as a
+    # bound alias because it is a documented attribute of this class and the
+    # binding is what guarantees it cannot drift from the canonical script.
 
     def __init__(self, es_service: ElasticsearchService):
         self._es = es_service
@@ -61,6 +60,40 @@ class OpsElasticsearchService:
     def client(self):
         """Access the underlying Elasticsearch client."""
         return self._es.client
+
+    async def search_documents(self, index, query, size=100, request_timeout=10):
+        """Passthrough to the facade's search, so callers stay off the raw client.
+
+        ``ops/api/endpoints.py`` and the two ops agent tools all held an
+        ``OpsElasticsearchService`` and reached through it to
+        ``es.client.search(...)``, which bypasses the document-store backend
+        switch — those 23 reads would have kept going to Elasticsearch after the
+        document plane moved to Postgres.
+
+        Same shape as the existing ``client`` passthrough, so nothing has to know
+        whether it is holding this class or ``ElasticsearchService``.
+        """
+        return await self._es.search_documents(
+            index, query, size=size, request_timeout=request_timeout
+        )
+
+    # The rest of the document plane, passed through for the same reason: the
+    # poison queue held an ``OpsElasticsearchService`` and reached
+    # ``.client.index`` / ``.get`` / ``.update`` / ``.delete`` / ``.count``, all of
+    # which bypass the backend switch. A poison-queue entry that lands in the
+    # wrong store after the cutover is an incident nobody can find.
+
+    async def index_document(self, index, doc_id, document):
+        return await self._es.index_document(index, doc_id, document)
+
+    async def get_document(self, index, doc_id):
+        return await self._es.get_document(index, doc_id)
+
+    async def update_document(self, index, doc_id, partial_doc):
+        return await self._es.update_document(index, doc_id, partial_doc)
+
+    async def delete_document(self, index, doc_id):
+        return await self._es.delete_document(index, doc_id)
 
     @property
     def circuit_breaker(self):
@@ -71,306 +104,16 @@ class OpsElasticsearchService:
     # Index setup
     # ------------------------------------------------------------------
 
-    def setup_ops_indices(self):
-        """
-        Create all ops indices with strict mappings if they don't exist.
-        Validates: Req 5.1-5.6
-        """
-        from services.elasticsearch_service import ElasticsearchService
-
-        indices = {
-            self.SHIPMENTS_CURRENT: self._get_shipments_current_mapping(),
-            self.SHIPMENT_EVENTS: self._get_shipment_events_mapping(),
-            self.RIDERS_CURRENT: self._get_riders_current_mapping(),
-            self.POISON_QUEUE: self._get_poison_queue_mapping(),
-        }
-
-        for index_name, mapping in indices.items():
-            try:
-                if not self.client.indices.exists(index=index_name):
-                    if self._es.is_serverless:
-                        mapping = ElasticsearchService.strip_serverless_incompatible_settings(mapping)
-                    self.client.indices.create(index=index_name, body=mapping)
-                    logger.info(f"✅ Created ops index: {index_name}")
-                else:
-                    # Index exists: reconcile any additively-introduced fields
-                    # (e.g. a new field a mutation started writing) onto the
-                    # live strict mapping. Adding fields is a safe, online
-                    # mapping update; existing fields are left untouched (ES
-                    # rejects type changes, which we never attempt here).
-                    self._reconcile_index_mapping(index_name, mapping)
-            except Exception:
-                logger.exception("Failed to create ops index %s", index_name)
-
-        # Set up shipment_events alias for time-based rollover
-        self._setup_shipment_events_alias()
-
-    def _reconcile_index_mapping(
-        self, index_name: str, mapping: Dict[str, Any]
-    ) -> None:
-        """Additively put any mapping fields missing from the live index.
-
-        Only fields absent from the current mapping are sent via
-        ``put_mapping`` so an existing index gains newly-introduced fields
-        (like ``priority``) without a reindex. No-op when nothing is missing.
-        """
-        expected_props = mapping.get("mappings", {}).get("properties", {})
-        if not expected_props:
-            return
-        try:
-            actual = self.client.indices.get_mapping(index=index_name)
-            actual_props = (
-                actual.get(index_name, {}).get("mappings", {}).get("properties", {})
-            )
-            missing = {
-                name: spec
-                for name, spec in expected_props.items()
-                if name not in actual_props
-            }
-            if not missing:
-                logger.info(f"📋 Ops index already up to date: {index_name}")
-                return
-            self.client.indices.put_mapping(
-                index=index_name, body={"properties": missing}
-            )
-            logger.info(
-                "✅ Reconciled ops index %s — added fields: %s",
-                index_name,
-                ", ".join(sorted(missing)),
-            )
-        except Exception:
-            logger.exception(
-                "Failed to reconcile ops index mapping for %s", index_name
-            )
-
-    def validate_ops_index_schemas(self) -> Dict[str, Any]:
-        """
-        Validate that ops index mappings match expected schemas.
-        Logs warnings for any mismatches.
-        """
-        logger.info("🔍 Validating ops index schemas...")
-
-        expected_mappings = {
-            self.SHIPMENTS_CURRENT: self._get_shipments_current_mapping(),
-            self.SHIPMENT_EVENTS: self._get_shipment_events_mapping(),
-            self.RIDERS_CURRENT: self._get_riders_current_mapping(),
-            self.POISON_QUEUE: self._get_poison_queue_mapping(),
-        }
-
-        results: Dict[str, Any] = {"valid": True, "indices": {}}
-
-        for index_name, expected in expected_mappings.items():
-            try:
-                if not self.client.indices.exists(index=index_name):
-                    results["indices"][index_name] = {
-                        "valid": False,
-                        "error": "Index does not exist",
-                    }
-                    results["valid"] = False
-                    logger.warning(f"⚠️ Ops index missing: {index_name}")
-                    continue
-
-                actual = self.client.indices.get_mapping(index=index_name)
-                actual_props = (
-                    actual.get(index_name, {})
-                    .get("mappings", {})
-                    .get("properties", {})
-                )
-                expected_props = expected.get("mappings", {}).get("properties", {})
-
-                missing = set(expected_props.keys()) - set(actual_props.keys())
-                if missing:
-                    results["indices"][index_name] = {
-                        "valid": False,
-                        "missing_fields": list(missing),
-                    }
-                    results["valid"] = False
-                    logger.warning(
-                        f"⚠️ Ops index {index_name} missing fields: {missing}"
-                    )
-                else:
-                    results["indices"][index_name] = {"valid": True}
-            except Exception as e:
-                results["indices"][index_name] = {"valid": False, "error": str(e)}
-                results["valid"] = False
-                logger.exception("Failed to validate ops index %s", index_name)
-
-        if results["valid"]:
-            logger.info("✅ All ops index schemas validated successfully")
-        return results
 
     # ------------------------------------------------------------------
     # Index mappings
     # ------------------------------------------------------------------
 
-    def _get_shipments_current_mapping(self) -> Dict[str, Any]:
-        """
-        Strict mapping for shipments_current index.
-        Validates: Req 5.1, 5.5
-        """
-        return {
-            "settings": {
-                "number_of_shards": 1,
-                "number_of_replicas": 1,
-            },
-            "mappings": {
-                "dynamic": "strict",
-                "properties": {
-                    "shipment_id": {"type": "keyword"},
-                    "status": {"type": "keyword"},
-                    "priority": {"type": "keyword"},
-                    "tenant_id": {"type": "keyword"},
-                    "rider_id": {"type": "keyword"},
-                    "failure_reason": {"type": "keyword"},
-                    "source_schema_version": {"type": "keyword"},
-                    "trace_id": {"type": "keyword"},
-                    "created_at": {"type": "date"},
-                    "updated_at": {"type": "date"},
-                    "estimated_delivery": {"type": "date"},
-                    "last_event_timestamp": {"type": "date"},
-                    "ingested_at": {"type": "date"},
-                    "current_location": {"type": "geo_point"},
-                    "origin": {
-                        "type": "text",
-                        "fields": {"keyword": {"type": "keyword"}},
-                    },
-                    "destination": {
-                        "type": "text",
-                        "fields": {"keyword": {"type": "keyword"}},
-                    },
-                },
-            },
-        }
-
-    def _get_shipment_events_mapping(self) -> Dict[str, Any]:
-        """
-        Strict mapping for shipment_events index.
-        Validates: Req 5.2, 5.6
-        """
-        return {
-            "settings": {
-                "number_of_shards": 1,
-                "number_of_replicas": 1,
-            },
-            "mappings": {
-                "dynamic": "strict",
-                "properties": {
-                    "event_id": {"type": "keyword"},
-                    "shipment_id": {"type": "keyword"},
-                    "event_type": {"type": "keyword"},
-                    "tenant_id": {"type": "keyword"},
-                    "source_schema_version": {"type": "keyword"},
-                    "trace_id": {"type": "keyword"},
-                    "event_timestamp": {"type": "date"},
-                    "ingested_at": {"type": "date"},
-                    "event_payload": {"type": "nested"},
-                    "location": {"type": "geo_point"},
-                },
-            },
-        }
-
-    def _get_riders_current_mapping(self) -> Dict[str, Any]:
-        """
-        Strict mapping for riders_current index.
-        Validates: Req 5.3
-        """
-        return {
-            "settings": {
-                "number_of_shards": 1,
-                "number_of_replicas": 1,
-            },
-            "mappings": {
-                "dynamic": "strict",
-                "properties": {
-                    "rider_id": {"type": "keyword"},
-                    "status": {"type": "keyword"},
-                    "tenant_id": {"type": "keyword"},
-                    "availability": {"type": "keyword"},
-                    "source_schema_version": {"type": "keyword"},
-                    "trace_id": {"type": "keyword"},
-                    "last_seen": {"type": "date"},
-                    "last_event_timestamp": {"type": "date"},
-                    "ingested_at": {"type": "date"},
-                    "current_location": {"type": "geo_point"},
-                    "active_shipment_count": {"type": "integer"},
-                    "completed_today": {"type": "integer"},
-                    "rider_name": {
-                        "type": "text",
-                        "fields": {"keyword": {"type": "keyword"}},
-                    },
-                },
-            },
-        }
-
-    def _get_poison_queue_mapping(self) -> Dict[str, Any]:
-        """
-        Mapping for ops_poison_queue index.
-        original_payload is stored but not indexed (enabled: false).
-        Validates: Req 4.2
-        """
-        return {
-            "mappings": {
-                "dynamic": "strict",
-                "properties": {
-                    "event_id": {"type": "keyword"},
-                    "error_type": {"type": "keyword"},
-                    "status": {"type": "keyword"},
-                    "tenant_id": {"type": "keyword"},
-                    "original_payload": {"type": "object", "enabled": False},
-                    "error_reason": {
-                        "type": "text",
-                        "fields": {"keyword": {"type": "keyword"}},
-                    },
-                    "created_at": {"type": "date"},
-                    "retry_count": {"type": "integer"},
-                    "max_retries": {"type": "integer"},
-                    "trace_id": {"type": "keyword"},
-                },
-            },
-        }
 
     # ------------------------------------------------------------------
     # Shipment events alias for time-based rollover
     # ------------------------------------------------------------------
 
-    def _setup_shipment_events_alias(self):
-        """
-        Set up an index alias for shipment_events with time-based naming
-        to support monthly rollover.
-        Validates: Req 5.6
-        """
-        alias_name = self.SHIPMENT_EVENTS
-        current_month = utcnow().strftime("%Y-%m")
-        concrete_index = f"{alias_name}-{current_month}"
-
-        try:
-            # If the concrete monthly index doesn't exist, the base index
-            # already serves as the write target. We add an alias so that
-            # future rollover can point to monthly indices transparently.
-            if not self.client.indices.exists(index=concrete_index):
-                # The base index was already created in setup_ops_indices.
-                # Add a write alias pointing to it.
-                alias_exists = False
-                try:
-                    aliases = self.client.indices.get_alias(name=alias_name)
-                    alias_exists = bool(aliases)
-                except Exception:
-                    pass
-
-                if not alias_exists:
-                    # The base index IS the alias name, so we don't need a
-                    # separate alias for the initial setup. The alias pattern
-                    # will be used when monthly rollover creates new indices.
-                    logger.info(
-                        f"📋 Shipment events using base index '{alias_name}' "
-                        f"(monthly rollover alias pattern: {alias_name}-YYYY-MM)"
-                    )
-            else:
-                logger.info(
-                    f"📋 Monthly shipment events index exists: {concrete_index}"
-                )
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to set up shipment events alias: {e}")
 
     # ------------------------------------------------------------------
     # Upsert operations
@@ -439,33 +182,22 @@ class OpsElasticsearchService:
         from resilience.circuit_breaker import CircuitOpenException
 
         try:
-            async def _do_upsert():
-                response = self.client.update(
-                    index=index,
-                    id=doc_id,
-                    body={
-                        "scripted_upsert": True,
-                        "script": {
-                            "source": self.UPSERT_SCRIPT,
-                            "lang": "painless",
-                            "params": doc,
-                        },
-                        "upsert": doc,
-                    },
-                    refresh=True,
+            # ``ElasticsearchService.upsert_if_newer`` owns the comparison now.
+            # This method's painless script was byte-identical to the one in
+            # ``fuel/order_repository.py``; both reached past the facade to
+            # ``client.update``, which would keep them writing to Elasticsearch
+            # after the document plane moved to Postgres while everything around
+            # them wrote to Postgres. The facade also carries the circuit breaker,
+            # so the wrapper that used to be here is redundant.
+            applied = await self._es.upsert_if_newer(index, doc_id, doc)
+            if not applied:
+                logger.info(
+                    f"Discarded stale {entity_label} event: "
+                    f"entity_id={doc_id}, "
+                    f"incoming_timestamp={doc.get('last_event_timestamp')}, "
+                    f"event_id={doc.get('trace_id', 'unknown')}"
                 )
-                result = response.get("result", "")
-                if result == "noop":
-                    logger.info(
-                        f"Discarded stale {entity_label} event: "
-                        f"entity_id={doc_id}, "
-                        f"incoming_timestamp={doc.get('last_event_timestamp')}, "
-                        f"event_id={doc.get('trace_id', 'unknown')}"
-                    )
-                    return False
-                return True
-
-            return await self._es._circuit_breaker.execute(_do_upsert)
+            return applied
         except CircuitOpenException as e:
             self._es._handle_circuit_breaker_exception(e)
             return False
@@ -500,305 +232,103 @@ class OpsElasticsearchService:
     # Bulk operations
     # ------------------------------------------------------------------
 
+    #: ``action -> (index, id field)``. Both upsert actions go through
+    #: out-of-order reconciliation; ``append_event`` is an immutable event
+    #: document and is written as-is.
+    _BULK_ACTIONS = {
+        "upsert_shipment": ("SHIPMENTS_CURRENT", "shipment_id", True),
+        "upsert_rider": ("RIDERS_CURRENT", "rider_id", True),
+        "append_event": ("SHIPMENT_EVENTS", "event_id", False),
+    }
+
     async def bulk_upsert(self, operations: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """
-        Bulk API for batch ingestion. Routes failures to poison queue.
+        """Batch ingestion of shipment / rider / event documents.
 
         Each operation dict must contain:
           - "action": "upsert_shipment" | "upsert_rider" | "append_event"
           - "doc": the document payload
 
-        Returns summary with success/failure counts.
+        Returns a summary with success/failure counts and per-document errors.
         Validates: Req 6.5, 6.6
-        """
-        from resilience.circuit_breaker import CircuitOpenException
 
+        This used to build ``elasticsearch.helpers.bulk`` actions carrying a
+        ``scripted_upsert`` and hand ``self.client`` to the helper. That was the
+        last application write in the codebase that bypassed the document-store
+        backend switch, and it was invisible to the raw-client inventory because
+        the client was passed as an ARGUMENT rather than called as
+        ``.client.bulk(...)`` — the inventory now recognises that shape too.
+
+        The batching is gone with it: each operation is one
+        :meth:`~services.elasticsearch_service.ElasticsearchService.upsert_if_newer`
+        or ``index_document`` call. On Postgres that costs nothing, because the
+        store applies the timestamp comparison per row under a lock either way;
+        on Elasticsearch it trades one round trip for N. Worth it — the
+        alternative was a fourth transcription of the painless script living on a
+        code path with no callers and no tests to catch it drifting.
+
+        One behaviour deliberately changed: a stale document (older-or-equal
+        ``last_event_timestamp``) now counts as ``discarded`` rather than
+        ``successful``. The bulk helper reported a scripted no-op as a success, so
+        an ingestion run that discarded every event as stale was indistinguishable
+        from one that applied every event.
+        """
         results: Dict[str, Any] = {
             "total": len(operations),
             "successful": 0,
+            "discarded": 0,
             "failed": 0,
             "errors": [],
         }
 
-        # Build bulk actions list
-        actions: List[Dict[str, Any]] = []
-        action_meta: List[Dict[str, Any]] = []  # parallel metadata
-
         for op in operations:
             action_type = op.get("action")
-            doc = op.get("doc", {})
-
-            if action_type == "upsert_shipment":
-                doc_id = doc.get("shipment_id")
-                actions.append({
-                    "_op_type": "update",
-                    "_index": self.SHIPMENTS_CURRENT,
-                    "_id": doc_id,
-                    "scripted_upsert": True,
-                    "script": {
-                        "source": self.UPSERT_SCRIPT,
-                        "lang": "painless",
-                        "params": doc,
-                    },
-                    "upsert": doc,
-                })
-                action_meta.append({"action": action_type, "doc_id": doc_id, "doc": doc})
-
-            elif action_type == "upsert_rider":
-                doc_id = doc.get("rider_id")
-                actions.append({
-                    "_op_type": "update",
-                    "_index": self.RIDERS_CURRENT,
-                    "_id": doc_id,
-                    "scripted_upsert": True,
-                    "script": {
-                        "source": self.UPSERT_SCRIPT,
-                        "lang": "painless",
-                        "params": doc,
-                    },
-                    "upsert": doc,
-                })
-                action_meta.append({"action": action_type, "doc_id": doc_id, "doc": doc})
-
-            elif action_type == "append_event":
-                doc_id = doc.get("event_id")
-                actions.append({
-                    "_op_type": "index",
-                    "_index": self.SHIPMENT_EVENTS,
-                    "_id": doc_id,
-                    "_source": doc,
-                })
-                action_meta.append({"action": action_type, "doc_id": doc_id, "doc": doc})
-            else:
+            doc = op.get("doc", {}) or {}
+            spec = self._BULK_ACTIONS.get(action_type)
+            if spec is None:
                 results["failed"] += 1
                 results["errors"].append({
                     "action": action_type,
                     "error": f"Unknown action type: {action_type}",
                 })
+                continue
 
-        if not actions:
-            return results
-
-        try:
-            async def _do_bulk():
-                from elasticsearch.helpers import bulk
-
-                success_count, errors = bulk(
-                    self.client,
-                    actions,
-                    refresh=True,
-                    raise_on_error=False,
-                    raise_on_exception=False,
-                )
-                return success_count, errors
-
-            success_count, errors = await self._es._circuit_breaker.execute(_do_bulk)
-            results["successful"] = success_count
-
-            if errors:
-                results["failed"] += len(errors)
-                for err in errors:
-                    error_info = self._es._extract_bulk_error_info(err)
-                    results["errors"].append(error_info)
-                    logger.error(
-                        f"❌ Bulk ops indexing failed: "
-                        f"doc_id={error_info.get('doc_id', 'unknown')}, "
-                        f"error_type={error_info.get('error_type', 'unknown')}, "
-                        f"reason={error_info.get('reason', 'unknown')}"
-                    )
-            else:
-                logger.info(
-                    f"✅ Bulk ops indexed {results['successful']} documents"
+            index_attribute, id_field, reconcile = spec
+            index = getattr(self, index_attribute)
+            doc_id = doc.get(id_field)
+            try:
+                if reconcile:
+                    applied = await self._es.upsert_if_newer(index, doc_id, doc)
+                    if applied:
+                        results["successful"] += 1
+                    else:
+                        results["discarded"] += 1
+                else:
+                    await self._es.index_document(index, doc_id, doc)
+                    results["successful"] += 1
+            except Exception as exc:  # noqa: BLE001 — one bad document must not
+                # abandon the rest of the batch, which is what the bulk helper's
+                # ``raise_on_error=False`` bought.
+                results["failed"] += 1
+                results["errors"].append({
+                    "action": action_type,
+                    "doc_id": doc_id,
+                    "error_type": type(exc).__name__,
+                    "reason": str(exc),
+                })
+                logger.error(
+                    "Bulk ops ingestion failed: action=%s doc_id=%s error=%s: %s",
+                    action_type, doc_id, type(exc).__name__, exc,
                 )
 
-        except CircuitOpenException as e:
-            self._es._handle_circuit_breaker_exception(e)
-            results["failed"] = len(actions)
-        except Exception as e:
-            self._es._handle_elasticsearch_error("bulk_upsert(ops)", e)
-            results["failed"] = len(actions)
-
+        if not results["failed"]:
+            logger.info(
+                "Bulk ops ingested %d documents (%d discarded as stale)",
+                results["successful"], results["discarded"],
+            )
         return results
 
     # ------------------------------------------------------------------
     # ILM policies
     # ------------------------------------------------------------------
 
-    def setup_ops_ilm_policies(self):
-        """
-        Create ILM policies for ops indices.
 
-        - shipment_events: warm@30d, cold@90d, delete@365d
-        - shipments_current / riders_current: force-merge after 7d no writes
-
-        Validates: Req 7.1-7.4
-        """
-        if not self._es._check_ilm_available():
-            logger.info(
-                "ℹ️ ILM not available — skipping ops ILM policy setup"
-            )
-            return
-
-        policies = {
-            "ops-shipment-events-policy": self._get_shipment_events_ilm_policy(),
-            "ops-current-state-policy": self._get_current_state_ilm_policy(),
-        }
-
-        for policy_name, policy_body in policies.items():
-            try:
-                try:
-                    self.client.ilm.get_lifecycle(name=policy_name)
-                    logger.info(f"📋 Ops ILM policy already exists: {policy_name}")
-                    self.client.ilm.put_lifecycle(name=policy_name, body=policy_body)
-                    logger.info(f"✅ Updated ops ILM policy: {policy_name}")
-                except Exception:
-                    self.client.ilm.put_lifecycle(name=policy_name, body=policy_body)
-                    logger.info(f"✅ Created ops ILM policy: {policy_name}")
-            except Exception as e:
-                logger.warning(
-                    f"⚠️ Failed to create/update ops ILM policy {policy_name}: {e}"
-                )
-
-        # Apply policies to indices
-        self._apply_ops_ilm_policies()
-
-    def verify_ops_ilm_policies(self):
-        """
-        Verify ILM policies are applied to all ops indices on startup.
-        Log warnings for any missing policies.
-        Validates: Req 7.5
-        """
-        if not getattr(self._es, "_ilm_available", False):
-            logger.debug(
-                "Skipping ops ILM verification — ILM not available"
-            )
-            return
-
-        expected = {
-            self.SHIPMENT_EVENTS: "ops-shipment-events-policy",
-            self.SHIPMENTS_CURRENT: "ops-current-state-policy",
-            self.RIDERS_CURRENT: "ops-current-state-policy",
-        }
-
-        for index_name, expected_policy in expected.items():
-            try:
-                if not self.client.indices.exists(index=index_name):
-                    logger.warning(
-                        f"⚠️ Ops index {index_name} does not exist — "
-                        f"cannot verify ILM policy"
-                    )
-                    continue
-
-                settings = self.client.indices.get_settings(index=index_name)
-                lifecycle_name = (
-                    settings.get(index_name, {})
-                    .get("settings", {})
-                    .get("index", {})
-                    .get("lifecycle", {})
-                    .get("name")
-                )
-
-                if lifecycle_name != expected_policy:
-                    logger.warning(
-                        f"⚠️ Ops index {index_name} has ILM policy "
-                        f"'{lifecycle_name}' but expected '{expected_policy}'"
-                    )
-                else:
-                    logger.info(
-                        f"✅ Ops ILM policy verified for {index_name}: "
-                        f"{expected_policy}"
-                    )
-            except Exception as e:
-                logger.warning(
-                    f"⚠️ Failed to verify ILM policy for {index_name}: {e}"
-                )
-
-    def _get_shipment_events_ilm_policy(self) -> Dict[str, Any]:
-        """
-        ILM policy for shipment_events: warm@30d, cold@90d, delete@365d.
-        Validates: Req 7.1-7.3
-        """
-        return {
-            "policy": {
-                "phases": {
-                    "hot": {
-                        "min_age": "0ms",
-                        "actions": {
-                            "set_priority": {"priority": 100},
-                        },
-                    },
-                    "warm": {
-                        "min_age": "30d",
-                        "actions": {
-                            "set_priority": {"priority": 50},
-                            "forcemerge": {"max_num_segments": 1},
-                            "readonly": {},
-                        },
-                    },
-                    "cold": {
-                        "min_age": "90d",
-                        "actions": {
-                            "set_priority": {"priority": 0},
-                            "allocate": {"number_of_replicas": 0},
-                        },
-                    },
-                    "delete": {
-                        "min_age": "365d",
-                        "actions": {"delete": {}},
-                    },
-                }
-            }
-        }
-
-    def _get_current_state_ilm_policy(self) -> Dict[str, Any]:
-        """
-        ILM policy for shipments_current and riders_current:
-        force-merge after 7d of no writes.
-        Validates: Req 7.4
-        """
-        return {
-            "policy": {
-                "phases": {
-                    "hot": {
-                        "min_age": "0ms",
-                        "actions": {
-                            "set_priority": {"priority": 100},
-                        },
-                    },
-                    "warm": {
-                        "min_age": "7d",
-                        "actions": {
-                            "forcemerge": {"max_num_segments": 1},
-                        },
-                    },
-                }
-            }
-        }
-
-    def _apply_ops_ilm_policies(self):
-        """Apply ILM policies to ops indices."""
-        index_policy_map = {
-            self.SHIPMENT_EVENTS: "ops-shipment-events-policy",
-            self.SHIPMENTS_CURRENT: "ops-current-state-policy",
-            self.RIDERS_CURRENT: "ops-current-state-policy",
-        }
-
-        for index_name, policy_name in index_policy_map.items():
-            try:
-                if self.client.indices.exists(index=index_name):
-                    self.client.indices.put_settings(
-                        index=index_name,
-                        body={
-                            "index": {
-                                "lifecycle": {"name": policy_name}
-                            }
-                        },
-                    )
-                    logger.info(
-                        f"✅ Applied ops ILM policy '{policy_name}' "
-                        f"to index '{index_name}'"
-                    )
-            except Exception as e:
-                logger.warning(
-                    f"⚠️ Failed to apply ops ILM policy to {index_name}: {e}"
-                )

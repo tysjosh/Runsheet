@@ -143,24 +143,58 @@ class DutyStatusWriteNotPermittedError(PermissionError):
 
 
 # ---------------------------------------------------------------------------
-# Painless script for atomic counter increment (design §3)
+# Atomic counter transforms (design §3)
 # ---------------------------------------------------------------------------
+#
+# These were painless scripts sent to ``client.update`` and
+# ``client.update_by_query``. They are Python now, run by
+# ``ElasticsearchService.atomic_update`` / ``update_by_query`` under a row lock on
+# Postgres and under a ``_seq_no`` assertion on Elasticsearch. The atomicity is
+# unchanged; what changed is that the rule is no longer written in a language that
+# only executes inside Elasticsearch, which is what let these two call sites
+# bypass the document-store backend switch.
 
-_DRIVER_COUNTER_SCRIPT = """
-if (params.delta_active != 0) {
-    ctx._source.active_order_count =
-        (ctx._source.active_order_count != null ? ctx._source.active_order_count : 0)
-        + params.delta_active;
-    if (ctx._source.active_order_count < 0) ctx._source.active_order_count = 0;
-}
-if (params.delta_completed != 0) {
-    ctx._source.completed_today =
-        (ctx._source.completed_today != null ? ctx._source.completed_today : 0)
-        + params.delta_completed;
-}
-ctx._source.last_event_timestamp = params.now;
-ctx._source.updated_at = params.now;
-""".strip()
+
+def _apply_counter_deltas(
+    current: Dict[str, Any],
+    *,
+    delta_active: int,
+    delta_completed: int,
+    now: str,
+) -> Dict[str, Any]:
+    """Adjust the two driver counters, clamping ``active_order_count`` at zero.
+
+    A faithful translation of the painless original, including the two details
+    that are easy to lose:
+
+    * a missing counter reads as ``0`` rather than raising — drivers created
+      before the counters existed have neither field;
+    * the clamp applies only to ``active_order_count``. ``completed_today`` is
+      never decremented in practice, and clamping it would hide a caller that
+      started doing so.
+
+    The timestamps are stamped unconditionally, so this never returns ``None``
+    and the update is never a no-op — matching the script, which also always
+    touched them.
+    """
+    updated = dict(current)
+    if delta_active:
+        active = updated.get("active_order_count") or 0
+        updated["active_order_count"] = max(0, active + delta_active)
+    if delta_completed:
+        completed = updated.get("completed_today") or 0
+        updated["completed_today"] = completed + delta_completed
+    updated["last_event_timestamp"] = now
+    updated["updated_at"] = now
+    return updated
+
+
+def _reset_completed_today(current: Dict[str, Any], *, now: str) -> Dict[str, Any]:
+    """Zero ``completed_today``. Paired with a ``completed_today > 0`` filter."""
+    updated = dict(current)
+    updated["completed_today"] = 0
+    updated["updated_at"] = now
+    return updated
 
 
 # ---------------------------------------------------------------------------
@@ -234,10 +268,14 @@ class DriverRepository:
         * ``await es.index_document(index, doc_id, document)``
         * ``await es.search_documents(index, query, size)``
         * ``await es.update_document(index, doc_id, partial_doc)``
-        * ``es.client.update(index, id, body, refresh)``
-        * ``es.client.update_by_query(index, body, refresh)``
+        * ``await es.atomic_update(index, doc_id, transform)``
+        * ``await es.update_by_query(index, query, transform)``
 
     which matches :class:`services.elasticsearch_service.ElasticsearchService`.
+    Every entry is a facade method — nothing here reaches ``es.client`` — so all
+    of it follows ``DOCUMENT_STORE_BACKEND``. The last two used to be painless
+    scripts sent straight to the raw client, which would have kept the counter
+    writes on Elasticsearch while the reads moved to Postgres.
 
     Tenant isolation is enforced at two points for defense-in-depth:
         1. Every ES query is wrapped through
@@ -632,7 +670,7 @@ class DriverRepository:
         }
 
     # ------------------------------------------------------------------
-    # Increment counters (atomic, painless script — design §3)
+    # Increment counters (atomic read-modify-write — design §3)
     # ------------------------------------------------------------------
 
     async def increment_counters(
@@ -644,9 +682,11 @@ class DriverRepository:
     ) -> bool:
         """Atomically adjust ``active_order_count`` and ``completed_today``.
 
-        Uses the painless script from design §3 to ensure race-free
-        counter updates. The script clamps ``active_order_count`` at 0
-        (never goes negative).
+        Race-free by read-modify-write through
+        :meth:`~services.elasticsearch_service.ElasticsearchService.atomic_update`
+        (design §3 specified a painless script; the arithmetic is identical, see
+        :func:`_apply_counter_deltas`). ``active_order_count`` is clamped at 0 and
+        never goes negative.
 
         Args:
             tenant_id: The caller's tenant (used for ownership validation).
@@ -668,7 +708,9 @@ class DriverRepository:
         if not driver_id or not driver_id.strip():
             raise ValueError("driver_id must be a non-empty string")
 
-        # Validate tenant ownership before running the script
+        # Validate tenant ownership before touching the counters. This is a
+        # separate read, so it is advisory rather than atomic with the update —
+        # unchanged from the painless version, which had the same gap.
         existing = await self.get(tenant_id, driver_id)
         if existing is None:
             return False
@@ -683,26 +725,17 @@ class DriverRepository:
         now = _utcnow_iso()
 
         try:
-            response = self._es.client.update(
-                index=self._drivers_index,
-                id=driver_id,
-                body={
-                    "script": {
-                        "source": _DRIVER_COUNTER_SCRIPT,
-                        "lang": "painless",
-                        "params": {
-                            "delta_active": delta_active,
-                            "delta_completed": delta_completed,
-                            "now": now,
-                        },
-                    },
-                },
-                refresh=True,
+            _doc, applied = await self._es.atomic_update(
+                self._drivers_index,
+                driver_id,
+                lambda current: _apply_counter_deltas(
+                    current,
+                    delta_active=delta_active,
+                    delta_completed=delta_completed,
+                    now=now,
+                ),
             )
-            result = response.get("result", "")
-            if result == "noop":
-                return False
-            return True
+            return applied
         except Exception as exc:
             logger.error(
                 "DriverRepository.increment_counters: failed for "
@@ -733,29 +766,18 @@ class DriverRepository:
         now = _utcnow_iso()
 
         try:
-            response = self._es.client.update_by_query(
-                index=self._drivers_index,
-                body={
-                    "query": {
-                        "bool": {
-                            "filter": [
-                                {"term": {"tenant_id": tenant_id}},
-                                {"range": {"completed_today": {"gt": 0}}},
-                            ]
-                        }
-                    },
-                    "script": {
-                        "source": (
-                            "ctx._source.completed_today = 0; "
-                            "ctx._source.updated_at = params.now;"
-                        ),
-                        "lang": "painless",
-                        "params": {"now": now},
-                    },
+            updated = await self._es.update_by_query(
+                self._drivers_index,
+                {
+                    "bool": {
+                        "filter": [
+                            {"term": {"tenant_id": tenant_id}},
+                            {"range": {"completed_today": {"gt": 0}}},
+                        ]
+                    }
                 },
-                refresh=True,
+                lambda current: _reset_completed_today(current, now=now),
             )
-            updated = response.get("updated", 0)
             logger.info(
                 "DriverRepository.reset_completed_today: reset %d drivers "
                 "for tenant=%s",

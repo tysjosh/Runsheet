@@ -336,7 +336,9 @@ export default function InvoiceDetailPage({
           </h2>
           <dl className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <div>
-              <dt className="text-xs uppercase text-gray-500">Actual gallons</dt>
+              <dt className="text-xs uppercase text-gray-500">
+                Actual gallons
+              </dt>
               <dd className="font-semibold">
                 {invoice.delivery_result.actual_gallons.toLocaleString()} gal
               </dd>
@@ -344,7 +346,9 @@ export default function InvoiceDetailPage({
             <div>
               <dt className="text-xs uppercase text-gray-500">Delivered</dt>
               <dd>
-                {new Date(invoice.delivery_result.delivered_at).toLocaleString()}
+                {new Date(
+                  invoice.delivery_result.delivered_at,
+                ).toLocaleString()}
               </dd>
             </div>
             <div>
@@ -357,9 +361,7 @@ export default function InvoiceDetailPage({
             </div>
             <div>
               <dt className="text-xs uppercase text-gray-500">Source ERP</dt>
-              <dd>
-                {invoice.delivery_result.source_system || "Not imported"}
-              </dd>
+              <dd>{invoice.delivery_result.source_system || "Not imported"}</dd>
             </div>
             {invoice.delivery_result.source_record_id && (
               <div>

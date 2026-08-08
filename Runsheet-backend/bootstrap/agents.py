@@ -16,6 +16,7 @@ from typing import Optional
 
 from bootstrap.container import ServiceContainer
 from bootstrap.routing import mount_router
+from persistence.leader_election import run_periodic
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,30 @@ _FUEL_OPS_FEATURE_FLAG_DEFAULTS = (
     "overlay.integration.stripe",
 )
 
+#: Agent-level overlay gates — ``overlay.{agent_id}`` for every overlay agent.
+#:
+#: These are NOT the capability flags above and the two sets do not overlap.
+#: ``OverlayAgentBase._get_mode`` reads ``overlay.{agent_id}``, and
+#: ``monitor_cycle`` skips a tenant outright when that resolves to
+#: ``disabled``. Seeding only the capability names left every agent-level gate
+#: unset, undocumented and invisible to the feature-flag admin API, so all
+#: twelve overlay agents skipped every tenant with nothing to point at.
+#:
+#: Derived from the live agent instances at boot rather than restated here, so a
+#: new overlay agent cannot ship without its gate being seeded
+#: (tests/unit/test_overlay_flag_gating.py pins the derivation).
+def _overlay_agent_flag_keys(agents) -> list:
+    """Return ``overlay.{agent_id}`` for every agent that exposes the gate."""
+    keys = []
+    for agent in agents:
+        getter = getattr(agent, "overlay_flag_key", None)
+        if callable(getter):
+            try:
+                keys.append(getter())
+            except Exception:  # pragma: no cover - defensive
+                continue
+    return keys
+
 
 def _resolve_fuel_ops_settings(settings) -> dict:
     """Resolve the fuel-ops hardening platform settings.
@@ -93,18 +118,30 @@ def _resolve_fuel_ops_settings(settings) -> dict:
 async def _seed_fuel_ops_feature_flag_defaults(
     container,
     redis_client,
+    flag_keys=None,
+    *,
+    label: str = "fuel-ops overlay",
 ) -> None:
-    """Seed every fuel-ops overlay feature flag to ``disabled`` by default.
+    """Seed overlay feature flags to ``disabled`` by default.
 
     Uses the shared :class:`ops.services.feature_flags.FeatureFlagService`
     Redis key layout (``overlay_ff:{flag_key}:{tenant_id}``). We only
     set the key when it is absent so existing tenant overrides are
     preserved across redeploys. Missing Redis simply logs a warning.
 
+    ``flag_keys`` defaults to the fuel-ops *capability* flags. Bootstrap calls
+    this a second time with the agent-level gates
+    (``overlay.{agent_id}``), which are a disjoint set and were previously
+    seeded nowhere — see ``_overlay_agent_flag_keys``.
+
     Validates: Requirement 10.2.2.
     """
 
     if redis_client is None:
+        return
+    if flag_keys is None:
+        flag_keys = _FUEL_OPS_FEATURE_FLAG_DEFAULTS
+    if not flag_keys:
         return
 
     # Feature flag defaults are keyed per tenant. Without a tenant
@@ -116,7 +153,7 @@ async def _seed_fuel_ops_feature_flag_defaults(
     from ops.services.feature_flags import OVERLAY_PREFIX
 
     seeded = []
-    for flag_key in _FUEL_OPS_FEATURE_FLAG_DEFAULTS:
+    for flag_key in flag_keys:
         redis_key = f"{OVERLAY_PREFIX}{flag_key}:{placeholder_tenant}"
         try:
             # SET NX so we never clobber an existing default.
@@ -126,19 +163,21 @@ async def _seed_fuel_ops_feature_flag_defaults(
                 seeded.append(flag_key)
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning(
-                "Failed to seed fuel-ops feature flag %s: %s",
+                "Failed to seed %s feature flag %s: %s",
+                label,
                 flag_key,
                 exc,
             )
 
     if seeded:
         logger.info(
-            "Seeded fuel-ops overlay feature flags (defaults=OFF): %s",
+            "Seeded %s feature flags (defaults=OFF): %s",
+            label,
             ", ".join(seeded),
         )
     else:
         logger.debug(
-            "Fuel-ops overlay feature flags already seeded; no changes made"
+            "%s feature flags already seeded; no changes made", label
         )
 
 
@@ -160,7 +199,6 @@ async def initialize(app, container: ServiceContainer) -> None:
     from Agents.memory_service import MemoryService
     from Agents.feedback_service import FeedbackService
     from Agents.tools.mutation_tools import configure_mutation_tools
-    from Agents.agent_es_mappings import setup_agent_indices
     from Agents.specialists import (
         FleetAgent,
         SchedulingAgent,
@@ -185,15 +223,12 @@ async def initialize(app, container: ServiceContainer) -> None:
     settings = container.settings
     es_service = container.es_service
 
-    # ---- Startup Mapping Validation (Req 5.1, 5.5) ----
-    try:
-        from services.mapping_validator import MappingValidator
-
-        mapping_validator = MappingValidator(es_service=es_service)
-        drift_items = await mapping_validator.validate_all()
-        await mapping_validator.remediate(drift_items)
-    except Exception as exc:
-        logger.error("Mapping validation failed (non-blocking): %s", exc)
+    # Startup mapping validation is gone with Elasticsearch (Req 5.1, 5.5). It
+    # compared live index mappings against the code-defined ones and added missing
+    # fields; there are no live mappings to drift from now. The declarations survive
+    # in the ``*_es_mappings`` modules because
+    # ``persistence/document_field_policy.py`` reads them to decide which fields
+    # must stay unqueryable — that is the one job they still do.
 
     # Agent WebSocket manager
     agent_ws_manager = AgentActivityWSManager()
@@ -245,14 +280,22 @@ async def initialize(app, container: ServiceContainer) -> None:
     #    AES-GCM envelope encryption under a process-local master key. This
     #    keeps credential-dependent flows (intake-channel registration,
     #    integration credential storage) working end-to-end off-AWS without
-    #    silently calling the real KMS API. Never used in production.
+    #    silently calling the real KMS API.
+    #
+    #    The fallback is restricted to development and test. It used to apply to
+    #    any environment that was not production, which included STAGING — so a
+    #    staging deployment without FUEL_OPS_KMS_KEY_ID encrypted real tenant
+    #    QuickBooks / Stripe / Geotab tokens under ``LocalKMSClient``'s master
+    #    key, which is derived from a literal default committed to this repo.
+    #    Staging holds real credentials, so it gets the same requirement as
+    #    production: a real CMK, or no vault.
     try:
         from services.credentials_vault import TenantCredentialsVault
 
         kms_key_id = fuel_ops_settings.get("kms_key_id")
         kms_client = None
         _env = getattr(settings.environment, "value", settings.environment)
-        if not kms_key_id and _env != "production":
+        if not kms_key_id and _env in ("development", "test"):
             from services.local_kms import LOCAL_KMS_DEFAULT_KEY_ID, LocalKMSClient
 
             kms_key_id = LOCAL_KMS_DEFAULT_KEY_ID
@@ -260,6 +303,19 @@ async def initialize(app, container: ServiceContainer) -> None:
             logger.info(
                 "No FUEL_OPS_KMS_KEY_ID configured in %s; using LocalKMSClient "
                 "for the credentials vault (dev/CI envelope encryption)",
+                _env,
+            )
+        elif not kms_key_id:
+            # Registering a vault that cannot encrypt is not itself wrong — it
+            # still serves reads of previously stored credentials — but the
+            # failure surfaced only when someone tried to store one, as a 500
+            # from a ValueError deep in ``put``. Say it at boot instead.
+            logger.warning(
+                "No FUEL_OPS_KMS_KEY_ID configured in %s: the credentials vault "
+                "cannot encrypt, so storing any tenant integration credential "
+                "will fail. Set a real KMS CMK. The dev-only LocalKMSClient "
+                "fallback is deliberately NOT used here because its master key "
+                "is a literal committed to this repository.",
                 _env,
             )
 
@@ -371,6 +427,66 @@ async def initialize(app, container: ServiceContainer) -> None:
     except Exception as exc:
         logger.warning("PodHashChainWriter wiring failed: %s", exc)
 
+    # 8b. Weather_Provider — HDD input to the propane / heating-oil
+    #    consumption models (Req 1.2.1–1.2.6).
+    #
+    #    Both adapters were fully implemented and neither was ever
+    #    constructed: nothing called ``build_weather_provider`` outside its own
+    #    module, and ``TankForecastingAgent.set_weather_provider`` was never
+    #    called, so ``_weather_provider`` stayed ``None`` and EVERY propane and
+    #    heating-oil forecast ran weather-blind with ``weather_fallback: true``.
+    #    Degree-days are the dominant term in those models, so the annotation
+    #    was the only sign that the forecast was running without its main input.
+    #
+    #    Built only when a credential is present. Both adapters return ``[]``
+    #    with a warning when their token is missing, so wiring one
+    #    unconditionally would swap a visible "not registered" for a provider
+    #    that fails on every call — the same silence, one layer deeper.
+    weather_provider = None
+    try:
+        from fuel.services.weather_provider import (
+            NOAA_TOKEN_ENV,
+            OPENWEATHER_KEY_ENV,
+            build_weather_provider,
+        )
+
+        _weather_name = (os.environ.get("FUEL_OPS_WEATHER_PROVIDER") or "").strip().lower()
+        if not _weather_name:
+            # Auto-select from whichever credential exists. OpenWeather first:
+            # its One Call history endpoint covers the [-14, +7] window the
+            # forecaster asks for, whereas NOAA CDO is observations-only.
+            if os.environ.get(OPENWEATHER_KEY_ENV):
+                _weather_name = "openweather"
+            elif os.environ.get(NOAA_TOKEN_ENV):
+                _weather_name = "noaa"
+
+        if _weather_name:
+            weather_provider = build_weather_provider(
+                _weather_name,
+                # ES persists daily observations to weather_observations, which
+                # also gives the compliance K-factor service real HDD to read
+                # instead of its empty-index fallback. Redis gives the 1h cache.
+                es_service=es_service,
+                redis_client=_agent_redis_client,
+            )
+            container.weather_provider = weather_provider
+            logger.info(
+                "Weather_Provider registered (%s) — HDD available to the "
+                "propane / heating-oil consumption models",
+                _weather_name,
+            )
+        else:
+            logger.info(
+                "Weather_Provider not registered — set FUEL_OPS_WEATHER_PROVIDER "
+                "with %s or %s. Propane / heating-oil forecasts will run without "
+                "degree-days and annotate weather_fallback: true",
+                OPENWEATHER_KEY_ENV,
+                NOAA_TOKEN_ENV,
+            )
+    except Exception as exc:  # noqa: BLE001 — forecasting degrades, not fails
+        weather_provider = None
+        logger.warning("Weather_Provider wiring failed: %s", exc)
+
     # 9. DeliveryDestinationService — unified reader over fuel_stations
     #    and customer_tanks.
     try:
@@ -390,13 +506,6 @@ async def initialize(app, container: ServiceContainer) -> None:
     # ---- Fuel-Ops Hardening ES indices (Task 12.2 prerequisite) --------
     # Create the 21 new indices introduced by this spec. The helper is
     # idempotent — existing indices are left untouched.
-    try:
-        from fuel.services.fuel_ops_es_mappings import setup_fuel_ops_indices
-
-        setup_fuel_ops_indices(es_service)
-        logger.info("Fuel-ops ES indices ready")
-    except Exception as exc:
-        logger.warning("Fuel-ops ES index setup failed: %s", exc)
 
     # ---- Fuel-Ops feature-flag defaults (Task 12.1, 12.7) -------------
     # Seed every overlay feature flag introduced by this spec to
@@ -461,24 +570,22 @@ async def initialize(app, container: ServiceContainer) -> None:
     # scheduled it, so expired-but-still-pending approvals piled up in the
     # queue (and inflated the operator alert badge). Mirrors the
     # asyncio.create_task periodic-job pattern used in bootstrap/core.py.
-    async def _periodic_approval_expiry() -> None:
-        """Background task that expires stale pending approvals."""
-        try:
-            while True:
-                await asyncio.sleep(APPROVAL_EXPIRY_INTERVAL_SECONDS)
-                try:
-                    expired = await approval_queue_service.expire_stale()
-                    if expired:
-                        logger.info(
-                            "Approval expiry sweep: %d approval(s) expired",
-                            expired,
-                        )
-                except Exception as exc:
-                    logger.error("Approval expiry sweep failed: %s", exc)
-        except asyncio.CancelledError:
-            logger.info("Approval expiry task cancelled")
+    async def _approval_expiry_cycle() -> None:
+        """One pass expiring stale pending approvals."""
+        expired = await approval_queue_service.expire_stale()
+        if expired:
+            logger.info(
+                "Approval expiry sweep: %d approval(s) expired",
+                expired,
+            )
 
-    _approval_expiry_task = asyncio.create_task(_periodic_approval_expiry())
+    _approval_expiry_task = asyncio.create_task(
+        run_periodic(
+            "agents.approval-expiry",
+            APPROVAL_EXPIRY_INTERVAL_SECONDS,
+            _approval_expiry_cycle,
+        )
+    )
     logger.info(
         "Approval expiry sweep started (interval: %ds)",
         APPROVAL_EXPIRY_INTERVAL_SECONDS,
@@ -495,6 +602,40 @@ async def initialize(app, container: ServiceContainer) -> None:
     configure_mutation_tools(confirmation_protocol, es_service)
     logger.info("Mutation tools configured")
 
+    # Wire the commerce read tool to the SAME services the order intake path
+    # uses. Building fresh instances here would let the agent's credit verdict
+    # drift from the one that actually gates an order; reusing the container's
+    # instances makes that impossible. Read-only by design — no commerce
+    # mutation tool is exposed to any specialist.
+    from Agents.tools.commerce_read_tools import configure_commerce_read_tools
+
+    _credit_svc = (
+        container.commerce_credit_service
+        if container.has("commerce_credit_service")
+        else None
+    )
+    _aging_svc = (
+        container.commerce_ar_aging_service
+        if container.has("commerce_ar_aging_service")
+        else None
+    )
+    configure_commerce_read_tools(
+        credit_service=_credit_svc,
+        ar_aging_service=_aging_svc,
+        es_service=es_service,
+    )
+    if _credit_svc is None:
+        # Commerce is flag-gated, so this is a legitimate state. Logged at
+        # WARNING because the tool will decline rather than answer, and a silent
+        # decline reads to a user like the feature is broken.
+        logger.warning(
+            "Commerce read tool has no CreditService (commerce backbone "
+            "disabled or wiring failed) — delivery-eligibility questions will "
+            "report the tool as unconfigured"
+        )
+    else:
+        logger.info("Commerce read tools configured (credit eligibility)")
+
     # Wire agent REST endpoints
     configure_agent_endpoints(
         approval_queue_service=approval_queue_service,
@@ -505,23 +646,18 @@ async def initialize(app, container: ServiceContainer) -> None:
     )
     logger.info("Agent endpoints configured")
 
-    # Specialist agents
-    from strands.models.litellm import LiteLLMModel
+    # Specialist agents.
+    #
+    # The model + credential come from Agents/model_provider.py rather than a
+    # literal model id and an ``os.environ.get(..., "")`` default. An unset key
+    # used to build a model with an EMPTY api_key: boot succeeded and every
+    # agent request failed on authentication. Settings now refuses to start
+    # staging/production without a credential, so reaching here means one is
+    # configured; a development stack without one raises and is logged loudly
+    # instead of pretending the agents work.
+    from Agents.model_provider import build_agent_model
 
-    # Set the env var litellm reads for Gemini API key auth
-    gemini_key = os.environ.get("GEMINI_API_KEY", "")
-    if gemini_key:
-        os.environ["GEMINI_API_KEY"] = gemini_key
-    specialist_model = LiteLLMModel(
-        model_id="gemini/gemini-2.5-flash",
-        client_args={
-            "api_key": gemini_key,
-        },
-        params={
-            "max_tokens": 8000,
-            "temperature": 0.7,
-        },
-    )
+    specialist_model = build_agent_model(settings)
 
     specialists = {
         "fleet": FleetAgent(model=specialist_model),
@@ -606,14 +742,12 @@ async def initialize(app, container: ServiceContainer) -> None:
     configure_orchestrator(agent_orchestrator)
 
     # Set up agent ES indices
-    setup_agent_indices(es_service)
     logger.info("Agent ES indices ready")
 
     # ---- Overlay Infrastructure (Phase 2) ----
     # Imports inside function to avoid circular imports
     from Agents.overlay.signal_bus import SignalBus
     from Agents.overlay.outcome_tracker import OutcomeTracker
-    from Agents.overlay.overlay_es_mappings import setup_overlay_indices
     from Agents.overlay.dispatch_optimizer import DispatchOptimizer
     from Agents.overlay.exception_commander import ExceptionCommander
     from Agents.overlay.revenue_guard import RevenueGuard
@@ -638,7 +772,6 @@ async def initialize(app, container: ServiceContainer) -> None:
         agent._signal_bus = signal_bus
 
     # Set up overlay ES indices
-    setup_overlay_indices(es_service)
     logger.info("Overlay ES indices ready")
 
     # Shared dependencies for overlay agents (Req 10.1, 10.4)
@@ -696,15 +829,18 @@ async def initialize(app, container: ServiceContainer) -> None:
     from Agents.overlay.compartment_loading_agent import CompartmentLoadingAgent
     from Agents.overlay.route_planning_agent import RoutePlanningAgent
     from Agents.overlay.exception_replanning_agent import ExceptionReplanningAgent
-    from Agents.support.mvp_es_mappings import setup_mvp_indices
     from Agents.support.fuel_distribution_pipeline import FuelDistributionPipeline
 
     # Set up MVP ES indices (Req 7.9)
-    setup_mvp_indices(es_service)
     logger.info("MVP ES indices ready")
 
     # Instantiate MVP agents with shared dependencies (Req 11.1–11.6)
-    tank_forecasting_agent = TankForecastingAgent(**overlay_common_args)
+    # ``weather_provider`` may be None (no credential configured), which is the
+    # pre-existing behaviour: the agent annotates ``weather_fallback: true``.
+    tank_forecasting_agent = TankForecastingAgent(
+        **overlay_common_args,
+        weather_provider=weather_provider,
+    )
     delivery_prioritization_agent = DeliveryPrioritizationAgent(
         **overlay_common_args,
         redis_client=_agent_redis_client,
@@ -732,6 +868,46 @@ async def initialize(app, container: ServiceContainer) -> None:
         "route_planning": route_planning_agent,
         "exception_replanning": exception_replanning_agent,
     }
+
+    # Seed the agent-level overlay gates — ``overlay.{agent_id}`` — now that
+    # every overlay and MVP agent exists to derive its own key.
+    #
+    # Without this the flags that decide whether an agent runs at all were set
+    # nowhere and were invisible to the feature-flag admin API, so an operator
+    # had no surface to enable an overlay and no way to see why nothing was
+    # happening. The capability flags seeded earlier are a different, disjoint
+    # set. Both are seeded to ``disabled`` for the ``__default__`` placeholder
+    # tenant; a real tenant with no value falls back to
+    # ``settings.overlay_default_mode``.
+    _overlay_gate_agents = list(app.state.overlay_agents.values()) + list(
+        app.state.mvp_agents.values()
+    )
+    await _seed_fuel_ops_feature_flag_defaults(
+        container,
+        _agent_redis_client,
+        _overlay_agent_flag_keys(_overlay_gate_agents),
+        label="overlay agent gate",
+    )
+    try:
+        _default_mode = settings.overlay_default_mode
+    except AttributeError:  # pragma: no cover - MagicMock settings in tests
+        _default_mode = "disabled"
+    if _default_mode == "disabled":
+        logger.warning(
+            "Overlay agents default to mode 'disabled' — %d agent(s) will skip "
+            "every tenant that has no overlay_ff:overlay.{agent_id} value. Set "
+            "OVERLAY_DEFAULT_MODE=shadow to run their decision logic in "
+            "observe-only mode, or enable per tenant via the feature-flag admin "
+            "API.",
+            len(_overlay_gate_agents),
+        )
+    else:
+        logger.info(
+            "Overlay agents default to mode '%s' for tenants with no explicit "
+            "flag (%d agent(s))",
+            _default_mode,
+            len(_overlay_gate_agents),
+        )
 
     # Create FuelDistributionPipeline instance (Req 6.1–6.6)
     mvp_pipeline = FuelDistributionPipeline(
@@ -903,26 +1079,64 @@ async def initialize(app, container: ServiceContainer) -> None:
             wait_report_repository=sourcing_wait_report_repo,
         )
 
-        # Rack-price provider: default to the CSV-backed fallback
-        # adapter. The CSV loader is a no-op async callable until a
-        # tenant uploads a rack sheet via the admin UI; the provider
-        # safely degrades to an empty candidate set when no CSV is
-        # present, which the recommender surfaces as
-        # ``no_price_available``. Swap in ``OPISRackPriceProvider`` here
-        # once the tenant has subscribed.
+        # Rack-price provider.
+        #
+        # This used to hardcode ``CSVFallbackRackPriceProvider`` with a loader
+        # that raised ``FileNotFoundError`` on every call, so terminal sourcing
+        # had NO price data for any tenant and every recommendation came back
+        # ``no_price_available``. The finished ``OPISRackPriceProvider`` was
+        # never constructed.
+        #
+        # OPIS is now used whenever its credential is present. It resolves
+        # OPIS_API_KEY / OPIS_API_SECRET / OPIS_BASE_URL itself, so bootstrap
+        # only has to decide which adapter to build.
         from integrations.rack_price_provider_base import (
-            CSVFallbackRackPriceProvider,
+            OPIS_API_KEY_ENV,
+            build_rack_price_provider,
         )
 
-        async def _noop_csv_loader(tenant_id: str) -> bytes:
+        async def _uploaded_csv_loader(tenant_id: str) -> bytes:
+            """Load the tenant's uploaded rack sheet.
+
+            Still unimplemented, and now says so once at wiring time rather
+            than only per call. Completing it needs two things this backend
+            does not have yet: an upload endpoint for the ``rack_csv``
+            category, and somewhere to record the resulting ``file_ref``.
+            A deterministic key cannot substitute — ``_assert_tenant_prefix``
+            validates the dated/uuid key shape that ``_build_key`` produces,
+            and ``FileStorageService`` exposes no list operation, so "the
+            latest sheet for this tenant" is not resolvable from the ref alone.
+            """
             raise FileNotFoundError(
                 f"no rack-price CSV configured for tenant {tenant_id!r}"
             )
 
-        sourcing_rack_provider = CSVFallbackRackPriceProvider(
-            csv_loader=_noop_csv_loader,
-            redis_client=_agent_redis_client,
-        )
+        _rack_name = (
+            os.environ.get("FUEL_OPS_RACK_PRICE_PROVIDER") or ""
+        ).strip().lower()
+        if not _rack_name:
+            _rack_name = "opis" if os.environ.get(OPIS_API_KEY_ENV) else "csv_fallback"
+
+        if _rack_name == "opis":
+            sourcing_rack_provider = build_rack_price_provider(
+                _rack_name, redis_client=_agent_redis_client
+            )
+            logger.info(
+                "Rack-price provider: OPIS (live rack feed) — terminal sourcing "
+                "will score candidates on real prices"
+            )
+        else:
+            sourcing_rack_provider = build_rack_price_provider(
+                _rack_name,
+                csv_loader=_uploaded_csv_loader,
+                redis_client=_agent_redis_client,
+            )
+            logger.warning(
+                "Rack-price provider: csv_fallback with NO uploaded sheet "
+                "(set %s for the live OPIS feed). Terminal sourcing has no "
+                "price data and will return no_price_available",
+                OPIS_API_KEY_ENV,
+            )
         sourcing_rack_sync = RackPriceSyncService(es_service=es_service)
 
         # Tenant-config handle — the recommender uses the same minimal
@@ -1438,31 +1652,24 @@ async def initialize(app, container: ServiceContainer) -> None:
             )
             container.invoice_erp_export_worker = invoice_erp_export_worker
 
-            async def _periodic_invoice_erp_export() -> None:
-                try:
-                    while True:
-                        try:
-                            counts = (
-                                await invoice_erp_export_worker.export_pending()
-                            )
-                            if counts["examined"]:
-                                logger.info(
-                                    "Invoice ERP export recovery cycle: %s",
-                                    counts,
-                                )
-                        except Exception as exc:
-                            logger.exception(
-                                "Invoice ERP export recovery cycle failed: %s",
-                                exc,
-                            )
-                        await asyncio.sleep(ERP_EXPORT_INTERVAL_SECONDS)
-                except asyncio.CancelledError:
+            async def _invoice_erp_export_cycle() -> None:
+                """One recovery pass exporting pending invoices to the ERP."""
+                counts = await invoice_erp_export_worker.export_pending()
+                if counts["examined"]:
                     logger.info(
-                        "Invoice ERP export recovery task cancelled"
+                        "Invoice ERP export recovery cycle: %s",
+                        counts,
                     )
 
+            # The original loop worked before its first sleep, so the recovery
+            # pass ran at boot. ``run_immediately`` preserves that.
             _erp_invoice_export_task = asyncio.create_task(
-                _periodic_invoice_erp_export()
+                run_periodic(
+                    "commerce.invoice-erp-export",
+                    ERP_EXPORT_INTERVAL_SECONDS,
+                    _invoice_erp_export_cycle,
+                    run_immediately=True,
+                )
             )
             logger.info(
                 "Invoice ERP export recovery started (interval: %ds)",

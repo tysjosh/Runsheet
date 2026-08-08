@@ -63,6 +63,12 @@ def _canonicalize_compatible_assets(
 class InventoryService:
     """Manages inventory item state, stock adjustments, and alerting."""
 
+    #: Cap on items scanned to total inventory value in :meth:`get_summary`. The
+    #: largest index in the cluster holds 988 documents, so this cannot bind on
+    #: today's data; past it the total is understated and a warning says so, rather
+    #: than the number quietly shrinking.
+    MAX_SUMMARY_ITEMS: int = 10_000
+
     def __init__(self, es_service: ElasticsearchService, ws_manager=None):
         self._es = es_service
         self._ws_manager = ws_manager
@@ -416,24 +422,25 @@ class InventoryService:
 
     async def get_summary(self, tenant_id: str) -> InventorySummary:
         """Return aggregated inventory counts and total value."""
+        # ``total_value`` was a script-valued ``sum`` multiplying ``quantity`` by
+        # ``unit_cost`` in painless. The Postgres document store refuses
+        # script-valued metrics — emulating a painless expression means guessing at
+        # a language's semantics — so it raised, and unlike the notification metrics
+        # this method has no ``except``, meaning the inventory summary endpoint
+        # returned a 500. A product of two stored fields does not need a script; it
+        # is computed below over the same documents.
         query: dict = {
             "query": {"term": {"tenant_id": tenant_id}},
-            "size": 0,
+            "size": self.MAX_SUMMARY_ITEMS,
+            "_source": ["quantity", "unit_cost"],
             "aggs": {
                 "status_counts": {"terms": {"field": "status", "size": 10}},
                 "category_counts": {"terms": {"field": "category", "size": 20}},
-                "total_value": {
-                    "sum": {
-                        "script": {
-                            "source": "doc['quantity'].value * (doc.containsKey('unit_cost') && doc['unit_cost'].size() > 0 ? doc['unit_cost'].value : 0)"
-                        }
-                    }
-                },
             },
         }
 
         response = await self._es.search_documents(
-            INVENTORY_INDEX, query, size=0
+            INVENTORY_INDEX, query, size=self.MAX_SUMMARY_ITEMS
         )
 
         total_items = response["hits"]["total"]["value"]
@@ -450,7 +457,30 @@ class InventoryService:
             for b in aggs.get("category_counts", {}).get("buckets", [])
         }
 
-        total_value = aggs.get("total_value", {}).get("value", 0.0) or 0.0
+        # ``quantity * (unit_cost or 0)`` summed, which is what the painless script
+        # did — including treating a missing ``unit_cost`` as zero rather than
+        # skipping the row, so an item priced at nothing still counts as an item.
+        total_value = 0.0
+        for hit in response["hits"]["hits"]:
+            source = hit.get("_source") or {}
+            quantity = source.get("quantity") or 0
+            unit_cost = source.get("unit_cost") or 0
+            try:
+                total_value += float(quantity) * float(unit_cost)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "inventory summary: skipping item with non-numeric "
+                    "quantity=%r unit_cost=%r",
+                    quantity, unit_cost,
+                )
+        if total_items > self.MAX_SUMMARY_ITEMS:
+            # Said out loud rather than reported as a smaller total, which would
+            # look like inventory shrinking.
+            logger.warning(
+                "inventory summary for tenant covers %d of %d items (scan cap); "
+                "total_value is understated",
+                self.MAX_SUMMARY_ITEMS, total_items,
+            )
 
         return InventorySummary(
             total_items=total_items,

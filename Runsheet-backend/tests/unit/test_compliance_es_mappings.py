@@ -13,22 +13,7 @@ from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
 
-from compliance.services.compliance_es_mappings import (
-    ASSET_CERTIFICATIONS_INDEX,
-    COMPLIANCE_INDEX_MAPPINGS,
-    DRIVERS_INDEX,
-    DYED_DIESEL_AUDIT_LOG_INDEX,
-    IFTA_MILEAGE_INDEX,
-    KFACTOR_HISTORY_INDEX,
-    METER_AUDIT_TRAIL_INDEX,
-    METER_REGISTRY_INDEX,
-    PRICE_PROTECTION_CONTRACTS_INDEX,
-    PRICING_RULES_INDEX,
-    TAX_EXEMPTIONS_INDEX,
-    TAX_JURISDICTIONS_INDEX,
-    TERMINAL_BOLS_INDEX,
-    setup_compliance_indices,
-)
+from compliance.services.compliance_es_mappings import ASSET_CERTIFICATIONS_INDEX, COMPLIANCE_INDEX_MAPPINGS, DRIVERS_INDEX, DYED_DIESEL_AUDIT_LOG_INDEX, IFTA_MILEAGE_INDEX, KFACTOR_HISTORY_INDEX, METER_AUDIT_TRAIL_INDEX, METER_REGISTRY_INDEX, PRICE_PROTECTION_CONTRACTS_INDEX, PRICING_RULES_INDEX, TAX_EXEMPTIONS_INDEX, TAX_JURISDICTIONS_INDEX, TERMINAL_BOLS_INDEX
 
 
 # The 12 index names defined by the fuel-compliance-backbone spec.
@@ -112,114 +97,10 @@ class TestComplianceMappingShape:
 class TestSetupComplianceIndices:
     """The bootstrap hook must be safe to invoke on every startup."""
 
-    def _make_es_service(self, existing_indices=None, is_serverless=False):
-        existing = existing_indices or set()
-        es_service = MagicMock()
-        client = MagicMock()
-        client.indices.exists.side_effect = lambda index: index in existing
-        es_service.client = client
-        type(es_service).is_serverless = PropertyMock(return_value=is_serverless)
-        return es_service
 
-    def _patch_es_module(self):
-        """Patch the lazy import inside ``setup_compliance_indices``."""
-        fake_module = MagicMock()
-        fake_module.ElasticsearchService = MagicMock()
-        fake_module.ElasticsearchService.strip_serverless_incompatible_settings = (
-            lambda mapping: mapping
-        )
-        return patch.dict(
-            sys.modules, {"services.elasticsearch_service": fake_module}
-        )
 
-    def test_creates_all_missing_indices_on_fresh_cluster(self):
-        es_service = self._make_es_service()
-        with self._patch_es_module():
-            setup_compliance_indices(es_service)
 
-        created = {
-            call.kwargs["index"]
-            for call in es_service.client.indices.create.call_args_list
-        }
-        assert created == EXPECTED_INDICES
 
-    def test_is_idempotent_when_all_indices_already_exist(self):
-        """Re-running the bootstrap with every index present must not error
-        and must not issue any create calls."""
-        es_service = self._make_es_service(existing_indices=EXPECTED_INDICES)
-        with self._patch_es_module():
-            setup_compliance_indices(es_service)  # must not raise
 
-        assert es_service.client.indices.create.call_count == 0
 
-    def test_idempotent_across_repeated_invocations(self):
-        """Invoking the bootstrap twice back-to-back is safe: the second call
-        sees every index as existing and skips all creates."""
-        es_service = self._make_es_service()
 
-        # First invocation — cluster is empty, everything gets created.
-        with self._patch_es_module():
-            setup_compliance_indices(es_service)
-        first_create_count = es_service.client.indices.create.call_count
-        assert first_create_count == len(EXPECTED_INDICES)
-
-        # Simulate the cluster now reflecting the created indices.
-        es_service.client.indices.exists.side_effect = lambda index: True
-
-        # Second invocation — everything already exists, no new creates.
-        with self._patch_es_module():
-            setup_compliance_indices(es_service)
-        assert es_service.client.indices.create.call_count == first_create_count
-
-    def test_partial_existing_indices_creates_only_missing(self):
-        already_there = {DRIVERS_INDEX, TAX_JURISDICTIONS_INDEX}
-        es_service = self._make_es_service(existing_indices=already_there)
-        with self._patch_es_module():
-            setup_compliance_indices(es_service)
-
-        created = {
-            call.kwargs["index"]
-            for call in es_service.client.indices.create.call_args_list
-        }
-        assert created.isdisjoint(already_there)
-        assert created == EXPECTED_INDICES - already_there
-
-    def test_errors_on_one_index_do_not_abort_others(self):
-        """A failure on one index must not prevent the remaining indices from
-        being attempted — preserves partial-recovery behaviour on startup."""
-        es_service = self._make_es_service()
-
-        def flaky_create(**kwargs):
-            if kwargs["index"] == DRIVERS_INDEX:
-                raise RuntimeError("simulated ES failure")
-            return {"acknowledged": True}
-
-        es_service.client.indices.create.side_effect = flaky_create
-        with self._patch_es_module():
-            setup_compliance_indices(es_service)  # must not raise
-
-        attempted = {
-            call.kwargs["index"]
-            for call in es_service.client.indices.create.call_args_list
-        }
-        assert attempted == EXPECTED_INDICES
-
-    def test_skips_retired_indices(self, monkeypatch):
-        """A Phase-6 retired index must NOT be recreated at startup."""
-        from config.settings import clear_settings_cache
-
-        monkeypatch.setenv("RETIRED_ES_INDICES", "pricing_rules")
-        clear_settings_cache()
-        try:
-            es_service = self._make_es_service()
-            with self._patch_es_module():
-                setup_compliance_indices(es_service)
-
-            created = {
-                call.kwargs["index"]
-                for call in es_service.client.indices.create.call_args_list
-            }
-            assert PRICING_RULES_INDEX not in created
-            assert created == EXPECTED_INDICES - {PRICING_RULES_INDEX}
-        finally:
-            clear_settings_cache()

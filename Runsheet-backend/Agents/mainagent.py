@@ -19,7 +19,8 @@ import time
 from typing import AsyncGenerator, Optional, Any
 from datetime import datetime
 from strands import Agent
-from strands.models.litellm import LiteLLMModel
+# The model itself is built by Agents.model_provider.build_agent_model, which
+# owns provider selection and credential resolution for every agent entry point.
 from dotenv import load_dotenv
 from .tools import ALL_TOOLS
 from .tools._tenant_context import set_current_tenant
@@ -155,23 +156,15 @@ class LogisticsAgent:
         
         # Setup Google credentials
         self.setup_gemini_credentials()
-        
-        # Initialize Gemini model through LiteLLM (using API key)
-        import os
-        # Set the env var litellm reads for Gemini API key auth
-        gemini_key = os.environ.get("GEMINI_API_KEY", "")
-        if gemini_key:
-            os.environ["GEMINI_API_KEY"] = gemini_key
-        gemini_model = LiteLLMModel(
-            model_id="gemini/gemini-2.5-flash",
-            client_args={
-                "api_key": gemini_key,
-            },
-            params={
-                "max_tokens": 8000,
-                "temperature": 0.7,
-            }
-        )
+
+        # Model + credential resolution lives in one place (see
+        # Agents/model_provider.py). This used to read GEMINI_API_KEY with an
+        # empty-string default and hardcode a ``gemini/`` model id, so an unset
+        # key produced a model that authenticated with nothing and failed on
+        # every request rather than at startup.
+        from Agents.model_provider import build_agent_model
+
+        gemini_model = build_agent_model(self.settings)
         
         # Initialize Strands Agent with the Gemini model
         self.agent = Agent(

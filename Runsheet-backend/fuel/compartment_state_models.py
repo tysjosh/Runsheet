@@ -45,9 +45,7 @@ Validates: Requirements 7.1.1, 7.1.2, 7.1.3.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
-import random
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Literal, Optional, Sequence
 from uuid import uuid4
@@ -55,6 +53,9 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from Agents.support.mvp_es_mappings import TRUCK_COMPARTMENTS_INDEX
+from commerce.services.commerce_persistence_bridge import (
+    mirror_current_state_upsert,
+)
 from fuel.services.fuel_ops_es_mappings import COMPARTMENT_CLEANING_EVENTS_INDEX
 from fuel.services.fuel_product_catalog import (
     UnknownFuelProductError,
@@ -256,31 +257,30 @@ class CompartmentStateRepository:
           cleaning before its next load (typically invoked by the
           cross-contamination guard).
 
-    Every write goes through :meth:`_atomic_update`, which uses
-    Elasticsearch optimistic concurrency control: it reads the current
-    ``_seq_no`` and ``_primary_term``, asserts them on the write, and
-    retries a bounded number of times with jittered backoff when a
-    ``version_conflict`` is detected. On persistent contention the
-    repository raises :class:`CompartmentStateConflictError` so the
-    caller can surface a 409 rather than silently losing the write.
+    Every write goes through :meth:`_atomic_update`, which delegates to
+    :meth:`services.elasticsearch_service.ElasticsearchService.atomic_update`.
+    How that call stays safe under concurrency depends on the backend, and the
+    difference matters to callers: on Elasticsearch it is ``_seq_no`` /
+    ``_primary_term`` optimistic concurrency with bounded jittered retries, so
+    persistent contention surfaces as :class:`CompartmentStateConflictError` and
+    the caller returns a 409. On Postgres the row is locked, so a concurrent
+    writer waits instead of colliding and that 409 becomes unreachable.
 
     Dependencies are injected via the constructor so the repository is
     trivially testable with a recording mock. The only interface the
     repository relies on is:
 
-        * synchronous ``es_service.client.get(index=..., id=...)`` —
-          returns a dict containing ``_source``, ``_seq_no``,
-          ``_primary_term``; raises ``NotFoundError``-compatible
-          exceptions when the document is missing.
-        * synchronous ``es_service.client.update(index=..., id=...,
-          body={"doc": ...}, if_seq_no=..., if_primary_term=...,
-          refresh=...)`` — raises ``ConflictError``-compatible
-          exceptions when the assertion fails.
+        * ``await es_service.get_document(index, doc_id)`` — the stored
+          document, or ``None`` when it does not exist.
+        * ``await es_service.atomic_update(index, doc_id, transform, ...)`` —
+          returns ``(document, applied)``; ``transform`` returns ``None`` to
+          leave the document untouched.
 
-    Both method names match the vanilla ``elasticsearch`` Python client's
-    public API, so the production ``ElasticsearchService`` drops in
-    unchanged (see :class:`Agents.approval_queue_service.ApprovalQueueService`
-    for the same pattern).
+    Neither reaches ``es_service.client``, so both follow
+    ``DOCUMENT_STORE_BACKEND``. That is not incidental here: this repository
+    writes ``last_loaded_product``, the history the cross-contamination guard
+    reads, so a read and a write that disagreed about which store to use would
+    let a contaminated load through.
     """
 
     #: Maximum number of retry attempts on ``version_conflict`` before a
@@ -509,133 +509,109 @@ class CompartmentStateRepository:
                 f"patch contains non-state fields: {sorted(invalid_fields)}"
             )
 
-        last_exc: Optional[Exception] = None
-        for attempt in range(self.MAX_OCC_RETRIES):
-            try:
-                current = self._get_with_version(compartment_doc_id)
-            except _NotFoundSentinel:
-                raise CompartmentNotFoundError(tenant_id, compartment_doc_id)
+        # The tenant guard fires BEFORE any mutation so an attacker cannot probe
+        # the existence of another tenant's compartment by watching for a write.
+        # Checked outside the transform because the transform may not run at all
+        # (a missing document) and because raising from inside it would surface as
+        # whatever the backend does with an exception mid-update.
+        owner_holder: Dict[str, Any] = {}
 
-            source = current["_source"]
-            owner = source.get("tenant_id")
-            if owner != tenant_id:
-                raise CrossTenantCompartmentAccessError(
+        def _apply(current: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+            owner_holder["tenant_id"] = current.get("tenant_id")
+            if current.get("tenant_id") != tenant_id:
+                # Signalled rather than raised so the guard's error is built
+                # outside the transform; returning None leaves the document
+                # untouched, which is the safe direction.
+                owner_holder["cross_tenant"] = True
+                return None
+            # ``{"doc": patch}`` semantics: a shallow merge, with ``None`` values
+            # permitted so :meth:`mark_cleaned` can clear ``last_loaded_product``.
+            # Callers outside this module cannot construct a null-bearing patch
+            # because the public methods control the allowed shape.
+            merged = dict(current)
+            merged.update(patch)
+            return merged
+
+        # One call replaces the read / assert-seq-no / write / retry-on-409 loop.
+        # On Elasticsearch the facade still does exactly that; on Postgres it
+        # takes a row lock, so a concurrent writer waits instead of colliding and
+        # :class:`CompartmentStateConflictError` becomes unreachable. Reaching the
+        # raw client here would also have kept this write on Elasticsearch after
+        # the document plane moved — and this is the write that records
+        # ``last_loaded_product``, which the cross-contamination guard reads.
+        try:
+            refreshed_source, applied = await self._es.atomic_update(
+                self._index,
+                compartment_doc_id,
+                _apply,
+                max_retries=self.MAX_OCC_RETRIES,
+                backoff_base_seconds=self.OCC_BACKOFF_BASE_SECONDS,
+            )
+        except Exception as exc:  # noqa: BLE001 — narrowed immediately below
+            # The facade signals exhausted optimistic-concurrency retries with a
+            # generic AppException. This repository's documented contract is
+            # ``CompartmentStateConflictError``, which callers translate to a 409,
+            # so it is preserved rather than leaked — a caller that starts seeing
+            # a 503 where it handled a 409 would retry the wrong way.
+            #
+            # Unreachable on the Postgres backend: a row lock makes the concurrent
+            # writer wait instead of colliding, so retries are never exhausted.
+            if "concurrent modification" in str(exc):
+                raise CompartmentStateConflictError(
                     tenant_id=tenant_id,
                     compartment_doc_id=compartment_doc_id,
-                    owning_tenant_id=owner,
-                )
-
-            # The ES ``update`` call with ``{"doc": patch}`` merges the
-            # patch into the source on the server side. We explicitly
-            # permit ``None`` values so :meth:`mark_cleaned` can clear
-            # ``last_loaded_product``; callers outside this module cannot
-            # construct a null-bearing patch because the public methods
-            # control the allowed shape.
-            try:
-                self._do_update(
-                    doc_id=compartment_doc_id,
-                    patch=patch,
-                    seq_no=current["_seq_no"],
-                    primary_term=current["_primary_term"],
-                )
-            except _ConflictSentinel as exc:
-                last_exc = exc
-                logger.info(
-                    "CompartmentStateRepository: OCC conflict on compartment=%s "
-                    "attempt=%d/%d — retrying",
-                    compartment_doc_id,
-                    attempt + 1,
-                    self.MAX_OCC_RETRIES,
-                )
-                await asyncio.sleep(self._backoff_seconds(attempt))
-                continue
-
-            # Success — read back the refreshed document so the returned
-            # model reflects the merged state (including fields the patch
-            # did not touch, e.g. ``last_loaded_at`` on ``mark_cleaned``).
-            try:
-                refreshed = self._get_with_version(compartment_doc_id)
-                refreshed_source = refreshed["_source"]
-            except _NotFoundSentinel:
-                # Extremely unlikely (the compartment was just updated)
-                # but we degrade to synthesising from the pre-update
-                # source plus the patch rather than raising NotFound,
-                # since the caller's write did succeed.
-                refreshed_source = {**source, **patch}
-
-            state = _safe_state_load(refreshed_source)
-            if state is None:
-                # The source is too malformed to validate. Raise a
-                # not-found rather than a ValidationError so the caller
-                # observes a clean error mode — the write still
-                # persisted, and an out-of-band re-read can recover.
-                raise CompartmentNotFoundError(tenant_id, compartment_doc_id)
-            return state
-
-        raise CompartmentStateConflictError(
-            tenant_id=tenant_id,
-            compartment_doc_id=compartment_doc_id,
-            attempts=self.MAX_OCC_RETRIES,
-        ) from last_exc
-
-    # ------------------------------------------------------------------
-    # Internals — raw ES plumbing
-    # ------------------------------------------------------------------
-
-    def _get_with_version(self, doc_id: str) -> Dict[str, Any]:
-        """Return ``{"_source", "_seq_no", "_primary_term"}`` or raise.
-
-        Internal sentinels (:class:`_NotFoundSentinel`,
-        :class:`_ConflictSentinel`) are used so the OCC loop can
-        ``except`` on exact shapes without importing the ES client's
-        exception hierarchy (which varies between the sync and async
-        client variants and would make unit-mocking brittle).
-        """
-
-        try:
-            response = self._es.client.get(index=self._index, id=doc_id)
-        except Exception as exc:  # pragma: no cover - thin wrapper
-            if _is_not_found(exc):
-                raise _NotFoundSentinel() from exc
+                    attempts=self.MAX_OCC_RETRIES,
+                ) from exc
             raise
-        return {
-            "_source": response.get("_source", {}),
-            "_seq_no": response.get("_seq_no"),
-            "_primary_term": response.get("_primary_term"),
-        }
 
-    def _do_update(
-        self,
-        *,
-        doc_id: str,
-        patch: Dict[str, Any],
-        seq_no: Any,
-        primary_term: Any,
-    ) -> None:
-        """Execute the asserted update or raise an internal conflict sentinel."""
-
-        try:
-            self._es.client.update(
-                index=self._index,
-                id=doc_id,
-                body={"doc": patch},
-                if_seq_no=seq_no,
-                if_primary_term=primary_term,
-                refresh=True,
+        if refreshed_source is None:
+            raise CompartmentNotFoundError(tenant_id, compartment_doc_id)
+        if owner_holder.get("cross_tenant"):
+            raise CrossTenantCompartmentAccessError(
+                tenant_id=tenant_id,
+                compartment_doc_id=compartment_doc_id,
+                owning_tenant_id=owner_holder.get("tenant_id"),
             )
-        except Exception as exc:
-            if _is_version_conflict(exc):
-                raise _ConflictSentinel() from exc
-            raise
+
+        # Postgres source of truth. ``truck_compartments`` was Elasticsearch-only
+        # until the fuel-asset migration, so a recreated cluster silently erased
+        # ``last_loaded_product`` — the history the cross-contamination guard reads
+        # before allowing a product into a compartment. The FULL post-update
+        # document is mirrored, not the patch, because a partial merge would leave
+        # Postgres missing anything the update recomputed.
+        await mirror_current_state_upsert(
+            "truck_compartment",
+            dict(refreshed_source),
+            doc_id=compartment_doc_id,
+        )
+
+        state = _safe_state_load(refreshed_source)
+        if state is None:
+            # The source is too malformed to validate. Raise a not-found rather
+            # than a ValidationError so the caller observes a clean error mode —
+            # the write still persisted, and an out-of-band re-read can recover.
+            raise CompartmentNotFoundError(tenant_id, compartment_doc_id)
+        return state
+
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
 
     async def _fetch_source(self, compartment_doc_id: str) -> Optional[Dict[str, Any]]:
-        """Fetch just the ``_source`` for a read path, returning ``None`` on 404."""
+        """Fetch the stored document for a read path, returning ``None`` if absent.
 
-        try:
-            current = self._get_with_version(compartment_doc_id)
-        except _NotFoundSentinel:
-            return None
-        return current["_source"]
+        Routed through the facade rather than ``es.client.get`` so the read
+        follows the same backend as the write. A raw ``client.get`` here would
+        have kept this read on Elasticsearch after the document plane moved to
+        Postgres, and the value it returns is ``last_loaded_product`` — the
+        history the cross-contamination guard checks before allowing a product
+        into a compartment. A stale read there approves a contaminated load.
+
+        ``get_document`` already maps a 404 to ``None``, so the not-found
+        sentinel this used to need is gone with it.
+        """
+
+        return await self._es.get_document(self._index, compartment_doc_id)
 
     # ------------------------------------------------------------------
     # Misc helpers
@@ -654,46 +630,12 @@ class CompartmentStateRepository:
         ):
             raise ValueError("compartment_doc_id must be a non-empty string")
 
-    @classmethod
-    def _backoff_seconds(cls, attempt: int) -> float:
-        """Compute jittered exponential backoff for OCC retries."""
 
-        base = cls.OCC_BACKOFF_BASE_SECONDS * (2 ** attempt)
-        return base * random.uniform(0.5, 1.5)
-
-
-# ---------------------------------------------------------------------------
-# Internal sentinels
-# ---------------------------------------------------------------------------
-
-
-class _NotFoundSentinel(Exception):
-    """Internal sentinel: ES reported a 404 on get."""
-
-
-class _ConflictSentinel(Exception):
-    """Internal sentinel: ES reported a version_conflict on update."""
-
-
-def _is_not_found(exc: Exception) -> bool:
-    """Heuristically detect an ES 404 without coupling to a specific client."""
-
-    if getattr(exc, "status_code", None) == 404:
-        return True
-    name = type(exc).__name__.lower()
-    return "notfound" in name
-
-
-def _is_version_conflict(exc: Exception) -> bool:
-    """Heuristically detect an ES version_conflict / 409 response."""
-
-    if getattr(exc, "status_code", None) == 409:
-        return True
-    name = type(exc).__name__.lower()
-    if "conflict" in name:
-        return True
-    text = str(exc).lower()
-    return "version_conflict" in text
+# The 404/409 sniffing helpers and the jittered-backoff calculator that used to
+# live here are gone: the read-modify-write loop they served moved into
+# ``ElasticsearchService.atomic_update``, which owns the retry policy for both
+# backends. ``MAX_OCC_RETRIES`` and ``OCC_BACKOFF_BASE_SECONDS`` survive as the
+# values this repository passes into it.
 
 
 # ---------------------------------------------------------------------------

@@ -38,15 +38,6 @@ async def initialize(app, container: ServiceContainer) -> None:
     container.ops_es_service = ops_es_service
 
     # Set up ops indices
-    try:
-        logger.info("Setting up ops intelligence indices...")
-        ops_es_service.setup_ops_indices()
-        ops_es_service.setup_ops_ilm_policies()
-        ops_es_service.verify_ops_ilm_policies()
-        ops_es_service.validate_ops_index_schemas()
-        logger.info("Ops intelligence indices ready")
-    except Exception as e:
-        logger.error("Failed to set up ops intelligence indices: %s", e)
 
     # Adapter
     ops_adapter = AdapterTransformer()

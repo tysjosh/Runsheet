@@ -22,6 +22,16 @@ def _make_agent_mock():
 @pytest.fixture(autouse=True)
 def _mock_external():
     """Mock all external modules that bootstrap/agents.py imports."""
+    # ``Agents.tools`` is replaced by a MagicMock, which is NOT a package — so every
+    # submodule ``bootstrap/agents.py`` imports has to be listed here too, or
+    # ``from Agents.tools.X import Y`` fails with "is not a package".
+    #
+    # ``commerce_read_tools`` was missing, and the test passed anyway because some
+    # earlier test in the suite happened to import it first, leaving it in
+    # ``sys.modules`` where the mock could not hide it. Deleting unrelated test files
+    # changed the collection order and the test started failing — it fails on its own
+    # at any commit, including before this migration. Listed now so it does not
+    # depend on what ran before it.
     modules_to_mock = [
         "services.elasticsearch_service",
         "Agents.tools",
@@ -29,6 +39,7 @@ def _mock_external():
         "Agents.tools.ops_feature_guard",
         "Agents.tools.ops_search_tools",
         "Agents.tools.ops_report_tools",
+        "Agents.tools.commerce_read_tools",
         "strands",
         "strands.models",
         "strands.models.litellm",
@@ -55,6 +66,12 @@ def container():
         redis_url="redis://localhost:6379",
         google_cloud_project="test-project-123456",
         google_cloud_location="us-central1",
+        # The agent model is resolved from settings now, not from a hardcoded
+        # model id plus os.environ. A MagicMock attribute would compose into a
+        # nonsense provider prefix, so state these explicitly.
+        agent_llm_provider="gemini",
+        agent_llm_model="gemini-2.5-flash",
+        gemini_api_key="test-gemini-key",
     )
     c.es_service = MagicMock()
     c.ops_feature_flags = MagicMock()
@@ -107,7 +124,6 @@ class TestAgentsBootstrap:
             patch("Agents.autonomous.FuelManagementAgent", return_value=_make_agent_mock()),
             patch("Agents.autonomous.SLAGuardianAgent", return_value=_make_agent_mock()),
             patch("Agents.mainagent.configure_orchestrator"),
-            patch("Agents.agent_es_mappings.setup_agent_indices"),
         ]
 
         for p in patches:

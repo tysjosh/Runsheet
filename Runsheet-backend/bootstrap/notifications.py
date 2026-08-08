@@ -137,10 +137,6 @@ def _create_dispatchers(environment=None, es_service=None):
 
 async def initialize(app, container: ServiceContainer) -> None:
     """Create and register notification domain services."""
-    from notifications.services.notification_es_mappings import (
-        setup_notification_indices,
-    )
-    from notifications.services.audit_es_mappings import setup_audit_indices
     from notifications.services.notification_service import NotificationService
     from notifications.services.audit_timeline_service import AuditTimelineService
     from notifications.services.communication_metrics_service import CommunicationMetricsService
@@ -155,20 +151,8 @@ async def initialize(app, container: ServiceContainer) -> None:
     es_service = container.es_service
 
     # Set up notification ES indices
-    try:
-        logger.info("Setting up notification indices...")
-        setup_notification_indices(es_service)
-        logger.info("Notification indices ready")
-    except Exception as e:
-        logger.warning("Failed to set up notification indices: %s", e)
 
     # Set up audit timeline indices
-    try:
-        logger.info("Setting up audit timeline indices...")
-        setup_audit_indices(es_service)
-        logger.info("Audit timeline indices ready")
-    except Exception as e:
-        logger.warning("Failed to set up audit timeline indices: %s", e)
 
     # Notification WebSocket manager
     ws_manager = NotificationWSManager()

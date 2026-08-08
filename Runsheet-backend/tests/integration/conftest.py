@@ -27,107 +27,29 @@ TEST_ES_INDEX_PREFIX = "test_"
 TEST_INDICES = ["trucks", "orders", "inventory", "support_tickets", "locations"]
 
 
-@dataclass
-class TestElasticsearchConfig:
-    """
-    Configuration for test Elasticsearch instance.
-    
-    Uses environment variables to configure the test ES instance,
-    with fallback to mock mode if no test instance is available.
-    
-    Environment Variables:
-    - TEST_ELASTIC_ENDPOINT: Elasticsearch endpoint URL for testing
-    - TEST_ELASTIC_API_KEY: API key for test Elasticsearch instance
-    - TEST_USE_MOCK_ES: Set to "false" to use real ES instance (default: "true")
-    - TEST_ES_TIMEOUT: Request timeout in seconds (default: 30)
-    
-    Validates:
-    - Requirement 12.1: Set up integration test environment with test Elasticsearch
-    """
-    endpoint: str = field(default_factory=lambda: os.getenv("TEST_ELASTIC_ENDPOINT", ""))
-    api_key: str = field(default_factory=lambda: os.getenv("TEST_ELASTIC_API_KEY", ""))
-    use_mock: bool = field(default_factory=lambda: os.getenv("TEST_USE_MOCK_ES", "true").lower() == "true")
-    index_prefix: str = TEST_ES_INDEX_PREFIX
-    timeout: int = field(default_factory=lambda: int(os.getenv("TEST_ES_TIMEOUT", "30")))
-    verify_certs: bool = True
-    
-    @property
-    def is_configured(self) -> bool:
-        """Check if a real test ES instance is configured."""
-        return bool(self.endpoint and self.api_key and not self.use_mock)
-    
-    def get_test_index_name(self, base_name: str) -> str:
-        """Get the test index name with prefix."""
-        return f"{self.index_prefix}{base_name}"
-    
-    def get_all_test_index_names(self) -> List[str]:
-        """Get all test index names with prefix."""
-        return [self.get_test_index_name(idx) for idx in TEST_INDICES]
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert configuration to dictionary for logging."""
-        return {
-            "endpoint": self.endpoint[:20] + "..." if self.endpoint else "",
-            "use_mock": self.use_mock,
-            "index_prefix": self.index_prefix,
-            "timeout": self.timeout,
-            "is_configured": self.is_configured
-        }
-
-
-@pytest.fixture(scope="session")
-def test_es_config() -> TestElasticsearchConfig:
-    """Provide test Elasticsearch configuration."""
-    config = TestElasticsearchConfig()
-    logger.info(f"Test ES Config: {config.to_dict()}")
-    return config
-
-
-@pytest.fixture(scope="session")
-def real_es_client(test_es_config: TestElasticsearchConfig):
-    """
-    Create a real Elasticsearch client for integration tests.
-    
-    This fixture is only available when TEST_USE_MOCK_ES=false and
-    valid credentials are provided.
-    
-    Validates:
-    - Requirement 12.1: Set up integration test environment with test Elasticsearch
-    """
-    if not test_es_config.is_configured:
-        pytest.skip("Real Elasticsearch not configured. Set TEST_USE_MOCK_ES=false and provide credentials.")
-    
-    try:
-        from elasticsearch import Elasticsearch
-        
-        client = Elasticsearch(
-            test_es_config.endpoint,
-            api_key=test_es_config.api_key,
-            verify_certs=test_es_config.verify_certs,
-            request_timeout=test_es_config.timeout
-        )
-        
-        # Verify connection
-        if not client.ping():
-            pytest.skip("Could not connect to test Elasticsearch instance")
-        
-        logger.info("Connected to test Elasticsearch instance")
-        yield client
-        
-        # Cleanup: delete all test indices after session
-        for index_name in test_es_config.get_all_test_index_names():
-            try:
-                if client.indices.exists(index=index_name):
-                    client.indices.delete(index=index_name)
-                    logger.info(f"Cleaned up test index: {index_name}")
-            except Exception as e:
-                logger.warning(f"Failed to cleanup index {index_name}: {e}")
-        
-        client.close()
-    except ImportError:
-        pytest.skip("elasticsearch package not installed")
-    except Exception as e:
-        pytest.skip(f"Failed to connect to Elasticsearch: {e}")
+# The real-cluster fixtures stood here and are gone: ``TestElasticsearchConfig``,
+# ``test_es_config``, ``real_es_client``, ``test_cleanup_real``,
+# ``test_index_mappings``, ``setup_test_indices``, ``test_data_seeder_real`` and
+# ``skip_if_no_real_es``. They connected to an Elasticsearch instance named by
+# ``TEST_ELASTIC_ENDPOINT`` / ``TEST_ELASTIC_API_KEY`` when ``TEST_USE_MOCK_ES``
+# was false, created prefixed test indices, and tore them down afterwards.
+#
+# Two reasons, and the second is why they went rather than being adapted:
+#
+# 1. There is no Elasticsearch, and ``import elasticsearch`` was the last one left
+#    in the tree — the package is no longer in ``requirements.txt``, so the
+#    fixture's ``except ImportError: pytest.skip`` was the only thing standing
+#    between it and a collection error.
+# 2. **Nothing requested them.** They formed a closed island — ``real_es_client``
+#    fed ``test_cleanup_real``, which fed ``setup_test_indices`` and
+#    ``test_data_seeder_real`` — and no test in the suite named any of the four.
+#    So they were never exercised even when a cluster existed, which is worth
+#    knowing before anyone rebuilds the equivalent: the mock fixtures below
+#    (``test_cleanup``, ``test_data_seeder``) are what the integration tests
+#    actually use, and ``tests/postgres/`` is where a real datastore is exercised.
+#
+# ``TestDataCleanup`` and ``TestDataSeeder`` themselves stay — the mock fixtures
+# build on them.
 
 
 @pytest.fixture
@@ -873,21 +795,6 @@ def test_cleanup(mock_es_client) -> Generator[TestDataCleanup, None, None]:
 
 
 @pytest.fixture
-def test_cleanup_real(real_es_client, test_es_config) -> Generator[TestDataCleanup, None, None]:
-    """
-    Provide a cleanup utility for real Elasticsearch tests.
-    
-    Validates:
-    - Requirement 12.6: Add cleanup utilities
-    """
-    cleanup = TestDataCleanup(real_es_client, test_es_config.index_prefix)
-    yield cleanup
-    # Automatic cleanup after test
-    result = cleanup.cleanup_all()
-    logger.info(f"Real ES test cleanup completed: {result}")
-
-
-@pytest.fixture
 def all_fixtures(
     truck_fixtures,
     order_fixtures,
@@ -910,206 +817,10 @@ def all_fixtures(
     }
 
 
-# ============================================================================
-# Test Index Setup Fixtures (Requirement 12.1)
-# ============================================================================
-
-@pytest.fixture
-def test_index_mappings() -> Dict[str, Dict[str, Any]]:
-    """
-    Provide index mappings for test indices.
-    
-    These mappings mirror the production index mappings but are
-    simplified for testing purposes.
-    
-    Validates:
-    - Requirement 12.1: Set up test Elasticsearch instance configuration
-    """
-    return {
-        "test_trucks": {
-            "mappings": {
-                "properties": {
-                    "truck_id": {"type": "keyword"},
-                    "driver_name": {"type": "text"},
-                    "driver_phone": {"type": "keyword"},
-                    "status": {"type": "keyword"},
-                    "current_location": {
-                        "properties": {
-                            "coordinates": {
-                                "properties": {
-                                    "lat": {"type": "float"},
-                                    "lon": {"type": "float"}
-                                }
-                            },
-                            "address": {"type": "text"},
-                            "last_updated": {"type": "date"}
-                        }
-                    },
-                    "capacity_kg": {"type": "integer"},
-                    "current_load_kg": {"type": "integer"},
-                    "fuel_level_percent": {"type": "integer"},
-                    "next_maintenance": {"type": "date"},
-                    "license_plate": {"type": "keyword"},
-                    "model": {"type": "text"},
-                    "year": {"type": "integer"}
-                }
-            },
-            "settings": {
-                "number_of_shards": 1,
-                "number_of_replicas": 0
-            }
-        },
-        "test_orders": {
-            "mappings": {
-                "properties": {
-                    "order_id": {"type": "keyword"},
-                    "customer_name": {"type": "text"},
-                    "customer_email": {"type": "keyword"},
-                    "customer_phone": {"type": "keyword"},
-                    "status": {"type": "keyword"},
-                    "priority": {"type": "keyword"},
-                    "items": {
-                        "type": "nested",
-                        "properties": {
-                            "name": {"type": "text"},
-                            "quantity": {"type": "integer"},
-                            "weight_kg": {"type": "float"},
-                            "sku": {"type": "keyword"}
-                        }
-                    },
-                    "total_weight_kg": {"type": "float"},
-                    "pickup_location": {
-                        "properties": {
-                            "address": {"type": "text"},
-                            "coordinates": {
-                                "properties": {
-                                    "lat": {"type": "float"},
-                                    "lon": {"type": "float"}
-                                }
-                            }
-                        }
-                    },
-                    "delivery_location": {
-                        "properties": {
-                            "address": {"type": "text"},
-                            "coordinates": {
-                                "properties": {
-                                    "lat": {"type": "float"},
-                                    "lon": {"type": "float"}
-                                }
-                            }
-                        }
-                    },
-                    "assigned_truck": {"type": "keyword"},
-                    "created_at": {"type": "date"},
-                    "estimated_delivery": {"type": "date"},
-                    "delivered_at": {"type": "date"},
-                    "special_instructions": {"type": "text"}
-                }
-            },
-            "settings": {
-                "number_of_shards": 1,
-                "number_of_replicas": 0
-            }
-        },
-        "test_inventory": {
-            "mappings": {
-                "properties": {
-                    "item_id": {"type": "keyword"},
-                    "name": {"type": "text"},
-                    "sku": {"type": "keyword"},
-                    "category": {"type": "keyword"},
-                    "quantity": {"type": "integer"},
-                    "unit": {"type": "keyword"},
-                    "warehouse_location": {"type": "text"},
-                    "reorder_level": {"type": "integer"},
-                    "unit_price": {"type": "float"},
-                    "last_restocked": {"type": "date"},
-                    "supplier": {"type": "text"},
-                    "weight_kg": {"type": "float"}
-                }
-            },
-            "settings": {
-                "number_of_shards": 1,
-                "number_of_replicas": 0
-            }
-        },
-        "test_support_tickets": {
-            "mappings": {
-                "properties": {
-                    "ticket_id": {"type": "keyword"},
-                    "subject": {"type": "text"},
-                    "description": {"type": "text"},
-                    "status": {"type": "keyword"},
-                    "priority": {"type": "keyword"},
-                    "customer_email": {"type": "keyword"},
-                    "customer_name": {"type": "text"},
-                    "category": {"type": "keyword"},
-                    "assigned_to": {"type": "keyword"},
-                    "created_at": {"type": "date"},
-                    "updated_at": {"type": "date"},
-                    "resolved_at": {"type": "date"},
-                    "resolution": {"type": "text"},
-                    "related_order": {"type": "keyword"}
-                }
-            },
-            "settings": {
-                "number_of_shards": 1,
-                "number_of_replicas": 0
-            }
-        },
-        "test_locations": {
-            "mappings": {
-                "properties": {
-                    "truck_id": {"type": "keyword"},
-                    "latitude": {"type": "float"},
-                    "longitude": {"type": "float"},
-                    "timestamp": {"type": "date"},
-                    "speed_kmh": {"type": "float"},
-                    "heading": {"type": "float"},
-                    "accuracy_meters": {"type": "float"}
-                }
-            },
-            "settings": {
-                "number_of_shards": 1,
-                "number_of_replicas": 0
-            }
-        }
-    }
-
-
-@pytest.fixture
-def setup_test_indices(real_es_client, test_es_config, test_index_mappings, test_cleanup_real):
-    """
-    Set up test indices with proper mappings for integration tests.
-    
-    This fixture creates all test indices before the test and ensures
-    they are cleaned up after.
-    
-    Validates:
-    - Requirement 12.1: Set up test Elasticsearch instance configuration
-    - Requirement 12.6: Isolated test data that is cleaned up after each test
-    """
-    created_indices = []
-    
-    for index_name, mapping in test_index_mappings.items():
-        try:
-            # Delete if exists (clean slate)
-            if real_es_client.indices.exists(index=index_name):
-                real_es_client.indices.delete(index=index_name)
-            
-            # Create with mapping
-            real_es_client.indices.create(index=index_name, body=mapping)
-            created_indices.append(index_name)
-            test_cleanup_real.track_index(index_name)
-            logger.info(f"Created test index: {index_name}")
-        except Exception as e:
-            logger.error(f"Failed to create test index {index_name}: {e}")
-            raise
-    
-    yield created_indices
-    
-    # Cleanup is handled by test_cleanup_real fixture
+# The "Test Index Setup Fixtures" section stood here. It declared mappings for five
+# prefixed test indices and created them on a real cluster before each test. There is
+# no cluster, and nothing requested the fixtures — see the note at the top of this
+# file.
 
 
 # ============================================================================
@@ -1270,15 +981,6 @@ def test_data_seeder(mock_es_client, test_cleanup) -> TestDataSeeder:
     return TestDataSeeder(mock_es_client, test_cleanup)
 
 
-@pytest.fixture
-def test_data_seeder_real(real_es_client, test_cleanup_real, test_es_config) -> TestDataSeeder:
-    """
-    Provide a test data seeder for real Elasticsearch.
-    
-    Validates:
-    - Requirement 12.6: Create test data fixtures
-    """
-    return TestDataSeeder(real_es_client, test_cleanup_real, test_es_config.index_prefix)
 
 
 # ============================================================================
@@ -1292,8 +994,3 @@ def is_ci_environment() -> bool:
     return any(os.getenv(indicator) for indicator in ci_indicators)
 
 
-@pytest.fixture
-def skip_if_no_real_es(test_es_config):
-    """Skip test if real Elasticsearch is not configured."""
-    if not test_es_config.is_configured:
-        pytest.skip("Real Elasticsearch not configured")

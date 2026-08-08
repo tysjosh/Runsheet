@@ -16,14 +16,19 @@ class DataSeeder:
         self.es_service = elasticsearch_service
     
     async def clear_all_data(self):
-        """Clear all existing data from indices"""
+        """Clear all existing data from the demo indices.
+
+        Went through ``client.delete_by_query`` — the last raw-client write outside
+        the migration tooling. The store's ``delete_by_query`` takes the same query
+        and, unlike the Elasticsearch version, has no page limit: a partially
+        applied delete is worse than a slow one.
+        """
         indices = ["trucks", "locations", "inventory", "support_tickets", "analytics_events"]
+        store = self.es_service._pg_store()
         for index in indices:
             try:
-                # Delete all documents in the index
-                query = {"query": {"match_all": {}}}
-                self.es_service.client.delete_by_query(index=index, body=query, refresh=True)
-                logger.info(f"🗑️ Cleared data from {index}")
+                deleted = await store.delete_by_query(index, {"match_all": {}})
+                logger.info("🗑️ Cleared %d document(s) from %s", deleted, index)
             except Exception as e:
                 logger.warning(f"Could not clear {index}: {e}")
     

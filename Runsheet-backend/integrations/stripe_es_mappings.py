@@ -71,35 +71,8 @@ STRIPE_INDEX_MAPPINGS = {
 }
 
 
-def setup_stripe_indices(es_service) -> None:
-    """Create the Stripe demo indices if they do not already exist.
-
-    Same shape as every other ``setup_*_indices`` helper so the seeder can call
-    it uniformly. Creation must run BEFORE the JSON fixtures load, or the bulk
-    write creates the index dynamically and this mapping never applies.
-    """
-    from services.elasticsearch_service import ElasticsearchService
-
-    client = es_service.client
-    for index_name, mapping in STRIPE_INDEX_MAPPINGS.items():
-        try:
-            if not client.indices.exists(index=index_name):
-                body = mapping
-                if es_service.is_serverless:
-                    body = ElasticsearchService.strip_serverless_incompatible_settings(
-                        mapping
-                    )
-                client.indices.create(index=index_name, body=body)
-                logger.info(f"✅ Created Stripe index: {index_name}")
-            else:
-                logger.info(f"📋 Stripe index already exists: {index_name}")
-        except Exception:
-            logger.exception("Failed to create Stripe index %s", index_name)
-
-
 __all__ = [
     "STRIPE_PAYMENT_INTENTS_INDEX",
     "STRIPE_PAYMENT_INTENTS_MAPPING",
     "STRIPE_INDEX_MAPPINGS",
-    "setup_stripe_indices",
 ]
