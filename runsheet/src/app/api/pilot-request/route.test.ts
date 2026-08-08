@@ -12,7 +12,12 @@
  * only prove the happy path would have passed against the broken placeholder
  * too. Each failure mode below asserts a non-2xx status.
  */
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
 import {
+  HONEYPOT_FIELD,
+  isHoneypotTripped,
   resolveHubSpotConfig,
   toHubSpotFields,
   validatePilotPayload,
@@ -40,6 +45,7 @@ const ORIGINAL_ENV = process.env;
 beforeEach(() => {
   process.env = { ...ORIGINAL_ENV, HUBSPOT_FORM_GUID: "test-guid" };
   jest.spyOn(console, "error").mockImplementation(() => {});
+  jest.spyOn(console, "warn").mockImplementation(() => {});
 });
 
 afterEach(() => {
@@ -232,5 +238,67 @@ describe("POST", () => {
       );
     const response = await POST(post(VALID));
     expect(JSON.stringify(await response.json())).not.toContain(VALID.email);
+  });
+});
+
+describe("honeypot", () => {
+  it("is not tripped by an absent or empty field", () => {
+    expect(isHoneypotTripped(VALID)).toBe(false);
+    expect(isHoneypotTripped({ ...VALID, [HONEYPOT_FIELD]: "" })).toBe(false);
+    expect(isHoneypotTripped({ ...VALID, [HONEYPOT_FIELD]: "   " })).toBe(
+      false,
+    );
+  });
+
+  it("is tripped by any real content", () => {
+    expect(
+      isHoneypotTripped({ ...VALID, [HONEYPOT_FIELD]: "http://spam.example" }),
+    ).toBe(true);
+  });
+
+  it("tolerates a non-object body", () => {
+    expect(isHoneypotTripped(null)).toBe(false);
+    expect(isHoneypotTripped("nope")).toBe(false);
+  });
+
+  it("drops the submission without forwarding it to HubSpot", async () => {
+    const fetchMock = jest.spyOn(global, "fetch");
+
+    const response = await POST(
+      post({ ...VALID, [HONEYPOT_FIELD]: "http://spam.example" }),
+    );
+
+    // 200 so a bot learns nothing, but nothing reaches the CRM.
+    expect(response.status).toBe(200);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("is checked before validation, so a bot cannot fingerprint it", async () => {
+    // Invalid payload AND honeypot filled: the response must be the honeypot's
+    // 200, not the 400 an ordinary invalid submission gets. Otherwise comparing
+    // the two responses reveals which field is the trap.
+    const fetchMock = jest.spyOn(global, "fetch");
+    const response = await POST(
+      post({ ...VALID, email: "bad", [HONEYPOT_FIELD]: "spam" }),
+    );
+    expect(response.status).toBe(200);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("never forwards the honeypot field to HubSpot", () => {
+    expect(toHubSpotFields(VALID).map((f) => f.name)).not.toContain(
+      HONEYPOT_FIELD,
+    );
+  });
+
+  it("uses the same field name as the form renders", () => {
+    // The page hardcodes the name rather than importing it, to keep the server
+    // module out of the client bundle. That duplication is only safe if
+    // something fails when the two drift apart.
+    const page = readFileSync(
+      join(__dirname, "..", "..", "request-pilot", "page.tsx"),
+      "utf8",
+    );
+    expect(page).toContain(`const HONEYPOT_FIELD = "${HONEYPOT_FIELD}"`);
   });
 });

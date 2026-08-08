@@ -36,6 +36,39 @@ export const HUBSPOT_TIMEOUT_MS = 8000;
  */
 export const MAX_FIELD_LENGTH = 2000;
 
+/**
+ * Name of the honeypot field rendered hidden on the form.
+ *
+ * Chosen to look worth filling in to a bot that scrapes input names and fills
+ * everything it recognises. A real prospect never sees it: it is positioned
+ * off-screen, removed from the accessibility tree with `aria-hidden`, and taken
+ * out of the tab order with `tabIndex={-1}`.
+ *
+ * This exists because disabling HubSpot's CAPTCHA is what made API submissions
+ * possible at all — a form with CAPTCHA enabled rejects them outright with
+ * `FORM_HAS_RECAPTCHA_ENABLED`. Turning it off removed the only spam control on
+ * an endpoint that must stay anonymous, so this replaces a fraction of it.
+ *
+ * Note what it is NOT: it stops naive form-filling bots and nothing else. A
+ * targeted script that reads the page can trivially skip it. If real abuse
+ * appears, add a proper challenge (Cloudflare Turnstile) rather than elaborating
+ * on this.
+ */
+export const HONEYPOT_FIELD = "website";
+
+/**
+ * True when the honeypot was filled, meaning the submitter is almost certainly
+ * automated.
+ *
+ * Absent or empty is the human case: the field is never rendered visibly, so a
+ * real prospect cannot populate it even by accident.
+ */
+export function isHoneypotTripped(body: unknown): boolean {
+  if (typeof body !== "object" || body === null) return false;
+  const value = (body as Record<string, unknown>)[HONEYPOT_FIELD];
+  return typeof value === "string" && value.trim().length > 0;
+}
+
 export interface PilotPayload {
   name: string;
   email: string;

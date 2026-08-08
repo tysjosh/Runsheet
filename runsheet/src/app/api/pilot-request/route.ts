@@ -45,6 +45,7 @@ import { NextResponse } from "next/server";
 import {
   HUBSPOT_SUBMIT_BASE,
   HUBSPOT_TIMEOUT_MS,
+  isHoneypotTripped,
   resolveHubSpotConfig,
   toHubSpotFields,
   validatePilotPayload,
@@ -64,6 +65,20 @@ export async function POST(request: Request): Promise<Response> {
       { error: "invalid_json", message: "Request body must be JSON." },
       { status: 400 },
     );
+  }
+
+  // Checked BEFORE validation, so a bot cannot distinguish the honeypot from a
+  // merely well-formed submission by comparing responses.
+  //
+  // Returns 200 while forwarding nothing, which is the one deliberate exception
+  // to this route's rule that success implies capture. The rule exists so a real
+  // prospect is never told their request was received when it wasn't; a caller
+  // that filled a field it could not see is not a real prospect, and any other
+  // status just tells the author which field is the trap. Logged so the
+  // behaviour is observable rather than invisible.
+  if (isHoneypotTripped(body)) {
+    console.warn("pilot-request: honeypot tripped — submission dropped");
+    return NextResponse.json({ ok: true }, { status: 200 });
   }
 
   const validated = validatePilotPayload(body);

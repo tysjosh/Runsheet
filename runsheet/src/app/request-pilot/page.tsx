@@ -36,6 +36,16 @@ interface PilotForm {
   message: string;
 }
 
+/**
+ * Honeypot field name. Must match `HONEYPOT_FIELD` in the route's `lead.ts`,
+ * which drops any submission that fills it.
+ *
+ * Kept as a literal here rather than imported so this client component does not
+ * pull the server-side lead module into the browser bundle. The route's test
+ * suite asserts the two agree.
+ */
+const HONEYPOT_FIELD = "website";
+
 interface PilotErrors {
   name?: string;
   email?: string;
@@ -74,11 +84,14 @@ const FALLBACK_EMAIL = "hello@runsheet.app";
  * success panel on the non-throwing path, so a capture failure cannot reach it
  * by omission. That is exactly how the old placeholder failed.
  */
-async function submitPilotRequest(payload: PilotForm): Promise<void> {
+async function submitPilotRequest(
+  payload: PilotForm,
+  honeypot: string,
+): Promise<void> {
   const response = await fetch("/api/pilot-request", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ ...payload, [HONEYPOT_FIELD]: honeypot }),
   });
   if (!response.ok) {
     throw new Error(`Lead capture failed with status ${response.status}`);
@@ -91,6 +104,8 @@ export default function RequestPilotPage() {
   const [submitting, setSubmitting] = useState(false);
   const [done, setDone] = useState(false);
   const [failed, setFailed] = useState(false);
+  /** Honeypot. Stays empty for every human; bots fill it and get dropped. */
+  const [honeypot, setHoneypot] = useState("");
 
   const update = (field: keyof PilotForm, value: string) => {
     setForm((prev) => ({ ...prev, [field]: value }));
@@ -107,7 +122,7 @@ export default function RequestPilotPage() {
     setSubmitting(true);
     setFailed(false);
     try {
-      await submitPilotRequest(form);
+      await submitPilotRequest(form, honeypot);
       setDone(true);
     } catch {
       // No `setDone(true)` on this path. The form stays filled in so the
@@ -248,6 +263,35 @@ export default function RequestPilotPage() {
                   </p>
                 </div>
               )}
+              {/*
+                Honeypot. Positioned off-screen rather than `display: none`,
+                because form-filling bots commonly skip display-none inputs but
+                do fill off-screen ones. `aria-hidden` keeps it out of the
+                accessibility tree and `tabIndex={-1}` out of the tab order, so
+                a keyboard or screen-reader user never reaches it — this must not
+                cost a real prospect anything. `autoComplete="off"` stops a
+                browser autofilling it and locking the user out of their own
+                form.
+              */}
+              <div
+                aria-hidden="true"
+                style={{
+                  position: "absolute",
+                  left: "-9999px",
+                  width: "1px",
+                  height: "1px",
+                  overflow: "hidden",
+                }}
+              >
+                <input
+                  type="text"
+                  name={HONEYPOT_FIELD}
+                  value={honeypot}
+                  onChange={(e) => setHoneypot(e.target.value)}
+                  tabIndex={-1}
+                  autoComplete="off"
+                />
+              </div>
               <div className="mb-5">
                 <label htmlFor="rp-name" className={labelClass}>
                   Full name
