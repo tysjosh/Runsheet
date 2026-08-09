@@ -171,9 +171,14 @@ async def generate_performance_report() -> str:
 ## 🎯 Key Performance Indicators
 """
         
-        for key, metric in metrics.items():
-            trend_emoji = "📈" if metric.get("trend") == "up" else "📉"
-            report += f"- **{metric.get('title')}**: {metric.get('value')} {trend_emoji} ({metric.get('change')})\n"
+        if metrics:
+            for metric in metrics.values():
+                value = metric.get("value")
+                if value is None:
+                    continue
+                report += f"- **{metric.get('title')}**: {value}\n"
+        else:
+            report += "- ℹ️ No performance snapshot available yet\n"
         
         report += f"""
 ## 🛣️ Route Performance

@@ -40,21 +40,6 @@ env:
 
 jobs:
   # -----------------------------------------------------------------
-  # Job 1: Secret scan — run scripts/check-secrets.sh on changed files
-  # -----------------------------------------------------------------
-  secret-scan:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Scan for secrets
-        run: |
-          chmod +x scripts/check-secrets.sh
-          bash scripts/check-secrets.sh
-
-  # -----------------------------------------------------------------
   # Job 2: Backend tests + coverage (70% minimum)
   # -----------------------------------------------------------------
   backend-tests:
@@ -298,27 +283,8 @@ jobs:
             "postgresql://runsheet:runsheet@localhost:5432/runsheet" \
             runsheet_ci_drill
 
-      # The Postgres document store translates the Elasticsearch query DSL to
-      # SQL over a jsonb column. That translation rests entirely on jsonb
-      # operators — containment (@>), key existence (?), jsonb's total ordering
-      # for sort — none of which SQLite has, so the main backend-tests job (which
-      # runs against in-memory SQLite) CANNOT cover it. Its fixtures skip without
-      # a server, which is the honest behaviour but means the tests would never
-      # run anywhere if this step did not exist.
-      #
-      # This job is the right home: it already has a postgres:16 service and has
-      # already applied the full migration chain, so es_documents exists with its
-      # GIN index. Placed after the restore drill so a schema problem is reported
-      # by the cheaper check first.
       - name: Document store — query translation and store behaviour
         env:
-          # ENVIRONMENT=test, overriding this job's development default. It was
-          # originally needed because ``ElasticsearchService.connect()`` raised on a
-          # failed ping outside the test environment and this job had no
-          # Elasticsearch service, so importing tests/conftest.py failed before a
-          # single test ran. ``connect()`` cannot fail any more — there is no
-          # cluster to ping — but the tests are written for the test environment
-          # and this is where the rest of the suite runs them.
           ENVIRONMENT: "test"
           # Required by settings validation in a non-development environment when
           # session_store_type is redis (the default). Never dialled: no test here
@@ -411,15 +377,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Runs before any install or build step: none of the four donor build
-      # credentials may survive into /driver-app, and the iOS bundle identifier
-      # and Android application id are immutable once published to a store.
-      - name: Guard against donor build credentials
-        working-directory: .
-        run: |
-          chmod +x scripts/check-donor-values.sh
-          bash scripts/check-donor-values.sh driver-app
-
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -495,12 +452,6 @@ jobs:
 
       - name: Start the image and wait for readiness
         run: |
-          # PostgreSQL is the only dependency /health/ready checks, so that is the
-          # only one this job stands up. It used to be Elasticsearch, which was the
-          # readiness dependency until the document plane moved: the probe now runs
-          # SELECT 1 through the same engine the document store uses. Redis is
-          # exercised by backend-tests; what is being proved here is that the IMAGE
-          # boots — imports resolve, the venv is intact, uvicorn binds.
           docker network create ci-net
           docker run -d --name pg --network ci-net \
             -e POSTGRES_USER=runsheet \

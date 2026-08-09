@@ -38,6 +38,18 @@ _approval_expiry_task = None
 # 5-minute cadence keeps the pending queue accurate without polling pressure.
 APPROVAL_EXPIRY_INTERVAL_SECONDS = 300
 
+# Module-level reference for the outcome-tracker measurement sweep so
+# shutdown can cancel it. OutcomeTracker.check_pending_outcomes() must run
+# periodically or every recorded proposal execution sits in
+# OutcomeTracker._pending forever with no after-KPI ever measured.
+_outcome_tracking_task = None
+
+# Interval for the outcome-measurement sweep. The default observation
+# window (DEFAULT_OBSERVATION_WINDOW_SECONDS, 1 hour) is long relative to
+# the poll cost, so a 5-minute cadence catches every due outcome promptly
+# without meaningful overhead.
+OUTCOME_TRACKING_INTERVAL_SECONDS = 300
+
 
 # ---------------------------------------------------------------------------
 # Fuel-Ops Hardening helpers (Task 12.1)
@@ -185,6 +197,7 @@ async def initialize(app, container: ServiceContainer) -> None:
     """Create and register all agentic AI services."""
     global _autonomous_agents, _agent_scheduler, _agent_redis_client
     global _approval_expiry_task
+    global _outcome_tracking_task
     global _storm_mode_evaluator, _integration_scheduler
     global _erp_invoice_export_task
 
@@ -767,6 +780,36 @@ async def initialize(app, container: ServiceContainer) -> None:
     )
     container.outcome_tracker = outcome_tracker
 
+    # ── Outcome-tracking measurement sweep ─────────────────────────────
+    # Periodically measure after-KPIs for every proposal execution that
+    # was recorded via record_proposal_execution() and is now past its
+    # observation window. Without this, OutcomeTracker.check_pending_
+    # outcomes() existed but nothing ever called it, so pending outcomes
+    # accumulated forever and LearningPolicyAgent never received an
+    # OutcomeRecord to learn from.
+    async def _outcome_tracking_cycle() -> None:
+        """One pass measuring after-KPIs for due proposal outcomes."""
+        outcomes = await outcome_tracker.check_pending_outcomes()
+        if outcomes:
+            adverse = sum(1 for o in outcomes if o.status == "adverse")
+            logger.info(
+                "Outcome tracking sweep: %d outcome(s) measured (%d adverse)",
+                len(outcomes),
+                adverse,
+            )
+
+    _outcome_tracking_task = asyncio.create_task(
+        run_periodic(
+            "agents.outcome-tracking",
+            OUTCOME_TRACKING_INTERVAL_SECONDS,
+            _outcome_tracking_cycle,
+        )
+    )
+    logger.info(
+        "Outcome tracking sweep started (interval: %ds)",
+        OUTCOME_TRACKING_INTERVAL_SECONDS,
+    )
+
     # Wire Layer 0 agents to publish RiskSignals (Req 2.2)
     for agent_name, agent in app.state.autonomous_agents.items():
         agent._signal_bus = signal_bus
@@ -823,6 +866,16 @@ async def initialize(app, container: ServiceContainer) -> None:
         "learning_policy_agent": learning_policy_agent,
     }
 
+    # Wire OutcomeTracker into every overlay agent (Req 11.1, 11.2) so an
+    # executed InterventionProposal has its before-KPIs captured. Without
+    # this, OutcomeTracker was constructed and stored on the container but
+    # never fed — LearningPolicyAgent subscribes to OutcomeRecord and had
+    # nothing to learn from.
+    for _agent in app.state.overlay_agents.values():
+        set_tracker = getattr(_agent, "set_outcome_tracker", None)
+        if set_tracker is not None:
+            set_tracker(outcome_tracker)
+
     # ---- Fuel Distribution MVP Agents (Phase 3) ----
     from Agents.overlay.tank_forecasting_agent import TankForecastingAgent
     from Agents.overlay.delivery_prioritization_agent import DeliveryPrioritizationAgent
@@ -868,6 +921,13 @@ async def initialize(app, container: ServiceContainer) -> None:
         "route_planning": route_planning_agent,
         "exception_replanning": exception_replanning_agent,
     }
+
+    # Wire OutcomeTracker into MVP agents too (Req 11.1, 11.2) — same
+    # rationale as the overlay agents above.
+    for _agent in app.state.mvp_agents.values():
+        set_tracker = getattr(_agent, "set_outcome_tracker", None)
+        if set_tracker is not None:
+            set_tracker(outcome_tracker)
 
     # Seed the agent-level overlay gates — ``overlay.{agent_id}`` — now that
     # every overlay and MVP agent exists to derive its own key.
@@ -1937,6 +1997,7 @@ async def shutdown(app, container: ServiceContainer) -> None:
     global _storm_mode_evaluator, _integration_scheduler
     global _erp_invoice_export_task
     global _approval_expiry_task
+    global _outcome_tracking_task
 
     # Stop the approval-expiry sweep first — it's a standalone asyncio task
     # with no dependency on the scheduler.
@@ -1947,6 +2008,15 @@ async def shutdown(app, container: ServiceContainer) -> None:
         except (asyncio.CancelledError, Exception):
             pass
         _approval_expiry_task = None
+
+    # Stop the outcome-tracking sweep — same standalone-task shape.
+    if _outcome_tracking_task is not None:
+        _outcome_tracking_task.cancel()
+        try:
+            await _outcome_tracking_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        _outcome_tracking_task = None
 
     if _erp_invoice_export_task is not None:
         _erp_invoice_export_task.cancel()

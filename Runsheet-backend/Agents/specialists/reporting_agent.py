@@ -30,6 +30,10 @@ from Agents.tools import (
     # Scheduling report tools
     generate_dispatch_report,
 )
+from Agents.tools.summary_tools import (
+    get_analytics_overview,
+    get_performance_insights,
+)
 from Agents.tools._tenant_context import require_tenant_id, set_current_tenant
 
 logger = logging.getLogger(__name__)
@@ -55,6 +59,9 @@ class ReportingAgent:
         generate_fuel_report,
         # Scheduling report tools
         generate_dispatch_report,
+        # Cross-domain analytics
+        get_analytics_overview,
+        get_performance_insights,
     ]
 
     SYSTEM_PROMPT = (
@@ -72,7 +79,10 @@ class ReportingAgent:
         "driver productivity report\n"
         "- `generate_fuel_report(days)` - Generate comprehensive fuel operations report\n"
         "- `generate_dispatch_report(days, tenant_id, intake_channel=None)` - Generate dispatch report with completion rates. "
-        "Filter by intake_channel (voice, web_portal, dispatcher, csv, edi, api_partner, legacy).\n\n"
+        "Filter by intake_channel (voice, web_portal, dispatcher, csv, edi, api_partner, legacy).\n"
+        "- `get_analytics_overview()` - Get current KPIs, top routes, and main delay causes\n"
+        "- `get_performance_insights()` - Get best/worst route and regional performance with "
+        "improvement recommendations\n\n"
         "**Guidelines:**\n"
         "- Always announce which report you are generating before using tools\n"
         "- When asked for a general overview, combine multiple reports for a comprehensive view\n"

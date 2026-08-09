@@ -14,14 +14,6 @@
 
 </div>
 
-> **Elasticsearch has been removed.** PostgreSQL is the only datastore: the
-> relational tables hold the transactional source-of-truth and the `es_documents`
-> table holds the document plane, served by `persistence/document_store.py`, which
-> translates the Elasticsearch query DSL to SQL over `jsonb`. Many names in this
-> file and in the code still say "Elasticsearch" or `es_service` — the
-> `ElasticsearchService` class deliberately kept its name rather than churn 567
-> files — so read those as "the document store". See
-> [docs/elasticsearch-to-postgres-migration.md](docs/elasticsearch-to-postgres-migration.md).
 
 ## Architecture
 

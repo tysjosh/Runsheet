@@ -119,6 +119,15 @@ class InvoiceService:
         # tax (Req 6.5) and logs the sale for IRS audit (Req 6.7).
         # Injected via set_dyed_diesel_enforcer() from bootstrap.
         self._dyed_diesel_enforcer: Optional[Any] = None
+        # Optional MeterAuditService instance. When supplied,
+        # generate_from_order() performs a post-generation check: if the
+        # delivery's meter (resolved from delivery_result.meter_number)
+        # has an expired calibration, the invoice is flagged with warning
+        # code meter.calibration_expired (Req 8.5) and, on success, the
+        # meter ticket is linked to the invoice as an immutable audit
+        # record (Req 8.2). Injected via set_meter_audit_service() from
+        # bootstrap.
+        self._meter_audit_service: Optional[Any] = None
         # Optional NotificationService for firing past_due_invoice
         # notifications when an invoice transitions to overdue status
         # (Req 12.6). Injected via set_notification_service() from
@@ -149,6 +158,28 @@ class InvoiceService:
         """
         self._dyed_diesel_enforcer = enforcer
 
+    def set_meter_audit_service(self, meter_audit_service) -> None:
+        """Inject the MeterAuditService for post-generation meter checks.
+
+        When set, generate_from_order() will, for invoices carrying a
+        delivery_result with a meter_number:
+        1. Resolve the meter_number to a registered meter_id and call
+           check_meter_calibration_for_delivery() — if the meter's
+           calibration has expired, the invoice is flagged with warning
+           code meter.calibration_expired (Req 8.5).
+        2. Call link_ticket_to_invoice() to record the immutable
+           audit-trail association between the meter ticket, delivery,
+           and invoice (Req 8.2).
+
+        This is a post-generation check — failures are logged as
+        warnings but do not block the invoice, and invoices with no
+        meter_number (manual gallon entry, no meter ticket) are
+        skipped entirely since there is nothing to look up.
+
+        Validates: Requirements 8.2, 8.5
+        """
+        self._meter_audit_service = meter_audit_service
+
     def set_notification_service(self, notification_service) -> None:
         """Inject the NotificationService for past_due_invoice notifications.
 
@@ -160,6 +191,19 @@ class InvoiceService:
         Validates: Requirement 12.6
         """
         self._notification_service = notification_service
+
+    def set_dunning_service(self, dunning_service) -> None:
+        """Inject the DunningService for overdue-invoice dunning cancellation.
+
+        When set, apply_payment() and void() will call
+        ``dunning_service.cancel_for_invoice()`` after an invoice
+        transitions to paid or void, marking any pending dunning_events
+        as cancelled so the notification pipeline drops queued-but-unsent
+        dunning emails.
+
+        Validates: Requirement 7.5
+        """
+        self._dunning_service = dunning_service
 
     # ------------------------------------------------------------------
     # Event helpers
@@ -418,6 +462,115 @@ class InvoiceService:
             # dyed-diesel validation or audit log failure.
             logger.warning(
                 "InvoiceService: dyed diesel post-check failed for "
+                "invoice %s (tenant %s): %s",
+                invoice_id,
+                tenant_id,
+                exc,
+            )
+
+    async def _run_meter_audit_post_check(
+        self,
+        *,
+        tenant_id: str,
+        invoice_id: str,
+        order_id: str,
+        delivery_snapshot: Dict[str, Any],
+        doc: Dict[str, Any],
+    ) -> None:
+        """Post-generation meter calibration + audit-trail linking.
+
+        Called after the invoice is persisted. Non-blocking — failures
+        are logged as warnings but never block invoice generation.
+
+        Steps:
+        1. Resolve delivery_snapshot['meter_number'] to a registered
+           meter via MeterAuditService.get_meter_by_number(). Skipped
+           entirely when no meter_number is present (manual gallon
+           entry, no meter ticket photographed).
+        2. Call check_meter_calibration_for_delivery() — if the meter's
+           calibration has expired, append the meter.calibration_expired
+           warning to the invoice document (Req 8.5).
+        3. Call link_ticket_to_invoice() to record the immutable
+           audit-trail association (Req 8.2).
+
+        Validates: Requirements 8.2, 8.5
+        """
+        meter_number = delivery_snapshot.get("meter_number")
+        if not meter_number:
+            return
+
+        service = self._meter_audit_service
+
+        try:
+            meter_doc = await service.get_meter_by_number(
+                tenant_id, meter_number
+            )
+            if meter_doc is None:
+                logger.info(
+                    "InvoiceService: meter_number %s on invoice %s "
+                    "(tenant %s) is not registered — skipping meter "
+                    "audit post-check",
+                    meter_number,
+                    invoice_id,
+                    tenant_id,
+                )
+                return
+
+            meter_id = meter_doc.get("meter_id", "")
+            delivery_id = delivery_snapshot.get("pod_id", "") or order_id
+
+            calibration_result = await service.check_meter_calibration_for_delivery(
+                tenant_id,
+                meter_id=meter_id,
+                delivery_id=delivery_id,
+                invoice_id=invoice_id,
+            )
+
+            if calibration_result.get("flagged"):
+                warning_code = calibration_result["warning_code"]
+                warnings = doc.setdefault("warnings", [])
+                warnings.append(
+                    {
+                        "code": warning_code,
+                        "message": calibration_result.get("message"),
+                    }
+                )
+                await self._es.update_document(
+                    INVOICES_CURRENT_INDEX,
+                    invoice_id,
+                    {"doc": {"warnings": warnings}},
+                )
+                logger.warning(
+                    "InvoiceService: invoice %s (tenant %s) flagged with "
+                    "%s — meter %s calibration expired",
+                    invoice_id,
+                    tenant_id,
+                    warning_code,
+                    meter_id,
+                )
+
+            meter_ticket_id = (
+                delivery_snapshot.get("ticket_number")
+                or delivery_snapshot.get("meter_ticket_ref")
+                or ""
+            )
+            await service.link_ticket_to_invoice(
+                tenant_id,
+                meter_id=meter_id,
+                meter_ticket_id=meter_ticket_id,
+                delivery_id=delivery_id,
+                invoice_id=invoice_id,
+                gross_gallons=float(
+                    delivery_snapshot.get("actual_gallons") or 0.0
+                ),
+                timestamp=utcnow(),
+            )
+
+        except Exception as exc:
+            # Non-blocking: log the failure but never raise. The invoice
+            # generation must not be blocked by a meter-audit failure.
+            logger.warning(
+                "InvoiceService: meter audit post-check failed for "
                 "invoice %s (tenant %s): %s",
                 invoice_id,
                 tenant_id,
@@ -848,6 +1001,22 @@ class InvoiceService:
                 invoice_id=invoice_id,
                 customer_id=customer_id,
                 line_items=line_items,
+                doc=doc,
+            )
+
+        # --- Meter audit post-generation check (Req 8.2, 8.5) ---------
+        # When a MeterAuditService is wired and the delivery snapshot
+        # carries a meter_number (i.e. the POD's gallons were resolved
+        # via OCR from a photographed meter ticket), check the meter's
+        # calibration status and link the ticket to this invoice as an
+        # immutable audit record. Non-blocking, mirroring the dyed
+        # diesel post-check above.
+        if self._meter_audit_service is not None and delivery_snapshot:
+            await self._run_meter_audit_post_check(
+                tenant_id=tenant_id,
+                invoice_id=invoice_id,
+                order_id=order_id,
+                delivery_snapshot=delivery_snapshot,
                 doc=doc,
             )
 

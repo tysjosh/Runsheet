@@ -189,6 +189,47 @@ class MeterAuditService:
         return hits[0]["_source"]
 
     # ------------------------------------------------------------------
+    # Get meter by number
+    # ------------------------------------------------------------------
+
+    async def get_meter_by_number(
+        self, tenant_id: str, meter_number: str
+    ) -> Optional[Dict[str, Any]]:
+        """Look up a MeterRegistration by its physical ``meter_number``.
+
+        Unlike :meth:`get_meter`, which requires the server-generated
+        ``meter_id``, this resolves the human/OCR-readable serial printed
+        on the meter itself — the only identifier available from a
+        photographed meter ticket (fuel-compliance-backbone Req 8.1).
+        Returns ``None`` rather than raising when no match is found, so
+        callers on the invoicing path (which must never block on a
+        missing/unregistered meter) can degrade gracefully.
+
+        Validates: Requirement 8.5
+        """
+        base_query: Dict[str, Any] = {
+            "query": {
+                "bool": {
+                    "must": [
+                        {"term": {"meter_number": meter_number}},
+                    ]
+                }
+            },
+            "size": 1,
+        }
+        query = inject_tenant_filter(base_query, tenant_id)
+
+        response = await self._es.search_documents(
+            METER_REGISTRY_INDEX, query, size=1
+        )
+
+        hits = response["hits"]["hits"]
+        if not hits:
+            return None
+
+        return hits[0]["_source"]
+
+    # ------------------------------------------------------------------
     # List meters
     # ------------------------------------------------------------------
 

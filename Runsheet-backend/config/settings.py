@@ -96,13 +96,6 @@ class Settings(BaseSettings):
         description="Deployment environment (development, staging, production)"
     )
     
-    # Elasticsearch: removed. ``ELASTIC_ENDPOINT`` and ``ELASTIC_API_KEY`` were
-    # REQUIRED fields here, so every process — including one-shot scripts and the
-    # test suite — refused to start without them. The document plane is PostgreSQL
-    # (``es_documents``) and there is no cluster left to point at, so they are gone
-    # rather than defaulted: a required-to-optional-to-ignored setting is how a
-    # placeholder endpoint survives into production looking configured.
-    # See docs/elasticsearch-to-postgres-migration.md.
     
     # Google Cloud / Gemini Configuration
     google_cloud_project: str = Field(
@@ -949,16 +942,7 @@ class Settings(BaseSettings):
                 pass
         return [part.strip() for part in raw.split(",") if part.strip()]
 
-    # ``document_store_is_postgres`` and its backend validator are gone with the
-    # switch. Both existed to answer "which store is this environment on?", and the
-    # answer is now structural: ``PostgresDocumentStore`` is the only
-    # implementation. Callers that branched on it (the outbox relay's log label,
-    # the health check's probe, the client construction) are unconditional.
-    #
-    # The property also required ``database_url`` before it would report Postgres,
-    # so a missing URL silently kept an environment on Elasticsearch. That failure
-    # mode is gone in the honest direction: without ``database_url`` the store now
-    # fails loudly rather than routing elsewhere.
+
 
     @model_validator(mode="after")
     def validate_session_store_config(self) -> "Settings":

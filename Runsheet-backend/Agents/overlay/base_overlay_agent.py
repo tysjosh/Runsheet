@@ -157,6 +157,13 @@ class OverlayAgentBase(AutonomousAgentBase):
         self._signal_buffer: List[Any] = []
         self._buffer_lock = asyncio.Lock()
 
+        # Optional OutcomeTracker, wired post-construction (Req 11.1). When
+        # unset, executed proposals are routed but no before/after KPI
+        # measurement is recorded — the historical behaviour. Injected via
+        # bootstrap so every concrete overlay agent gets outcome tracking
+        # for free without a constructor signature change.
+        self._outcome_tracker: Optional[Any] = None
+
         # Per-cycle metrics
         self._cycle_metrics: Dict[str, Any] = {
             "signals_consumed": 0,
@@ -282,6 +289,24 @@ class OverlayAgentBase(AutonomousAgentBase):
         })
 
         return signals, proposals_generated
+
+    # ------------------------------------------------------------------
+    # Outcome tracking wiring
+    # ------------------------------------------------------------------
+
+    def set_outcome_tracker(self, outcome_tracker: Optional[Any]) -> None:
+        """Inject the OutcomeTracker post-construction (``None`` disables).
+
+        When wired, every executed ``InterventionProposal`` this agent
+        routes through :meth:`_route_proposal` has its before-KPIs
+        captured via ``outcome_tracker.record_proposal_execution`` so the
+        after-KPI measurement (a separate periodic sweep) has something
+        to compare against. Without this hook proposals were routed and
+        published to the SignalBus, but no OutcomeRecord was ever
+        produced — LearningPolicyAgent's ``evaluate()`` subscribes to
+        OutcomeRecord and had nothing to learn from.
+        """
+        self._outcome_tracker = outcome_tracker
 
     # ------------------------------------------------------------------
     # Mode management
@@ -434,10 +459,21 @@ class OverlayAgentBase(AutonomousAgentBase):
         For ``InterventionProposal`` instances, creates a ``MutationRequest``
         for each action and submits through the confirmation protocol.
         All proposals are also published to the Signal Bus for downstream
-        consumers (e.g. OutcomeTracker, LearningPolicyAgent).
+        consumers (e.g. LearningPolicyAgent).
+
+        When an OutcomeTracker is wired (:meth:`set_outcome_tracker`), an
+        executed ``InterventionProposal`` also has its before-KPIs captured
+        so the tracker's periodic after-KPI sweep has a baseline to
+        compare against — see Req 11.1, 11.2.
         """
         if isinstance(proposal, InterventionProposal):
             from Agents.confirmation_protocol import MutationRequest
+
+            # Capture the "before" baseline BEFORE any action executes —
+            # measuring it afterward would silently record the post-
+            # mutation state as the baseline and erase every KPI delta.
+            if self._outcome_tracker is not None:
+                await self._record_outcome_baseline(proposal)
 
             for action in proposal.actions:
                 request = MutationRequest(
@@ -450,6 +486,67 @@ class OverlayAgentBase(AutonomousAgentBase):
 
         # Publish proposal to Signal Bus for downstream consumers
         await self._signal_bus.publish(proposal)
+
+    async def _record_outcome_baseline(
+        self, proposal: InterventionProposal
+    ) -> None:
+        """Capture before-KPIs for an executed proposal via OutcomeTracker.
+
+        ``entity_ids`` are derived from each action's ``parameters`` —
+        ``job_id`` / ``station_id`` / ``entity_ids`` are the identifier
+        keys overlay agents already use (see ``dispatch_optimizer.py``,
+        ``exception_commander.py``, ``route_planning_agent.py``).
+
+        ``before_kpis`` is a REAL measurement via
+        ``OutcomeTracker.measure_current_kpis`` — the identical query
+        :meth:`OutcomeTracker.check_pending_outcomes` runs for "after" —
+        not the proposal's own ``expected_kpi_delta`` forecast. Those are
+        different units (a delta vs. an absolute value); comparing a
+        forecast delta against a later absolute measurement would corrupt
+        every adverse-outcome calculation downstream. Failures are
+        logged, never raised: a broken outcome capture must not block the
+        mutation that already executed.
+        """
+        entity_ids: List[str] = []
+        for action in proposal.actions:
+            params = action.get("parameters", {}) or {}
+            for key in ("job_id", "station_id", "customer_tank_id"):
+                value = params.get(key)
+                if value:
+                    entity_ids.append(str(value))
+            raw_ids = params.get("entity_ids")
+            if isinstance(raw_ids, (list, tuple)):
+                entity_ids.extend(str(v) for v in raw_ids if v)
+
+        entity_ids = list(dict.fromkeys(entity_ids))
+        if not entity_ids:
+            # Nothing to measure "after" against — skip rather than
+            # register a pending outcome that can never resolve.
+            return
+
+        try:
+            before_kpis = await self._outcome_tracker.measure_current_kpis(
+                entity_ids, proposal.tenant_id
+            )
+            if before_kpis is None:
+                # Entities not found (or KPI query failed) — same
+                # degrade-quietly contract as the "after" measurement.
+                return
+            await self._outcome_tracker.record_proposal_execution(
+                intervention_id=proposal.proposal_id,
+                before_kpis=before_kpis,
+                tenant_id=proposal.tenant_id,
+                entity_ids=entity_ids,
+                confidence_score=proposal.confidence_score,
+                confidence_rationale=proposal.confidence_rationale,
+            )
+        except Exception as exc:
+            self.logger.warning(
+                "%s: failed to record outcome baseline for proposal=%s: %s",
+                self.agent_id,
+                proposal.proposal_id,
+                exc,
+            )
 
     # ------------------------------------------------------------------
     # Helpers

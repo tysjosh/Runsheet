@@ -129,6 +129,8 @@ class DeliveryResult(BaseModel):
     signature_ref: Optional[str] = None
     photo_refs: List[str] = Field(default_factory=list)
     meter_ticket_ref: Optional[str] = None
+    meter_number: Optional[str] = None
+    ticket_number: Optional[str] = None
     bol_id: Optional[str] = None
     bol_ref: Optional[str] = None
     pod_hash: Optional[str] = None

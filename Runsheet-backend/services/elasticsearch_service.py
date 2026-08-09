@@ -833,6 +833,21 @@ class ElasticsearchService:
         """
         Get current performance metrics with circuit breaker protection.
 
+        Returns ``None`` when the tenant has no ``daily_performance``
+        snapshot yet (e.g. no orders have been delivered/failed in the
+        lookback window the analytics snapshot job scores) rather than
+        raising or fabricating a placeholder value. Callers MUST treat
+        ``None`` as "no data available yet", not as an error.
+
+        Metric values themselves may also be ``None`` — e.g.
+        ``fleet_utilization_pct`` when the tenant has zero drivers on
+        record, or ``delivery_performance_pct`` when no order in the
+        window carried a delivery window to score against. Callers must
+        render those as "not available" rather than a default number.
+
+        ``customer_satisfaction`` is intentionally never included: no
+        survey/rating feature exists in this codebase to source it from.
+
         Validates:
         - Requirement 3.5: Implement circuit breakers for Elasticsearch
         - Requirement 2.4: Return specific error code indicating database unavailability
@@ -851,38 +866,35 @@ class ElasticsearchService:
                 "sort": [{"timestamp": {"order": "desc"}}],
                 "size": 1
             }
-            
+
             response = await self.search_documents("analytics_events", query)
-            if response["hits"]["hits"]:
-                latest = response["hits"]["hits"][0]["_source"]["metrics"]
-                return {
-                    "delivery_performance": {
-                        "title": "Delivery Performance",
-                        "value": f"{latest.get('delivery_performance_pct', 87.5)}%",
-                        "change": "+2.3%",
-                        "trend": "up"
-                    },
-                    "average_delay": {
-                        "title": "Average Delay", 
-                        "value": f"{latest.get('average_delay_minutes', 144)/60:.1f} hrs",
-                        "change": "-0.8 hrs",
-                        "trend": "down"
-                    },
-                    "fleet_utilization": {
-                        "title": "Fleet Utilization",
-                        "value": f"{latest.get('fleet_utilization_pct', 92)}%",
-                        "change": "+5%",
-                        "trend": "up"
-                    },
-                    "customer_satisfaction": {
-                        "title": "Customer Satisfaction",
-                        "value": f"{latest.get('customer_satisfaction', 4.2)}/5",
-                        "change": "+0.1",
-                        "trend": "up"
-                    }
-                }
-            else:
-                raise Exception("No analytics data found")
+            if not response["hits"]["hits"]:
+                return None
+
+            latest = response["hits"]["hits"][0]["_source"]["metrics"]
+
+            def _pct(value: Any) -> Optional[str]:
+                return f"{value}%" if value is not None else None
+
+            delay_minutes = latest.get("average_delay_minutes")
+            return {
+                "delivery_performance": {
+                    "title": "Delivery Performance",
+                    "value": _pct(latest.get("delivery_performance_pct")),
+                },
+                "average_delay": {
+                    "title": "Average Delay",
+                    "value": (
+                        f"{delay_minutes / 60:.1f} hrs"
+                        if delay_minutes is not None
+                        else None
+                    ),
+                },
+                "fleet_utilization": {
+                    "title": "Fleet Utilization",
+                    "value": _pct(latest.get("fleet_utilization_pct")),
+                },
+            }
         except AppException:
             # Re-raise AppExceptions (already handled by search_documents)
             raise

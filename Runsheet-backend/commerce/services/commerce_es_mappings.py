@@ -214,6 +214,10 @@ INVOICES_CURRENT_MAPPING = {
             # the breakdown for this invoice. Persisted for IRS /
             # operator audit (Req 6.7).
             "exemptions_applied":  {"type": "keyword"},
+            # Non-blocking compliance warnings appended post-generation
+            # (e.g. meter.calibration_expired — Req 8.5). ``enabled: False``
+            # mirrors tax_breakdown: rendered on the invoice, never queried.
+            "warnings":            {"type": "object", "enabled": False},
             "issued_at":           {"type": "date"},
             "due_date":            {"type": "date"},
             "finalized_at":        {"type": "date"},

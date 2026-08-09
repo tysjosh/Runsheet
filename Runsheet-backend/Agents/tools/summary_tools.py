@@ -215,7 +215,9 @@ async def get_analytics_overview() -> str:
     try:
         logger.info("📊 Getting analytics overview")
         
-        # Get current metrics
+        # Get current metrics. get_current_metrics() returns None when the
+        # tenant has no daily_performance snapshot yet (no orders scored
+        # in the lookback window) — that is a real state, not an error.
         metrics = await elasticsearch_service.get_current_metrics(tenant_id)
         routes = await elasticsearch_service.get_route_performance_data(tenant_id)
         delays = await elasticsearch_service.get_delay_causes_data(tenant_id)
@@ -224,19 +226,30 @@ async def get_analytics_overview() -> str:
         
         # Current metrics
         response += "**Key Metrics:**\n"
-        for key, metric in metrics.items():
-            trend_emoji = "📈" if metric.get("trend") == "up" else "📉"
-            response += f"• {metric.get('title')}: {metric.get('value')} {trend_emoji}\n"
+        if metrics:
+            for metric in metrics.values():
+                value = metric.get("value")
+                if value is None:
+                    continue
+                response += f"• {metric.get('title')}: {value}\n"
+        else:
+            response += "ℹ️ No performance snapshot available yet\n"
         
         # Top routes
         response += f"\n**Top Routes:**\n"
-        for route in sorted(routes, key=lambda x: x.get('performance', 0), reverse=True)[:3]:
-            response += f"• {route.get('name')}: {route.get('performance')}%\n"
+        if routes:
+            for route in sorted(routes, key=lambda x: x.get('performance', 0), reverse=True)[:3]:
+                response += f"• {route.get('name')}: {route.get('performance')}%\n"
+        else:
+            response += "ℹ️ No route performance data available yet\n"
         
         # Main delay causes
         response += f"\n**Main Delay Causes:**\n"
-        for cause in sorted(delays, key=lambda x: x.get('percentage', 0), reverse=True)[:3]:
-            response += f"• {cause.get('name')}: {cause.get('percentage')}%\n"
+        if delays:
+            for cause in sorted(delays, key=lambda x: x.get('percentage', 0), reverse=True)[:3]:
+                response += f"• {cause.get('name')}: {cause.get('percentage')}%\n"
+        else:
+            response += "ℹ️ No delay data recorded\n"
         
         success = True
         return response

@@ -22,6 +22,8 @@ from Agents.tools import (
     find_truck_by_id,
     get_all_locations,
     assign_asset_to_job,
+    search_inventory,
+    get_inventory_summary,
 )
 from Agents.tools._tenant_context import require_tenant_id, set_current_tenant
 
@@ -40,6 +42,8 @@ class FleetAgent:
         get_fleet_summary,
         find_truck_by_id,
         get_all_locations,
+        search_inventory,
+        get_inventory_summary,
         # Fleet mutation tools
         assign_asset_to_job,
     ]
@@ -58,6 +62,8 @@ class FleetAgent:
         "- `get_fleet_summary()` - Get current fleet status overview with per-type breakdowns\n"
         "- `find_truck_by_id(truck_id)` - Find any asset by ID or plate number\n"
         "- `get_all_locations()` - Get all depots, warehouses, and stations\n"
+        "- `search_inventory(query)` - Search inventory items (parts, supplies) by name or stock status\n"
+        "- `get_inventory_summary()` - Get all inventory items organized by in-stock/low-stock/out-of-stock\n"
         "- `assign_asset_to_job(job_id, asset_id)` - Assign an asset to a job (mutation)\n\n"
         "**Guidelines:**\n"
         "- Always announce what you are searching for before using tools\n"

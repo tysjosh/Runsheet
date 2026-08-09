@@ -27,6 +27,10 @@ _invoice_draft_finalize_task = None
 # so shutdown can cancel it.
 _ar_aging_snapshot_task = None
 
+# Module-level reference for the analytics snapshot background task
+# so shutdown can cancel it.
+_analytics_snapshot_task = None
+
 # ── Commerce / Intake flag dependency keys ──────────────────────────
 COMMERCE_BACKBONE_FLAG_KEY = "commerce_backbone"
 ORDER_INTAKE_PIPELINE_FLAG_KEY = "order_intake_pipeline"
@@ -966,6 +970,45 @@ async def initialize(app, container: ServiceContainer) -> None:
             "commerce_backbone_enabled is off"
         )
 
+    # ── Analytics snapshot job ─────────────────────────────────────────
+    # Daily background task that computes real daily_performance /
+    # route_performance / delay_cause_analysis / regional_performance
+    # documents in analytics_events from actual delivered/failed orders,
+    # replacing the seed-only demo data. Not gated behind
+    # commerce_backbone_enabled — this scores fuel_orders_current
+    # directly and has no commerce/invoicing dependency.
+    try:
+        global _analytics_snapshot_task
+        from commerce.services.analytics_snapshot_job import (
+            run_analytics_snapshot_cycle,
+            ANALYTICS_SNAPSHOT_INTERVAL_SECONDS,
+        )
+
+        async def _analytics_snapshot_cycle() -> None:
+            """One pass computing daily analytics snapshots."""
+            snapshotted = await run_analytics_snapshot_cycle(
+                es_service=elasticsearch_service,
+            )
+            if snapshotted:
+                logger.info(
+                    "Analytics snapshot job: %d tenant(s) snapshotted",
+                    snapshotted,
+                )
+
+        _analytics_snapshot_task = asyncio.create_task(
+            run_periodic(
+                "core.analytics-snapshot",
+                ANALYTICS_SNAPSHOT_INTERVAL_SECONDS,
+                _analytics_snapshot_cycle,
+            )
+        )
+        logger.info(
+            "Analytics snapshot job started (interval: %ds)",
+            ANALYTICS_SNAPSHOT_INTERVAL_SECONDS,
+        )
+    except Exception as exc:
+        logger.warning("Analytics snapshot job wiring failed: %s", exc)
+
     logger.info("Core infrastructure initialized")
 
 
@@ -974,6 +1017,7 @@ async def shutdown(app, container: ServiceContainer) -> None:
     global _credit_override_expiry_task
     global _invoice_overdue_task
     global _ar_aging_snapshot_task
+    global _analytics_snapshot_task
 
     # Stand down as sweep leader first, so the replacement task can pick up
     # leadership as soon as this one's lock connection closes rather than
@@ -1013,6 +1057,15 @@ async def shutdown(app, container: ServiceContainer) -> None:
         except asyncio.CancelledError:
             pass
         logger.info("AR aging snapshot task stopped")
+
+    # Cancel the analytics snapshot background task if running.
+    if _analytics_snapshot_task is not None and not _analytics_snapshot_task.done():
+        _analytics_snapshot_task.cancel()
+        try:
+            await _analytics_snapshot_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("Analytics snapshot task stopped")
 
     # Redis client cleanup is handled by modules that own the connection.
     logger.info("Core infrastructure shut down")

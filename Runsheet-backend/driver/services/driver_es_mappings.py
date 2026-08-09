@@ -85,6 +85,12 @@ PROOF_OF_DELIVERY_MAPPING = {
             "ocr_confidence":              {"type": "double"},
             "ocr_requires_manual_review":  {"type": "boolean"},
             "ocr_error":                   {"type": "keyword"},
+            # Meter/ticket identification extracted alongside the gallon
+            # count (fuel-compliance-backbone Req 8.1, Task 10.3). Feeds the
+            # meter-registry lookup MeterAuditService performs at invoicing
+            # time (calibration-expiry flag + meter/POD variance flag).
+            "meter_number":                {"type": "keyword"},
+            "ticket_number":               {"type": "keyword"},
             "geotag":             {"type": "geo_point"},
             "timestamp":          {"type": "date"},
             "otp_verified":       {"type": "boolean"},

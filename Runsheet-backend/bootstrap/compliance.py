@@ -35,9 +35,11 @@ logger = logging.getLogger(__name__)
 # Module-level references so ``shutdown`` can cancel cron tasks.
 _price_protection_expiry_task = None
 _rack_price_refresh_task = None
+_dunning_evaluation_task = None
 _driver_expiry_cron_agent = None
 _asset_cert_expiry_cron_agent = None
 _meter_calibration_cron_agent = None
+_dyed_diesel_cert_expiry_cron_agent = None
 
 
 async def initialize(app, container: ServiceContainer) -> None:
@@ -511,6 +513,28 @@ async def initialize(app, container: ServiceContainer) -> None:
         container.meter_audit_service = meter_service
         configure_meter_api(meter_service=meter_service)
         logger.info("Meter Audit API configured")
+
+        # Task 10.6 / Req 8.2, 8.5: wire the MeterAuditService into the
+        # InvoiceService so generate_from_order() resolves the delivery's
+        # meter_number to a registered meter, flags the invoice
+        # meter.calibration_expired when the meter's calibration has
+        # lapsed, and links the meter ticket to the invoice as an
+        # immutable audit record. This was previously implemented and
+        # unit-tested but never triggered from any production code path.
+        if container.has("commerce_invoice_service"):
+            container.commerce_invoice_service.set_meter_audit_service(
+                meter_service
+            )
+            logger.info(
+                "MeterAuditService wired into InvoiceService (task 10.6)"
+            )
+        else:
+            logger.warning(
+                "InvoiceService not present in container — "
+                "MeterAuditService not injected (task 10.6). "
+                "MeterAuditService is available on "
+                "container.meter_audit_service for deferred wiring."
+            )
     except Exception as exc:
         logger.warning("MeterAuditService wiring failed: %s", exc)
 
@@ -761,6 +785,71 @@ async def initialize(app, container: ServiceContainer) -> None:
         logger.warning(
             "DyedDieselEnforcer intake hook wiring failed (task 9.7): %s",
             exc,
+        )
+
+    # ── DyedDieselCertExpiryCronAgent (Req 6.6) ────────────────────────
+    # Daily sweep calling DyedDieselEnforcer.check_expiring_certificates()
+    # for every tenant so customers get advance warning before an IRS
+    # 637M certificate lapses and validate_order() starts blocking their
+    # dyed-diesel orders. The enforcer's validation methods were wired
+    # above (intake hook, CompartmentLoadingAgent, InvoiceService), but
+    # this proactive-alert sweep had no scheduler entry — nothing ever
+    # called check_expiring_certificates() outside its own unit tests.
+    global _dyed_diesel_cert_expiry_cron_agent
+    try:
+        from Agents.autonomous.dyed_diesel_cert_expiry_cron_agent import (
+            DyedDieselCertExpiryCronAgent,
+        )
+        from bootstrap.agent_scheduler import RestartPolicy
+
+        activity_log_service = (
+            container.get("activity_log_service")
+            if container.has("activity_log_service")
+            else None
+        )
+        ws_manager = (
+            container.get("ws_manager")
+            if container.has("ws_manager")
+            else None
+        )
+        confirmation_protocol = (
+            container.get("confirmation_protocol")
+            if container.has("confirmation_protocol")
+            else None
+        )
+        signal_bus_for_cron = (
+            container.get("signal_bus")
+            if container.has("signal_bus")
+            else None
+        )
+
+        _dyed_diesel_cert_expiry_cron_agent = DyedDieselCertExpiryCronAgent(
+            es_service=es_service,
+            activity_log_service=activity_log_service,
+            ws_manager=ws_manager,
+            confirmation_protocol=confirmation_protocol,
+            signal_bus=signal_bus_for_cron,
+        )
+
+        if container.has("agent_scheduler"):
+            scheduler = container.agent_scheduler
+            scheduler.register(
+                _dyed_diesel_cert_expiry_cron_agent, RestartPolicy.ON_FAILURE
+            )
+            await scheduler.start_all()
+            logger.info(
+                "DyedDieselCertExpiryCronAgent registered with "
+                "AgentScheduler (daily, ON_FAILURE restart)"
+            )
+        else:
+            await _dyed_diesel_cert_expiry_cron_agent.start()
+            logger.info(
+                "DyedDieselCertExpiryCronAgent started directly "
+                "(AgentScheduler unavailable)"
+            )
+    except Exception as exc:
+        logger.warning(
+            "DyedDieselCertExpiryCronAgent wiring failed: %s", exc
         )
 
     # ── IFTA Reporter → GeotabConnector wiring (Task 12.3 / Req 7.1) ──
@@ -1037,6 +1126,80 @@ async def initialize(app, container: ServiceContainer) -> None:
             exc,
         )
 
+    # ── DunningService wiring + scheduled evaluation job (Req 7.3–7.5) ──
+    # Construct the DunningService, inject it into the already-wired
+    # InvoiceService so paid/void transitions cancel pending dunning
+    # notifications, and start a daily background job that scans overdue
+    # invoices and enqueues threshold-crossing notifications. Both the
+    # feature-flag gate (commerce.dunning_enabled) and duplicate
+    # prevention live inside DunningService itself.
+    global _dunning_evaluation_task
+    try:
+        from commerce.services.dunning_job import (
+            run_dunning_evaluation_cycle,
+            DUNNING_EVALUATION_INTERVAL_SECONDS,
+        )
+        from commerce.services.dunning_service import DunningService
+
+        notif_svc_for_dunning = (
+            container.get("notification_service")
+            if container.has("notification_service")
+            else None
+        )
+        feature_flags_for_dunning = (
+            container.get("ops_feature_flags")
+            if container.has("ops_feature_flags")
+            else None
+        )
+
+        dunning_service = DunningService(
+            es_service=es_service,
+            notification_service=notif_svc_for_dunning,
+            feature_flag_service=feature_flags_for_dunning,
+        )
+        container.dunning_service = dunning_service
+
+        if container.has("commerce_invoice_service"):
+            container.commerce_invoice_service.set_dunning_service(
+                dunning_service
+            )
+            logger.info(
+                "DunningService wired into InvoiceService for "
+                "paid/void notification cancellation"
+            )
+        else:
+            logger.warning(
+                "DunningService constructed but commerce_invoice_service "
+                "not available in container — paid/void cancellation "
+                "hook not wired"
+            )
+
+        async def _dunning_evaluation_cycle() -> None:
+            """One pass evaluating overdue invoices for dunning thresholds."""
+            enqueued = await run_dunning_evaluation_cycle(
+                es_service=es_service,
+                dunning_service=dunning_service,
+            )
+            if enqueued:
+                logger.info(
+                    "Dunning evaluation job: %d notification(s) enqueued",
+                    enqueued,
+                )
+
+        _dunning_evaluation_task = asyncio.create_task(
+            run_periodic(
+                "commerce.dunning-evaluation",
+                DUNNING_EVALUATION_INTERVAL_SECONDS,
+                _dunning_evaluation_cycle,
+            )
+        )
+        logger.info(
+            "Dunning evaluation job started (interval: %ds)",
+            DUNNING_EVALUATION_INTERVAL_SECONDS,
+        )
+    except Exception as exc:
+        logger.warning("DunningService wiring failed: %s", exc)
+
     # ── DeliveryCompletedSubscriber → order.delivered (Task 14.6 / Req 12.7) ──
     # Subscribe the DeliveryCompletedSubscriber to the OrderService's
     # order.delivered event so that a ``delivery_completed`` notification
@@ -1179,9 +1342,11 @@ async def shutdown(app, container: ServiceContainer) -> None:
     """
     global _price_protection_expiry_task
     global _rack_price_refresh_task
+    global _dunning_evaluation_task
     global _driver_expiry_cron_agent
     global _asset_cert_expiry_cron_agent
     global _meter_calibration_cron_agent
+    global _dyed_diesel_cert_expiry_cron_agent
 
     if (
         _price_protection_expiry_task is not None
@@ -1204,6 +1369,17 @@ async def shutdown(app, container: ServiceContainer) -> None:
         except asyncio.CancelledError:
             pass
         logger.info("Rack price refresh task stopped")
+
+    if (
+        _dunning_evaluation_task is not None
+        and not _dunning_evaluation_task.done()
+    ):
+        _dunning_evaluation_task.cancel()
+        try:
+            await _dunning_evaluation_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("Dunning evaluation task stopped")
 
     # Stop the DriverExpiryCronAgent (Task 6.10). If it was registered
     # with the AgentScheduler, the scheduler handles its lifecycle;
@@ -1231,5 +1407,14 @@ async def shutdown(app, container: ServiceContainer) -> None:
             await _meter_calibration_cron_agent.stop()
             logger.info("MeterCalibrationCronAgent stopped (direct)")
         _meter_calibration_cron_agent = None
+
+    # Stop the DyedDieselCertExpiryCronAgent. If it was registered with
+    # the AgentScheduler, the scheduler handles its lifecycle; this is a
+    # fallback for the direct-start path.
+    if _dyed_diesel_cert_expiry_cron_agent is not None:
+        if not container.has("agent_scheduler"):
+            await _dyed_diesel_cert_expiry_cron_agent.stop()
+            logger.info("DyedDieselCertExpiryCronAgent stopped (direct)")
+        _dyed_diesel_cert_expiry_cron_agent = None
 
     logger.info("Compliance domain shut down")
