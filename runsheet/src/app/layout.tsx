@@ -31,8 +31,12 @@ export const metadata: Metadata = {
     default: "Runsheet — Autonomous Fuel Distribution Operations",
     template: "%s · Runsheet",
   },
+  // Ordered to match the landing page's three pillars: runout prevention,
+  // load/route planning, then compliance enforcement. Dyed-diesel and driver
+  // qualification were added because they are a primary search intent for this
+  // buyer and were missing from the snippet entirely.
   description:
-    "Runsheet forecasts tank runout, prioritizes deliveries, builds compliant multi-compartment load plans and optimizes routes for US regional fuel distributors — with net-gallon accuracy and a human-in-the-loop agent layer.",
+    "Runsheet forecasts tank runout from degree-day normalized consumption, builds compliant multi-compartment load plans, and enforces dyed-diesel and DOT driver qualification rules for US regional fuel distributors — with net-gallon accuracy and a human-in-the-loop agent layer.",
   applicationName: "Runsheet",
   keywords: [
     "fuel distribution software",
@@ -42,6 +46,8 @@ export const metadata: Metadata = {
     "IFTA reporting",
     "net gallons",
     "multi-compartment load planning",
+    "dyed diesel compliance",
+    "driver qualification files",
   ],
   openGraph: {
     type: "website",
@@ -49,7 +55,7 @@ export const metadata: Metadata = {
     url: SITE_URL,
     title: "Runsheet — Autonomous Fuel Distribution Operations",
     description:
-      "Runout forecasting, compliant load planning and route optimization for US regional fuel distributors. Human-in-the-loop agents, net-gallon accuracy.",
+      "Runout forecasting, compliant multi-compartment load planning, and dyed-diesel enforcement for US regional fuel distributors. Human-in-the-loop agents, net-gallon accuracy.",
   },
   twitter: {
     card: "summary_large_image",
