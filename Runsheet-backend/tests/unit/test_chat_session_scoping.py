@@ -168,3 +168,23 @@ def test_same_session_retains_context(harness):
     call = turn("tenant-A", "s1", "which truck?")
 
     assert any("QA-TRUCK-AG-01" in t for t in _texts(call))
+
+
+def test_clear_reports_failure_when_store_delete_fails(harness, monkeypatch):
+    """A failed store delete must not be reported as a successful clear.
+
+    Before this, ``/api/chat/clear`` ignored ``clear_memory``'s result and
+    returned 200 even though the history was still stored, so the next turn
+    reloaded it.
+    """
+    turn, clear = harness
+    turn("tenant-A", "s1", "still-stored-secret")
+
+    async def _failing_delete(self, key):
+        raise ConnectionError("redis down")
+
+    monkeypatch.setattr(FakeSessionStore, "delete", _failing_delete)
+    resp = clear("tenant-A", "s1")
+
+    assert resp.status_code == 503, resp.text
+    assert resp.json()["error_code"] == "SESSION_STORE_UNAVAILABLE"

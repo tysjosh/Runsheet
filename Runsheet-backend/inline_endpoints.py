@@ -138,10 +138,22 @@ async def clear_chat_endpoint(
     # load and never another tenant's entry under the same session id (F1).
     # Specialists keep no history between requests, so the session store
     # entry is the caller's whole history.
+    #
+    # A False result means the store delete failed (it is True when there was
+    # nothing to clear). Reporting success then would be wrong: the history is
+    # still stored and the next turn reloads it. Fail with 503 so the client
+    # can retry.
     from Agents.mainagent import LogisticsAgent
-    await LogisticsAgent().clear_memory(
+    from errors.exceptions import session_store_unavailable
+
+    cleared = await LogisticsAgent().clear_memory(
         session_id=request.session_id, tenant_id=tenant.tenant_id
     )
+    if not cleared:
+        raise session_store_unavailable(
+            "Chat memory could not be cleared; retry the request",
+            details={"session_id": request.session_id},
+        )
     return {"message": "Chat memory cleared successfully", "session_id": request.session_id}
 
 
