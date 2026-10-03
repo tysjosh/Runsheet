@@ -20,6 +20,7 @@ import { Truck } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import EmailPassword from "supertokens-auth-react/recipe/emailpassword";
+import { throttledMessage } from "../../../utils/authThrottle";
 
 export default function ForgotPasswordPage() {
   const router = useRouter();
@@ -52,8 +53,12 @@ export default function ForgotPasswordPage() {
       // OK (or any non-field status): show the same confirmation to avoid
       // leaking whether the address maps to a real account.
       setSent(true);
-    } catch {
-      setError("Something went wrong. Please try again.");
+    } catch (err) {
+      // A throttled request (F5) rejects with the raw 429 response.
+      setError(
+        (await throttledMessage(err)) ??
+          "Something went wrong. Please try again.",
+      );
     } finally {
       setIsLoading(false);
     }

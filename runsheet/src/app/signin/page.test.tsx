@@ -51,6 +51,22 @@ function signInResult(partial: Record<string, unknown>): SignInResult {
   return partial as unknown as SignInResult;
 }
 
+// A fetch-Response-shaped 429, as supertokens-web-js rejects with.
+function fake429(body: Record<string, unknown>, retryAfter: string | null) {
+  const res = {
+    status: 429,
+    headers: {
+      get: (h: string) =>
+        h.toLowerCase() === "retry-after" ? retryAfter : null,
+    },
+    clone() {
+      return res;
+    },
+    json: async () => body,
+  };
+  return res;
+}
+
 function fillCredentials(email: string, password: string) {
   fireEvent.change(screen.getByLabelText(/email address/i), {
     target: { value: email },
@@ -113,6 +129,31 @@ describe("SignInPage", () => {
 
     await waitFor(() => expect(replaceMock).toHaveBeenCalledWith("/dashboard"));
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("shows the retry wait when sign-in is throttled (429)", async () => {
+    // Staging finding F5: the SDK rejects a 429 with the raw response.
+    signInMock.mockRejectedValue(
+      fake429({ details: { retry_after_seconds: 42 } }, "42"),
+    );
+    render(<SignInPage />);
+    fillCredentials("admin@runsheet.com", "wrong-password");
+    submit();
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(
+      "Too many attempts, try again in 42 seconds",
+    );
+    expect(replaceMock).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the Retry-After header when the body has no wait", async () => {
+    signInMock.mockRejectedValue(fake429({ error_code: "RATE_LIMITED" }, "17"));
+    render(<SignInPage />);
+    fillCredentials("admin@runsheet.com", "wrong-password");
+    submit();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Too many attempts, try again in 17 seconds",
+    );
   });
 
   it("validates required fields before calling SuperTokens", async () => {
