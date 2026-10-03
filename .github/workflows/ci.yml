@@ -512,6 +512,35 @@ jobs:
           fi
           echo "✅ Unauthenticated reads are rejected."
 
+      - name: Verify WebSocket upgrades reach the app
+        run: |
+          # uvicorn without a WebSocket library logs "No supported WebSocket
+          # library detected", ignores the Upgrade header and serves the
+          # handshake as a plain GET. That matches no HTTP route, so every WS
+          # endpoint 404s — which is how staging shipped with live updates dead
+          # (S1) while every local run worked off an undeclared venv package.
+          # With the library, the unauthenticated handshake reaches
+          # bootstrap/websockets.py, which closes with 4001 before accept, and
+          # uvicorn sends that as an HTTP 403 handshake rejection. So 403 proves
+          # upgrades are handled; 404 is the bug; anything else is a finding.
+          code=$(curl -s -o /dev/null -m 10 -w '%{http_code}' --http1.1 \
+            -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+            -H 'Sec-WebSocket-Version: 13' \
+            -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+            http://127.0.0.1:8080/ws/agent-activity || true)
+          echo "/ws/agent-activity upgrade -> $code"
+          if [ "$code" = "404" ]; then
+            echo "❌ WebSocket upgrade returned 404: the image has no WebSocket library (websockets/wsproto)"
+            docker logs app 2>&1 | grep -i websocket | tail -20 || true
+            exit 1
+          fi
+          if [ "$code" != "403" ]; then
+            echo "❌ Expected 403 (unauthenticated handshake rejected by the app), got $code"
+            docker logs app 2>&1 | tail -40
+            exit 1
+          fi
+          echo "✅ WebSocket upgrades reach the app; unauthenticated ones are rejected."
+
       - name: Container logs
         if: always()
         run: docker logs app 2>&1 | tail -60 || true

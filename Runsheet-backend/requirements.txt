@@ -13,6 +13,20 @@
 fastapi==0.128.0
 starlette==0.50.0
 uvicorn==0.40.0
+# uvicorn without the [standard] extra ships no WebSocket library. Without one
+# it logs "No supported WebSocket library detected", ignores the Upgrade header
+# and serves the handshake as a plain GET, which matches no HTTP route, so every
+# /ws/* endpoint and /api/fleet/live returned 404 on staging (finding S1). It
+# worked locally only because websockets was in dev venvs undeclared, the same
+# failure class as pypdf below.
+#
+# 13.1 is the exact version uvicorn 0.40.0 pins in its own dev group (it runs
+# its suite against it), satisfies [standard]'s websockets>=10.4, and predates
+# the deprecation of websockets.legacy, which uvicorn's "auto" ws
+# implementation imports. [standard] itself is not used: it would also pull
+# unpinned httptools, uvloop and watchfiles and swap the HTTP parser and event
+# loop production runs on, when the WS library is the only missing piece.
+websockets==13.1
 # pydantic floor is set by supertokens-python 0.31.3 (requires >=2.10.6);
 # pinned to the versions the test suite is validated against.
 pydantic==2.12.5
