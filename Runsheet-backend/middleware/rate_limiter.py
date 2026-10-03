@@ -13,6 +13,7 @@ Validates:
 
 import ipaddress
 import logging
+import os
 from typing import Callable, Optional
 
 from fastapi import FastAPI, Request, Response
@@ -111,8 +112,57 @@ def driver_rate_key(request: Request) -> str:
     return get_client_ip(request)
 
 
+def _rate_limit_storage_uri(
+    environment: Optional[str] = None, redis_url: Optional[str] = None
+) -> str:
+    """Pick the slowapi storage backend (staging finding F5).
+
+    ``REDIS_URL`` when set, so every replica shares one set of counters;
+    in-process memory otherwise. Always memory under ``ENVIRONMENT=test``: CI and
+    local runs share one long-lived Redis, and shared counters would leak 429s
+    between tests and between consecutive runs.
+
+    Read from ``os.environ`` because the limiter is built at import time, after
+    ``main.py``'s ``load_dotenv`` and before settings are loaded. The URL can
+    carry an AUTH token, so only its scheme is ever logged.
+    """
+    env = (
+        os.environ.get("ENVIRONMENT", "development")
+        if environment is None
+        else environment
+    ).strip().lower()
+    url = (os.environ.get("REDIS_URL", "") if redis_url is None else redis_url).strip()
+    if url and env != "test":
+        return url
+    return "memory://"
+
+
+def _build_limiter() -> Limiter:
+    """Build a Limiter keyed on the client IP, backed by Redis when configured.
+
+    ``in_memory_fallback_enabled`` keeps decorated routes limited (per process)
+    when Redis is unreachable, and slowapi re-probes it periodically. That is
+    also what keeps development working with REDIS_URL set but Redis down.
+
+    ``headers_enabled`` stays off: with it on, slowapi raises "parameter
+    'response' must be an instance of starlette.responses.Response" on every
+    decorated endpoint that returns a dict without a ``response: Response``
+    parameter, turning those routes into 500s. 429s still carry Retry-After
+    from :func:`_custom_rate_limit_handler`.
+    """
+    return Limiter(
+        key_func=get_client_ip,
+        storage_uri=_rate_limit_storage_uri(),
+        in_memory_fallback_enabled=True,
+    )
+
+
 # Create the limiter instance with IP-based key function
-limiter = Limiter(key_func=get_client_ip)
+limiter = _build_limiter()
+logger.info(
+    "Rate-limit storage backend: %s",
+    _rate_limit_storage_uri().split(":", 1)[0],
+)
 
 
 def create_rate_limiter(
@@ -132,7 +182,7 @@ def create_rate_limiter(
     Returns:
         Configured Limiter instance
     """
-    return Limiter(key_func=get_client_ip)
+    return _build_limiter()
 
 
 def get_api_rate_limit_string(requests_per_minute: int) -> str:
