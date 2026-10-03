@@ -70,6 +70,19 @@ class TestRegisterAtImport:
         # fallback to slowapi's 100/min would ignore RATE_LIMIT_REQUESTS_PER_MINUTE.
         assert mock_rate.call_args.kwargs["api_rate_limit"] == 100
         assert mock_rate.call_args.kwargs["ai_rate_limit"] == 10
+        # MagicMock settings carry no int hop count: X-Forwarded-For is ignored (F5).
+        assert mock_rate.call_args.kwargs["trusted_proxy_hops"] == 0
+
+    def test_passes_effective_trusted_proxy_hops(self, mock_app, settings):
+        """Staging finding F5: the per-environment hop count reaches the limiter."""
+        from bootstrap.middleware import register_at_import
+
+        settings.effective_trusted_proxy_hops = 1
+        with patch("middleware.rate_limiter.setup_rate_limiting") as mock_rate, \
+             patch("middleware.security_headers.setup_security_headers"):
+            register_at_import(mock_app, settings)
+
+        assert mock_rate.call_args.kwargs["trusted_proxy_hops"] == 1
 
     @pytest.mark.parametrize(
         "is_local,expected",

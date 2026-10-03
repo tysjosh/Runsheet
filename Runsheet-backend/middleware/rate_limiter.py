@@ -11,6 +11,7 @@ Validates:
   per minute per IP address for AI chat endpoints
 """
 
+import ipaddress
 import logging
 from typing import Callable, Optional
 
@@ -23,33 +24,62 @@ from starlette.types import ASGIApp
 
 logger = logging.getLogger(__name__)
 
+#: How many proxies in front of the app append to X-Forwarded-For. Set once at
+#: import by ``setup_rate_limiting`` from ``settings.effective_trusted_proxy_hops``.
+#: 0 (the default) ignores the header entirely, which is right when nothing
+#: trusted sits in front of the app (local development and tests).
+_trusted_proxy_hops: int = 0
 
-def get_client_ip(request: Request) -> str:
+
+def configure_trusted_proxy_hops(hops: int) -> None:
+    """Set the number of trusted proxies that append to X-Forwarded-For (F5)."""
+    global _trusted_proxy_hops
+    _trusted_proxy_hops = max(0, int(hops))
+
+
+def get_client_ip(request: Request, trusted_hops: Optional[int] = None) -> str:
     """
-    Extract the client IP address from the request.
-    
-    This function handles various proxy scenarios by checking common
-    forwarding headers before falling back to the direct client address.
-    
+    Return the client IP used to key rate limits and in log lines.
+
+    Behind the AWS ALB the leftmost X-Forwarded-For entries are whatever the
+    client sent; the ALB only APPENDS the address it saw as the rightmost
+    entry. Keying on the leftmost entry let a caller rotate it per request and
+    get a fresh bucket every time (staging finding F5/L3). So with N trusted
+    proxies the client is the Nth entry from the right, the same rule as
+    werkzeug's ``ProxyFix(x_for=N)``. The leftmost entry is never read.
+
+    ``X-Real-IP`` is ignored: the ALB does not set it, so it is purely
+    client-controlled.
+
     Args:
-        request: The incoming FastAPI request
-        
+        request: The incoming request.
+        trusted_hops: Trusted proxy count. ``None`` uses the value set by
+            :func:`configure_trusted_proxy_hops`; 0 ignores X-Forwarded-For.
+
     Returns:
-        The client's IP address as a string
+        The client IP, or the socket peer when X-Forwarded-For is absent, has
+        fewer than N entries, or the selected entry is not an IP address.
     """
-    # Check for X-Forwarded-For header (common in load balancer setups)
-    forwarded_for = request.headers.get("X-Forwarded-For")
-    if forwarded_for:
-        # X-Forwarded-For can contain multiple IPs, take the first (original client)
-        return forwarded_for.split(",")[0].strip()
-    
-    # Check for X-Real-IP header (used by some proxies like nginx)
-    real_ip = request.headers.get("X-Real-IP")
-    if real_ip:
-        return real_ip.strip()
-    
-    # Fall back to the direct client address
-    return get_remote_address(request)
+    hops = _trusted_proxy_hops if trusted_hops is None else max(0, int(trusted_hops))
+    peer = get_remote_address(request)
+    if hops == 0:
+        return peer
+
+    # Several X-Forwarded-For header lines are one list, in order (RFC 7230 §3.2.2).
+    entries = [
+        part.strip()
+        for value in request.headers.getlist("x-forwarded-for")
+        for part in value.split(",")
+        if part.strip()
+    ]
+    if len(entries) < hops:
+        return peer
+    candidate = entries[-hops]
+    try:
+        ipaddress.ip_address(candidate)
+    except ValueError:
+        return peer
+    return candidate
 
 
 def driver_rate_key(request: Request) -> str:
@@ -60,7 +90,9 @@ def driver_rate_key(request: Request) -> str:
     identity has been stamped onto ``request.state`` by the driver tenant
     guard. When either value is missing — unauthenticated requests, or any
     path that does not stamp the driver identity — the key falls back to the
-    client IP so the endpoint is still rate limited.
+    client IP so the endpoint is still rate limited. That IP comes from
+    :func:`get_client_ip`, so it is the proxy-appended address, not a spoofable
+    leftmost X-Forwarded-For entry (F5).
 
     Validates:
     - Requirement 15.13: per-driver rate limit on every driver-surface write
@@ -153,7 +185,8 @@ def setup_rate_limiting(
     app: FastAPI,
     api_rate_limit: int = 100,
     ai_rate_limit: int = 10,
-    enabled: bool = True
+    enabled: bool = True,
+    trusted_proxy_hops: int = 0,
 ) -> None:
     """
     Configure rate limiting for a FastAPI application.
@@ -170,7 +203,11 @@ def setup_rate_limiting(
         api_rate_limit: Maximum requests per minute for general API endpoints
         ai_rate_limit: Maximum requests per minute for AI chat endpoints
         enabled: Whether rate limiting is enabled (default: True)
+        trusted_proxy_hops: Proxies that append to X-Forwarded-For (F5). Applied
+            even when ``enabled`` is False, because ``driver_rate_key`` and log
+            lines still derive the client IP.
     """
+    configure_trusted_proxy_hops(trusted_proxy_hops)
     if not enabled:
         logger.info("Rate limiting is disabled")
         return
@@ -184,7 +221,8 @@ def setup_rate_limiting(
     app.add_exception_handler(RateLimitExceeded, _custom_rate_limit_handler)
     
     logger.info(
-        f"Rate limiting configured: API={api_rate_limit}/min, AI={ai_rate_limit}/min"
+        f"Rate limiting configured: API={api_rate_limit}/min, AI={ai_rate_limit}/min, "
+        f"trusted_proxy_hops={_trusted_proxy_hops}"
     )
 
 

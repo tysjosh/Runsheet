@@ -79,11 +79,16 @@ def register_at_import(app, settings) -> None:
 
     # Not middleware. It sets ``app.state.limiter`` and registers the
     # ``RateLimitExceeded`` handler that turns an over-limit request into a 429
-    # instead of a 500.
+    # instead of a 500. It also sets how many X-Forwarded-For hops to trust when
+    # deriving the client IP (staging finding F5). Non-int values (MagicMock
+    # settings in tests) mean 0: ignore the header.
+    hops = getattr(settings, "effective_trusted_proxy_hops", 0)
+    hops = hops if isinstance(hops, int) and not isinstance(hops, bool) else 0
     setup_rate_limiting(
         app,
         api_rate_limit=settings.rate_limit_requests_per_minute,
         ai_rate_limit=settings.rate_limit_ai_requests_per_minute,
+        trusted_proxy_hops=hops,
     )
 
     # HSTS outside development/test (staging finding F6). Gated on the

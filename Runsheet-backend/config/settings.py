@@ -299,6 +299,18 @@ class Settings(BaseSettings):
         le=1000,
         description="Maximum AI chat requests per minute per IP"
     )
+    trusted_proxy_hops: Optional[int] = Field(
+        default=None,
+        ge=0,
+        le=5,
+        description=(
+            "Env TRUSTED_PROXY_HOPS. Proxies in front of the app that append the "
+            "caller to X-Forwarded-For; the client IP is the Nth entry from the "
+            "right (staging finding F5). Unset = 0 in development/test (no proxy, "
+            "every entry is client-supplied) and 1 in staging/production (one "
+            "AWS ALB). Set 2 if CloudFront is put in front of the ALB."
+        ),
+    )
     
     # Observability Configuration
     log_level: str = Field(
@@ -445,6 +457,15 @@ class Settings(BaseSettings):
         """True for development and test, the environments that skip HSTS and
         keep the API docs served (staging findings F6, F7)."""
         return self.environment in (Environment.DEVELOPMENT, Environment.TEST)
+
+    @property
+    def effective_trusted_proxy_hops(self) -> int:
+        """``trusted_proxy_hops`` when set, else 0 locally and 1 behind the ALB
+        (F5). 0 behind the ALB would key every client on the ALB node's IP, one
+        shared bucket that a single noisy client could exhaust for everyone."""
+        if self.trusted_proxy_hops is not None:
+            return self.trusted_proxy_hops
+        return 0 if self.is_local_environment else 1
 
     # API-key authentication
     #

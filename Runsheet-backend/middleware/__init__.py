@@ -12,6 +12,7 @@ from middleware.rate_limiter import (
     api_rate_limit,
     ai_rate_limit,
     get_client_ip,
+    configure_trusted_proxy_hops,
     AI_CHAT_PATHS,
     is_ai_chat_endpoint,
 )
@@ -30,6 +31,7 @@ __all__ = [
     "api_rate_limit",
     "ai_rate_limit",
     "get_client_ip",
+    "configure_trusted_proxy_hops",
     "AI_CHAT_PATHS",
     "is_ai_chat_endpoint",
     "SecurityHeadersMiddleware",

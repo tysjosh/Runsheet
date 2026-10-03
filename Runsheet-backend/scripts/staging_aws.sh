@@ -1148,6 +1148,11 @@ containers = [
             {"name": "ENVIRONMENT", "value": "staging"},
             {"name": "PORT", "value": "8080"},
             {"name": "LOG_LEVEL", "value": "INFO"},
+            # The ALB appends the caller as the rightmost X-Forwarded-For entry;
+            # anything left of it is client-supplied. 1 = trust exactly that hop
+            # when keying rate limits (staging finding F5). Set 2 if CloudFront
+            # is ever put in front of the ALB.
+            {"name": "TRUSTED_PROXY_HOPS", "value": "1"},
             {"name": "SESSION_STORE_TYPE", "value": "redis"},
             # SuperTokens Cloud over HTTPS. The API key arrives as a secret below.
             {"name": "SUPERTOKENS_CONNECTION_URI", "value": os.environ["ST_URI"]},
