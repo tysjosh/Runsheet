@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import importlib
 from typing import Any, Dict, List
 
 import pytest
@@ -87,11 +88,20 @@ def harness(monkeypatch):
     store = FakeSessionStore()
     current = {"tenant": "tenant-A"}
 
+    # Patch the module objects in ``sys.modules``: that is what the handlers'
+    # call-time ``from Agents.mainagent import LogisticsAgent`` resolves to.
+    # A dotted-string target walks package attributes instead, and after other
+    # tests evict and re-import these modules the two can differ. Then the patch
+    # missed, the real RedisSessionStore wrote session:tenant-*:s1 into the local
+    # Redis, and the next full run within the TTL failed on that history.
+    mainagent = importlib.import_module("Agents.mainagent")
+    model_provider = importlib.import_module("Agents.model_provider")
+
     # Makes setup_gemini_credentials return early; no network either way.
     monkeypatch.setenv("GEMINI_API_KEY", "test-placeholder")
-    monkeypatch.setattr("Agents.model_provider.build_agent_model", lambda settings: model)
-    monkeypatch.setattr("Agents.mainagent._orchestrator", None)
-    monkeypatch.setattr("Agents.mainagent._get_session_store", lambda: store)
+    monkeypatch.setattr(model_provider, "build_agent_model", lambda settings: model)
+    monkeypatch.setattr(mainagent, "_orchestrator", None)
+    monkeypatch.setattr(mainagent, "_get_session_store", lambda: store)
 
     async def _tenant() -> TenantContext:
         return TenantContext(
