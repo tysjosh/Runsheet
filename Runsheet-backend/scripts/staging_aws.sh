@@ -658,6 +658,9 @@ cmd_up() {
   ensure_execution_role
   ensure_task_role
 
+  log "Credentials vault KMS key"
+  ensure_vault_kms
+
   log "Load balancer"
   local alb_arn tg_arn
   if [ -n "$(alb_dns)" ]; then
@@ -1025,6 +1028,38 @@ ensure_task_role() {
   ok "created role $role (no policies — staging needs no AWS API access)"
 }
 
+#: The credentials vault (TenantCredentialsVault) envelope-encrypts tenant
+#: integration credentials under this key. The "empty by design" note on the task
+#: role above predates the finding that staging cannot run without it: dispatcher
+#: order intake writes a channel credential, so with no key POST /api/orders 500s.
+VAULT_KMS_ALIAS="alias/${PREFIX}-vault"
+
+vault_kms_arn() {
+  aws kms describe-key --key-id "${VAULT_KMS_ALIAS}" --query 'KeyMetadata.Arn' \
+    --output text 2>/dev/null | grep -v '^None$' || true
+}
+
+#: One symmetric CMK (rotation on, ~$1/month) and an inline task-role policy
+#: scoped to exactly the three calls the vault makes, on exactly that key.
+ensure_vault_kms() {
+  local arn; arn="$(vault_kms_arn)"
+  if [ -n "$arn" ]; then
+    ok "kms ${VAULT_KMS_ALIAS} (${arn##*/})"
+  else
+    arn="$(aws kms create-key \
+      --description "Runsheet ${ENV_NAME} TenantCredentialsVault envelope encryption" \
+      --key-usage ENCRYPT_DECRYPT --key-spec SYMMETRIC_DEFAULT \
+      --tags "TagKey=Project,TagValue=${PROJECT}" "TagKey=Environment,TagValue=${ENV_NAME}" \
+      --query 'KeyMetadata.Arn' --output text)"
+    aws kms create-alias --alias-name "${VAULT_KMS_ALIAS}" --target-key-id "$arn"
+    aws kms enable-key-rotation --key-id "$arn"
+    ok "created kms ${VAULT_KMS_ALIAS} (${arn##*/}, rotation on)"
+  fi
+  aws iam put-role-policy --role-name "${PREFIX}-task" --policy-name "${PREFIX}-vault-kms" \
+    --policy-document "$(printf '{"Version":"2012-10-17","Statement":[{"Sid":"CredentialsVaultEnvelope","Effect":"Allow","Action":["kms:GenerateDataKey","kms:Decrypt","kms:DescribeKey"],"Resource":"%s"}]}' "$arn")" >/dev/null
+  ok "task role may use ${VAULT_KMS_ALIAS} (GenerateDataKey/Decrypt/DescribeKey only)"
+}
+
 # ---------------------------------------------------------------------------
 # task definition
 # ---------------------------------------------------------------------------
@@ -1134,7 +1169,16 @@ containers = [
             # list here would suppress projection for aggregates whose relational
             # tables are empty in a brand-new environment.
             {"name": "RETIRED_ES_INDICES", "value": ""},
-        ],
+            {"name": "AWS_REGION", "value": region},
+        ] + (
+            # The TenantCredentialsVault's envelope-encryption key (see
+            # ensure_vault_kms). Without it every credential write raises
+            # "kms_key_id required", which is what made POST /api/orders 500 on
+            # staging: dispatcher intake stores a channel credential first.
+            # Omitted, rather than empty, when no key exists yet.
+            [{"name": "FUEL_OPS_KMS_KEY_ID", "value": os.environ["VAULT_KMS_KEY_ARN"]}]
+            if os.environ.get("VAULT_KMS_KEY_ARN") else []
+        ),
         "secrets": [
             {"name": "DATABASE_URL", "valueFrom": secret_db},
             {"name": "GEMINI_API_KEY", "valueFrom": secret_gemini},
@@ -1366,6 +1410,12 @@ cmd_deploy() {
   export API_ORIGIN="$(api_origin)" APP_ORIGIN="$(app_origin)"
   ok "api origin ${API_ORIGIN}"
   ok "app origin ${APP_ORIGIN}"
+  export VAULT_KMS_KEY_ARN="$(vault_kms_arn)"
+  if [ -n "$VAULT_KMS_KEY_ARN" ]; then
+    ok "vault kms key ${VAULT_KMS_KEY_ARN##*/}"
+  else
+    warn "no ${VAULT_KMS_ALIAS} — credential writes (and dispatcher order intake) will fail; run 'up'"
+  fi
   local td; td="$(register_task_def "$image")"
   ok "$td"
 
