@@ -154,20 +154,13 @@ from bootstrap.middleware import register_at_import as _register_middleware
 
 _register_middleware(app, _auth_settings)
 
-# CORS must be added before the app starts (cannot be added in lifespan/bootstrap)
+# CORS must be added before the app starts (cannot be added in lifespan/bootstrap).
+# Origins are parsed by config/cors.py, shared with the WebSocket Origin check.
 from fastapi.middleware.cors import CORSMiddleware
-import json as _json
-_cors_raw = os.environ.get(
-    "CORS_ORIGINS", '["http://localhost:3000", "http://127.0.0.1:3000"]'
-)
-try:
-    _cors_origins = _json.loads(_cors_raw)
-except Exception as e:  # noqa: BLE001
-    logger.warning(f"Failed to parse CORS_ORIGINS: {e}, using defaults")
-    _cors_origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
+from config.cors import get_cors_origins as _get_cors_origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_cors_origins,
+    allow_origins=_get_cors_origins(),
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allow_headers=[
