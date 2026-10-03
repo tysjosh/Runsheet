@@ -45,6 +45,7 @@ def _mock_external():
         "strands.models.litellm",
     ]
     saved = {}
+    preloaded = set(sys.modules)
     for name in modules_to_mock:
         saved[name] = sys.modules.get(name)
         sys.modules[name] = MagicMock()
@@ -57,6 +58,20 @@ def _mock_external():
         else:
             sys.modules[name] = orig
     sys.modules.pop("bootstrap.agents", None)
+
+    # Restoring the mocked entries is not enough. Any module FIRST imported while
+    # they were mocked bound the mocks at import time and stays cached with them:
+    # ``patch("Agents.mainagent.configure_orchestrator")`` imports
+    # ``Agents.mainagent`` here, so ``mainagent.Agent`` became ``mock.Agent`` and
+    # every later test that built a real ``LogisticsAgent`` failed with "object
+    # MagicMock can't be used in 'await' expression". Evict such modules so the
+    # next importer gets a clean copy.
+    for name in set(sys.modules) - preloaded:
+        module = sys.modules.get(name)
+        if module is None or isinstance(module, MagicMock):
+            continue
+        if any(isinstance(value, MagicMock) for value in vars(module).values()):
+            sys.modules.pop(name, None)
 
 
 @pytest.fixture
