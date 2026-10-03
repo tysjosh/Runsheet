@@ -7,7 +7,9 @@ authoritative list of who may sign in, which tenant they belong to, which
 canonical roles they hold, and whether they have PII access. This module reads
 those rows and reflects them into SuperTokens_Core:
 
-* creates (or finds, idempotently) the SuperTokens user keyed by ``email``,
+* creates (or finds, idempotently) the SuperTokens user keyed by ``email`` —
+  re-using an existing user only when the row's backfilled ``st_user_id``
+  already names it, and refusing to adopt one it did not create (F1),
 * assigns the UserRoles recipe roles so they match the source row exactly,
 * writes ``tenant_id`` / ``has_pii_access`` / ``driver_id`` into the user's
   SuperTokens metadata, and
@@ -20,7 +22,8 @@ Validates: Requirements 9.3, 9.4, 9.6, 9.7
 - 9.3: create a SuperTokens user, assign roles, set ``tenant_id`` /
   ``has_pii_access`` for each migrated user.
 - 9.4: idempotent — re-running for the same source email never creates a
-  duplicate SuperTokens user (looked up by email before creating).
+  duplicate SuperTokens user (looked up by email before creating, and matched
+  against the backfilled ``st_user_id``).
 - 9.6: map each row's ``tenant_id`` / role set / ``has_pii_access`` to the
   equivalent SuperTokens identity attributes.
 - 9.7: per-row failure is recorded and the batch continues with the rest.
@@ -90,6 +93,15 @@ class AuthUserRow:
     driver_id: Optional[str] = None
     st_user_id: Optional[str] = None
     id: Optional[str] = None
+
+
+class ProvisioningConflictError(RuntimeError):
+    """A SuperTokens user exists for the email but the row is not bound to it.
+
+    Raised by :func:`provision_user` instead of adopting a user the
+    provisioner did not create (staging finding F1). :func:`provision_all`
+    records it as a ``FAILED`` row and continues the batch.
+    """
 
 
 class ProvisionStatus(str, Enum):
@@ -236,11 +248,15 @@ async def provision_user(
 
     Steps:
 
-    1. Look up the SuperTokens user by ``email``. If one already exists it is
-       reused (the ``UPDATED`` path); otherwise a new user is created (the
-       ``CREATED`` path). This lookup-before-create is what makes provisioning
-       idempotent — running it once or N times yields exactly one SuperTokens
-       user for the source email (Req 9.4).
+    1. Look up the SuperTokens user by ``email``. If none exists a new user is
+       created (the ``CREATED`` path). If one exists and the row's backfilled
+       ``st_user_id`` equals it, it is reused (the ``UPDATED`` path). This
+       lookup-before-create is what makes provisioning idempotent — running it
+       once or N times yields exactly one SuperTokens user for the source
+       email (Req 9.4). If one exists but the row is unbound (``st_user_id``
+       is ``None``) or bound to a different id, the provisioner did not create
+       it and raises :class:`ProvisioningConflictError` without touching
+       roles, metadata or the row (F1).
     2. Reconcile the user's UserRoles to exactly the row's role set (Req 9.3).
     3. Write ``tenant_id`` / ``has_pii_access`` / ``driver_id`` into the user's
        metadata so they map to the equivalent SuperTokens identity attributes
@@ -262,6 +278,8 @@ async def provision_user(
 
     Raises:
         ValueError: if the row is missing an ``email`` or ``tenant_id``.
+        ProvisioningConflictError: if a SuperTokens user already exists for
+            the email and the row is not bound to it.
     """
     if not isinstance(row.email, str) or not row.email.strip():
         raise ValueError("auth_users row is missing a non-empty email")
@@ -276,8 +294,29 @@ async def provision_user(
     email = row.email.strip()
     roles = _normalize_roles(row.roles)
 
-    # 1. Idempotent create-or-find keyed by email (Req 9.4).
+    # 1. Idempotent create-or-find keyed by email (Req 9.4), bound by the
+    #    backfilled st_user_id (F1).
     existing_user_id = await admin.get_user_id_by_email(email)
+    if existing_user_id is not None and row.st_user_id != existing_user_id:
+        # A SuperTokens user exists for this email that this row was never
+        # bound to, so the provisioner did not create it (e.g. someone used
+        # the public sign-up API first). Adopting it would hand that user the
+        # row's tenant and roles (staging finding F1). Refuse before any role,
+        # metadata or write-back call.
+        binding = "unset" if row.st_user_id is None else "a different id"
+        logger.error(
+            "Refusing to adopt pre-existing SuperTokens user for %s "
+            "(auth_users.st_user_id is %s)",
+            email,
+            binding,
+        )
+        raise ProvisioningConflictError(
+            f"SuperTokens user for {email!r} was not created by the "
+            f"provisioner (auth_users.st_user_id is {binding}); refusing to "
+            "adopt it. Verify the account owner, then either set "
+            "auth_users.st_user_id to that id or delete the SuperTokens user, "
+            "and re-run."
+        )
     if existing_user_id is None:
         st_user_id = await admin.create_user(email)
         status = ProvisionStatus.CREATED
@@ -504,6 +543,7 @@ def _default_store() -> AuthUserStore:
 __all__ = [
     "DEFAULT_ST_TENANT_ID",
     "AuthUserRow",
+    "ProvisioningConflictError",
     "ProvisionStatus",
     "ProvisionResult",
     "ProvisionReport",

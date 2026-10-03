@@ -4,15 +4,20 @@ Auth_Backend — SuperTokens SDK initialization (``init_supertokens``).
 This module initializes the SuperTokens Python SDK once at startup, before the
 FastAPI app is created, wiring the three recipes the migration uses:
 
-* **EmailPassword** — email/password sign-up + sign-in served by the SDK-owned
-  auth routes under ``/auth`` (Req 1.1–1.6). Sign-up enforces a configurable
-  minimum password length through a form-field validator (Req 1.7).
+* **EmailPassword** — email/password sign-in and password reset served by the
+  SDK-owned auth routes under ``/auth`` (Req 1.1–1.6). The public sign-up and
+  email-exists HTTP APIs are **disabled** (staging finding F1): accounts are
+  created only by :mod:`auth.provisioner`, which calls the recipe-level
+  ``sign_up`` function and is unaffected. The sign-up form-field validator
+  still enforces the configurable minimum password length (Req 1.7), because
+  the password-reset form validates against it.
 * **Session** — SuperTokens-issued session tokens delivered as ``HttpOnly`` /
   ``Secure`` cookies with anti-CSRF protection (Req 2.1, 2.2, 2.3, 2.5, 2.7).
-  A ``create_new_session`` override reads the signing user's ``auth_users`` row
-  and writes ``tenant_id`` / ``roles`` / ``has_pii_access`` into the
-  access-token payload so those claims are signed by the managed core and can
-  never be asserted by the client (Req 3.3).
+  A ``create_new_session`` override reads the ``auth_users`` row bound to the
+  signing SuperTokens user (``auth_users.st_user_id``) and writes
+  ``tenant_id`` / ``roles`` / ``has_pii_access`` into the access-token payload
+  so those claims are signed by the managed core and can never be asserted by
+  the client (Req 3.3).
 * **UserRoles** — represents the canonical roles listed in
   :data:`CANONICAL_ROLES`: ``admin`` / ``dispatcher`` / ``driver`` /
   ``platform_admin`` (Req 4.4). That constant is the single source of truth;
@@ -45,6 +50,9 @@ from supertokens_python.recipe import emailpassword, session, userroles
 from supertokens_python.recipe.emailpassword import (
     InputFormField,
     InputSignUpFeature,
+)
+from supertokens_python.recipe.emailpassword.interfaces import (
+    APIInterface as EmailPasswordAPIInterface,
 )
 from supertokens_python.recipe.session.interfaces import (
     RecipeInterface as SessionRecipeInterface,
@@ -248,55 +256,38 @@ def _make_password_validator(
 async def _claims_for_user(user_id: str) -> Dict[str, Any]:
     """Resolve the server-controlled session claims for a SuperTokens user.
 
-    Looks the user up by email (the provisioning idempotency key) in the
-    PostgreSQL ``auth_users`` source-of-truth and returns the ``tenant_id`` /
+    Reads the PostgreSQL ``auth_users`` row **bound** to this SuperTokens user
+    (``auth_users.st_user_id = user_id``) and returns the ``tenant_id`` /
     ``roles`` / ``has_pii_access`` (and ``driver_id`` when present) to embed in
     the access-token payload (Req 3.3, 9.6, 7.3).
 
-    Returns an empty mapping when the user's email or ``auth_users`` row cannot
-    be found, or when the persistence layer is dormant. An empty mapping means
-    the session carries no ``tenant_id`` claim, so the Session_Verifier rejects
-    it on protected routes (Req 5.3) — fail-closed by construction.
+    The binding is ``st_user_id``, which only :mod:`auth.provisioner` writes
+    (``mark_provisioned``). Email is deliberately NOT the key (staging finding
+    F1): a SuperTokens user registered by someone else under a provisioned
+    email address would otherwise inherit that row's tenant and roles.
+
+    Returns an empty mapping when no row (or more than one) is bound to the
+    user, or when the persistence layer is dormant. An empty mapping means the
+    session carries no ``tenant_id`` claim, so the Session_Verifier rejects it
+    on protected routes (Req 5.3) — fail-closed by construction.
     """
-    email = await _lookup_user_email(user_id)
-    if not email:
-        logger.warning(
-            "SuperTokens session: no email for user_id=%s; session will lack "
-            "tenant claims and be rejected on protected routes",
-            user_id,
-        )
-        return {}
-    return await _lookup_auth_user_claims(email)
+    return await _lookup_auth_user_claims(user_id)
 
 
-async def _lookup_user_email(user_id: str) -> Optional[str]:
-    """Return the primary email for a SuperTokens user id, or ``None``."""
-    # Imported lazily so importing this module never forces a core call.
-    from supertokens_python.asyncio import get_user
-
-    try:
-        user = await get_user(user_id)
-    except Exception as exc:  # pragma: no cover - defensive (network/core)
-        logger.warning("SuperTokens get_user failed for %s: %s", user_id, exc)
-        return None
-    if user is None or not user.emails:
-        return None
-    return user.emails[0]
-
-
-async def _lookup_auth_user_claims(email: str) -> Dict[str, Any]:
+async def _lookup_auth_user_claims(st_user_id: str) -> Dict[str, Any]:
     """Read ``tenant_id`` / ``roles`` / ``has_pii_access`` from ``auth_users``.
 
-    The ``email`` column is CITEXT (case-insensitive) and is the provisioning
-    idempotency key (Req 9.4), so it is the natural lookup key here.
+    Keyed on ``st_user_id`` (the provisioner's write-back), not ``email`` —
+    see :func:`_claims_for_user` (F1). Exactly one bound row yields claims;
+    zero or several yield ``{}`` (fail closed).
     """
     from persistence.database import is_persistence_enabled, session_scope
 
     if not is_persistence_enabled():
         logger.warning(
-            "auth_users lookup skipped for %s: persistence layer is dormant "
-            "(database_url unset)",
-            email,
+            "auth_users lookup skipped for st_user_id=%s: persistence layer is "
+            "dormant (database_url unset)",
+            st_user_id,
         )
         return {}
 
@@ -304,23 +295,34 @@ async def _lookup_auth_user_claims(email: str) -> Dict[str, Any]:
 
     query = text(
         "SELECT tenant_id, roles, has_pii_access, driver_id "
-        "FROM auth_users WHERE email = :email"
+        "FROM auth_users WHERE st_user_id = :user_id"
     )
     try:
         async with session_scope() as db:
-            row = (await db.execute(query, {"email": email})).first()
+            rows = (await db.execute(query, {"user_id": st_user_id})).all()
     except Exception as exc:  # pragma: no cover - defensive (DB unavailable)
-        logger.warning("auth_users lookup failed for %s: %s", email, exc)
-        return {}
-
-    if row is None:
         logger.warning(
-            "No auth_users row for email=%s; session will lack tenant claims",
-            email,
+            "auth_users lookup failed for st_user_id=%s: %s", st_user_id, exc
         )
         return {}
 
-    tenant_id, roles, has_pii_access, driver_id = row
+    if not rows:
+        logger.warning(
+            "No auth_users row bound to st_user_id=%s; session will carry no "
+            "tenant claims",
+            st_user_id,
+        )
+        return {}
+    if len(rows) > 1:
+        logger.warning(
+            "%d auth_users rows bound to st_user_id=%s; refusing to pick one, "
+            "session will carry no tenant claims",
+            len(rows),
+            st_user_id,
+        )
+        return {}
+
+    tenant_id, roles, has_pii_access, driver_id = rows[0]
     claims: Dict[str, Any] = {
         "tenant_id": tenant_id,
         # Only the canonical role names are stored; surface them verbatim for
@@ -333,6 +335,24 @@ async def _lookup_auth_user_claims(email: str) -> Dict[str, Any]:
     if driver_id:
         claims["driver_id"] = driver_id
     return claims
+
+
+def _override_emailpassword_apis(
+    original_implementation: EmailPasswordAPIInterface,
+) -> EmailPasswordAPIInterface:
+    """Disable the public sign-up and email-exists HTTP APIs (staging finding F1).
+
+    ``POST /auth/signup`` let anyone create users in the core, and
+    ``GET /auth/signup/email/exists`` was an account-enumeration oracle (F4).
+    With the SDK flags set, the middleware no longer matches those routes, so
+    requests fall through to FastAPI and get a 404. Sign-in and the password
+    reset APIs stay enabled. Accounts are created only by
+    :mod:`auth.provisioner` via the recipe-level ``sign_up`` function, which
+    these flags do not affect.
+    """
+    original_implementation.disable_sign_up_post = True
+    original_implementation.disable_email_exists_get = True
+    return original_implementation
 
 
 def _override_session_functions(
@@ -419,9 +439,14 @@ def init_supertokens(settings: Settings) -> None:
         mode="asgi",
         recipe_list=[
             # EmailPassword: server-side credential verification only; no
-            # hardcoded credential pair (Req 1.1–1.5). Sign-up enforces the
-            # configurable minimum password length (Req 1.7).
+            # hardcoded credential pair (Req 1.1–1.5). The sign-up feature's
+            # password validator stays: the reset-password form validates
+            # against it (Req 1.7). The HTTP sign-up route itself is disabled
+            # by the APIs override (F1).
             emailpassword.init(
+                override=emailpassword.EmailPasswordOverrideConfig(
+                    apis=_override_emailpassword_apis,
+                ),
                 sign_up_feature=InputSignUpFeature(
                     form_fields=[
                         InputFormField(

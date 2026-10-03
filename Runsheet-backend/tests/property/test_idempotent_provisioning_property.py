@@ -21,6 +21,7 @@ row ``N`` times must:
 """
 
 import asyncio
+from dataclasses import replace
 
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -100,13 +101,17 @@ class TestProvisioningIsIdempotent:
         async def _run() -> None:
             admin = FakeSuperTokensAdmin()
             store = FakeAuthUserStore()
-
-            results = [
-                await provision_user(row, admin=admin, store=store)
-                for _ in range(n)
-            ]
-
             email = row.email.strip()
+
+            # Each re-run sees the row as production reloads it: with the
+            # st_user_id that mark_provisioned backfilled. An unbound row
+            # whose email already exists in the core is a conflict (F1).
+            results = []
+            current = row
+            for _ in range(n):
+                result = await provision_user(current, admin=admin, store=store)
+                results.append(result)
+                current = replace(current, st_user_id=store.provisioned[email])
 
             # Exactly one user was created across all n runs (Req 9.4).
             assert admin.create_calls == [email], (

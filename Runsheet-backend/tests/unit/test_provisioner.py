@@ -21,8 +21,11 @@ Validates: Requirements 9.3, 9.4, 9.6, 9.7
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
+import auth.provisioner as provisioner_module
 from auth.provisioner import (
     AuthUserRow,
     ProvisionStatus,
@@ -154,7 +157,11 @@ async def test_provision_user_is_idempotent_no_duplicate_created():
     row = _row()
 
     first = await provision_user(row, admin=admin, store=store)
-    second = await provision_user(row, admin=admin, store=store)
+    # In production the re-run reloads the row with st_user_id backfilled by
+    # mark_provisioned; model that, since an unbound row now conflicts (F1).
+    second = await provision_user(
+        replace(row, st_user_id=first.st_user_id), admin=admin, store=store
+    )
 
     # Exactly one user created across two runs (Req 9.4).
     assert admin.create_calls == ["admin@runsheet.com"]
@@ -168,12 +175,72 @@ async def test_provision_user_reconciles_changed_roles_on_rerun():
     admin = FakeSuperTokensAdmin()
     store = FakeAuthUserStore()
 
-    await provision_user(_row(roles=("admin", "ops_manager")), admin=admin, store=store)
-    # Re-provision the same email with a reduced role set.
-    result = await provision_user(_row(roles=("dispatcher",)), admin=admin, store=store)
+    first = await provision_user(
+        _row(roles=("admin", "ops_manager")), admin=admin, store=store
+    )
+    # Re-provision the same (now bound) email with a reduced role set.
+    result = await provision_user(
+        _row(roles=("dispatcher",), st_user_id=first.st_user_id),
+        admin=admin,
+        store=store,
+    )
 
     # Roles are made to exactly match the new source row (added + removed).
     assert admin.roles[result.st_user_id] == {"dispatcher"}
+
+
+# ---------------------------------------------------------------------------
+# provision_user — refuses to adopt a user it did not create (F1)
+# ---------------------------------------------------------------------------
+
+
+def _admin_with_foreign_user(email: str) -> FakeSuperTokensAdmin:
+    """A core where someone else already registered ``email`` (e.g. sign-up)."""
+    admin = FakeSuperTokensAdmin()
+    admin.users[email] = "st-attacker"
+    admin.roles["st-attacker"] = set()
+    admin.metadata["st-attacker"] = {}
+    return admin
+
+
+@pytest.mark.parametrize("bound_to", [None, "st-other"])
+async def test_provision_user_refuses_unbound_preexisting_user(bound_to):
+    admin = _admin_with_foreign_user("newhire@runsheet.com")
+    store = FakeAuthUserStore()
+
+    # RuntimeError (the base) so this fails by "DID NOT RAISE" on code that
+    # silently adopts; the concrete type is pinned below.
+    with pytest.raises(RuntimeError, match="refusing to adopt") as excinfo:
+        await provision_user(
+            _row(email="newhire@runsheet.com", st_user_id=bound_to),
+            admin=admin,
+            store=store,
+        )
+    assert isinstance(excinfo.value, provisioner_module.ProvisioningConflictError)
+
+    # Nothing was granted to the pre-existing user, nothing was written back.
+    assert admin.roles["st-attacker"] == set()
+    assert admin.metadata["st-attacker"] == {}
+    assert admin.create_calls == []
+    assert store.provisioned == {}
+
+
+async def test_provision_all_reports_conflict_row_failed_and_continues():
+    admin = _admin_with_foreign_user("newhire@runsheet.com")
+    store = FakeAuthUserStore()
+    rows = [
+        _row(email="a@runsheet.com"),
+        _row(email="newhire@runsheet.com"),
+        _row(email="c@runsheet.com"),
+    ]
+
+    report = await provision_all(rows, admin=admin, store=store)
+
+    assert [r.email for r in report.failed] == ["newhire@runsheet.com"]
+    assert "refusing to adopt" in (report.failed[0].error or "")
+    assert {r.email for r in report.succeeded} == {"a@runsheet.com", "c@runsheet.com"}
+    assert "refusing to adopt" in store.errors["newhire@runsheet.com"]
+    assert admin.roles["st-attacker"] == set()
 
 
 # ---------------------------------------------------------------------------

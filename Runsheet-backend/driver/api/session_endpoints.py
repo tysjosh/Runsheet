@@ -111,14 +111,15 @@ def configure_session_endpoints(
     _driver_repository = None
 
 
-async def lookup_auth_user_claims(email: str) -> Dict[str, Any]:
-    """Read the server-set session claims for ``email`` from ``auth_users``.
+async def lookup_auth_user_claims(st_user_id: str) -> Dict[str, Any]:
+    """Read the server-set session claims bound to ``st_user_id``.
 
     Thin wrapper over the same read the ``create_new_session`` override
     performs (``auth/supertokens_init.py``), so sign-in and session creation
     cannot disagree about a user's ``tenant_id`` / ``roles`` / ``driver_id``.
+    Keyed on the SuperTokens user id, not the submitted email (F1).
     """
-    return await _lookup_auth_user_claims(email)
+    return await _lookup_auth_user_claims(st_user_id)
 
 
 def _get_driver_repository() -> Any:
@@ -318,9 +319,10 @@ async def create_driver_session(
             details={"reason": "credential_verification_failed"},
         )
 
-    # 2. Resolve the server-set claims from auth_users — the same read the
-    #    create_new_session override performs.
-    claims = await lookup_auth_user_claims(body.email)
+    # 2. Resolve the server-set claims from the auth_users row bound to the
+    #    signed-in SuperTokens user — the same read the create_new_session
+    #    override performs. Never keyed on the submitted email (F1).
+    claims = await lookup_auth_user_claims(result.user.id)
     roles = [r for r in (claims.get("roles") or []) if isinstance(r, str)]
     if _DRIVER_ROLE not in roles:
         # R15.14: echo only the required role, never the caller's held roles.

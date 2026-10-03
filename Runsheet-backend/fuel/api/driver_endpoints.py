@@ -1307,7 +1307,7 @@ class AppAccessService:
                     has_pii_access=body.has_pii_access,
                 )
 
-                from auth.provisioner import AuthUserRow
+                from auth.provisioner import AuthUserRow, ProvisioningConflictError
 
                 row = AuthUserRow(
                     email=email,
@@ -1318,9 +1318,37 @@ class AppAccessService:
                     st_user_id=existing.get("st_user_id"),
                 )
                 provisioned = True
-                result = await self._provisioner()(
-                    row, admin=self._admin(), store=uow
-                )
+                try:
+                    result = await self._provisioner()(
+                        row, admin=self._admin(), store=uow
+                    )
+                except ProvisioningConflictError as exc:
+                    # A SuperTokens user exists for this email that the
+                    # auth_users row is not bound to (F1). The provisioner
+                    # refused before any SuperTokens write, so there is
+                    # nothing to compensate — and compensating would edit the
+                    # roles of a user we do not own. Same indistinguishable
+                    # 409 as the cross-tenant guard above, so this cannot
+                    # become an enumeration oracle; the reason stays in the
+                    # log and the audit event.
+                    provisioned = False
+                    logger.warning(
+                        "App-access grant refused: SuperTokens user for "
+                        "target_email=%s is not bound to its auth_users row "
+                        "(user=%s tenant=%s driver_id=%s)",
+                        email,
+                        tenant.user_id,
+                        tenant.tenant_id,
+                        driver_id,
+                    )
+                    audit_outcome = "rejected:unbound_supertokens_user"
+                    raise app_access_already_linked(
+                        message=(
+                            "That email cannot be granted app access in this "
+                            "tenant."
+                        ),
+                        details={"driver_id": driver_id},
+                    ) from exc
         except AppException as exc:
             # 404 / 409 rejections happen before the SuperTokens write; a
             # translated failure after it still needs compensating.
